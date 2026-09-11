@@ -202,3 +202,48 @@ def test_workload_runtime_refuses_unknown_writers_before_any_patch(tmp_path, blo
         raise RuntimeError("writer refused")
     with pytest.raises(RuntimeError, match="writer refused"):
         journal.execute(plan, [_component(apply)])
+
+
+def test_recovery_rejects_a_baseline_that_would_release_the_guard_cronjob(tmp_path):
+    from loom_cli.rollout.operator.protected_application_workload_runtime import (
+        restore_application_workloads,
+    )
+    from loom_cli.rollout.operator.protected_application_workloads import ApplicationWorkload
+
+    plan, journal, evidence, _, runner, admit = _context(tmp_path)
+    def apply(_):
+        admit()
+        saved = tuple(ApplicationWorkload.capture(obj) for obj in runner.objects)
+        saved = tuple(replace(obj, original_value=False) if obj.kind == "CronJob" else obj for obj in saved)
+        journal.record_application_workloads(plan, workloads=saved)
+        with pytest.raises((ValueError, RuntimeError)):
+            restore_application_workloads(plan, journal=journal, runner=runner, guard=evidence)
+        assert runner.patch_calls == []
+        assert runner.objects[-1]["spec"]["suspend"] is True
+        raise RuntimeError("unsafe baseline refused before mutation")
+    with pytest.raises(RuntimeError, match="unsafe baseline refused"):
+        journal.execute(plan, [_component(apply)])
+
+
+def test_recovery_rechecks_saved_uid_after_serving_generation_read(tmp_path):
+    from loom_cli.rollout.operator.protected_application_workload_runtime import (
+        pause_application_workloads,
+        restore_application_workloads,
+    )
+
+    plan, journal, evidence, _, runner, admit = _context(tmp_path)
+    capture = runner.capture_stdout
+    def replaced_at_readiness(argv, **kwargs):
+        if "deployment" in argv and "loom-control-plane" in argv:
+            current = next(obj for obj in runner.objects if obj["metadata"]["name"] == "loom-control-plane")
+            current["metadata"]["uid"] = str(uuid4())
+        return capture(argv, **kwargs)
+    def apply(_):
+        admit()
+        pause_application_workloads(plan, journal=journal, runner=runner, guard=evidence)
+        runner.capture_stdout = replaced_at_readiness
+        with pytest.raises((ValueError, RuntimeError)):
+            restore_application_workloads(plan, journal=journal, runner=runner, guard=evidence)
+        raise RuntimeError("replacement cannot satisfy recovery")
+    with pytest.raises(RuntimeError, match="replacement cannot"):
+        journal.execute(plan, [_component(apply)])
