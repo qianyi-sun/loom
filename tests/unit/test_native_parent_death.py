@@ -49,7 +49,7 @@ def test_parent_death_setup_errors_never_succeed(monkeypatch, boundary):
     assert calls == ([] if boundary == "unavailable" else [1] if boundary == "set-error" else [1, 2])
 
 
-@pytest.mark.parametrize("boundary", ["fork", "exec", "cleanup-control"])
+@pytest.mark.parametrize("boundary", ["fork", "exec", "cleanup-control", "native-start"])
 def test_kernel_parent_death_stops_child_even_when_it_is_blocked(boundary):
     # The locked Python build lacks os.pidfd_open although the host libc/kernel
     # provide it. Keep exact process handles for failure cleanup; never send a
@@ -71,8 +71,22 @@ parent = os.getpid()
 child = os.fork()
 if child == 0:
     signal.alarm(15)  # Final safety bound even if the harness itself fails.
-    if boundary != 'cleanup-control':
+    if boundary not in {'cleanup-control', 'native-start'}:
         bind_native_parent_death(parent)
+    if boundary == 'native-start':
+        import time
+        from pathlib import Path
+        from loom_capacity_executor.native_runsc import NativeRunscLayout, exec_native_runsc
+        def blocked_exec(*args):
+            # Freeze the actual fixed helper at its exec syscall boundary.
+            # Only exec_native_runsc may have installed the parent-death bound.
+            os.write(ready, str(os.getpid()).encode()+b'\\n')
+            signal.pause()
+            raise AssertionError('blocked native start resumed after parent death')
+        os.execve = blocked_exec
+        exec_native_runsc(NativeRunscLayout(Path('/protected/runsc'), Path('/private/state'),
+            Path('/private/bundles'), 'a'*64), operation='start', role='pause',
+            expected_parent_pid=parent, deadline_boottime_ns=time.clock_gettime_ns(time.CLOCK_BOOTTIME)+10000000000)
     if boundary == 'exec':
         os.set_inheritable(ready, True)
         os.execv(sys.executable, [sys.executable, '-c',
