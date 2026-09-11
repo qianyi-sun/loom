@@ -410,6 +410,17 @@ validation and a protected local join, not independent signature verification.
 It neither revokes a worker nor removes a capacity hold; protected release
 publication and authoritative hold release remain separate prerequisites.
 
+Build-guard revision `build_guard_0014` supplies the native protected-release
+outbox. Publications derive only from committed immutable unbound revocations or
+bound withdrawals and retain the installation's original reporter identity.
+Each event is skipped only after its own immutable acknowledgement; sparse shared
+event IDs are not a global commit-order cursor. `BuildReleaseCoordinator` reads,
+publishes with a stable idempotency key, then records the exact validated manager
+receipt in a separate transaction. Lost responses and concurrent acknowledgements
+replay the same event. Neither publication nor acknowledgement removes holds or
+asserts physical termination. Unbound revocation needs no fabricated terminal
+inventory; the manager's separate physical-release checks remain authoritative.
+
 `ActivationRuntimeArtifactV3` and its explicit pinned loader compose the exact
 typed admission file, complete purpose/profile policy, approved profile digest,
 execution fence and controller-local manifest. Assembly verifies route executor,

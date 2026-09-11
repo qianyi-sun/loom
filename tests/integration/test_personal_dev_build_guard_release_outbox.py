@@ -139,3 +139,193 @@ async def test_outbox_corrupt_checkpoint_rolls_back_before_outer_commit(prepared
                 manager_acknowledgement_digest=publication.publication_digest)
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.release_publication_receipts")) == 0
+
+
+@pytest.mark.parametrize("boundary", ["intent", "release", "receipt", "type"])
+async def test_outbox_coordinator_rejects_unrelated_manager_receipt(prepared_input, boundary):
+    factory, engine, installation, *_ = prepared_input
+    await release_input(prepared_input, "withdrawn")
+
+    class Publisher:
+        async def publish_executable_protected_release(self, publication, *, idempotency_key):
+            result = ExecutableProtectedReleasePublishReceiptV2(intent_id=publication.release.binding.intent_id,
+                protected_release_sha256=publication.release.protected_release_sha256,
+                receipt_digest=publication.publication_digest, replayed=False, executable=True)
+            changes = {"intent": {"intent_id": uuid4()}, "release": {"protected_release_sha256": "f"*64},
+                "receipt": {"receipt_digest": "f"*64}}
+            return result.model_dump() if boundary == "type" else result.model_copy(update=changes[boundary])
+
+    runtime = import_module("loom_capacity_build_guard.release_outbox").BuildReleaseCoordinator(
+        session_factory=factory, installation=installation, publisher=Publisher())
+    with pytest.raises(ValueError, match="receipt"):
+        await runtime.publish_next()
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.release_publication_receipts")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
+
+
+async def test_outbox_concurrent_ack_and_committed_cursor(prepared_input):
+    import asyncio
+
+    factory, engine, installation, *_ = prepared_input
+    await release_input(prepared_input, "withdrawn")
+    async with factory.begin() as session:
+        publication = await outbox(session, installation).read_next()
+
+    async def acknowledge():
+        try:
+            async with factory.begin() as session:
+                receipt = await outbox(session, installation).acknowledge(publication,
+                    manager_acknowledgement_digest=publication.publication_digest)
+                with pytest.raises(DBAPIError, match="committed"):
+                    await outbox(session, installation).read_next()
+            return receipt
+        except DBAPIError as exc:
+            assert exc.orig.sqlstate == "40001"
+            return None
+
+    receipts = [item for item in await asyncio.gather(acknowledge(), acknowledge()) if item is not None]
+    assert receipts and all(item == receipts[0] for item in receipts)
+    async with factory.begin() as session:
+        assert await outbox(session, installation).acknowledge(publication,
+            manager_acknowledgement_digest=publication.publication_digest) == receipts[0]
+        assert await outbox(session, installation).read_next() is None
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.release_publication_receipts")) == 1
+
+
+async def test_outbox_acknowledgements_are_private_immutable_and_retained(prepared_input, build_guard_database):
+    from alembic import command
+
+    factory, engine, installation, *_ = prepared_input
+    await release_input(prepared_input, "prepared-revoked")
+    async with factory.begin() as session:
+        publication = await outbox(session, installation).read_next()
+        await outbox(session, installation).acknowledge(publication,
+            manager_acknowledgement_digest=publication.publication_digest)
+        with pytest.raises(DBAPIError):
+            async with session.begin_nested():
+                await session.execute(text("SELECT * FROM loom_capacity_build_guard.release_publication_receipts"))
+    for statement in ("UPDATE loom_capacity_build_guard.release_publication_receipts SET payload=payload",
+        "DELETE FROM loom_capacity_build_guard.release_publication_receipts", "TRUNCATE loom_capacity_build_guard.release_publication_receipts"):
+        with pytest.raises(DBAPIError):
+            with engine.begin() as connection:
+                connection.execute(text(statement))
+    with pytest.raises(DBAPIError, match="retained evidence"):
+        command.downgrade(build_guard_database[0], "build_guard_0013")
+
+
+@pytest.mark.parametrize("boundary", ["noncanonical", "manager", "event", "kind", "release", "schema", "extra", "installation"])
+async def test_outbox_direct_sql_rejects_changed_publication(prepared_input, boundary):
+    import json
+    from hashlib import sha256
+
+    from loom_capacity_manager.executable_contracts import canonical_executable_bytes
+
+    factory, engine, installation, *_ = prepared_input
+    await release_input(prepared_input, "withdrawn")
+    async with factory.begin() as session:
+        publication = await outbox(session, installation).read_next()
+    payload = json.loads(canonical_executable_bytes(publication))
+    if boundary == "event":
+        payload["event_id"] += 1
+    elif boundary == "kind":
+        payload["event_kind"] = "prepared-revoked"
+    elif boundary == "release":
+        payload["release"]["protected_registration_epoch"] += 1
+    elif boundary == "schema":
+        payload["schema_version"] = "2"
+    elif boundary == "extra":
+        payload["free_capacity"] = True
+    wire = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    if boundary == "noncanonical":
+        wire += b" "
+    async with factory.begin() as session:
+        with pytest.raises(DBAPIError):
+            async with session.begin_nested():
+                await session.scalar(text("""SELECT loom_capacity_build_guard.acknowledge_protected_release(
+                    :installation,CAST(:payload AS jsonb),:wire,:digest,:manager)"""),
+                    {"installation": uuid4() if boundary == "installation" else installation.id,
+                        "payload": wire.decode("ascii"), "wire": wire, "digest": sha256(wire).hexdigest(),
+                        "manager": "f"*64 if boundary == "manager" else publication.publication_digest})
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.release_publication_receipts")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
+
+
+async def test_outbox_pending_events_cannot_be_skipped_and_old_ack_replays(prepared_input):
+    from loom_capacity_agent.admission import PublishableExecutableProtectedReleaseV2
+    from loom_capacity_build_guard.bootstrap_store import BuildGuardBootstrapStore
+    from loom_capacity_manager.executable_contracts import (
+        ExecutableProtectedReleaseV2,
+        canonical_executable_digest,
+    )
+    from tests.integration.test_personal_dev_build_guard_bootstrap import bootstrap
+
+    factory, engine, installation, plan, *_ = prepared_input
+    await release_input(prepared_input, "withdrawn")
+    async with factory.begin() as session:
+        first = await outbox(session, installation).read_next()
+    proposal = bootstrap(plan)
+    proposal = proposal.model_copy(update={"binding": proposal.binding.model_copy(update={"intent_id": uuid4()})})
+    async with factory.begin() as session:
+        await BuildGuardBootstrapStore(session, installation=installation).register(proposal)
+    async with factory.begin() as session:
+        revoked = await store(session, installation).revoke_prepared_bootstrap(ExecutablePreparedBootstrapRevocationV2(
+            operation_id=uuid4(), binding=proposal.binding, bootstrap_registration_epoch=1, protected_registration_epoch=2))
+    release = ExecutableProtectedReleaseV2(binding=revoked.binding, reporter_incarnation=revoked.reporter_incarnation,
+        bootstrap_registration_epoch=1, protected_registration_epoch=2, bootstrap_revoked=True,
+        protected_release_sha256=revoked.protected_release_sha256)
+    second = PublishableExecutableProtectedReleaseV2(event_id=revoked.protected_high_water, event_kind="prepared-revoked",
+        release=release, publication_digest=canonical_executable_digest(release))
+    assert second.event_id > first.event_id > 1
+    async with factory.begin() as session:
+        with pytest.raises(DBAPIError, match="exact next"):
+            await outbox(session, installation).acknowledge(second, manager_acknowledgement_digest=second.publication_digest)
+        first_ack = await outbox(session, installation).acknowledge(first, manager_acknowledgement_digest=first.publication_digest)
+    async with factory.begin() as session:
+        assert await outbox(session, installation).read_next() == second
+        await outbox(session, installation).acknowledge(second, manager_acknowledgement_digest=second.publication_digest)
+    async with factory.begin() as session:
+        assert await outbox(session, installation).acknowledge(first, manager_acknowledgement_digest=first.publication_digest) == first_ack
+        assert await outbox(session, installation).read_next() is None
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.release_publication_receipts")) == 2
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
+
+
+async def test_outbox_cannot_acknowledge_another_installed_owner(prepared_input, owner_sessions, tmp_path):
+    from loom_capacity_build_guard.installation_store import BuildGuardInstallationStore
+    from loom_capacity_manager.executable_contracts import (
+        canonical_executable_bytes,
+        canonical_executable_digest,
+    )
+    from tests.unit.test_personal_dev_build_admission import admission_input
+
+    factory, engine, installation, *_ = prepared_input
+    await release_input(prepared_input, "withdrawn")
+    async with factory.begin() as session:
+        publication = await outbox(session, installation).read_next()
+    values = admission_input(tmp_path)
+    member = values["member"]
+    subject, incarnation = uuid4(), uuid4()
+    member = member.model_copy(update={
+        "configuration": member.configuration.model_copy(update={"subject_id": subject, "subject_incarnation": incarnation}),
+        "acknowledgement": member.acknowledgement.model_copy(update={"subject_id": subject, "subject_incarnation": incarnation})})
+    owner_factory, owner = owner_sessions
+    async with owner_factory.begin() as session:
+        await session.execute(text(f"SET LOCAL ROLE {owner}"))
+        foreign = await BuildGuardInstallationStore(session, expected_owner_role=owner).retain(member=member, runtime=values["runtime"])
+    assert foreign.id != installation.id and foreign.document.owner_user_id != installation.document.owner_user_id
+    wire = canonical_executable_bytes(publication)
+    async with factory.begin() as session:
+        assert await outbox(session, foreign).read_next() is None
+        with pytest.raises(DBAPIError, match="installation"):
+            async with session.begin_nested():
+                await session.scalar(text("""SELECT loom_capacity_build_guard.acknowledge_protected_release(
+                    :installation,CAST(:payload AS jsonb),:wire,:digest,:manager)"""),
+                    {"installation": foreign.id, "payload": wire.decode("ascii"), "wire": wire,
+                        "digest": canonical_executable_digest(publication), "manager": publication.publication_digest})
+        assert await outbox(session, installation).read_next() == publication
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.release_publication_receipts")) == 0
