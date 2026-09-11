@@ -378,6 +378,8 @@ async def register_execution_executors(
     session: AsyncSession,
     fixture: PreparedExecutionFixture,
     prepared: ExecutionContextV2,
+    *,
+    idempotency_base: int = 740,
 ) -> None:
     for index, binding in enumerate(fixture.request.executors, start=1):
         await fixture.store.register_execution_executor(
@@ -394,7 +396,7 @@ async def register_execution_executors(
                 controller_authority_sha256=binding.controller_authority_sha256,
             ),
             actor="executor-installer",
-            idempotency_key=UUID(int=740 + index),
+            idempotency_key=UUID(int=idempotency_base + index),
         )
 
 

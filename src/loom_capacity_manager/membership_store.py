@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Sequence
 from typing import cast
@@ -33,6 +32,7 @@ from loom_capacity_manager.membership_contracts import (
     PersonalReincarnationEvidenceV1,
     parse_execution_preparation,
 )
+from loom_capacity_manager.membership_digest import canonical_membership_event_head as _head_digest
 from loom_capacity_manager.models import (
     CapacityAccountPolicy,
     CapacityAuthorityState,
@@ -71,44 +71,6 @@ def _subject_reference(subject: SubjectConfigurationV1) -> ConfigurationGenerati
         subject_incarnation=subject.subject_incarnation,
         generation=subject.configuration_generation,
         digest=canonical_digest(subject),
-    )
-
-
-def _json_digest(value: object) -> str:
-    encoded = json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        allow_nan=False,
-    ).encode("ascii")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _head_digest(
-    *,
-    actor: str,
-    execution_epoch: int,
-    idempotency_key: UUID,
-    operation_id: UUID,
-    previous_sha256: str,
-    request_digest: str,
-    request_payload: dict[str, object],
-    member: PersonalApplicationMemberV1,
-    revision: int,
-) -> str:
-    return _json_digest(
-        {
-            "actor": actor,
-            "execution_epoch": execution_epoch,
-            "idempotency_key": str(idempotency_key),
-            "operation_id": str(operation_id),
-            "previous_sha256": previous_sha256,
-            "request_digest": request_digest,
-            "request_payload": request_payload,
-            "result_member": member.model_dump(mode="json", exclude_none=False),
-            "revision": revision,
-        }
     )
 
 

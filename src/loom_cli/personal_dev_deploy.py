@@ -22,6 +22,35 @@ class PersonalDevDeployError(RuntimeError):
     """The remote personal-development apply did not satisfy its bindings."""
 
 
+def _receipt_identity(operation: Mapping[str, Any]) -> tuple[str, ...]:
+    try:
+        values = tuple(str(UUID(str(operation[key]))) for key in (
+            "id", "idempotency_key", "attempt_id", "subject_id", "subject_incarnation", "candidate_id",
+        ))
+        if any(UUID(value).int == 0 for value in values):
+            raise ValueError
+        if type(operation["deployment_generation"]) is not int or operation["deployment_generation"] < 1:
+            raise ValueError
+        return values
+    except (KeyError, TypeError, ValueError):
+        raise PersonalDevDeployError("personal-dev operation identity binding is invalid") from None
+
+
+def _verify_ready_projection(environment: Mapping[str, Any], operation: Mapping[str, Any]) -> None:
+    _receipt_identity(operation)
+    if (
+        operation.get("state") != "succeeded" or operation.get("checkpoint") != "complete"
+        or operation.get("kind") not in {"create", "update", "capacity", "noop"}
+        or environment.get("status") != "ready" or environment.get("operation_step") != "complete"
+        or (operation.get("kind") != "noop" and environment.get("operation_id") != operation.get("id"))
+        or any(environment.get(key) != operation.get(key) for key in (
+            "operation_epoch", "subject_id", "subject_incarnation", "candidate_id", "candidate_sha",
+            "min_slots", "max_slots", "deployment_generation",
+        ))
+    ):
+        raise PersonalDevDeployError("personal-dev environment readiness binding is invalid")
+
+
 def _object(value: object, *, label: str) -> dict[str, Any]:
     if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
         raise PersonalDevDeployError(f"{label} response is invalid")
@@ -133,6 +162,7 @@ def _operation(
             "failed",
             "cancelling",
             "cancelled",
+            "superseded",
         }
     ):
         raise PersonalDevDeployError("personal-dev operation response binding is invalid")
@@ -276,35 +306,47 @@ class PersonalDevDeployClient:
         expected_operation_epoch: int,
         idempotency_key: UUID | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        request_key = idempotency_key or uuid4()
         response = self._request_apply(
             name=name,
             candidate=candidate,
             min_slots=min_slots,
             max_slots=max_slots,
             expected_operation_epoch=expected_operation_epoch,
-            idempotency_key=idempotency_key,
+            idempotency_key=request_key,
         )
         body = assert_2xx(response, action=f"apply development environment {name!r}")
-        environment = _environment(
-            body.get("environment"),
-            expected_name=name,
-            expected_candidate_sha=str(candidate["candidate_sha"]),
-            expected_min_slots=min_slots,
-            expected_max_slots=max_slots,
-        )
+        environment = _environment(body.get("environment"), expected_name=name)
+        operation_body = _object(body.get("operation"), label="personal-dev operation")
         operation = _operation(
-            body.get("operation"),
+            operation_body,
             expected_name=name,
             expected_candidate_sha=str(candidate["candidate_sha"]),
             expected_min_slots=min_slots,
             expected_max_slots=max_slots,
-            expected_operation_epoch=int(environment["operation_epoch"]),
+            expected_operation_epoch=expected_operation_epoch + (operation_body.get("kind") != "noop"),
         )
+        _receipt_identity(operation)
         if (
             operation.get("expected_operation_epoch") != expected_operation_epoch
-            or operation.get("operation_epoch") != environment["operation_epoch"]
+            or operation.get("idempotency_key") != str(request_key)
+            or operation.get("candidate_id") != str(candidate["id"])
+            or operation.get("kind") not in {"create", "update", "capacity", "noop"}
+            or any(environment.get(key) != operation.get(key) for key in ("subject_id", "subject_incarnation"))
         ):
             raise PersonalDevDeployError("personal-dev apply response binding is invalid")
+        if operation["state"] == "superseded":
+            if environment["operation_epoch"] <= operation["operation_epoch"]:
+                raise PersonalDevDeployError("personal-dev superseded apply epoch is invalid")
+        elif operation["state"] == "succeeded":
+            _verify_ready_projection(environment, operation)
+        elif (
+            operation["state"] in {"failed", "cancelled"}
+            or environment["operation_epoch"] != operation["operation_epoch"]
+            or environment.get("operation_id") != operation["id"]
+            or environment["status"] not in {"provisioning", "updating", "activating"}
+        ):
+            raise PersonalDevDeployError("personal-dev apply is terminal or no longer current")
         return environment, operation
 
     def wait_ready(
@@ -318,10 +360,18 @@ class PersonalDevDeployClient:
         operation_epoch: int,
         timeout: float,
         poll_interval: float,
+        operation_receipt: Mapping[str, Any] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> dict[str, Any]:
         deadline = monotonic() + timeout
+        predecessor_id: str | None = None
+        retained_identity: tuple[str, ...] | None = None
+        continuation_kind: str | None = None
+        visited = {operation_id}
+        anchor = _receipt_identity(operation_receipt) if operation_receipt is not None else None
+        previous_identity: tuple[str, ...] | None = None
+        previous_generation: int | None = None
         while True:
             operation_body = _operation(
                 assert_2xx(
@@ -338,6 +388,58 @@ class PersonalDevDeployClient:
                 expected_operation_epoch=operation_epoch,
             )
             state = operation_body.get("state")
+            identity = _receipt_identity(operation_body)
+            if predecessor_id is None and operation_receipt is not None and (
+                identity != anchor or any(operation_body.get(key) != operation_receipt.get(key) for key in (
+                    "deployment_generation", "kind", "expected_operation_epoch", "membership_continuation_kind",
+                ))
+                or (operation_receipt.get("state") == "superseded" and any(
+                    operation_body.get(key) != operation_receipt.get(key) for key in (
+                        "state", "checkpoint", "membership_successor_operation_id",
+                    )
+                ))
+            ):
+                raise PersonalDevDeployError("personal-dev operation differs from the apply receipt")
+            if predecessor_id is not None and (
+                operation_body.get("membership_predecessor_operation_id") != predecessor_id
+                or operation_body.get("expected_operation_epoch") != operation_epoch - 1
+                or operation_body.get("membership_continuation_kind") != continuation_kind
+                or operation_body.get("kind") not in {"create", "update"}
+                or tuple(str(operation_body.get(key)) for key in (
+                    "subject_id", "subject_incarnation", "candidate_id",
+                )) != retained_identity
+                or previous_identity is None or any(identity[index] == previous_identity[index] for index in range(3))
+                or previous_generation is None or operation_body["deployment_generation"] <= previous_generation
+            ):
+                raise PersonalDevDeployError("personal-dev successor changed the original owner intent")
+            if state == "superseded":
+                try:
+                    successor_id = str(UUID(str(operation_body["membership_successor_operation_id"])))
+                    identity = tuple(str(UUID(str(operation_body[key]))) for key in (
+                        "subject_id", "subject_incarnation", "candidate_id",
+                    ))
+                except (KeyError, TypeError, ValueError):
+                    raise PersonalDevDeployError("personal-dev successor identity is invalid") from None
+                intent = operation_body.get("membership_continuation_kind") or operation_body.get("kind")
+                if (
+                    successor_id in visited or UUID(successor_id).int == 0
+                    or any(UUID(value).int == 0 for value in identity)
+                    or intent not in {"create", "update", "capacity"}
+                    or operation_body.get("checkpoint") != "membership_successor_created"
+                    or operation_body.get("expected_operation_epoch") != operation_epoch - 1
+                ):
+                    raise PersonalDevDeployError("personal-dev successor lineage is invalid")
+                if monotonic() >= deadline:
+                    raise PersonalDevDeployError("timed out following personal-dev successor recovery")
+                predecessor_id = operation_id
+                previous_identity = _receipt_identity(operation_body)
+                previous_generation = operation_body["deployment_generation"]
+                retained_identity = identity
+                continuation_kind = str(intent)
+                operation_id = successor_id
+                operation_epoch += 1
+                visited.add(successor_id)
+                continue
             if state == "succeeded":
                 environment_body = assert_2xx(
                     self._client.get(f"/api/v1/dev-instances/{name}"),
@@ -351,10 +453,7 @@ class PersonalDevDeployClient:
                     expected_max_slots=max_slots,
                     expected_operation_epoch=operation_epoch,
                 )
-                if environment["status"] != "ready":
-                    raise PersonalDevDeployError(
-                        "personal-dev operation succeeded without a ready environment projection"
-                    )
+                _verify_ready_projection(environment, operation_body)
                 return environment
             if state in {"failed", "cancelled"}:
                 reason = operation_body.get("failure_reason") or state

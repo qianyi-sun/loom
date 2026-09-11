@@ -6,6 +6,10 @@ import json
 from typing import Literal
 
 from loom_capacity_manager.allocator import ExecutableEpochV2
+from loom_capacity_manager.build_membership_contracts import (
+    DelegatedAllocationInputV3,
+    PersonalMembershipSnapshotV2,
+)
 from loom_capacity_manager.contracts import canonical_digest
 from loom_capacity_manager.executable_contracts import canonical_executable_digest
 from loom_capacity_manager.membership import resolved_subject_references
@@ -21,6 +25,31 @@ class ExecutableEpochV3(ExecutableEpochV2):
     # Deliberately distinct wire version; legacy V2 validation remains unchanged.
     schema_version: Literal[3] = 3  # type: ignore[assignment]
     membership: PersonalMembershipSnapshotV1
+
+
+class ExecutableEpochV4(ExecutableEpochV2):
+    """Placement sealed with purpose-preserving application/build membership."""
+
+    schema_version: Literal[4] = 4  # type: ignore[assignment]
+    membership: PersonalMembershipSnapshotV2
+
+
+def bind_typed_executable_membership(
+    epoch: ExecutableEpochV2, value: DelegatedAllocationInputV3
+) -> ExecutableEpochV4:
+    """Bind typed input without translating either purpose to an application."""
+    if (
+        epoch.input_digest != canonical_digest(value)
+        or epoch.configuration != value.configuration
+        or epoch.execution.execution_manifest_sha256
+        != canonical_executable_digest(value.preparation)
+    ):
+        raise ValueError("typed executable membership input binding changed")
+    resolved_subject_references(value)
+    return ExecutableEpochV4.model_validate(epoch.model_dump(mode="python") | {
+        "schema_version": 4,
+        "membership": value.membership.model_dump(mode="python"),
+    })
 
 
 def bind_executable_membership(
@@ -44,12 +73,14 @@ def bind_executable_membership(
 
 
 def parse_executable_epoch(payload: str | bytes) -> ExecutableEpochV2:
-    """Keep the exact V2 parser while requiring an integer V3 wire discriminator."""
+    """Preserve each membership version with an exact integer discriminator."""
 
     document = json.loads(payload)
     if not isinstance(document, dict):
         raise ValueError("executable allocation must be an object")
     version = document.get("schema_version")
+    if version == 4 and type(version) is int:
+        return ExecutableEpochV4.model_validate_json(payload)
     if version == 3 and type(version) is int:
         return ExecutableEpochV3.model_validate_json(payload)
     if version == 2 and type(version) is int:
@@ -57,4 +88,5 @@ def parse_executable_epoch(payload: str | bytes) -> ExecutableEpochV2:
     raise ValueError("unsupported executable allocation schema")
 
 
-__all__ = ["ExecutableEpochV3", "bind_executable_membership", "parse_executable_epoch"]
+__all__ = ["ExecutableEpochV3", "ExecutableEpochV4", "bind_executable_membership",
+    "bind_typed_executable_membership", "parse_executable_epoch"]

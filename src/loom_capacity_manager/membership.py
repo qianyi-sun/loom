@@ -8,22 +8,39 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
+from loom_capacity_manager.build_membership_contracts import (
+    DelegatedAllocationInputV3,
+    PersonalBuildMemberV1,
+    PersonalBuildTemplateV1,
+    PersonalMembershipSnapshotV2,
+    personal_build_subject_id,
+    personal_build_subject_name,
+)
 from loom_capacity_manager.contracts import (
     AccountPolicyV1,
     AllocationInputV1,
     CapacityContractError,
     ConfigurationGenerationRefV1,
     DevelopmentSubjectTemplateV1,
+    FleetManifestV1,
     SubjectConfigurationV1,
     canonical_digest,
     checked_sum,
 )
 from loom_capacity_manager.executable_contracts import canonical_executable_digest
+from loom_capacity_manager.fleet_state import validate_profile_narrowing
+from loom_capacity_manager.inherited_reincarnation_contracts import (
+    PersonalInheritedReincarnationEvidenceV2,
+)
 from loom_capacity_manager.membership_contracts import (
     DelegatedAllocationInputV2,
     PersonalApplicationMemberV1,
     PersonalMembershipPolicyV1,
     PersonalMembershipSnapshotV1,
+)
+from loom_capacity_manager.successor_origin_contracts import (
+    ManagedApplicationOriginV2,
+    ManagedBuildOriginV1,
 )
 
 _PERSONAL_NAME = re.compile(r"^[a-z]([-a-z0-9]{0,18}[a-z0-9])?$")
@@ -104,7 +121,7 @@ def _validate_personal_configuration(
         raise _invalid("disabled personal application must have zero capacity")
 
 
-def _member_reference(member: PersonalApplicationMemberV1) -> ConfigurationGenerationRefV1:
+def _member_reference(member: PersonalApplicationMemberV1 | PersonalBuildMemberV1) -> ConfigurationGenerationRefV1:
     configuration = member.configuration
     return ConfigurationGenerationRefV1(
         scope="subject",
@@ -115,21 +132,68 @@ def _member_reference(member: PersonalApplicationMemberV1) -> ConfigurationGener
     )
 
 
+def _validate_build_template(template: PersonalBuildTemplateV1, fleet: FleetManifestV1, owner: AccountPolicyV1) -> None:
+    if (
+        template.max_slots_per_subject > owner.max_slots
+        or template.max_pending_slots_per_subject > owner.max_pending_slots
+        or template.max_pending_jobs_per_subject > owner.max_pending_jobs
+    ):
+        raise _invalid("build membership template exceeds the shared owner policy")
+    for profile in template.profiles:
+        try:
+            validate_profile_narrowing(fleet, profile)
+        except ValueError as exc:
+            raise _invalid("build membership profile differs from fleet authority") from exc
+        pool = next(item for item in fleet.pools if item.pool_id == profile.pool_id)
+        expected_architecture = "arm64" if profile.pool_id == "gb10" else "x86_64"
+        if any(domain.architecture != expected_architecture for domain in pool.resource_domains if domain.domain_id in profile.eligible_resource_domains):
+            raise _invalid("build membership profile is not natively placed")
+
+
+def _validate_build_configuration(
+    member: PersonalBuildMemberV1, namespace_id: UUID, template: PersonalBuildTemplateV1, owner: AccountPolicyV1,
+) -> None:
+    configuration = member.configuration
+    if (
+        configuration.subject_id != personal_build_subject_id(namespace_id, member.owner_id)
+        or configuration.display_name != personal_build_subject_name(member.owner_id)
+        or configuration.profiles != template.profiles
+        or member.acknowledgement.candidate != template.runtime_candidate
+        or configuration.max_slots > template.max_slots_per_subject
+        or configuration.max_pending_slots != template.max_pending_slots_per_subject
+        or configuration.max_pending_jobs != template.max_pending_jobs_per_subject
+        or configuration.submission_rate_per_minute != owner.submission_rate_per_minute
+    ):
+        raise _invalid("build membership identity, runtime or owner policy changed")
+
+
 def resolved_subject_references(
     value: AllocationInputV1,
 ) -> tuple[ConfigurationGenerationRefV1, ...]:
     """Resolve a bounded delegated overlay without mutating its immutable base."""
 
-    if not isinstance(value, DelegatedAllocationInputV2):
+    if not isinstance(value, (DelegatedAllocationInputV2, DelegatedAllocationInputV3)):
         return value.configuration.subjects
 
+    membership: PersonalMembershipSnapshotV1 | PersonalMembershipSnapshotV2
+    build_template: PersonalBuildTemplateV1 | None = None
     try:
         policy = PersonalMembershipPolicyV1.model_validate(
             value.preparation.personal_membership.model_dump(mode="python")
         )
-        membership = PersonalMembershipSnapshotV1.model_validate(
-            value.membership.model_dump(mode="python")
-        )
+        if isinstance(value, DelegatedAllocationInputV3):
+            checked = DelegatedAllocationInputV3.model_validate_json(value.model_dump_json())
+            membership = checked.membership
+            build_template = checked.preparation.personal_builds
+            for inherited_origin in (*checked.preparation.managed_application_origins, *checked.preparation.managed_build_origins):
+                if isinstance(inherited_origin, (ManagedApplicationOriginV2, ManagedBuildOriginV1)) and isinstance(
+                    inherited_origin.inherited.anchor.member.reincarnation, PersonalInheritedReincarnationEvidenceV2,
+                ):
+                    raise _invalid("cross-epoch recreation allocation is not yet connected")
+        else:
+            membership = PersonalMembershipSnapshotV1.model_validate(
+                value.membership.model_dump(mode="python")
+            )
     except ValidationError as exc:
         raise _invalid("personal membership contract is invalid") from exc
 
@@ -165,6 +229,8 @@ def resolved_subject_references(
     )
     if template_policy is None:
         raise _invalid("personal membership owner template is unavailable")
+    if build_template is not None:
+        _validate_build_template(build_template, fleet, template_policy)
     accounts = {
         account.account_id: account
         for account in (value.effective_account_policies or fleet.account_policies)
@@ -174,6 +240,21 @@ def resolved_subject_references(
     base_references = {cast(UUID, item.subject_id): item for item in configuration.subjects}
     managed_ids = set(policy.managed_base_subject_ids)
     managed_base = {item.subject_id: item for item in value.managed_base_subjects}
+    build_origins: dict[UUID, ManagedBuildOriginV1] = {}
+    original_roots = dict(base_references)
+    if isinstance(value, DelegatedAllocationInputV3):
+        for origin in value.preparation.managed_application_origins:
+            original = managed_base.get(origin.configuration.subject_id)
+            if original is None or canonical_digest(original) != canonical_digest(origin.configuration):
+                raise _invalid("managed application origin differs from immutable base configuration")
+            if isinstance(origin, ManagedApplicationOriginV2):
+                original_roots[origin.configuration.subject_id] = origin.inherited.original_origin
+        for build_origin in value.preparation.managed_build_origins:
+            original = managed_base.get(build_origin.configuration.subject_id)
+            if original is None or canonical_digest(original) != canonical_digest(build_origin.configuration):
+                raise _invalid("managed build origin differs from immutable base configuration")
+            build_origins[original.subject_id] = build_origin
+            original_roots[original.subject_id] = build_origin.inherited.original_origin
     if set(managed_base) != managed_ids:
         raise _invalid("managed base subject payloads do not exactly cover policy")
     if not managed_ids <= set(base_references):
@@ -190,7 +271,15 @@ def resolved_subject_references(
             raise _invalid("managed base payload differs from its immutable generation")
         owner_id = _owner_id(original)
         owner_policy = _derived_owner_policy(owner_id, template_policy, accounts)
-        _validate_personal_configuration(original, owner_id, template, owner_policy)
+        if subject_id in build_origins:
+            if build_template is None:
+                raise _invalid("managed build template is unavailable")
+            build_member = build_origins[subject_id].inherited.anchor.member
+            if not isinstance(build_member, PersonalBuildMemberV1):
+                raise _invalid("managed build origin purpose changed")
+            _validate_build_configuration(build_member, membership.namespace_id, build_template, owner_policy)
+        else:
+            _validate_personal_configuration(original, owner_id, template, owner_policy)
         owners_by_subject[subject_id] = owner_id
 
     members_by_subject = {item.configuration.subject_id: item for item in membership.members}
@@ -199,21 +288,27 @@ def resolved_subject_references(
 
     resolved = dict(base_references)
     for subject_id, member in members_by_subject.items():
+        if isinstance(member.reincarnation, PersonalInheritedReincarnationEvidenceV2):
+            raise _invalid("cross-epoch recreation allocation is not yet connected")
         owner_policy = _derived_owner_policy(member.owner_id, template_policy, accounts)
-        _validate_personal_configuration(
-            member.configuration,
-            member.owner_id,
-            template,
-            owner_policy,
-        )
+        if isinstance(member, PersonalBuildMemberV1):
+            if build_template is None:
+                raise _invalid("build membership template is unavailable")
+            _validate_build_configuration(member, membership.namespace_id, build_template, owner_policy)
+        else:
+            _validate_personal_configuration(member.configuration, member.owner_id, template, owner_policy)
         managed_original = managed_base.get(subject_id)
+        if isinstance(member, PersonalBuildMemberV1) and subject_id in base_references and subject_id not in build_origins:
+            raise _invalid("build membership cannot override an application or immutable base")
+        if not isinstance(member, PersonalBuildMemberV1) and subject_id in build_origins:
+            raise _invalid("application membership cannot override a managed build")
         if subject_id in base_references and managed_original is None:
             raise _invalid("personal membership cannot override a static base subject")
         evidence = member.reincarnation
         if evidence is not None and (
             evidence.namespace_id != membership.namespace_id
             or evidence.execution_manifest_sha256 != canonical_executable_digest(preparation)
-            or (managed_original is not None and evidence.origin != base_references[subject_id])
+            or (managed_original is not None and evidence.origin != original_roots[subject_id])
         ):
             raise _invalid("personal reincarnation authority or origin changed")
         if managed_original is not None and (

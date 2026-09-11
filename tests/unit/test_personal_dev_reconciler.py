@@ -650,26 +650,40 @@ async def _async_value(value):
     return value
 
 
-async def test_live_preparation_runtime_converges_fixtures_then_exact_generation() -> None:
+@pytest.mark.parametrize("bound_storage", (False, True))
+async def test_live_preparation_runtime_converges_fixtures_then_exact_generation(bound_storage) -> None:
+    from loom.dev_instance import derive_identity
+    from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
+
+    claim = _bound_claim() if bound_storage else _claim()
+    identity = claim.operation.storage_binding.identity if bound_storage else derive_identity("alice")
     events: list[str] = []
     owner_access = type("OwnerAccess", (), {"user_id": _OWNER, "team_id": _TEAM})()
 
     class _Sql:
         async def apply_role_and_database(self, _identity, **_kwargs):
+            assert _identity == identity
+            if bound_storage:
+                assert "secrets" in events, "bound credentials must win before role mutation"
+            assert f'CREATE DATABASE "{identity.database}"' in _kwargs["create_database_sql"]
             events.append("database")
 
     class _Buckets:
         async def ensure_buckets(self, _identity, _buckets):
+            assert _identity == identity
+            assert identity.task_bucket in _buckets
             events.append("buckets")
 
     class _Vault:
         password = None
 
         async def database_password(self, _identity):
+            assert _identity == identity
             assert events and events[-1] == "namespace-authority"
             return self.password
 
         async def store(self, _identity, password):
+            assert _identity == identity
             assert password == "a" * 20
             self.password = password
             events.append("secrets")
@@ -677,16 +691,19 @@ async def test_live_preparation_runtime_converges_fixtures_then_exact_generation
 
     class _Tenant:
         async def converge(self, _identity):
+            assert _identity == identity
             events.append("tenant")
 
     class _Cluster:
         async def bootstrap(self, _identity, config):
+            assert _identity == identity
             assert config.candidate_sha == "a" * 64
             assert config.lifecycle_binding is not None
             assert config.lifecycle_binding.attempt_id == _ATTEMPT_ID
             events.append("namespace-authority")
 
         async def prepare(self, _identity, config):
+            assert _identity == identity
             assert config.candidate_sha == "a" * 64
             assert config.lifecycle_binding is not None
             assert config.lifecycle_binding.attempt_id == _ATTEMPT_ID
@@ -695,6 +712,7 @@ async def test_live_preparation_runtime_converges_fixtures_then_exact_generation
 
     class _Access:
         async def bootstrap(self, _identity, *, password, access):
+            assert _identity == identity
             assert password == "a" * 20
             assert access is owner_access
             events.append("access")
@@ -711,22 +729,23 @@ async def test_live_preparation_runtime_converges_fixtures_then_exact_generation
     )
 
     observation = await runtime.prepare(
-        _claim(),
+        claim,
         access=owner_access,  # type: ignore[arg-type]
     )
 
     assert observation == _observation()
     assert events == [
         "namespace-authority",
+        *(["secrets"] if bound_storage else []),
         "database",
         "buckets",
-        "secrets",
+        *([] if bound_storage else ["secrets"]),
         "tenant",
         "generation",
     ]
 
     await runtime.bootstrap_access(
-        _claim(),
+        claim,
         access=owner_access,  # type: ignore[arg-type]
     )
     assert events[-2:] == ["namespace-authority", "access"]
@@ -953,27 +972,58 @@ async def test_capacity_installer_rejects_seed_runtime_secret_mismatch_before_mu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bound_storage", (False, True))
 async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement(
     tmp_path: Path,
+    bound_storage,
 ) -> None:
+    from loom.dev_instance import derive_identity
+    from loom.dev_instance_runtime import KubectlClient
+    from loom.personal_dev_capacity_identity import capacity_runtime_database_url
+    from loom.personal_dev_incarnation_storage import personal_dev_secret_name
+    from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
+    from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
+    from tests.unit.test_personal_dev_storage_vault import _Cluster
+
+    create = _bound_claim() if bound_storage else _claim()
+    identity = create.operation.storage_binding.identity if bound_storage else derive_identity("alice")
+    runtime_url = capacity_runtime_database_url("postgresql://admin:fixture@db/postgres", identity, _RUNTIME_PASSWORD)
+    storage_data = {} if not bound_storage else {
+        "storage-binding.json": canonical_bytes(identity.storage_binding),
+        "storage-binding.sha256": canonical_digest(identity.storage_binding).encode(),
+    }
+
     class _Kubectl:
         def __init__(self) -> None:
-            self.secrets: dict[str, dict[str, bytes]] = {
-                "loom-protected-worker-runtime": {
-                    "database-url": _RUNTIME_DATABASE_URL.encode("ascii")
+            self.runner = _Cluster()
+            self.secrets = self.runner.secrets
+            self.secrets.update({
+                personal_dev_secret_name(identity, "loom-protected-worker-runtime"): {
+                    **storage_data,
+                    "database-url": runtime_url.encode("ascii")
                 }
-            }
+            })
             self.documents: list[dict[str, object]] = []
             self.applied: list[list[dict[str, object]]] = []
             self.waited: list[tuple[str, str]] = []
 
+        @staticmethod
+        def _argv(*parts):
+            return ["kubectl", *parts]
+
+        _namespace_uid = staticmethod(KubectlClient._namespace_uid)
+
+        async def read_storage_namespace(self, supplied_identity):
+            assert supplied_identity == identity
+            return {"metadata": {"name": identity.namespace, "uid": "namespace-uid"}}
+
         async def read_secret_optional(self, namespace, name):
             assert namespace == "loom-dev-alice"
-            assert name in {
+            assert name in {personal_dev_secret_name(identity, purpose) for purpose in (
                 "loom-capacity-agent",
                 "loom-capacity-agent-credentials",
                 "loom-protected-worker-runtime",
-            }
+            )}
             return self.secrets.get(name)
 
         async def apply(self, manifest):
@@ -995,6 +1045,7 @@ async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement
             self.configurations = []
 
         async def converge(self, *, configuration, credentials, **_kwargs):
+            assert _kwargs["identity"] == identity
             self.configurations.append(configuration)
             return CapacityDatabaseInstallation(
                 protected_admission_sha256=(
@@ -1003,9 +1054,9 @@ async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement
                 agent_database_url=(
                     "postgresql+psycopg://agent:"
                     + credentials.agent_password
-                    + "@loom-dev-postgres/loom_dev_alice"
+                    + f"@loom-dev-postgres/{identity.database}"
                 ),
-                runtime_database_url=_RUNTIME_DATABASE_URL,
+                runtime_database_url=runtime_url,
             )
 
     def credential(name: str, payload: str) -> Path:
@@ -1048,13 +1099,14 @@ async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement
         database=database,
         config=runtime_config,
     )
-    create = _claim()
     first = await installer.converge(create)
     replay = await installer.converge(create)
     assert replay == first
     assert database.configurations[-1].reporter_incarnation == first.reporter_incarnation
-    seed = kubectl.secrets["loom-capacity-agent-credentials"]
-    runtime_secret = kubectl.secrets["loom-capacity-agent"]
+    seed = kubectl.secrets[personal_dev_secret_name(identity, "loom-capacity-agent-credentials")]
+    runtime_secret = kubectl.secrets[personal_dev_secret_name(identity, "loom-capacity-agent")]
+    for key, value in storage_data.items():
+        assert seed[key] == runtime_secret[key] == value
     assert seed["reporter-token"] == runtime_secret["reporter-token"]
     assert seed["operation-id"] == runtime_secret["operation-id"]
     assert seed["agent-password"] in runtime_secret["database-url"]
@@ -1072,6 +1124,12 @@ async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement
         changed_installation.capacity_agent_installation_sha256
         != first.capacity_agent_installation_sha256
     )
+    changed_deployment = (
+        kubectl.runner.workloads[("Deployment", "loom-capacity-agent")]
+        if bound_storage else next(document for document in kubectl.documents if document["kind"] == "Deployment")
+    )
+    changed_command = changed_deployment["spec"]["template"]["spec"]["containers"][0]["command"]
+    assert changed_command[changed_command.index("--max-attempts") + 1] == "9999"
 
     capacity_operation = replace(
         create.operation,
@@ -1082,7 +1140,11 @@ async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement
         kind="capacity",
         checkpoint="capacity_projection_requested",
     )
-    capacity = replace(create, operation=capacity_operation)
+    capacity = replace(
+        create, operation=capacity_operation,
+        environment=replace(create.environment, operation_id=capacity_operation.id, operation_epoch=2),
+        attempt=replace(create.attempt, operation_id=capacity_operation.id, operation_epoch=2),
+    )
     capacity_result = await installer.converge(capacity)
     assert capacity_result.reporter_incarnation == first.reporter_incarnation
     assert capacity_result.protected_admission_sha256 == first.protected_admission_sha256
@@ -1102,18 +1164,26 @@ async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement
         candidate_sha="b" * 64,
         deployment_generation=2,
     )
-    replacement = replace(create, operation=replacement_operation)
+    replacement = replace(
+        create, operation=replacement_operation,
+        environment=replace(create.environment, operation_id=replacement_operation.id, operation_epoch=3),
+        attempt=replace(create.attempt, operation_id=replacement_operation.id, operation_epoch=3),
+        candidate=replace(create.candidate, candidate_sha=replacement_operation.candidate_sha),
+    )
     replacement_result = await installer.converge(replacement)
     assert replacement_result.reporter_incarnation != first.reporter_incarnation
     assert replacement_result.protected_admission_sha256 != first.protected_admission_sha256
     assert database.configurations[-1].candidate_digest == "b" * 64
     assert database.configurations[-1].deployment_generation == 2
 
-    deployment = kubectl.documents[1]
+    deployment = (
+        kubectl.runner.workloads[("Deployment", "loom-capacity-agent")]
+        if bound_storage else next(document for document in kubectl.documents if document["kind"] == "Deployment")
+    )
     assert deployment["kind"] == "Deployment"
     assert "registry.example/loom-service@sha256:" in str(deployment)
     assert "registry.example/loom-service@sha256:" + "1" * 64 in str(deployment)
-    network_policy = kubectl.documents[2]
+    network_policy = next(document for document in kubectl.documents if document["kind"] == "NetworkPolicy")
     assert network_policy["kind"] == "NetworkPolicy"
     egress = network_policy["spec"]["egress"]  # type: ignore[index]
     assert egress == [

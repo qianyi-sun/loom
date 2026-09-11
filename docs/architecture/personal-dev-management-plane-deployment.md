@@ -20,6 +20,12 @@ remains the only allocation authority across OLDLAB and GB10, and its
 executable new-capacity ceiling must remain exactly zero throughout the live
 personal-application acceptance and the initial durable operational mode.
 
+These are the historical zero-capacity deployment contracts. The separate
+[active membership service connection](personal-dev-active-membership.md#explicit-service-mode-and-recovery-boundary)
+does not relax them or add an active renderer. Its `membership-v1` service mode
+supports stored application recovery but deliberately leaves the legacy builder
+inert until the allocation-accounted provider and new adoption evidence exist.
+
 ## Current boundary
 
 The following repository capabilities already exist:
@@ -155,20 +161,33 @@ the separately fenced capacity-agent objects retain
 `loom-personal-dev-builder-controller`. A broad prefix or a pre-existing
 malformed namespace cannot bypass the policy.
 
-The namespace-local management role can get only the four fixed lifecycle
-Secrets; it cannot list or watch arbitrary application or TLS Secrets.
+The legacy namespace-local management role retains its four fixed lifecycle
+Secret reads. Incarnation-bound namespaces use a separate general role with no
+Secret reads and a namespace-local credential-reader Role granting only GET on
+the five exact incarnation-suffixed Secret names. This includes the protected
+worker-runtime credential already consumed by management's capacity installer.
+Admission restricts the reader Role and its binding to those names and the
+management service account; neither mode permits listing or watching Secrets.
+See [active membership](personal-dev-active-membership.md) for the two-phase
+write and incarnation-isolation boundaries.
 Management may prepare only generation-suffixed candidate Services and has no
 Ingress mutation verb. Stable Services and Ingresses remain exclusive to the
 candidate-independent activation principal. Its admission contract binds the
 namespace owner and deployment generation, permits only internal ClusterIP
 Services with exact selectors and ports, and fixes every Ingress host, backend,
-TLS Secret, class, and annotation. Admission applies the same fixed Secret set
-to personal Deployment and Job volume/environment references, rejects
+TLS Secret, class, and annotation. Admission applies purpose-specific Secret
+allowlists to personal Deployment and Job volume/environment references, using
+incarnation-suffixed names for bound namespaces, rejects
 projected or CSI Secret paths, and keeps API-token automount disabled.
 Builder Jobs are likewise limited to attempt-capability Secrets and the
 unprivileged default service account, without projected API credentials. Both
 workload families reject `imagePullSecrets`, closing the remaining indirect
 Secret reference path.
+
+Current control-plane renders contain 39 resources, or 41 with the prepared
+native-builder store. Historical single-owner acceptance and durable-launch
+runbooks remain byte-preserved with their original counts and release bindings;
+they do not authorize a current-release deployment or membership enablement.
 
 Admission deliberately does not duplicate every field of the dynamic
 Deployment, Job, ConfigMap, quota, or NetworkPolicy constructors in CEL. The

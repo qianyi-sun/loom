@@ -2534,9 +2534,11 @@ async def test_deployment_fence_canary_preparation_cannot_select_a_noninitial_us
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("handoff_pause_sec", (0, 1.1))
 async def test_materialization_cooperative_two_owner_canary_records_safe_evidence(
     materialization_setup,
     monkeypatch: pytest.MonkeyPatch,
+    handoff_pause_sec: float,
 ) -> None:
     """Exercise the staging-canary handoff without a kill, GC, or external state."""
     app, tokens, teams = materialization_setup
@@ -2594,7 +2596,7 @@ async def test_materialization_cooperative_two_owner_canary_records_safe_evidenc
             task_name="cooperative-loser-a",
         )
         a_staged.set()
-        await asyncio.wait_for(allow_a_resume.wait(), timeout=1)
+        await allow_a_resume.wait()
         async with app.state.session_factory() as session:
             with pytest.raises(taskset_materializer.LeaseLost):
                 await taskset_materializer.publish_if_current(
@@ -2606,56 +2608,51 @@ async def test_materialization_cooperative_two_owner_canary_records_safe_evidenc
                 )
         return output, CanaryClock.current
 
-    owner_a_task = asyncio.create_task(stage_then_resume_as_a())
-    await asyncio.wait_for(a_staged.wait(), timeout=1)
+    # One deadlock budget bounds the whole handoff. TaskGroup cancels and joins
+    # owner A if staging or owner B fails; no orphan waiter survives the test.
+    async with asyncio.timeout(30), asyncio.TaskGroup() as owners:
+        owner_a_task = owners.create_task(stage_then_resume_as_a())
+        await a_staged.wait()
+        # Deliberately exercise a slow handoff. Only CanaryClock expires leases.
+        await asyncio.sleep(handoff_pause_sec)
 
-    # Advance only the test clock. Reclaim itself is the production CAS path;
-    # no row is directly edited and no driver, pod, or object is killed.
-    CanaryClock.current += timedelta(seconds=claim_ttl_sec + 1)
-    async with app.state.session_factory() as session:
-        assert (
-            await taskset_materializer.reclaim_stale_jobs(
-                session,
-                claim_ttl_sec=claim_ttl_sec,
+        # Reclaim uses the production CAS path, without editing a row directly
+        # or killing any driver, pod or object.
+        CanaryClock.current += timedelta(seconds=claim_ttl_sec + 1)
+        async with app.state.session_factory() as session:
+            assert (
+                await taskset_materializer.reclaim_stale_jobs(
+                    session, claim_ttl_sec=claim_ttl_sec,
+                )
+                == 1
             )
-            == 1
-        )
 
-    # The reclaimer applies the normal retry delay before B can claim.
-    CanaryClock.current += timedelta(seconds=31)
-    async with app.state.session_factory() as session:
-        claimed_by_b = await taskset_materializer._claim_jobs(
-            session,
-            batch_size=1,
-            claimed_by=owner_b,
-        )
-    assert len(claimed_by_b) == 1
-    lease_b = claimed_by_b[0]
-    assert lease_b.id == lease_a.id
-    assert lease_b.lease_epoch > lease_a.lease_epoch
+        # The reclaimer applies the normal retry delay before B can claim.
+        CanaryClock.current += timedelta(seconds=31)
+        async with app.state.session_factory() as session:
+            claimed_by_b = await taskset_materializer._claim_jobs(
+                session, batch_size=1, claimed_by=owner_b,
+            )
+        assert len(claimed_by_b) == 1
+        lease_b = claimed_by_b[0]
+        assert lease_b.id == lease_a.id
+        assert lease_b.lease_epoch > lease_a.lease_epoch
 
-    async with app.state.session_factory() as session:
-        await taskset_materializer._start_job(session, lease=lease_b)
-    output_b = _stage_output_for_lease(
-        app,
-        team_id=teams["team_a"],
-        slug="inline-tasks",
-        lease=lease_b,
-        task_set_id=task_set_id,
-        task_name="cooperative-winner-b",
-    )
-    async with app.state.session_factory() as session:
-        await taskset_materializer.publish_if_current(
-            session,
-            lease=lease_b,
-            task_set_id=task_set_id,
-            output=output_b,
-            claim_ttl_sec=claim_ttl_sec,
+        async with app.state.session_factory() as session:
+            await taskset_materializer._start_job(session, lease=lease_b)
+        output_b = _stage_output_for_lease(
+            app, team_id=teams["team_a"], slug="inline-tasks", lease=lease_b,
+            task_set_id=task_set_id, task_name="cooperative-winner-b",
         )
-    b_published_at = CanaryClock.current
+        async with app.state.session_factory() as session:
+            await taskset_materializer.publish_if_current(
+                session, lease=lease_b, task_set_id=task_set_id,
+                output=output_b, claim_ttl_sec=claim_ttl_sec,
+            )
+        b_published_at = CanaryClock.current
 
-    allow_a_resume.set()
-    output_a, a_lost_at = await asyncio.wait_for(owner_a_task, timeout=1)
+        allow_a_resume.set()
+        output_a, a_lost_at = await owner_a_task
 
     async with app.state.session_factory() as session:
         winner_job = await session.get(TaskSetMaterializationJob, lease_b.id)

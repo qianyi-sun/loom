@@ -24,6 +24,7 @@ from loom.personal_dev_control_plane_config import (
     load_personal_dev_trusted_release,
 )
 from loom.personal_dev_control_plane_render import (
+    _personal_secret_names_cel,
     render_acceptance_personal_dev_control_plane,
     render_operational_personal_dev_control_plane,
     render_shadow_personal_dev_control_plane,
@@ -313,7 +314,7 @@ def _acceptance_render(tmp_path: Path):
         "source": {"commit": release.source_sha, "tree": release.source_tree},
         "storage": {
             "backup_restore_evidence_sha256": "b" * 64,
-            "schema_head": "0138",
+            "schema_head": "0141",
         },
         "window": {
             "expires_at": "2026-08-17T23:00:00Z",
@@ -434,7 +435,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert repeated == rendered
     assert rendered.yaml_text.endswith("\n")
     assert rendered.resource_count == len(documents)
-    assert rendered.resource_count == 38
+    assert rendered.resource_count == 39
     expected_input = hashlib.sha256(
         b"loom-personal-dev-shadow-render-v1\0"
         + profile.canonical_bytes()
@@ -447,7 +448,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "57352268fe484603ac11b7837b79b15e0ebc8a3cd038d79cbeec94046dd38c24"
+        "594d20f3ac23042bf8b3ef1a34cf3b582b7e0dd0b85a2a6a7019c898edd75a30"
     )
 
     identities = {_identity(document) for document in documents}
@@ -456,6 +457,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
         ("ClusterRole", "", "loom-personal-dev-management-mutation"),
         ("ClusterRoleBinding", "", "loom-personal-dev-management-mutation"),
         ("ClusterRole", "", "loom-personal-dev-managed-namespace"),
+        ("ClusterRole", "", "loom-personal-dev-managed-namespace-bound"),
         ("ClusterRole", "", "loom-personal-dev-activation-agent"),
         ("ValidatingAdmissionPolicy", "", "loom-personal-dev-management-namespaces"),
         ("ValidatingAdmissionPolicyBinding", "", "loom-personal-dev-management-namespaces"),
@@ -596,7 +598,7 @@ def test_previous_schema_renders_exact_api_only_rollback_shape(tmp_path: Path) -
     rendered = render_shadow_personal_dev_control_plane(profile, release)
     documents = _parsed_documents(rendered.yaml_text)
 
-    assert rendered.resource_count == 35
+    assert rendered.resource_count == 36
     assert not any(
         document["metadata"].get("name", "").startswith("loom-personal-dev-web")
         for document in documents
@@ -698,7 +700,7 @@ def test_acceptance_render_is_deterministic_plan_bound_and_keeps_shadow_resource
             + plan.canonical_bytes()
         ).hexdigest()
     )
-    assert rendered.resource_count == shadow.resource_count == 40
+    assert rendered.resource_count == shadow.resource_count == 41
     assert rendered.runtime_class_name == plan.builder.runtime_class_name
     assert rendered.runtime_handler == plan.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == plan.builder.runtime_profile_sha256
@@ -1225,8 +1227,8 @@ def test_management_prepares_and_mounts_only_the_release_bound_scanner_generatio
         acceptance_documents,
     ) = _acceptance_render(tmp_path)
 
-    assert shadow_render.resource_count == 38
-    assert acceptance_render.resource_count == 40
+    assert shadow_render.resource_count == 39
+    assert acceptance_render.resource_count == 41
     for profile, release, plan, documents in (
         (shadow_profile, shadow_release, None, shadow_documents),
         (
@@ -1698,7 +1700,7 @@ def test_prepared_shadow_public_store_is_tls_bound_but_inert(tmp_path: Path) -> 
         if _identity(item) == ("NetworkPolicy", "loom-dev", "loom-personal-dev-minio-ingress")
     )
 
-    assert rendered.resource_count == 40
+    assert rendered.resource_count == 41
     assert disabled_service["spec"] == {
         "ports": [{"name": "s3", "port": 9000, "targetPort": 9000}],
     }
@@ -1772,7 +1774,7 @@ def test_enabled_public_store_routes_only_s3_and_shadow_reapply_closes_it(
         if _identity(item) == ("NetworkPolicy", "loom-dev", "loom-personal-dev-minio-ingress")
     )
 
-    assert rendered.resource_count == shadow.resource_count == 40
+    assert rendered.resource_count == shadow.resource_count == 41
     enabled_backend = enabled_ingress["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"]
     shadow_backend = shadow_ingress["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"]
     assert enabled_backend == {"name": "loom-dev-minio", "port": {"number": 9000}}
@@ -1802,7 +1804,7 @@ def test_management_ingress_admits_public_https_port_without_source_identity(
         if _identity(item) == ("NetworkPolicy", "loom-dev", "loom-personal-dev-management-ingress")
     )
 
-    assert rendered.resource_count == 38
+    assert rendered.resource_count == 39
     assert management_ingress["spec"] == {
         "podSelector": {"matchLabels": {"app": "loom-personal-dev-management"}},
         "policyTypes": ["Ingress"],
@@ -1828,7 +1830,7 @@ def test_management_ingress_ignores_legacy_controller_source_profile(
     )
 
     assert profile.network.ingress_controller_source_cidrs == ("192.168.50.14/32",)
-    assert rendered.resource_count == 38
+    assert rendered.resource_count == 39
     assert management_ingress["spec"] == {
         "podSelector": {"matchLabels": {"app": "loom-personal-dev-management"}},
         "policyTypes": ["Ingress"],
@@ -1855,7 +1857,7 @@ def test_capacity_manager_ingress_admits_only_personal_management_mtls(
         )
     )
 
-    assert rendered.resource_count == 38
+    assert rendered.resource_count == 39
     assert manager_ingress["spec"] == {
         "podSelector": {
             "matchLabels": {
@@ -1889,7 +1891,7 @@ def test_acme_http01_ingress_admits_public_challenge_only_on_exact_port(
         )
     )
 
-    assert rendered.resource_count == 38
+    assert rendered.resource_count == 39
     assert solver_ingress["spec"] == {
         "podSelector": {"matchLabels": {"acme.cert-manager.io/http01-solver": "true"}},
         "policyTypes": ["Ingress"],
@@ -2092,7 +2094,9 @@ def test_builder_namespace_admission_binds_metadata_without_wedging_delete(
     expression = validation["expression"]
 
     for shape_validation in policy["spec"]["validations"][1:]:
-        assert shape_validation["expression"].startswith("request.operation == 'DELETE' || ")
+        assert shape_validation["expression"].startswith((
+            "request.operation == 'DELETE' || ", "request.operation != 'UPDATE' || ",
+        ))
     assert expression.startswith("request.operation == 'DELETE' || ")
     for fragment in (
         ".metadata.annotations.size() == 0",
@@ -2691,8 +2695,8 @@ def test_management_admission_blocks_indirect_personal_secret_reads(
         for item in validations
         if "builder workload cannot acquire" in item["message"]
     )
-    application_secrets = "['loom-secrets','loom-admin-secret']"
-    capacity_secrets = "['loom-capacity-agent']"
+    application_secrets = _personal_secret_names_cel("loom-secrets", "loom-admin-secret")
+    capacity_secrets = _personal_secret_names_cel("loom-capacity-agent")
 
     assert "automountServiceAccountToken == false" in expressions
     assert "serviceAccountName == 'default'" in expressions
@@ -2732,7 +2736,7 @@ def test_management_admission_limits_protected_runtime_secret_to_control_plane(
         if "builder workload cannot acquire" in item["message"]
     )
     all_expressions = "\n".join(item["expression"] for item in policy["spec"]["validations"])
-    control_plane_secrets = "['loom-secrets','loom-admin-secret','loom-protected-worker-runtime']"
+    control_plane_secrets = _personal_secret_names_cel("loom-secrets", "loom-admin-secret", "loom-protected-worker-runtime")
 
     assert "loom-protected-worker-runtime" in all_expressions
     assert "metadata.name.matches('^loom-control-plane-g[1-9][0-9]*$')" in workload
@@ -2742,7 +2746,7 @@ def test_management_admission_limits_protected_runtime_secret_to_control_plane(
         "variable.valueFrom.secretKeyRef.name",
     ):
         assert f"{reference} in {control_plane_secrets}" in workload
-        assert f"{reference} in ['loom-secrets','loom-admin-secret']" in workload
+        assert f"{reference} in {_personal_secret_names_cel('loom-secrets', 'loom-admin-secret')}" in workload
 
 
 def test_management_admission_binds_capacity_lifecycle_ownership_to_exact_resources(

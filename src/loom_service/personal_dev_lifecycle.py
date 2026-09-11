@@ -6,10 +6,11 @@ import asyncio
 import logging
 import os
 import ssl
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -33,6 +34,15 @@ from loom.personal_dev_environment import (
     PersonalDevReconciliationClaim,
 )
 from loom.personal_dev_environment_store import SqlAlchemyPersonalDevEnvironmentAuthority
+from loom.personal_dev_membership_client import CapacityManagerPersonalDevMembershipClient
+from loom.personal_dev_membership_reconciler import (
+    MembershipAdmissionGuard,
+    MembershipClient,
+    MembershipInstaller,
+    MembershipObserver,
+    PersonalDevMembershipReconciler,
+)
+from loom.personal_dev_membership_successor import PersonalDevMembershipSuccessorBindingV1
 from loom.personal_dev_reconciler import (
     PersonalDevEnvironmentReconciler,
     PersonalDevPreparationExecutor,
@@ -52,10 +62,27 @@ from loom_capacity_agent.client import (
     build_reporter_tls_context,
     read_owner_only_bytes,
 )
+from loom_capacity_manager.executable_contracts import ExecutionAuthorityV2
 from loom_service.config import LoomServiceSettings
 from loom_service.dev_instance_access import load_owner_access_snapshot_by_binding
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevMembershipRuntime:
+    """Trusted active ports; each saved operation still chooses its own mode.
+
+    The service owns client lifetime. The loop must keep running for historical
+    recovery and release when the independent admission interlock is unavailable.
+    """
+
+    installer: MembershipInstaller
+    client: MembershipClient
+    observer: MembershipObserver
+    admission: MembershipAdmissionGuard
+    management_principal_id: str
+    successor_bindings: Mapping[UUID, PersonalDevMembershipSuccessorBindingV1] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +92,8 @@ class PersonalDevCapacityRuntime:
     status_reader: PersonalDevCapacityStatusReader
     acceptance_interlock: PersonalDevAcceptanceInterlock | None
     operational_interlock: PersonalDevOperationalInterlock | None
+    membership: PersonalDevMembershipRuntime | None = None
+    owned_membership_clients: tuple[CapacityManagerPersonalDevMembershipClient, ...] = ()
 
 
 def build_personal_dev_capacity_runtime(
@@ -75,6 +104,14 @@ def build_personal_dev_capacity_runtime(
     mode = settings.personal_dev_runtime_mode
     if mode not in {"shadow", "acceptance", "operational"}:
         raise RuntimeError("personal-dev runtime mode is invalid")
+    if (
+        settings.personal_dev_membership_binding_json != "{}"
+        or settings.personal_dev_membership_plan_sha256
+        or settings.personal_dev_membership_observer_principal_id
+        or settings.personal_dev_membership_successor_plan_file
+        or settings.personal_dev_membership_successor_plan_sha256
+    ):
+        raise RuntimeError("legacy personal-dev runtime cannot use membership bindings")
     if not settings.dev_instances_enabled:
         if mode != "shadow":
             raise RuntimeError("disabled personal-dev runtime must remain shadow")
@@ -100,6 +137,46 @@ def build_personal_dev_capacity_runtime(
             )
         except PersonalDevOperationalInterlockError as exc:
             raise RuntimeError("personal-dev operational binding is invalid") from exc
+    installer, kubectl, connection = build_personal_dev_capacity_installation(settings)
+    try:
+        projector = CapacityManagerPersonalDevProjector.from_files(connection)
+    except (OSError, ssl.SSLError, TypeError, ValueError) as exc:
+        raise RuntimeError("personal-dev capacity runtime credentials are invalid") from exc
+    return PersonalDevCapacityRuntime(
+        installer=installer,
+        projector=projector,
+        status_reader=PersonalDevCapacityStatusReader(
+            kubectl=kubectl,
+            database_admin_url=str(settings.dev_instance_database_admin_url),
+            projector=projector,
+        ),
+        acceptance_interlock=(
+            PersonalDevAcceptanceInterlock.from_binding(
+                projector=projector,
+                binding=acceptance_binding,
+            )
+            if acceptance_binding is not None
+            else None
+        ),
+        operational_interlock=(
+            PersonalDevOperationalInterlock.from_binding(
+                projector=projector,
+                binding=operational_binding,
+            )
+            if operational_binding is not None
+            else None
+        ),
+    )
+
+
+def build_personal_dev_capacity_installation(
+    settings: LoomServiceSettings,
+    *,
+    membership_execution: ExecutionAuthorityV2 | None = None,
+) -> tuple[
+    KubectlPersonalDevCapacityInstaller, KubectlClient, PersonalDevCapacityManagerConnection
+]:
+    """Validate common protected installation inputs before opening HTTP clients."""
     if settings.dev_instance_database_admin_url is None:
         raise RuntimeError(
             "LOOM_SVC_DEV_INSTANCE_DATABASE_ADMIN_URL is required when dev instances are enabled"
@@ -169,36 +246,9 @@ def build_personal_dev_capacity_runtime(
         kubectl=kubectl,
         database=PsycopgPersonalDevCapacityDatabase(str(settings.dev_instance_database_admin_url)),
         config=config,
+        membership_execution=membership_execution,
     )
-    try:
-        projector = CapacityManagerPersonalDevProjector.from_files(connection)
-    except (OSError, ssl.SSLError, TypeError, ValueError) as exc:
-        raise RuntimeError("personal-dev capacity runtime credentials are invalid") from exc
-    return PersonalDevCapacityRuntime(
-        installer=installer,
-        projector=projector,
-        status_reader=PersonalDevCapacityStatusReader(
-            kubectl=kubectl,
-            database_admin_url=str(settings.dev_instance_database_admin_url),
-            projector=projector,
-        ),
-        acceptance_interlock=(
-            PersonalDevAcceptanceInterlock.from_binding(
-                projector=projector,
-                binding=acceptance_binding,
-            )
-            if acceptance_binding is not None
-            else None
-        ),
-        operational_interlock=(
-            PersonalDevOperationalInterlock.from_binding(
-                projector=projector,
-                binding=operational_binding,
-            )
-            if operational_binding is not None
-            else None
-        ),
-    )
+    return installer, kubectl, connection
 
 
 class SessionPersonalDevReconciliationAuthority:
@@ -245,6 +295,24 @@ class SessionPersonalDevReconciliationAuthority:
     async def record_capacity_projection(self, **kwargs: Any) -> Any:
         return await self._call("record_capacity_projection", **kwargs)
 
+    async def prepare_capacity_membership(self, **kwargs: Any) -> Any:
+        return await self._call("prepare_capacity_membership", **kwargs)
+
+    async def create_membership_successor(self, **kwargs: Any) -> Any:
+        return await self._call("create_membership_successor", **kwargs)
+
+    async def refresh_capacity_membership(self, **kwargs: Any) -> Any:
+        return await self._call("refresh_capacity_membership", **kwargs)
+
+    async def record_capacity_membership(self, **kwargs: Any) -> Any:
+        return await self._call("record_capacity_membership", **kwargs)
+
+    async def record_capacity_membership_outcome(self, **kwargs: Any) -> Any:
+        return await self._call("record_capacity_membership_outcome", **kwargs)
+
+    async def record_capacity_membership_release(self, **kwargs: Any) -> Any:
+        return await self._call("record_capacity_membership_release", **kwargs)
+
     async def advance_destroy_checkpoint(self, **kwargs: Any) -> Any:
         return await self._call("advance_destroy_checkpoint", **kwargs)
 
@@ -274,6 +342,7 @@ async def personal_dev_reconcile_run_loop(
     reconciler_id: str,
     lease_seconds: int,
     poll_interval_seconds: float,
+    membership: PersonalDevMembershipRuntime | None = None,
 ) -> None:
     if poll_interval_seconds <= 0:
         raise ValueError("personal-dev reconcile poll interval must be positive")
@@ -289,6 +358,19 @@ async def personal_dev_reconcile_run_loop(
         access_loader=personal_dev_access_loader(session_factory),
         reconciler_id=reconciler_id,
         lease_seconds=lease_seconds,
+        membership_reconciler=(
+            PersonalDevMembershipReconciler(
+                authority=authority,
+                client=membership.client,
+                installer=membership.installer,
+                management_principal_id=membership.management_principal_id,
+                observer=membership.observer,
+                cleanup_executor=executor,
+                admission=membership.admission,
+                successor_bindings=membership.successor_bindings,
+            )
+            if membership is not None else None
+        ),
     )
     while True:
         try:
@@ -307,6 +389,7 @@ async def personal_dev_reconcile_run_loop(
 
 __all__ = [
     "PersonalDevCapacityRuntime",
+    "PersonalDevMembershipRuntime",
     "SessionPersonalDevReconciliationAuthority",
     "build_personal_dev_capacity_runtime",
     "personal_dev_access_loader",

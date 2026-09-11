@@ -37,6 +37,12 @@ def _candidate(*, status: str = "ready") -> dict[str, object]:
 
 def _environment(*, status: str, epoch: int) -> dict[str, object]:
     return {
+        "operation_id": _OPERATION_ID,
+        "subject_id": "00000000-0000-0000-0000-000000000003",
+        "subject_incarnation": "00000000-0000-0000-0000-000000000004",
+        "candidate_id": _CANDIDATE_ID,
+        "deployment_generation": 1,
+        "operation_step": "complete" if status == "ready" else "candidate_build",
         "name": "alice",
         "status": status,
         "operation_epoch": epoch,
@@ -49,6 +55,14 @@ def _environment(*, status: str, epoch: int) -> dict[str, object]:
 
 def _operation(*, state: str) -> dict[str, object]:
     return {
+        "subject_id": "00000000-0000-0000-0000-000000000003",
+        "subject_incarnation": "00000000-0000-0000-0000-000000000004",
+        "candidate_id": _CANDIDATE_ID,
+        "idempotency_key": "00000000-0000-0000-0000-000000000005",
+        "attempt_id": "00000000-0000-0000-0000-000000000006",
+        "deployment_generation": 1,
+        "kind": "create",
+        "checkpoint": "complete" if state == "succeeded" else "candidate_build",
         "id": _OPERATION_ID,
         "environment_name": "alice",
         "candidate_sha": _CANDIDATE_SHA,
@@ -109,7 +123,7 @@ def test_personal_deploy_uploads_binds_epoch_and_waits_for_exact_operation(
                 202,
                 json={
                     "environment": _environment(status="provisioning", epoch=1),
-                    "operation": _operation(state="running"),
+                    "operation": _operation(state="running") | {"idempotency_key": payload["idempotency_key"]},
                 },
             )
         if path.endswith(f"/operations/{_OPERATION_ID}"):

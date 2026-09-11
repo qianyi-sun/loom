@@ -40,6 +40,25 @@ from sqlalchemy.orm import Mapped, mapped_column
 from loom.db.base import Base
 
 
+def _personal_storage_binding_check(environment_name: str) -> str:
+    return (
+        "(storage_binding IS NULL AND storage_binding_sha256 IS NULL) OR (("
+        "storage_binding IS NOT NULL AND storage_binding_sha256 ~ '^[0-9a-f]{64}$' "
+        "AND storage_binding_sha256 <> repeat('0', 64) "
+        "AND storage_binding->>'schema_version' = '1' "
+        "AND subject_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+        "AND subject_incarnation <> '00000000-0000-0000-0000-000000000000'::uuid "
+        "AND owner_user_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+        "AND owner_team_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+        f"AND {environment_name} NOT IN ('dev', 'development', 'staging', 'production', "
+        "'prod', 'local', 'loom', 'shared', 'default') "
+        "AND storage_binding = jsonb_build_object('schema_version', 1, "
+        f"'layout', 'incarnation-v1', 'environment_name', {environment_name}, "
+        "'subject_id', subject_id::text, 'subject_incarnation', subject_incarnation::text, "
+        "'owner_user_id', owner_user_id::text, 'owner_team_id', owner_team_id::text)) IS TRUE)"
+    )
+
+
 class Team(Base):
     __tablename__ = "teams"
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -536,6 +555,7 @@ class DevInstance(Base):
 
     __tablename__ = "dev_instances"
     __table_args__ = (
+        CheckConstraint(_personal_storage_binding_check("name"), name="dev_instances_storage_binding_check"),
         CheckConstraint(
             "name ~ '^[a-z]([-a-z0-9]{0,18}[a-z0-9])?$'",
             name="dev_instances_name_check",
@@ -563,6 +583,28 @@ class DevInstance(Base):
             name="dev_instances_operation_epoch_check",
         ),
         CheckConstraint(
+            "accepted_capacity_mode IN ('shadow-v1', 'membership-v1') AND ("
+            "(accepted_capacity_mode = 'shadow-v1' "
+            "AND accepted_capacity_membership_checkpoint IS NULL) OR (("
+            "accepted_capacity_mode = 'membership-v1' "
+            "AND accepted_capacity_membership_checkpoint IS NOT NULL "
+            "AND jsonb_typeof(accepted_capacity_membership_checkpoint) = 'object' "
+            "AND accepted_capacity_membership_checkpoint->>'schema_version' = '1' "
+            "AND jsonb_typeof(accepted_capacity_membership_checkpoint->'execution') = 'object' "
+            "AND accepted_capacity_membership_checkpoint->>'namespace_id' IS NOT NULL "
+            "AND jsonb_typeof(accepted_capacity_membership_checkpoint->'revision') = 'number' "
+            "AND accepted_capacity_membership_checkpoint->>'head_sha256' "
+            "~ '^[0-9a-f]{64}$' "
+            "AND capacity_reporter_incarnation IS NOT NULL "
+            "AND capacity_reporter_token_sha256 IS NOT NULL "
+            "AND local_activation_sha256 IS NOT NULL "
+            "AND protected_admission_sha256 IS NOT NULL "
+            "AND capacity_agent_installation_sha256 IS NOT NULL "
+            "AND capacity_supported_pool_ids IS NOT NULL "
+            "AND capacity_supported_architectures IS NOT NULL) IS TRUE))",
+            name="dev_instances_accepted_capacity_mode_check",
+        ),
+        CheckConstraint(
             "(capacity_configuration_epoch IS NULL "
             "AND capacity_configuration_sha256 IS NULL "
             "AND capacity_reporter_incarnation IS NULL "
@@ -572,9 +614,7 @@ class DevInstance(Base):
             "AND capacity_agent_installation_sha256 IS NULL "
             "AND capacity_supported_pool_ids IS NULL "
             "AND capacity_supported_architectures IS NULL) OR ("
-            "capacity_configuration_epoch > 0 "
-            "AND capacity_configuration_sha256 ~ '^[0-9a-f]{64}$' "
-            "AND capacity_reporter_incarnation IS NOT NULL "
+            "capacity_reporter_incarnation IS NOT NULL "
             "AND capacity_reporter_token_sha256 ~ '^[0-9a-f]{64}$' "
             "AND local_activation_sha256 ~ '^[0-9a-f]{64}$' "
             "AND protected_admission_sha256 ~ '^[0-9a-f]{64}$' "
@@ -582,7 +622,13 @@ class DevInstance(Base):
             "AND jsonb_typeof(capacity_supported_pool_ids) = 'array' "
             "AND jsonb_array_length(capacity_supported_pool_ids) > 0 "
             "AND jsonb_typeof(capacity_supported_architectures) = 'array' "
-            "AND jsonb_array_length(capacity_supported_architectures) > 0)",
+            "AND jsonb_array_length(capacity_supported_architectures) > 0 "
+            "AND ((accepted_capacity_mode = 'shadow-v1' "
+            "AND capacity_configuration_epoch > 0 "
+            "AND capacity_configuration_sha256 ~ '^[0-9a-f]{64}$') OR ("
+            "accepted_capacity_mode = 'membership-v1' "
+            "AND capacity_configuration_epoch IS NULL "
+            "AND capacity_configuration_sha256 IS NULL)))",
             name="dev_instances_capacity_projection_check",
         ),
         CheckConstraint(
@@ -590,11 +636,17 @@ class DevInstance(Base):
             "OR (candidate_id IS NOT NULL AND capacity_namespace IS NOT NULL "
             "AND capacity_database IS NOT NULL "
             "AND capacity_namespace = 'loom-dev-' || name "
-            "AND capacity_database = 'loom_dev_' || replace(name, '-', '_'))",
+            "AND capacity_database = CASE WHEN storage_binding IS NULL THEN "
+            "'loom_dev_' || replace(name, '-', '_') ELSE "
+            "'ld_' || replace(name, '-', '_') || '_' || replace(subject_incarnation::text, '-', '') END)",
             name="dev_instances_personal_capacity_identity_check",
         ),
         CheckConstraint(
-            "status <> 'ready' OR candidate_id IS NULL OR capacity_configuration_epoch IS NOT NULL",
+            "status <> 'ready' OR candidate_id IS NULL OR ("
+            "(accepted_capacity_mode = 'shadow-v1' "
+            "AND capacity_configuration_epoch IS NOT NULL) OR ("
+            "accepted_capacity_mode = 'membership-v1' "
+            "AND accepted_capacity_membership_checkpoint IS NOT NULL))",
             name="dev_instances_personal_readiness_capacity_check",
         ),
         UniqueConstraint("subject_id", name="dev_instances_subject_id_uidx"),
@@ -639,6 +691,8 @@ class DevInstance(Base):
     candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     capacity_namespace: Mapped[str | None] = mapped_column(Text, nullable=True)
     capacity_database: Mapped[str | None] = mapped_column(Text, nullable=True)
+    storage_binding: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    storage_binding_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     operation_epoch: Mapped[int] = mapped_column(
         BigInteger,
         nullable=False,
@@ -649,6 +703,16 @@ class DevInstance(Base):
         String(32),
         nullable=False,
         server_default=text("'claimed'"),
+    )
+    accepted_capacity_mode: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'shadow-v1'"),
+        default="shadow-v1",
+    )
+    accepted_capacity_membership_checkpoint: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
     )
     capacity_configuration_epoch: Mapped[int | None] = mapped_column(
         BigInteger,
@@ -1340,6 +1404,7 @@ class DevLifecycleOperation(Base):
 
     __tablename__ = "dev_lifecycle_operations"
     __table_args__ = (
+        CheckConstraint(_personal_storage_binding_check("environment_name"), name="dev_lifecycle_operations_storage_binding_check"),
         CheckConstraint(
             "operation_epoch >= expected_operation_epoch "
             "AND operation_epoch <= expected_operation_epoch + 1 "
@@ -1352,8 +1417,63 @@ class DevLifecycleOperation(Base):
         ),
         CheckConstraint(
             "state IN ('requested', 'running', 'activating', 'succeeded', "
-            "'failed', 'cancelling', 'cancelled')",
+            "'failed', 'cancelling', 'cancelled', 'superseded')",
             name="dev_lifecycle_operations_state_check",
+        ),
+        CheckConstraint(
+            "capacity_mode IN ('shadow-v1', 'membership-v1') AND ("
+            "(capacity_mode = 'shadow-v1' AND capacity_membership_envelope IS NULL) OR ("
+            "capacity_mode = 'membership-v1' "
+            "AND capacity_expected_configuration_epoch IS NULL "
+            "AND capacity_projection_request_sha256 IS NULL "
+            "AND capacity_configuration_epoch IS NULL "
+            "AND capacity_configuration_sha256 IS NULL "
+            "AND (capacity_membership_envelope IS NULL OR "
+            "(jsonb_typeof(capacity_membership_envelope) = 'object' "
+            "AND capacity_membership_envelope->>'schema_version' = '1' "
+            "AND capacity_membership_envelope->>'mode' = 'membership-v1' "
+            "AND jsonb_typeof(capacity_membership_envelope->'request') = 'object' "
+            "AND jsonb_typeof(capacity_membership_envelope->'observation') = 'object' "
+            "AND jsonb_typeof(capacity_membership_envelope->'expected_checkpoint') = 'object' "
+            "AND capacity_membership_envelope->>'request_sha256' ~ '^[0-9a-f]{64}$' "
+            "AND capacity_membership_envelope->>'idempotency_key' IS NOT NULL "
+            "AND jsonb_typeof(capacity_membership_envelope->'result') "
+            "IN ('null', 'object') "
+            "AND jsonb_typeof(capacity_membership_envelope->'historical_outcome') "
+            "IN ('null', 'object') "
+            "AND (jsonb_typeof(capacity_membership_envelope->'release') = 'null' OR ("
+            "jsonb_typeof(capacity_membership_envelope->'release') = 'object' "
+            "AND capacity_membership_envelope->'release'->>'schema_version' = '1' "
+            "AND capacity_membership_envelope->'release'->>'outcome' = 'verified' "
+            "AND capacity_membership_envelope->'release'->>'query_sha256' "
+            "~ '^[0-9a-f]{64}$' "
+            "AND jsonb_typeof(capacity_membership_envelope->'release' "
+            "->'membership_receipt') = 'object' "
+            "AND jsonb_typeof(capacity_membership_envelope->'release'->'current') = 'object' "
+            "AND capacity_membership_envelope->'release'->>'historical' = 'true' "
+            "AND capacity_membership_envelope->'release'->>'worker_available' = 'false' "
+            "AND jsonb_typeof(capacity_membership_envelope->'release' "
+            "->'incarnation_work') = 'object' "
+            "AND capacity_membership_envelope->'release'->>'release_set_sha256' "
+            "~ '^[0-9a-f]{64}$')) IS TRUE) IS TRUE)) AND ("
+            "kind = 'noop' OR checkpoint NOT IN ("
+            "'capacity_projection_pending', 'capacity_projected', 'cleanup_pending', "
+            "'membership_outcome_resolved', 'release_verified', "
+            "'local_authority_sealed', 'namespace_deleted', 'database_deleted', "
+            "'buckets_deleted', 'tenant_deleted', 'complete') OR ("
+            "capacity_membership_envelope IS NOT NULL "
+            "AND capacity_reporter_incarnation IS NOT NULL "
+            "AND capacity_reporter_token_sha256 IS NOT NULL "
+            "AND local_activation_sha256 IS NOT NULL "
+            "AND protected_admission_sha256 IS NOT NULL "
+            "AND capacity_agent_installation_sha256 IS NOT NULL "
+            "AND capacity_supported_pool_ids IS NOT NULL "
+            "AND jsonb_typeof(capacity_supported_pool_ids) = 'array' "
+            "AND jsonb_array_length(capacity_supported_pool_ids) > 0 "
+            "AND capacity_supported_architectures IS NOT NULL "
+            "AND jsonb_typeof(capacity_supported_architectures) = 'array' "
+            "AND jsonb_array_length(capacity_supported_architectures) > 0)))",
+            name="dev_lifecycle_operations_capacity_mode_check",
         ),
         CheckConstraint(
             "request_sha256 ~ '^[0-9a-f]{64}$' "
@@ -1377,7 +1497,7 @@ class DevLifecycleOperation(Base):
             name="dev_lifecycle_operations_digests_check",
         ),
         CheckConstraint(
-            "(capacity_expected_configuration_epoch IS NULL "
+            "capacity_mode = 'membership-v1' OR ((capacity_expected_configuration_epoch IS NULL "
             "AND capacity_projection_request_sha256 IS NULL "
             "AND capacity_configuration_epoch IS NULL "
             "AND capacity_configuration_sha256 IS NULL "
@@ -1415,7 +1535,7 @@ class DevLifecycleOperation(Base):
             "AND ((capacity_configuration_epoch IS NULL "
             "AND capacity_configuration_sha256 IS NULL) OR ("
             "capacity_configuration_epoch = capacity_expected_configuration_epoch + 1 "
-            "AND capacity_configuration_sha256 IS NOT NULL))))",
+            "AND capacity_configuration_sha256 IS NOT NULL)))))",
             name="dev_lifecycle_operations_capacity_projection_check",
         ),
         CheckConstraint(
@@ -1436,8 +1556,61 @@ class DevLifecycleOperation(Base):
             "AND capacity_supported_architectures IS NULL)) AND ("
             "state <> 'succeeded' OR kind = 'noop' "
             "OR checkpoint = 'pre_activation_abandoned' "
-            "OR capacity_configuration_epoch IS NOT NULL)",
+            "OR (capacity_mode = 'shadow-v1' "
+            "AND capacity_configuration_epoch IS NOT NULL) OR ("
+            "capacity_mode = 'membership-v1' "
+            "AND ((capacity_membership_envelope -> 'result' IS NOT NULL "
+            "AND jsonb_typeof(capacity_membership_envelope -> 'result') = 'object') OR ("
+            "kind = 'destroy' AND checkpoint = 'complete' "
+            "AND capacity_membership_envelope -> 'historical_outcome' ->> 'outcome' "
+            "= 'committed' "
+            "AND jsonb_typeof(capacity_membership_envelope "
+            "-> 'historical_outcome' -> 'receipt') = 'object' "
+            "AND jsonb_typeof(capacity_membership_envelope -> 'release') = 'object'))))",
             name="dev_lifecycle_operations_capacity_completion_check",
+        ),
+        CheckConstraint(
+            "(capacity_mode = 'shadow-v1' OR kind = 'noop' "
+            "OR checkpoint = 'pre_activation_abandoned' "
+            "OR (checkpoint NOT IN ('capacity_projection_pending', 'capacity_projected', "
+            "'cleanup_pending', 'membership_outcome_resolved', 'release_verified', "
+            "'local_authority_sealed', 'namespace_deleted', 'database_deleted', "
+            "'buckets_deleted', 'tenant_deleted', 'complete') AND ("
+            "capacity_membership_envelope IS NULL OR "
+            "jsonb_typeof(capacity_membership_envelope -> 'release') = 'null')) OR ("
+            "checkpoint = 'capacity_projection_pending' "
+            "AND jsonb_typeof(capacity_membership_envelope -> 'result') = 'null' "
+            "AND jsonb_typeof(capacity_membership_envelope -> 'historical_outcome') = 'null' "
+            "AND jsonb_typeof(capacity_membership_envelope -> 'release') = 'null') "
+            "OR (checkpoint = 'membership_outcome_resolved' "
+            "AND jsonb_typeof(capacity_membership_envelope -> 'result') = 'null' "
+            "AND jsonb_typeof(capacity_membership_envelope -> 'historical_outcome') = 'object' "
+            "AND jsonb_typeof(capacity_membership_envelope -> 'release') = 'null') "
+            "OR (checkpoint = 'capacity_projected' AND "
+            "(capacity_membership_envelope -> 'result' IS NOT NULL AND "
+            "jsonb_typeof(capacity_membership_envelope -> 'result') = 'object') AND "
+            "jsonb_typeof(capacity_membership_envelope -> 'historical_outcome') = 'null' "
+            "AND jsonb_typeof(capacity_membership_envelope -> 'release') = 'null') "
+            "OR (checkpoint = 'cleanup_pending' AND kind = 'destroy' "
+            "AND jsonb_typeof(capacity_membership_envelope -> 'result') = 'object' "
+            "AND jsonb_typeof(capacity_membership_envelope -> 'historical_outcome') = 'null' "
+            "AND jsonb_typeof(capacity_membership_envelope -> 'release') = 'null') "
+            "OR (kind = 'destroy' AND checkpoint IN ('release_verified', "
+            "'local_authority_sealed', 'namespace_deleted', 'database_deleted', "
+            "'buckets_deleted', 'tenant_deleted', 'complete') "
+            "AND jsonb_typeof(capacity_membership_envelope -> 'release') = 'object' AND (("
+            "jsonb_typeof(capacity_membership_envelope -> 'result') = 'object' "
+            "AND jsonb_typeof(capacity_membership_envelope -> 'historical_outcome') = 'null') "
+            "OR (jsonb_typeof(capacity_membership_envelope -> 'result') = 'null' "
+            "AND capacity_membership_envelope -> 'historical_outcome' ->> 'outcome' "
+            "= 'committed' AND jsonb_typeof(capacity_membership_envelope "
+            "-> 'historical_outcome' -> 'receipt') = 'object'))) "
+            "OR (checkpoint = 'complete' AND kind <> 'destroy' "
+            "AND jsonb_typeof(capacity_membership_envelope -> 'result') = 'object' "
+            "AND jsonb_typeof(capacity_membership_envelope -> 'historical_outcome') = 'null' "
+            "AND jsonb_typeof(capacity_membership_envelope -> 'release') = 'null')) "
+            "IS TRUE",
+            name="dev_lifecycle_operations_membership_completion_check",
         ),
         CheckConstraint(
             "min_slots >= 0 AND max_slots >= min_slots AND max_slots <= 8 "
@@ -1453,7 +1626,7 @@ class DevLifecycleOperation(Base):
         CheckConstraint(
             "(state IN ('requested', 'running', 'activating', 'cancelling') "
             "AND finished_at IS NULL AND failure_reason IS NULL) OR "
-            "(state = 'succeeded' AND finished_at IS NOT NULL "
+            "(state IN ('succeeded', 'superseded') AND finished_at IS NOT NULL "
             "AND failure_reason IS NULL) OR "
             "(state IN ('failed', 'cancelled') AND finished_at IS NOT NULL)",
             name="dev_lifecycle_operations_terminal_fields_check",
@@ -1467,9 +1640,51 @@ class DevLifecycleOperation(Base):
             "AND readiness_evidence_sha256 IS NULL "
             "AND activation_acknowledgement_sha256 IS NULL) OR "
             "(state = 'activating' AND readiness_evidence_sha256 IS NOT NULL) OR "
-            "(state = 'succeeded' AND readiness_evidence_sha256 IS NOT NULL "
+            "(state IN ('succeeded', 'superseded') AND readiness_evidence_sha256 IS NOT NULL "
             "AND activation_acknowledgement_sha256 IS NOT NULL)))",
             name="dev_lifecycle_operations_activation_evidence_check",
+        ),
+        CheckConstraint(
+            "(membership_predecessor_operation_id IS NULL "
+            "AND membership_accepted_operation_id IS NULL "
+            "AND membership_predecessor_envelope_sha256 IS NULL "
+            "AND membership_successor_binding IS NULL "
+            "AND membership_successor_binding_sha256 IS NULL "
+            "AND membership_continuation_kind IS NULL) OR (("
+            "membership_predecessor_operation_id IS NOT NULL "
+            "AND membership_predecessor_operation_id <> id "
+            "AND capacity_mode = 'membership-v1' AND kind IN ('create', 'update', 'destroy') "
+            "AND membership_predecessor_envelope_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND membership_predecessor_envelope_sha256 <> repeat('0', 64) "
+            "AND membership_successor_binding_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND membership_successor_binding_sha256 <> repeat('0', 64) "
+            "AND membership_continuation_kind IN ('create', 'update', 'capacity', 'destroy') "
+            "AND jsonb_typeof(membership_successor_binding) = 'object' "
+            "AND membership_successor_binding->>'schema_version' = '1' "
+            "AND membership_successor_binding->>'predecessor_operation_id' "
+            "= membership_predecessor_operation_id::text "
+            "AND membership_successor_binding->>'predecessor_envelope_sha256' "
+            "= membership_predecessor_envelope_sha256 "
+            "AND (membership_successor_binding->>'accepted_operation_id') "
+            "IS NOT DISTINCT FROM membership_accepted_operation_id::text "
+            "AND membership_successor_binding->>'owner_team_id' = owner_team_id::text) IS TRUE)",
+            name="dev_lifecycle_operations_successor_fields_check",
+        ),
+        CheckConstraint(
+            "(state = 'superseded') = (checkpoint = 'membership_successor_created') "
+            "AND (state <> 'superseded' OR ((capacity_mode = 'membership-v1' "
+            "AND jsonb_typeof(capacity_membership_envelope->'result') = 'null' "
+            "AND jsonb_typeof(capacity_membership_envelope->'historical_outcome') = 'object' "
+            "AND jsonb_typeof(capacity_membership_envelope->'release') = 'null' "
+            "AND capacity_membership_envelope->'historical_outcome'->>'outcome' "
+            "IN ('committed', 'terminal-not-committed') "
+            "AND NOT (kind = 'destroy' AND capacity_membership_envelope "
+            "->'historical_outcome'->>'outcome' = 'committed')) IS TRUE))",
+            name="dev_lifecycle_operations_superseded_check",
+        ),
+        UniqueConstraint(
+            "membership_predecessor_operation_id",
+            name="dev_lifecycle_operations_successor_predecessor_uidx",
         ),
         UniqueConstraint(
             "owner_user_id",
@@ -1481,6 +1696,7 @@ class DevLifecycleOperation(Base):
             "subject_incarnation",
             "expected_operation_epoch",
             "request_sha256",
+            "capacity_mode",
             name="dev_lifecycle_operations_request_uidx",
         ),
         UniqueConstraint(
@@ -1533,6 +1749,38 @@ class DevLifecycleOperation(Base):
         server_default=text("0"),
     )
     request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    capacity_mode: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'shadow-v1'"),
+        default="shadow-v1",
+    )
+    capacity_membership_envelope: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+    )
+    storage_binding: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    storage_binding_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    membership_predecessor_operation_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("dev_lifecycle_operations.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    membership_predecessor_envelope_sha256: Mapped[str | None] = mapped_column(
+        String(64), nullable=True,
+    )
+    membership_accepted_operation_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("dev_lifecycle_operations.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    membership_successor_binding: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True,
+    )
+    membership_successor_binding_sha256: Mapped[str | None] = mapped_column(
+        String(64), nullable=True,
+    )
+    membership_continuation_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
     candidate_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("personal_dev_candidates.id", ondelete="RESTRICT"),
@@ -1631,13 +1879,13 @@ class DevLifecycleOperationAttempt(Base):
             name="dev_lifecycle_operation_attempts_lease_check",
         ),
         CheckConstraint(
-            "state IN ('running', 'activating', 'succeeded', 'failed', 'cancelled')",
+            "state IN ('running', 'activating', 'succeeded', 'failed', 'cancelled', 'superseded')",
             name="dev_lifecycle_operation_attempts_state_check",
         ),
         CheckConstraint(
             "(state IN ('running', 'activating') AND finished_at IS NULL "
             "AND failure_reason IS NULL) OR "
-            "(state = 'succeeded' AND finished_at IS NOT NULL "
+            "(state IN ('succeeded', 'superseded') AND finished_at IS NOT NULL "
             "AND failure_reason IS NULL) OR "
             "(state IN ('failed', 'cancelled') AND finished_at IS NOT NULL)",
             name="dev_lifecycle_operation_attempts_terminal_fields_check",

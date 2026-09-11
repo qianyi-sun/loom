@@ -14,6 +14,11 @@ import yaml  # type: ignore[import-untyped]
 from loom.dev_instance import DevInstanceIdentity
 from loom.personal_dev_candidate import PERSONAL_DEV_COMPONENTS
 from loom.personal_dev_capacity_identity import PROTECTED_WORKER_RUNTIME_SECRET_NAME
+from loom.personal_dev_incarnation_storage import (
+    personal_dev_secret_name,
+    personal_dev_storage_annotations,
+    validate_personal_dev_storage_identity,
+)
 
 _MANAGED_LABELS = {
     "app.kubernetes.io/managed-by": "loom-dev-instance-controller",
@@ -33,10 +38,13 @@ class PersonalDevManifestBinding:
     operation_id: UUID
     attempt_id: UUID
     operation_epoch: int
+    attempt_sequence: int = 0
 
     def __post_init__(self) -> None:
         if type(self.operation_epoch) is not int or self.operation_epoch <= 0:
             raise ValueError("personal-dev manifest operation epoch must be positive")
+        if type(self.attempt_sequence) is not int or not 0 <= self.attempt_sequence < 2**63:
+            raise ValueError("personal-dev manifest attempt sequence must be nonnegative and bounded")
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,10 +109,10 @@ class DevInstanceManifestConfig:
         return f"{self.container_registry}/loom-{component}:{self.image_tag}"
 
 
-def _secret_env(name: str, key: str) -> dict[str, Any]:
+def _secret_env(identity: DevInstanceIdentity, name: str, key: str) -> dict[str, Any]:
     return {
         "name": name,
-        "valueFrom": {"secretKeyRef": {"name": "loom-secrets", "key": key}},
+        "valueFrom": {"secretKeyRef": {"name": personal_dev_secret_name(identity, "loom-secrets"), "key": key}},
     }
 
 
@@ -112,17 +120,29 @@ def _literal_env(name: str, value: str) -> dict[str, str]:
     return {"name": name, "value": value}
 
 
-def _lifecycle_labels(config: DevInstanceManifestConfig) -> dict[str, str]:
+def _lifecycle_labels(config: DevInstanceManifestConfig, identity: DevInstanceIdentity) -> dict[str, str]:
     if config.lifecycle_binding is None:
         return {}
     binding = config.lifecycle_binding
     return {
+        **({"loom.dev/attempt-sequence": str(binding.attempt_sequence)} if identity.storage_binding is not None else {}),
         "loom.dev/subject": str(binding.subject_id),
         "loom.dev/incarnation": str(binding.subject_incarnation),
         "loom.dev/operation": str(binding.operation_id),
         "loom.dev/attempt": str(binding.attempt_id),
         "loom.dev/operation-epoch": str(binding.operation_epoch),
         "loom.dev/generation": str(config.deployment_generation),
+    }
+
+
+def _immutable_execution_labels(
+    identity: DevInstanceIdentity, labels: dict[str, str],
+) -> dict[str, str]:
+    # Reconciliation retries retain operation/generation but get a new attempt.
+    # Keep mutable attempt evidence out of bound immutable execution fields.
+    return {
+        key: value for key, value in labels.items()
+        if identity.storage_binding is None or key not in {"loom.dev/attempt", "loom.dev/attempt-sequence"}
     }
 
 
@@ -163,7 +183,7 @@ def _management_role_binding(
         "roleRef": {
             "apiGroup": "rbac.authorization.k8s.io",
             "kind": "ClusterRole",
-            "name": "loom-personal-dev-managed-namespace",
+            "name": "loom-personal-dev-managed-namespace-bound" if identity.storage_binding is not None else "loom-personal-dev-managed-namespace",
         },
         "subjects": [
             {
@@ -188,18 +208,44 @@ def _metadata(
             "loom.dev/instance": identity.name,
             "loom.dev/environment": identity.runtime_environment,
             "loom.dev/candidate": config.candidate_sha[:12],
-            **_lifecycle_labels(config),
+            **_lifecycle_labels(config, identity),
         },
     }
 
 
-def _admin_volume(mount_path: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _credential_reader_authority(
+    identity: DevInstanceIdentity, config: DevInstanceManifestConfig,
+) -> tuple[dict[str, Any], ...]:
+    if identity.storage_binding is None:
+        return ()
+    name = "loom-personal-dev-credential-reader"
+    role = {
+        "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+        "metadata": _metadata(name, identity, config),
+        "rules": [{
+            "apiGroups": [""], "resources": ["secrets"], "verbs": ["get"],
+            "resourceNames": [personal_dev_secret_name(identity, purpose) for purpose in (
+                "loom-secrets", "loom-admin-secret", "loom-protected-worker-runtime",
+                "loom-capacity-agent", "loom-capacity-agent-credentials",
+            )],
+        }],
+    }
+    binding = {
+        "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+        "metadata": _metadata(name, identity, config),
+        "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": name},
+        "subjects": [{"kind": "ServiceAccount", "name": "loom-personal-dev-management", "namespace": "loom-dev"}],
+    }
+    return role, binding
+
+
+def _admin_volume(identity: DevInstanceIdentity, mount_path: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     return (
         [{"name": "loom-admin-secret", "mountPath": mount_path, "readOnly": True}],
         [
             {
                 "name": "loom-admin-secret",
-                "secret": {"secretName": "loom-admin-secret", "defaultMode": 0o440},
+                "secret": {"secretName": personal_dev_secret_name(identity, "loom-admin-secret"), "defaultMode": 0o440},
             }
         ],
     )
@@ -220,14 +266,14 @@ def _deployment(
     extra_mounts: list[dict[str, Any]] | None = None,
     extra_volumes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    mounts, volumes = _admin_volume(admin_mount_path)
+    mounts, volumes = _admin_volume(identity, admin_mount_path)
     mounts.extend(extra_mounts or ())
     volumes.extend(extra_volumes or ())
     labels = {
         "app": name,
         "loom.dev/instance": identity.name,
         "loom.dev/generation": str(config.deployment_generation),
-        **_lifecycle_labels(config),
+        **_lifecycle_labels(config, identity),
     }
     return {
         "apiVersion": "apps/v1",
@@ -236,7 +282,7 @@ def _deployment(
         "spec": {
             "replicas": 1,
             "revisionHistoryLimit": 2,
-            "selector": {"matchLabels": labels},
+            "selector": {"matchLabels": _immutable_execution_labels(identity, labels)},
             "template": {
                 "metadata": {"labels": labels},
                 "spec": {
@@ -487,7 +533,7 @@ def _web_deployment(
         "app": name,
         "loom.dev/instance": identity.name,
         "loom.dev/generation": str(config.deployment_generation),
-        **_lifecycle_labels(config),
+        **_lifecycle_labels(config, identity),
     }
     return {
         "apiVersion": "apps/v1",
@@ -496,7 +542,7 @@ def _web_deployment(
         "spec": {
             "replicas": 1,
             "revisionHistoryLimit": 2,
-            "selector": {"matchLabels": labels},
+            "selector": {"matchLabels": _immutable_execution_labels(identity, labels)},
             "template": {
                 "metadata": {"labels": labels},
                 "spec": {
@@ -556,6 +602,12 @@ def dev_instance_manifest_documents(
     config: DevInstanceManifestConfig,
 ) -> tuple[dict[str, Any], ...]:
     """Return namespace, migration, and runtime documents with no secret values."""
+    identity = validate_personal_dev_storage_identity(identity)
+    if identity.storage_binding is not None and config.lifecycle_binding is not None and (
+        identity.storage_binding.subject_id != config.lifecycle_binding.subject_id
+        or identity.storage_binding.subject_incarnation != config.lifecycle_binding.subject_incarnation
+    ):
+        raise ValueError("manifest lifecycle differs from its storage binding")
     personal_candidate = config.image_references is not None
     generation_suffix = f"-g{config.deployment_generation}" if personal_candidate else ""
     cp_name = f"loom-control-plane{generation_suffix}"
@@ -567,10 +619,10 @@ def dev_instance_manifest_documents(
         _literal_env("LOOM_NAMESPACE", identity.namespace),
     ]
     cp_env = [
-        _secret_env("LOOM_CP_DB_URL", "cp-db-url"),
-        _secret_env("LOOM_CP_STEP_JWT_SIGNING_KEY", "step-jwt-signing-key"),
-        _secret_env("LOOM_CP_MINIO_ACCESS_KEY", "minio-access-key"),
-        _secret_env("LOOM_CP_MINIO_SECRET_KEY", "minio-secret-key"),
+        _secret_env(identity, "LOOM_CP_DB_URL", "cp-db-url"),
+        _secret_env(identity, "LOOM_CP_STEP_JWT_SIGNING_KEY", "step-jwt-signing-key"),
+        _secret_env(identity, "LOOM_CP_MINIO_ACCESS_KEY", "minio-access-key"),
+        _secret_env(identity, "LOOM_CP_MINIO_SECRET_KEY", "minio-secret-key"),
         _literal_env("LOOM_CP_MINIO_ENDPOINT", config.minio_endpoint),
         _literal_env("LOOM_CP_MINIO_REGION", config.minio_region),
         _literal_env("LOOM_CP_ARTIFACTS_BUCKET", identity.artifacts_bucket),
@@ -642,7 +694,7 @@ def dev_instance_manifest_documents(
             {
                 "name": "protected-worker-runtime-projected",
                 "secret": {
-                    "secretName": PROTECTED_WORKER_RUNTIME_SECRET_NAME,
+                    "secretName": personal_dev_secret_name(identity, PROTECTED_WORKER_RUNTIME_SECRET_NAME),
                     "defaultMode": 0o440,
                     "items": [{"key": "database-url", "path": "database-url"}],
                 },
@@ -653,17 +705,17 @@ def dev_instance_manifest_documents(
             },
         ]
     gw_env = [
-        _secret_env("LOOM_GW_DB_URL", "gw-db-url"),
-        _secret_env("LOOM_GW_STEP_JWT_SIGNING_KEY", "step-jwt-signing-key"),
-        _secret_env("LOOM_SECRET_STORE_MASTER_KEY", "secret-store-master-key"),
+        _secret_env(identity, "LOOM_GW_DB_URL", "gw-db-url"),
+        _secret_env(identity, "LOOM_GW_STEP_JWT_SIGNING_KEY", "step-jwt-signing-key"),
+        _secret_env(identity, "LOOM_SECRET_STORE_MASTER_KEY", "secret-store-master-key"),
         _literal_env("LOOM_GW_ADMIN_SECRET_FILE", "/var/run/loom/admin/secrets.toml"),
         *common,
     ]
     svc_env = [
-        _secret_env("LOOM_SVC_DB_URL", "svc-db-url"),
-        _secret_env("LOOM_SVC_MINIO_ACCESS_KEY", "minio-access-key"),
-        _secret_env("LOOM_SVC_MINIO_SECRET_KEY", "minio-secret-key"),
-        _secret_env("LOOM_SECRET_STORE_MASTER_KEY", "secret-store-master-key"),
+        _secret_env(identity, "LOOM_SVC_DB_URL", "svc-db-url"),
+        _secret_env(identity, "LOOM_SVC_MINIO_ACCESS_KEY", "minio-access-key"),
+        _secret_env(identity, "LOOM_SVC_MINIO_SECRET_KEY", "minio-secret-key"),
+        _secret_env(identity, "LOOM_SECRET_STORE_MASTER_KEY", "secret-store-master-key"),
         _literal_env("LOOM_SVC_MINIO_ENDPOINT", config.minio_endpoint),
         _literal_env("LOOM_SVC_MINIO_REGION", config.minio_region),
         _literal_env("LOOM_SVC_ARTIFACTS_BUCKET", identity.artifacts_bucket),
@@ -674,7 +726,7 @@ def dev_instance_manifest_documents(
         _literal_env("LOOM_SVC_ADMIN_SECRET_FILE", "/var/run/loom/admin/secrets.toml"),
         *common,
     ]
-    namespace = {
+    namespace: dict[str, Any] = {
         "apiVersion": "v1",
         "kind": "Namespace",
         "metadata": {
@@ -683,10 +735,13 @@ def dev_instance_manifest_documents(
                 **_MANAGED_LABELS,
                 "loom.dev/instance": identity.name,
                 "pod-security.kubernetes.io/enforce": "restricted",
-                **_lifecycle_labels(config),
+                **_lifecycle_labels(config, identity),
             },
         },
     }
+    storage_annotations = personal_dev_storage_annotations(identity)
+    if storage_annotations:
+        namespace["metadata"]["annotations"] = storage_annotations
     migration = {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -698,12 +753,12 @@ def dev_instance_manifest_documents(
         "spec": {
             "backoffLimit": 1,
             "activeDeadlineSeconds": 600,
-            "ttlSecondsAfterFinished": 600,
+            **({"ttlSecondsAfterFinished": 600} if identity.storage_binding is None else {}),
             "template": {
                 "metadata": {
                     "labels": {
                         "app": "loom-migration",
-                        **_lifecycle_labels(config),
+                        **_immutable_execution_labels(identity, _lifecycle_labels(config, identity)),
                     }
                 },
                 "spec": {
@@ -728,7 +783,7 @@ def dev_instance_manifest_documents(
                                 "upgrade",
                                 "head",
                             ],
-                            "env": [_secret_env("LOOM_DB_URL", "cp-db-url")],
+                            "env": [_secret_env(identity, "LOOM_DB_URL", "cp-db-url")],
                             "securityContext": {
                                 "allowPrivilegeEscalation": False,
                                 "capabilities": {"drop": ["ALL"]},
@@ -869,6 +924,7 @@ def dev_instance_manifest_documents(
         *(
             (
                 _management_role_binding(identity, config),
+                *_credential_reader_authority(identity, config),
                 _activation_agent_role_binding(identity, config),
             )
             if personal_candidate

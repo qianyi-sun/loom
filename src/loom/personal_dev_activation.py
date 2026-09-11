@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
+from typing import Literal
 from uuid import UUID
 
 from cryptography.exceptions import InvalidSignature
@@ -24,6 +25,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 
 from loom.dev_instance import InvalidDevInstanceNameError, validate_name
 from loom.personal_dev_candidate import PERSONAL_DEV_COMPONENTS
+from loom.personal_dev_incarnation_storage import (
+    PersonalDevStorageBindingV1,
+    parse_personal_dev_storage_binding,
+)
+from loom_capacity_manager.contracts import canonical_bytes
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _SIGNATURE_RE = re.compile(r"[0-9a-f]{128}")
@@ -100,8 +106,29 @@ class PersonalDevActivationIntent:
     max_slots: int
     images: Mapping[str, str]
     intent_created_at: datetime
+    schema_version: Literal[1, 2] = 1
+    storage_binding: PersonalDevStorageBindingV1 | None = None
+    storage_binding_sha256: str | None = None
 
     def __post_init__(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version not in (1, 2):
+            raise ValueError("activation storage schema version is invalid")
+        if self.schema_version == 1:
+            if self.storage_binding is not None or self.storage_binding_sha256 is not None:
+                raise ValueError("legacy activation cannot reinterpret storage binding")
+        else:
+            if self.storage_binding is None or self.storage_binding_sha256 is None:
+                raise ValueError("activation storage binding is incomplete")
+            binding = parse_personal_dev_storage_binding(
+                canonical_bytes(self.storage_binding), expected_sha256=self.storage_binding_sha256,
+            )
+            if (
+                binding.layout != "incarnation-v1"
+                or binding.environment_name != self.environment_name
+                or binding.subject_id != self.subject_id
+                or binding.subject_incarnation != self.subject_incarnation
+            ):
+                raise ValueError("activation storage binding coordinates are inconsistent")
         try:
             validate_name(self.environment_name)
         except InvalidDevInstanceNameError as exc:
@@ -142,8 +169,15 @@ class PersonalDevActivationIntent:
 
     def canonical_bytes(self) -> bytes:
         created_at = self.intent_created_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        storage: dict[str, object] = {}
+        if self.storage_binding is not None:
+            storage = {
+                "storage_binding": self.storage_binding.model_dump(mode="json"),
+                "storage_binding_sha256": self.storage_binding_sha256,
+            }
         return _canonical_bytes(
             {
+                **storage,
                 "attempt_id": str(self.attempt_id),
                 "attempt_sequence": self.attempt_sequence,
                 "candidate_id": str(self.candidate_id),
@@ -158,7 +192,7 @@ class PersonalDevActivationIntent:
                 "operation_epoch": self.operation_epoch,
                 "operation_id": str(self.operation_id),
                 "readiness_evidence_sha256": self.readiness_evidence_sha256,
-                "schema_version": 1,
+                "schema_version": self.schema_version,
                 "subject_id": str(self.subject_id),
                 "subject_incarnation": str(self.subject_incarnation),
             }

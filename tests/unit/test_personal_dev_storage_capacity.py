@@ -1,0 +1,208 @@
+"""Protected capacity consumers retain the same immutable storage identity."""
+
+from dataclasses import fields, replace
+from types import SimpleNamespace
+from urllib.parse import urlsplit
+from uuid import uuid4
+
+import pytest
+
+from loom.dev_instance_runtime import KubectlClient
+from loom.personal_dev_capacity_runtime import (
+    KubectlPersonalDevCapacityInstaller,
+    PersonalDevCapacityInstallationError,
+)
+from loom.personal_dev_incarnation_storage import personal_dev_secret_name
+from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
+from tests.unit.test_personal_dev_reconciler import _installation
+from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
+from tests.unit.test_personal_dev_storage_vault import _PASSWORD, _Cluster, _vault
+
+
+@pytest.mark.parametrize("method", ("converge", "verify_publishing", "seal", "destroy"))
+async def test_capacity_entrypoints_resolve_bound_storage(method):
+    claim = _bound_claim()
+    seen = []
+
+    class Database:
+        async def seal(self, identity):
+            seen.append(identity)
+
+        async def destroy(self, identity):
+            seen.append(identity)
+
+    class Installer(KubectlPersonalDevCapacityInstaller):
+        async def _credentials(self, claim, identity):
+            seen.append(identity)
+            raise RuntimeError("stop before write")
+
+        async def _assert_installed_credentials(self, claim, installation, identity):
+            seen.append(identity)
+            raise RuntimeError("stop before write")
+
+    installer = Installer(kubectl=None, database=Database(), config=None)
+    if method in ("seal", "destroy"):
+        claim = replace(claim, operation=replace(claim.operation, kind="destroy"))
+        await getattr(installer, method)(claim)
+    else:
+        with pytest.raises(RuntimeError, match="stop before"):
+            await getattr(installer, method)(claim, *([_installation()] if method == "verify_publishing" else []))
+    assert seen == [claim.operation.storage_binding.identity]
+
+
+@pytest.mark.parametrize("secret_name", ("loom-protected-worker-runtime", "loom-capacity-agent-credentials"))
+async def test_capacity_credentials_and_seed_pin_full_storage_binding(secret_name):
+    claim = _bound_claim()
+    identity = claim.operation.storage_binding.identity
+    cluster = _Cluster()
+    await _vault(cluster).store(identity, _PASSWORD)
+    installer = KubectlPersonalDevCapacityInstaller(
+        kubectl=KubectlClient("kubectl", runner=cluster), database=None, config=None,
+    )
+    credentials = await installer._credentials(claim, identity)
+    await installer._persist_credentials(claim, identity, credentials)
+    seed = cluster.secrets[personal_dev_secret_name(identity, "loom-capacity-agent-credentials")]
+    assert seed["storage-binding.json"] == canonical_bytes(identity.storage_binding)
+    assert seed["storage-binding.sha256"] == canonical_digest(identity.storage_binding).encode()
+    assert (await installer._credentials(claim, identity)).reporter_token == credentials.reporter_token
+    cluster.secrets[personal_dev_secret_name(identity, secret_name)]["storage-binding.sha256"] = b"0" * 64
+    before = list(cluster.writes)
+    with pytest.raises(PersonalDevCapacityInstallationError):
+        await installer._credentials(claim, identity)
+    assert cluster.writes == before
+
+
+@pytest.mark.parametrize("tamper", (None, "database", "namespace", "subject_id", "subject_incarnation", "secret"))
+async def test_status_uses_bound_observer_role_and_fences_mixed_coordinates(monkeypatch, tamper):
+    from loom.personal_dev_capacity_identity import capacity_role_names
+    from loom.personal_dev_capacity_runtime import PersonalDevCapacityStatusReader
+
+    claim = _bound_claim()
+    identity = claim.operation.storage_binding.identity
+    cluster = _Cluster()
+    await _vault(cluster).store(identity, _PASSWORD)
+    kubectl = KubectlClient("kubectl", runner=cluster)
+    installer = KubectlPersonalDevCapacityInstaller(kubectl=kubectl, database=None, config=None)
+    credentials = await installer._credentials(claim, identity)
+    await installer._persist_credentials(claim, identity, credentials)
+    arguments = dict(namespace=identity.namespace, database=identity.database,
+                     subject_id=claim.operation.subject_id, subject_incarnation=claim.operation.subject_incarnation,
+                     deployment_generation=1, storage_binding=identity.storage_binding)
+    if tamper in ("database", "namespace"):
+        arguments[tamper] = "other-resource"
+    elif tamper in ("subject_id", "subject_incarnation"):
+        arguments[tamper] = uuid4()
+    elif tamper == "secret":
+        cluster.secrets[personal_dev_secret_name(identity, "loom-capacity-agent-credentials")]["storage-binding.sha256"] = b"0" * 64
+
+    class Projector:
+        async def subject_status(self, **kwargs):
+            return SimpleNamespace(checkpoint=SimpleNamespace(execution_state="active"),
+                                   active_bindings=(SimpleNamespace(intent_id=uuid4()),))
+
+    connections = []
+
+    async def connect(url):
+        connections.append(url)
+        raise RuntimeError("stop before live connection")
+
+    monkeypatch.setattr("loom.personal_dev_capacity_runtime.psycopg.AsyncConnection.connect", connect)
+    result = await PersonalDevCapacityStatusReader(
+        kubectl=kubectl, database_admin_url="postgresql://admin:fixture@db.example/postgres", projector=Projector(),
+    ).read(**arguments)
+    assert not result.worker_available
+    if tamper:
+        assert connections == []
+    else:
+        assert len(connections) == 1
+        assert urlsplit(connections[0]).username == capacity_role_names(identity)[4]
+        assert urlsplit(connections[0]).path == "/" + identity.database
+
+
+async def test_owner_status_passes_persisted_binding_to_reader():
+    from loom.dev_instance_provisioner import DevInstanceRecord
+    from loom.personal_dev_capacity import PersonalDevCapacityAvailability
+    from loom_service.routes.dev_instances import _enriched_response
+
+    claim = _bound_claim()
+    identity = claim.operation.storage_binding.identity
+    values = {field.name: getattr(claim.environment, field.name) for field in fields(DevInstanceRecord)
+              if hasattr(claim.environment, field.name)}
+    record = DevInstanceRecord(**{**values, "capacity_namespace": identity.namespace, "capacity_database": identity.database,
+                                  "storage_binding": identity.storage_binding})
+    calls = []
+
+    class Reader:
+        async def read(self, **kwargs):
+            calls.append(kwargs)
+            return PersonalDevCapacityAvailability("waiting", True, False)
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(personal_dev_capacity_status_reader=Reader())))
+    await _enriched_response(request, record)
+    assert calls[0]["storage_binding"] == identity.storage_binding
+
+
+def test_generic_owner_store_preserves_and_validates_bound_storage():
+    from loom.db.schema import DevInstance
+    from loom.dev_instance_store import _record
+
+    claim = _bound_claim()
+    binding = claim.operation.storage_binding
+    row = DevInstance(**{f.name: getattr(claim.environment, f.name) for f in fields(claim.environment)
+                         if f.name in DevInstance.__table__.columns and f.name != "storage_binding"})
+    row.storage_binding = binding.model_dump(mode="json")
+    row.storage_binding_sha256 = canonical_digest(binding)
+    assert _record(row).storage_binding == binding
+    row.storage_binding_sha256 = "0" * 64
+    with pytest.raises(ValueError, match="storage"):
+        _record(row)
+
+
+@pytest.mark.parametrize("method", ("converge_create", "converge_destroy"))
+async def test_legacy_provisioner_cannot_operate_bound_record(method):
+    from loom.dev_instance_provisioner import DevInstanceConflictError
+    from tests.unit.test_dev_instance_provisioner import (
+        _access,
+        _FakeStore,
+        _provisioner,
+        _record,
+        _Recorder,
+    )
+
+    recorder = _Recorder()
+    record = replace(_record("alice"), storage_binding=_bound_claim().operation.storage_binding)
+    store = _FakeStore()
+    store._rows[record.name] = record
+    with pytest.raises(DevInstanceConflictError, match="personal"):
+        await getattr(_provisioner(store, recorder), method)(record, **({"access": _access()} if method == "converge_create" else {}))
+    assert recorder.calls == []
+    assert store._rows[record.name] == record
+
+
+@pytest.mark.parametrize("method", ("create", "claim_create", "destroy", "claim_destroy"))
+@pytest.mark.parametrize("status", ("ready", "failed", "deleted"))
+async def test_legacy_public_entrypoints_reject_bound_records_before_reserving(method, status):
+    from loom.dev_instance_provisioner import DevInstanceConflictError
+    from tests.unit.test_dev_instance_provisioner import (
+        _access,
+        _FakeStore,
+        _provisioner,
+        _record,
+        _Recorder,
+    )
+
+    recorder = _Recorder()
+    record = replace(_record("alice"), status=status,
+                     storage_binding=_bound_claim().operation.storage_binding)
+    store = _FakeStore()
+    store._rows[record.name] = record
+    arguments = {}
+    if method in ("create", "claim_create"):
+        arguments.update(owner_user_id=record.owner_user_id, owner_team_id=record.owner_team_id,
+                         min_slots=record.min_slots, max_slots=record.max_slots)
+    if method == "create":
+        arguments["access"] = _access()
+    with pytest.raises(DevInstanceConflictError, match="personal"):
+        await getattr(_provisioner(store, recorder), method)(record.name, **arguments)
+    assert recorder.calls == []
+    assert store._rows[record.name] == record

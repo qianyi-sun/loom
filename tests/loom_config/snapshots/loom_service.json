@@ -229,6 +229,31 @@
     "default": "''",
     "required": false
   },
+  "personal_dev_membership_binding_json": {
+    "annotation": "<class 'str'>",
+    "default": "'{}'",
+    "required": false
+  },
+  "personal_dev_membership_plan_sha256": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "personal_dev_membership_successor_plan_file": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "personal_dev_membership_successor_plan_sha256": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "personal_dev_membership_observer_principal_id": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
   "personal_dev_activation_ack_max_age_sec": {
     "annotation": "<class 'int'>",
     "default": "300",
@@ -462,6 +487,26 @@
   "personal_dev_capacity_lifecycle_private_key_file": {
     "annotation": "<class 'pathlib.Path'>",
     "default": "PosixPath('/var/run/loom-personal-dev-capacity/lifecycle-private-key.pem')",
+    "required": false
+  },
+  "personal_dev_capacity_observer_bearer_token_file": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/var/run/loom-personal-dev-capacity/observer-token')",
+    "required": false
+  },
+  "personal_dev_capacity_observer_ca_file": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/var/run/loom-personal-dev-capacity/observer-ca.pem')",
+    "required": false
+  },
+  "personal_dev_capacity_observer_certificate_file": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/var/run/loom-personal-dev-capacity/observer-certificate.pem')",
+    "required": false
+  },
+  "personal_dev_capacity_observer_private_key_file": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/var/run/loom-personal-dev-capacity/observer-private-key.pem')",
     "required": false
   },
   "personal_dev_capacity_manager_namespace": {

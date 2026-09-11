@@ -72,6 +72,7 @@ from loom_service.personal_dev_lifecycle import (
     build_personal_dev_capacity_runtime,
     personal_dev_reconcile_run_loop,
 )
+from loom_service.personal_dev_membership import build_personal_dev_membership_runtime
 from loom_service.pipeline_control_bindings import SqlPipelineRecipeBindingResolver
 from loom_service.pipeline_stage1_smoke_authority import (
     build_stage1_candidate_authority_from_environment,
@@ -375,12 +376,24 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         personal_dev_artifact_collector = None
         personal_dev_capacity_runtime = None
         if personal_dev_limits is not None:
-            personal_dev_capacity_runtime = build_personal_dev_capacity_runtime(settings)
+            personal_dev_capacity_runtime = (
+                await build_personal_dev_membership_runtime(settings)
+                if settings.personal_dev_runtime_mode == "membership-v1"
+                else build_personal_dev_capacity_runtime(settings)
+            )
             if personal_dev_capacity_runtime is None:  # pragma: no cover - guarded by limits
                 raise RuntimeError("personal-dev capacity runtime is unavailable")
             app.state._owned_personal_dev_capacity_projector = (
                 personal_dev_capacity_runtime.projector
             )
+            app.state._owned_personal_dev_membership_clients = getattr(
+                personal_dev_capacity_runtime, "owned_membership_clients", ()
+            )
+            membership = getattr(personal_dev_capacity_runtime, "membership", None)
+            if membership is not None:
+                # Do not assert admission at startup: historical recovery and
+                # authenticated release must survive an expired admission window.
+                app.state.personal_dev_membership_admission = membership.admission
             if settings.personal_dev_activation_public_key_file is None:
                 raise RuntimeError(
                     "LOOM_SVC_PERSONAL_DEV_ACTIVATION_PUBLIC_KEY_FILE is required "
@@ -516,6 +529,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                     reconciler_id=f"loom-service:{socket.gethostname()}:{os.getpid()}",
                     lease_seconds=settings.personal_dev_reconciler_lease_sec,
                     poll_interval_seconds=(settings.personal_dev_reconciler_poll_interval_sec),
+                    membership=getattr(personal_dev_capacity_runtime, "membership", None),
                 ),
                 name="loom-svc-personal-dev-reconciler",
             )
@@ -630,6 +644,9 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                     with contextlib.suppress(Exception):
                         await close()
             minio = getattr(app.state, "_owned_service_minio_client", None)
+            for client in getattr(app.state, "_owned_personal_dev_membership_clients", ()):
+                with contextlib.suppress(Exception):
+                    await client.aclose()
             close_minio = getattr(minio, "close", None)
             if callable(close_minio):
                 with contextlib.suppress(Exception):
@@ -660,7 +677,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.state.personal_dev_enablement_required = (
         settings.dev_instances_enabled
         and settings.personal_dev_builder_enabled
-        and settings.personal_dev_runtime_mode in {"acceptance", "operational"}
+        and settings.personal_dev_runtime_mode in {"acceptance", "operational", "membership-v1"}
     )
     stage1_candidate_authority = build_stage1_candidate_authority_from_environment(
         repo_root=Path(__file__).resolve().parents[2]

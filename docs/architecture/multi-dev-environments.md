@@ -307,8 +307,11 @@ are removed so retained data has no live runtime authority.
 
 A later candidate-aware deployment of the same name starts a new subject
 incarnation through the normal build, activation, and capacity-publication
-path. Reusing retained data therefore rotates the personal authority rather
-than reviving the deleted subject or its reporter credentials.
+path. In membership mode, recreation after `--keep-data` remains blocked until
+fresh incarnation-isolated storage and verified application-data transfer are
+implemented. Retained protected authority and reporter credentials must never be
+reused. See [the storage contract](personal-dev-active-membership.md) for the
+durable binding and remaining runtime enablement boundaries.
 
 ## Isolation and limits
 

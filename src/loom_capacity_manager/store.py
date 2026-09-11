@@ -15,6 +15,10 @@ from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom_capacity_manager.build_membership_contracts import (
+    ExecutionPreparationPolicyV4,
+    ExecutionPreparationV4,
+)
 from loom_capacity_manager.contracts import (
     AccountPolicyV1,
     AllocationInputV1,
@@ -2262,7 +2266,7 @@ class CapacityManagementStore:
             update(CapacityDemandReporter)
             .where(
                 CapacityDemandReporter.subject_id == subject.subject_id,
-                CapacityDemandReporter.state == "current",
+                CapacityDemandReporter.state.in_(("current", "equivocal")),
                 CapacityDemandReporter.reporter_incarnation != subject.demand_reporter_incarnation,
             )
             .values(state="fenced")
@@ -3328,13 +3332,23 @@ class CapacityManagementStore:
             or row.effective_ceiling != authority.executable_new_capacity_ceiling
         ):
             raise AuthorityRecoveryError("execution authority database binding changed")
+        preparation: ExecutionPreparationV2
         try:
-            preparation = self._execution_preparation_from_row(row)
+            if row.manifest_payload.get("schema_version") == 4:
+                # Authenticate retained active typed authority for allocation.
+                # Preparation/activation and legacy runtime parsers stay closed
+                # until their purpose-aware consumers are connected.
+                from loom_capacity_manager.typed_membership_store import _load_typed_history
+
+                preparation = (await _load_typed_history(session, row.execution_epoch)).preparation
+            else:
+                preparation = self._execution_preparation_from_row(row)
             await self._validate_execution_preparation(
                 session,
                 authority,
                 preparation,
                 require_writer_binding=row.state != "drain-only",
+                allow_typed_readback=True,
             )
             if row.state in {"active", "drain-only"}:
                 await self._validate_execution_executor_bindings(
@@ -3342,7 +3356,7 @@ class CapacityManagementStore:
                     row,
                     preparation,
                 )
-        except (ExecutionConflictError, ExecutionPreparationDisabledError) as exc:
+        except (ExecutionConflictError, ExecutionPreparationDisabledError, ConfigurationConflictError) as exc:
             raise AuthorityRecoveryError(
                 "active execution authority executor binding or owner policy changed"
             ) from exc
@@ -3454,12 +3468,25 @@ class CapacityManagementStore:
         request: ExecutionPreparationV2,
         *,
         require_writer_binding: bool = True,
+        allow_typed_readback: bool = False,
     ) -> None:
         policy = self._execution_policy
         if policy is None:
             raise ExecutionPreparationDisabledError(
                 "execution preparation requires owner-configured policy"
             )
+        supported_requests = {ExecutionPreparationV2: 2, ExecutionPreparationV3: 3}
+        supported_policies = {ExecutionPreparationPolicyV2: 2, ExecutionPreparationPolicyV3: 3}
+        if allow_typed_readback:
+            supported_requests[ExecutionPreparationV4] = 4
+            supported_policies[ExecutionPreparationPolicyV4] = 4
+        if (
+            type(request.schema_version) is not int
+            or supported_requests.get(type(request)) != request.schema_version
+            or type(policy.schema_version) is not int
+            or supported_policies.get(type(policy)) != policy.schema_version
+        ):
+            raise ExecutionConflictError("unsupported execution preparation schema")
         if authority.authority_incarnation != request.authority_incarnation or (
             require_writer_binding and authority.writer_epoch != request.expected_writer_epoch
         ):
@@ -3484,6 +3511,16 @@ class CapacityManagementStore:
             raise ExecutionConflictError("execution configuration or fleet changed")
         if request.trusted_fleet_release_sha256 != policy.trusted_fleet_release_sha256:
             raise ExecutionConflictError("trusted fleet release is not configured exactly")
+        if request.schema_version != policy.schema_version:
+            raise ExecutionConflictError("execution preparation and policy versions differ")
+        if isinstance(request, ExecutionPreparationV4):
+            if not isinstance(policy, ExecutionPreparationPolicyV4) or any(
+                getattr(request, name) != getattr(policy, name) for name in (
+                    "personal_membership", "personal_builds", "managed_application_origins",
+                    "managed_build_origins", "retired_source",
+                )
+            ):
+                raise ExecutionConflictError("typed membership policy is not configured exactly")
         if isinstance(request, ExecutionPreparationV3) != isinstance(
             policy, ExecutionPreparationPolicyV3
         ) or (
@@ -4200,6 +4237,7 @@ class CapacityManagementStore:
         authority = (
             await session.execute(
                 select(CapacityAuthorityState).where(CapacityAuthorityState.singleton_id == 1)
+                .execution_options(populate_existing=True)
             )
         ).scalar_one()
         if (
@@ -4248,6 +4286,7 @@ class CapacityManagementStore:
         preparation: ExecutionPreparationV3 | None = None
         membership = None
         managed_base_subjects: tuple[SubjectConfigurationV1, ...] = ()
+        typed_history = None
         if authority.execution_epoch > 0:
             execution_epoch_row = (
                 await session.execute(
@@ -4258,7 +4297,26 @@ class CapacityManagementStore:
             ).scalar_one_or_none()
             if execution_epoch_row is None:
                 raise AuthorityRecoveryError("execution epoch row is missing")
-            parsed_preparation = self._execution_preparation_from_row(execution_epoch_row)
+            if execution_epoch_row.manifest_payload.get("schema_version") == 4:
+                # Accounting-only read dispatch. Preparation and executable
+                # promotion remain closed until every typed executor is ready.
+                from loom_capacity_manager.typed_membership_store import (
+                    _load_typed_history,
+                    _validated_materialization,
+                )
+
+                typed_history = await _load_typed_history(session, execution_epoch_row.execution_epoch)
+                if typed_history.epoch.configuration_epoch != active.configuration_epoch:
+                    raise ConfigurationConflictError("typed membership active configuration changed")
+                typed_rows, _accounts = await _validated_materialization(
+                    session, typed_history.epoch, typed_history.fleet, typed_history.latest,
+                )
+                subjects = tuple(_parse_contract(SubjectConfigurationV1, row.payload) for row in typed_rows)
+                managed_ids = set(typed_history.preparation.personal_membership.managed_base_subject_ids)
+                managed_base_subjects = tuple(value for value in base_subjects if value.subject_id in managed_ids)
+                parsed_preparation = None
+            else:
+                parsed_preparation = self._execution_preparation_from_row(execution_epoch_row)
             if isinstance(parsed_preparation, ExecutionPreparationV3):
                 preparation = parsed_preparation
                 delegated_epoch_row = execution_epoch_row
@@ -4305,7 +4363,7 @@ class CapacityManagementStore:
                 )
                 if {value.subject_id for value in managed_base_subjects} != managed_ids:
                     raise ConfigurationConflictError("managed base membership is incomplete")
-            else:
+            elif typed_history is None:
                 subjects = base_subjects
         else:
             subjects = base_subjects
@@ -4493,6 +4551,16 @@ class CapacityManagementStore:
             existing_pending_slots=0,
             existing_pending_jobs=0,
         )
+        if typed_history is not None:
+            from loom_capacity_manager.build_membership_contracts import DelegatedAllocationInputV3
+            from loom_capacity_manager.membership import resolved_subject_references
+
+            typed_value = DelegatedAllocationInputV3(
+                **values, preparation=typed_history.preparation,
+                managed_base_subjects=managed_base_subjects, membership=typed_history.snapshot(),
+            )
+            resolved_subject_references(typed_value)
+            return typed_value
         if preparation is not None and membership is not None:
             return DelegatedAllocationInputV2(
                 **values,

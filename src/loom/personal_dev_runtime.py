@@ -11,12 +11,12 @@ from datetime import UTC, datetime
 from typing import Literal, Protocol
 from uuid import UUID
 
-from loom.dev_instance import DevInstanceIdentity, derive_identity
+from loom.dev_instance import DevInstanceIdentity
 from loom.dev_instance_manifest import (
     DevInstanceManifestConfig,
     PersonalDevManifestBinding,
 )
-from loom.dev_instance_provision import provisioning_plan
+from loom.dev_instance_provision import provisioning_plan_for_identity
 from loom.dev_instance_provisioner import (
     AccessBootstrap,
     BucketEnsurer,
@@ -27,6 +27,8 @@ from loom.dev_instance_provisioner import (
 )
 from loom.personal_dev_capacity import PersonalDevCapacityManagerBinding
 from loom.personal_dev_environment import PersonalDevReconciliationClaim
+from loom.personal_dev_incarnation_storage import resolve_personal_dev_storage_identity
+from loom.personal_dev_membership_cleanup import validated_membership_destroy
 from loom.personal_dev_reconciler import (
     PersonalDevReadinessObservation,
     personal_dev_candidate_images,
@@ -460,7 +462,7 @@ class PersonalDevPreparationRuntime:
     ) -> tuple[DevInstanceIdentity, DevInstanceManifestConfig]:
         operation = claim.operation
         images = personal_dev_candidate_images(claim)
-        identity = derive_identity(operation.environment_name)
+        identity = resolve_personal_dev_storage_identity(claim)
         return identity, DevInstanceManifestConfig(
             image_tag="",
             candidate_sha=operation.candidate_sha,
@@ -477,6 +479,7 @@ class PersonalDevPreparationRuntime:
                 subject_incarnation=operation.subject_incarnation,
                 operation_id=operation.id,
                 attempt_id=claim.attempt.id,
+                attempt_sequence=claim.attempt.attempt_sequence,
                 operation_epoch=operation.operation_epoch,
             ),
         )
@@ -499,14 +502,20 @@ class PersonalDevPreparationRuntime:
             if operation.kind == "update":
                 raise RuntimeError("personal-dev update has no existing fixture credential")
             password = self.password_factory()
-        plan = provisioning_plan(identity.name, password)
+        if identity.storage_binding is not None:
+            # Choose durable, immutable credentials before any role/password
+            # mutation. A concurrent vault loser must never reach SQL with its
+            # separately prepared password; retries recover the winner first.
+            await self.vault.store(identity, password)
+        plan = provisioning_plan_for_identity(identity, password)
         await self.sql.apply_role_and_database(
             identity,
             role_sql=str(plan["role_sql"]),
             create_database_sql=str(plan["create_database_sql"]),
         )
         await self.buckets.ensure_buckets(identity, dev_buckets(identity))
-        await self.vault.store(identity, password)
+        if identity.storage_binding is None:
+            await self.vault.store(identity, password)
         await self.object_store_tenant.converge(identity)
         return await self.cluster.prepare(identity, manifest_config)
 
@@ -528,23 +537,32 @@ class PersonalDevPreparationRuntime:
         await self.access.bootstrap(identity, password=password, access=access)
 
     @staticmethod
-    def _destroy_identity(claim: PersonalDevReconciliationClaim) -> DevInstanceIdentity:
+    def _destroy_identity(
+        claim: PersonalDevReconciliationClaim, *, checkpoints: tuple[str, ...]
+    ) -> DevInstanceIdentity:
         if claim.operation.kind != "destroy":
             raise ValueError("personal-dev cleanup requires a destroy operation")
-        return derive_identity(claim.operation.environment_name)
+        if claim.operation.capacity_mode == "membership-v1":
+            validated_membership_destroy(claim, checkpoints=checkpoints)
+        return resolve_personal_dev_storage_identity(claim)
 
     async def delete_namespace(self, claim: PersonalDevReconciliationClaim) -> None:
-        await self.cluster.destroy(self._destroy_identity(claim))
+        await self.cluster.destroy(
+            self._destroy_identity(claim, checkpoints=("local_authority_sealed",))
+        )
 
     async def delete_buckets(self, claim: PersonalDevReconciliationClaim) -> None:
-        identity = self._destroy_identity(claim)
+        identity = self._destroy_identity(claim, checkpoints=("database_deleted",))
         await self.buckets.remove_buckets(identity, dev_buckets(identity))
 
     async def delete_tenant(self, claim: PersonalDevReconciliationClaim) -> None:
-        await self.object_store_tenant.delete(self._destroy_identity(claim))
+        checkpoint = "namespace_deleted" if claim.operation.keep_data else "buckets_deleted"
+        await self.object_store_tenant.delete(
+            self._destroy_identity(claim, checkpoints=(checkpoint,))
+        )
 
     async def delete_credentials(self, claim: PersonalDevReconciliationClaim) -> None:
-        await self.vault.delete(self._destroy_identity(claim))
+        await self.vault.delete(self._destroy_identity(claim, checkpoints=("tenant_deleted",)))
 
 
 __all__ = [

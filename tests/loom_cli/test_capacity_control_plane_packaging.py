@@ -42,6 +42,7 @@ _MIGRATION_RESOURCES = {
     "capacity_migrations/versions/capacity_0015_terminal_inventory_evidence.py",
     "capacity_migrations/versions/capacity_0016_personal_membership_events.py",
     "capacity_migrations/versions/capacity_0017_personal_membership_execution.py",
+    "capacity_migrations/versions/capacity_0018_personal_build_membership.py",
 }
 _GUARD_MIGRATION_RESOURCES = {
     "capacity_guard_migrations/__init__.py",
@@ -317,4 +318,4 @@ def test_installed_wheel_renders_capacity_manifests_outside_checkout(
     assert postgres_service["metadata"]["name"] == "loom-capacity-postgres"
     assert postgres_statefulset["metadata"]["name"] == "loom-capacity-postgres"
     assert len(migration_jobs) == 1
-    assert migration_jobs[0]["metadata"]["name"].startswith("loom-capacity-migrate-capacity-0017-")
+    assert migration_jobs[0]["metadata"]["name"].startswith("loom-capacity-migrate-capacity-0018-")

@@ -710,7 +710,7 @@ def _up_personal(args: argparse.Namespace) -> int:
                 max_slots=max_slots,
                 expected_operation_epoch=expected_epoch,
             )
-            if not args.no_wait and environment["status"] != "ready":
+            if not args.no_wait and operation["state"] != "succeeded":
                 environment = deploy.wait_ready(
                     name,
                     operation_id=str(operation["id"]),
@@ -720,6 +720,7 @@ def _up_personal(args: argparse.Namespace) -> int:
                     operation_epoch=int(operation["operation_epoch"]),
                     timeout=timeout,
                     poll_interval=poll_interval,
+                    operation_receipt=operation,
                 )
             if not args.quiet:
                 _print_personal_summary(environment)

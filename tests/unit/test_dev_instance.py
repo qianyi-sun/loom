@@ -48,6 +48,9 @@ class TestDeriveIdentity:
         a = derive_identity("alice")
         b = derive_identity("bob")
         for field in a.__dataclass_fields__:
+            if field in {"storage_incarnation", "storage_binding"}:
+                assert getattr(a, field) is None and getattr(b, field) is None
+                continue
             if field == "name":
                 continue
             assert getattr(a, field) != getattr(b, field), field

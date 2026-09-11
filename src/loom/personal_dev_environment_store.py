@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from loom.db.schema import (
     DevInstance,
@@ -34,6 +37,7 @@ from loom.personal_dev_capacity import PersonalDevCapacityProjectionResult
 from loom.personal_dev_environment import (
     PersonalDevAccessBinding,
     PersonalDevApplyReservation,
+    PersonalDevCapacityMode,
     PersonalDevEnvironmentApplyRequest,
     PersonalDevEnvironmentDestroyRequest,
     PersonalDevEnvironmentRecord,
@@ -45,6 +49,27 @@ from loom.personal_dev_environment import (
     PersonalDevOperationState,
     PersonalDevReconciliationClaim,
 )
+from loom.personal_dev_incarnation_storage import (
+    PersonalDevStorageBindingV1,
+)
+from loom.personal_dev_membership_checkpoint import (
+    PersonalDevMembershipEnvelopeV1,
+    PersonalDevMembershipHistoricalOutcomeV1,
+    refresh_membership_checkpoint,
+)
+from loom.personal_dev_membership_successor import (
+    PersonalDevMembershipSuccessorBindingV1,
+    parse_membership_successor_binding,
+    validate_membership_successor,
+)
+from loom.personal_dev_storage_records import personal_dev_storage_record as _storage_record
+from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
+from loom_capacity_manager.membership_contracts import (
+    PersonalApplicationMembershipResponseV1,
+    PersonalMembershipCheckpointV1,
+)
+from loom_capacity_manager.membership_outcomes import PersonalMembershipOperationCommittedV1
+from loom_capacity_manager.membership_subject_status import PersonalMembershipReleaseVerifiedV1
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _ACTIVE_OPERATION_STATES = ("requested", "running", "activating", "cancelling")
@@ -142,8 +167,20 @@ class SqlAlchemyPersonalDevActivationIntentReader:
         if row is None:
             return None
         operation, environment, attempt, candidate = row
+        try:
+            storage_binding = _storage_record(operation)
+            if storage_binding != _storage_record(environment):
+                raise ValueError("activation storage binding mismatch")
+        except ValueError:
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev activation storage bindings are inconsistent",
+            ) from None
         if (
             operation.subject_id != environment.subject_id
+            or operation.owner_user_id != environment.owner_user_id
+            or operation.owner_team_id != environment.owner_team_id
+            or operation.owner_user_id != candidate.owner_user_id
+            or operation.owner_team_id != candidate.owner_team_id
             or operation.subject_incarnation != environment.subject_incarnation
             or operation.subject_id != attempt.subject_id
             or operation.subject_incarnation != attempt.subject_incarnation
@@ -190,6 +227,9 @@ class SqlAlchemyPersonalDevActivationIntentReader:
             max_slots=operation.max_slots,
             images=images,
             intent_created_at=operation.updated_at,
+            schema_version=2 if storage_binding is not None else 1,
+            storage_binding=storage_binding,
+            storage_binding_sha256=operation.storage_binding_sha256,
         )
 
 
@@ -220,8 +260,28 @@ def _capacity_capabilities(
     return values
 
 
+def _membership_envelope_from_jsonb(value: object) -> PersonalDevMembershipEnvelopeV1:
+    """Re-enter Pydantic through JSON so strict UUID/time fields decode correctly."""
+
+    return PersonalDevMembershipEnvelopeV1.model_validate_json(
+        json.dumps(value, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def _membership_checkpoint_from_jsonb(value: object) -> PersonalMembershipCheckpointV1:
+    return PersonalMembershipCheckpointV1.model_validate_json(
+        json.dumps(value, sort_keys=True, separators=(",", ":"))
+    )
+
+
 def _environment_record(row: DevInstance) -> PersonalDevEnvironmentRecord:
+    accepted_checkpoint = (
+        _membership_checkpoint_from_jsonb(row.accepted_capacity_membership_checkpoint)
+        if row.accepted_capacity_membership_checkpoint is not None
+        else None
+    )
     return PersonalDevEnvironmentRecord(
+        storage_binding=_storage_record(row),
         name=row.name,
         subject_id=row.subject_id,
         subject_incarnation=row.subject_incarnation,
@@ -242,6 +302,8 @@ def _environment_record(row: DevInstance) -> PersonalDevEnvironmentRecord:
         keep_data=row.keep_data,
         ready_at=row.ready_at,
         deleted_at=row.deleted_at,
+        accepted_capacity_mode=cast(PersonalDevCapacityMode, row.accepted_capacity_mode),
+        accepted_capacity_membership_checkpoint=accepted_checkpoint,
         capacity_configuration_epoch=row.capacity_configuration_epoch,
         capacity_configuration_sha256=row.capacity_configuration_sha256,
         capacity_reporter_incarnation=row.capacity_reporter_incarnation,
@@ -267,7 +329,13 @@ def _environment_record(row: DevInstance) -> PersonalDevEnvironmentRecord:
 
 
 def _operation_record(row: DevLifecycleOperation) -> PersonalDevLifecycleOperationRecord:
+    membership_envelope = (
+        _membership_envelope_from_jsonb(row.capacity_membership_envelope)
+        if row.capacity_membership_envelope is not None
+        else None
+    )
     return PersonalDevLifecycleOperationRecord(
+        storage_binding=_storage_record(row),
         id=row.id,
         idempotency_key=row.idempotency_key,
         environment_name=row.environment_name,
@@ -289,6 +357,22 @@ def _operation_record(row: DevLifecycleOperation) -> PersonalDevLifecycleOperati
         deployment_generation=row.deployment_generation,
         checkpoint=row.checkpoint,
         failure_reason=row.failure_reason,
+        capacity_mode=cast(PersonalDevCapacityMode, row.capacity_mode),
+        capacity_membership_envelope=membership_envelope,
+        membership_predecessor_operation_id=row.membership_predecessor_operation_id,
+        membership_accepted_operation_id=row.membership_accepted_operation_id,
+        membership_predecessor_envelope_sha256=row.membership_predecessor_envelope_sha256,
+        membership_successor_binding=(
+            parse_membership_successor_binding(
+                json.dumps(row.membership_successor_binding, sort_keys=True, separators=(",", ":")),
+                expected_binding_sha256=row.membership_successor_binding_sha256 or "",
+            ) if row.membership_successor_binding is not None else None
+        ),
+        membership_successor_binding_sha256=row.membership_successor_binding_sha256,
+        membership_continuation_kind=cast(
+            Literal["create", "update", "capacity", "destroy"] | None,
+            row.membership_continuation_kind,
+        ),
         readiness_evidence_sha256=row.readiness_evidence_sha256,
         activation_acknowledgement_sha256=(row.activation_acknowledgement_sha256),
         local_activation_sha256=row.local_activation_sha256,
@@ -339,7 +423,7 @@ def _attempt_record(row: DevLifecycleOperationAttempt) -> PersonalDevLifecycleAt
         operation_epoch=row.operation_epoch,
         attempt_sequence=row.attempt_sequence,
         state=cast(
-            Literal["running", "activating", "succeeded", "failed", "cancelled"],
+            Literal["running", "activating", "succeeded", "failed", "cancelled", "superseded"],
             row.state,
         ),
         checkpoint=row.checkpoint,
@@ -403,23 +487,43 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         session: AsyncSession,
         *,
         limits: PersonalDevLifecycleLimits | None = None,
+        storage_layout: Literal["legacy-name-v1", "incarnation-v1"] = "legacy-name-v1",
     ) -> None:
+        if storage_layout not in {"legacy-name-v1", "incarnation-v1"}:
+            raise ValueError("personal storage layout is invalid")
         self.session = session
+        self._storage_layout = storage_layout
         self._candidates = SqlAlchemyPersonalDevCandidateStore(session)
         self._limits = limits or PersonalDevLifecycleLimits()
+
+    def _new_storage_binding(
+        self, requested: PersonalDevEnvironmentApplyRequest, *, subject_id: UUID,
+        subject_incarnation: UUID, previous: DevInstance | None = None,
+    ) -> PersonalDevStorageBindingV1 | None:
+        if self._storage_layout == "legacy-name-v1" and (previous is None or previous.storage_binding is None):
+            return None
+        return PersonalDevStorageBindingV1(
+            layout="incarnation-v1", environment_name=requested.name, subject_id=subject_id,
+            subject_incarnation=subject_incarnation, owner_user_id=requested.owner_user_id,
+            owner_team_id=requested.owner_team_id,
+        )
 
     async def apply(
         self,
         requested: PersonalDevEnvironmentApplyRequest,
         *,
         access_binding: PersonalDevAccessBinding,
+        capacity_mode: PersonalDevCapacityMode = "shadow-v1",
         now: datetime | None = None,
     ) -> PersonalDevApplyReservation:
+        if capacity_mode not in {"shadow-v1", "membership-v1"}:
+            raise ValueError("personal-dev capacity mode is invalid")
         now = now or datetime.now(UTC)
         try:
             reservation = await self._claim_apply(
                 requested,
                 access_binding=access_binding,
+                capacity_mode=capacity_mode,
                 now=now,
             )
             if reservation.requires_build_binding:
@@ -444,15 +548,19 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         requested: PersonalDevEnvironmentDestroyRequest,
         *,
         access_binding: PersonalDevAccessBinding,
+        capacity_mode: PersonalDevCapacityMode = "shadow-v1",
         now: datetime | None = None,
     ) -> PersonalDevApplyReservation:
         """Durably retire manager authority before any local resource deletion."""
 
+        if capacity_mode not in {"shadow-v1", "membership-v1"}:
+            raise ValueError("personal-dev capacity mode is invalid")
         now = now or datetime.now(UTC)
         try:
             reservation = await self._claim_destroy(
                 requested,
                 access_binding=access_binding,
+                capacity_mode=capacity_mode,
                 now=now,
             )
             await self.session.commit()
@@ -467,6 +575,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         requested: PersonalDevEnvironmentDestroyRequest,
         *,
         access_binding: PersonalDevAccessBinding,
+        capacity_mode: PersonalDevCapacityMode,
         now: datetime,
     ) -> PersonalDevApplyReservation:
         global_lock_a, global_lock_b = _lock_keys("\0global-admission")
@@ -491,6 +600,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 or prior.owner_team_id != requested.owner_team_id
                 or prior.request_sha256 != requested.request_sha256
                 or prior.keep_data != requested.keep_data
+                or prior.capacity_mode != capacity_mode
             ):
                 raise PersonalDevEnvironmentConflictError(
                     "idempotency key is already bound to a different request"
@@ -531,6 +641,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 environment,
                 requested=requested,
                 access_binding=access_binding,
+                capacity_mode=capacity_mode,
                 now=now,
             )
             if abandoned is not None:
@@ -538,6 +649,10 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         if environment.status != "ready" or environment.candidate_id is None:
             raise PersonalDevEnvironmentConflictError(
                 f"personal-dev environment cannot be destroyed while {environment.status}"
+            )
+        if environment.accepted_capacity_mode != capacity_mode:
+            raise PersonalDevEnvironmentConflictError(
+                "personal-dev destroy mode differs from accepted capacity authority"
             )
         active = (
             await self.session.execute(
@@ -560,8 +675,6 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             allowed=frozenset({"x86_64", "arm64"}),
         )
         evidence = (
-            environment.capacity_configuration_epoch,
-            environment.capacity_configuration_sha256,
             environment.capacity_reporter_incarnation,
             environment.capacity_reporter_token_sha256,
             environment.local_activation_sha256,
@@ -573,6 +686,19 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         if any(value is None for value in evidence):
             raise PersonalDevEnvironmentConflictError(
                 "personal-dev environment has no complete capacity retirement evidence"
+            )
+        if (
+            capacity_mode == "shadow-v1"
+            and (
+                environment.capacity_configuration_epoch is None
+                or environment.capacity_configuration_sha256 is None
+            )
+        ) or (
+            capacity_mode == "membership-v1"
+            and environment.accepted_capacity_membership_checkpoint is None
+        ):
+            raise PersonalDevEnvironmentConflictError(
+                "personal-dev environment has no accepted capacity retirement checkpoint"
             )
         assert supported_pool_ids is not None
         assert supported_architectures is not None
@@ -601,6 +727,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             id=operation_id,
             idempotency_key=requested.idempotency_key,
             environment_name=environment.name,
+            storage_binding=environment.storage_binding,
+            storage_binding_sha256=environment.storage_binding_sha256,
             subject_id=environment.subject_id,
             subject_incarnation=environment.subject_incarnation,
             owner_user_id=environment.owner_user_id,
@@ -612,6 +740,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             attempt_id=attempt_id,
             attempt_sequence=0,
             request_sha256=requested.request_sha256,
+            capacity_mode=capacity_mode,
             candidate_id=environment.candidate_id,
             candidate_sha=environment.candidate_sha,
             min_slots=environment.min_slots,
@@ -671,6 +800,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         *,
         requested: PersonalDevEnvironmentDestroyRequest,
         access_binding: PersonalDevAccessBinding,
+        capacity_mode: PersonalDevCapacityMode,
         now: datetime,
     ) -> PersonalDevApplyReservation | None:
         """Retire exactly one failed initial build that never reached activation."""
@@ -712,6 +842,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             failed.capacity_agent_installation_sha256,
             failed.capacity_supported_pool_ids,
             failed.capacity_supported_architectures,
+            failed.capacity_membership_envelope,
         )
         environment_evidence = (
             environment.capacity_configuration_epoch,
@@ -723,6 +854,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             environment.capacity_agent_installation_sha256,
             environment.capacity_supported_pool_ids,
             environment.capacity_supported_architectures,
+            environment.accepted_capacity_membership_checkpoint,
         )
         if any(value is not None for value in (*operation_evidence, *environment_evidence)):
             return None
@@ -747,6 +879,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             id=operation_id,
             idempotency_key=requested.idempotency_key,
             environment_name=environment.name,
+            storage_binding=environment.storage_binding,
+            storage_binding_sha256=environment.storage_binding_sha256,
             subject_id=environment.subject_id,
             subject_incarnation=environment.subject_incarnation,
             owner_user_id=environment.owner_user_id,
@@ -758,6 +892,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             attempt_id=attempt_id,
             attempt_sequence=0,
             request_sha256=requested.request_sha256,
+            capacity_mode=capacity_mode,
             candidate_id=failed.candidate_id,
             candidate_sha=failed.candidate_sha,
             min_slots=environment.min_slots,
@@ -817,6 +952,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         requested: PersonalDevEnvironmentApplyRequest,
         *,
         access_binding: PersonalDevAccessBinding,
+        capacity_mode: PersonalDevCapacityMode,
         now: datetime,
     ) -> PersonalDevApplyReservation:
         global_lock_a, global_lock_b = _lock_keys("\0global-admission")
@@ -839,6 +975,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 prior.environment_name != requested.name
                 or prior.owner_team_id != requested.owner_team_id
                 or prior.request_sha256 != requested.request_sha256
+                or prior.capacity_mode != capacity_mode
             ):
                 raise PersonalDevEnvironmentConflictError(
                     "idempotency key is already bound to a different request",
@@ -917,6 +1054,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             await self._assert_limits(requested, replacing_name=None)
             subject_id = uuid4()
             subject_incarnation = uuid4()
+            storage = self._new_storage_binding(requested, subject_id=subject_id, subject_incarnation=subject_incarnation)
+            identity = storage.identity if storage is not None else derive_identity(requested.name)
             operation_epoch = 1
             generation = 1
             kind: PersonalDevOperationKind = "create"
@@ -933,8 +1072,10 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 deployment_generation=generation,
                 candidate_id=requested.candidate_id,
                 candidate_sha=requested.candidate_sha,
-                capacity_namespace=derive_identity(requested.name).namespace,
-                capacity_database=derive_identity(requested.name).database,
+                capacity_namespace=identity.namespace,
+                capacity_database=identity.database,
+                storage_binding=storage.model_dump(mode="json") if storage is not None else None,
+                storage_binding_sha256=canonical_digest(storage) if storage is not None else None,
                 operation_epoch=operation_epoch,
                 operation_id=operation_id,
                 operation_step="candidate_build",
@@ -962,6 +1103,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                         DevLifecycleOperation.expected_operation_epoch
                         == requested.expected_operation_epoch,
                         DevLifecycleOperation.request_sha256 == requested.request_sha256,
+                        DevLifecycleOperation.capacity_mode == capacity_mode,
                     ),
                 )
             ).scalar_one_or_none()
@@ -1016,9 +1158,18 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             subject_id = environment.subject_id
             subject_incarnation = environment.subject_incarnation
             if environment.status == "deleted":
+                if environment.keep_data and (
+                    capacity_mode == "membership-v1"
+                    or environment.accepted_capacity_mode == "membership-v1"
+                ):
+                    raise PersonalDevEnvironmentConflictError(
+                        "retained-data membership recreation requires a fresh storage binding"
+                    )
                 await self._assert_limits(requested, replacing_name=None)
-                identity = derive_identity(requested.name)
                 subject_incarnation = uuid4()
+                storage = self._new_storage_binding(requested, subject_id=environment.subject_id,
+                                                   subject_incarnation=subject_incarnation, previous=environment)
+                identity = storage.identity if storage is not None else derive_identity(requested.name)
                 operation_epoch = environment.operation_epoch + 1
                 generation = 1
                 kind = "create"
@@ -1032,6 +1183,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 environment.candidate_sha = requested.candidate_sha
                 environment.capacity_namespace = identity.namespace
                 environment.capacity_database = identity.database
+                environment.storage_binding = storage.model_dump(mode="json") if storage is not None else None
+                environment.storage_binding_sha256 = canonical_digest(storage) if storage is not None else None
                 environment.operation_epoch = operation_epoch
                 environment.operation_id = operation_id
                 environment.operation_step = "candidate_build"
@@ -1048,6 +1201,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 environment.capacity_agent_installation_sha256 = None
                 environment.capacity_supported_pool_ids = None
                 environment.capacity_supported_architectures = None
+                environment.accepted_capacity_mode = "shadow-v1"
+                environment.accepted_capacity_membership_checkpoint = None
                 environment.updated_at = now
             elif environment.status == "ready":
                 same_candidate = (
@@ -1058,7 +1213,11 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                     environment.min_slots == requested.min_slots
                     and environment.max_slots == requested.max_slots
                 )
-                if same_candidate and same_policy:
+                if (
+                    same_candidate
+                    and same_policy
+                    and environment.accepted_capacity_mode == capacity_mode
+                ):
                     operation_epoch = environment.operation_epoch
                     generation = environment.deployment_generation
                     kind = "noop"
@@ -1134,6 +1293,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             id=operation_id,
             idempotency_key=requested.idempotency_key,
             environment_name=requested.name,
+            storage_binding=environment.storage_binding,
+            storage_binding_sha256=environment.storage_binding_sha256,
             subject_id=subject_id,
             subject_incarnation=subject_incarnation,
             owner_user_id=requested.owner_user_id,
@@ -1145,6 +1306,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             attempt_id=attempt_id,
             attempt_sequence=0,
             request_sha256=requested.request_sha256,
+            capacity_mode=capacity_mode,
             candidate_id=requested.candidate_id,
             candidate_sha=requested.candidate_sha,
             min_slots=requested.min_slots,
@@ -1227,12 +1389,30 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             and_(
                 DevLifecycleOperation.state.in_(("running", "activating")),
                 DevLifecycleOperation.checkpoint == "capacity_projection_pending",
-                DevLifecycleOperation.capacity_expected_configuration_epoch.is_not(None),
+                or_(
+                    and_(
+                        DevLifecycleOperation.capacity_mode == "shadow-v1",
+                        DevLifecycleOperation.capacity_expected_configuration_epoch.is_not(None),
+                    ),
+                    and_(
+                        DevLifecycleOperation.capacity_mode == "membership-v1",
+                        DevLifecycleOperation.capacity_membership_envelope.is_not(None),
+                    ),
+                ),
             ),
             and_(
                 DevLifecycleOperation.state == "activating",
                 DevLifecycleOperation.checkpoint == "capacity_projected",
-                DevLifecycleOperation.capacity_configuration_epoch.is_not(None),
+                or_(
+                    and_(
+                        DevLifecycleOperation.capacity_mode == "shadow-v1",
+                        DevLifecycleOperation.capacity_configuration_epoch.is_not(None),
+                    ),
+                    and_(
+                        DevLifecycleOperation.capacity_mode == "membership-v1",
+                        DevLifecycleOperation.capacity_membership_envelope.is_not(None),
+                    ),
+                ),
             ),
             and_(
                 DevLifecycleOperation.kind == "destroy",
@@ -1241,6 +1421,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                     (
                         "capacity_retirement_requested",
                         "capacity_retired",
+                        "cleanup_pending",
+                        "release_verified",
                         "local_authority_sealed",
                         "namespace_deleted",
                         "database_deleted",
@@ -1248,6 +1430,12 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                         "tenant_deleted",
                     )
                 ),
+            ),
+            and_(
+                DevLifecycleOperation.capacity_mode == "membership-v1",
+                DevLifecycleOperation.state.in_(("running", "activating")),
+                DevLifecycleOperation.checkpoint == "membership_outcome_resolved",
+                DevLifecycleOperation.capacity_membership_envelope.is_not(None),
             ),
         )
         statement = (
@@ -1560,6 +1748,11 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             operation_id,
             operation_epoch,
         )
+        if operation.capacity_mode != "shadow-v1":
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev operation does not use shadow capacity projection"
+            )
         exact = (
             operation.checkpoint == "capacity_projection_pending"
             and operation.capacity_expected_configuration_epoch == expected_configuration_epoch
@@ -1602,7 +1795,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 "personal-dev operation cannot prepare capacity projection"
             )
         if operation.kind in {"capacity", "destroy"} and (
-            environment.capacity_configuration_epoch is not None
+            environment.local_activation_sha256 is not None
         ):
             if (
                 environment.capacity_reporter_incarnation != reporter_incarnation
@@ -1678,6 +1871,11 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             operation_id,
             operation_epoch,
         )
+        if operation.capacity_mode != "shadow-v1":
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev operation does not use shadow capacity projection"
+            )
         if (
             operation.checkpoint != "capacity_projection_pending"
             or operation.capacity_expected_configuration_epoch is None
@@ -1731,6 +1929,11 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             operation_id,
             operation_epoch,
         )
+        if operation.capacity_mode != "shadow-v1":
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev operation does not use shadow capacity projection"
+            )
         binding_matches = (
             result.subject_id == operation.subject_id
             and result.subject_incarnation == operation.subject_incarnation
@@ -1802,6 +2005,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             environment.operation_step = "capacity_projected"
         environment.capacity_configuration_epoch = result.configuration_epoch
         environment.capacity_configuration_sha256 = result.configuration_digest
+        environment.accepted_capacity_mode = "shadow-v1"
+        environment.accepted_capacity_membership_checkpoint = None
         environment.capacity_reporter_incarnation = operation.capacity_reporter_incarnation
         environment.capacity_reporter_token_sha256 = operation.capacity_reporter_token_sha256
         environment.local_activation_sha256 = operation.local_activation_sha256
@@ -1820,6 +2025,667 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         await self.session.commit()
         return reservation
 
+    async def prepare_capacity_membership(
+        self,
+        *,
+        operation_id: UUID,
+        operation_epoch: int,
+        attempt_id: UUID,
+        reconciler_id: str,
+        lease_epoch: int,
+        envelope: PersonalDevMembershipEnvelopeV1,
+        now: datetime | None = None,
+    ) -> PersonalDevApplyReservation:
+        """Persist an exact membership mutation before any manager request."""
+
+        if not isinstance(envelope, PersonalDevMembershipEnvelopeV1):
+            raise TypeError("capacity membership envelope is invalid")
+        now = now or datetime.now(UTC)
+        operation, environment = await self._locked_current_operation(
+            operation_id,
+            operation_epoch,
+        )
+        if operation.capacity_mode != "membership-v1":
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev operation does not use capacity membership"
+            )
+        attempt = await self._locked_current_attempt_lease(
+            operation,
+            attempt_id=attempt_id,
+            reconciler_id=reconciler_id,
+            lease_epoch=lease_epoch,
+            now=now,
+        )
+        try:
+            saved = (
+                _membership_envelope_from_jsonb(operation.capacity_membership_envelope)
+                if operation.capacity_membership_envelope is not None
+                else None
+            )
+        except ValueError as exc:
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "saved capacity membership request is invalid"
+            ) from exc
+        if saved is not None:
+            if saved != envelope:
+                await self.session.rollback()
+                raise PersonalDevEnvironmentConflictError(
+                    "capacity membership request changed after persistence"
+                )
+            if attempt.checkpoint != "capacity_projection_pending":
+                await self.session.rollback()
+                raise PersonalDevEnvironmentOperationFencedError(
+                    "personal-dev lifecycle attempt was superseded"
+                )
+            attempt.claimed_by = None
+            attempt.lease_expires_at = None
+            attempt.updated_at = now
+            await self.session.flush()
+            result = self._reservation(environment, operation, acquired=False)
+            await self.session.commit()
+            return result
+        allowed = (
+            (
+                operation.kind in {"create", "update"}
+                and operation.state == "activating"
+                and operation.checkpoint == "activation_acknowledged"
+                and operation.activation_acknowledgement_sha256 is not None
+                and operation.local_activation_sha256 is not None
+            )
+            or (
+                operation.kind == "capacity"
+                and operation.state == "running"
+                and operation.checkpoint == "capacity_projection_requested"
+                and operation.local_activation_sha256 is not None
+            )
+            or (
+                operation.kind == "destroy"
+                and operation.state == "running"
+                and operation.checkpoint == "capacity_retirement_requested"
+                and operation.local_activation_sha256 is not None
+            )
+        )
+        if (
+            not allowed
+            or envelope.result is not None
+            or envelope.historical_outcome is not None
+        ):
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev operation cannot prepare capacity membership"
+            )
+        projection = envelope.request.projection
+        candidate = await self.session.get(PersonalDevCandidate, operation.candidate_id)
+        expected_slots = (0, 0) if operation.kind == "destroy" else (
+            operation.min_slots,
+            operation.max_slots,
+        )
+        bindings_match = (
+            envelope.idempotency_key == operation.idempotency_key
+            and envelope.observation.operation_id == operation.id
+            and envelope.observation.operation_epoch == operation.operation_epoch
+            and envelope.observation.attempt_id == operation.attempt_id
+            and envelope.observation.observation_lease_epoch == lease_epoch
+            and envelope.observation.observed_at >= operation.updated_at
+            and projection.operation_id == operation.id
+            and projection.operation_epoch == operation.operation_epoch
+            and projection.operation_kind == operation.kind
+            and projection.environment_name == operation.environment_name
+            and projection.subject_id == operation.subject_id
+            and projection.subject_incarnation == operation.subject_incarnation
+            and projection.owner_id == operation.owner_user_id
+            and (projection.min_slots, projection.max_slots) == expected_slots
+            and projection.candidate_generation == operation.deployment_generation
+            and projection.candidate_sha256 == operation.candidate_sha
+            and projection.deployment_generation == operation.deployment_generation
+            and projection.configuration_generation == operation.operation_epoch
+            and projection.demand_reporter_incarnation
+            == envelope.observation.acknowledgement.reporter_incarnation
+            and operation.local_activation_sha256 == projection.local_activation_sha256
+            and candidate is not None
+            and candidate.publication_sha256 == projection.candidate_publication_sha256
+        )
+        if not bindings_match:
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "capacity membership request binding was superseded"
+            )
+        if operation.kind in {"capacity", "destroy"}:
+            accepted_common = (
+                environment.capacity_reporter_incarnation,
+                environment.capacity_reporter_token_sha256,
+                environment.local_activation_sha256,
+                environment.protected_admission_sha256,
+                environment.capacity_agent_installation_sha256,
+                tuple(environment.capacity_supported_pool_ids or ()),
+                tuple(environment.capacity_supported_architectures or ()),
+            )
+            requested_common = (
+                projection.demand_reporter_incarnation,
+                projection.demand_reporter_token_sha256,
+                projection.local_activation_sha256,
+                projection.protected_admission_sha256,
+                projection.capacity_agent_installation_sha256,
+                projection.supported_pool_ids,
+                projection.supported_architectures,
+            )
+            if accepted_common != requested_common:
+                await self.session.rollback()
+                raise PersonalDevEnvironmentConflictError(
+                    "capacity-only membership changed trusted deployment evidence"
+                )
+        expected_attempt_state = "activating" if operation.state == "activating" else "running"
+        if attempt.state != expected_attempt_state:
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev lifecycle attempt was superseded"
+            )
+        operation.capacity_membership_envelope = envelope.model_dump(mode="json")
+        operation.capacity_reporter_incarnation = projection.demand_reporter_incarnation
+        operation.capacity_reporter_token_sha256 = projection.demand_reporter_token_sha256
+        operation.local_activation_sha256 = projection.local_activation_sha256
+        operation.protected_admission_sha256 = projection.protected_admission_sha256
+        operation.capacity_agent_installation_sha256 = (
+            projection.capacity_agent_installation_sha256
+        )
+        operation.capacity_supported_pool_ids = list(projection.supported_pool_ids)
+        operation.capacity_supported_architectures = list(projection.supported_architectures)
+        operation.checkpoint = "capacity_projection_pending"
+        operation.updated_at = now
+        attempt.checkpoint = "capacity_projection_pending"
+        attempt.claimed_by = None
+        attempt.lease_expires_at = None
+        attempt.updated_at = now
+        environment.operation_step = "capacity_projection_pending"
+        environment.updated_at = now
+        await self.session.flush()
+        result = self._reservation(environment, operation, acquired=True)
+        await self.session.commit()
+        return result
+
+    async def refresh_capacity_membership(
+        self,
+        *,
+        operation_id: UUID,
+        operation_epoch: int,
+        attempt_id: UUID,
+        reconciler_id: str,
+        lease_epoch: int,
+        checkpoint: PersonalMembershipCheckpointV1,
+        now: datetime | None = None,
+    ) -> PersonalDevApplyReservation:
+        """Persist an authenticated same-authority revision refresh before retry."""
+
+        if not isinstance(checkpoint, PersonalMembershipCheckpointV1):
+            raise TypeError("capacity membership checkpoint is invalid")
+        now = now or datetime.now(UTC)
+        operation, environment = await self._locked_current_operation(
+            operation_id,
+            operation_epoch,
+        )
+        if operation.capacity_mode != "membership-v1":
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev operation does not use capacity membership"
+            )
+        attempt = await self._locked_current_attempt_lease(
+            operation,
+            attempt_id=attempt_id,
+            reconciler_id=reconciler_id,
+            lease_epoch=lease_epoch,
+            now=now,
+        )
+        if (
+            operation.checkpoint != "capacity_projection_pending"
+            or attempt.checkpoint != "capacity_projection_pending"
+            or operation.capacity_membership_envelope is None
+        ):
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev lifecycle attempt was superseded"
+            )
+        try:
+            envelope = _membership_envelope_from_jsonb(operation.capacity_membership_envelope)
+            refreshed = refresh_membership_checkpoint(envelope, checkpoint)
+        except ValueError as exc:
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "capacity membership checkpoint refresh was superseded"
+            ) from exc
+        operation.capacity_membership_envelope = refreshed.model_dump(mode="json")
+        operation.updated_at = now
+        attempt.claimed_by = None
+        attempt.lease_expires_at = None
+        attempt.updated_at = now
+        await self.session.flush()
+        result = self._reservation(environment, operation, acquired=True)
+        await self.session.commit()
+        return result
+
+    async def record_capacity_membership(
+        self,
+        *,
+        operation_id: UUID,
+        operation_epoch: int,
+        attempt_id: UUID,
+        reconciler_id: str,
+        lease_epoch: int,
+        response: PersonalApplicationMembershipResponseV1,
+        now: datetime | None = None,
+    ) -> PersonalDevApplyReservation:
+        """Commit an exact membership receipt and atomically switch accepted mode."""
+
+        if not isinstance(response, PersonalApplicationMembershipResponseV1):
+            raise TypeError("capacity membership response is invalid")
+        now = now or datetime.now(UTC)
+        operation, environment = await self._locked_current_operation(
+            operation_id,
+            operation_epoch,
+        )
+        if operation.capacity_mode != "membership-v1":
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev operation does not use capacity membership"
+            )
+        attempt = await self._locked_current_attempt_lease(
+            operation,
+            attempt_id=attempt_id,
+            reconciler_id=reconciler_id,
+            lease_epoch=lease_epoch,
+            now=now,
+        )
+        if (
+            operation.checkpoint != "capacity_projection_pending"
+            or attempt.checkpoint != "capacity_projection_pending"
+            or operation.capacity_membership_envelope is None
+        ):
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev lifecycle attempt was superseded"
+            )
+        try:
+            envelope = _membership_envelope_from_jsonb(operation.capacity_membership_envelope)
+            accepted = PersonalDevMembershipEnvelopeV1.model_validate(
+                envelope.model_dump(mode="python") | {"result": response}
+            )
+        except ValueError as exc:
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "capacity membership acknowledgement binding was superseded"
+            ) from exc
+        operation.capacity_membership_envelope = accepted.model_dump(mode="json")
+        operation.updated_at = now
+        if operation.kind == "capacity":
+            environment.min_slots = operation.min_slots
+            environment.max_slots = operation.max_slots
+            environment.status = "ready"
+            environment.operation_step = "complete"
+            environment.failure_reason = None
+            environment.ready_at = now
+            operation.state = "succeeded"
+            operation.checkpoint = "complete"
+            operation.finished_at = now
+            attempt.state = "succeeded"
+            attempt.checkpoint = "complete"
+            attempt.finished_at = now
+        elif operation.kind == "destroy":
+            operation.checkpoint = "cleanup_pending"
+            attempt.checkpoint = "cleanup_pending"
+            environment.status = "deleting"
+            environment.operation_step = "cleanup_pending"
+        else:
+            operation.checkpoint = "capacity_projected"
+            attempt.checkpoint = "capacity_projected"
+            environment.operation_step = "capacity_projected"
+        projection = accepted.request.projection
+        environment.accepted_capacity_mode = "membership-v1"
+        environment.accepted_capacity_membership_checkpoint = (
+            response.checkpoint.model_dump(mode="json")
+        )
+        environment.capacity_configuration_epoch = None
+        environment.capacity_configuration_sha256 = None
+        environment.capacity_reporter_incarnation = projection.demand_reporter_incarnation
+        environment.capacity_reporter_token_sha256 = projection.demand_reporter_token_sha256
+        environment.local_activation_sha256 = projection.local_activation_sha256
+        environment.protected_admission_sha256 = projection.protected_admission_sha256
+        environment.capacity_agent_installation_sha256 = (
+            projection.capacity_agent_installation_sha256
+        )
+        environment.capacity_supported_pool_ids = list(projection.supported_pool_ids)
+        environment.capacity_supported_architectures = list(projection.supported_architectures)
+        environment.updated_at = now
+        attempt.claimed_by = None
+        attempt.lease_expires_at = None
+        attempt.updated_at = now
+        await self.session.flush()
+        result = self._reservation(environment, operation, acquired=True)
+        await self.session.commit()
+        return result
+
+    async def record_capacity_membership_outcome(
+        self,
+        *,
+        operation_id: UUID,
+        operation_epoch: int,
+        attempt_id: UUID,
+        reconciler_id: str,
+        lease_epoch: int,
+        outcome: PersonalDevMembershipHistoricalOutcomeV1,
+        now: datetime | None = None,
+    ) -> PersonalDevApplyReservation:
+        """Persist historical resolution without presenting it as current readiness."""
+
+        now = now or datetime.now(UTC)
+        operation, environment = await self._locked_current_operation(
+            operation_id,
+            operation_epoch,
+        )
+        if operation.capacity_mode != "membership-v1":
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev operation does not use capacity membership"
+            )
+        attempt = await self._locked_current_attempt_lease(
+            operation,
+            attempt_id=attempt_id,
+            reconciler_id=reconciler_id,
+            lease_epoch=lease_epoch,
+            now=now,
+        )
+        if operation.capacity_membership_envelope is None:
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "capacity membership request was not durably prepared"
+            )
+        try:
+            envelope = _membership_envelope_from_jsonb(
+                operation.capacity_membership_envelope
+            )
+            if envelope.historical_outcome is not None:
+                if (
+                    envelope.historical_outcome != outcome
+                    or operation.checkpoint != "membership_outcome_resolved"
+                    or attempt.checkpoint != "membership_outcome_resolved"
+                ):
+                    raise ValueError("historical membership outcome changed")
+                accepted = envelope
+                acquired = False
+            else:
+                if (
+                    envelope.result is not None
+                    or operation.checkpoint != "capacity_projection_pending"
+                    or attempt.checkpoint != "capacity_projection_pending"
+                ):
+                    raise ValueError("membership outcome resolution was superseded")
+                accepted = PersonalDevMembershipEnvelopeV1.model_validate(
+                    envelope.model_dump(mode="python") | {"historical_outcome": outcome}
+                )
+                acquired = True
+        except ValueError as exc:
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "historical capacity membership outcome was superseded"
+            ) from exc
+        operation.capacity_membership_envelope = accepted.model_dump(mode="json")
+        operation.checkpoint = "membership_outcome_resolved"
+        operation.updated_at = now
+        attempt.checkpoint = "membership_outcome_resolved"
+        attempt.claimed_by = None
+        attempt.lease_expires_at = None
+        attempt.updated_at = now
+        environment.operation_step = "membership_outcome_resolved"
+        environment.updated_at = now
+        await self.session.flush()
+        result = self._reservation(environment, operation, acquired=acquired)
+        await self.session.commit()
+        return result
+
+    async def create_membership_successor(
+        self,
+        *,
+        operation_id: UUID,
+        operation_epoch: int,
+        attempt_id: UUID,
+        reconciler_id: str,
+        lease_epoch: int,
+        binding: PersonalDevMembershipSuccessorBindingV1,
+        expected_binding_sha256: str,
+        current_checkpoint: PersonalMembershipCheckpointV1,
+        now: datetime | None = None,
+    ) -> PersonalDevApplyReservation:
+        """Continue exact owner intent once, without replacing historical authority.
+
+        The caller supplies an authenticated current checkpoint and a protected
+        operator binding. This transaction validates consistency, not transport
+        authenticity; neither artifact may come from a personal owner request.
+        """
+        now = now or datetime.now(UTC)
+        binding = parse_membership_successor_binding(
+            canonical_bytes(binding), expected_binding_sha256=expected_binding_sha256,
+        )
+        current_checkpoint = PersonalMembershipCheckpointV1.model_validate_json(
+            canonical_bytes(current_checkpoint)
+        )
+        operation = (await self.session.scalars(
+            select(DevLifecycleOperation).where(
+                DevLifecycleOperation.id == operation_id,
+                DevLifecycleOperation.operation_epoch == operation_epoch,
+            ).with_for_update()
+        )).one_or_none()
+        if operation is None:
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError("successor predecessor is absent")
+        environment = await self._locked_environment(operation.environment_name)
+        if environment is None:
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError("successor environment is absent")
+        child = (await self.session.scalars(select(DevLifecycleOperation).where(
+            DevLifecycleOperation.membership_predecessor_operation_id == operation_id
+        ))).one_or_none()
+        if child is not None:
+            if (
+                operation.state != "superseded"
+                or child.membership_successor_binding_sha256 != expected_binding_sha256
+                or child.membership_successor_binding != binding.model_dump(mode="json")
+            ):
+                await self.session.rollback()
+                raise PersonalDevEnvironmentConflictError("successor review changed after persistence")
+            result = self._reservation(environment, child, acquired=False)
+            await self.session.commit()
+            return result
+        attempt = await self._locked_current_attempt_lease(
+            operation, attempt_id=attempt_id, reconciler_id=reconciler_id,
+            lease_epoch=lease_epoch, now=now,
+        )
+        candidate = await self.session.get(PersonalDevCandidate, operation.candidate_id)
+        previous = (
+            (await self.session.scalars(select(DevLifecycleOperation).where(
+                DevLifecycleOperation.id == binding.accepted_operation_id,
+            ).with_for_update())).one_or_none()
+            if binding.accepted_operation_id is not None else None
+        )
+        try:
+            if candidate is None:
+                raise ValueError("successor candidate is absent")
+            if (
+                current_checkpoint.execution != binding.authority.execution
+                or current_checkpoint.namespace_id != binding.authority.namespace_id
+            ):
+                raise ValueError("successor current mutation authority changed")
+            decision = validate_membership_successor(
+                binding,
+                claim=PersonalDevReconciliationClaim(
+                    environment=_environment_record(environment),
+                    operation=_operation_record(operation), attempt=_attempt_record(attempt),
+                    candidate=_candidate_record(candidate),
+                ),
+                accepted_operation=_operation_record(previous) if previous is not None else None,
+                now=now,
+            )
+        except (TypeError, ValueError) as exc:
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError("successor authority or intent changed") from exc
+        child_id, child_attempt_id, key = uuid4(), uuid4(), uuid4()
+        intent = (
+            PersonalDevEnvironmentDestroyRequest(
+                name=operation.environment_name, owner_user_id=operation.owner_user_id,
+                owner_team_id=operation.owner_team_id, expected_operation_epoch=operation.operation_epoch,
+                idempotency_key=key, keep_data=operation.keep_data,
+            )
+            if decision.kind == "destroy" else PersonalDevEnvironmentApplyRequest(
+                name=operation.environment_name, owner_user_id=operation.owner_user_id,
+                owner_team_id=operation.owner_team_id, expected_operation_epoch=operation.operation_epoch,
+                idempotency_key=key, candidate_id=operation.candidate_id, candidate_sha=operation.candidate_sha,
+                min_slots=operation.min_slots, max_slots=operation.max_slots,
+            )
+        )
+        checkpoint = "capacity_retirement_requested" if decision.kind == "destroy" else "candidate_build"
+        child = DevLifecycleOperation(
+            id=child_id, idempotency_key=key, environment_name=operation.environment_name,
+            storage_binding=operation.storage_binding,
+            storage_binding_sha256=operation.storage_binding_sha256,
+            subject_id=operation.subject_id, subject_incarnation=operation.subject_incarnation,
+            owner_user_id=operation.owner_user_id, owner_team_id=operation.owner_team_id,
+            operation_epoch=decision.operation_epoch, expected_operation_epoch=operation.operation_epoch,
+            kind=decision.kind, state="running", attempt_id=child_attempt_id, attempt_sequence=0,
+            request_sha256=intent.request_sha256, capacity_mode="membership-v1",
+            candidate_id=operation.candidate_id, candidate_sha=operation.candidate_sha,
+            min_slots=operation.min_slots, max_slots=operation.max_slots,
+            deployment_generation=decision.deployment_generation, keep_data=operation.keep_data,
+            checkpoint=checkpoint, created_at=now, updated_at=now, started_at=now,
+            membership_predecessor_operation_id=operation.id,
+            membership_accepted_operation_id=binding.accepted_operation_id,
+            membership_predecessor_envelope_sha256=binding.predecessor_envelope_sha256,
+            membership_successor_binding=binding.model_dump(mode="json"),
+            membership_successor_binding_sha256=canonical_digest(binding),
+            membership_continuation_kind=operation.membership_continuation_kind or operation.kind,
+        )
+        if decision.kind == "destroy":
+            # These were cross-checked against accepted history above. No active
+            # reporter, activation or credentials may be created for retirement.
+            for field in (
+                "capacity_reporter_incarnation", "capacity_reporter_token_sha256",
+                "local_activation_sha256", "protected_admission_sha256",
+                "capacity_agent_installation_sha256", "capacity_supported_pool_ids",
+                "capacity_supported_architectures",
+            ):
+                setattr(child, field, getattr(operation, field))
+        operation.state = "superseded"
+        operation.checkpoint = "membership_successor_created"
+        operation.updated_at = operation.finished_at = now
+        attempt.state = "superseded"
+        attempt.checkpoint = "membership_successor_created"
+        attempt.updated_at = attempt.finished_at = now
+        attempt.claimed_by = attempt.lease_expires_at = None
+        # Release active-operation uniqueness before inserting the child. The
+        # deferred transition guard requires the complete link at commit.
+        await self.session.flush()
+        self.session.add(child)
+        await self.session.flush()
+        self.session.add(DevLifecycleOperationAttempt(
+            id=child_attempt_id, operation_id=child_id, subject_id=child.subject_id,
+            subject_incarnation=child.subject_incarnation, operation_epoch=child.operation_epoch,
+            attempt_sequence=0, state="running", checkpoint=checkpoint,
+            credential_binding_version=attempt.credential_binding_version,
+            bootstrap_auth_kind=attempt.bootstrap_auth_kind,
+            bootstrap_credential_hash=attempt.bootstrap_credential_hash,
+            created_at=now, updated_at=now, started_at=now,
+        ))
+        environment.operation_id = child_id
+        environment.operation_epoch = child.operation_epoch
+        environment.operation_step = checkpoint
+        environment.status = (
+            "deleting" if decision.kind == "destroy" else
+            "provisioning" if decision.kind == "create" else "updating"
+        )
+        environment.updated_at = now
+        await self.session.flush()
+        result = self._reservation(environment, child, acquired=True)
+        await self.session.commit()
+        return result
+
+    async def record_capacity_membership_release(
+        self,
+        *,
+        operation_id: UUID,
+        operation_epoch: int,
+        attempt_id: UUID,
+        reconciler_id: str,
+        lease_epoch: int,
+        release: PersonalMembershipReleaseVerifiedV1,
+        now: datetime | None = None,
+    ) -> PersonalDevApplyReservation:
+        """Persist authenticated zero-work proof before membership teardown."""
+
+        if not isinstance(release, PersonalMembershipReleaseVerifiedV1):
+            raise TypeError("capacity membership release is invalid")
+        now = now or datetime.now(UTC)
+        operation, environment = await self._locked_current_operation(
+            operation_id,
+            operation_epoch,
+        )
+        if (
+            operation.capacity_mode != "membership-v1"
+            or operation.kind != "destroy"
+            or operation.state != "running"
+            or operation.capacity_membership_envelope is None
+        ):
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev operation does not await membership release"
+            )
+        attempt = await self._locked_current_attempt_lease(
+            operation,
+            attempt_id=attempt_id,
+            reconciler_id=reconciler_id,
+            lease_epoch=lease_epoch,
+            now=now,
+        )
+        try:
+            envelope = _membership_envelope_from_jsonb(
+                operation.capacity_membership_envelope
+            )
+            current_receipt = (
+                operation.checkpoint == "cleanup_pending"
+                and attempt.checkpoint == "cleanup_pending"
+                and envelope.result is not None
+                and envelope.historical_outcome is None
+            )
+            historical_receipt = (
+                operation.checkpoint == "membership_outcome_resolved"
+                and attempt.checkpoint == "membership_outcome_resolved"
+                and envelope.result is None
+                and isinstance(
+                    envelope.historical_outcome,
+                    PersonalMembershipOperationCommittedV1,
+                )
+            )
+            if envelope.release is not None or not (current_receipt or historical_receipt):
+                raise ValueError("membership release source was superseded")
+            accepted = PersonalDevMembershipEnvelopeV1.model_validate(
+                envelope.model_dump(mode="python") | {"release": release}
+            )
+        except ValueError as exc:
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "capacity membership release binding was superseded"
+            ) from exc
+        operation.capacity_membership_envelope = accepted.model_dump(mode="json")
+        operation.checkpoint = "release_verified"
+        operation.updated_at = now
+        attempt.checkpoint = "release_verified"
+        attempt.claimed_by = None
+        attempt.lease_expires_at = None
+        attempt.updated_at = now
+        environment.operation_step = "release_verified"
+        environment.updated_at = now
+        await self.session.flush()
+        result = self._reservation(environment, operation, acquired=True)
+        await self.session.commit()
+        return result
+
     async def complete_activation(
         self,
         *,
@@ -1835,6 +2701,45 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             operation_id,
             operation_epoch,
         )
+        try:
+            membership_envelope = (
+                _membership_envelope_from_jsonb(operation.capacity_membership_envelope)
+                if operation.capacity_membership_envelope is not None
+                else None
+            )
+        except ValueError as exc:
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "saved capacity membership request is invalid"
+            ) from exc
+        operation_capacity_accepted = (
+            operation.capacity_configuration_epoch is not None
+            and operation.capacity_configuration_sha256 is not None
+            if operation.capacity_mode == "shadow-v1"
+            else membership_envelope is not None and membership_envelope.result is not None
+        )
+        environment_capacity_matches = (
+            environment.accepted_capacity_mode == operation.capacity_mode
+            and (
+                (
+                    operation.capacity_mode == "shadow-v1"
+                    and environment.capacity_configuration_epoch
+                    == operation.capacity_configuration_epoch
+                    and environment.capacity_configuration_sha256
+                    == operation.capacity_configuration_sha256
+                    and environment.accepted_capacity_membership_checkpoint is None
+                )
+                or (
+                    operation.capacity_mode == "membership-v1"
+                    and membership_envelope is not None
+                    and membership_envelope.result is not None
+                    and environment.capacity_configuration_epoch is None
+                    and environment.capacity_configuration_sha256 is None
+                    and environment.accepted_capacity_membership_checkpoint
+                    == membership_envelope.result.checkpoint.model_dump(mode="json")
+                )
+            )
+        )
         if operation.state == "succeeded":
             if (
                 operation.kind not in {"create", "update"}
@@ -1845,8 +2750,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 or environment.min_slots != operation.min_slots
                 or environment.max_slots != operation.max_slots
                 or environment.deployment_generation != operation.deployment_generation
-                or operation.capacity_configuration_epoch is None
-                or operation.capacity_configuration_sha256 is None
+                or not operation_capacity_accepted
                 or operation.capacity_reporter_incarnation is None
                 or operation.capacity_reporter_token_sha256 is None
                 or operation.local_activation_sha256 is None
@@ -1854,10 +2758,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 or operation.capacity_agent_installation_sha256 is None
                 or operation.capacity_supported_pool_ids is None
                 or operation.capacity_supported_architectures is None
-                or environment.capacity_configuration_epoch
-                != operation.capacity_configuration_epoch
-                or environment.capacity_configuration_sha256
-                != operation.capacity_configuration_sha256
+                or not environment_capacity_matches
                 or environment.capacity_reporter_incarnation
                 != operation.capacity_reporter_incarnation
                 or environment.capacity_reporter_token_sha256
@@ -1883,8 +2784,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             or operation.readiness_evidence_sha256 is None
             or operation.activation_acknowledgement_sha256 is None
             or operation.local_activation_sha256 is None
-            or operation.capacity_configuration_epoch is None
-            or operation.capacity_configuration_sha256 is None
+            or not operation_capacity_accepted
             or operation.capacity_reporter_incarnation is None
             or operation.capacity_reporter_token_sha256 is None
             or operation.protected_admission_sha256 is None
@@ -1924,8 +2824,11 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         environment.min_slots = operation.min_slots
         environment.max_slots = operation.max_slots
         environment.deployment_generation = operation.deployment_generation
-        environment.capacity_configuration_epoch = operation.capacity_configuration_epoch
-        environment.capacity_configuration_sha256 = operation.capacity_configuration_sha256
+        if operation.capacity_mode == "shadow-v1":
+            environment.accepted_capacity_mode = "shadow-v1"
+            environment.accepted_capacity_membership_checkpoint = None
+            environment.capacity_configuration_epoch = operation.capacity_configuration_epoch
+            environment.capacity_configuration_sha256 = operation.capacity_configuration_sha256
         environment.capacity_reporter_incarnation = operation.capacity_reporter_incarnation
         environment.capacity_reporter_token_sha256 = operation.capacity_reporter_token_sha256
         environment.local_activation_sha256 = operation.local_activation_sha256
@@ -1974,8 +2877,13 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             operation_id,
             operation_epoch,
         )
+        teardown_start = (
+            "release_verified"
+            if operation.capacity_mode == "membership-v1"
+            else "capacity_retired"
+        )
         transitions = {
-            "capacity_retired": "local_authority_sealed",
+            teardown_start: "local_authority_sealed",
             "local_authority_sealed": "namespace_deleted",
             "database_deleted": "buckets_deleted",
             "buckets_deleted": "tenant_deleted",
@@ -1984,6 +2892,18 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         transitions["namespace_deleted"] = (
             "tenant_deleted" if operation.keep_data else "database_deleted"
         )
+        if operation.capacity_mode == "membership-v1":
+            try:
+                envelope = _membership_envelope_from_jsonb(
+                    operation.capacity_membership_envelope
+                )
+                if envelope.release is None:
+                    raise ValueError("membership release is absent")
+            except (TypeError, ValueError) as exc:
+                await self.session.rollback()
+                raise PersonalDevEnvironmentOperationFencedError(
+                    "personal-dev membership release was not verified"
+                ) from exc
         if (
             operation.kind != "destroy"
             or operation.state != "running"
@@ -2104,8 +3024,31 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         self,
         operation_id: UUID,
     ) -> PersonalDevLifecycleOperationRecord | None:
-        row = await self.session.get(DevLifecycleOperation, operation_id)
-        return _operation_record(row) if row is not None else None
+        successor = aliased(DevLifecycleOperation)
+        pair = (await self.session.execute(
+            select(DevLifecycleOperation, successor).outerjoin(
+                successor, successor.membership_predecessor_operation_id == DevLifecycleOperation.id,
+            ).where(DevLifecycleOperation.id == operation_id).execution_options(populate_existing=True)
+        )).one_or_none()
+        if pair is None:
+            return None
+        row, child = pair
+        record = _operation_record(row)
+        if row.state != "superseded":
+            if child is not None:
+                raise RuntimeError("non-superseded operation has successor lineage")
+            return record
+        if (
+            row.checkpoint != "membership_successor_created" or child is None
+            or child.operation_epoch != row.operation_epoch + 1
+            or child.expected_operation_epoch != row.operation_epoch
+            or any(getattr(child, field) != getattr(row, field) for field in (
+                "environment_name", "owner_user_id", "owner_team_id", "subject_id",
+                "subject_incarnation", "candidate_id", "candidate_sha", "min_slots", "max_slots",
+            ))
+        ):
+            raise RuntimeError("membership successor lineage is missing or inconsistent")
+        return replace(record, membership_successor_operation_id=child.id)
 
     async def _retry_failed_operation(
         self,

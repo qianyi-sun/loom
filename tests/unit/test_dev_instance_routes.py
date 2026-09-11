@@ -486,7 +486,7 @@ async def test_personal_apply_binds_authenticated_owner_and_returns_operation() 
     captured = []
 
     class _Authority:
-        async def apply(self, requested, *, access_binding, now=None):
+        async def apply(self, requested, *, access_binding, capacity_mode="shadow-v1", now=None):
             captured.append((requested, access_binding))
             environment = PersonalDevEnvironmentRecord(
                 name=requested.name,
@@ -598,7 +598,7 @@ async def test_personal_apply_fails_before_mutation_when_builder_is_inert() -> N
 
 async def test_personal_apply_marks_only_hidden_target_not_found_response() -> None:
     class _Authority:
-        async def apply(self, requested, *, access_binding, now=None):
+        async def apply(self, requested, *, access_binding, capacity_mode="shadow-v1", now=None):
             raise PersonalDevEnvironmentNotFoundError(
                 "personal-dev environment not found",
             )
@@ -632,7 +632,7 @@ async def test_personal_apply_marks_only_hidden_target_not_found_response() -> N
 
 async def test_personal_apply_maps_candidate_conflict_to_unmarked_409() -> None:
     class _Authority:
-        async def apply(self, requested, *, access_binding, now=None):
+        async def apply(self, requested, *, access_binding, capacity_mode="shadow-v1", now=None):
             raise PersonalDevEnvironmentConflictError(
                 "personal-dev candidate is invalid for the requested apply",
             )
@@ -689,7 +689,7 @@ async def test_personal_destroy_requires_epoch_and_submits_durable_authority() -
     captured = []
 
     class _Authority:
-        async def destroy(self, requested, *, access_binding, now=None):
+        async def destroy(self, requested, *, access_binding, capacity_mode="shadow-v1", now=None):
             captured.append((requested, access_binding))
             environment = PersonalDevEnvironmentRecord(
                 name="alice",
@@ -804,7 +804,7 @@ async def test_personal_abandonment_replay_survives_candidate_gc_unbind() -> Non
     captured = []
 
     class _Authority:
-        async def destroy(self, requested, *, access_binding, now=None):
+        async def destroy(self, requested, *, access_binding, capacity_mode="shadow-v1", now=None):
             captured.append((requested, access_binding))
             environment = PersonalDevEnvironmentRecord(
                 name="alice",

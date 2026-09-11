@@ -29,6 +29,7 @@ from loom.dev_instance import (
     validate_dev_instance,
 )
 from loom.dev_instance_provision import provisioning_plan
+from loom.personal_dev_incarnation_storage import PersonalDevStorageBindingV1
 
 #: Dev instances only ever run on the Slurm actuator (the envelope the
 #: autoscaler admission also enforces). Fixed here so a caller cannot request a
@@ -101,6 +102,8 @@ class DevInstanceRecord:
     candidate_id: UUID | None = None
     capacity_namespace: str | None = None
     capacity_database: str | None = None
+    accepted_capacity_mode: Literal["shadow-v1", "membership-v1"] = "shadow-v1"
+    storage_binding: PersonalDevStorageBindingV1 | None = None
 
 
 @dataclass(frozen=True)
@@ -367,6 +370,10 @@ class DevInstanceProvisioner:
 
         operation_id = uuid4()
         existing = await self.store.get(name)
+        if existing is not None and existing.storage_binding is not None:
+            raise DevInstanceConflictError(
+                "incarnation-bound storage requires the personal lifecycle controller"
+            )
         reservation = await self.store.claim_create(
             DevInstanceRecord(
                 name=name,
@@ -394,6 +401,8 @@ class DevInstanceProvisioner:
         access: OwnerAccessSnapshot,
     ) -> DevInstanceRecord:
         """Run idempotent external effects for one previously claimed create."""
+        if record.storage_binding is not None:
+            raise DevInstanceConflictError("incarnation-bound storage requires the personal lifecycle controller")
         name = record.name
         owner_user_id = record.owner_user_id
         owner_team_id = record.owner_team_id
@@ -478,6 +487,11 @@ class DevInstanceProvisioner:
         keep_data: bool = False,
     ) -> InstanceReservation | None:
         """Durably claim deletion without running external effects."""
+        existing = await self.store.get(name)
+        if existing is not None and existing.storage_binding is not None:
+            raise DevInstanceConflictError(
+                "incarnation-bound storage requires the personal lifecycle controller"
+            )
         reservation = await self.store.claim_destroy(
             name,
             operation_id=uuid4(),
@@ -489,6 +503,8 @@ class DevInstanceProvisioner:
 
     async def converge_destroy(self, record: DevInstanceRecord) -> DevInstanceRecord:
         """Run drain-first external cleanup for one previously claimed delete."""
+        if record.storage_binding is not None:
+            raise DevInstanceConflictError("incarnation-bound storage requires the personal lifecycle controller")
         name = record.name
         keep_data = record.keep_data
         operation_id = record.operation_id

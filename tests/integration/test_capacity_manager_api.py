@@ -1389,6 +1389,9 @@ def _assert_exact_approved_routes(app: FastAPI) -> None:
         ("/v1/configuration-rollbacks", ("POST",)),
         ("/v1/development-projections/{subject_id}", ("PUT",)),
         ("/v1/personal-memberships/checkpoint", ("GET",)),
+        ("/v1/personal-memberships/operation-outcomes/query", ("POST",)),
+        ("/v1/personal-memberships/subjects/status/query", ("POST",)),
+        ("/v1/personal-memberships/subjects/release/query", ("POST",)),
         ("/v1/personal-memberships/{subject_id}", ("PUT",)),
         ("/v1/reports/demand/{subject_id}", ("PUT",)),
         (

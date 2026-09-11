@@ -380,20 +380,33 @@ def render_signed_launch(context: TrustedLaunchContextV2) -> RenderedTrustedLaun
         signing_key_id=context.ownership_key.signing_key_id,
         metadata=metadata,
     )
-    profile = context.profile
+    request = _render_slurm_request(
+        binding=context.binding, profile=context.profile, domain=domain,
+        ownership_token=executable_ownership_token(proof),
+        candidate_diagnostic=context.candidate_diagnostic, display_diagnostic=context.display_diagnostic,
+    )
+    return RenderedTrustedLaunchV2(request=request, ownership_proof=proof)
+
+
+def _render_slurm_request(
+    *, binding: ExecutableIntentBindingV2, profile: OperatorLaunchProfileV2,
+    domain: OperatorResourceDomainV2, ownership_token: str,
+    candidate_diagnostic: str, display_diagnostic: str,
+) -> SlurmLaunchRequestV2:
+    """Shared scheduler translation, only after version-specific authorization."""
     generic_tres = tuple(
         SlurmTresValueV2(
             name=item.tres_name,
-            value=context.binding.resources.generic[item.resource_name],
+            value=binding.resources.generic[item.resource_name],
         )
         for item in profile.generic_tres
     )
     candidate_digest = _diagnostic_digest(
-        context.candidate_diagnostic,
+        candidate_diagnostic,
         label="candidate",
     )
-    display_digest = _diagnostic_digest(context.display_diagnostic, label="display")
-    request = SlurmLaunchRequestV2(
+    display_digest = _diagnostic_digest(display_diagnostic, label="display")
+    return SlurmLaunchRequestV2(
         cluster=profile.slurm_cluster,
         controller_host=profile.controller_host,
         partition=profile.partition,
@@ -401,21 +414,20 @@ def render_signed_launch(context: TrustedLaunchContextV2) -> RenderedTrustedLaun
         submitter=profile.submitter,
         qos=profile.qos,
         job_name=f"{profile.job_name_prefix}-{candidate_digest}-{display_digest}",
-        operation_id=context.binding.intent_id,
-        nodes=context.binding.node_ids,
+        operation_id=binding.intent_id,
+        nodes=binding.node_ids,
         features=domain.features,
         cpus=profile.cpus,
-        memory_bytes=context.binding.resources.memory_bytes,
-        gpus=context.binding.resources.gpu_count,
+        memory_bytes=binding.resources.memory_bytes,
+        gpus=binding.resources.gpu_count,
         generic_tres=generic_tres,
         time_limit_seconds=profile.time_limit_seconds,
         launcher=profile.launcher,
         trusted_launcher_config=profile.trusted_launcher_config,
         launcher_release_sha256=profile.trusted_launcher_release_sha256,
         image_digest=profile.image_digest,
-        ownership_token=executable_ownership_token(proof),
+        ownership_token=ownership_token,
     )
-    return RenderedTrustedLaunchV2(request=request, ownership_proof=proof)
 
 
 def render_launch_request(context: TrustedLaunchContextV2) -> SlurmLaunchRequestV2:

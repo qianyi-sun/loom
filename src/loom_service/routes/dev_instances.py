@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Annotated, Literal, Protocol, cast
 from uuid import UUID
@@ -51,6 +52,7 @@ from loom.personal_dev_expected_denial import (
     EXPECTED_HIDDEN_DENIAL_PHASE_HEADER,
     expected_hidden_denial_phase,
 )
+from loom.personal_dev_incarnation_storage import PersonalDevStorageBindingV1
 from loom.personal_dev_runtime import (
     PersonalDevAcceptanceInterlockError,
     PersonalDevOperationalInterlockError,
@@ -72,6 +74,18 @@ ProvisionerFactory = Callable[[InstanceStore], DevInstanceProvisioner]
 
 async def _assert_personal_dev_acceptance(request: Request) -> None:
     mode = getattr(request.app.state, "personal_dev_runtime_mode", None)
+    if mode == "membership-v1":
+        interlock = getattr(request.app.state, "personal_dev_membership_admission", None)
+        assert_admission = getattr(interlock, "assert_admission_ready", None)
+        if not callable(assert_admission):
+            raise HTTPException(status_code=503, detail="personal-dev membership admission unavailable")
+        try:
+            await assert_admission(now=datetime.now(UTC))
+        except Exception:
+            raise HTTPException(
+                status_code=503, detail="personal-dev membership admission unavailable"
+            ) from None
+        return
     enablement_required = getattr(
         request.app.state,
         "personal_dev_enablement_required",
@@ -234,6 +248,12 @@ class PersonalDevActivationIntentPayload(BaseModel):
     intent_sha256: str
 
 
+class PersonalDevActivationIntentV2Payload(PersonalDevActivationIntentPayload):
+    schema_version: Literal[2] = 2
+    storage_binding: PersonalDevStorageBindingV1
+    storage_binding_sha256: str
+
+
 class DevInstanceIdentityResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -371,7 +391,11 @@ class PersonalDevLifecycleOperationResponse(BaseModel):
         "failed",
         "cancelling",
         "cancelled",
+        "superseded",
     ]
+    membership_predecessor_operation_id: UUID | None = None
+    membership_successor_operation_id: UUID | None = None
+    membership_continuation_kind: Literal["create", "update", "capacity", "destroy"] | None = None
     attempt_id: UUID
     attempt_sequence: int
     candidate_id: UUID
@@ -452,7 +476,7 @@ def _response(
         updated_at=record.updated_at,
         ready_at=record.ready_at,
         deleted_at=record.deleted_at,
-        identity=_identity_response(derive_identity(record.name)),
+        identity=_identity_response(_record_identity(record)),
     )
 
 
@@ -471,22 +495,34 @@ async def _enriched_response(request: Request, record: DevInstanceRecord) -> Dev
     if reader is None:
         return _response(record, PersonalDevCapacityAvailability("waiting", True, False))
     try:
+        storage = {} if record.storage_binding is None else {"storage_binding": record.storage_binding}
         availability = await reader.read(
             namespace=record.capacity_namespace,
             database=record.capacity_database,
             subject_id=record.subject_id,
             subject_incarnation=record.subject_incarnation,
             deployment_generation=record.deployment_generation,
+            **storage,
         )
     except Exception:
         availability = PersonalDevCapacityAvailability("waiting", True, False)
     return _response(record, availability)
 
 
+def _record_identity(record: DevInstanceRecord | PersonalDevEnvironmentRecord) -> DevInstanceIdentity:
+    if record.storage_binding is not None:
+        return record.storage_binding.identity
+    return derive_identity(record.name)
+
+
 def _personal_environment_response(
     record: PersonalDevEnvironmentRecord,
 ) -> PersonalDevEnvironmentResponse:
-    capacity_prepared = record.capacity_configuration_epoch is not None
+    capacity_prepared = (
+        record.accepted_capacity_membership_checkpoint is not None
+        if record.accepted_capacity_mode == "membership-v1"
+        else record.capacity_configuration_epoch is not None
+    )
     return PersonalDevEnvironmentResponse(
         name=record.name,
         subject_id=record.subject_id,
@@ -514,14 +550,14 @@ def _personal_environment_response(
         updated_at=record.updated_at,
         ready_at=record.ready_at,
         deleted_at=record.deleted_at,
-        identity=_identity_response(derive_identity(record.name)),
+        identity=_identity_response(_record_identity(record)),
     )
 
 
 def _personal_activation_intent_response(
     intent: PersonalDevActivationIntent,
-) -> PersonalDevActivationIntentPayload:
-    return PersonalDevActivationIntentPayload(
+) -> PersonalDevActivationIntentPayload | PersonalDevActivationIntentV2Payload:
+    legacy = PersonalDevActivationIntentPayload(
         environment_name=intent.environment_name,
         subject_id=intent.subject_id,
         subject_incarnation=intent.subject_incarnation,
@@ -540,6 +576,13 @@ def _personal_activation_intent_response(
         intent_created_at=intent.intent_created_at,
         intent_sha256=intent.intent_sha256,
     )
+    if intent.storage_binding is None:
+        return legacy
+    assert intent.storage_binding_sha256 is not None
+    return PersonalDevActivationIntentV2Payload(
+        **legacy.model_dump(), storage_binding=intent.storage_binding,
+        storage_binding_sha256=intent.storage_binding_sha256,
+    )
 
 
 def _personal_operation_response(
@@ -555,6 +598,9 @@ def _personal_operation_response(
         expected_operation_epoch=record.expected_operation_epoch,
         kind=record.kind,
         state=record.state,
+        membership_predecessor_operation_id=record.membership_predecessor_operation_id,
+        membership_successor_operation_id=record.membership_successor_operation_id,
+        membership_continuation_kind=record.membership_continuation_kind,
         attempt_id=record.attempt_id,
         attempt_sequence=record.attempt_sequence,
         candidate_id=record.candidate_id,
@@ -702,6 +748,7 @@ async def apply_personal_dev_environment(
         )
     if payload.min_slots > payload.max_slots:
         raise HTTPException(status_code=400, detail="min_slots must not exceed max_slots")
+    await _assert_personal_dev_acceptance(request)
     try:
         reservation = await _personal_authority(request, session).apply(
             PersonalDevEnvironmentApplyRequest(
@@ -716,6 +763,11 @@ async def apply_personal_dev_environment(
                 idempotency_key=payload.idempotency_key,
             ),
             access_binding=access_binding_from_context(ctx),
+            capacity_mode=(
+                "membership-v1"
+                if getattr(request.app.state, "personal_dev_runtime_mode", None) == "membership-v1"
+                else "shadow-v1"
+            ),
         )
     except PersonalDevEnvironmentNotFoundError as exc:
         raise HTTPException(
@@ -746,20 +798,32 @@ async def apply_personal_dev_environment(
             status_code=503,
             detail="personal-dev environment apply failed before external activation",
         ) from None
+    if reservation.operation.state == "superseded":
+        try:
+            operation = await _personal_authority(request, session).get_operation(reservation.operation.id)
+            if operation is None:
+                raise RuntimeError("retained recovery operation is missing")
+        except Exception:
+            logger.exception("personal_dev_recovery_status_unavailable", extra={"dev_instance_name": name})
+            raise HTTPException(
+                status_code=503,
+                detail="personal-dev apply was retained; recovery status is temporarily unavailable",
+            ) from None
+        reservation = replace(reservation, operation=operation)
     response.status_code = 200 if reservation.operation.state == "succeeded" else 202
     return _personal_apply_response(reservation)
 
 
 @internal_router.post(
     "/personal-dev/activation-intents/next",
-    response_model=PersonalDevActivationIntentPayload,
+    response_model=PersonalDevActivationIntentPayload | PersonalDevActivationIntentV2Payload,
     responses={204: {"description": "No current activation intent"}},
 )
 async def next_personal_dev_activation_intent(
     payload: PersonalDevActivationIntentRequestPayload,
     request: Request,
     signature: Annotated[str, Header(alias="X-Loom-Activation-Signature")],
-) -> PersonalDevActivationIntentPayload | Response:
+) -> PersonalDevActivationIntentPayload | PersonalDevActivationIntentV2Payload | Response:
     """Return one current intent only to an agent proving signing-key possession."""
     await _assert_personal_dev_acceptance(request)
     verifier = getattr(request.app.state, "personal_dev_activation_verifier", None)
@@ -1019,6 +1083,7 @@ async def delete_dev_instance(
                     keep_data=keep_data,
                 ),
                 access_binding=access_binding_from_context(ctx),
+                capacity_mode=visible.accepted_capacity_mode,
             )
         except PersonalDevEnvironmentNotFoundError as exc:
             raise HTTPException(status_code=404, detail="personal-dev resource not found") from exc

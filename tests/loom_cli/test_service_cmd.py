@@ -158,6 +158,7 @@ def test_personal_service_up_routes_to_authenticated_lifecycle_without_docker(
     candidate_id = "00000000-0000-0000-0000-000000000001"
     operation_id = "00000000-0000-0000-0000-000000000002"
     requests: list[httpx.Request] = []
+    from tests.loom_cli.test_personal_dev_deploy import _environment, _operation
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
@@ -189,6 +190,7 @@ def test_personal_service_up_routes_to_authenticated_lifecycle_without_docker(
                 202,
                 json={
                     "environment": {
+                        **_environment(status="provisioning", epoch=1),
                         "name": "alice",
                         "status": "provisioning",
                         "operation_epoch": 1,
@@ -198,6 +200,8 @@ def test_personal_service_up_routes_to_authenticated_lifecycle_without_docker(
                         "identity": {"route_host": "alice.dev.example"},
                     },
                     "operation": {
+                        **_operation(state="running"),
+                        "idempotency_key": payload["idempotency_key"],
                         "id": operation_id,
                         "environment_name": "alice",
                         "candidate_sha": candidate_sha,
@@ -262,6 +266,7 @@ def test_personal_service_up_routes_to_authenticated_lifecycle_without_docker(
 def test_personal_service_up_retries_a_failed_environment_at_its_current_epoch(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    from tests.loom_cli.test_personal_dev_deploy import _environment, _operation
     candidate_sha = "c" * 64
     candidate_id = "00000000-0000-0000-0000-000000000001"
     operation_id = "00000000-0000-0000-0000-000000000002"
@@ -304,22 +309,25 @@ def test_personal_service_up_retries_a_failed_environment_at_its_current_epoch(
                 202,
                 json={
                     "environment": {
+                        **_environment(status="provisioning", epoch=4),
                         "name": "alice",
                         "status": "provisioning",
-                        "operation_epoch": 3,
+                        "operation_epoch": 4,
                         "candidate_sha": candidate_sha,
                         "min_slots": 0,
                         "max_slots": 2,
                         "identity": {},
                     },
                     "operation": {
+                        **_operation(state="running"),
+                        "idempotency_key": payload["idempotency_key"],
                         "id": operation_id,
                         "environment_name": "alice",
                         "candidate_sha": candidate_sha,
                         "min_slots": 0,
                         "max_slots": 2,
                         "expected_operation_epoch": 3,
-                        "operation_epoch": 3,
+                        "operation_epoch": 4,
                         "state": "running",
                     },
                 },
@@ -364,6 +372,7 @@ def test_personal_service_up_retries_a_failed_environment_at_its_current_epoch(
 def test_personal_service_up_redeploys_a_deleted_retained_name_with_explicit_epoch(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    from tests.loom_cli.test_personal_dev_deploy import _environment, _operation
     candidate_sha = "c" * 64
     candidate_id = "00000000-0000-0000-0000-000000000001"
     operation_id = "00000000-0000-0000-0000-000000000002"
@@ -395,6 +404,7 @@ def test_personal_service_up_redeploys_a_deleted_retained_name_with_explicit_epo
                 202,
                 json={
                     "environment": {
+                        **_environment(status="provisioning", epoch=5),
                         "name": "alice",
                         "status": "provisioning",
                         "operation_epoch": 5,
@@ -404,6 +414,8 @@ def test_personal_service_up_redeploys_a_deleted_retained_name_with_explicit_epo
                         "identity": {},
                     },
                     "operation": {
+                        **_operation(state="running"),
+                        "idempotency_key": payload["idempotency_key"],
                         "id": operation_id,
                         "environment_name": "alice",
                         "candidate_sha": candidate_sha,
@@ -852,6 +864,7 @@ def test_personal_update_expected_hidden_denial_rejects_zero_epoch_before_auth(
 def test_personal_service_up_quiet_suppresses_stdout_but_not_lifecycle_requests(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    from tests.loom_cli.test_personal_dev_deploy import _environment, _operation
     candidate_sha = "c" * 64
     requests: list[httpx.Request] = []
 
@@ -869,11 +882,14 @@ def test_personal_service_up_quiet_suppresses_stdout_but_not_lifecycle_requests(
         if request.method == "PUT" and request.url.path == "/api/v1/dev-instances/alice":
             return httpx.Response(202, json={
                 "environment": {
+                    **_environment(status="provisioning", epoch=1),
                     "name": "alice", "status": "provisioning", "operation_epoch": 1,
                     "candidate_sha": candidate_sha, "min_slots": 0, "max_slots": 2,
                     "identity": {},
                 },
                 "operation": {
+                    **_operation(state="running"),
+                    "idempotency_key": json.loads(request.content)["idempotency_key"],
                     "id": "00000000-0000-0000-0000-000000000002",
                     "environment_name": "alice", "candidate_sha": candidate_sha,
                     "min_slots": 0, "max_slots": 2, "expected_operation_epoch": 0,
@@ -900,6 +916,27 @@ def test_personal_service_up_quiet_suppresses_stdout_but_not_lifecycle_requests(
         ("GET", "/api/v1/personal-dev-candidates"),
         ("PUT", "/api/v1/dev-instances/alice"),
     ]
+
+
+def test_personal_service_up_polls_superseded_request_even_when_current_environment_is_ready():
+    from tests.loom_cli.test_personal_dev_deploy import _candidate, _environment, _operation
+
+    environment = _environment(status="ready", epoch=2)
+    operation = _operation(state="superseded")
+    http_client = httpx.Client(base_url="https://loom.example")
+    with (
+        patch("loom_cli.server_client.require_logged_in", return_value=SimpleNamespace(server_url="https://loom.example")),
+        patch("loom_cli.server_client.authed_client", return_value=http_client),
+        patch("loom_cli.personal_dev_deploy.PersonalDevDeployClient") as client_type,
+    ):
+        deploy = client_type.return_value
+        deploy.expected_operation_epoch.return_value = 0
+        deploy.resolve_ready_candidate.return_value = _candidate()
+        deploy.apply.return_value = environment, operation
+        deploy.wait_ready.return_value = environment
+        assert main(["service", "up", "--environment", "dev-alice", "--candidate", "c" * 64, "--quiet"]) == 0
+        deploy.wait_ready.assert_called_once()
+        assert deploy.wait_ready.call_args.kwargs["operation_receipt"] == operation
 
 
 def test_personal_service_up_quiet_keeps_denial_on_stderr(

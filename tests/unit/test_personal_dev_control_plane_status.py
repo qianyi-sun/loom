@@ -709,7 +709,7 @@ def _acceptance_inputs(
         "source": {"commit": release.source_sha, "tree": release.source_tree},
         "storage": {
             "backup_restore_evidence_sha256": "b" * 64,
-            "schema_head": "0138",
+            "schema_head": "0141",
         },
         "window": {
             "expires_at": "2099-12-31T23:00:00Z",
@@ -1175,7 +1175,7 @@ def test_healthy_acceptance_returns_separate_readiness_facets_and_safe_commands(
         "blockers": [],
         "capacity_publication_ready": True,
         "components": [
-            {"name": "cluster-resources", "observed": 10, "ready": True},
+            {"name": "cluster-resources", "observed": 11, "ready": True},
             {"name": "manager", "observed": 1, "ready": True},
             {"name": "namespaced-resources", "observed": 37, "ready": True},
             {"name": "namespaces", "observed": 1, "ready": True},
@@ -2486,7 +2486,7 @@ def test_healthy_shadow_returns_canonical_bounded_status_and_safe_commands(
     assert result.to_dict() == {
         "blockers": [],
         "components": [
-            {"name": "cluster-resources", "observed": 10, "ready": True},
+            {"name": "cluster-resources", "observed": 11, "ready": True},
             {"name": "manager", "observed": 1, "ready": True},
             {"name": "namespaced-resources", "observed": 34, "ready": True},
             {"name": "namespaces", "observed": 1, "ready": True},

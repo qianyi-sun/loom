@@ -207,6 +207,14 @@ async def create_personal_dev_candidate(
     require_scope(ctx, "submit")
     _require_enabled(request)
     owner_user_id, owner_team_id = _owner(ctx)
+    if (
+        getattr(request.app.state, "personal_dev_runtime_mode", None) == "membership-v1"
+        and getattr(request.app.state, "personal_dev_builder_available", False) is not True
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="personal-dev allocation-accounted candidate builder is not activated",
+        )
     settings = request.app.state.settings
     try:
         registration = await intake_personal_dev_candidate(

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,6 +59,7 @@ async def _accepted_release_witness(
             )
             .order_by(CapacityExecutableProtectedReleaseReceipt.protected_registration_epoch)
             .limit(1)
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if protected_row is None:
@@ -99,7 +101,7 @@ async def _accepted_release_witness(
     else:
         terminal_row = (
             await session.execute(
-                select(CapacityExecutableTerminalInventoryEvidence).where(
+                select(CapacityExecutableTerminalInventoryEvidence).execution_options(populate_existing=True).where(
                     CapacityExecutableTerminalInventoryEvidence.intent_id == intent.intent_id,
                 )
             )
@@ -153,7 +155,7 @@ async def _accepted_release_witness(
         "inventory_sequence": intent.inventory_sequence,
         "terminal_kind": intent.terminal_kind,
         "terminal_identity": intent.terminal_identity,
-        "released_at": intent.released_at.isoformat(),
+        "released_at": intent.released_at.astimezone(UTC).isoformat(),
     }
 
 
@@ -177,14 +179,14 @@ async def _legacy_shape_witness(
         raise ConfigurationConflictError(error)
     evidence = (
         await session.execute(
-            select(CapacityReservationReleaseEvidence).where(
+            select(CapacityReservationReleaseEvidence).execution_options(populate_existing=True).where(
                 CapacityReservationReleaseEvidence.shape_instance_id == shape.shape_instance_id
             )
         )
     ).scalar_one_or_none()
     protected = (
         await session.execute(
-            select(CapacityProtectedReleaseAcknowledgement).where(
+            select(CapacityProtectedReleaseAcknowledgement).execution_options(populate_existing=True).where(
                 CapacityProtectedReleaseAcknowledgement.shape_instance_id == shape.shape_instance_id
             )
         )
@@ -244,7 +246,7 @@ async def _legacy_shape_witness(
         raise ConfigurationConflictError(error)
     observation = (
         await session.execute(
-            select(CapacityExecutorObservation).where(
+            select(CapacityExecutorObservation).execution_options(populate_existing=True).where(
                 CapacityExecutorObservation.executor_incarnation == tranche.executor_incarnation,
                 CapacityExecutorObservation.inventory_sequence == item.inventory_sequence,
             )
@@ -323,7 +325,7 @@ async def _legacy_shape_witness(
         "release_digest": digest,
         "protected_digest": protected.acknowledgement_digest,
         "inventory_digest": observation.inventory_digest,
-        "released_at": shape.released_at.isoformat(),
+        "released_at": shape.released_at.astimezone(UTC).isoformat(),
     }
 
 
@@ -337,11 +339,12 @@ async def _legacy_release_witness(
             select(CapacityReservationShape)
             .where(CapacityReservationShape.tranche_id == tranche.id)
             .order_by(CapacityReservationShape.shape_instance_id)
+            .execution_options(populate_existing=True)
         )
     ).all()
     intents = (
         await session.scalars(
-            select(CapacitySubmissionIntent).where(
+            select(CapacitySubmissionIntent).execution_options(populate_existing=True).where(
                 CapacitySubmissionIntent.tranche_id == tranche.id
             )
         )
@@ -373,7 +376,7 @@ async def _legacy_release_witness(
         "tranche_id": str(tranche.id),
         "proposal_digest": tranche.proposal_digest,
         "closure_reason": tranche.closure_reason,
-        "closed_at": tranche.closed_at.isoformat(),
+        "closed_at": tranche.closed_at.astimezone(UTC).isoformat(),
         "shapes": witnesses,
     }
 
@@ -385,8 +388,26 @@ async def predecessor_release_sha256(
 
     Lifecycle/ownership and current disabled-generation checks belong to the
     admission caller. This function only verifies the retained capacity ledger.
+    Callers must flush pending ledger edits before requesting this read-only proof.
     """
 
+    # Refreshing evidence must neither trust nor silently discard pending edits.
+    # Once flushed, every ORM read below uses the transaction's database snapshot,
+    # not objects retained from an earlier read or transaction in this session.
+    ledger_models = (
+        CapacityExecutableIntent,
+        CapacityExecutableProtectedReleaseReceipt,
+        CapacityExecutableTerminalInventoryEvidence,
+        CapacityExecutorObservation,
+        CapacityObservedCommitment,
+        CapacityProtectedReleaseAcknowledgement,
+        CapacityReservationReleaseEvidence,
+        CapacityReservationShape,
+        CapacityReservationTranche,
+        CapacitySubmissionIntent,
+    )
+    if any(isinstance(row, ledger_models) for row in session.new | session.dirty | session.deleted):
+        raise ConfigurationConflictError("predecessor executable or legacy release witness has unflushed changes")
     identity = (predecessor.subject_id, predecessor.subject_incarnation)
     observed = (
         await session.execute(
@@ -422,6 +443,7 @@ async def predecessor_release_sha256(
                 CapacityReservationTranche.subject_incarnation == identity[1],
             )
             .order_by(CapacityReservationTranche.id)
+            .execution_options(populate_existing=True)
         )
     ).all()
     witnesses = [await _legacy_release_witness(session, tranche) for tranche in legacy]
@@ -434,6 +456,7 @@ async def predecessor_release_sha256(
                     CapacityExecutableIntent.subject_incarnation == identity[1],
                 )
                 .order_by(CapacityExecutableIntent.intent_id)
+                .execution_options(populate_existing=True)
             )
         )
         .scalars()
@@ -473,7 +496,7 @@ async def predecessor_release_sha256(
                 "kind": "never-accepted-executable",
                 "intent_id": str(intent.intent_id),
                 "binding_digest": intent.binding_digest,
-                "released_at": intent.released_at.isoformat(),
+                "released_at": intent.released_at.astimezone(UTC).isoformat(),
             }
         )
     payload = {

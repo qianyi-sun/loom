@@ -1,8 +1,9 @@
 # Personal lifecycle connection to active membership
 
-Status: dependent design, not implemented or runtime-certified. Execute after
-the manager membership plan passes review. This is a required step toward the
-multi-person development goal, not an alternative to live acceptance.
+Status: checkpoint/client, protected observation, historical recovery and release
+gating are implemented in the dependent candidate. Successor re-attestation,
+fresh retained-data storage and runtime connection remain incomplete. Nothing in
+this plan is runtime-certified; source verification does not replace live acceptance.
 
 Dependencies: `2026-09-08-personal-dev-active-membership.md` and
 `../architecture/personal-dev-active-membership.md`. Preserve the V2 shadow path,

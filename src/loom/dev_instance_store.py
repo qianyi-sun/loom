@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import cast
+from typing import Literal, cast
 from uuid import UUID
 
 from sqlalchemy import select, update
@@ -18,6 +18,7 @@ from loom.dev_instance_provisioner import (
     DevInstanceStatus,
     InstanceReservation,
 )
+from loom.personal_dev_storage_records import personal_dev_storage_record
 
 
 def _record(row: DevInstance) -> DevInstanceRecord:
@@ -36,6 +37,7 @@ def _record(row: DevInstance) -> DevInstanceRecord:
         created_at=row.created_at,
         updated_at=row.updated_at,
         secret_ref=row.secret_ref,
+        storage_binding=personal_dev_storage_record(row),
         keep_data=row.keep_data,
         failure_reason=row.failure_reason,
         ready_at=row.ready_at,
@@ -45,6 +47,9 @@ def _record(row: DevInstance) -> DevInstanceRecord:
         candidate_id=row.candidate_id,
         capacity_namespace=row.capacity_namespace,
         capacity_database=row.capacity_database,
+        accepted_capacity_mode=cast(
+            Literal["shadow-v1", "membership-v1"], row.accepted_capacity_mode
+        ),
     )
 
 
@@ -95,6 +100,10 @@ class SqlAlchemyDevInstanceStore:
         return [_record(row) for row in rows]
 
     async def claim_create(self, requested: DevInstanceRecord) -> InstanceReservation:
+        if requested.storage_binding is not None:
+            raise DevInstanceConflictError(
+                "incarnation-bound storage requires the personal lifecycle controller"
+            )
         inserted = (
             await self.session.execute(
                 pg_insert(DevInstance)
@@ -125,6 +134,7 @@ class SqlAlchemyDevInstanceStore:
             return InstanceReservation(record=_record(row), acquired=True)
 
         row = await self._locked(requested.name)
+        self._assert_legacy(row)
         if row.owner_user_id != requested.owner_user_id:
             raise DevInstanceConflictError("dev instance name is already owned")
         if row.owner_team_id != requested.owner_team_id:
@@ -170,10 +180,14 @@ class SqlAlchemyDevInstanceStore:
     ) -> InstanceReservation | None:
         row = (
             await self.session.execute(
-                select(DevInstance).where(DevInstance.name == name).with_for_update(),
+                select(DevInstance).where(DevInstance.name == name).with_for_update()
+                .execution_options(populate_existing=True),
             )
         ).scalar_one_or_none()
-        if row is None or row.status == "deleted":
+        if row is None:
+            return None
+        self._assert_legacy(row)
+        if row.status == "deleted":
             return None
         if row.status == "provisioning":
             raise DevInstanceConflictError(
@@ -196,6 +210,15 @@ class SqlAlchemyDevInstanceStore:
         row.updated_at = now
         await self.session.flush()
         return InstanceReservation(record=_record(row), acquired=True)
+
+    @staticmethod
+    def _assert_legacy(row: DevInstance) -> None:
+        # Check under the reservation's row lock, before modifying any state.
+        # A provisioner-level read alone can race an incarnation opt-in.
+        if row.storage_binding is not None or row.storage_binding_sha256 is not None:
+            raise DevInstanceConflictError(
+                "incarnation-bound storage requires the personal lifecycle controller"
+            )
 
     async def assert_operation(self, name: str, operation_id: UUID) -> None:
         observed = (
@@ -280,7 +303,8 @@ class SqlAlchemyDevInstanceStore:
     async def _locked(self, name: str) -> DevInstance:
         return (
             await self.session.execute(
-                select(DevInstance).where(DevInstance.name == name).with_for_update(),
+                select(DevInstance).where(DevInstance.name == name).with_for_update()
+                .execution_options(populate_existing=True),
             )
         ).scalar_one()
 

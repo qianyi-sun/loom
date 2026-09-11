@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import Field, TypeAdapter, field_validator, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    TypeAdapter,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from loom_capacity_manager.contracts import (
     MAX_SUBJECTS,
@@ -86,6 +94,14 @@ class PersonalReincarnationEvidenceV1(StrictV1Model):
     the immutable event chain and actual durable release witnesses.
     """
 
+    model_config = ConfigDict(revalidate_instances="subclass-instances")
+
+    @model_serializer(mode="wrap")
+    def _serialize_evidence(self, handler: SerializerFunctionWrapHandler) -> Any:
+        if self.schema_version != 1:
+            raise ValueError("legacy evidence serialization cannot truncate a newer version")
+        return handler(self)
+
     namespace_id: UUID
     execution_manifest_sha256: Digest
     origin: ConfigurationGenerationRefV1
@@ -107,6 +123,13 @@ class PersonalReincarnationEvidenceV1(StrictV1Model):
 
     @model_validator(mode="after")
     def _predecessor_binding(self) -> PersonalReincarnationEvidenceV1:
+        self._require_predecessor_identity()
+        if self.admission_revision <= self.predecessor_revision:
+            raise ValueError("reincarnation predecessor binding changed")
+        return self
+
+    def _require_predecessor_identity(self) -> None:
+        """Shared identity checks; each evidence version defines its own ordering."""
         predecessor = self.predecessor
         identities = (
             self.origin.subject_id,
@@ -130,14 +153,14 @@ class PersonalReincarnationEvidenceV1(StrictV1Model):
                 predecessor.subject_incarnation,
                 self.origin.subject_incarnation,
             )
-            or self.admission_revision <= self.predecessor_revision
         ):
             raise ValueError("reincarnation predecessor binding changed")
-        return self
 
 
 class PersonalApplicationMemberV1(StrictV1Model):
     """One revisioned personal application configuration and acknowledgement."""
+
+    model_config = ConfigDict(revalidate_instances="subclass-instances")
 
     revision: PositiveQuantity
     owner_id: UUID

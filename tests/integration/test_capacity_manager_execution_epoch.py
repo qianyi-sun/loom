@@ -30,6 +30,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutionPreparationPolicyV2,
     ExecutionRetirementExecutorCheckpointV2,
     ExecutionRetirementV2,
+    PreparedExecutorBindingV2,
     canonical_executable_digest,
     canonical_inventory_confirmation_journal_head,
 )
@@ -498,12 +499,12 @@ async def _retained_active_context(
 async def _publish_final_safe_evidence(
     capacity_session: AsyncSession,
     drained: ExecutionContextV2,
+    *, bindings: tuple[PreparedExecutorBindingV2, ...] | None = None,
 ) -> tuple[ExecutionRetirementExecutorCheckpointV2, ...]:
     execution_store = CapacityExecutionStore()
     checkpoints = []
     retained_execution = await _retained_active_context(capacity_session, drained)
-    for pool_id in ("gb10", "oldlab"):
-        binding = _executor_binding(pool_id)
+    for binding in bindings or tuple(_executor_binding(pool_id) for pool_id in ("gb10", "oldlab")):
         runtime = (
             await capacity_session.execute(
                 select(CapacityExecutableExecutorState).where(
@@ -590,6 +591,24 @@ async def test_execution_preparation_is_disabled_without_owner_policy(
             actor="activation-operator",
             idempotency_key=UUID(int=720),
         )
+
+
+async def test_direct_build_preparation_cannot_create_legacy_execution_epoch(capacity_session: AsyncSession) -> None:
+    from loom_capacity_manager.build_membership_contracts import ExecutionPreparationV4
+    from tests.unit.test_capacity_build_membership import build_membership_input
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    proposed = build_membership_input().preparation
+    request = ExecutionPreparationV4.model_validate(fixture.request.model_dump(mode="python") | {
+        "schema_version": 4, "personal_membership": proposed.personal_membership.model_copy(update={"managed_base_subject_ids": ()}),
+        "personal_builds": proposed.personal_builds,
+    })
+    with pytest.raises(ExecutionConflictError, match="unsupported execution preparation schema"):
+        await fixture.store.prepare_execution_epoch(capacity_session, request, actor="activation-operator", idempotency_key=UUID(int=22880))
+    assert (await capacity_session.execute(select(CapacityExecutionEpoch))).scalars().all() == []
+    authority = (await capacity_session.execute(select(CapacityAuthorityState))).scalar_one()
+    assert authority.execution_state == "shadow"
+    assert authority.executable_new_capacity_ceiling == 0
 
 
 async def test_prepare_rejects_executor_pool_generation_outside_active_fleet(

@@ -45,6 +45,7 @@ from loom_capacity_manager.contracts import (
     PoolObservationV1,
     ShadowEpochV1,
     SubjectConfigurationV1,
+    canonical_bytes,
     canonical_digest,
 )
 from loom_capacity_manager.executable_contracts import (
@@ -112,9 +113,19 @@ from loom_capacity_manager.membership_contracts import (
     PersonalMembershipCheckpointV1,
     parse_execution_preparation,
 )
+from loom_capacity_manager.membership_outcomes import (
+    PersonalMembershipOperationOutcomeQueryV1,
+    parse_membership_operation_outcome_query,
+    query_membership_operation_outcome,
+)
 from loom_capacity_manager.membership_store import (
     CapacityMembershipStore,
     PersonalMembershipRevisionConflictError,
+)
+from loom_capacity_manager.membership_subject_status import (
+    PersonalMembershipSubjectQueryV1,
+    parse_membership_subject_query,
+    query_membership_subject,
 )
 from loom_capacity_manager.metrics import (
     FRESHNESS_STATES,
@@ -594,6 +605,20 @@ def create_app(
     development_projection_body = contract_body(DynamicDevelopmentSubjectProjectionV1)
     membership_mutation_body = contract_body(PersonalApplicationMembershipMutationV1)
 
+    async def membership_subject_query_body(request: Request) -> PersonalMembershipSubjectQueryV1:
+        try:
+            return parse_membership_subject_query(await request.body())
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="invalid capacity contract") from exc
+
+    async def membership_outcome_query_body(
+        request: Request,
+    ) -> PersonalMembershipOperationOutcomeQueryV1:
+        try:
+            return parse_membership_operation_outcome_query(await request.body())
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="invalid capacity contract") from exc
+
     async def execution_preparation_v3_body(request: Request) -> ExecutionPreparationV3:
         try:
             value = parse_execution_preparation(await request.body())
@@ -812,6 +837,51 @@ def create_app(
                     idempotency_key=idempotency_key,
                 )
             return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.post("/v1/personal-memberships/operation-outcomes/query")
+    async def personal_membership_operation_outcome(
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:read")),
+        value: PersonalMembershipOperationOutcomeQueryV1 = Depends(membership_outcome_query_body),
+    ) -> Response:
+        assert_unbound_execution_actor(actor)
+        session_factory, store, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await query_membership_operation_outcome(session, store, value)
+            return Response(content=canonical_bytes(result), media_type="application/json")
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.post("/v1/personal-memberships/subjects/status/query")
+    async def historical_personal_subject_status(
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:read")),
+        value: PersonalMembershipSubjectQueryV1 = Depends(membership_subject_query_body),
+    ) -> Response:
+        assert_unbound_execution_actor(actor)
+        session_factory, store, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await query_membership_subject(session, store, value)
+            return Response(content=canonical_bytes(result), media_type="application/json")
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.post("/v1/personal-memberships/subjects/release/query")
+    async def historical_personal_subject_release(
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:read")),
+        value: PersonalMembershipSubjectQueryV1 = Depends(membership_subject_query_body),
+    ) -> Response:
+        assert_unbound_execution_actor(actor)
+        session_factory, store, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await query_membership_subject(session, store, value, release=True)
+            return Response(content=canonical_bytes(result), media_type="application/json")
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
 

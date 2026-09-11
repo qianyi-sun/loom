@@ -12,11 +12,17 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from loom.dev_instance import PER_INSTANCE_CAP, InvalidDevInstanceNameError, validate_name
 from loom.personal_dev_candidate import PersonalDevCandidateRecord
+from loom.personal_dev_membership_checkpoint import PersonalDevMembershipEnvelopeV1
+from loom_capacity_manager.membership_contracts import PersonalMembershipCheckpointV1
+
+if TYPE_CHECKING:
+    from loom.personal_dev_incarnation_storage import PersonalDevStorageBindingV1
+    from loom.personal_dev_membership_successor import PersonalDevMembershipSuccessorBindingV1
 
 PersonalDevEnvironmentStatus = Literal[
     "provisioning",
@@ -37,8 +43,10 @@ PersonalDevOperationState = Literal[
     "failed",
     "cancelling",
     "cancelled",
+    "superseded",
 ]
 PersonalDevAccessKind = Literal["bearer", "session"]
+PersonalDevCapacityMode = Literal["shadow-v1", "membership-v1"]
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -190,10 +198,13 @@ class PersonalDevEnvironmentRecord:
     operation_step: str
     created_at: datetime
     updated_at: datetime
+    storage_binding: PersonalDevStorageBindingV1 | None = None
     keep_data: bool = False
     ready_at: datetime | None = None
     deleted_at: datetime | None = None
     failure_reason: str | None = None
+    accepted_capacity_mode: PersonalDevCapacityMode = "shadow-v1"
+    accepted_capacity_membership_checkpoint: PersonalMembershipCheckpointV1 | None = None
     capacity_configuration_epoch: int | None = None
     capacity_configuration_sha256: str | None = None
     capacity_reporter_incarnation: UUID | None = None
@@ -231,10 +242,21 @@ class PersonalDevLifecycleOperationRecord:
     checkpoint: str
     created_at: datetime
     updated_at: datetime
+    storage_binding: PersonalDevStorageBindingV1 | None = None
     keep_data: bool = False
     started_at: datetime | None = None
     finished_at: datetime | None = None
     failure_reason: str | None = None
+    capacity_mode: PersonalDevCapacityMode = "shadow-v1"
+    capacity_membership_envelope: PersonalDevMembershipEnvelopeV1 | None = None
+    membership_predecessor_operation_id: UUID | None = None
+    # Derived from the unique predecessor relation, never persisted or accepted as input.
+    membership_successor_operation_id: UUID | None = None
+    membership_accepted_operation_id: UUID | None = None
+    membership_predecessor_envelope_sha256: str | None = None
+    membership_successor_binding: PersonalDevMembershipSuccessorBindingV1 | None = None
+    membership_successor_binding_sha256: str | None = None
+    membership_continuation_kind: Literal["create", "update", "capacity", "destroy"] | None = None
     readiness_evidence_sha256: str | None = None
     activation_acknowledgement_sha256: str | None = None
     local_activation_sha256: str | None = None
@@ -260,7 +282,7 @@ class PersonalDevLifecycleAttemptRecord:
     subject_incarnation: UUID
     operation_epoch: int
     attempt_sequence: int
-    state: Literal["running", "activating", "succeeded", "failed", "cancelled"]
+    state: Literal["running", "activating", "succeeded", "failed", "cancelled", "superseded"]
     checkpoint: str
     access_binding: PersonalDevAccessBinding
     lease_epoch: int
@@ -295,6 +317,7 @@ __all__ = [
     "PersonalDevAccessBinding",
     "PersonalDevAccessKind",
     "PersonalDevApplyReservation",
+    "PersonalDevCapacityMode",
     "PersonalDevEnvironmentApplyRequest",
     "PersonalDevEnvironmentDestroyRequest",
     "PersonalDevEnvironmentRecord",

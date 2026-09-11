@@ -18,6 +18,7 @@ from loom_capacity_manager.allocator import (
     allocate_shadow,
     promote_shadow_epoch,
 )
+from loom_capacity_manager.build_membership_contracts import DelegatedAllocationInputV3
 from loom_capacity_manager.contracts import (
     AllocationInputV1,
     CapacityContractError,
@@ -26,7 +27,10 @@ from loom_capacity_manager.contracts import (
 )
 from loom_capacity_manager.executable_contracts import ExecutionAuthorityV2
 from loom_capacity_manager.membership_contracts import DelegatedAllocationInputV2
-from loom_capacity_manager.membership_execution import bind_executable_membership
+from loom_capacity_manager.membership_execution import (
+    bind_executable_membership,
+    bind_typed_executable_membership,
+)
 from loom_capacity_manager.models import (
     CapacityAllocation,
     CapacityAllocationEpoch,
@@ -89,6 +93,14 @@ async def _commit_reconciled_epoch(
             raise StaleWriterError("writer is no longer current")
 
         current_input = await store.load_allocation_input(session, writer)
+        supported_inputs = {AllocationInputV1: 1, DelegatedAllocationInputV2: 2, DelegatedAllocationInputV3: 3}
+        if (
+            type(current_input.schema_version) is not int
+            or supported_inputs.get(type(current_input)) != current_input.schema_version
+        ):
+            # Future delegated inputs must not be promoted into a legacy epoch
+            # that silently drops their purpose/membership evidence.
+            raise CapacityStoreError("unsupported executable allocation input schema")
         if canonical_digest(current_input) != shadow.input_digest:
             raise StaleAllocationInputError("allocation input changed before commit")
         if current_input.configuration != shadow.configuration:
@@ -139,6 +151,8 @@ async def _commit_reconciled_epoch(
         )
         if isinstance(current_input, DelegatedAllocationInputV2):
             committed = bind_executable_membership(committed, current_input)
+        elif isinstance(current_input, DelegatedAllocationInputV3):
+            committed = bind_typed_executable_membership(committed, current_input)
         row = CapacityAllocationEpoch(
             allocation_epoch=allocation_epoch,
             writer_epoch=writer.writer_epoch,

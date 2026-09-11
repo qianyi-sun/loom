@@ -27,9 +27,15 @@ from loom_capacity_manager.grant_contracts import (
     OwnershipMetadataV1,
     SignedOwnershipProofV1,
 )
+from loom_capacity_manager.typed_ownership_contracts import (
+    ExecutableOwnershipMetadataV3,
+    SignedExecutableOwnershipProofV3,
+    canonical_typed_ownership_bytes,
+)
 
 _KEY_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,127}")
 _MAX_OWNERSHIP_KEYS = 256
+_TYPED_EXECUTABLE_DOMAIN = b"loom/executable-ownership/v3\x00"
 
 
 class OwnershipKeyringError(ValueError):
@@ -82,9 +88,33 @@ def sign_executable_ownership(
 ) -> SignedExecutableOwnershipProofV2:
     """Sign the complete canonical executable-v2 ownership metadata."""
 
+    if type(metadata) is not ExecutableOwnershipMetadataV2:
+        raise ValueError("legacy executable signing requires exact V2 metadata")
+    metadata = ExecutableOwnershipMetadataV2.model_validate_json(metadata.model_dump_json())
     signature = private_key.sign(canonical_executable_bytes(metadata))
     return SignedExecutableOwnershipProofV2(
         metadata=metadata,
+        signing_key_id=signing_key_id,
+        signature_base64=base64.b64encode(signature).decode("ascii"),
+    )
+
+
+def _typed_signing_bytes(metadata: ExecutableOwnershipMetadataV3, signing_key_id: str) -> bytes:
+    if not isinstance(signing_key_id, str) or _KEY_ID_RE.fullmatch(signing_key_id) is None:
+        raise ValueError("typed ownership signing key id is invalid")
+    return _TYPED_EXECUTABLE_DOMAIN + signing_key_id.encode("ascii") + b"\x00" + canonical_typed_ownership_bytes(metadata)
+
+
+def sign_typed_executable_ownership(
+    private_key: Ed25519PrivateKey,
+    *,
+    signing_key_id: str,
+    metadata: ExecutableOwnershipMetadataV3,
+) -> SignedExecutableOwnershipProofV3:
+    """Sign validated provenance, not a new-capacity or membership authorization."""
+    signature = private_key.sign(_typed_signing_bytes(metadata, signing_key_id))
+    return SignedExecutableOwnershipProofV3(
+        metadata=ExecutableOwnershipMetadataV3.model_validate_json(canonical_typed_ownership_bytes(metadata)),
         signing_key_id=signing_key_id,
         signature_base64=base64.b64encode(signature).decode("ascii"),
     )
@@ -193,6 +223,12 @@ class OwnershipKeyring:
     ) -> bool:
         """Verify executable-v2 metadata against the registered controller key."""
 
+        if type(proof) is not SignedExecutableOwnershipProofV2 or type(proof.metadata) is not ExecutableOwnershipMetadataV2:
+            return False
+        try:
+            proof = SignedExecutableOwnershipProofV2.model_validate_json(proof.model_dump_json())
+        except ValueError:
+            return False
         public_key = self._keys.get(proof.signing_key_id)
         if public_key is None or not self.matches(
             proof.signing_key_id,
@@ -202,6 +238,28 @@ class OwnershipKeyring:
         try:
             signature = base64.b64decode(proof.signature_base64, validate=True)
             public_key.verify(signature, canonical_executable_bytes(proof.metadata))
+        except (InvalidSignature, ValueError, binascii.Error):
+            return False
+        return True
+
+    def verify_typed_executable(
+        self,
+        proof: SignedExecutableOwnershipProofV3,
+        *,
+        expected_public_key_sha256: str,
+    ) -> bool:
+        """Verify historical V3 authenticity, without asserting current admission."""
+        if type(proof) is not SignedExecutableOwnershipProofV3:
+            return False
+        try:
+            canonical_typed_ownership_bytes(proof)
+            public_key = self._keys.get(proof.signing_key_id)
+            if public_key is None or not self.matches(proof.signing_key_id, expected_public_key_sha256):
+                return False
+            public_key.verify(
+                base64.b64decode(proof.signature_base64, validate=True),
+                _typed_signing_bytes(proof.metadata, proof.signing_key_id),
+            )
         except (InvalidSignature, ValueError, binascii.Error):
             return False
         return True
@@ -229,5 +287,6 @@ __all__ = [
     "public_key_fingerprint",
     "sign_executable_ownership",
     "sign_ownership",
+    "sign_typed_executable_ownership",
     "verify_executable_ownership",
 ]

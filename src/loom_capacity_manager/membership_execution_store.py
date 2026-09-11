@@ -9,9 +9,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_capacity_manager.contracts import SubjectConfigurationV1, canonical_digest
-from loom_capacity_manager.executable_contracts import SubjectExecutionAcknowledgementV2
+from loom_capacity_manager.executable_contracts import (
+    ExecutionPreparationV2,
+    SubjectExecutionAcknowledgementV2,
+)
 from loom_capacity_manager.membership_contracts import ExecutionPreparationV3
-from loom_capacity_manager.membership_execution import ExecutableEpochV3, parse_executable_epoch
+from loom_capacity_manager.membership_execution import (
+    ExecutableEpochV3,
+    ExecutableEpochV4,
+    parse_executable_epoch,
+)
 from loom_capacity_manager.membership_store import (
     CapacityMembershipStore,
     resolve_subject_acknowledgement,
@@ -61,7 +68,15 @@ async def _resolve_allocation_subject(
     subject_id: UUID,
     require_current: bool,
 ) -> tuple[SubjectConfigurationV1, SubjectExecutionAcknowledgementV2]:
-    preparation = CapacityManagementStore._execution_preparation_from_row(epoch)
+    preparation: ExecutionPreparationV2
+    typed_history = None
+    if epoch.manifest_payload.get("schema_version") == 4:
+        from loom_capacity_manager.typed_membership_store import _load_typed_immutable_history
+
+        typed_history = await _load_typed_immutable_history(session, epoch.execution_epoch)
+        preparation = typed_history.preparation
+    else:
+        preparation = CapacityManagementStore._execution_preparation_from_row(epoch)
     payload = parse_executable_epoch(json.dumps(allocation.complete_payload))
     fence = payload.execution
     if (
@@ -82,7 +97,7 @@ async def _resolve_allocation_subject(
         or fence.trusted_fleet_release_sha256 != epoch.trusted_fleet_release_sha256
         or fence.executable_new_capacity_ceiling > preparation.requested_ceiling
         or fence.executable_new_capacity_rate_per_minute > preparation.requested_rate_per_minute
-        or isinstance(preparation, ExecutionPreparationV3) != isinstance(payload, ExecutableEpochV3)
+        or preparation.schema_version != payload.schema_version
     ):
         raise ExecutionConflictError("allocation subject generation fence changed")
     base = await session.get(CapacityConfigurationEpoch, epoch.configuration_epoch)
@@ -98,6 +113,12 @@ async def _resolve_allocation_subject(
 
     subject: SubjectConfigurationV1 | None = None
     acknowledgement: SubjectExecutionAcknowledgementV2 | None = None
+    if isinstance(payload, ExecutableEpochV4):
+        if typed_history is None or typed_history.snapshot(payload.membership.revision) != payload.membership:
+            raise ExecutionConflictError("allocation typed membership generation changed")
+        typed_member = next((item for item in payload.membership.members if item.configuration.subject_id == subject_id), None)
+        if typed_member is not None:
+            subject, acknowledgement = typed_member.configuration, typed_member.acknowledgement
     if isinstance(payload, ExecutableEpochV3):
         snapshot = await CapacityMembershipStore(CapacityManagementStore()).snapshot(
             session, epoch, through_revision=payload.membership.revision
@@ -136,15 +157,22 @@ async def _resolve_allocation_subject(
             or subject.configuration_generation != reference.generation
         ):
             raise ExecutionConflictError("allocation base subject generation changed")
-        acknowledgement = await resolve_subject_acknowledgement(
-            session,
-            epoch,
-            subject_id=subject.subject_id,
-            subject_incarnation=subject.subject_incarnation,
-            configuration_generation=subject.configuration_generation,
-            deployment_generation=subject.deployment_generation,
-            reporter_incarnation=subject.demand_reporter_incarnation,
-        )
+        if typed_history is not None:
+            from loom_capacity_manager.membership_current import _acknowledgement_matches
+
+            acknowledgement = next((ack for ack in preparation.subject_acknowledgements if _acknowledgement_matches(ack, subject)), None)
+            if acknowledgement is None:
+                raise ExecutionConflictError("allocation typed base acknowledgement is unavailable")
+        else:
+            acknowledgement = await resolve_subject_acknowledgement(
+                session,
+                epoch,
+                subject_id=subject.subject_id,
+                subject_incarnation=subject.subject_incarnation,
+                configuration_generation=subject.configuration_generation,
+                deployment_generation=subject.deployment_generation,
+                reporter_incarnation=subject.demand_reporter_incarnation,
+            )
     assert acknowledgement is not None
     if require_current:
         from loom_capacity_manager.membership_current import resolve_current_subject
