@@ -11,6 +11,78 @@ from loom.nebius_platform_render import NebiusPlatformError, build_platform, wri
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_native_builds_share_the_actuator_but_have_an_isolated_namespace(
+    platform_inputs: tuple,
+) -> None:
+    config, candidate, profile = platform_inputs
+    config["task_image_builder"] = {
+        "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images"
+    }
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    namespaces = {doc["metadata"]["name"]: doc for doc in files["00-namespaces.yaml"]}
+    build_ns = config["execution_namespace"] + "-build"
+    assert (
+        namespaces[config["execution_namespace"]]["metadata"]["labels"][
+            "pod-security.kubernetes.io/enforce"
+        ]
+        == "restricted"
+    )
+    assert (
+        namespaces[build_ns]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"]
+        == "privileged"
+    )
+    docs = files["60-execution.yaml"]
+    actuator = next(doc for doc in docs if doc["kind"] == "Deployment")
+    env = {
+        row["name"]: row.get("value")
+        for row in actuator["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    settings = json.loads(env["LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER"])
+    assert settings["namespace"] == build_ns
+    assert settings["source_bucket"] == config["buckets"]["artifacts"]
+    assert settings["service_image"] == candidate["images"]["service"]["image_ref"]
+    assert settings["cache_secret_name"] is None
+    assert len([doc for doc in docs if doc["kind"] == "Deployment"]) == 1
+    build_docs = [doc for doc in docs if doc["metadata"].get("namespace") == build_ns]
+    role = next(doc for doc in build_docs if doc["kind"] == "Role")
+    assert all("secrets" not in rule["resources"] for rule in role["rules"])
+    assert "delete" in next(
+        rule["verbs"] for rule in role["rules"] if rule["resources"] == ["pods"]
+    )
+    quota = next(doc for doc in build_docs if doc["kind"] == "ResourceQuota")
+    assert quota["spec"]["hard"]["requests.ephemeral-storage"] == "16384Mi"
+    assert quota["spec"]["hard"]["count/configmaps"] == "2"
+    network = next(doc for doc in build_docs if doc["kind"] == "NetworkPolicy")
+    assert network["spec"]["ingress"] == []
+    public = network["spec"]["egress"][1]
+    assert "169.254.0.0/16" in public["to"][0]["ipBlock"]["except"]
+    assert "10.0.0.0/8" in public["to"][0]["ipBlock"]["except"]
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [
+        {"registry_repository": "docker.io/public/task-images"},
+        {
+            "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
+            "ephemeral_storage_mib": 2048,
+        },
+        {"registry_repository": "cr.eu-north1.nebius.cloud/test/task-images", "privileged": True},
+        {
+            "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
+            "cache_bucket": "loom-integration-backup",
+        },
+    ],
+)
+def test_native_build_configuration_rejects_wrong_boundary(
+    platform_inputs: tuple, builder: dict
+) -> None:
+    config, candidate, profile = platform_inputs
+    config["task_image_builder"] = builder
+    with pytest.raises(NebiusPlatformError):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
 @pytest.fixture
 def platform_inputs() -> tuple[dict, dict, dict]:
     config = json.loads((ROOT / "deploy/nebius/integration.platform.json.example").read_text())

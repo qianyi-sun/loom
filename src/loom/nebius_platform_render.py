@@ -79,6 +79,7 @@ def validate_environment(config: dict[str, Any]) -> None:
             "execution_resource_quota",
             "regional_execution_targets",
             "public_gateway_ipv4",
+            "task_image_builder",
         }
         != expected
     ):
@@ -271,6 +272,8 @@ def validate_environment(config: dict[str, Any]) -> None:
         raise NebiusPlatformError("model provider must be an HTTPS URL without credentials")
 
     _validate_regions(config)
+    if "task_image_builder" in config:
+        _task_image_builder_settings(config, service_image="test.invalid/loom@sha256:" + "a" * 64)
 
 
 _REGIONAL_FIELDS = {
@@ -293,6 +296,9 @@ def _regional_config(config: dict[str, Any], target: dict[str, Any]) -> dict[str
     result = dict(config)
     result.pop("regional_execution_targets", None)
     result.pop("execution_resource_quota", None)
+    # Native image builds remain in the primary region, even when execution
+    # targets are configured elsewhere.
+    result.pop("task_image_builder", None)
     result.update({key: value for key, value in target.items() if key != "service_account_ids"})
     result["storage_endpoint"] = f"https://storage.{target['region']}.nebius.cloud"
     return result
@@ -805,10 +811,168 @@ def _execution_quota(config: dict[str, Any], documents: list[dict[str, Any]]) ->
     return hard
 
 
+def _task_image_builder_settings(config: dict[str, Any], *, service_image: str) -> Any:
+    from loom_execution_actuator.task_image_controller import NativeTaskImageSettings
+
+    supplied = config.get("task_image_builder")
+    if supplied is None:
+        return None
+    allowed = {
+        "registry_repository",
+        "cache_bucket",
+        "cpu_millis",
+        "memory_mib",
+        "ephemeral_storage_mib",
+        "max_processes",
+        "active_deadline_seconds",
+        "max_concurrent",
+    }
+    if (
+        not isinstance(supplied, dict)
+        or set(supplied) - allowed
+        or not supplied.get("registry_repository")
+    ):
+        raise NebiusPlatformError(
+            "task_image_builder requires a repository and supported build limits"
+        )
+    repository = supplied["registry_repository"]
+    if not isinstance(repository, str) or not re.fullmatch(
+        r"cr\.eu-north1\.nebius\.cloud/[a-z0-9][a-z0-9/_.-]{1,160}/task-images", repository
+    ):
+        raise NebiusPlatformError(
+            "task image publication requires a dedicated primary Nebius task-images repository"
+        )
+    cache = supplied.get("cache_bucket")
+    if cache is not None:
+        _name(cache, "task image cache bucket")
+        if cache in {
+            config["buckets"]["source"],
+            config["buckets"]["backup"],
+            config["buckets"]["trajectories"],
+        }:
+            raise NebiusPlatformError(
+                "build cache must not share source, backup or trajectory storage"
+            )
+    try:
+        return NativeTaskImageSettings(
+            namespace=config["execution_namespace"] + "-build",
+            service_image=service_image,
+            storage_endpoint=config["storage_endpoint"],
+            storage_region=config["region"],
+            # Ordinary catalog/task uploads live in the canonical artifacts
+            # bucket. The separate source bucket stores execution input packs.
+            source_bucket=config["buckets"]["artifacts"],
+            cache_secret_name="loom-task-build-cache" if cache else None,
+            **{**supplied, "cache_bucket": cache},
+        )
+    except ValueError:
+        raise NebiusPlatformError("invalid task image build resource limits or namespace") from None
+
+
+def _task_image_builder_documents(config: dict[str, Any], settings: Any) -> list[dict[str, Any]]:
+    ns = settings.namespace
+    namespace = _namespace(ns)
+    # Rootless BuildKit requires user-namespace helpers and an unconfined
+    # profile. The ordinary execution namespace remains restricted.
+    namespace["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] = "privileged"
+    quota = _obj("ResourceQuota", "loom-task-image-build-capacity", ns)
+    count = settings.max_concurrent
+    quota["spec"] = {
+        "hard": {
+            "pods": str(count),
+            "count/jobs.batch": str(count),
+            # Kubernetes creates kube-root-ca.crt in every namespace.
+            "count/configmaps": str(count + 1),
+            "requests.cpu": f"{settings.cpu_millis * count}m",
+            "requests.memory": f"{settings.memory_mib * count}Mi",
+            "requests.ephemeral-storage": f"{settings.ephemeral_storage_mib * count}Mi",
+            "limits.cpu": f"{settings.cpu_millis * count}m",
+            "limits.memory": f"{settings.memory_mib * count}Mi",
+            "limits.ephemeral-storage": f"{settings.ephemeral_storage_mib * count}Mi",
+        }
+    }
+    account = _obj("ServiceAccount", "loom-execution-attempt", ns)
+    account["automountServiceAccountToken"] = False
+    role = _obj("Role", "loom-task-image-builder", ns, api="rbac.authorization.k8s.io/v1")
+    role["rules"] = [
+        {
+            "apiGroups": ["batch"],
+            "resources": ["jobs"],
+            "verbs": ["create", "get", "list", "delete"],
+        },
+        {"apiGroups": [""], "resources": ["configmaps"], "verbs": ["create", "get", "delete"]},
+        {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "delete"]},
+        {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]},
+    ]
+    binding = _obj("RoleBinding", "loom-task-image-builder", ns, api="rbac.authorization.k8s.io/v1")
+    binding["roleRef"] = {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": role["metadata"]["name"],
+    }
+    binding["subjects"] = [
+        {
+            "kind": "ServiceAccount",
+            "name": "loom-execution-actuator",
+            "namespace": config["execution_namespace"],
+        }
+    ]
+    network = _obj("NetworkPolicy", "loom-task-image-builder", ns, api="networking.k8s.io/v1")
+    network["spec"] = {
+        "podSelector": {},
+        "policyTypes": ["Ingress", "Egress"],
+        "ingress": [],
+        "egress": [
+            {
+                "to": [
+                    {
+                        "namespaceSelector": {
+                            "matchLabels": {"kubernetes.io/metadata.name": "kube-system"}
+                        },
+                        "podSelector": {
+                            "matchExpressions": [
+                                {
+                                    "key": "k8s-app",
+                                    "operator": "In",
+                                    "values": ["kube-dns", "coredns"],
+                                }
+                            ]
+                        },
+                    }
+                ],
+                "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}],
+            },
+            {
+                "to": [
+                    {
+                        "ipBlock": {
+                            "cidr": "0.0.0.0/0",
+                            "except": [
+                                "0.0.0.0/8",
+                                "10.0.0.0/8",
+                                "100.64.0.0/10",
+                                "127.0.0.0/8",
+                                "169.254.0.0/16",
+                                "172.16.0.0/12",
+                                "192.168.0.0/16",
+                                "224.0.0.0/4",
+                                "240.0.0.0/4",
+                            ],
+                        }
+                    }
+                ],
+                "ports": [{"protocol": "TCP", "port": 80}, {"protocol": "TCP", "port": 443}],
+            },
+        ],
+    }
+    return [namespace, quota, account, role, binding, network]
+
+
 def _execution_documents(
     config: dict[str, Any], images: dict[str, str], repo_root: Path
 ) -> list[dict[str, Any]]:
     ns, ex = config["namespace"], config["execution_namespace"]
+    builder = _task_image_builder_settings(config, service_image=images["service"])
     # Reuse the existing least-privilege execution pod and collector definitions.
     execution_docs = []
     replacements = {
@@ -847,6 +1011,14 @@ def _execution_documents(
             pod = None
             if doc["kind"] == "Deployment":
                 pod = doc["spec"]["template"]["spec"]
+                if builder is not None:
+                    pod["containers"][0].setdefault("env", []).extend(
+                        _env(
+                            {
+                                "LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER": builder.model_dump_json(),
+                            }
+                        )
+                    )
                 _mount_secret(
                     pod, "db-ca", "loom-execution-actuator-db", "/var/run/loom-db", ca_only=True
                 )
@@ -903,6 +1075,8 @@ def _execution_documents(
     for doc in execution_docs:
         if doc["kind"] == "ResourceQuota":
             doc["spec"]["hard"] = _execution_quota(config, execution_docs)
+    if builder is not None:
+        execution_docs.extend(_task_image_builder_documents(config, builder))
     return execution_docs
 
 
@@ -1538,7 +1712,7 @@ def build_platform(
         primary_docs, _ = _regional_documents(config, regional, images, repo_root)
         execution_docs.extend(primary_docs)
     for document in execution_docs:
-        if document["kind"] == "ResourceQuota":
+        if document["kind"] == "ResourceQuota" and document["metadata"].get("namespace") == ex:
             document["spec"]["hard"] = _execution_quota(config, execution_docs)
     if config.get("regional_execution_targets"):
         database_policy = next(
@@ -1559,7 +1733,8 @@ def build_platform(
                 for regional in config["regional_execution_targets"]
             ]
         )
-    files["60-execution.yaml"] = execution_docs
+    files["00-namespaces.yaml"].extend(doc for doc in execution_docs if doc["kind"] == "Namespace")
+    files["60-execution.yaml"] = [doc for doc in execution_docs if doc["kind"] != "Namespace"]
     public = _service("loom-web", ns, 443, 8443)
     public["spec"]["type"] = "LoadBalancer"
     public["metadata"]["annotations"] = {

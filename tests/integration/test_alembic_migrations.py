@@ -221,7 +221,7 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
                     ),
                     {"name": coordinate_name},
                 ).one()
-            assert revision == "0134"
+            assert revision == "0135"
             assert tuple(coordinates) == (
                 f"loom-dev-{coordinate_name}",
                 "loom_dev_coordinate_repair",
@@ -254,6 +254,10 @@ def test_all_tables_exist(postgres_url: str) -> None:
         "agents",
         "workers",
         "trials",
+        "task_image_materializations",
+        "task_image_materialization_attempts",
+        "task_image_publication_evidence",
+        "trial_task_image_materializations",
         "trial_resource_usage",
         "execution_classes",
         "execution_targets",
@@ -308,6 +312,9 @@ def test_all_tables_exist(postgres_url: str) -> None:
         "alembic_version",
     }
     assert expected.issubset(names)
+    native = next(column for column in inspect(engine).get_columns("task_image_materialization_attempts")
+                  if column["name"] == "native_build")
+    assert native["nullable"] and str(native["type"]) == "JSONB"
 
 
 def _publication(

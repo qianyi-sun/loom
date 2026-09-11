@@ -4,6 +4,7 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from loom.nebius_kubernetes import NebiusKubernetesConnection, connection_from_fields
+from loom_execution_actuator.task_image_controller import NativeTaskImageSettings
 
 
 class ExecutionActuatorSettings(BaseSettings):
@@ -30,6 +31,7 @@ class ExecutionActuatorSettings(BaseSettings):
         )
 
     db_url: str
+    task_image_builder: NativeTaskImageSettings | None = None
     controller_id: str = Field(min_length=1, max_length=120)
     target_id: str = Field(min_length=1, max_length=80)
     namespace: str = Field(pattern=r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")

@@ -948,6 +948,38 @@ async def test_placement_preserves_fragmentation_slots_and_pending_lease_identit
     assert snapshot.requested.cpu_millis == 6000
 
 
+@pytest.mark.parametrize("pending", [True, False])
+async def test_native_build_placement_uses_distinct_identity_without_execution_lease(pending) -> None:
+    pod = _pod(name="build", namespace="loom-nebius-staging-build", node_name=None if pending else "node-1",
+               target=True, pending=pending)
+    pod.metadata.labels = {"app.kubernetes.io/component": "task-image-builder",
+                           "loom.materialization-id": "build-materialization", "loom.lease-epoch": "3"}
+    snapshot = await _capture_nodes([_node("node-1")], [pod])
+    observed = snapshot.pending_pods if pending else snapshot.nodes[0].managed_pods
+    assert len(observed) == 1
+    assert (observed[0].lease_id, observed[0].generation) == ("task-image:build-materialization", 3)
+    assert snapshot.requested.cpu_millis == (2000 if pending else 500)
+    assert snapshot.pending_jobs == int(pending)
+
+
+@pytest.mark.parametrize("change", ["namespace", "target", "epoch"])
+async def test_native_build_observation_preserves_target_boundary(change) -> None:
+    pod = _pod(name="build", namespace="loom-nebius-staging-build", node_name=None, target=True, pending=True)
+    pod.metadata.labels = {"app.kubernetes.io/component": "task-image-builder",
+                           "loom.materialization-id": "build-materialization", "loom.lease-epoch": "3"}
+    if change == "namespace":
+        pod.metadata.namespace = "other"
+    elif change == "target":
+        pod.metadata.annotations["loom.openai.com/target-id"] = "other"
+    else:
+        del pod.metadata.labels["loom.lease-epoch"]
+        with pytest.raises(KubernetesObservationError):
+            await _capture_nodes([_node("node-1")], [pod])
+        return
+    snapshot = await _capture_nodes([_node("node-1")], [pod])
+    assert snapshot.pending_pods == [] and snapshot.pending_jobs == 0
+
+
 @pytest.mark.asyncio
 async def test_observed_cold_sample_uses_allocatable_and_matching_daemonset_generation() -> None:
     node = _node("node-1")

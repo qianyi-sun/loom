@@ -692,3 +692,98 @@ image references (including collector init containers), configuration values and
 commands retain their original values. The regional processes reuse the existing
 actuator database Secret and collector CP token. A renderer-only repair can therefore
 rerender the same published candidate and runtime profile without rebuilding images.
+
+### Native task-image preparation
+
+Platform and harness images continue to build and publish on GitHub-hosted CI.
+Task Dockerfiles are product workloads: the existing execution actuator claims
+`task_image_materializations` and runs one native Kubernetes Job per fenced
+attempt. No additional queue, worker service or autoscaler is required.
+
+Enable the primary-only loop by adding the following to the operator's platform
+configuration; omission leaves native building disabled:
+
+```json
+"task_image_builder": {
+  "registry_repository": "cr.eu-north1.nebius.cloud/REGISTRY/task-images",
+  "cache_bucket": "EXISTING_ARTIFACTS_BUCKET",
+  "max_concurrent": 1,
+  "cpu_millis": 1000,
+  "memory_mib": 2048,
+  "ephemeral_storage_mib": 16384,
+  "max_processes": 512,
+  "active_deadline_seconds": 1800
+}
+```
+
+`cache_bucket` is optional. When absent, cache credentials and import/export are
+omitted. Source, backup and trajectory buckets cannot be used as build cache.
+Before activation, provision these Secrets through the same protected operator
+path as the other platform credentials in `<execution_namespace>-build`:
+
+| Secret | Keys | Required access |
+| --- | --- | --- |
+| `loom-task-build-source` | `access-key`, `secret-key` | Read ordinary catalog bundles in the canonical artifacts bucket |
+| `loom-task-build-registry` | `credentials.json` | Authorized service-account key scoped to the native registry used for task images |
+| `loom-task-build-cache` (optional) | `access-key`, `secret-key` | Read/write/delete only `task-build-cache/` in the configured cache bucket |
+
+The deployer checks these keys before enabling the loop. Never put credentials
+in platform JSON, ConfigMaps, task build arguments or execution metadata. The
+actuator can manage build Jobs/ConfigMaps and read Pod status/logs in this one
+namespace; its Kubernetes role does not grant Secret reads.
+The platform's separate `source` bucket contains prepared execution input packs;
+it is not the source of ordinary task/catalog Dockerfiles. The build reader uses
+the canonical `artifacts` bucket and the frozen task directory prefix.
+The trusted publisher exchanges the authorized key for a short-lived registry
+token at startup, using the same SDK helper as GitHub publication. The token
+exists only in its private temporary volume and is removed after publication;
+there is no expiring copied login token to refresh manually. Native IAM scopes
+the key to the registry; the publisher restricts output to the configured
+`task-images` repository. Do not represent this as provider-enforced per-repository
+authorization.
+
+The Job runs three phases sequentially. Trusted preparation downloads the frozen
+source and optional cache. Rootless BuildKit receives only disposable data and
+scratch volumes. After that container has stopped, trusted publication reads the
+output volume read-only, checks the local OCI structure and publishes with
+Skopeo's native digest handling. Registry and storage credentials are absent from
+the Dockerfile container. Supported task and sidecar components use the same
+path, including declared build arguments and multi-stage targets.
+
+The dedicated build namespace permits the rootless user-namespace helper's
+SETUID/SETGID and unconfined seccomp/AppArmor profiles. This exception does not
+change the restricted execution namespace. Build Pods remain nonprivileged,
+without host paths/sockets, host namespaces or service-account tokens. Network
+policy permits cluster DNS and public HTTP(S), excluding private/link-local
+addresses. Private registries, private package services, ARM/GPU and nested host
+container requirements need an explicit supported path; they must not fall back
+to a legacy host.
+
+The hard process limit is set **before** entering rootlesskit and inherited by
+Dockerfile processes. Linux counts the mapped processes against the parent UID;
+concurrent Pods sharing that host UID can have less available process capacity.
+Verify this startup contract on the actual native node before enabling untrusted
+builds. A successful local test alone is not native isolation acceptance.
+
+Build CPU, RAM, ephemeral storage and pending/create slots use the same capacity
+admission lock and placement/quota observations as Trials. Reservations remain
+until the matching Job and Pods have disappeared, including after failure,
+cancellation, lease expiry and actuator restart. Attempt metadata retains the
+Job/Pod identity, phase observations and bounded diagnostic output. No model
+request is needed to test preparation or a Dockerfile failure.
+
+Default limits are one build, 1 CPU, 2 GiB RAM, 16 GiB ephemeral storage, 512
+processes and 30 minutes. Sources are bounded to 2,000 files/512 MiB; one attempt
+supports at most eight components and each OCI archive at most 3 GiB. Component
+outputs must fit the shared volume together. BuildKit scratch is cleared between
+components. The disposable cache uses the frozen materialization identity;
+publication trims entries older than seven days and evicts oldest entries toward
+4 GiB. This is publication-time cleanup, not a periodic retention guarantee or a
+provider-enforced object-storage quota. Ready images use the existing
+materialization reference/retention lifecycle.
+
+Acceptance must exercise ordinary submission, ready-image admission and retrieval:
+two new Dockerfiles, unchanged-input reuse, a relevant input change, useful failure
+without a model call, last-consumer cancellation, restart recovery and final
+Job/Pod/capacity cleanup. These preparation checks do not replace the separate
+minimal-harness and real trajectory acceptance in #1550/#1538/#1766.

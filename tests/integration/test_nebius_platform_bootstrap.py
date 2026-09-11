@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import ipaddress
@@ -13,6 +14,7 @@ import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -25,6 +27,104 @@ from testcontainers.postgres import PostgresContainer
 
 from loom import nebius_platform_bootstrap as bootstrap
 from tests.unit.test_nebius_platform_render import platform_inputs, regional_inputs  # noqa: F401
+
+
+async def _exercise_native_builder_role(database: str) -> None:
+    """Run the native queue/capacity/publication path as the deployed DB role."""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from loom.db.schema import (
+        Batch,
+        TaskImageMaterialization,
+        TaskImageMaterializationAttempt,
+        TaskImagePublicationEvidence,
+        Trial,
+        TrialTaskImageMaterialization,
+    )
+    from loom_control_plane.task_image_capacity import reserve_native_task_image_capacity
+    from loom_control_plane.task_image_materializations import (
+        claim_task_image_materialization,
+        complete_task_image_materialization,
+        fail_task_image_materialization,
+        has_nebius_task_image_demand,
+        heartbeat_task_image_materialization,
+        start_task_image_materialization,
+    )
+    from tests.integration.test_service_execution_leases import _seed_ready_trial
+
+    owner_engine = create_async_engine(make_url(database).set(drivername="postgresql+psycopg"))
+    actuator_engine = create_async_engine(make_url(database).set(
+        drivername="postgresql+psycopg", username="loom_actuator",
+        password=os.environ["LOOM_DB_ACTUATOR_PASSWORD"],
+    ))
+    owners = async_sessionmaker(owner_engine, expire_on_commit=False)
+    actuators = async_sessionmaker(actuator_engine, expire_on_commit=False)
+    try:
+        for outcome in ("ready", "failed"):
+            now = datetime.now(UTC)
+            async with owners() as session, session.begin():
+                trial_id, target = await _seed_ready_trial(session, now=now)
+                trial = await session.get(Trial, trial_id)
+                batch = Batch(id=uuid4(), team_id=trial.team_id, name="native-role-test", task_filter={},
+                              trial_config={}, created_by_token_prefix="test", backend="nebius",
+                              service_execution_runtime_profile={"logical_pool_id": target.logical_pool_id})
+                session.add(batch)
+                await session.flush()
+                trial.batch_id = batch.id
+                trial.requires_caps = {"worker_pool": target.logical_pool_id}
+                image = TaskImageMaterialization(
+                    id=uuid4(), materialization_key=uuid4().hex * 2, task_id=trial.task_id,
+                    task_checksum="b" * 64, cpu_arch="x86_64",
+                    task_config={
+                        "schema_version": "1", "task": {"id": "native-role", "name": "native-role"},
+                        "environment": {"os": "linux", "cpu_arch": "x86_64", "dockerfile": "Dockerfile"},
+                        "agent": {"name": "oracle"}, "verifier": {"name": "pytest"},
+                    },
+                )
+                session.add(image)
+                await session.flush()
+                session.add(TrialTaskImageMaterialization(trial_id=trial_id, materialization_id=image.id))
+                image_id = image.id
+            async with actuators() as session, session.begin():
+                row = await claim_task_image_materialization(
+                    session, builder_id="native-role", cpu_arch="x86_64", nebius_pool_id=target.logical_pool_id,
+                )
+                assert row is not None and row.id == image_id
+                assert await has_nebius_task_image_demand(session, materialization_id=image_id,
+                                                         pool_id=target.logical_pool_id)
+                attempt = await session.scalar(select(TaskImageMaterializationAttempt).where(
+                    TaskImageMaterializationAttempt.materialization_id == image_id,
+                ))
+                attempt.native_build = {
+                    "target_id": target.target_id, "namespace": "builds", "job_name": "role-test",
+                    "state": "reserved", "reserved_at": now.isoformat(),
+                    "resources": {"vcpu_millis": 1000, "memory_mib": 1024, "storage_mib": 2048},
+                }
+                await session.flush()
+                reserved = await reserve_native_task_image_capacity(session, attempt_id=attempt.id)
+                assert reserved["capacity_reserved_at"]
+                ownership = {"materialization_id": image_id, "builder_id": "native-role", "lease_epoch": row.lease_epoch}
+                await start_task_image_materialization(session, **ownership)
+                await heartbeat_task_image_materialization(session, **ownership)
+                images = {"task": "registry.example/tasks@sha256:" + "a" * 64}
+                if outcome == "ready":
+                    await complete_task_image_materialization(session, **ownership, registry_images=images)
+                else:
+                    await fail_task_image_materialization(session, **ownership, registry_images=images,
+                                                         retryable=False, failure_reason="build_failed",
+                                                         failure_message="bounded test failure")
+                # The same actor persists cleanup acknowledgement and can read
+                # publication evidence without mutable task/catalog privileges.
+                attempt.native_build = {**attempt.native_build, "capacity_released_at": datetime.now(UTC).isoformat()}
+                assert row.state == outcome
+                evidence = await session.scalar(select(TaskImagePublicationEvidence).where(
+                    TaskImagePublicationEvidence.materialization_id == image_id,
+                ))
+                assert evidence is not None and evidence.registry_image == images["task"]
+    finally:
+        await actuator_engine.dispose()
+        await owner_engine.dispose()
 
 
 @pytest.fixture(scope="module")
@@ -140,6 +240,32 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
             connection.rollback()
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 connection.execute("CREATE ROLE bootstrap_escape")
+            connection.rollback()
+            for table in ("task_image_materializations", "trial_task_image_materializations"):
+                connection.execute("SELECT 1 FROM " + table + " LIMIT 0")
+            if role == "gateway":
+                for table in ("batches", "task_image_materialization_attempts", "task_image_publication_evidence"):
+                    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                        connection.execute("SELECT 1 FROM " + table + " LIMIT 0")
+                    connection.rollback()
+                for table in ("task_image_materializations", "trial_task_image_materializations"):
+                    assert connection.execute(
+                        "SELECT has_table_privilege(current_user, %s, 'INSERT,UPDATE,DELETE')", (table,),
+                    ).fetchone() == (False,)
+            else:
+                for table in ("batches", "trial_task_image_materializations"):
+                    assert connection.execute(
+                        "SELECT has_table_privilege(current_user, %s, 'INSERT,UPDATE,DELETE')", (table,),
+                    ).fetchone() == (False,)
+                for table, denied in (
+                    ("task_image_materializations", "INSERT,DELETE"),
+                    ("task_image_materialization_attempts", "DELETE"),
+                    ("task_image_publication_evidence", "UPDATE,DELETE"),
+                    ("tasks", "SELECT,INSERT,UPDATE,DELETE"),
+                ):
+                    assert connection.execute(
+                        "SELECT has_table_privilege(current_user, %s, %s)", (table, denied),
+                    ).fetchone() == (False,)
     # Exercise actual CP HTTP handlers and actual database policy writes. Only
     # the transport is adapted from in-cluster HTTP to an in-process ASGI app.
     from fastapi import FastAPI
@@ -338,6 +464,7 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
             (environment["target_id"],),
         ).fetchone() == (True,)
     # Replaying bootstrap must not rebind, broaden, extend or revive a token.
+    asyncio.run(_exercise_native_builder_role(platform_database))
     with psycopg.connect(platform_database) as connection:
         connection.execute(
             "INSERT INTO teams (id, name) VALUES ('11111111-1111-1111-1111-111111111111', 'other-authority')"

@@ -27,7 +27,7 @@ from sqlalchemy.engine import make_url
 
 # Explicit subsystem grants. New tables receive no automatic gateway/actuator
 # grants; update this inventory with their owning runtime change.
-ACTUATOR_TABLES = (
+COMMON_EXECUTION_TABLES = (
     "alembic_version",
     "trials",
     "execution_classes",
@@ -47,6 +47,19 @@ ACTUATOR_TABLES = (
     "execution_price_snapshots",
     "execution_target_price_bindings",
 )
+# Keep the Gateway's inventory independent: it may read task-image readiness,
+# but never acquires builder leases or writes publication evidence.
+ACTUATOR_TASK_IMAGE_WRITES = {
+    "task_image_materializations": ("UPDATE",),
+    "task_image_materialization_attempts": ("INSERT", "UPDATE"),
+    "task_image_publication_evidence": ("INSERT",),
+}
+ACTUATOR_TABLES = (
+    *COMMON_EXECUTION_TABLES,
+    "batches",
+    "trial_task_image_materializations",
+    *ACTUATOR_TASK_IMAGE_WRITES,
+)
 # PostgreSQL row locks require UPDATE on at least one column. Capacity settings
 # remain read-only; admission/budget terminal triggers write only their counters.
 ACTUATOR_POLICY_UPDATES = {
@@ -59,7 +72,7 @@ ACTUATOR_POLICY_UPDATES = {
     ),
 }
 GATEWAY_TABLES = (
-    *ACTUATOR_TABLES,
+    *COMMON_EXECUTION_TABLES,
     "tokens",
     "users",
     "secrets",
@@ -199,7 +212,10 @@ def bootstrap_database(config: dict[str, Any]) -> None:
                         "tokens",
                         "secrets",
                         "tasks",
+                        "batches",
                         "task_image_materializations",
+                        "task_image_materialization_attempts",
+                        "task_image_publication_evidence",
                         "trial_task_image_materializations",
                         "data_lifecycle_authorities",
                         "provider_connections",
@@ -229,6 +245,13 @@ def bootstrap_database(config: dict[str, Any]) -> None:
                             "GRANT UPDATE (last_used_at, last_seen_at) ON tokens TO loom_gateway"
                         )
                     if role == "loom_actuator":
+                        for table, privileges in ACTUATOR_TASK_IMAGE_WRITES.items():
+                            cursor.execute(
+                                sql.SQL("GRANT {} ON {} TO loom_actuator").format(
+                                    sql.SQL(", ").join(map(sql.SQL, privileges)),
+                                    sql.Identifier(table),
+                                )
+                            )
                         for table, columns in ACTUATOR_POLICY_UPDATES.items():
                             cursor.execute(
                                 sql.SQL("GRANT UPDATE ({}) ON {} TO loom_actuator").format(

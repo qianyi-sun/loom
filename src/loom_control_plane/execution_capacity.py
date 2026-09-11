@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
@@ -18,6 +18,7 @@ from loom.db.schema import (
     ServiceExecutionCommand,
     ServiceExecutionLease,
     ServiceExecutionTarget,
+    TaskImageMaterializationAttempt,
 )
 from loom.pipeline.keys import canonical_digest
 from loom_control_plane.execution_placement import (
@@ -35,9 +36,7 @@ from loom_execution_capacity_collector.contracts import (
 _CAPACITY_MUTATION_LOCK = text(
     "SELECT pg_advisory_xact_lock(hashtextextended('execution-capacity-mutation', 1552))"
 )
-_CAPACITY_ADMISSION_LOCK = text(
-    "SELECT pg_advisory_xact_lock(hashtextextended('execution-capacity-mutation', 1552))"
-)
+_CAPACITY_ADMISSION_LOCK = _CAPACITY_MUTATION_LOCK
 _ACTIVE_AUTHORIZATION_STATES = (
     "authorized",
     "pending",
@@ -375,6 +374,55 @@ async def _latest_observation(
     ).scalar_one_or_none()
 
 
+@dataclass(frozen=True)
+class _NativeCapacityReservation:
+    attempt_id: UUID
+    demand_id: str
+    target_id: str
+    resources: ResourceTotals
+    state: str
+    reserved_at: datetime
+    released: bool
+
+
+def native_build_resources(native: dict[str, Any]) -> ResourceTotals:
+    raw = native["resources"]
+    values = {"cpu_millis": raw["vcpu_millis"], "memory_mib": raw["memory_mib"], "storage_mib": raw["storage_mib"]}
+    if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in values.values()):
+        raise ValueError("native build resources must be positive integers")
+    return ResourceTotals(**values)
+
+
+async def _native_capacity_reservations(
+    session: AsyncSession, *, current_time: datetime,
+) -> list[_NativeCapacityReservation]:
+    # Reservation writers use canonical UTC ISO timestamps. Retain all active
+    # reservations and only the released history needed by the create-rate limit.
+    attempts = (await session.scalars(select(TaskImageMaterializationAttempt).where(
+        TaskImageMaterializationAttempt.native_build["capacity_reserved_at"].astext.is_not(None),
+        or_(
+            TaskImageMaterializationAttempt.native_build["capacity_released_at"].astext.is_(None),
+            TaskImageMaterializationAttempt.native_build["capacity_reserved_at"].astext
+            >= (current_time - timedelta(minutes=1)).isoformat(),
+        ),
+    ))).all()
+    result = []
+    for attempt in attempts:
+        native = attempt.native_build or {}
+        try:
+            result.append(_NativeCapacityReservation(
+                attempt_id=attempt.id,
+                demand_id=f"task-image:{attempt.materialization_id}:{attempt.lease_epoch}",
+                target_id=_clean_text(native["target_id"], name="native target", max_length=160),
+                resources=native_build_resources(native), state=str(native.get("state", "reserved")),
+                reserved_at=_utc(datetime.fromisoformat(native["capacity_reserved_at"]), name="native reservation time"),
+                released=native.get("capacity_released_at") is not None,
+            ))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ExecutionProvisioningBlockedError("execution_capacity_native_reservation_invalid") from exc
+    return result
+
+
 async def reserve_execution_provisioning(
     session: AsyncSession,
     *,
@@ -406,6 +454,62 @@ async def reserve_execution_provisioning(
             raise ExecutionProvisioningBlockedError("execution_capacity_authorization_released")
         if not revalidate_existing:
             return existing
+    cost = (
+        await session.execute(
+            select(ExecutionCostReservation).where(ExecutionCostReservation.lease_id == lease_id)
+        )
+    ).scalar_one_or_none()
+    if cost is None:
+        raise ExecutionProvisioningBlockedError("execution_capacity_resource_envelope_unavailable")
+    decision = await admit_capacity_resources(
+        session, target=target, demand_id=f"{lease_id}:{lease.resource_generation}",
+        resources=ResourceTotals(cpu_millis=cost.requested_cpu_millis, memory_mib=cost.requested_memory_mib,
+                                 storage_mib=cost.requested_ephemeral_storage_mib),
+        current_time=current_time, already_reserved=existing is not None, exclude_lease_id=lease_id,
+    )
+    if existing is not None:
+        return existing
+    payload = {"schema_version": "loom.execution-provisioning-authorization.v1", "lease_id": str(lease_id), **decision}
+    row = ExecutionProvisioningAuthorization(
+        id=uuid4(),
+        lease_id=lease_id,
+        target_id=target.id,
+        observation_id=UUID(decision["observation_id"]),
+        policy_version=decision["policy_version"],
+        requested_cpu_millis=cost.requested_cpu_millis,
+        requested_memory_mib=cost.requested_memory_mib,
+        requested_storage_mib=cost.requested_ephemeral_storage_mib,
+        incremental_nodes=decision["incremental_nodes"],
+        incremental_vcpu_millis=decision["incremental_vcpu_millis"],
+        incremental_memory_mib=decision["incremental_memory_mib"],
+        incremental_storage_mib=decision["incremental_storage_mib"],
+        decision_reason=decision["decision_reason"],
+        authorization_sha256=canonical_digest(payload),
+        state="authorized",
+        authorized_at=current_time,
+        updated_at=current_time,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def admit_capacity_resources(
+    session: AsyncSession,
+    *,
+    target: ServiceExecutionTarget,
+    demand_id: str,
+    resources: ResourceTotals,
+    current_time: datetime,
+    already_reserved: bool = False,
+    exclude_lease_id: UUID | None = None,
+    exclude_native_attempt_id: UUID | None = None,
+) -> dict[str, Any]:
+    """Shared admission arithmetic under the caller's capacity transaction lock.
+
+    Both reservation writers acquire _CAPACITY_ADMISSION_LOCK before checking
+    idempotency and persist the returned decision before releasing that lock.
+    """
     if target.desired_state != "active":
         raise ExecutionProvisioningBlockedError("execution_capacity_target_not_active")
     if target.health_status != "healthy":
@@ -422,16 +526,9 @@ async def reserve_execution_provisioning(
         seconds=policy.observation_max_age_seconds
     ):
         raise ExecutionProvisioningBlockedError("execution_capacity_observation_stale")
-    cost = (
-        await session.execute(
-            select(ExecutionCostReservation).where(ExecutionCostReservation.lease_id == lease_id)
-        )
-    ).scalar_one_or_none()
-    if cost is None:
-        raise ExecutionProvisioningBlockedError("execution_capacity_resource_envelope_unavailable")
-    requested_cpu = cost.requested_cpu_millis
-    requested_memory = cost.requested_memory_mib
-    requested_storage = cost.requested_ephemeral_storage_mib
+    requested_cpu = resources.cpu_millis
+    requested_memory = resources.memory_mib
+    requested_storage = resources.storage_mib
     if (
         requested_cpu > policy.node_cpu_millis
         or requested_memory > policy.node_memory_mib
@@ -447,13 +544,19 @@ async def reserve_execution_provisioning(
             await session.execute(
                 select(ExecutionProvisioningAuthorization).where(
                     ExecutionProvisioningAuthorization.state.in_(_ACTIVE_AUTHORIZATION_STATES),
-                    ExecutionProvisioningAuthorization.lease_id != lease_id,
+                    *(() if exclude_lease_id is None else (ExecutionProvisioningAuthorization.lease_id != exclude_lease_id,)),
                 )
             )
         )
         .scalars()
         .all()
     )
+    native = await _native_capacity_reservations(session, current_time=current_time)
+    native_active = [row for row in native if not row.released and row.attempt_id != exclude_native_attempt_id]
+
+    def native_demands(target_id: str) -> list[tuple[str, ResourceTotals]]:
+        return [(row.demand_id, row.resources) for row in native_active if row.target_id == target_id]
+
     same_target = [row for row in authorizations if row.target_id == target.id]
     generations = {
         lease_key: generation
@@ -473,20 +576,29 @@ async def reserve_execution_provisioning(
         for row in same_target
         if f"{row.lease_id}:{generations[row.lease_id]}" not in observed_leases
     ]
+    recent_native = [row for row in native_active
+                     if row.target_id == target.id and row.demand_id not in observed_leases]
     recent_creates = await session.scalar(
         select(func.count(ExecutionProvisioningAuthorization.id)).where(
             ExecutionProvisioningAuthorization.target_id == target.id,
             ExecutionProvisioningAuthorization.authorized_at >= current_time - timedelta(minutes=1),
         )
     )
-    if existing is None and int(recent_creates or 0) >= policy.max_create_per_minute:
+    recent_creates = int(recent_creates or 0) + sum(
+        row.target_id == target.id and row.reserved_at >= current_time - timedelta(minutes=1)
+        for row in native
+    )
+    if not already_reserved and int(recent_creates or 0) >= policy.max_create_per_minute:
         raise ExecutionProvisioningBlockedError("execution_capacity_create_rate_exceeded", 30)
     recent_pending = sum(
         row.state in _PENDING_AUTHORIZATION_STATES for row in recent_authorizations
     )
-    if observation.pending_jobs + recent_pending + 1 > policy.max_pending_jobs:
+    recent_pending += sum(row.state != "running" for row in recent_native)
+    incoming_pending = int(demand_id not in observed_leases)
+    if observation.pending_jobs + recent_pending + incoming_pending > policy.max_pending_jobs:
         raise ExecutionProvisioningBlockedError("execution_capacity_pending_limit_exceeded")
-    recent_unschedulable = sum(row.state == "unschedulable" for row in recent_authorizations)
+    recent_unschedulable = (sum(row.state == "unschedulable" for row in recent_authorizations)
+                            + sum(row.state == "unschedulable" for row in recent_native))
     if (
         observation.unschedulable_jobs + recent_unschedulable >= policy.max_unschedulable_jobs
         and policy.max_unschedulable_jobs >= 0
@@ -495,7 +607,8 @@ async def reserve_execution_provisioning(
             raise ExecutionProvisioningBlockedError(
                 "execution_capacity_unschedulable_limit_exceeded"
             )
-    recent_image_pull = sum(row.state == "image_pull_backoff" for row in recent_authorizations)
+    recent_image_pull = (sum(row.state == "image_pull_backoff" for row in recent_authorizations)
+                         + sum(row.state == "image_pull_backoff" for row in recent_native))
     if (
         observation.image_pull_backoff_jobs + recent_image_pull
         >= policy.max_image_pull_backoff_jobs
@@ -552,13 +665,14 @@ async def reserve_execution_provisioning(
 
     try:
         sample = await sample_for(target.id, placement)
-        prior = plan_placement(placement, demands(same_target), sample=sample)
+        prior = plan_placement(placement, [*demands(same_target), *native_demands(target.id)], sample=sample)
         projected = plan_placement(
             placement,
             [
                 *demands(same_target),
+                *native_demands(target.id),
                 (
-                    f"{lease_id}:{lease.resource_generation}",
+                    demand_id,
                     ResourceTotals(
                         cpu_millis=requested_cpu,
                         memory_mib=requested_memory,
@@ -643,7 +757,8 @@ async def reserve_execution_provisioning(
     seen_groups = {placement.node_group.id}
     for other_target in other_targets:
         other_observation = await _latest_observation(session, other_target)
-        has_active = any(row.target_id == other_target for row in authorizations)
+        has_active = (any(row.target_id == other_target for row in authorizations)
+                      or any(row.target_id == other_target for row in native_active))
         if other_observation is None and not has_active:
             continue
         if other_observation is None:
@@ -694,7 +809,8 @@ async def reserve_execution_provisioning(
         try:
             other_plan = plan_placement(
                 other,
-                demands([row for row in authorizations if row.target_id == other_target]),
+                [*demands([row for row in authorizations if row.target_id == other_target]),
+                 *native_demands(other_target)],
                 sample=await sample_for(other_target, other),
             )
         except PlacementUnavailableError as exc:
@@ -721,12 +837,8 @@ async def reserve_execution_provisioning(
             raise ExecutionProvisioningBlockedError(
                 f"execution_capacity_provider_quota_{key}_exceeded"
             )
-    if existing is not None:
-        return existing
     decision_reason = "existing_allocatable" if total_nodes == 0 else "bounded_scale_headroom"
     payload = {
-        "schema_version": "loom.execution-provisioning-authorization.v1",
-        "lease_id": str(lease_id),
         "target_id": target.id,
         "observation_id": str(observation.id),
         "policy_version": policy.version,
@@ -740,28 +852,7 @@ async def reserve_execution_provisioning(
         "decision_reason": decision_reason,
         "authorized_at": current_time.isoformat(),
     }
-    row = ExecutionProvisioningAuthorization(
-        id=uuid4(),
-        lease_id=lease_id,
-        target_id=target.id,
-        observation_id=observation.id,
-        policy_version=policy.version,
-        requested_cpu_millis=requested_cpu,
-        requested_memory_mib=requested_memory,
-        requested_storage_mib=requested_storage,
-        incremental_nodes=incremental_nodes,
-        incremental_vcpu_millis=incremental_nodes * raw.cpu_millis,
-        incremental_memory_mib=incremental_nodes * raw.memory_mib,
-        incremental_storage_mib=incremental_nodes * raw.storage_mib,
-        decision_reason=decision_reason,
-        authorization_sha256=canonical_digest(payload),
-        state="authorized",
-        authorized_at=current_time,
-        updated_at=current_time,
-    )
-    session.add(row)
-    await session.flush()
-    return row
+    return payload
 
 
 async def fetch_execution_capacity_status(

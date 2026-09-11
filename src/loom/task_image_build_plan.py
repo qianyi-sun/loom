@@ -274,6 +274,14 @@ def _component(
     )
 
 
+def derive_task_image_build_components(
+    task_config: dict[str, Any],
+) -> tuple[TaskImageBuildComponentV1, ...]:
+    """Resolve Dockerfile/context paths without a provider-specific build session."""
+    task = TaskConfig.model_validate(task_config)
+    return _derived_components(task, task_config.get("environment", {}))
+
+
 def _derived_components(
     task: TaskConfig,
     raw_environment: dict[str, Any],
@@ -413,4 +421,5 @@ __all__ = [
     "TaskImageBuildComponentV1",
     "TaskImageBuildPlanV1",
     "derive_task_image_build_plan",
+    "derive_task_image_build_components",
 ]
