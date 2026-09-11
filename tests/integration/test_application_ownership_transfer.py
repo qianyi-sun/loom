@@ -49,7 +49,8 @@ async def transfer_database(
     identity = derive_identity(f"transfer-{uuid4().hex[:8]}")
     password = uuid4().hex
     if getattr(request, "param", None) == "protected-staging":
-        identity = derive_identity("staging")
+        from loom.staging_capacity_database_bootstrap import staging_capacity_identity
+        identity = staging_capacity_identity()
     if getattr(request, "param", None) in {"staging-credential", "protected-staging"}:
         # Fixed staging DB/role names only inside this disposable PostgreSQL.
         identity = replace(identity, database="loom", db_role="loom")
