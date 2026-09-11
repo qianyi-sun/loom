@@ -139,7 +139,7 @@ async def repair_accounting(
     usage = terminus_usage(list(events), trial_config)
     atif_body = build_canonical_atif(
         events, task_id=task_id, agent_name=trial_config.agent_name,
-        agent_version=task_config.agent.version or "service-execution-v1",
+        agent_version=trial_config.agent_version or task_config.agent.version or "service-execution-v1",
     )
     report = {"status": "prepared", "trial_id": str(trial_id), "lease_id": str(lease_id), "usage": usage}
     if not apply:

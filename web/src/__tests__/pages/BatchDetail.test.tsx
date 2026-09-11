@@ -274,6 +274,15 @@ describe("BatchDetail run plan", () => {
     vi.restoreAllMocks();
   });
 
+  it("distinguishes combinations using different Harbor versions of the same model", async () => {
+    mockBatch({ ...BATCH_BODY, backend: "nebius", combinations: ["harbor-v1", "harbor-v2"].map((agent_version) => ({
+      agent_name: "terminus-2", agent_version, agent_model: { provider: "openai", name: "glm-5.2" }, n_per_task: 1,
+    })) });
+    renderBatchDetail();
+    expect((await screen.findAllByText(/terminus-2@harbor-v1/)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/terminus-2@harbor-v2/)).length).toBeGreaterThan(0);
+  });
+
   it("shows a human-readable run plan instead of raw payload fields", async () => {
     mockBatch();
     renderBatchDetail();

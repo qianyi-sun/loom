@@ -371,6 +371,10 @@ async def submit_trial(
             task_ids=[task_id],
             trial_config=trial_config.model_dump(mode="json"),
         )
+    if trial_config.agent_version is not None and (
+        batch_backend != NEBIUS_BACKEND or task_config.service_execution is not None
+    ):
+        raise HTTPException(status_code=400, detail="agent_version requires automatic native Nebius execution")
     requires_caps = derive_requires_caps(task_config)
     requires_caps_json = requires_caps.model_dump(mode="json")
     requires_caps_json["backend"] = batch_backend

@@ -24,6 +24,14 @@ import { renderWithProviders } from "../../test-utils/renderWithProviders";
 const AGENTS_RESPONSE = {
   items: [
     {
+      name: "terminus-2", needs_model: true, kind: "adapter",
+      description: "Harbor Terminus-2", supported_providers: ["*"], supported_model_sources: ["api"],
+      versions: [
+        { agent_version: "harbor-v1", harbor_version: "0.1.0", loom_bridge_revision: "1" },
+        { agent_version: "harbor-v2", harbor_version: "0.2.0", loom_bridge_revision: "2" },
+      ],
+    },
+    {
       name: "oracle",
       needs_model: false,
       kind: "builtin",
@@ -1556,5 +1564,53 @@ describe("NewBatch", () => {
       "11111111-1111-4111-8111-111111111111",
     );
     expect(body.combinations?.[0].provider_model_id).toBe("manual-vllm-checkpoint");
+  });
+});
+
+
+describe("NewBatch Harbor version serialization", () => {
+  it.each([undefined, "harbor-v1"])("sends selected version %s only when explicit", async (version) => {
+    const spy = mockEndpoints({ matchingTasks: 12 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+    await user.selectOptions(screen.getByLabelText(/^Backend$/i), "nebius");
+    await pickBenchmark();
+    await pickDefaultModel(user);
+    await user.click(screen.getByRole("checkbox", { name: /Use a specific agent/i }));
+    await user.selectOptions(screen.getByLabelText("Agent"), "terminus-2");
+    if (version) await user.selectOptions(screen.getByLabelText("Agent version"), version);
+    if (version) expect(screen.getByText(/terminus-2@harbor-v1 · openai\/deepseek-chat/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
+    const combo = batchCall(spy)!.body.combinations![0];
+    expect(combo.agent_name).toBe("terminus-2");
+    if (version) expect(combo.agent_version).toBe(version);
+    else expect(combo).not.toHaveProperty("agent_version");
+  });
+
+  it("keeps version selection per combination and does not inherit it in added rows", async () => {
+    const spy = mockEndpoints({ matchingTasks: 12 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+    await user.selectOptions(screen.getByLabelText(/^Backend$/i), "nebius");
+    await pickBenchmark();
+    await pickDefaultModel(user);
+    await user.click(screen.getByRole("checkbox", { name: /Use a specific agent/i }));
+    await user.selectOptions(screen.getByLabelText("Agent"), "terminus-2");
+    await user.selectOptions(screen.getByLabelText("Agent version"), "harbor-v1");
+    await user.click(screen.getByRole("button", { name: /Add combination/ }));
+    expect(screen.getAllByLabelText("Agent version")).toHaveLength(1);
+    const second = within(screen.getByText("Combination 2").parentElement!.parentElement!);
+    await user.click(second.getByRole("checkbox", { name: /Use a specific agent/i }));
+    await user.selectOptions(second.getByLabelText("Agent"), "terminus-2");
+    expect(second.getByLabelText("Agent version")).toHaveValue("");
+    await user.selectOptions(second.getByLabelText("Agent version"), "harbor-v2");
+    await user.selectOptions(second.getByLabelText(/^Provider connection$/i), "11111111-1111-4111-8111-111111111111");
+    await user.selectOptions(second.getByLabelText(/^Model$/i), "openai|deepseek-chat|11111111-1111-4111-8111-111111111111");
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
+    expect(batchCall(spy)!.body.combinations!.map((c) => c.agent_version)).toEqual(["harbor-v1", "harbor-v2"]);
   });
 });

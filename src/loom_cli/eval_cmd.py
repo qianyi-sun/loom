@@ -556,6 +556,7 @@ def _batch_create(args: argparse.Namespace) -> int:
                     flag
                     for flag, value in (
                         ("--agent", args.agent),
+                        ("--agent-version", getattr(args, "agent_version", None)),
                         ("--provider", args.provider),
                         ("--model", args.model),
                         ("--agent-provider", args.agent_provider),
@@ -610,6 +611,8 @@ def _batch_create(args: argparse.Namespace) -> int:
                     "agent_name": args.agent,
                     "agent_model": None,
                 }
+                if getattr(args, "agent_version", None) is not None:
+                    trial_config["agent_version"] = args.agent_version
                 if needs_model:
                     conn = _resolve_by_name(
                         c,
@@ -1459,6 +1462,7 @@ def dispatch(argv: list[str]) -> int:
             "--combinations-json."
         ),
     )
+    p_bc.add_argument("--agent-version", default=None, help="Published native Terminus runtime version; omit for deployment default.")
     p_bc.add_argument(
         "--combinations-json",
         dest="combinations_json",

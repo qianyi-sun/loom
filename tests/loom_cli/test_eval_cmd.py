@@ -1410,6 +1410,23 @@ def test_batch_create_forwards_optional_fields(
     assert body["backend"] == "fake"
 
 
+@pytest.mark.parametrize("agent_version", [None, "harbor-0.18.0-abc123"])
+def test_batch_create_serializes_selected_agent_version(mock_server, agent_version):
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201, json={"batch_id": _BATCH_ID, "expected_trial_count": 1, "state": "submitted"},
+    )
+    argv = ["eval", "batch", "create", "--provider", "openai-prod", "--model", "gpt-4o",
+            "--agent", "terminus-2", "--benchmark", "terminal-bench", "--backend", "nebius"]
+    if agent_version is not None:
+        argv += ["--agent-version", agent_version]
+    assert main(argv) == 0
+    payload = json.loads(next(r.content for r in mock_server.requests if r.method == "POST"))
+    assert payload["trial_config"].get("agent_version") == agent_version
+    if agent_version is None:
+        assert "agent_version" not in payload["trial_config"]
+
+
 def test_batch_create_has_no_required_worker_pool_flag(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

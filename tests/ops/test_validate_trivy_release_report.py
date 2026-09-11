@@ -298,21 +298,35 @@ def test_validator_accepts_service_alpine_inventory_without_debian_exceptions(
 def test_nebius_task_uses_zero_exceptions_without_legacy_release_registration(
     tmp_path: Path,
 ) -> None:
+    component = "nebius-terminal-bench"
     ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
     payload = _report("service", ignore_file)
-    payload["ArtifactName"] = "/tmp/nebius-terminal-bench-amd64.release.oci"
+    payload["ArtifactName"] = f"/tmp/{component}-amd64.release.oci"
     payload["Metadata"]["OS"] = {"Family": "ubuntu", "Name": "24.04"}
     payload["Results"][0]["Type"] = "ubuntu"
-    result = _run_validator(tmp_path, payload, component="nebius-terminal-bench")
+    result = _run_validator(tmp_path, payload, component=component)
     assert result.returncode == 0, result.stderr
-    assert "nebius-terminal-bench" not in {
+    assert component not in {
         item.id
         for item in load_manifest(
             REPO_ROOT / "config/component-ownership.toml"
         ).release_components()
     }
     payload["Results"][0]["Vulnerabilities"] = [{"VulnerabilityID": "unreviewed-critical"}]
-    _assert_rejected(_run_validator(tmp_path, payload, component="nebius-terminal-bench"))
+    _assert_rejected(_run_validator(tmp_path, payload, component=component))
+
+
+def test_harbor_runtime_reuses_exact_existing_worker_perl_base_policy(tmp_path: Path) -> None:
+    ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
+    payload = _report("worker", ignore_file)
+    payload["ArtifactName"] = "/tmp/harbor-runtime-amd64.release.oci"
+    result = _run_validator(tmp_path, payload, component="harbor-runtime")
+    assert result.returncode == 0, result.stderr
+    assert "harbor-runtime" not in {
+        item.id for item in load_manifest(REPO_ROOT / "config/component-ownership.toml").release_components()
+    }
+    payload["Results"][0]["ExperimentalModifiedFindings"].pop()
+    _assert_rejected(_run_validator(tmp_path, payload, component="harbor-runtime"))
 
 
 def test_validator_rejects_a_missing_suppressed_finding(tmp_path: Path) -> None:

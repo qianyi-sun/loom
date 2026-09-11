@@ -32,6 +32,7 @@ import { Link } from "react-router-dom";
 
 import {
   api,
+  type AgentVersionEntry,
   type ModelEntry,
   type ProviderConnectionEntry,
 } from "../api/client";
@@ -49,6 +50,7 @@ export type HFExecution = "local-vllm" | "inference-api";
 
 export interface AgentModelValue {
   agentName: string;
+  agentVersion?: string;
   source: ModelSource;
   modelProvider: string;
   modelName: string;
@@ -74,11 +76,13 @@ export interface AgentModelPickerProps {
   defaultAgentName?: string;
   /** Team whose owned/shared provider connections are valid for submission. */
   teamId?: string | null;
+  backend?: string;
 }
 
 interface AgentEntry extends AgentReadinessLike {
   name: string;
   aliases?: string[];
+  versions?: AgentVersionEntry[];
   needs_model: boolean;
   kind: "builtin" | "adapter";
   description: string;
@@ -145,7 +149,14 @@ export function AgentModelPicker({
   specificAgentToggle = false,
   defaultAgentName = "direct-completion",
   teamId,
+  backend,
 }: AgentModelPickerProps): JSX.Element {
+  const supportsAgentVersion = backend === "nebius" && value.agentName === "terminus-2";
+  useEffect(() => {
+    if (value.agentVersion && !supportsAgentVersion) {
+      onChange({ ...value, agentVersion: undefined });
+    }
+  }, [supportsAgentVersion, value, onChange]);
   const [showRaw, setShowRaw] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
   const agents = useQuery({
@@ -195,7 +206,7 @@ export function AgentModelPicker({
       if (!value.agentName) return;
       const current = agents.data.items.find((a) => a.name === value.agentName);
       if (current && agentServiceModeReady(current)) return;
-      onChange({ ...value, agentName: "" });
+      onChange({ ...value, agentName: "", agentVersion: undefined });
       return;
     }
 
@@ -211,6 +222,7 @@ export function AgentModelPicker({
       onChange({
         ...value,
         agentName: defaultAgent.name,
+        agentVersion: undefined,
         source: defaultAgent.needs_model ? nextSource : value.source,
         useSpecificAgent: false,
         hfExecution: value.hfExecution ?? "local-vllm",
@@ -838,6 +850,7 @@ export function AgentModelPicker({
       onChange({
         ...value,
         agentName,
+        agentVersion: undefined,
         useSpecificAgent: specificAgentToggle ? true : value.useSpecificAgent,
       });
       return;
@@ -850,6 +863,7 @@ export function AgentModelPicker({
     onChange({
       ...value,
       agentName: next.name,
+      agentVersion: undefined,
       source: next.needs_model ? nextSource : value.source,
       modelProvider: keepModel ? value.modelProvider : "",
       modelName: keepModel ? value.modelName : "",
@@ -868,6 +882,7 @@ export function AgentModelPicker({
       onChange({
         ...value,
         agentName: "",
+        agentVersion: undefined,
         useSpecificAgent: true,
       });
       return;
@@ -876,6 +891,7 @@ export function AgentModelPicker({
     onChange({
       ...value,
       agentName: next?.name ?? defaultAgentName,
+      agentVersion: undefined,
       source: next?.needs_model
         ? next.supported_model_sources.includes(value.source)
           ? value.source
@@ -948,6 +964,34 @@ export function AgentModelPicker({
               Setup needed: {agentReadinessMessage(selectedAgent)}
             </p>
           ) : null}
+        </label>
+      ) : null}
+
+      {supportsAgentVersion ? (
+        <label className="block">
+          <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+            Agent version
+          </span>
+          <select
+            aria-label="Agent version"
+            className={SELECT_CLS}
+            value={value.agentVersion ?? ""}
+            disabled={disabled || agents.isPending}
+            onChange={(e) => onChange({ ...value, agentVersion: e.target.value || undefined })}
+          >
+            <option value="">Deployment default</option>
+            {value.agentVersion && !selectedAgent?.versions?.some((v) => v.agent_version === value.agentVersion) ? (
+              <option value={value.agentVersion} disabled>{value.agentVersion} (unavailable)</option>
+            ) : null}
+            {selectedAgent?.versions?.map((version) => (
+              <option key={version.agent_version} value={version.agent_version}>
+                {version.agent_version} · Harbor {version.harbor_version} · bridge {version.loom_bridge_revision}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1 text-xs text-slate-500">
+            Deployment default follows platform configuration. Choose an exact version to keep this combination on that version.
+          </p>
         </label>
       ) : null}
 

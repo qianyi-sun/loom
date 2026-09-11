@@ -189,7 +189,7 @@ def test_profile_and_independent_signer_binding(tmp_path: Path) -> None:
     assert parsed.candidate_sha == manifest["candidate_sha"]
     assert parsed.task_image_ref == manifest["images"]["service"]["image_ref"]
     assert parsed.runtime_image_ref == manifest["images"]["execution_runtime"]["image_ref"]
-    assert parsed.agent_image_ref == manifest["images"]["worker"]["image_ref"]
+    assert parsed.agent_image_ref == manifest["images"]["harbor_runtime"]["image_ref"]
     verify_execution_image_admission(
         parsed.image_admission,
         required_image_refs=tuple(
@@ -244,6 +244,129 @@ def test_build_rejects_pr_before_any_process_or_output(
     assert not output.exists()
 
 
+def runtime_metadata(version: str = "test-1") -> dict[str, str]:
+    return {
+        "agent_name": "terminus-2", "agent_version": version,
+        "runtime_contract": "loom.terminus-controller.v1", "harbor_version": "0.18.0",
+        "harbor_source_revision": "527d50deb63a5d279e8c20593c18a2cbc7f61f9e",
+        "loom_bridge_revision": "1.0", "publisher_source_revision": "a" * 40,
+    }
+
+
+def test_runtime_release_cli_outputs_only_reusable_single_image_record(tmp_path: Path) -> None:
+    document, private, keyring = inputs(tmp_path)
+    document["images"] = {"harbor_runtime": document["images"]["harbor_runtime"]}
+    document["runtime_metadata"] = runtime_metadata()
+    record, trust = tmp_path / "build.json", tmp_path / "trust.json"
+    record.write_text(json.dumps(document))
+    trust.write_text(keyring)
+    output = tmp_path / "release"
+    result = subprocess.run(
+        [sys.executable, str(candidate.ROOT / "scripts/ops/nebius_candidate.py"),
+         "create-runtime-release", "--build-record", str(record), "--signing-key", str(private),
+         "--signing-key-id", "publisher", "--trusted-keyring", str(trust), "--output", str(output)],
+        capture_output=True, text=True, env={**os.environ, "PYTHONPATH": str(candidate.ROOT / "src")},
+    )
+    assert result.returncode == 0, result.stderr
+    assert {path.name for path in output.iterdir()} == {"agent-runtime-release.json"}
+    release = json.loads((output / "agent-runtime-release.json").read_text())
+    assert release["schema_version"] == "loom.agent-runtime-release.v1"
+    assert {key: release[key] for key in runtime_metadata()} == runtime_metadata()
+    assert set(release) == set(runtime_metadata()) | {"schema_version", "agent_image_ref", "image_admission"}
+    from loom.execution_image_admission import verify_execution_image_admission
+
+    verify_execution_image_admission(
+        candidate.ExecutionImageAdmissionBundleV1(
+            schema_version="loom.execution-image-admission.v1",
+            admissions=(candidate.SignedImageAdmissionV1.model_validate(release["image_admission"]),),
+        ), required_image_refs=(release["agent_image_ref"],),
+        keyring=candidate.ImageAdmissionKeyring.from_json(keyring),
+    )
+
+
+@pytest.mark.parametrize("fault", ["version", "source", "repository", "extra_image"])
+def test_runtime_release_rejects_bad_binding(tmp_path: Path, fault: str) -> None:
+    document, private, trust = inputs(tmp_path)
+    document["images"] = {"harbor_runtime": document["images"]["harbor_runtime"]}
+    document["runtime_metadata"] = runtime_metadata()
+    if fault == "version":
+        document["runtime_metadata"]["agent_version"] = "bad label"
+    elif fault == "source":
+        document["runtime_metadata"]["publisher_source_revision"] = "b" * 40
+    elif fault == "repository":
+        document["images"]["harbor_runtime"]["image_ref"] = "docker.io/untrusted@sha256:" + "a" * 64
+    else:
+        document["images"]["worker"] = document["images"]["harbor_runtime"]
+    with pytest.raises(ValueError):
+        candidate.create_runtime_release(document, signing_key=private,
+            signing_key_id="publisher", keyring_json=trust)
+
+
+@pytest.mark.parametrize("mode", ["harness-only", "platform"])
+def test_publication_builds_selected_images_and_reuses_platform_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+) -> None:
+    import shutil
+
+    document, private, keyring = inputs(tmp_path)
+    trust = tmp_path / "keyring.json"
+    trust.write_text(keyring)
+    version = "test-1" if mode == "harness-only" else "nebius-" + "a" * 40
+    archive = oci_fixture(tmp_path, metadata=runtime_metadata(version))
+    digest, _ = candidate.inspect_oci_archive(archive, candidate="a" * 40)
+    calls: list[tuple[str, ...]] = []
+    for key, value in {
+        "GITHUB_SHA": "a" * 40, "GITHUB_REPOSITORY": candidate.REPOSITORY,
+        "GITHUB_REF": candidate.SOURCE_REF, "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "GITHUB_WORKFLOW_REF": f"{candidate.REPOSITORY}/{candidate.WORKFLOW}@{candidate.SOURCE_REF}",
+        "GITHUB_RUN_ID": "123", "NEBIUS_REGISTRY_CREDENTIALS_FILE": str(tmp_path / "fake-key"),
+        "REGISTRY_AUTH_FILE": str(tmp_path / "fake-auth"),
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    def run(*args: str) -> str:
+        calls.append(args)
+        if args[:2] == ("git", "rev-parse"):
+            return "a" * 40
+        if args[0] == "uname":
+            return "x86_64"
+        if len(args) > 1 and args[1] == "build":
+            destination = args[args.index("--output") + 1].split("dest=", 1)[1]
+            shutil.copyfile(archive, destination)
+        elif args[0] == "scanner":
+            Path(args[args.index("--output") + 1]).write_text('{"Trivy":{"Version":"0.74.0"},"Results":[]}')
+        elif args[:2] == ("skopeo", "inspect"):
+            return digest
+        return ""
+
+    monkeypatch.setattr(candidate, "_run", run)
+    monkeypatch.setattr(candidate, "install_trivy", lambda *args, **kwargs: Path("scanner"))
+    monkeypatch.setattr(candidate, "validate_trivy_release_report", lambda *args: None)
+    monkeypatch.setattr(candidate, "refresh_registry_auth", lambda *args: None)
+    output = tmp_path / "publication"
+    candidate.build(argparse.Namespace(
+        mode=mode, agent_version="test-1" if mode == "harness-only" else None, output=output,
+        registry_prefix=document["registry_prefix"], signing_key=private,
+        signing_key_id="publisher", trusted_keyring=trust,
+    ))
+    builds = [call for call in calls if len(call) > 1 and call[1] == "build"]
+    expected = 1 if mode == "harness-only" else len(candidate.COMPONENTS)
+    assert len(builds) == expected
+    harbor = next(call for call in builds if "filename=Dockerfile.harbor-runtime" in call)
+    assert f"build-arg:LOOM_AGENT_VERSION={version}" in harbor
+    assert len([call for call in calls if call[:2] == ("skopeo", "copy")]) == expected
+    release = json.loads((output / "agent-runtime-release.json").read_text())
+    if mode == "harness-only":
+        assert not (output / "candidate.json").exists()
+        assert not (output / "runtime-profile.json").exists()
+    else:
+        manifest = json.loads((output / "candidate.json").read_text())
+        profile = json.loads((output / "runtime-profile.json").read_text())
+        assert "worker" not in manifest["images"]
+        assert profile["agent_image_ref"] == manifest["images"]["harbor_runtime"]["image_ref"]
+        assert release["image_admission"] in profile["image_admission"]["admissions"]
+
+
 def test_duplicate_input_fields_rejected(tmp_path: Path) -> None:
     path = tmp_path / "bad.json"
     path.write_text('{"candidate_sha":"a","candidate_sha":"b"}')
@@ -251,7 +374,10 @@ def test_duplicate_input_fields_rejected(tmp_path: Path) -> None:
         candidate.read_json(path)
 
 
-def oci_fixture(tmp_path: Path, *, revision: str = "a" * 40, corrupt: bool = False) -> Path:
+def oci_fixture(
+    tmp_path: Path, *, revision: str = "a" * 40, corrupt: bool = False,
+    metadata: dict[str, str] | None = None,
+) -> Path:
     import io
     import tarfile
 
@@ -273,7 +399,8 @@ def oci_fixture(tmp_path: Path, *, revision: str = "a" * 40, corrupt: bool = Fal
             {
                 "architecture": "amd64",
                 "os": "linux",
-                "config": {"Labels": {"org.opencontainers.image.revision": revision}},
+                "config": {"Labels": {"org.opencontainers.image.revision": revision,
+                    **{"io.loom." + key: value for key, value in (metadata or {}).items()}}},
             }
         ),
         "application/vnd.oci.image.config.v1+json",

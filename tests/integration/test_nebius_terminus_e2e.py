@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 import threading
 import tomllib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,8 +22,9 @@ from pathlib import Path
 from uuid import uuid4
 
 
-def test_native_harbor_manifest_and_isolated_verifier(tmp_path: Path) -> None:
+def test_native_harbor_manifest_and_isolated_verifier(tmp_path: Path, missing_tool: bool) -> None:
     import pytest
+    import tomli_w
 
     repository = Path(__file__).resolve().parents[2]
     task_image = os.environ["LOOM_TERMINUS_SMOKE_IMAGE"]
@@ -43,6 +45,11 @@ def test_native_harbor_manifest_and_isolated_verifier(tmp_path: Path) -> None:
     shutil.copyfile(source / "verifier/run.sh", workspace / "verifier/run.sh")
     workspace.chmod(0o777)
     (workspace / "task.toml").chmod(0o666)
+    raw = tomllib.loads((workspace / "task.toml").read_text())
+    raw["environment"].update({"cpu_arch": "x86_64", "baseline_network_policy": {"kind": "gateway-only"}})
+    raw["verifier"].pop("user", None)
+    raw["verifier"]["args"]["script_path"] = "verifier/run.sh"
+    (workspace / "task.toml").write_text(tomli_w.dumps(raw))
     poison = (
         "from pathlib import Path\n"
         "Path('/evidence/shadow-import-executed').write_text('untrusted import')\n"
@@ -66,23 +73,33 @@ def test_native_harbor_manifest_and_isolated_verifier(tmp_path: Path) -> None:
                    "-v", f"{binary}:/loom/bin/loom-sandbox-runtime:ro",
                    "-v", f"{volume}:{socket_dir}", "--entrypoint", "/loom/bin/loom-sandbox-runtime",
                    task_image, "--socket", socket_dir + "/sandbox.sock")
+        if missing_tool:
+            # Change only this disposable task container, never the shared image.
+            docker("exec", "--user", "0", names[0], "/bin/sh", "-c",
+                   'rm "$(command -v tmux)"')
         result = docker(
             "run", "--rm", "--network", "none", "--user", "65532:65532",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-            "-v", f"{repository}:/checkout:ro", "-v", f"{repository / 'src'}:/app/src:ro",
+            "-v", f"{Path(__file__).resolve()}:/fixture/test.py:ro",
+            "-v", f"{source}:/fixture/task:ro",
             "-v", f"{evidence}:/evidence",
             "-v", volumes[0] + ":/loom/sandboxes/task-sandbox",
             "-v", volumes[1] + ":/loom/sandboxes/verifier-sandbox",
+            "-e", f"LOOM_SMOKE_MISSING_TOOL={int(missing_tool)}",
             "-e", "HOME=/tmp/loom-home", "--workdir", "/app", "--entrypoint", "python",
-            controller_image, "-I", "-B", "/checkout/tests/integration/test_nebius_terminus_e2e.py", "--inside",
+            controller_image, "-I", "-B", "/fixture/test.py", "--inside",
         )
         (evidence / "controller.stdout").write_text(result.stdout)
         (evidence / "controller.stderr").write_text(result.stderr)
         report = json.loads((evidence / "report.json").read_text())
-        assert report["reward"] == 1
-        assert report["native_turns"] >= 2
+        if missing_tool:
+            assert report["missing_tool_rejected"] is True
+            assert report["gateway_calls"] == 0
+        else:
+            assert report["reward"] == 1
+            assert report["native_turns"] >= 2
+            assert report["private_inputs_hidden"] is True
         assert report["gateway_calls"] == report["typed_calls"]
-        assert report["private_inputs_hidden"] is True
         assert report["external_model_calls"] == 0
         assert report["untrusted_imports_blocked"] is True
         assert not (evidence / "shadow-import-executed").exists()
@@ -145,24 +162,18 @@ async def _verify_harbor_tool_identity() -> None:
 
 
 async def _inside() -> None:
-    import tomli_w
-
     import loom
     from loom.models.trial import TrialConfig
 
     Path.home().mkdir(parents=True, exist_ok=True)
     await _verify_harbor_tool_identity()
-    source = Path("/checkout/deploy/catalog/nebius-terminal-bench/file-archive-manifest")
+    source = Path("/fixture/task")
     workspace = Path("/evidence/workspace")
-    assert sys.flags.isolated and str(loom.__file__).startswith("/app/src/loom/")
+    assert sys.flags.isolated
+    assert Path(loom.__file__).is_relative_to(Path(sysconfig.get_path("purelib")) / "loom")
     assert str(workspace) not in sys.path and "" not in sys.path
     assert not Path("/evidence/shadow-import-executed").exists()
     assert "LOOM_SHADOW_ENV_IMPORTED" not in os.environ
-    raw = tomllib.loads((workspace / "task.toml").read_text())
-    raw["environment"].update({"cpu_arch": "x86_64", "baseline_network_policy": {"kind": "gateway-only"}})
-    raw["verifier"].pop("user", None)
-    raw["verifier"]["args"]["script_path"] = "verifier/run.sh"
-    (workspace / "task.toml").write_text(tomli_w.dumps(raw))
     trial = TrialConfig(agent_name="terminus-2", agent_model={"provider": "openai", "name": "glm-5.2"},
                         override_agent_timeout_sec=90, request_params={"temperature": 0.2})
     trial_id, team_id = uuid4(), uuid4()
@@ -217,7 +228,8 @@ async def _inside() -> None:
     os.environ["LOOM_GATEWAY_URL"] = f"http://127.0.0.1:{server.server_port}"
     os.environ["LOOM_TASK_ARTIFACTS_JSON"] = '["archive_manifest.json","build_manifest.py","private-inputs-hidden"]'
     try:
-        for phase in ("terminus-2", "verify-sandbox"):
+        missing_tool = os.environ.get("LOOM_SMOKE_MISSING_TOOL") == "1"
+        for phase in (("terminus-2",) if missing_tool else ("terminus-2", "verify-sandbox")):
             completed = subprocess.run(
                 [sys.executable, "-I", "-B", "-m", "loom.service_execution_sandbox_task",
                  phase, "--workspace", str(workspace)],
@@ -226,12 +238,26 @@ async def _inside() -> None:
             )
             sys.stdout.write(completed.stdout)
             sys.stderr.write(completed.stderr)
-            completed.check_returncode()
+            if missing_tool:
+                assert completed.returncode != 0
+                assert "task image must preinstall bash, tmux and asciinema" in completed.stderr
+                assert not ledger
+            else:
+                completed.check_returncode()
         assert not Path("/evidence/shadow-import-executed").exists()
     finally:
         server.shutdown()
         server.server_close()
         thread.join()
+    if missing_tool:
+        assert not (workspace / ".loom/agent/harbor/trajectory.json").exists()
+        usage = json.loads((workspace / ".loom/agent/usage.json").read_text())
+        assert usage["call_count"] == usage["totals"]["cost_usd"] == 0
+        report = {"missing_tool_rejected": True, "gateway_calls": 0, "typed_calls": 0,
+                  "external_model_calls": 0, "untrusted_imports_blocked": True}
+        Path("/evidence/report.json").write_text(json.dumps(report, indent=2))
+        print(json.dumps(report))
+        return
     native = json.loads((workspace / ".loom/agent/harbor/trajectory.json").read_text())
     events = [json.loads(line) for line in (workspace / ".loom/agent/trajectory.jsonl").read_text().splitlines()]
     verifier = json.loads((workspace / ".loom/verifier/output.json").read_text())
@@ -249,6 +275,9 @@ if __name__ == "__main__" and "--inside" in sys.argv:
 else:
     import pytest
 
+    test_native_harbor_manifest_and_isolated_verifier = pytest.mark.parametrize(
+        "missing_tool", [False, True], ids=["manifest", "missing-tool"]
+    )(test_native_harbor_manifest_and_isolated_verifier)
     test_native_harbor_manifest_and_isolated_verifier = pytest.mark.skipif(
         not os.environ.get("LOOM_TERMINUS_SMOKE_IMAGE"),
         reason="local prepared task image required",

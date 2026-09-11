@@ -130,6 +130,20 @@ async def test_repair_publishes_separate_revision_and_is_idempotent(case: Simple
     assert len(case.store.objects) == count and case.commits == 1
 
 
+@pytest.mark.parametrize("selected,expected", [(None, "2.0.0"), ("harbor-frozen", "harbor-frozen")])
+async def test_repair_preserves_trial_agent_version(case, monkeypatch, selected, expected):
+    case.trial.config["agent_version"] = selected
+    seen = []
+
+    def project(*args, **kwargs):
+        seen.append(kwargs["agent_version"])
+        return b'{}'
+
+    monkeypatch.setattr(repair, "build_canonical_atif", project)
+    await repair.repair_accounting(**case.kwargs)
+    assert seen == [expected]
+
+
 async def test_repair_fences_concurrent_pointer_change(case: SimpleNamespace) -> None:
     old_storage = copy.deepcopy(case.artifact.storage)
     case.change_on_commit = lambda: case.trial.trajectory_index.update({"concurrent": True})

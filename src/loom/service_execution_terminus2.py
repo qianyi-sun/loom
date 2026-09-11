@@ -13,7 +13,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -26,11 +26,14 @@ from loom.errors import AgentError
 from loom.models.task import TaskConfig
 from loom.models.trajectory import TrajectoryEvent
 from loom.models.trial import TrialConfig
-from loom.trajectory.writer import TrajectoryWriter
+
+if TYPE_CHECKING:
+    from loom.trajectory.writer import TrajectoryWriter
 
 _PROXY_TOKEN = "loom_workload_proxy"
 _LEDGER_MAX_BYTES = 16 * 1024 * 1024
 _NATIVE_ARTIFACTS = frozenset({"trajectory.json", "recording.cast"})
+TASK_IMAGE_TOOLS_REQUIRED = "task image must preinstall bash, tmux and asciinema"
 
 
 @dataclass(frozen=True)
@@ -235,12 +238,12 @@ async def run_terminus2(
             timeout_sec=min(15.0, deadline.require_remaining()),
         )
         if deps.return_code != 0:
-            raise AgentError("task image must preinstall bash, tmux and asciinema")
+            raise AgentError(TASK_IMAGE_TOOLS_REQUIRED)
         # Do not call runtime.setup: the old worker method installs OS packages.
         await runtime.run(
             instruction=instruction,
             env=protected_driver,
-            trajectory=cast(TrajectoryWriter, trajectory),
+            trajectory=cast("TrajectoryWriter", trajectory),
             mcp=[],
             skills_dir=None,
             step_id="agent",

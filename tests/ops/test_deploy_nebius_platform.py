@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,6 +36,56 @@ def test_on_demand_build_secret_preflight_and_namespace(
     assert requirements[namespace, "loom-task-build-source"] == {"access-key", "secret-key"}
     assert requirements[namespace, "loom-task-build-registry"] == {"credentials.json"}
     assert requirements[namespace, "loom-task-build-cache"] == {"access-key", "secret-key"}
+
+
+@pytest.mark.parametrize("cache_enabled", [False, True])
+def test_native_build_render_preflight_does_not_import_service_dependencies(
+    request: pytest.FixtureRequest, tmp_path: Path, cache_enabled: bool
+) -> None:
+    config, release, profile = request.getfixturevalue("platform_inputs")
+    config["task_image_builder"] = {
+        "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
+        **({"cache_bucket": config["buckets"]["artifacts"]} if cache_enabled else {}),
+    }
+    inputs = tmp_path / "inputs.json"
+    inputs.write_text(json.dumps([config, release, profile]))
+    # A fresh process prevents imports already loaded by pytest from masking
+    # accidental controller/DB dependencies in the offline operator path.
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", """
+import importlib.abc
+import json
+import sys
+from pathlib import Path
+root, inputs, output = map(Path, sys.argv[1:])
+sys.path[:0] = [str(root), str(root / "src")]
+class NoServiceDependencies(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".")[0] in {"sqlalchemy", "asyncpg", "kubernetes", "nebius"} or fullname in {
+            "loom.db", "loom_control_plane", "loom_execution_actuator.task_image_controller",
+            "loom_execution_actuator.task_image_renderer", "loom_execution_actuator.renderer",
+        }:
+            raise ModuleNotFoundError("offline rendering imported " + fullname)
+sys.meta_path.insert(0, NoServiceDependencies())
+from loom.nebius_platform_render import build_platform, write_platform
+from scripts.ops.deploy_nebius_platform import load_render, secret_requirements
+from loom_execution_actuator.config import ExecutionActuatorSettings
+config, release, profile = json.loads(inputs.read_text())
+files = build_platform(config, release, profile, {}, repo_root=root)
+write_platform(files, config, release, output)
+identity, observed, loaded = load_render(output)
+assert observed == config
+assert loaded == files
+assert identity["candidate_sha"] == release["candidate_sha"]
+required = secret_requirements(loaded, observed)
+namespace = config["execution_namespace"] + "-build"
+assert required[namespace, "loom-task-build-source"] == {"access-key", "secret-key"}
+assert required[namespace, "loom-task-build-registry"] == {"credentials.json"}
+assert ((namespace, "loom-task-build-cache") in required) == ("cache_bucket" in config["task_image_builder"])
+""", str(deploy.ROOT), str(inputs), str(tmp_path / "render")],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.fixture

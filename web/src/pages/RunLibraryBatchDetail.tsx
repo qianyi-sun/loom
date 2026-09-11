@@ -19,6 +19,7 @@ import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
 import { StatusPill } from "../components/StatusPill";
+import { agentLabel } from "../lib/agentLabel";
 import { formatLocalDateTime } from "../lib/dateTime";
 import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
 import { humanizeTrialConfig } from "../lib/humanizeTrialConfig";
@@ -104,11 +105,11 @@ function artifactActionsAllowed(artifact: RunLibraryArtifact): boolean {
 function comboText(batch: RunLibraryBatchDetail): string {
   if (batch.combinations.length > 0) {
     return batch.combinations
-      .map((combo) => `${combo.agent_name} / ${modelLabel(combo.agent_model)}`)
+      .map((combo) => `${agentLabel(combo.agent_name, combo.agent_version)} / ${modelLabel(combo.agent_model)}`)
       .join(", ");
   }
-  const agent = batch.trial_config.agent_name;
-  return `${typeof agent === "string" ? agent : "default"} / ${modelLabel(
+  const agent = agentLabel(batch.trial_config.agent_name ?? "default", batch.trial_config.agent_version);
+  return `${agent} / ${modelLabel(
     batch.trial_config.agent_model,
   )}`;
 }
@@ -279,7 +280,7 @@ function CombinationSummarySection({
                       {combo.label}
                     </div>
                     <div className="mt-1 text-xs text-slate-500">
-                      #{combo.combination_idx}
+                      {agentLabel(combo.agent_name, combo.agent_version)} · #{combo.combination_idx}
                       {combo.provider_model_id
                         ? ` · ${combo.provider_model_id}`
                         : ""}

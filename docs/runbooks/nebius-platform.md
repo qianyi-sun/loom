@@ -11,6 +11,40 @@ are outside this integration lane and are explicitly rejected.
 
 ## Inputs and rendering
 
+New Nebius candidates use `images.harbor_runtime` (`loom-harbor-runtime`) for
+the trusted Terminus-2 controller. The dedicated Python 3.12 image includes the
+Harbor compatibility pin and current-user tool patch, without installing the
+Loom worker or platform packages. Historical candidates with `images.worker`
+remain readable. `tb90_task` remains a regression fixture in the platform
+publication; generic task images use their existing preparation path.
+
+The existing GitHub-hosted `nebius-candidate` workflow also supports manual
+`mode=harness-only`, with an explicit `agent_version` label. This builds, scans
+and publishes only the Harbor controller through the same native digest and
+image-admission path. Its `nebius-agent-runtime-*` artifact contains
+`agent-runtime-release.json` and scan evidence, not a partial platform candidate.
+Labels accept 1–128 letters, digits, dots, underscores or hyphens and must start
+with a letter or digit. The label is baked into the image so two labels identify
+distinct packages even when they share a source commit.
+
+Full platform publication also emits a default runtime release record, using
+`nebius-<source SHA>` unless a label was explicitly supplied. It reuses the
+runtime profile's existing image admission. Registering that version is optional;
+publication itself does not register a version or deploy the platform. Preserve
+and reuse the original release JSON when registering or retrying registration.
+The same version label cannot be rebound to a different image or re-signed
+record. To publish a changed runtime, use a new version label.
+
+The split Harbor image retains the worker's existing Debian `perl-base` policy
+mapping. It must match exactly the same three reviewed findings; no CVE, package
+scope, severity allowance or expiration is added. The existing policy expiry
+still blocks publication unless its owning review renews or removes the finding.
+
+For local tooling tests, `nebius_candidate.py create-runtime-release` accepts
+the single-image build record plus the existing signing-key/keyring arguments.
+`build --mode harness-only --agent-version <label>` retains the protected
+workflow-source checks and is the publication entry point.
+
 Copy `deploy/nebius/integration.platform.json.example` to a protected operator
 directory and fill its non-secret values from the reviewed Terraform outputs.
 Set `quota_parent_id` from the Terraform input `tenant_id`, while `project_id`

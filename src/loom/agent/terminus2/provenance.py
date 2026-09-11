@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
-HARBOR_COMPAT_SHA = "527d50deb63a5d279e8c20593c18a2cbc7f61f9e"
-HARBOR_RUNTIME_VERSION = "0.18.0"
-LOOM_BRIDGE_REVISION = "1.0"
+import os
+from importlib.metadata import PackageNotFoundError, version
+
+HARBOR_COMPAT_SHA = os.environ.get(
+    "LOOM_HARBOR_SOURCE_REVISION", "527d50deb63a5d279e8c20593c18a2cbc7f61f9e",
+)
+try:
+    HARBOR_RUNTIME_VERSION = version("harbor")
+except PackageNotFoundError:
+    HARBOR_RUNTIME_VERSION = "0.18.0"
+LOOM_BRIDGE_REVISION = os.environ.get("LOOM_BRIDGE_REVISION", "1.0")
 
 
 def harbor_template_hashes() -> dict[str, str]:

@@ -13,6 +13,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from loom.agent_runtime import AgentRuntimeBindingV1, AgentRuntimeReleaseV1
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
 from loom.execution_runtime_contract import (
     ContainerResourcesV1,
@@ -101,6 +102,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     execution_class_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     task_image_ref: str
     agent_image_ref: str | None = None
+    agent_runtime_bindings: tuple[AgentRuntimeBindingV1, ...] = ()
     runtime_image_ref: str
     runtime_binary_sha256: str = Field(pattern=_SHA256.pattern)
     image_admission: ExecutionImageAdmissionBundleV1
@@ -111,6 +113,13 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     termination_grace_seconds: int = Field(default=30, ge=1, le=300)
     max_log_bytes_per_stream: int = Field(default=10 * 1024 * 1024, gt=0)
     max_artifact_bytes: int = Field(default=1024 * 1024 * 1024, gt=0)
+
+    @model_validator(mode="after")
+    def unique_agent_versions(self) -> ServiceExecutionRuntimeProfileV1:
+        keys = [(item.agent_name, item.agent_version) for item in self.agent_runtime_bindings]
+        if len(set(keys)) != len(keys):
+            raise ValueError("runtime profile has duplicate agent version bindings")
+        return self
 
     @field_validator("task_image_ref", "runtime_image_ref", "agent_image_ref")
     @classmethod
@@ -304,9 +313,10 @@ def compile_service_execution_plan(
         raise ValueError("automatic service execution is incompatible: " + ",".join(reasons))
     terminus = trial.agent_name == "terminus-2"
     profile_reasons = runtime_profile_rejections(task, trial, profile)
-    if task_image_grant is not None and profile.agent_image_ref is not None:
+    selected_agent_image = controller_image_for_trial(profile, trial)
+    if task_image_grant is not None and selected_agent_image is not None:
         admitted = {item.statement.image_ref for item in profile.image_admission.admissions}
-        profile_reasons = (() if profile.agent_image_ref in admitted
+        profile_reasons = (() if selected_agent_image in admitted
                            else ("task_image_not_in_runtime_profile",))
     if "terminus_controller_unavailable" in profile_reasons:
         raise ValueError("active runtime profile has no Terminus controller image")
@@ -356,6 +366,8 @@ def compile_service_execution_plan(
             "schema_version": "loom.automatic-service-execution-command.v1",
             "task_revision_sha256": task_revision_sha256,
             "agent": trial.agent_name,
+            **({"agent_version": trial.agent_version, "agent_image_ref": selected_agent_image}
+               if trial.agent_version is not None else {}),
             "model": trial.agent_model.model_dump(mode="json"),
             "request_params": trial.request_params,
             "instruction_file": str(step.instruction_file),
@@ -446,19 +458,52 @@ def compile_service_execution_plan(
     )
 
 
+def controller_image_for_trial(
+    profile: ServiceExecutionRuntimeProfileV1, trial: TrialConfig,
+) -> str | None:
+    if trial.agent_version is None:
+        return profile.agent_image_ref
+    for binding in profile.agent_runtime_bindings:
+        if (binding.agent_name, binding.agent_version) == (trial.agent_name, trial.agent_version):
+            return binding.agent_image_ref
+    return None
+
+
+def freeze_agent_runtime_releases(
+    profile: ServiceExecutionRuntimeProfileV1,
+    releases: tuple[AgentRuntimeReleaseV1, ...],
+) -> ServiceExecutionRuntimeProfileV1:
+    admissions = {item.statement.image_ref: item for item in profile.image_admission.admissions}
+    for release in releases:
+        admissions[release.agent_image_ref] = release.image_admission
+    return ServiceExecutionRuntimeProfileV1.model_validate({
+        **profile.model_dump(mode="json"),
+        "agent_runtime_bindings": [release.binding().model_dump(mode="json") for release in releases],
+        "image_admission": {
+            "schema_version": profile.image_admission.schema_version,
+            "admissions": [item.model_dump(mode="json") for item in admissions.values()],
+        },
+    })
+
+
 def runtime_profile_rejections(
     task: TaskConfig, trial: TrialConfig, profile: ServiceExecutionRuntimeProfileV1,
     *, allow_task_image_preparation: bool = False,
 ) -> tuple[str, ...]:
     """Submission and scheduling share the profile's image/agent compatibility."""
+    if trial.agent_version is not None and (
+        trial.agent_name != "terminus-2" or controller_image_for_trial(profile, trial) is None
+    ):
+        return ("agent_version_not_in_runtime_profile",)
     if trial.agent_name != "terminus-2":
         return (() if task.environment.docker_image == profile.task_image_ref
                 else ("task_image_not_in_runtime_profile",))
-    if profile.agent_image_ref is None:
+    agent_image = controller_image_for_trial(profile, trial)
+    if agent_image is None:
         return ("terminus_controller_unavailable",)
     admitted = {item.statement.image_ref for item in profile.image_admission.admissions}
     preparing = allow_task_image_preparation and task.environment.dockerfile is not None
-    if (not preparing and task.environment.docker_image not in admitted) or profile.agent_image_ref not in admitted:
+    if (not preparing and task.environment.docker_image not in admitted) or agent_image not in admitted:
         return ("task_image_not_in_runtime_profile",)
     return ()
 
@@ -480,6 +525,8 @@ def _compile_terminus_plan(
 ) -> ExecutionRuntimePlanV1:
     """Reuse Harbor in a trusted controller with private native task/verifier sandboxes."""
     env = task.environment
+    agent_image = controller_image_for_trial(profile, trial)
+    assert agent_image is not None
     assert env.docker_image and env.cpus and env.memory_mb and env.storage_mb
     resources = ContainerResourcesV1(
         cpu_millis=round(env.cpus * 1000), memory_mib=env.memory_mb,
@@ -528,17 +575,17 @@ def _compile_terminus_plan(
         outputs.append(RuntimeOutputDeclarationV1(
             source_path=f".loom/{source}", relative_path=target, kind=kind, required=required,
         ))
+    published_refs: set[str | None] = {agent_image, profile.runtime_image_ref}
+    if task_image_materialization_id is None:
+        published_refs.add(env.docker_image)
     return ExecutionRuntimePlanV1(
         candidate_sha=profile.candidate_sha, task_revision_sha256=task_revision_sha256,
         command_identity_sha256=command_identity, execution_class_id=profile.execution_class_id,
         composition="init_payload", task_image_ref=env.docker_image,
         task_image_materialization_id=task_image_materialization_id,
-        agent_image_ref=profile.agent_image_ref, runtime_image_ref=profile.runtime_image_ref,
+        agent_image_ref=agent_image, runtime_image_ref=profile.runtime_image_ref,
         runtime_binary_sha256=profile.runtime_binary_sha256,
-        image_admission=_plan_admissions(
-            profile, {profile.agent_image_ref, profile.runtime_image_ref}
-            | ({env.docker_image} if task_image_materialization_id is None else set()),
-        ),
+        image_admission=_plan_admissions(profile, published_refs),
         run_as_user=profile.run_as_user, run_as_group=profile.run_as_group, fs_group=profile.fs_group,
         task_resources=resources, workspace_mib=env.storage_mb,
         runtime_volume_mib=profile.runtime_volume_mib,

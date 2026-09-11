@@ -20,6 +20,7 @@ import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
 import { StatusPill } from "../components/StatusPill";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
+import { agentLabel } from "../lib/agentLabel";
 import { formatLocalDateTime } from "../lib/dateTime";
 import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
 import { humanizeTrialConfig } from "../lib/humanizeTrialConfig";
@@ -41,13 +42,14 @@ function comboSummary(
   combo: {
     label?: string | null;
     agent_name: string;
+    agent_version?: string | null;
     agent_model: unknown;
     n_per_task: number;
   },
   index: number,
 ): string {
   const label = combo.label || `combo${index + 1}`;
-  return `${label} / ${combo.agent_name} / ${modelLabel(combo.agent_model)} / n=${combo.n_per_task}`;
+  return `${label} / ${agentLabel(combo.agent_name, combo.agent_version)} / ${modelLabel(combo.agent_model)} / n=${combo.n_per_task}`;
 }
 
 function scoreText(value: number | null): string {
@@ -288,7 +290,7 @@ export default function BatchDetail(): JSX.Element {
                   >
                     <span className="font-semibold">{lbl}</span>
                     <span className="text-slate-500">
-                      {combo.agent_name} · {modelTxt} · n={combo.n_per_task}
+                      {agentLabel(combo.agent_name, combo.agent_version)} · {modelTxt} · n={combo.n_per_task}
                     </span>
                   </span>
                 );

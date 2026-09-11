@@ -165,6 +165,8 @@ def _combination_label(combo: dict[str, Any]) -> str:
     if isinstance(label, str) and label.strip():
         return label
     agent_name = str(combo.get("agent_name") or "unknown agent")
+    if combo.get("agent_version"):
+        agent_name += "@" + str(combo["agent_version"])
     return f"{agent_name} / {_model_display(combo)}"
 
 
@@ -367,6 +369,7 @@ async def combination_summary_for_batch(
             "combination_idx": idx,
             "label": _combination_label(combo),
             "agent_name": combo.get("agent_name"),
+            "agent_version": combo.get("agent_version"),
             "agent_model": combo.get("agent_model"),
             "provider_connection_id": (
                 str(combo["provider_connection_id"])

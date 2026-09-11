@@ -888,7 +888,7 @@ class ServiceExecutionMaterializer:
             events,
             task_id=trial_task_id,
             agent_name=trial_config.agent_name,
-            agent_version=task_config.agent.version or "service-execution-v1",
+            agent_version=trial_config.agent_version or task_config.agent.version or "service-execution-v1",
         )
         identity = TrajectoryObjectIdentity(
             bucket=self._trajectories_bucket,

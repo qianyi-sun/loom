@@ -126,10 +126,11 @@ def platform_inputs() -> tuple[dict, dict, dict]:
     return config, candidate, profile
 
 
-def test_worker_profile_binding_matches_published_candidate(platform_inputs: tuple) -> None:
+@pytest.mark.parametrize("component", ["worker", "harbor_runtime"])
+def test_agent_profile_binding_matches_published_candidate(platform_inputs: tuple, component: str) -> None:
     config, candidate, profile = platform_inputs
     image = "cr.eu-north1.nebius.cloud/test/worker@sha256:" + "d" * 64
-    candidate["images"]["worker"] = {"image_ref": image}
+    candidate["images"][component] = {"image_ref": image}
     profile["agent_image_ref"] = image
     build_platform(config, candidate, profile, {}, repo_root=ROOT)
     profile["agent_image_ref"] = image.replace("d" * 64, "e" * 64)
