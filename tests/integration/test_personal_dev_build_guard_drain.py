@@ -99,3 +99,81 @@ async def test_registered_drain_rejects_changed_authority(prepared_input, monkey
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_drains")) == int(boundary == "replay")
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
+
+
+async def test_native_claim_and_drain_serialize_without_late_work(prepared_input, monkeypatch):
+    import asyncio
+
+    factory, _engine, installation, *_ = prepared_input
+    request, claim = await drain_input(prepared_input, monkeypatch, claimed=False)
+    ready = [asyncio.Event(), asyncio.Event()]
+
+    async def compete(index):
+        try:
+            async with factory.begin() as session:
+                ready[index].set()
+                await ready[1-index].wait()
+                if index:
+                    await store(session, installation).begin_drain(request)
+                else:
+                    await store(session, installation).claim_platform(claim, worker_credential=CREDENTIAL)
+            return True
+        except DBAPIError:
+            return False
+
+    claimed, drained = await asyncio.gather(compete(0), compete(1))
+    assert claimed != drained
+    async with factory.begin() as session:
+        observed = await store(session, installation).observe_intent(request.binding)
+        assert observed.claim_high_water == int(claimed)
+        if not drained:
+            request = request.model_copy(update={"expected_claim_high_water": observed.claim_high_water})
+            await store(session, installation).begin_drain(request)
+    async with factory.begin() as session:
+        observed = await store(session, installation).observe_intent(request.binding)
+        assert observed.drain is not None and observed.drain.live_claim_count == int(claimed)
+
+
+async def test_corrupt_drain_receipt_rolls_back_fence_and_downgrade_refuses_evidence(prepared_input, monkeypatch, build_guard_database):
+    from alembic import command
+
+    factory, engine, installation, *_ = prepared_input
+    request, _claim = await drain_input(prepared_input, monkeypatch, claimed=False)
+    async with factory.begin() as session:
+        original = session.scalar
+
+        async def corrupt(statement, *args, **kwargs):
+            result = await original(statement, *args, **kwargs)
+            if "begin_drain(" in str(statement):
+                return result.replace(str(request.worker_id), str(uuid4()))
+            return result
+
+        monkeypatch.setattr(session, "scalar", corrupt)
+        with pytest.raises(ValueError, match="receipt"):
+            await store(session, installation).begin_drain(request)
+    async with factory.begin() as session:
+        assert (await store(session, installation).observe_intent(request.binding)).drain is None
+        await store(session, installation).begin_drain(request)
+    for statement in ("UPDATE loom_capacity_build_guard.worker_drains SET payload=payload",
+        "DELETE FROM loom_capacity_build_guard.worker_drains", "TRUNCATE loom_capacity_build_guard.worker_drains"):
+        with engine.begin() as connection, pytest.raises(DBAPIError, match="append-only"):
+            connection.execute(text(statement))
+    with pytest.raises(DBAPIError, match="retained evidence"):
+        command.downgrade(build_guard_database[0], "build_guard_0017")
+
+
+@pytest.mark.parametrize("boundary", ["grant", "public", "search-path", "helper"])
+def test_native_drain_privilege_drift_is_rejected(build_guard_database, boundary):
+    from alembic import command
+
+    config, engine, _owner, agent, _url = build_guard_database
+    command.upgrade(config, "head")
+    signature = "loom_capacity_build_guard.begin_drain(uuid,jsonb,bytea,text)"
+    statements = {"grant": f"REVOKE EXECUTE ON FUNCTION {signature} FROM {engine.dialect.identifier_preparer.quote(agent)}",
+        "public": f"GRANT EXECUTE ON FUNCTION {signature} TO PUBLIC",
+        "search-path": f"ALTER FUNCTION {signature} SET search_path=public",
+        "helper": "ALTER FUNCTION loom_capacity_build_guard.native_worker_drain(uuid) SECURITY DEFINER"}
+    with engine.begin() as connection:
+        connection.execute(text(statements[boundary]))
+    with pytest.raises(RuntimeError, match=r"privilege|surface"):
+        command.upgrade(config, "head")
