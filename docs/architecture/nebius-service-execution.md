@@ -483,6 +483,12 @@ compatible; a secondary target cannot fall back to it. No additional Loom token
 issuer, public database or runtime cloud writer is introduced. Gateway and
 actuator images use the same pinned Nebius SDK as the development lock.
 
+For prepared task images, Gateway resolves input from the frozen snapshot bound
+to the authorized lease, even after the current Task changes or the image enters
+retirement. Database bootstrap grants `loom_gateway` only `SELECT` on
+`task_image_materializations` and `trial_task_image_materializations`; it cannot
+create, change, or remove image preparation state or Trial associations.
+
 `0115` adds the observed Pod IP and one generation-bound service-execution
 Artifact commit ledger. Gateway maps the direct peer to the immutable Pod UID,
 resource generation, role, target health, and frozen runtime identity before it
