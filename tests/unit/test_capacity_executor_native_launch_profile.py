@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -59,6 +60,14 @@ def test_legacy_profile_has_no_native_eligibility_and_preserves_pinned_bytes() -
         "ebb98585ad60f65b544e109e84d5bd51061a95b8bba6aa86c79676fadbad45ee"
     )
     assert "native_execution" not in profile.model_dump(mode="json")
+    request = render_launch_request(launch_context_fixture())
+    payload = request.model_dump(mode="json")
+    assert "native_lifetime" not in payload
+    # Exact legacy scheduler request captured before the optional lifetime field.
+    assert hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True).encode("ascii")).hexdigest() == (
+        "8a43e76ec2958204cda4944726dbeaf83cc17f843e7962a91f7961218875e547"
+    )
 
 
 def test_approved_native_profile_resolves_the_release_pinned_public_root() -> None:
@@ -143,6 +152,7 @@ def test_native_launch_retains_exact_approved_worker_image_and_config() -> None:
     request = render_launch_request(context)
     assert request.image_digest == context.profile.image_digest
     assert request.trusted_launcher_config == context.profile.trusted_launcher_config
+    assert request.native_lifetime == "single-use-no-requeue/v1"
 
 
 def test_native_root_substitution_after_approval_rejects_scheduler_launch() -> None:
@@ -209,6 +219,7 @@ def test_typed_native_launch_binds_active_application_profile():
     rendered = render_typed_signed_launch(context)
     assert rendered.request.image_digest == context.profiles[0].image_digest
     assert rendered.ownership_proof.metadata.launch_profile_sha256 == full_launch_profile_digest(context.profiles[0])
+    assert rendered.request.native_lifetime == "single-use-no-requeue/v1"
 
 
 def test_personal_build_policy_cannot_select_task_image_execution_profile():

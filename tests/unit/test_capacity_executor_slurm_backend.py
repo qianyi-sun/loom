@@ -83,6 +83,15 @@ def cancel_request(job_id: str = "101") -> SlurmCancelRequestV2:
     )
 
 
+async def test_native_submission_explicitly_disables_scheduler_requeue(fake_slurm):
+    request = slurm_launch_request_fixture(fake_slurm)
+    request = SlurmLaunchRequestV2.model_validate(request.model_dump() | {
+        "native_lifetime": "single-use-no-requeue/v1",
+    })
+    await fake_slurm.backend().submit(request)
+    assert "--no-requeue" in fake_slurm.sbatch_calls[-1].argv
+
+
 def test_launch_contract_has_no_candidate_script_or_freeform_argv(
     fake_slurm: FakeSlurm,
 ) -> None:
