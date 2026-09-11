@@ -58,7 +58,10 @@ async def test_native_context_client_validates_current_claim_and_bounded_reply(p
 @pytest.mark.parametrize("boundary", ["exact", "error", "invalid", "directory"])
 @pytest.mark.parametrize("method", ["read_source_context", "claim_assigned_platform"])
 async def test_native_context_router_never_uses_application_authority(tmp_path, purpose, boundary, method):
-    from loom_capacity_agent.build_admission import BuildAllocatedClaimRequestV1, BuildClaimReceiptV1
+    from loom_capacity_agent.build_admission import (
+        BuildAllocatedClaimRequestV1,
+        BuildClaimReceiptV1,
+    )
 
     module, request, document, path, digest = configured(tmp_path, "gb10", purpose)
     claim = claim_for(request.binding)
@@ -160,7 +163,10 @@ async def test_claim_context_stages_real_sealed_source_without_application_recor
 
 @pytest.mark.parametrize("boundary", ["exact", "worker", "operation", "digest", "noncanonical"])
 async def test_allocated_claim_client_pins_every_supplied_field(boundary):
-    from loom_capacity_agent.build_admission import BuildAllocatedClaimRequestV1, BuildClaimReceiptV1
+    from loom_capacity_agent.build_admission import (
+        BuildAllocatedClaimRequestV1,
+        BuildClaimReceiptV1,
+    )
 
     claim = claim_for(native_registration().binding)
     request = BuildAllocatedClaimRequestV1.model_validate_json(claim.model_dump_json(exclude={"request_id"}))
@@ -179,3 +185,12 @@ async def test_allocated_claim_client_pins_every_supplied_field(boundary):
         else:
             with pytest.raises((RuntimeError, ValueError)):
                 await client.claim_assigned_platform(request, worker_credential="x" * 43)
+
+
+async def test_allocated_claim_client_rejects_caller_selected_request_before_transport():
+    claim = claim_for(native_registration().binding)
+    async def unexpected(request):
+        pytest.fail("assigned claim silently discarded a caller-selected request")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected)) as http:
+        with pytest.raises(ValueError):
+            await client_for(http, claim).claim_assigned_platform(claim, worker_credential="x" * 43)

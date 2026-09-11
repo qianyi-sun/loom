@@ -11,8 +11,12 @@ from sqlalchemy.exc import DBAPIError
 from loom_capacity_manager.contracts import canonical_digest
 from tests.integration.test_personal_dev_build_guard_claims import claim_input
 from tests.integration.test_personal_dev_build_guard_execution import store
-from tests.integration.test_personal_dev_build_guard_installations import owner_sessions as owner_sessions
-from tests.integration.test_personal_dev_build_guard_migrations import build_guard_database as build_guard_database
+from tests.integration.test_personal_dev_build_guard_installations import (
+    owner_sessions as owner_sessions,
+)
+from tests.integration.test_personal_dev_build_guard_migrations import (
+    build_guard_database as build_guard_database,
+)
 from tests.integration.test_personal_dev_build_guard_prepare import prepared_input as prepared_input
 from tests.integration.test_personal_dev_build_guard_registration import CREDENTIAL
 from tests.integration.test_personal_dev_native_builder_store import sessions as sessions
@@ -65,7 +69,7 @@ async def test_assigned_claim_http_commit_and_replay_do_not_renew_authority(prep
     from tests.integration.test_personal_dev_build_guard_http import application
     from tests.unit.test_capacity_build_admission_client import client_for
 
-    factory, engine, _installation, _plan, _source, platform = prepared_input
+    _factory, engine, _installation, _plan, _source, platform = prepared_input
     claim = await claim_input(prepared_input, monkeypatch)
     request = BuildAllocatedClaimRequestV1.model_validate_json(claim.model_dump_json(exclude={"request_id"}))
     app = application(prepared_input, tmp_path)
@@ -103,3 +107,37 @@ async def test_assigned_claim_http_commit_and_replay_do_not_renew_authority(prep
                     await client.read_source_context(receipt.request, worker_credential=CREDENTIAL)
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_claims")) == int(boundary != "cancelled")
+
+
+@pytest.mark.parametrize("boundary", ["execute", "public", "search-path"])
+def test_allocated_claim_private_acl_is_verified(build_guard_database, boundary):
+    from alembic import command
+
+    config, engine, _owner, agent, _url = build_guard_database
+    command.upgrade(config, "head")
+    signature = "loom_capacity_build_guard.claim_assigned_platform(uuid,jsonb,bytea,text,text)"
+    statements = {"execute": f"REVOKE EXECUTE ON FUNCTION {signature} FROM {engine.dialect.identifier_preparer.quote(agent)}",
+        "public": f"GRANT EXECUTE ON FUNCTION {signature} TO PUBLIC",
+        "search-path": f"ALTER FUNCTION {signature} SET search_path=public"}
+    with engine.begin() as connection:
+        connection.execute(text(statements[boundary]))
+    with pytest.raises(RuntimeError, match=r"privilege|surface"):
+        command.upgrade(config, "head")
+
+
+async def test_assigned_claim_downgrade_preserves_retained_claim(prepared_input, build_guard_database, monkeypatch):
+    from alembic import command
+
+    from loom_capacity_agent.build_admission import BuildAllocatedClaimRequestV1
+
+    factory, engine, installation, *_ = prepared_input
+    claim = await claim_input(prepared_input, monkeypatch)
+    request = BuildAllocatedClaimRequestV1.model_validate_json(claim.model_dump_json(exclude={"request_id"}))
+    async with factory.begin() as session:
+        receipt = await store(session, installation).claim_assigned_platform(request, worker_credential=CREDENTIAL)
+    command.downgrade(build_guard_database[0], "build_guard_0028")
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT to_regprocedure('loom_capacity_build_guard.claim_assigned_platform(uuid,jsonb,bytea,text,text)')")) is None
+    async with factory.begin() as session:
+        assert await store(session, installation).claim_platform(claim, worker_credential=CREDENTIAL) == receipt
+    command.upgrade(build_guard_database[0], "head")
