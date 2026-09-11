@@ -426,3 +426,74 @@ def test_resume_refuses_retention_without_exact_original_recovery_binding(tmp_pa
         )
     with pytest.raises((RuntimeError, ValueError), match="application guard"):
         _resume_guard(tmp_path, plan, **overrides)
+
+
+def test_retained_epoch_probe_uses_original_guard_and_rejects_stale_reply(tmp_path):
+    from loom_cli.rollout.operator.protected_application_guard_probe import (
+        answer_retained_epoch_probe, probe_retained_epoch,
+    )
+    plan, _, guard = _pending_resume(tmp_path)
+    config = replace(_config(tmp_path), state_root=tmp_path / "state")
+    guard_module._publish_evidence(config, guard, service_uid=os.getuid())
+    queries = []
+    health = []
+    sleeps = []
+
+    def query(statement):
+        queries.append(statement)
+        assert statement == guard_module._READ_EPOCH_SQL
+        return ({"mutation_epoch": 8},)
+
+    def sleep(_):
+        sleeps.append(1)
+        answer_retained_epoch_probe(
+            config, guard=guard, service_uid=os.getuid(), query=query,
+            assert_healthy=lambda: health.append(1),
+        )
+
+    for _ in range(2):
+        assert probe_retained_epoch(
+            config, guard=guard, service_uid=os.getuid(),
+            assert_ready=lambda: guard, sleep=sleep,
+        ) == 8
+    # A second fresh nonce cannot consume the first answer, even with identical epoch.
+    assert len(sleeps) == 2 and len(queries) == 2 and len(health) == 4
+
+
+@pytest.mark.parametrize("failure", ["not-retained", "lost", "replaced", "query", "malformed"])
+def test_retained_epoch_probe_never_reacquires_or_uses_an_unhealthy_response(tmp_path, failure):
+    from loom_cli.rollout.operator.protected_application_guard_probe import (
+        answer_retained_epoch_probe, probe_retained_epoch,
+    )
+    from loom_cli.rollout.operator.staging_mutation_guard import MutationGuardError
+
+    plan, journal, guard = _pending_resume(tmp_path)
+    config = replace(_config(tmp_path), state_root=tmp_path / "state")
+    guard_module._publish_evidence(config, guard, service_uid=os.getuid())
+    queries = []
+    if failure == "not-retained":
+        (journal.attempt_root.parent.parent / "application-guard-retention.json").unlink()
+
+    def ready():
+        if failure == "lost":
+            raise MutationGuardError("guard lost")
+        if failure == "replaced":
+            return _guard(replace(plan, candidate_tree="c" * 40))
+        return guard
+
+    def query(_):
+        queries.append(1)
+        if failure == "query":
+            raise RuntimeError("private database diagnostic")
+        return ({"mutation_epoch": True},)
+
+    def sleep(_):
+        answer_retained_epoch_probe(
+            config, guard=guard, service_uid=os.getuid(), query=query,
+            assert_healthy=lambda: None,
+        )
+
+    with pytest.raises((ValueError, RuntimeError)):
+        probe_retained_epoch(config, guard=guard, service_uid=os.getuid(),
+                             assert_ready=ready, sleep=sleep)
+    assert len(queries) == (1 if failure in {"query", "malformed"} else 0)
