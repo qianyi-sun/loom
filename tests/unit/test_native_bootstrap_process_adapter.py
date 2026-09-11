@@ -7,6 +7,8 @@ the installed-image and receiver entrypoint suites exercise those boundaries.
 import asyncio
 import os
 import sys
+import time
+from dataclasses import replace
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
@@ -148,3 +150,148 @@ async def test_closed_adapter_never_starts_another_child(process_fixture):
     with pytest.raises(ValueError):
         await adapter.receive(value.payload)
     assert value.state.calls == []
+
+
+@pytest.mark.parametrize("boundary", ("cleanup-receipt", "cleanup-unknown", "parse"))
+async def test_late_result_is_refused_after_cleanup_or_synchronous_parse(process_fixture, monkeypatch, boundary):
+    value = process_fixture
+    adapter = value.module.NativeBootstrapProcessAdapter(replace(value.policy, timeout_seconds=1.0))
+    original_run = adapter._run
+    original_parse = value.module.parse_native_delivery_receipt
+    deadline_seen = []
+
+    def overrun():
+        # Intentionally stall past the operation deadline without yielding:
+        # asyncio's timer alone cannot reject synchronous late success.
+        time.sleep(max(0, deadline_seen[0] - asyncio.get_running_loop().time()) + 0.02)
+
+    async def run(raw, operation, deadline):
+        deadline_seen.append(deadline)
+        result = await original_run(raw, operation, deadline)
+        if boundary.startswith("cleanup"):
+            overrun()
+        return result
+
+    def parse(raw):
+        result = original_parse(raw)
+        overrun()
+        return result
+
+    monkeypatch.setattr(adapter, "_run", run)
+    if boundary == "parse":
+        monkeypatch.setattr(value.module, "parse_native_delivery_receipt", parse)
+    try:
+        with pytest.raises(ValueError, match="unavailable or refused"):
+            if boundary == "cleanup-unknown":
+                value.state.mode = "unknown"
+                query = value.storage.encode_native_delivery_query(value.physical, value.expected)
+                await adapter.observe_receipt(query)
+            else:
+                await adapter.receive(value.payload)
+    finally:
+        await adapter.aclose()
+    assert all(process.returncode == 0 for process in value.state.processes)
+
+
+async def test_pipe_read_error_does_not_finish_cleanup_before_reap(process_fixture, monkeypatch):
+    value = process_fixture
+    adapter = value.module.NativeBootstrapProcessAdapter(value.policy)
+    waiting, release = asyncio.Event(), asyncio.Event()
+
+    async def reap():
+        waiting.set()
+        await release.wait()
+
+    async def discard(reader):
+        raise OSError("disposable-private-pipe-error")
+
+    async def spawn():
+        return SimpleNamespace(returncode=0, stdin=None, stdout=None, stderr=None, wait=reap)
+
+    monkeypatch.setattr(value.module, "_discard", discard)
+    cleanup = asyncio.create_task(adapter._cleanup(asyncio.create_task(spawn()), []))
+    try:
+        await asyncio.wait_for(waiting.wait(), 1)
+        # Give a premature gather failure a chance to propagate; the simulated
+        # reap must remain owned until its explicit release, even after IO error.
+        done, _pending = await asyncio.wait({cleanup}, timeout=0.05)
+        assert not done
+        release.set()
+        with pytest.raises(ValueError, match="unavailable or refused"):
+            await asyncio.wait_for(cleanup, 1)
+    finally:
+        release.set()
+        await asyncio.gather(cleanup, return_exceptions=True)
+        await adapter.aclose()
+
+
+async def test_failed_kill_retains_owned_child_and_close_can_retry(process_fixture, monkeypatch):
+    value = process_fixture
+    value.state.mode = "hang"
+    adapter = value.module.NativeBootstrapProcessAdapter(replace(value.policy, timeout_seconds=0.5))
+    request = asyncio.create_task(adapter.receive(value.payload))
+    process = original_kill = None
+    try:
+        await asyncio.wait_for(value.state.created.wait(), 3)
+        process = value.state.processes[0]
+        original_kill = process.kill
+
+        def refuse_kill():
+            raise PermissionError("disposable-private-kill-detail")
+
+        monkeypatch.setattr(process, "kill", refuse_kill)
+        with pytest.raises(ValueError, match="unavailable or refused"):
+            await asyncio.wait_for(request, 3)
+        assert process.returncode is None
+        assert adapter.active_operations > 0
+        with pytest.raises(ValueError):
+            await adapter.receive(value.payload)
+        assert len(value.state.calls) == 1
+        with pytest.raises(ValueError, match="unavailable or refused"):
+            await asyncio.wait_for(adapter.aclose(), 3)
+        os.fstat(value.state.descriptors[0])
+        assert adapter.active_operations > 0 and process.returncode is None
+        monkeypatch.setattr(process, "kill", original_kill)
+        await asyncio.wait_for(adapter.aclose(), 3)
+        assert process.returncode is not None
+        assert adapter.active_operations == 0
+    finally:
+        if original_kill is not None:
+            monkeypatch.setattr(process, "kill", original_kill)
+            if process.returncode is None:
+                process.kill()
+            await process.communicate()
+        request.cancel()
+        await asyncio.gather(request, return_exceptions=True)
+        await adapter.aclose()
+
+
+async def test_cancelled_close_retains_spawn_slot_and_descriptor(process_fixture):
+    value = process_fixture
+    value.state.mode, value.state.delay_handoff = "hang", True
+    adapter = value.module.NativeBootstrapProcessAdapter(replace(value.policy, maximum_processes=1))
+    request = asyncio.create_task(adapter.receive(value.payload))
+    close = None
+    try:
+        await asyncio.wait_for(value.state.created.wait(), 3)
+        with pytest.raises(ValueError):
+            await adapter.receive(value.payload)
+        assert len(value.state.calls) == 1
+        close = asyncio.create_task(adapter.aclose())
+        await asyncio.sleep(0)
+        close.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await close
+        assert adapter.active_operations > 0
+        os.fstat(value.state.descriptors[0])
+        value.state.release.set()
+        await asyncio.wait_for(adapter.aclose(), 5)
+        assert value.state.processes[0].returncode is not None
+        assert adapter.active_operations == 0
+        with pytest.raises(OSError):
+            os.fstat(value.state.descriptors[0])
+    finally:
+        value.state.release.set()
+        request.cancel()
+        await asyncio.gather(request, return_exceptions=True)
+        await adapter.aclose()
