@@ -90,7 +90,9 @@ if override is not None:
     sys.stdout.write(override)
     raise SystemExit(0)
 
-if command == "scontrol":
+if command == "scontrol" and "--json=v0.0.40" in sys.argv:
+    sys.stdout.write(state["native_job_output"])
+elif command == "scontrol":
     sys.stdout.write(
         "Configuration data as of 2026-08-13T12:00:00\n"
         "AccountingStorageType = accounting_storage/slurmdbd\n"
