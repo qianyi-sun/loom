@@ -362,6 +362,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         if build_admission is not None:
             app.state.personal_dev_build_admission_sessions = build_admission.sessions
             app.state.personal_dev_build_admission_verifier = build_admission.verifier
+            app.state.personal_dev_build_admission_mode = build_admission.mode
         admin_secret_verifier = _load_admin_secret_verifier(settings)
         if settings.pipeline_stage1_smoke_public_key_file is not None:
             app.state.pipeline_stage1_smoke_verifier = load_stage1_smoke_signature_verifier(
@@ -644,6 +645,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             # access before closing its resources, including failed startup.
             app.state.personal_dev_build_admission_sessions = None
             app.state.personal_dev_build_admission_verifier = None
+            app.state.personal_dev_build_admission_mode = None
             for attribute in (
                 "_owned_personal_dev_build_admission",
                 "_owned_service_gateway_client",

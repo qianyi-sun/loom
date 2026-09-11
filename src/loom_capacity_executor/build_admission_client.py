@@ -11,14 +11,19 @@ import httpx
 from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
     ExecutablePreparedBootstrapRevocationV2,
+    ExecutableWorkerRegistrationV2,
     ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
     PreparedExecutableAdmissionV2,
     ProtectedIntentObservationV2,
+    RegisteredExecutableWorkerV2,
     RevokedExecutableBootstrapV2,
     WithdrawnExecutableWorkerV2,
 )
-from loom_capacity_agent.build_admission import BuildPreparationRequestV1
+from loom_capacity_agent.build_admission import (
+    BuildPreparationRequestV1,
+    BuildRegistrationRequestV1,
+)
 from loom_capacity_agent.client import (
     DemandReporterConnection,
     build_reporter_tls_context,
@@ -72,7 +77,7 @@ def _validate_connection(origin: str, token: str, timeout: float) -> str:
 
 
 class BuildAdmissionClient:
-    """Preparation/physical binding only; no claim, exchange or worker secret."""
+    """Pool-authenticated native lifecycle; no application DB or source access."""
 
     def __init__(self, identity: BuildAdmissionExecutorV1, *, origin: str,
         bearer_token: str, http_client: httpx.AsyncClient, owns_http_client: bool = False,
@@ -158,6 +163,26 @@ class BuildAdmissionClient:
             or receipt.bootstrap_registration_epoch != request.bootstrap_registration_epoch
             or receipt.bootstrap_sha256 != bootstrap_sha256 or receipt.request_digest != digest or receipt.admission_digest != digest):
             raise BuildAdmissionTransportError("build admission preparation receipt binding changed")
+        return receipt
+
+    async def register_worker(self, request: ExecutableWorkerRegistrationV2, *,
+        bootstrap_capability: str,
+    ) -> RegisteredExecutableWorkerV2:
+        try:
+            envelope = BuildRegistrationRequestV1.model_validate_json(BuildRegistrationRequestV1(
+                registration=request, bootstrap_capability=bootstrap_capability).model_dump_json())
+        except ValueError:
+            raise ValueError("build registration request is invalid") from None
+        request = envelope.registration
+        receipt = await self._post(request.binding, "register", canonical_bytes(envelope), RegisteredExecutableWorkerV2)
+        digest = canonical_executable_digest(request)
+        if (receipt.subject_id != request.binding.subject_id or receipt.subject_incarnation != request.binding.subject_incarnation
+            or receipt.intent_id != request.binding.intent_id or receipt.worker_id != request.worker_id
+            or receipt.worker_incarnation != request.worker_incarnation
+            or receipt.predecessor_worker_incarnation != request.predecessor_worker_incarnation
+            or receipt.protected_registration_epoch != request.protected_registration_epoch
+            or receipt.request_digest != digest or receipt.registration_digest != digest):
+            raise BuildAdmissionTransportError("build admission registration binding changed")
         return receipt
 
     async def bind_slurm_job(self, request: PhysicalJobBindingV2) -> BoundExecutableWorkerV2:

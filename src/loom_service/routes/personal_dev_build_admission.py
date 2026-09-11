@@ -1,4 +1,4 @@
-"""Controller-authenticated native build admission; no worker/source credentials."""
+"""Controller-authenticated native build admission; no application/source grants."""
 
 from __future__ import annotations
 
@@ -16,7 +16,10 @@ from loom_capacity_agent.admission import (
     ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
 )
-from loom_capacity_agent.build_admission import BuildPreparationRequestV1
+from loom_capacity_agent.build_admission import (
+    BuildPreparationRequestV1,
+    BuildRegistrationRequestV1,
+)
 from loom_capacity_build_guard.execution_store import BuildGuardExecutionStore
 from loom_capacity_manager.auth import AuthorizationError, CapacityPrincipalVerifier
 from loom_capacity_manager.executable_contracts import (
@@ -33,7 +36,7 @@ async def _admit(
     *,
     pool_id: str,
     intent_id: UUID,
-    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap", "withdraw"],
+    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap", "withdraw", "register"],
 ) -> Response:
     sessions = getattr(request.app.state, "personal_dev_build_admission_sessions", None)
     verifier = getattr(request.app.state, "personal_dev_build_admission_verifier", None)
@@ -41,6 +44,10 @@ async def _admit(
         verifier, CapacityPrincipalVerifier
     ):
         raise HTTPException(503, "build admission unavailable")
+    if operation_name == "register" and getattr(
+        request.app.state, "personal_dev_build_admission_mode", None
+    ) != "native-registration":
+        raise HTTPException(503, "build registration unavailable")
     if request.url.scheme != "https":
         raise HTTPException(403, "build admission requires TLS")
     if len(request.headers.getlist("authorization")) != 1:
@@ -59,13 +66,19 @@ async def _admit(
                     raise HTTPException(413, "build admission request exceeds byte bound")
                 body.extend(chunk)
             try:
+                registration = (
+                    BuildRegistrationRequestV1.model_validate_json(bytes(body))
+                    if operation_name == "register" else None
+                )
                 preparation = (
                     BuildPreparationRequestV1.model_validate_json(bytes(body))
                     if operation_name == "prepare"
                     else None
                 )
                 operation = (
-                    preparation.registration
+                    registration.registration
+                    if registration is not None
+                    else preparation.registration
                     if preparation is not None
                     else ExecutableIntentBindingV2.model_validate_json(bytes(body))
                     if operation_name == "observe"
@@ -95,7 +108,11 @@ async def _admit(
                 await session.execute(text("SET LOCAL statement_timeout='10000ms'"))
                 await session.execute(text("SET LOCAL lock_timeout='5000ms'"))
                 store = BuildGuardExecutionStore(session, binding=binding)
-                if preparation is not None:
+                if registration is not None:
+                    wire = canonical_executable_bytes(await store.register_worker(
+                        registration.registration, bootstrap_capability=registration.bootstrap_capability
+                    ))
+                elif preparation is not None:
                     wire = canonical_executable_bytes(
                         await store.prepare_worker(
                             preparation.registration, bootstrap_sha256=preparation.bootstrap_sha256
@@ -146,3 +163,8 @@ async def revoke_build_bootstrap(request: Request, pool_id: str, intent_id: UUID
 @router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/withdraw")
 async def withdraw_build_worker(request: Request, pool_id: str, intent_id: UUID) -> Response:
     return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="withdraw")
+
+
+@router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/register")
+async def register_build_worker(request: Request, pool_id: str, intent_id: UUID) -> Response:
+    return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="register")

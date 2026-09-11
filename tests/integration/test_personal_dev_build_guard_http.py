@@ -203,23 +203,37 @@ async def test_real_service_mounts_admission_closed_by_default(monkeypatch):
     assert result.status_code == 503
 
 
-async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_input,tmp_path,monkeypatch):
+@pytest.mark.parametrize("operation", ["prepare", "register"])
+async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_input,tmp_path,monkeypatch,operation):
     from sqlalchemy import event
 
     factory, engine, _installation, _plan, _source, _request = prepared_input
-    registration,digest = await admitted(prepared_input)
+    if operation == "register":
+        from tests.integration.test_personal_dev_build_guard_registration import (
+            BOOTSTRAP,
+            registration_input,
+        )
+
+        registration, _physical = await registration_input(prepared_input, monkeypatch)
+        payload = {"schema_version": 1, "registration": registration.model_dump(mode="json"),
+            "bootstrap_capability": BOOTSTRAP}
+    else:
+        registration,digest = await admitted(prepared_input)
+        payload = preparation(registration, digest)
     app = application(prepared_input,tmp_path)
+    app.state.personal_dev_build_admission_mode = "native-registration"
     reached_outer_commit = []
     store_completed = []
     store_type = import_module("loom_capacity_build_guard.execution_store").BuildGuardExecutionStore
-    original = store_type.prepare_worker
+    method = "register_worker" if operation == "register" else "prepare_worker"
+    original = getattr(store_type, method)
 
     async def prepare_then_observe(*args,**kwargs):
         receipt = await original(*args,**kwargs)
         store_completed.append(True)
         return receipt
 
-    monkeypatch.setattr(store_type,"prepare_worker",prepare_then_observe)
+    monkeypatch.setattr(store_type,method,prepare_then_observe)
 
     def fail_commit(session):
         if session.in_nested_transaction():
@@ -233,24 +247,28 @@ async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_inpu
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="https://management.test",
             headers={"Authorization":"Bearer executor-secret"}) as client:
-            result = await client.post(route(registration,"prepare"),json=preparation(registration,digest))
+            result = await client.post(route(registration,operation),json=payload)
         assert result.status_code == 409
         assert reached_outer_commit == [True]
         assert "admission_digest" not in result.text
+        assert "registration_digest" not in result.text
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == 0
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == (2 if operation == "register" else 0)
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_registrations")) == 0
     finally:
         event.remove(target,"before_commit",fail_commit)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="https://management.test",
         headers={"Authorization":"Bearer executor-secret"}) as client:
-        assert (await client.post(route(registration,"prepare"),json=preparation(registration,digest))).status_code == 200
+        assert (await client.post(route(registration,operation),json=payload)).status_code == 200
 
 
 @pytest.mark.parametrize("pinned", [False,True,"typed"])
-async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepared_input,tmp_path,pinned):
+@pytest.mark.parametrize("register", [False, True])
+async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepared_input,tmp_path,pinned,register,monkeypatch):
     import asyncio
     import socket
     import ssl
+    from hashlib import sha256
 
     import uvicorn
     from cryptography.hazmat.primitives import serialization
@@ -260,16 +278,22 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
         BuildAdmissionClient,
         BuildAdmissionExecutorV1,
     )
+    from tests.integration import test_personal_dev_build_guard_execution as execution
     from tests.integration.test_capacity_manager_mtls import (
         _new_ca,
         _private_key_bytes,
         _signed_certificate,
         _write,
     )
+    from tests.integration.test_personal_dev_build_guard_registration import BOOTSTRAP
 
+    original = execution.bootstrap
+    monkeypatch.setattr(execution, "bootstrap", lambda proposal: original(proposal).model_copy(
+        update={"bootstrap_sha256": sha256(BOOTSTRAP.encode("ascii")).hexdigest()}))
     _factory,engine,_installation,_plan,_source,_request = prepared_input
     registration,digest = await admitted(prepared_input)
     app = application(prepared_input,tmp_path)
+    app.state.personal_dev_build_admission_mode = "native-registration" if register else "prepare-bind-only"
     ca_key,ca = _new_ca("build-admission-ca")
     server_key,server_cert = _signed_certificate("localhost",ca_key,ca,server=True)
     client_key,client_cert = _signed_certificate("build-executor",ca_key,ca,server=False)
@@ -343,10 +367,19 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
         assert await client.observe_intent(binding) == observation
         from tests.integration.test_personal_dev_build_guard_withdrawal import withdrawal
 
-        withdraw = withdrawal(physical_request)
-        withdrawn = await client.withdraw_unregistered_worker(withdraw)
-        assert await client.withdraw_unregistered_worker(withdraw) == withdrawn
-        assert (await client.observe_intent(binding)).withdrawal == withdrawn
+        if register:
+            from tests.unit.test_capacity_build_admission_client import native_registration
+
+            worker = native_registration(binding.pool_id).model_copy(update={
+                "binding": binding, "slurm_job_id": physical_request.slurm_job_id})
+            registered = await client.register_worker(worker, bootstrap_capability=BOOTSTRAP)
+            assert await client.register_worker(worker, bootstrap_capability=BOOTSTRAP) == registered
+            assert (await client.observe_intent(binding)).worker_id == worker.worker_id
+        else:
+            withdraw = withdrawal(physical_request)
+            withdrawn = await client.withdraw_unregistered_worker(withdraw)
+            assert await client.withdraw_unregistered_worker(withdraw) == withdrawn
+            assert (await client.observe_intent(binding)).withdrawal == withdrawn
         # A valid bearer without its client certificate cannot reach the API.
         context = ssl.create_default_context(cafile=str(ca_path))
         async with httpx.AsyncClient(verify=context,trust_env=False,timeout=2) as unauthenticated:
@@ -355,7 +388,8 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
                     headers={"Authorization":"Bearer executor-secret"},json=preparation(registration,digest))
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == 2
-            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_withdrawals")) == 1
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_withdrawals")) == (0 if register else 1)
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_registrations")) == (1 if register else 0)
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
     finally:
         if client is not None and hasattr(client,"aclose"):

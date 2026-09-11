@@ -286,13 +286,25 @@ activation remain to be connected; endpoint presence does not enable build intak
 Service startup can install these private sessions with the optional
 `LOOM_SVC_PERSONAL_DEV_BUILD_ADMISSION_CONFIG_FILE` and its exact
 `LOOM_SVC_PERSONAL_DEV_BUILD_ADMISSION_CONFIG_SHA256`. The canonical V1 document
-has `mode="prepare-bind-only"`, owner-only `database_url_file` and
+has `mode="prepare-bind-only"` (or explicit `"native-registration"`), owner-only `database_url_file` and
 `principals_file` paths, and their SHA-256 digests. The database URL requires
 verified PostgreSQL TLS. Startup checks the restricted agent and protected
-prepare/bind procedures, and rejects incomplete inputs or privilege drift.
+admission procedures, and rejects incomplete inputs or privilege drift. The
+registration mode additionally verifies the private registration procedure and
+its exact privileges before enabling the `register` endpoint; preparation-only
+configuration keeps that endpoint closed.
 The service owns this independent connection pool through normal shutdown and
 partial startup failure; it removes admission access before disposing the pool.
 This configuration never sets builder availability or enables source intake.
+
+The registration endpoint exchanges the sealed bootstrap capability over the same
+pool-authenticated mTLS transport. The trusted wrapper sends only the chosen
+worker credential's hash; the private guard authenticates the actual bootstrap
+capability and retains a committed allocation-bound registration. The pinned
+client checks exact subject, intent, worker incarnation, epoch and request digest
+on every receipt, including replay after a lost reply. The purpose router never
+falls back to application admission. Registration does not grant source access,
+claim work, release a hold, or open the public typed-execution interlock.
 
 Private guard revision `build_guard_0010` adds read-only exact-intent observation
 at the same path with the `observe` suffix. It requires committed preparation,

@@ -1,4 +1,4 @@
-"""Pinned, least-privileged management connection for prepare/bind only."""
+"""Pinned, least-privileged management connection for native admission."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from loom_service.config import LoomServiceSettings
 
 
 class BuildAdmissionServiceConfigV1(StrictV1Model):
-    mode: Literal["prepare-bind-only"]
+    mode: Literal["prepare-bind-only", "native-registration"]
     database_url_file: str
     database_url_sha256: Digest
     principals_file: str
@@ -54,12 +54,13 @@ class PersonalBuildAdmissionRuntime:
     engine: AsyncEngine
     sessions: async_sessionmaker[AsyncSession]
     verifier: CapacityPrincipalVerifier
+    mode: Literal["prepare-bind-only", "native-registration"]
 
     async def aclose(self) -> None:
         await self.engine.dispose()
 
 
-async def _assert_private_agent(connection: AsyncConnection) -> None:
+async def _assert_private_agent(connection: AsyncConnection, *, registration_enabled: bool = False) -> None:
     safe = await connection.scalar(
         text("""
         SELECT rolcanlogin AND NOT (rolinherit OR rolsuper OR rolcreatedb OR rolcreaterole
@@ -100,13 +101,16 @@ async def _assert_private_agent(connection: AsyncConnection) -> None:
     )
     if safe_schema is not True:
         raise RuntimeError("build admission agent has direct data privileges")
-    for signature in (
+    signatures: tuple[str, ...] = (
         "prepare_worker(uuid,jsonb,bytea,text,text)",
         "bind_slurm_job(uuid,jsonb,bytea,text)",
         "observe_intent(uuid,jsonb,bytea,text)",
         "revoke_prepared_bootstrap(uuid,jsonb,bytea,text)",
         "withdraw_unregistered_worker(uuid,jsonb,bytea,text)",
-    ):
+    )
+    if registration_enabled:
+        signatures += ("register_worker(uuid,jsonb,bytea,text,text)",)
+    for signature in signatures:
         callable_safe = await connection.scalar(
             text("""
             SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
@@ -160,10 +164,10 @@ async def build_personal_build_admission_runtime(
         async with asyncio.timeout(30), engine.connect() as connection:
             await connection.execute(text("SET LOCAL statement_timeout='10000ms'"))
             await connection.execute(text("SET LOCAL lock_timeout='5000ms'"))
-            await _assert_private_agent(connection)
+            await _assert_private_agent(connection, registration_enabled=config.mode == "native-registration")
     except BaseException:
         await engine.dispose()
         raise
     return PersonalBuildAdmissionRuntime(
-        engine, async_sessionmaker(engine, expire_on_commit=False), verifier
+        engine, async_sessionmaker(engine, expire_on_commit=False), verifier, config.mode
     )

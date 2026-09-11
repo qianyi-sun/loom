@@ -21,7 +21,7 @@ def test_service_owns_private_admission_through_startup_and_shutdown(monkeypatch
     async def close():
         events.append("admission-closed")
 
-    runtime = SimpleNamespace(sessions=object(), verifier=object(), aclose=close)
+    runtime = SimpleNamespace(sessions=object(), verifier=object(), aclose=close, mode="native-registration")
 
     async def build(settings):
         events.append("admission-built")
@@ -67,6 +67,7 @@ def test_service_owns_private_admission_through_startup_and_shutdown(monkeypatch
             if boundary == "normal":
                 assert app.state.personal_dev_build_admission_sessions is runtime.sessions
                 assert app.state.personal_dev_build_admission_verifier is runtime.verifier
+                assert app.state.personal_dev_build_admission_mode == "native-registration"
             else:
                 assert getattr(app.state, "personal_dev_build_admission_sessions", None) is None
                 assert getattr(app.state, "personal_dev_build_admission_verifier", None) is None
@@ -83,3 +84,4 @@ def test_service_owns_private_admission_through_startup_and_shutdown(monkeypatch
         assert "task-started" not in events
     assert getattr(app.state, "personal_dev_build_admission_sessions", None) is None
     assert getattr(app.state, "personal_dev_build_admission_verifier", None) is None
+    assert getattr(app.state, "personal_dev_build_admission_mode", None) is None
