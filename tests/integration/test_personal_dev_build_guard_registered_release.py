@@ -65,10 +65,14 @@ async def registered_release_input(values, monkeypatch, *, result="failed", drai
 
 @pytest.mark.parametrize("result", ["unclaimed", "artifact-ready", "failed", "cancelled", "interrupted"])
 async def test_registered_release_retirement_and_correct_post_release_demand(prepared_input, monkeypatch, result):
+    from loom_capacity_build_guard.artifact_resolver import BuildAcceptedArtifactResolver
     from loom_capacity_build_guard.plan_store import BuildGuardPlanStore
 
     factory, engine, installation, plan, source, platform = prepared_input
     request, _claim, terminal, _drain = await registered_release_input(prepared_input, monkeypatch, result=result)
+    resolver = BuildAcceptedArtifactResolver(session_factory=factory, installation=installation)
+    prior = await resolver.observe(source, platform=platform.platform)
+    assert (None if prior is None else prior.request.result) == (None if result == "unclaimed" else result)
     async with factory.begin() as session:
         released = await store(session, installation).acknowledge_release(request, current_worker_credential=CREDENTIAL)
         assert released.binding == request.binding and released.live_claim_count == 0
@@ -110,6 +114,15 @@ async def test_registered_release_retirement_and_correct_post_release_demand(pre
         following = BuildGuardPlanStore(session, installation=installation)
         if result in {"unclaimed", "failed", "interrupted"}:
             await following.prepare(successor, sources={platform.id: source})
+            from hashlib import sha256
+
+            from loom.personal_dev_build_platform_requests import canonical_build_source
+
+            wire = canonical_build_source(source)
+            with pytest.raises(DBAPIError, match="committed preparation"):
+                async with session.begin_nested():
+                    await session.scalar(text("SELECT loom_capacity_build_guard.read_platform_outcome(:installation,:request,CAST(:source AS jsonb),:wire,:digest)"),
+                        {"installation": installation.id, "request": platform.id, "source": wire.decode("ascii"), "wire": wire, "digest": sha256(wire).hexdigest()})
         else:
             with pytest.raises(DBAPIError, match="live lease changed"):
                 await following.prepare(successor, sources={platform.id: source})
@@ -118,6 +131,11 @@ async def test_registered_release_retirement_and_correct_post_release_demand(pre
         assert await retirement(session, installation).retire(witness) == receipt
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == int(result in {"unclaimed", "failed", "interrupted"})
+    current = await resolver.observe(source, platform=platform.platform)
+    if result in {"unclaimed", "failed", "interrupted"}:
+        assert current is None  # The new allocation, not an older failed claim.
+    else:
+        assert current == prior
 
 
 @pytest.mark.parametrize("boundary", ["credential", "live", "no-drain", "reporter", "epoch", "water", "binding", "replay"])

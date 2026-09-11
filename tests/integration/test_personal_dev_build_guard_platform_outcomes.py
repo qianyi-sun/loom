@@ -9,10 +9,16 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from loom.personal_dev_build_platform_requests import canonical_build_source
-from tests.integration.test_personal_dev_build_guard_installations import owner_sessions as owner_sessions
-from tests.integration.test_personal_dev_build_guard_migrations import build_guard_database as build_guard_database
+from tests.integration.test_personal_dev_build_guard_installations import (
+    owner_sessions as owner_sessions,
+)
+from tests.integration.test_personal_dev_build_guard_migrations import (
+    build_guard_database as build_guard_database,
+)
 from tests.integration.test_personal_dev_build_guard_prepare import prepared_input as prepared_input
-from tests.integration.test_personal_dev_build_guard_registered_release import registered_release_input
+from tests.integration.test_personal_dev_build_guard_registered_release import (
+    registered_release_input,
+)
 from tests.integration.test_personal_dev_native_builder_store import sessions as sessions
 
 
@@ -93,5 +99,5 @@ def test_platform_outcome_private_authority_and_upgrade_boundary(build_guard_dat
         "public": f"GRANT EXECUTE ON FUNCTION {signature} TO PUBLIC", "search-path": f"ALTER FUNCTION {signature} SET search_path=public"}
     with engine.begin() as connection:
         connection.exec_driver_sql(statements[boundary])
-    with pytest.raises(RuntimeError, match="privilege|surface"):
+    with pytest.raises(RuntimeError, match=r"privilege|surface"):
         command.upgrade(config, "head")

@@ -41,6 +41,9 @@ async def make_attempt_input(sessions, sealed_source, tmp_path):
     async with sessions.begin() as session:
         await session.execute(update(PersonalDevCandidate).where(PersonalDevCandidate.id == candidate.id).values(**values))
     member, runtime = build_service(tmp_path, registration)
+    identity = {"subject_id": uuid4(), "subject_incarnation": uuid4()}
+    member = member.model_copy(update={"configuration": member.configuration.model_copy(update=identity),
+        "acknowledgement": member.acknowledgement.model_copy(update=identity)})
     return registration, tmp_path / "sealed.tar", member, runtime
 
 
@@ -164,7 +167,8 @@ async def test_native_attempt_rejects_unbounded_timing_and_legacy_publication(at
             outcomes=outcomes, exporter=exporter, **timing)
 
 
-async def test_two_owner_whole_attempt_coordinators_route_heartbeat_finish_and_cancel_demand(sessions, sealed_source, tmp_path):
+@pytest.mark.parametrize("one_owner_fails", [False, True])
+async def test_two_owner_whole_attempt_coordinators_route_heartbeat_finish_and_cancel_demand(sessions, sealed_source, tmp_path, one_owner_fails):
     from contextlib import asynccontextmanager
 
     from loom.db.schema import PersonalDevCandidateBuildAttempt
@@ -176,6 +180,7 @@ async def test_two_owner_whole_attempt_coordinators_route_heartbeat_finish_and_c
     module = import_module("loom.personal_dev_native_attempt_executor")
     router_type = module.NativePersonalDevBuildExecutorRouter
     inputs = [await make_attempt_input(sessions, sealed_source, tmp_path) for _ in range(2)]
+    failed_owner = inputs[0][0].candidate.owner_user_id if one_owner_fails else None
     async with sessions.begin() as session:
         await session.execute(update(PersonalDevCandidateBuildAttempt).values(state="queued", claimed_by=None,
             lease_expires_at=None, started_at=None))
@@ -195,7 +200,7 @@ async def test_two_owner_whole_attempt_coordinators_route_heartbeat_finish_and_c
                 await asyncio.wait_for(release.wait(), timeout=5)
                 # Exercise coordinator heartbeats while both owners are waiting.
                 await asyncio.sleep(0.12)
-                return receipt_for(incoming, member, platform)
+                return receipt_for(incoming, member, platform, result="failed" if owner == failed_owner else "artifact-ready")
 
         outcomes = Outcomes()
 
@@ -230,12 +235,48 @@ async def test_two_owner_whole_attempt_coordinators_route_heartbeat_finish_and_c
     coordinators = [PersonalDevBuildCoordinator(authority=authority, source=source, executor=router,
         builder_id=f"native-coordinator-{index}", lease_seconds=10, heartbeat_interval_seconds=0.05) for index in range(2)]
     assert await asyncio.gather(*(item.build_once(now=datetime.now(UTC)) for item in coordinators)) == [True, True]
-    assert authority.heartbeats >= 2 and set(publications) == entered and len(publications) == 2
+    assert authority.heartbeats >= 2 and len(entered) == 2
+    assert set(publications) == entered - {failed_owner} and len(publications) == 2 - int(one_owner_fails)
     async with sessions() as session:
         attempts = (await session.scalars(select(PersonalDevCandidateBuildAttempt))).all()
         candidates = (await session.scalars(select(PersonalDevCandidate))).all()
         requests = (await session.scalars(select(PersonalDevBuildPlatformRequest))).all()
         assert len(attempts) == len(candidates) == 2 and len(requests) == 4
-        assert all(row.state == "succeeded" and row.lease_expires_at is None for row in attempts)
-        assert all(row.status == "ready" for row in candidates)
+        candidate_owners = {row.id: row.owner_user_id for row in candidates}
+        assert all(row.state == ("failed" if candidate_owners[row.candidate_id] == failed_owner else "succeeded")
+            and row.lease_expires_at is None for row in attempts)
+        assert all(row.status == ("failed" if row.owner_user_id == failed_owner else "ready") for row in candidates)
         assert all(row.cancelled_at is not None for row in requests)
+
+
+@pytest.mark.parametrize("boundary", ["empty", "wrong-owner", "duplicate-subject", "unknown-owner"])
+async def test_native_attempt_router_never_rebinds_or_falls_back(attempt_input, sessions, boundary):
+    from types import SimpleNamespace
+
+    module = import_module("loom.personal_dev_native_attempt_executor")
+    registration, archive, member, runtime = attempt_input
+    outcomes = object()
+    executor = module.NativePersonalDevBuildExecutor(session_factory=sessions, member=member, runtime=runtime,
+        outcomes=outcomes, exporter=SimpleNamespace(accepted_artifact_resolver=outcomes))
+    mapping = {member.owner_id: executor}
+    if boundary == "empty":
+        mapping.clear()
+    elif boundary == "wrong-owner":
+        mapping = {uuid4(): executor}
+    elif boundary == "duplicate-subject":
+        owner = uuid4()
+        other = member.model_copy(update={"owner_id": owner, "configuration": member.configuration.model_copy(
+            update={"account_id": f"dev-owner-{owner.hex}"})})
+        mapping[owner] = replace(executor, member=other)
+    if boundary != "unknown-owner":
+        with pytest.raises(ValueError, match="routing"):
+            module.NativePersonalDevBuildExecutorRouter(executors=mapping)
+        return
+    router = module.NativePersonalDevBuildExecutorRouter(executors=mapping)
+    foreign = replace(registration, candidate=replace(registration.candidate, owner_user_id=uuid4()))
+    with pytest.raises(ValueError, match="installation is unavailable"):
+        await router.build(foreign, source_archive=archive)
+    with pytest.raises(ValueError, match="installation is unavailable"):
+        await router.cleanup(foreign)
+    async with sessions() as session:
+        assert (await session.scalars(select(PersonalDevBuildPlatformRequest))).all() == []

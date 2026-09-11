@@ -2037,6 +2037,30 @@ task-image reservation.
 
 ## Implementation boundaries and acceptance
 
+Revision `build_guard_0030` adds the management-only `read_platform_outcome`
+reader. It rechecks the live source/lease/installation and observes the newest
+assignment for that exact platform request. Only absence of a claim or outcome
+is pending; committed failed, cancelled and interrupted outcomes remain distinct.
+An older failed allocation cannot mask its successor. The reader reuses the
+existing protected outcome contract, rejects uncommitted preparation and result
+history, and does not grant source access, execution or physical release.
+
+`NativePersonalDevBuildExecutor` adapts the existing whole-attempt coordinator to
+both native platform requests. It verifies sealed source, commits AMD64 and ARM64
+demand together, waits within a bounded deadline, and invokes trusted publication
+only after both exact artifact-ready outcomes. It requires the exporter to use
+the same native accepted-artifact resolver, checking that binding again before
+publication, to independently recheck and verify both outputs.
+The whole-attempt coordinator retains heartbeat and finalization authority and
+always invokes cleanup; cleanup cancels exact-lease demand, including a race with
+staging, while protected recovery retains physical workers and capacity charges.
+The immutable `NativePersonalDevBuildExecutorRouter` selects an installed owner
+scope for each globally claimed attempt. Unknown owners have no fallback. A
+replacement service router cannot change the cleanup scope of in-flight builds.
+This adapter does not enable membership intake. Allocation-contained KVM runtime,
+native artifact garbage collection and installed service composition still gate
+operational readiness.
+
 1. Deliver executable delegated **application** membership: versioned policy,
    durable log/projection, authenticated lifecycle endpoint, common allocation
    and executor integration. Existing V2 active-mutation rejection remains.

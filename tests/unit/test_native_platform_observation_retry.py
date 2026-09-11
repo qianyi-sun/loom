@@ -6,7 +6,10 @@ import pytest
 from sqlalchemy.exc import DBAPIError
 
 from loom_capacity_build_guard.artifact_resolver import BuildAcceptedArtifactResolver
-from loom_capacity_build_guard.installation_store import RetainedBuildInstallation, build_guard_installation_document
+from loom_capacity_build_guard.installation_store import (
+    RetainedBuildInstallation,
+    build_guard_installation_document,
+)
 from loom_capacity_manager.contracts import canonical_bytes
 from tests.integration.test_personal_dev_native_attempt_executor import receipt_for
 from tests.unit.test_personal_dev_build_admission import admission_input
