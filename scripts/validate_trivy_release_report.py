@@ -60,6 +60,7 @@ _PERL_BASE_COMPONENTS = (
     "worker",
 )
 _EMPTY_COMPONENTS = (
+    "harbor-runtime",
     "execution-runtime",
     "nebius-terminal-bench",
     "llm-gateway-sandbox",
@@ -184,7 +185,10 @@ def _policy_statements() -> dict[str, str]:
 def _validate_release_component(component: str) -> None:
     manifest = load_manifest(REPO_ROOT / "config/component-ownership.toml")
     owners = manifest.release_components()
-    if component == "nebius-terminal-bench":
+    if component == "harbor-runtime":
+        # The independent Nebius publisher owns this disabled legacy-CI image.
+        owners = tuple(item for item in manifest.components if item.kind == "release-image")
+    elif component == "nebius-terminal-bench":
         # Fixed workload published only by Nebius, with a runtime-payload owner.
         owners = tuple(item for item in manifest.components if item.kind == "runtime-payload-image")
     matches = tuple(item for item in owners if item.id == component)

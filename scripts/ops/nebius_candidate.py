@@ -54,11 +54,13 @@ COMPONENTS = {
     "gateway": "loom-llm-gateway",
     "execution_runtime": "loom-execution-runtime",
     "execution_actuator": "loom-execution-actuator",
-    "worker": "loom-worker",
+    "harbor_runtime": "loom-harbor-runtime",
     "tb90_task": "loom-nebius-terminal-bench",
 }
-EXECUTION_COMPONENTS = ("service", "execution_runtime", "worker", "tb90_task")
-LEGACY_COMPONENTS = frozenset(COMPONENTS) - {"worker", "tb90_task"}
+EXECUTION_COMPONENTS = ("service", "execution_runtime", "harbor_runtime", "tb90_task")
+LEGACY_COMPONENTS = frozenset(COMPONENTS) - {"harbor_runtime", "tb90_task"}
+HISTORICAL_COMPONENTS = LEGACY_COMPONENTS | {"worker", "tb90_task"}
+AGENT_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 REGISTRY = re.compile(r"cr\.[a-z0-9-]+\.nebius\.cloud/[a-z0-9]+\Z")
@@ -120,7 +122,7 @@ def _trusted_signer(path: Path, key_id: str, keyring_json: str) -> Ed25519Privat
     return key
 
 
-def validate_identity(document: dict[str, Any], *, require_current_images: bool = False) -> None:
+def validate_source_identity(document: dict[str, Any]) -> None:
     if (
         document.get("schema_version") != "loom.nebius-candidate.v1"
         or document.get("repository") != REPOSITORY
@@ -132,14 +134,18 @@ def validate_identity(document: dict[str, Any], *, require_current_images: bool 
         or REGISTRY.fullmatch(str(document.get("registry_prefix"))) is None
     ):
         raise ValueError("candidate source identity is invalid")
+
+
+def validate_identity(document: dict[str, Any], *, require_current_images: bool = False) -> None:
+    validate_source_identity(document)
     images = document.get("images")
     allowed = {frozenset(COMPONENTS)}
     if not require_current_images:
-        allowed.add(LEGACY_COMPONENTS)
+        allowed.update((LEGACY_COMPONENTS, HISTORICAL_COMPONENTS))
     if not isinstance(images, dict) or frozenset(images) not in allowed:
         raise ValueError("candidate must contain the configured platform and execution images")
     for component in images:
-        name = COMPONENTS[component]
+        name = "loom-worker" if component == "worker" else COMPONENTS[component]
         row = images[component]
         prefix = f"{document['registry_prefix']}/{name}@"
         if (
@@ -148,6 +154,80 @@ def validate_identity(document: dict[str, Any], *, require_current_images: bool 
             or DIGEST.fullmatch(str(row.get("image_ref", ""))[len(prefix) :]) is None
         ):
             raise ValueError(f"candidate image identity is invalid: {component}")
+
+
+def _sign_admission(
+    row: dict[str, Any], policy_sha256: str, provenance: str, *,
+    key: Ed25519PrivateKey, signing_key_id: str,
+) -> SignedImageAdmissionV1:
+    statement = ImageAdmissionStatementV1(
+        schema_version="loom.image-admission-statement.v1",
+        image_ref=row["image_ref"], platform="linux/x86_64",
+        sbom_sha256=row["sbom_sha256"],
+        vulnerability_report_sha256=row["vulnerability_report_sha256"],
+        provenance_sha256=provenance, policy_sha256=policy_sha256,
+        highest_vulnerability_severity=row["highest_vulnerability_severity"],
+        issued_at=datetime.now(UTC),
+        expires_at=datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC),
+    )
+    return SignedImageAdmissionV1(
+        statement=statement, signing_key_id=signing_key_id,
+        signature_base64=base64.b64encode(
+            key.sign(canonical_document(statement.model_dump(mode="json")))
+        ).decode(),
+    )
+
+
+def validate_runtime_metadata(metadata: dict[str, str]) -> None:
+    if (
+        metadata.get("agent_name") != "terminus-2"
+        or metadata.get("runtime_contract") != "loom.terminus-controller.v1"
+        or AGENT_VERSION.fullmatch(metadata.get("agent_version", "")) is None
+        or SHA.fullmatch(metadata.get("harbor_source_revision", "")) is None
+        or SHA.fullmatch(metadata.get("publisher_source_revision", "")) is None
+        or not metadata.get("harbor_version")
+        or not metadata.get("loom_bridge_revision")
+    ):
+        raise ValueError("runtime image metadata is invalid")
+
+
+def _runtime_release_payload(document: dict[str, Any]) -> dict[str, Any]:
+    """Prepare runtime metadata without creating a partial platform candidate."""
+    validate_source_identity(document)
+    if set(document.get("images", {})) != {"harbor_runtime"}:
+        raise ValueError("runtime release requires exactly one Harbor image")
+    metadata = document["runtime_metadata"]
+    validate_runtime_metadata(metadata)
+    if metadata["publisher_source_revision"] != document["candidate_sha"]:
+        raise ValueError("runtime metadata does not match its publisher source")
+    row = document["images"]["harbor_runtime"]
+    prefix = f"{document['registry_prefix']}/{COMPONENTS['harbor_runtime']}@"
+    ref = row["image_ref"]
+    if not ref.startswith(prefix) or DIGEST.fullmatch(ref[len(prefix):]) is None:
+        raise ValueError("runtime release image must be in the native Harbor repository")
+    result = {
+        "schema_version": "loom.agent-runtime-release.v1",
+        **{name: metadata[name] for name in (
+            "agent_name", "agent_version", "runtime_contract", "harbor_version",
+            "harbor_source_revision", "loom_bridge_revision", "publisher_source_revision",
+        )},
+        "agent_image_ref": ref,
+    }
+    return result
+
+
+def create_runtime_release(
+    document: dict[str, Any], *, signing_key: Path, signing_key_id: str, keyring_json: str,
+) -> dict[str, Any]:
+    """Sign a standalone release once; registration reuses this original record."""
+    result = _runtime_release_payload(document)
+    row = document["images"]["harbor_runtime"]
+    key = _trusted_signer(signing_key, signing_key_id, keyring_json)
+    result["image_admission"] = _sign_admission(
+        row, document["policy_sha256"], sha256(encoded(result)),
+        key=key, signing_key_id=signing_key_id,
+    ).model_dump(mode="json")
+    return result
 
 
 def create_candidate(
@@ -175,37 +255,17 @@ def create_candidate(
         component: {"image_ref": row["image_ref"]} for component, row in document["images"].items()
     }
     provenance = sha256(encoded(result))
-    now = datetime.now(UTC)
-    admissions = []
-    for component in EXECUTION_COMPONENTS:
-        row = document["images"][component]
-        statement = ImageAdmissionStatementV1(
-            schema_version="loom.image-admission-statement.v1",
-            image_ref=row["image_ref"],
-            platform="linux/x86_64",
-            sbom_sha256=row["sbom_sha256"],
-            vulnerability_report_sha256=row["vulnerability_report_sha256"],
-            provenance_sha256=provenance,
-            policy_sha256=document["policy_sha256"],
-            highest_vulnerability_severity=row["highest_vulnerability_severity"],
-            issued_at=now,
-            expires_at=datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC),
-        )
-        admissions.append(
-            SignedImageAdmissionV1(
-                statement=statement,
-                signing_key_id=signing_key_id,
-                signature_base64=base64.b64encode(
-                    key.sign(canonical_document(statement.model_dump(mode="json")))
-                ).decode(),
-            )
-        )
+    admissions = [
+        _sign_admission(document["images"][component], document["policy_sha256"], provenance,
+                        key=key, signing_key_id=signing_key_id)
+        for component in EXECUTION_COMPONENTS
+    ]
     profile = ServiceExecutionRuntimeProfileV1(
         candidate_sha=document["candidate_sha"],
         execution_class_id="linux-amd64-cpu-pod-v1",
         task_image_ref=document["images"]["service"]["image_ref"],
         runtime_image_ref=document["images"]["execution_runtime"]["image_ref"],
-        agent_image_ref=document["images"]["worker"]["image_ref"],
+        agent_image_ref=document["images"]["harbor_runtime"]["image_ref"],
         runtime_binary_sha256=document["runtime_binary_sha256"],
         image_admission=ExecutionImageAdmissionBundleV1(
             schema_version="loom.execution-image-admission.v1",
@@ -258,7 +318,8 @@ def _run(*command: str) -> str:
 
 
 def inspect_oci_archive(
-    archive: Path, *, candidate: str, runtime: bool = False
+    archive: Path, *, candidate: str, runtime: bool = False,
+    runtime_metadata: dict[str, str] | None = None,
 ) -> tuple[str, str | None]:
     """Bind the exact scanned OCI bytes; never execute an image to inspect it."""
     with tarfile.open(archive) as bundle:
@@ -293,6 +354,12 @@ def inspect_oci_archive(
             != candidate
         ):
             raise ValueError("built OCI image source/platform mismatch")
+        if runtime_metadata is not None:
+            labels = config.get("config", {}).get("Labels", {})
+            for field in ("agent_name", "agent_version", "runtime_contract", "harbor_version",
+                          "harbor_source_revision", "loom_bridge_revision"):
+                runtime_metadata[field] = labels.get("io.loom." + field, "")
+            runtime_metadata["publisher_source_revision"] = candidate
         binary_digest = None
         if runtime:
             import io
@@ -345,10 +412,22 @@ def build(args: argparse.Namespace) -> None:
     if _run("uname", "-m") != "x86_64":
         raise ValueError("Nebius release requires a native AMD64 runner")
     _trusted_signer(args.signing_key, args.signing_key_id, args.trusted_keyring.read_text())
+    mode = getattr(args, "mode", "platform")
+    version = getattr(args, "agent_version", None)
+    if mode == "harness-only" and not version:
+        raise ValueError("harness-only publication requires an explicit agent version")
+    version = version or "nebius-" + candidate
+    if AGENT_VERSION.fullmatch(version) is None:
+        raise ValueError("invalid agent version label")
     args.output.mkdir(parents=True, exist_ok=False)
     _diagnostic_dir = args.output
-    rows = release_image_matrix(load_manifest(ROOT / "config/component-ownership.toml"))
+    manifest = load_manifest(ROOT / "config/component-ownership.toml")
+    rows = release_image_matrix(manifest)
     ownership = {row["image_name"]: row for row in rows}
+    harbor = next(component for component in manifest.components if component.id == "harbor-runtime")
+    ownership[COMPONENTS["harbor_runtime"]] = {
+        "image": harbor.id, "context": harbor.build_context, "dockerfile": harbor.dockerfile,
+    }
     # This workload belongs only to Nebius publication, not legacy dev/main releases.
     ownership[COMPONENTS["tb90_task"]] = {
         "image": "nebius-terminal-bench",
@@ -371,9 +450,11 @@ def build(args: argparse.Namespace) -> None:
         policy, exceptions = work / "trivy.yaml", work / "ignore.yaml"
         write_release_policy(policy, exceptions)
         document["policy_sha256"] = sha256(policy.read_bytes() + exceptions.read_bytes())
-        for component, name in COMPONENTS.items():
+        components = {"harbor_runtime": COMPONENTS["harbor_runtime"]} if mode == "harness-only" else COMPONENTS
+        for component, name in components.items():
             owner = ownership[name]
-            tag = f"{args.registry_prefix}/{name}:candidate-{candidate}"
+            tag_label = f"runtime-{candidate}-{document['run_id']}" if mode == "harness-only" else f"candidate-{candidate}"
+            tag = f"{args.registry_prefix}/{name}:{tag_label}"
             archive = Path(f"/tmp/{owner['image']}-amd64.release.docker.tar")
             if archive.exists():
                 raise ValueError("release archive already exists; use a clean ephemeral runner")
@@ -400,12 +481,21 @@ def build(args: argparse.Namespace) -> None:
                 f"label:org.opencontainers.image.revision={candidate}",
                 "--opt",
                 f"build-arg:LOOM_BUILD_SHA={candidate}",
+                *(["--opt", f"build-arg:LOOM_AGENT_VERSION={version}"]
+                  if component == "harbor_runtime" else []),
                 "--output",
                 f"type=oci,oci-mediatypes=true,name={tag},dest={archive}",
             )
+            metadata: dict[str, str] = {}
             scanned_digest, runtime_digest = inspect_oci_archive(
-                archive, candidate=candidate, runtime=component == "execution_runtime"
+                archive, candidate=candidate, runtime=component == "execution_runtime",
+                runtime_metadata=metadata if component == "harbor_runtime" else None,
             )
+            if component == "harbor_runtime":
+                validate_runtime_metadata(metadata)
+                if metadata["agent_version"] != version:
+                    raise ValueError("built runtime agent version does not match publication")
+                document["runtime_metadata"] = metadata
             with oci_scan_layout(
                 archive, Path(f"/tmp/{owner['image']}-amd64.release.oci")
             ) as layout:
@@ -476,14 +566,29 @@ def build(args: argparse.Namespace) -> None:
                     }
                 )
             archive.unlink()
-        manifest, profile = create_candidate(
-            document,
-            signing_key=args.signing_key,
-            signing_key_id=args.signing_key_id,
-            keyring_json=args.trusted_keyring.read_text(),
-        )
-        write_json(args.output / "candidate.json", manifest)
-        write_json(args.output / "runtime-profile.json", profile)
+        if mode == "harness-only":
+            release = create_runtime_release(
+                document, signing_key=args.signing_key,
+                signing_key_id=args.signing_key_id, keyring_json=args.trusted_keyring.read_text(),
+            )
+            write_json(args.output / "agent-runtime-release.json", release)
+        else:
+            manifest, profile = create_candidate(
+                document,
+                signing_key=args.signing_key,
+                signing_key_id=args.signing_key_id,
+                keyring_json=args.trusted_keyring.read_text(),
+            )
+            write_json(args.output / "candidate.json", manifest)
+            write_json(args.output / "runtime-profile.json", profile)
+            release = _runtime_release_payload({
+                **document, "images": {"harbor_runtime": document["images"]["harbor_runtime"]},
+            })
+            release["image_admission"] = next(
+                item for item in profile["image_admission"]["admissions"]
+                if item["statement"]["image_ref"] == release["agent_image_ref"]
+            )
+            write_json(args.output / "agent-runtime-release.json", release)
 
 
 def main() -> int:
@@ -493,18 +598,29 @@ def main() -> int:
     inspect.add_argument("--candidate", type=Path, required=True)
     create = commands.add_parser("create")
     create.add_argument("--build-record", type=Path, required=True)
+    release = commands.add_parser("create-runtime-release")
+    release.add_argument("--build-record", type=Path, required=True)
     builder = commands.add_parser("build")
+    builder.add_argument("--mode", choices=("platform", "harness-only"), default="platform")
+    builder.add_argument("--agent-version")
     builder.add_argument("--registry-prefix", required=True)
-    for command in (create, builder):
+    for command in (create, builder, release):
         command.add_argument("--signing-key", type=Path, required=True)
         command.add_argument("--signing-key-id", required=True)
         command.add_argument("--output", type=Path, required=True)
-    for command in (create, builder):
+    for command in (create, builder, release):
         command.add_argument("--trusted-keyring", type=Path, required=True)
     args = parser.parse_args()
     try:
         if args.command == "check-shape":
             validate_identity(read_json(args.candidate))
+        elif args.command == "create-runtime-release":
+            result = create_runtime_release(
+                read_json(args.build_record), signing_key=args.signing_key,
+                signing_key_id=args.signing_key_id, keyring_json=args.trusted_keyring.read_text(),
+            )
+            args.output.mkdir(parents=True, exist_ok=False)
+            write_json(args.output / "agent-runtime-release.json", result)
         elif args.command == "create":
             manifest, profile = create_candidate(
                 read_json(args.build_record),

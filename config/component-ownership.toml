@@ -745,6 +745,21 @@ runtime_policy = "conformance"
 rollout_role = "auxiliary"
 
 [[components]]
+id = "harbor-runtime"
+# Nebius publishes this separately; do not add it to the legacy release matrix.
+ci_enabled = false
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.harbor-runtime"
+build_context = "."
+source_paths = [".dockerignore", "deploy/Dockerfile.harbor-runtime", "deploy/harbor-runtime-requirements.txt", "deploy/patches/**", "src/loom/**"]
+smoke_owner = "worker-runtime-conformance"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-harbor-runtime"
+runtime_policy = "start"
+rollout_role = "none"
+
+[[components]]
 id = "worker"
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.worker"

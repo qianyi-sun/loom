@@ -2,6 +2,7 @@ FROM python:3.12-slim
 ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
 # Keep the existing Harbor compatibility version and current-user tool probes.
 ARG HARBOR_COMPAT_SHA=527d50deb63a5d279e8c20593c18a2cbc7f61f9e
+ARG HARBOR_VERSION=0.18.0
 WORKDIR /app
 COPY deploy/harbor-runtime-requirements.txt /tmp/harbor-runtime-requirements.txt
 COPY deploy/patches/harbor-current-user-tool-probes.patch /tmp/harbor-current-user-tool-probes.patch
@@ -13,7 +14,21 @@ RUN apt-get update -qq && \
     rm /tmp/harbor-runtime-requirements.txt /tmp/harbor-current-user-tool-probes.patch && \
     apt-get purge -y --auto-remove git patch && \
     rm -rf /var/lib/apt/lists/* && \
-    pip check
+    pip check && \
+    python -I -c "import importlib.metadata; assert importlib.metadata.version('harbor') == '${HARBOR_VERSION}'"
+ARG LOOM_BRIDGE_REVISION=1.0
+ARG LOOM_AGENT_VERSION=development
+ARG LOOM_BUILD_SHA=development
+ENV LOOM_HARBOR_SOURCE_REVISION=${HARBOR_COMPAT_SHA} \
+    LOOM_BRIDGE_REVISION=${LOOM_BRIDGE_REVISION} \
+    LOOM_AGENT_VERSION=${LOOM_AGENT_VERSION}
+LABEL org.opencontainers.image.revision=${LOOM_BUILD_SHA} \
+    io.loom.agent_name=terminus-2 \
+    io.loom.agent_version=${LOOM_AGENT_VERSION} \
+    io.loom.runtime_contract=loom.terminus-controller.v1 \
+    io.loom.harbor_version=${HARBOR_VERSION} \
+    io.loom.harbor_source_revision=${HARBOR_COMPAT_SHA} \
+    io.loom.loom_bridge_revision=${LOOM_BRIDGE_REVISION}
 # Install the whole Loom library at a trusted Python location. Isolated Python
 # ignores PYTHONPATH; no editable install, worker package or per-file copy list.
 COPY src/loom /usr/local/lib/python3.12/site-packages/loom

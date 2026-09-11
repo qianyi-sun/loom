@@ -1249,7 +1249,7 @@ def build_platform(
     if (
         profile.get("task_image_ref") != images["service"]
         or profile.get("runtime_image_ref") != images["execution_runtime"]
-        or profile.get("agent_image_ref") != images.get("worker")
+        or profile.get("agent_image_ref") != images.get("harbor_runtime", images.get("worker"))
     ):
         raise NebiusPlatformError("execution images do not match the deployed candidate")
     ns, ex = config["namespace"], config["execution_namespace"]
