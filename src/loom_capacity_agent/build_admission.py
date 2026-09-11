@@ -1,10 +1,11 @@
 """Purpose-specific management/executor build admission envelopes."""
 
 import base64
+from datetime import UTC, datetime
 from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from loom_capacity_agent.admission import ExecutableReleaseRequestV2, ExecutableWorkerRegistrationV2
 from loom_capacity_manager.contracts import Digest, PositiveQuantity, Quantity, StrictV1Model
@@ -88,6 +89,43 @@ class BuildSourceReadReceiptV1(StrictV1Model):
             or base64.b64encode(data).decode("ascii") != self.data_base64):
             raise ValueError("native source response bytes are invalid")
         return self
+
+
+class BuildSourceContextV1(StrictV1Model):
+    """Current claim-bound metadata, never a build-start or object-store permit.
+
+    source_sha256 already identifies the complete canonical source manifest;
+    the worker verifies it inside the sealed archive instead of receiving a
+    second, potentially large manifest through the admission channel.
+    """
+
+    claim_digest: Digest
+    request_id: UUID
+    source_binding_sha256: Digest
+    platform: Literal["linux/amd64", "linux/arm64"]
+    candidate_id: UUID
+    candidate_sha: Digest
+    source_sha256: Digest
+    archive_sha256: Digest
+    archive_size_bytes: PositiveQuantity
+    build_contract_sha256: Digest
+    source_commit: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+    dirty: bool
+    attempt_id: UUID
+    attempt_sequence: Quantity
+    lease_epoch: PositiveQuantity
+    subject_id: UUID
+    subject_incarnation: UUID
+    operation_id: UUID
+    operation_epoch: PositiveQuantity
+    lease_not_after: datetime
+
+    @field_validator("lease_not_after")
+    @classmethod
+    def _aware_deadline(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("native context deadline requires timezone")
+        return value.astimezone(UTC)
 
 
 class BuildOutcomeRequestV1(StrictV1Model):

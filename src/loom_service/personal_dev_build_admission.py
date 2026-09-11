@@ -172,7 +172,8 @@ async def build_personal_build_admission_runtime(
             await connection.execute(text("SET LOCAL lock_timeout='5000ms'"))
             await _assert_private_agent(connection, registration_enabled=config.mode != "prepare-bind-only",
                 claims_enabled=config.mode in {"native-claims", "native-source"},
-                additional_signatures=("authorize_source(uuid,jsonb,bytea,text,text)",)
+                additional_signatures=("authorize_source(uuid,jsonb,bytea,text,text)",
+                    "read_source_context(uuid,jsonb,bytea,text,text)")
                     if config.mode == "native-source" else ())
     except BaseException:
         await engine.dispose()

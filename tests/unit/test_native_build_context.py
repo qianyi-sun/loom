@@ -120,11 +120,12 @@ async def test_claim_context_stages_real_sealed_source_without_application_recor
             import asyncio
 
             raise asyncio.CancelledError
-        return httpx.Response(200, content=canonical_bytes({"schema_version": 1,
+        return httpx.Response(200, content=json.dumps({"schema_version": 1,
             "claim_digest": canonical_digest(claim), "archive_sha256": candidate.archive_sha256,
             "source_binding_sha256": "f" * 64 if boundary == "source-drift" else context.source_binding_sha256,
             "archive_size_bytes": len(archive), "offset": offset,
-            "data_base64": base64.b64encode(archive[offset:offset + length]).decode("ascii")}))
+            "data_base64": base64.b64encode(archive[offset:offset + length]).decode("ascii")},
+            sort_keys=True, separators=(",", ":")).encode("ascii"))
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
         module = import_module("loom_capacity_executor.native_build_source")
         source = module.NativeClaimBuildSource(client=client_for(http, claim), workspace=workspace,

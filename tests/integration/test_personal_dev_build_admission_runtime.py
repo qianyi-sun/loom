@@ -15,7 +15,7 @@ from tests.unit.test_personal_dev_build_admission_runtime import inputs, setting
 
 
 @pytest.mark.parametrize("privileged", [False, True])
-@pytest.mark.parametrize("mode", ["prepare-bind-only", "native-registration", "native-claims"])
+@pytest.mark.parametrize("mode", ["prepare-bind-only", "native-registration", "native-claims", "native-source"])
 async def test_runtime_accepts_only_private_agent_and_disposes_on_rejection(
     build_guard_database, owner_sessions, tmp_path, monkeypatch, privileged, mode
 ):
@@ -62,7 +62,7 @@ async def test_runtime_accepts_only_private_agent_and_disposes_on_rejection(
         assert disposed == created
 
 
-@pytest.mark.parametrize("boundary", ["foreign-prepare", "foreign-bind", "foreign-register", "foreign-claim", "foreign-drain", "foreign-outcome", "foreign-release", "owner-login", "owner-createdb", "owner-membership"])
+@pytest.mark.parametrize("boundary", ["foreign-prepare", "foreign-bind", "foreign-register", "foreign-claim", "foreign-drain", "foreign-outcome", "foreign-release", "foreign-context", "context-missing", "context-revoked", "owner-login", "owner-createdb", "owner-membership"])
 async def test_runtime_rejects_protected_authority_drift(
     build_guard_database, owner_sessions, tmp_path, monkeypatch, boundary
 ):
@@ -79,9 +79,14 @@ async def test_runtime_rejects_protected_authority_drift(
                 "foreign-claim": "claim_platform(uuid,jsonb,bytea,text,text)",
                 "foreign-drain": "begin_drain(uuid,jsonb,bytea,text)",
                 "foreign-outcome": "record_outcome(uuid,jsonb,bytea,text,text)",
+                "foreign-context": "read_source_context(uuid,jsonb,bytea,text,text)",
                 "foreign-release": "acknowledge_release(uuid,jsonb,bytea,text,text)"}[boundary]
             connection.exec_driver_sql(f"GRANT USAGE ON SCHEMA loom_capacity_build_guard TO {quote(foreign)}")
             connection.exec_driver_sql(f"GRANT EXECUTE ON FUNCTION loom_capacity_build_guard.{signature} TO {quote(foreign)}")
+        elif boundary == "context-missing":
+            connection.exec_driver_sql("DROP FUNCTION loom_capacity_build_guard.read_source_context(uuid,jsonb,bytea,text,text)")
+        elif boundary == "context-revoked":
+            connection.exec_driver_sql(f"REVOKE EXECUTE ON FUNCTION loom_capacity_build_guard.read_source_context(uuid,jsonb,bytea,text,text) FROM {quote(agent)}")
         elif boundary == "owner-login":
             connection.exec_driver_sql(f"ALTER ROLE {quote(owner)} LOGIN")
         elif boundary == "owner-createdb":
@@ -89,7 +94,7 @@ async def test_runtime_rejects_protected_authority_drift(
         else:
             connection.exec_driver_sql(f"GRANT {quote(foreign)} TO {quote(owner)}")
     document, _, _ = inputs(tmp_path)
-    document["mode"] = "native-claims"
+    document["mode"] = "native-source" if "context" in boundary else "native-claims"
     configured = settings(tmp_path, document)
     created = []
 

@@ -27,6 +27,7 @@ from loom_capacity_agent.admission import (
 from loom_capacity_agent.build_admission import (
     BuildClaimRequestV1,
     BuildOutcomeRequestV1,
+    BuildSourceContextV1,
     BuildSourceReadReceiptV1,
 )
 from loom_capacity_agent.claim_guard import ExecutableClaimProposalV2
@@ -97,7 +98,7 @@ class TypedAdmissionDirectoryV3(_StrictLaunchV3):
 _BUILD_CONSUMERS = frozenset({
     "prepare_worker", "bind_slurm_job", "observe_intent", "revoke_prepared_bootstrap",
     "withdraw_unregistered_worker", "register_worker", "claim_platform", "begin_drain", "record_outcome", "acknowledge_release",
-    "read_source",
+    "read_source", "read_source_context",
 })
 
 
@@ -226,4 +227,12 @@ class TypedAdmissionRouter:
             worker_credential=worker_credential, offset=offset, length=length)
         if not isinstance(receipt, BuildSourceReadReceiptV1):
             raise ValueError("native source route returned an invalid receipt")
+        return receipt
+
+    async def read_source_context(self, claim: BuildClaimRequestV1, *, worker_credential: str) -> BuildSourceContextV1:
+        if self.purpose(claim.binding) != "personal-build-worker":
+            raise ValueError("native context requires a build-purpose route")
+        receipt = await self._call(claim.binding, "read_source_context", claim, worker_credential=worker_credential)
+        if not isinstance(receipt, BuildSourceContextV1):
+            raise ValueError("native context route returned an invalid receipt")
         return receipt

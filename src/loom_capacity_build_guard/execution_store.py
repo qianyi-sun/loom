@@ -31,6 +31,7 @@ from loom_capacity_agent.build_admission import (
     BuildClaimRequestV1,
     BuildOutcomeReceiptV1,
     BuildOutcomeRequestV1,
+    BuildSourceContextV1,
 )
 from loom_capacity_build_guard.installation_store import (
     BuildGuardInstallationV1,
@@ -271,6 +272,26 @@ class BuildGuardExecutionStore:
             if (canonical_bytes(receipt).decode("ascii") != returned or receipt.claim != request
                 or receipt.claim_digest != digest):
                 raise ValueError("native source receipt changed")
+            return receipt
+
+    async def read_source_context(self, request: BuildClaimRequestV1, *, worker_credential: str) -> BuildSourceContextV1:
+        """Return only the allocated claim's current compact build metadata."""
+        if not self._session.in_transaction():
+            raise ValueError("native context requires an outer transaction")
+        request = BuildClaimRequestV1.model_validate_json(request.model_dump_json())
+        if not isinstance(worker_credential, str) or re.fullmatch(r"[A-Za-z0-9_-]{43,512}", worker_credential) is None:
+            raise ValueError("native context credential is invalid")
+        wire, digest = canonical_bytes(request), canonical_digest(request)
+        async with self._session.begin_nested():
+            returned = await self._session.scalar(text("""SELECT loom_capacity_build_guard.read_source_context(
+                :installation,CAST(:payload AS jsonb),:wire,:digest,:credential)"""),
+                {"installation": self._installation.id, "payload": wire.decode("ascii"), "wire": wire,
+                    "digest": digest, "credential": sha256(worker_credential.encode("ascii")).hexdigest()})
+            receipt = BuildSourceContextV1.model_validate_json(returned)
+            if (canonical_bytes(receipt).decode("ascii") != returned or receipt.request_id != request.request_id
+                or receipt.claim_digest != digest
+                or request.binding.pool_id != ("gb10" if receipt.platform == "linux/arm64" else "oldlab")):
+                raise ValueError("native context receipt changed")
             return receipt
 
     async def revoke_prepared_bootstrap(self, request: ExecutablePreparedBootstrapRevocationV2) -> RevokedExecutableBootstrapV2:

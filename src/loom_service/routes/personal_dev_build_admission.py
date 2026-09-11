@@ -47,7 +47,7 @@ async def _admit(
     *,
     pool_id: str,
     intent_id: UUID,
-    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap", "withdraw", "register", "claim", "drain", "outcome", "release", "source"],
+    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap", "withdraw", "register", "claim", "drain", "outcome", "release", "source", "context"],
 ) -> Response:
     sessions = getattr(request.app.state, "personal_dev_build_admission_sessions", None)
     verifier = getattr(request.app.state, "personal_dev_build_admission_verifier", None)
@@ -64,6 +64,8 @@ async def _admit(
     ) not in {"native-claims", "native-source"}:
         raise HTTPException(503, "native claims unavailable")
     source_reader = getattr(request.app.state, "personal_dev_build_source_reader", None)
+    if operation_name == "context" and getattr(request.app.state, "personal_dev_build_admission_mode", None) != "native-source":
+        raise HTTPException(503, "native context unavailable")
     if operation_name == "source" and (
         getattr(request.app.state, "personal_dev_build_admission_mode", None) != "native-source"
         or not isinstance(source_reader, BuildSourceReader)
@@ -101,7 +103,7 @@ async def _admit(
                 )
                 claim = (
                     BuildClaimExchangeV1.model_validate_json(bytes(body))
-                    if operation_name == "claim" else None
+                    if operation_name in {"claim", "context"} else None
                 )
                 registration = (
                     BuildRegistrationRequestV1.model_validate_json(bytes(body))
@@ -171,6 +173,9 @@ async def _admit(
                 elif outcome is not None:
                     wire = canonical_bytes(await store.record_outcome(
                         outcome.outcome, worker_credential=outcome.worker_credential))
+                elif claim is not None and operation_name == "context":
+                    wire = canonical_bytes(await store.read_source_context(
+                        claim.claim, worker_credential=claim.worker_credential))
                 elif claim is not None:
                     wire = canonical_bytes(await store.claim_platform(
                         claim.claim, worker_credential=claim.worker_credential))
@@ -199,7 +204,8 @@ async def _admit(
                     wire = canonical_executable_bytes(await store.bind_slurm_job(operation))
             # Context exit commits. Never send a preparation receipt from an
             # uncommitted transaction that could be followed by scheduler submit.
-            return Response(wire, media_type="application/json")
+            return Response(wire, media_type="application/json",
+                headers={"Cache-Control": "no-store"} if operation_name == "context" else None)
     except (DBAPIError, ValueError):
         raise HTTPException(409, "build admission evidence unavailable or changed") from None
     except (TimeoutError, PoolTimeoutError, BotoCoreError, ClientError):
@@ -214,6 +220,11 @@ async def prepare_build(request: Request, pool_id: str, intent_id: UUID) -> Resp
 @router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/source")
 async def read_build_source(request: Request, pool_id: str, intent_id: UUID) -> Response:
     return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="source")
+
+
+@router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/context")
+async def read_build_context(request: Request, pool_id: str, intent_id: UUID) -> Response:
+    return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="context")
 
 
 @router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/bind")

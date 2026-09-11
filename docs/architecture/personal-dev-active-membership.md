@@ -554,7 +554,8 @@ authority or invents a new retry key. Legacy application routes are unchanged.
 This is membership transport, not scope installation or native build readiness.
 
 The private admission configuration's explicit `native-source` mode adds bounded
-source reads to `native-claims`; existing modes do not enable this surface.
+source and compact context reads to `native-claims`; existing modes do not enable
+these surfaces. Startup checks both private procedure ACLs.
 Revision `build_guard_0027` checks the exact committed claim, registered worker
 credential, assignment and current source/whole-attempt lease. Historical claim
 replay never renews source access. Drain, physical terminal evidence, any outcome
@@ -589,9 +590,29 @@ before yielding any path. It extracts nothing on the host. The yielded path is
 valid only in the caller's context; pass its contents into the sandbox.
 Normal exit, failed transfer/verification and cancellation remove temporary data.
 Cancellation waits for filesystem threads, including a late failing verifier,
-before cleanup. This adapter still needs the protected full worker-contract
-handoff and allocation-contained execution entrypoint; staging success grants
-neither execution authority nor candidate publication.
+before cleanup.
+
+Revision `build_guard_0028` adds
+`POST /api/v1/internal/capacity-build/pools/{pool_id}/intents/{intent_id}/context`
+under the same TLS pool-executor and worker-credential boundary. Its private
+procedure calls the live source fence and reads the exact candidate/attempt rows
+under the same serializable transaction and locks. The compact response binds
+the claim, platform, source/archive identities and build-attempt metadata; it
+contains no object coordinates, credentials or reusable URL. The existing
+`source_sha256` already identifies the full canonical manifest inside the sealed
+archive, so no second manifest transfer or protocol byte-limit expansion is
+needed. Unicode paths and large manifests remain inside the archive.
+
+`NativeClaimBuildSource.stage_claim` obtains this context through the pinned
+client or purpose-aware router, verifies the exact claim/platform and fixed
+build contract, enforces the protected source-size limit, and uses the same
+private staging/cleanup path. It verifies the complete archive, manifest digest,
+every archived file, source commit and dirty marker before yielding context and
+archive together. It does not fabricate application records or require worker
+database access. Legacy registration-based staging retains its full manifest
+equality check. Context/source reads do not extend leases; neither is permission
+to start a build or publish an artifact. Claim discovery/launcher handoff and
+allocation-contained execution still need their actual runtime connection.
 
 `BuildManagementRuntime` composes installation-scoped terminal recovery, protected
 release publication, final retirement, demand reporting, bootstrap registration

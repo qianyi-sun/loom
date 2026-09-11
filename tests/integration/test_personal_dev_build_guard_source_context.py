@@ -11,8 +11,12 @@ from loom_capacity_agent.build_admission import BuildOutcomeRequestV1
 from loom_capacity_manager.contracts import canonical_digest
 from tests.integration.test_personal_dev_build_guard_claims import claim_input
 from tests.integration.test_personal_dev_build_guard_execution import store
-from tests.integration.test_personal_dev_build_guard_installations import owner_sessions as owner_sessions
-from tests.integration.test_personal_dev_build_guard_migrations import build_guard_database as build_guard_database
+from tests.integration.test_personal_dev_build_guard_installations import (
+    owner_sessions as owner_sessions,
+)
+from tests.integration.test_personal_dev_build_guard_migrations import (
+    build_guard_database as build_guard_database,
+)
 from tests.integration.test_personal_dev_build_guard_prepare import prepared_input as prepared_input
 from tests.integration.test_personal_dev_build_guard_registration import CREDENTIAL
 from tests.integration.test_personal_dev_native_builder_store import sessions as sessions
@@ -72,7 +76,7 @@ async def test_native_context_is_compact_and_requires_current_claim(prepared_inp
             assert forbidden not in payload
 
 
-@pytest.mark.parametrize("boundary", ["exact", "disabled", "credential", "cancelled"])
+@pytest.mark.parametrize("boundary", ["exact", "disabled", "credential", "cancelled", "controller", "http"])
 async def test_native_context_crosses_protected_http_only_for_live_claim(prepared_input, tmp_path, monkeypatch, boundary):
     import httpx
 
@@ -93,6 +97,10 @@ async def test_native_context_crosses_protected_http_only_for_live_claim(prepare
         responses.append(response)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), event_hooks={"response": [capture]}) as http:
         client = client_for(http, claim)
+        client._token = "wrong" if boundary == "controller" else "executor-secret"
+        if boundary == "http":
+            # Exercise server TLS enforcement; production client rejects this origin.
+            client._origin = "http://management.test"
         if boundary == "exact":
             context = await client.read_source_context(claim, worker_credential=CREDENTIAL)
             assert context.candidate_id == source.candidate.id
@@ -100,6 +108,7 @@ async def test_native_context_crosses_protected_http_only_for_live_claim(prepare
         else:
             with pytest.raises(RuntimeError):
                 await client.read_source_context(claim, worker_credential="x" * 43 if boundary == "credential" else CREDENTIAL)
+            assert responses[0].status_code == {"disabled": 503, "controller": 401, "http": 403}.get(boundary, 409)
 
 
 @pytest.mark.parametrize("boundary", ["execute", "public", "search-path"])

@@ -9,18 +9,27 @@ import stat
 import tempfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import ParamSpec, Protocol, TypeVar
 
 from loom.personal_dev_build_demand import personal_build_work_identity
 from loom.personal_dev_build_platform_requests import canonical_build_source
 from loom.personal_dev_builder import verify_personal_dev_build_source
-from loom.personal_dev_candidate import CandidateRegistration, PersonalDevPlatform
+from loom.personal_dev_candidate import (
+    PERSONAL_DEV_BUILD_CONTRACT_SHA256,
+    CandidateRegistration,
+    PersonalDevPlatform,
+)
+from loom.personal_dev_source import PersonalDevSourceError, verify_personal_dev_source_snapshot
 from loom_capacity_agent.build_admission import (
     BuildClaimExchangeV1,
     BuildClaimRequestV1,
+    BuildSourceContextV1,
     BuildSourceReadReceiptV1,
 )
+from loom_capacity_manager.contracts import canonical_digest
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
@@ -33,6 +42,21 @@ class NativeBuildSourceClient(Protocol):
     async def read_source(self, claim: BuildClaimRequestV1, *, worker_credential: str,
         offset: int, length: int,
     ) -> BuildSourceReadReceiptV1: ...
+
+    async def read_source_context(self, claim: BuildClaimRequestV1, *, worker_credential: str) -> BuildSourceContextV1: ...
+
+
+@dataclass(frozen=True, slots=True)
+class NativeStagedBuildSource:
+    context: BuildSourceContextV1
+    archive: Path
+
+
+def _verify_context_source(context: BuildSourceContextV1, archive: Path) -> None:
+    manifest = verify_personal_dev_source_snapshot(archive,
+        expected_source_digest=context.source_sha256, expected_archive_sha256=context.archive_sha256)
+    if manifest.source_commit != context.source_commit or manifest.dirty is not context.dirty:
+        raise PersonalDevSourceError("native context source manifest binding changed")
 
 
 async def _settled_io(function: Callable[_P, _T], *args: _P.args, **kwargs: _P.kwargs) -> _T:
@@ -59,7 +83,7 @@ def _write_all(descriptor: int, data: bytes) -> None:
 
 
 class NativeClaimBuildSource:
-    """Consume a protected launch's registration, not feature-controlled metadata.
+    """Consume protected registration or authenticated context, never feature metadata.
 
     The yielded path lives only within this context and references an open private
     workspace descriptor. Pass its contents into the sandbox; never extract on
@@ -89,6 +113,32 @@ class NativeClaimBuildSource:
             or not 1 <= candidate.archive_size_bytes <= self._max_archive_bytes):
             raise ValueError("native source launch binding or size is invalid")
         source_digest = hashlib.sha256(canonical_build_source(registration)).hexdigest()
+        async with self._stage(claim, worker_credential=envelope.worker_credential,
+            archive_size=candidate.archive_size_bytes, archive_sha256=candidate.archive_sha256,
+            source_digest=source_digest, verify=partial(verify_personal_dev_build_source, candidate)) as archive:
+            yield archive
+
+    @asynccontextmanager
+    async def stage_claim(self, claim: BuildClaimRequestV1, *, worker_credential: str) -> AsyncIterator[NativeStagedBuildSource]:
+        """Fetch current metadata and sealed source without application records."""
+        envelope = BuildClaimExchangeV1.model_validate_json(BuildClaimExchangeV1(
+            claim=claim, worker_credential=worker_credential).model_dump_json())
+        context = await self._client.read_source_context(envelope.claim, worker_credential=envelope.worker_credential)
+        context = BuildSourceContextV1.model_validate_json(context.model_dump_json())
+        if (context.claim_digest != canonical_digest(envelope.claim) or context.request_id != envelope.claim.request_id
+            or envelope.claim.binding.pool_id != ("gb10" if context.platform == "linux/arm64" else "oldlab")
+            or context.build_contract_sha256 != PERSONAL_DEV_BUILD_CONTRACT_SHA256
+            or context.archive_size_bytes > self._max_archive_bytes):
+            raise ValueError("native context launch binding or size is invalid")
+        async with self._stage(envelope.claim, worker_credential=envelope.worker_credential,
+            archive_size=context.archive_size_bytes, archive_sha256=context.archive_sha256,
+            source_digest=context.source_binding_sha256, verify=partial(_verify_context_source, context)) as archive:
+            yield NativeStagedBuildSource(context=context, archive=archive)
+
+    @asynccontextmanager
+    async def _stage(self, claim: BuildClaimRequestV1, *, worker_credential: str,
+        archive_size: int, archive_sha256: str, source_digest: str, verify: Callable[[Path], None],
+    ) -> AsyncIterator[Path]:
         workspace = os.open(self._workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
         try:
             metadata = os.fstat(workspace)
@@ -101,23 +151,26 @@ class NativeClaimBuildSource:
                 try:
                     observed = 0
                     digest = hashlib.sha256()
-                    while observed < candidate.archive_size_bytes:
-                        receipt = await self._client.read_source(claim, worker_credential=envelope.worker_credential,
-                            offset=observed, length=min(_CHUNK_BYTES, candidate.archive_size_bytes - observed))
+                    while observed < archive_size:
+                        count = min(_CHUNK_BYTES, archive_size - observed)
+                        receipt = await self._client.read_source(claim, worker_credential=worker_credential,
+                            offset=observed, length=count)
                         if (receipt.source_binding_sha256 != source_digest
-                            or receipt.archive_sha256 != candidate.archive_sha256
-                            or receipt.archive_size_bytes != candidate.archive_size_bytes):
+                            or receipt.archive_sha256 != archive_sha256
+                            or receipt.archive_size_bytes != archive_size
+                            or receipt.claim_digest != canonical_digest(claim)
+                            or receipt.offset != observed or len(receipt.data) != count):
                             raise ValueError("native source reply differs from protected launch")
                         data = receipt.data
                         await _settled_io(_write_all, descriptor, data)
                         observed += len(data)
                         digest.update(data)
-                    if observed != candidate.archive_size_bytes or digest.hexdigest() != candidate.archive_sha256:
+                    if observed != archive_size or digest.hexdigest() != archive_sha256:
                         raise ValueError("native source complete archive digest changed")
                     await _settled_io(os.fsync, descriptor)
                 finally:
                     os.close(descriptor)
-                await _settled_io(verify_personal_dev_build_source, candidate, archive)
+                await _settled_io(verify, archive)
                 yield archive
         finally:
             os.close(workspace)

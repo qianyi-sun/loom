@@ -34,6 +34,7 @@ from loom_capacity_agent.build_admission import (
     BuildPreparationRequestV1,
     BuildRegistrationRequestV1,
     BuildReleaseExchangeV1,
+    BuildSourceContextV1,
     BuildSourceReadExchangeV1,
     BuildSourceReadReceiptV1,
 )
@@ -175,6 +176,15 @@ class BuildAdmissionClient:
         if (receipt.claim_digest != canonical_digest(request.claim) or receipt.offset != request.offset
             or len(receipt.data) != min(request.length, receipt.archive_size_bytes - request.offset)):
             raise BuildAdmissionTransportError("native source response binding changed")
+        return receipt
+
+    async def read_source_context(self, claim: BuildClaimRequestV1, *, worker_credential: str) -> BuildSourceContextV1:
+        request = BuildClaimExchangeV1.model_validate_json(BuildClaimExchangeV1(
+            claim=claim, worker_credential=worker_credential).model_dump_json())
+        receipt = await self._post(request.claim.binding, "context", canonical_bytes(request), BuildSourceContextV1)
+        if (receipt.claim_digest != canonical_digest(request.claim) or receipt.request_id != request.claim.request_id
+            or request.claim.binding.pool_id != ("gb10" if receipt.platform == "linux/arm64" else "oldlab")):
+            raise BuildAdmissionTransportError("native context response binding changed")
         return receipt
 
     async def prepare_worker(self, request: ExecutableBootstrapRegistrationV2, *,
