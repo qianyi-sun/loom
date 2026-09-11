@@ -230,12 +230,20 @@ async def test_real_service_mounts_admission_closed_by_default(monkeypatch):
     assert result.status_code == 503
 
 
-@pytest.mark.parametrize("operation", ["prepare", "register", "claim", "drain", "outcome"])
+@pytest.mark.parametrize("operation", ["prepare", "register", "claim", "drain", "outcome", "release"])
 async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_input,tmp_path,monkeypatch,operation):
     from sqlalchemy import event
 
     factory, engine, _installation, _plan, _source, _request = prepared_input
-    if operation == "outcome":
+    if operation == "release":
+        from tests.integration.test_personal_dev_build_guard_registered_release import (
+            registered_release_input,
+        )
+        from tests.integration.test_personal_dev_build_guard_registration import CREDENTIAL
+
+        registration, _claim, _terminal, _drain = await registered_release_input(prepared_input, monkeypatch)
+        payload = {"schema_version": 1, "release": registration.model_dump(mode="json"), "worker_credential": CREDENTIAL}
+    elif operation == "outcome":
         from tests.integration.test_personal_dev_build_guard_drain import drain_input
         from tests.integration.test_personal_dev_build_guard_outcomes import outcome_request
         from tests.integration.test_personal_dev_build_guard_registration import CREDENTIAL
@@ -272,7 +280,7 @@ async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_inpu
     reached_outer_commit = []
     store_completed = []
     store_type = import_module("loom_capacity_build_guard.execution_store").BuildGuardExecutionStore
-    method = {"prepare": "prepare_worker", "register": "register_worker", "claim": "claim_platform", "drain": "begin_drain", "outcome": "record_outcome"}[operation]
+    method = {"prepare": "prepare_worker", "register": "register_worker", "claim": "claim_platform", "drain": "begin_drain", "outcome": "record_outcome", "release": "acknowledge_release"}[operation]
     original = getattr(store_type, method)
 
     async def prepare_then_observe(*args,**kwargs):
@@ -474,6 +482,17 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
             assert drained.live_claim_count == int(register == "claim")
             assert await client.begin_drain(drain) == drained
             assert (await client.observe_intent(binding)).drain == drained
+            if register != "claim":
+                from loom_capacity_agent.admission import ExecutableReleaseRequestV2
+
+                release = ExecutableReleaseRequestV2(binding=binding, operation_id=uuid4(),
+                    reporter_incarnation=_installation.document.reporter_incarnation,
+                    bootstrap_registration_epoch=1, protected_registration_epoch=2,
+                    expected_claim_high_water=drain.expected_claim_high_water, release_epoch=4)
+                released = await client.acknowledge_release(release, current_worker_credential="w" * 43)
+                assert released.live_claim_count == 0 and released.worker_credentials_revoked
+                assert await client.acknowledge_release(release, current_worker_credential="w" * 43) == released
+                assert (await client.observe_intent(binding)).release == released
         else:
             withdraw = withdrawal(physical_request)
             withdrawn = await client.withdraw_unregistered_worker(withdraw)
