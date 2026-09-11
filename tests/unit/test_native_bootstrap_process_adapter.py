@@ -244,6 +244,8 @@ async def test_failed_kill_retains_owned_child_and_close_can_retry(process_fixtu
             await asyncio.wait_for(request, 3)
         assert process.returncode is None
         assert adapter.active_operations > 0
+        with pytest.raises(ValueError, match="unavailable or refused"):
+            await asyncio.wait_for(adapter.wait(), 1)
         with pytest.raises(ValueError):
             await adapter.receive(value.payload)
         assert len(value.state.calls) == 1
