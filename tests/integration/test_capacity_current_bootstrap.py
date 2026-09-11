@@ -16,7 +16,10 @@ from loom_capacity_agent.executable_admission import (
     ExecutableAdmissionError,
     ExecutableAdmissionStore,
 )
-from loom_capacity_manager.executable_contracts import canonical_executable_bytes, canonical_executable_digest
+from loom_capacity_manager.executable_contracts import (
+    canonical_executable_bytes,
+    canonical_executable_digest,
+)
 from tests.integration.test_capacity_agent_executable_admission import (
     _initialize_and_register,
     _physical,

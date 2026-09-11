@@ -435,6 +435,13 @@ class CurrentExecutableBootstrapV2(StrictV2Model):
     observation_state: Literal["current-unused-bootstrap"] = "current-unused-bootstrap"
     executable: Literal[False] = False
 
+    @model_validator(mode="before")
+    @classmethod
+    def _exact_nonexecutable(cls, value: object) -> object:
+        if isinstance(value, dict) and "executable" in value and value["executable"] is not False:
+            raise ValueError("current bootstrap evidence requires a literal false executable flag")
+        return value
+
     @property
     def binding(self) -> ExecutableIntentBindingV2:
         return self.physical_binding.binding

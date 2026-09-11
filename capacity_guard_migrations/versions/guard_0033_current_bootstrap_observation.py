@@ -87,7 +87,9 @@ def upgrade() -> None:
             'schema_version', 2, 'physical_binding', p_payload,
             'agent_incarnation', v_agent_incarnation,
             'bootstrap_sha256', v_bootstrap.bootstrap_sha256,
-            'observed_at', v_now, 'bootstrap_expires_at', v_expires,
+            -- Snapshot age must never be refreshed by lock/read delay. The
+            -- separate v_now above still checks expiry against the current clock.
+            'observed_at', pg_catalog.transaction_timestamp(), 'bootstrap_expires_at', v_expires,
             'request_digest', p_request_digest,
             'observation_state', 'current-unused-bootstrap', 'executable', false
           );
