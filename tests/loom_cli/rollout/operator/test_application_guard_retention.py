@@ -267,7 +267,7 @@ def test_pending_handoff_cannot_be_discarded_by_normal_cleanup(tmp_path, monkeyp
                 stop_mutation_guard=lambda *_args, **_kwargs: pytest.fail("stopped retained guard"),
             ),
         )
-        with pytest.raises(RuntimeError, match="retains"):
+        with pytest.raises(guard_module.MutationGuardRetainedError, match="retains"):
             manager.release(plan.request_id)
     elif boundary == "transport":
         from loom_cli.rollout.operator.systemd import SystemdUserManager
