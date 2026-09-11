@@ -1,8 +1,10 @@
 """Real standard-crypto verification without importing a site-package runtime."""
 
+import fcntl
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 from importlib import import_module
@@ -95,3 +97,79 @@ def test_native_crypto_does_not_execute_an_unprotected_binary(crypto, tmp_path):
     values["openssl_path"] = str(binary)
     with pytest.raises(module.NativeContainmentVerificationError):
         module.verify_native_ed25519(**values)
+
+
+def test_native_verification_seals_every_input_before_start(crypto, monkeypatch):
+    module, values = crypto
+    original = subprocess.Popen
+    calls = []
+
+    def inspected(args, **kwargs):
+        calls.append((args, kwargs))
+        assert args[:4] == ["openssl", "pkeyutl", "-verify", "-rawin"]
+        assert kwargs["env"] == {"OPENSSL_CONF": "/dev/null", "LC_ALL": "C"}
+        assert kwargs["cwd"] == "/"
+        assert kwargs["start_new_session"] is True
+        assert kwargs["executable"].startswith("/proc/self/fd/")
+        assert len(kwargs["pass_fds"]) == 4
+        for descriptor in kwargs["pass_fds"]:
+            assert fcntl.fcntl(descriptor, getattr(fcntl, "F_GET_SEALS", 1034)) & 15 == 15
+            with pytest.raises(PermissionError):
+                os.write(descriptor, b"tamper")
+        return original(args, **kwargs)
+
+    monkeypatch.setattr(module.subprocess, "Popen", inspected)
+    module.verify_native_ed25519(**values)
+    assert len(calls) == 1
+
+
+def test_native_verifier_timeout_kills_and_reaps_exact_owned_process(crypto, monkeypatch):
+    module, values = crypto
+    original = subprocess.Popen
+    children = []
+
+    def stuck_verifier(args, **kwargs):
+        # Substitute only the crypto process to exercise actual OS timeout,
+        # kill and reap behavior; normal tests run the real pinned OpenSSL.
+        child = original(["/usr/bin/sleep", "30"], start_new_session=True,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(module.subprocess, "Popen", stuck_verifier)
+    values["timeout_seconds"] = 1
+    with pytest.raises(module.NativeContainmentVerificationError, match="unavailable"):
+        module.verify_native_ed25519(**values)
+    assert len(children) == 1
+    assert children[0].returncode == -signal.SIGKILL
+    with pytest.raises(ProcessLookupError):
+        os.kill(children[0].pid, 0)
+
+
+def test_interrupted_wait_does_not_signal_an_already_reaped_process_group(crypto, monkeypatch):
+    module, values = crypto
+
+    class ReapedDuringInterrupt:
+        pid = 12345
+        returncode = None
+
+        def wait(self, timeout):
+            if self.returncode is None:
+                # Popen.wait may reap during its brief KeyboardInterrupt grace
+                # period, then still propagate the interrupt to its caller.
+                self.returncode = 0
+                raise KeyboardInterrupt
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+    def foreign_group(*args):
+        pytest.fail("a reaped verifier PID may already name a foreign process group")
+
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *args, **kwargs: ReapedDuringInterrupt())
+    monkeypatch.setattr(module.os, "killpg", foreign_group)
+    before = set(os.listdir("/proc/self/fd"))
+    with pytest.raises(KeyboardInterrupt):
+        module.verify_native_ed25519(**values)
+    assert set(os.listdir("/proc/self/fd")) == before
