@@ -6,7 +6,7 @@ import json
 from datetime import timedelta
 from importlib import import_module
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import UUID, uuid5
 
 import pytest
 
@@ -30,7 +30,8 @@ def delivery(tmp_path):
     controller.mkdir(mode=0o700)
     node.mkdir(mode=0o700)
     binding = launch_context_fixture().binding
-    physical = _physical(binding)
+    physical = _physical(binding).model_copy(update={"operation_id": uuid5(
+        UUID("cb359b0c-a844-4bc5-9592-a4c35e344f3d"), f"physical-bind:{binding.intent_id}")})
     store = BootstrapHandoffStore(controller)
     lease = store.prepare(binding, bootstrap_registration_epoch=1,
         expires_at=_NOW + timedelta(minutes=5),
@@ -166,3 +167,43 @@ async def test_conflicting_duplicate_cannot_overwrite_received_capability(delive
     with pytest.raises(ValueError):
         await receiver.receive(changed)
     assert await receiver.receive(payload) == receipt
+
+
+async def test_retry_after_uncertain_rename_reestablishes_directory_durability(delivery, monkeypatch):
+    module, payload, receiver = objects(delivery)
+    fsync = module._fsync_directory
+    attempts = []
+
+    def interrupted(path):
+        if path == delivery.node:
+            attempts.append(path)
+            if len(attempts) == 1:
+                raise OSError("injected parent fsync failure")
+        return fsync(path)
+
+    monkeypatch.setattr(module, "_fsync_directory", interrupted)
+    with pytest.raises(ValueError):
+        await receiver.receive(payload)
+    receipt = await receiver.receive(payload)
+    assert receipt.source_payload_sha256 == hashlib.sha256(payload).hexdigest()
+    assert len(attempts) >= 2, "an uncertain publish must be fsynced before replay acknowledgment"
+
+
+async def test_delivery_never_replaces_an_empty_destination_created_during_publish(delivery, monkeypatch):
+    module, payload, receiver = objects(delivery)
+    publish = module._publish_private_new
+    final = module.native_delivery_directory(delivery.node, delivery.lease.reference)
+    identity = []
+
+    def raced(path, data):
+        result = publish(path, data)
+        if path.name == "delivery-receipt.json":
+            final.mkdir(mode=0o700)
+            identity.append(final.stat().st_ino)
+        return result
+
+    monkeypatch.setattr(module, "_publish_private_new", raced)
+    with pytest.raises(ValueError):
+        await receiver.receive(payload)
+    assert final.stat().st_ino == identity[0]
+    assert list(final.iterdir()) == []
