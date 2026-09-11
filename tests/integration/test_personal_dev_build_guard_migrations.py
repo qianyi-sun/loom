@@ -50,7 +50,7 @@ def test_build_guard_is_private_owner_only_and_empty_rollback_is_reversible(buil
     config, engine, owner, agent, agent_url = build_guard_database
     command.upgrade(config, "head")
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0014"
+        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0015"
         assert connection.scalar(text("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='loom_capacity_build_guard'")) == owner
         assert connection.scalar(text("SELECT has_schema_privilege(:agent,'loom_capacity_build_guard','USAGE')"), {"agent": agent})
     runtime = create_engine(agent_url)
@@ -175,7 +175,7 @@ def test_retained_installation_is_immutable_and_blocks_downgrade(build_guard_dat
     with pytest.raises(DBAPIError, match="retained evidence"):
         command.downgrade(config, "base")
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0014"
+        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0015"
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.installations")) == 1
 
 

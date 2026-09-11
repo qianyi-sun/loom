@@ -440,7 +440,26 @@ checks intent, subject/incarnation, deployment, candidate and reporter pins.
 This manager proof is not by itself native hold-retirement permission: the build
 guard must still join its installation, assignment, bootstrap, acknowledged
 protected-release publication and (for bound work) imported native terminal
-inventory. Native hold retirement and runtime orchestration remain incomplete.
+inventory.
+
+Build-guard revision `build_guard_0015` performs that exact join for unbound
+revocations and unregistered physical withdrawals. It requires committed local
+revocation, publication acknowledgement and any required native terminal import;
+it atomically retains an immutable retirement and deletes only the matching
+request/assignment hold. Cleanup does not require a current source lease. Exact
+replay resolves the retained retirement before inspecting current holds, so it
+cannot remove a successor assignment's charge. Prior plans cannot regain admission
+or publication. Direct agent table writes stay forbidden and retained retirement
+evidence prevents lossy downgrade. The caller must be the management reporter
+fetching authenticated manager evidence, not an executor-provided assertion.
+
+A still-live unregistered request can requeue after this cleanup; new admission
+rechecks current source and owner authority. Cancelled or expired requests do not
+requeue. This deliberately does not implement retirement for registered workers:
+that requires durable per-platform outcomes which distinguish successful work,
+retryable failure and cancellation, suppress both pending demand and fresh
+admission when finished, and do not infer an outcome from physical termination.
+Native exchange/claims, outcome handling and runtime orchestration remain incomplete.
 
 `ActivationRuntimeArtifactV3` and its explicit pinned loader compose the exact
 typed admission file, complete purpose/profile policy, approved profile digest,
