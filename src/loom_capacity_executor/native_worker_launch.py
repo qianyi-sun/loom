@@ -285,8 +285,11 @@ async def _run_native_worker_on_host(
             raise NativeContainerError("native worker Docker endpoint is not protected")
     except OSError:
         raise NativeContainerError("native worker Docker endpoint is unavailable") from None
+    # A systemd sibling with the same limits does not share the allocation's
+    # aggregate budget or lifetime. Refuse it before any image pull/handoff.
+    driver = native_daemon_cgroup_driver(cli)
     image = prefetch_native_image(cli, image_digest=image_digest, platform=policy.native_execution.platform)
-    parent = discover_docker_cgroup_parent(docker_driver=native_daemon_cgroup_driver(cli),
+    parent = discover_docker_cgroup_parent(docker_driver=driver,
         job_id=physical.slurm_job_id, pids_max=policy.pids_max, wait_seconds=60)
     scratch = _native_scratch_directory(str(binding.intent_id))
     try:
@@ -304,11 +307,16 @@ async def _run_native_worker_on_host(
 
 
 def native_daemon_cgroup_driver(cli: FixedDockerCLI) -> str:
-    """Ask Docker explicitly for machine-readable daemon containment facts."""
+    """Require the native daemon's actual allocation-descendant capability.
+
+    Legacy workers keep their independent systemd-slice bridge. Native workers
+    and trial descendants must share the real Slurm ancestor, not duplicate its
+    aggregate limits in a sibling. Never reconfigure a shared daemon here.
+    """
 
     daemon = cli.json("info", "--format={{json .}}")
     if (not isinstance(daemon, dict) or daemon.get("CgroupVersion") != "2"
-        or daemon.get("CgroupDriver") not in {"systemd", "cgroupfs"}):
-        raise NativeContainerError("native worker Docker cgroup v2 is unavailable")
+        or daemon.get("CgroupDriver") != "cgroupfs"):
+        raise NativeContainerError("native worker requires allocation-contained cgroupfs on cgroup v2")
     driver: str = daemon["CgroupDriver"]
     return driver

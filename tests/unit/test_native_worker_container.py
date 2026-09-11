@@ -56,7 +56,7 @@ def _allocation():
     from loom_capacity_executor.native_worker_container import NativeWorkerAllocation
 
     return NativeWorkerAllocation(intent_id="11111111-1111-4111-8111-111111111111", job_id="101",
-        cgroup_parent="loom-job-101.slice", cpu_millicores=1000, memory_bytes=1024**3,
+        cgroup_parent="/system.slice/slurmstepd.scope/job_101", cpu_millicores=1000, memory_bytes=1024**3,
         pids_max=128, concurrency_slots=1, scratch_directory="/var/lib/loom/native-workers/test",
         docker_socket_gid=998, runtime_uid=65532, runtime_gid=65532, pool_id="oldlab",
         hostname="oldlab-5", candidate_sha="a" * 64)
@@ -82,7 +82,7 @@ def test_fixed_create_removes_loader_environment_and_has_no_secret_or_command_ov
     assert argv[-4:] == ("sha256:" + "a" * 64, "-I", "-m", "loom_worker.native_main",)
     assert "--entrypoint=/usr/local/bin/python" in argv
     for flag in ("--read-only", "--restart=no", "--cap-drop=ALL", "--security-opt=no-new-privileges",
-                 "--cgroup-parent=loom-job-101.slice", "--memory=1073741824", "--pids-limit=128"):
+                 "--cgroup-parent=/system.slice/slurmstepd.scope/job_101", "--memory=1073741824", "--pids-limit=128"):
         assert flag in argv
     assert "--env=LD_PRELOAD" in argv
     assert "--env=PYTHONPATH" in argv
@@ -101,7 +101,7 @@ def test_runtime_settings_bind_allocation_and_refuse_ungated_runtime_modes():
     result = bind_native_settings(original, _allocation())
     settings = result.worker_settings()
     assert settings["require_cgroup_parent"] is True
-    assert settings["cgroup_parent"] == "loom-job-101.slice"
+    assert settings["cgroup_parent"] == "/system.slice/slurmstepd.scope/job_101"
     assert settings["slurm_job_id"] == "101"
     assert settings["slurm_allocated_gpus"] == 0
     assert settings["max_concurrent"] == 1
