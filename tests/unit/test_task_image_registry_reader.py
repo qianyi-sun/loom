@@ -66,6 +66,7 @@ class _Response:
     chunk_delay: float = 0.0
     wait_for_peer_close_before_response: bool = False
     wait_for_peer_close: bool = False
+    continue_after_first_chunk: asyncio.Event | None = None
 
 
 @dataclass(frozen=True)
@@ -159,7 +160,7 @@ class _TLSRegistry:
             )
             writer.write(head.encode("ascii") + b"\r\n")
             await writer.drain()
-            for chunk in response.chunks:
+            for index, chunk in enumerate(response.chunks):
                 if response.chunk_delay:
                     await asyncio.sleep(response.chunk_delay)
                 if content_length:
@@ -168,6 +169,8 @@ class _TLSRegistry:
                     writer.write(f"{len(chunk):x}\r\n".encode("ascii") + chunk + b"\r\n")
                 await writer.drain()
                 self.first_chunk_sent.set()
+                if index == 0 and response.continue_after_first_chunk is not None:
+                    await response.continue_after_first_chunk.wait()
             if response.wait_for_peer_close:
                 if await reader.read(1) == b"":
                     self.peer_closed.set()

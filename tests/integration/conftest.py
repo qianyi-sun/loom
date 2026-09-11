@@ -238,7 +238,8 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                 )
                 connection.exec_driver_sql(
                     "GRANT SELECT (id, materialization_key, task_id, task_checksum, cpu_arch, "
-                    "task_config, task_source, task_source_provenance, state, registry_images) "
+                    "task_config, task_source, task_source_provenance, state, registry_images, "
+                    "ready_publication_operation_id) "
                     f"ON TABLE public.task_image_materializations TO {quoted_owner}"
                 )
                 connection.exec_driver_sql(

@@ -232,6 +232,7 @@ async def _initialize_manager_bound_admission_agent(
     reporter_incarnation: UUID,
     protected_admission_sha256: str,
     environment_id: str = "dev-e2e",
+    cpu_arch: str = "x86_64",
 ) -> tuple[AgentRegistrationV1, ReporterConfigurationV1]:
     """Create a real guard authority bound to one manager-owned subject."""
 
@@ -260,7 +261,7 @@ async def _initialize_manager_bound_admission_agent(
                 capability_id=f"{binding.pool_id}-manager-guard-e2e",
                 pool_id=binding.pool_id,
                 operating_system="linux",
-                cpu_architecture="x86_64",
+                cpu_architecture=cpu_arch,
                 gpu_vendor="none",
                 network_policies=("public",),
             ),
@@ -1605,6 +1606,7 @@ async def _assign_protected_attempts(
     database: dict[str, object],
     *,
     registration: AgentRegistrationV1,
+    cpu_arch: str = "x86_64",
     assignments: tuple[
         tuple[ExecutableBootstrapRegistrationV2, UUID, int, str],
         ...,
@@ -1633,7 +1635,7 @@ async def _assign_protected_attempts(
             node_resources=(item.resources,),
             compatible_domain_ids=(item.pool_id,),
             capabilities=(
-                "cpu_arch.x86_64",
+                f"cpu_arch.{cpu_arch}",
                 "gpu_vendor.none",
                 "network.public",
                 "os.linux",
@@ -1733,10 +1735,12 @@ async def _assign_protected_attempt(
     protected_attempt_id: UUID,
     execution_generation: int,
     requirements_digest: str,
+    cpu_arch: str = "x86_64",
 ) -> PreparedAdmissionPlanV1:
     return await _assign_protected_attempts(
         database,
         registration=registration,
+        cpu_arch=cpu_arch,
         assignments=(
             (
                 request,
@@ -2069,6 +2073,7 @@ async def _protect_bootstrap(
     *,
     bootstrap_sha256: str,
     request: ExecutableBootstrapRegistrationV2 | None = None,
+    cpu_arch: str = "x86_64",
 ) -> ExecutableBootstrapRegistrationV2:
     template = request or _bootstrap(
         registration.subject_id,
@@ -2082,7 +2087,7 @@ async def _protect_bootstrap(
                 capability_id=f"{template.binding.pool_id}-test-capability",
                 pool_id=template.binding.pool_id,
                 operating_system="linux",
-                cpu_architecture="x86_64",
+                cpu_architecture=cpu_arch,
                 gpu_vendor="none",
                 network_policies=("public",),
             ),
@@ -2519,7 +2524,7 @@ async def test_guard_0020_downgrade_serializes_committing_executable_evidence(
             await downgrade_task
         await executor_engine.dispose()
 
-    assert version == "guard_0030"
+    assert version == "guard_0031"
     assert evidence == 1
 
 
