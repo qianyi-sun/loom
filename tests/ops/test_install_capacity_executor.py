@@ -5,6 +5,8 @@ import io
 import json
 import os
 import stat
+import subprocess
+import sys
 import tarfile
 from pathlib import Path
 from typing import Any
@@ -65,6 +67,45 @@ _UNITS = (
     "loom-capacity-pool-executor-active.timer",
 )
 _TMPFILES = b"d /run/loom-capacity-executor 0700 loom_capacity_executor loom_capacity_executor -\n"
+
+
+@pytest.mark.parametrize("colocated", [False, True], ids=["candidate-tree", "installed-helpers"])
+def test_installer_supports_broker_isolation_without_ambient_imports(tmp_path: Path, colocated: bool) -> None:
+    installer = _REPO_ROOT / "scripts/ops/install_capacity_executor.py"
+    if colocated:
+        helper_directory = tmp_path / "installed helpers"
+        helper_directory.mkdir()
+        for name in ("install_capacity_executor.py", "capacity_executor_release.py"):
+            (helper_directory / name).write_bytes((_REPO_ROOT / "scripts/ops" / name).read_bytes())
+        installer = helper_directory / installer.name
+    ambient = tmp_path / "ambient"
+    ambient.mkdir()
+    for name in ("scripts.py", "capacity_executor_release.py"):
+        (ambient / name).write_text("raise AssertionError('ambient helper imported')\n")
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", str(installer), "--help"],
+        cwd=ambient, env={**os.environ, "PYTHONPATH": str(ambient)}, capture_output=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr.decode()
+    assert b"discover-controller" in result.stdout
+    assert not result.stderr
+    if colocated:
+        assert not (installer.parent / "__pycache__").exists()
+
+
+def test_isolated_installer_does_not_fall_back_when_sibling_verifier_is_missing(tmp_path: Path) -> None:
+    installer = tmp_path / "install_capacity_executor.py"
+    installer.write_bytes((_REPO_ROOT / "scripts/ops" / installer.name).read_bytes())
+    ambient = tmp_path / "ambient"
+    ambient.mkdir()
+    (ambient / "capacity_executor_release.py").write_text("raise AssertionError('ambient helper imported')\n")
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", str(installer), "--help"],
+        cwd=ambient, env={**os.environ, "PYTHONPATH": str(ambient)}, capture_output=True, timeout=30,
+    )
+    assert result.returncode != 0
+    assert b"ambient helper imported" not in result.stderr
+    assert b"capacity_executor_release" in result.stderr
 
 
 def _tar(entries: tuple[tuple[str, bytes | None, int, str], ...]) -> io.BytesIO:
