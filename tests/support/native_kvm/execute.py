@@ -4,9 +4,18 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import time
 from pathlib import Path
+
+
+def native_runtime_command():
+    return ["/runtime/runsc", "--root=/tmp/runsc-state", "--platform=kvm",
+        "--network=none", "--ignore-cgroups=true", "--gvisor-marker-file=true",
+        "--host-settings=check", "--sidecar-release-enforcement-policy=ALWAYS",
+        "--host-uds=none", "--host-fifo=none", "--directfs=false",
+        "--allow-suid=false", "--oci-seccomp=true"]
 
 
 def main():
@@ -44,11 +53,7 @@ def main():
     buildkit_id = identity["buildkit_id"]
     client_id = identity["client_id"]
     probe_id, lifecycle_id, late_id = (role + "-" + sandbox_id for role in ("probe", "lifecycle", "late"))
-    runtime = ["/runtime/runsc", "--root=/tmp/runsc-state", "--platform=kvm",
-        "--network=none", "--ignore-cgroups=true", "--gvisor-marker-file=true",
-        "--host-settings=check", "--sidecar-release-enforcement-policy=ALWAYS",
-        "--host-uds=none", "--host-fifo=none", "--directfs=false",
-        "--allow-suid=false", "--oci-seccomp=true"]
+    runtime = native_runtime_command()
     started = []
     logs = []
     root_launcher = None
@@ -60,13 +65,17 @@ def main():
             if component == "pause":
                 # Pinned runsc's attached root gives sentry/helper processes a
                 # kernel parent-death signal; detached mode has no such bound.
-                root_launcher = subprocess.Popen([*runtime, "run", "--bundle=/fixtures/pause", name],
-                    stdout=log, stderr=subprocess.STDOUT)
+                command = ([sys.executable, "/test-support/death_chain.py", "supervisor", str(os.getpid()), name]
+                    if identity["root_stop"] == "supervisor-death"
+                    else [*runtime, "run", "--bundle=/fixtures/pause", name])
+                root_launcher = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
+                    env={"PATH": "/usr/local/bin:/usr/bin:/bin", "PYTHONPATH": "/fixtures/helper-modules"})
                 deadline = time.monotonic() + 20
                 while True:
                     state = subprocess.run([*runtime, "state", name], capture_output=True,
                         text=True, timeout=5)
-                    if state.returncode == 0 and json.loads(state.stdout)["status"] == "running":
+                    if (state.returncode == 0 and json.loads(state.stdout)["status"] == "running"
+                        and root_launcher.poll() is None):
                         break
                     if root_launcher.poll() is not None or time.monotonic() >= deadline:
                         raise RuntimeError("attached sandbox root did not become ready")
@@ -115,7 +124,7 @@ def main():
             if time.monotonic() >= deadline:
                 raise RuntimeError("lifecycle child did not start")
             time.sleep(0.05)
-        if identity["root_stop"] == "launcher-death":
+        if identity["root_stop"] in {"launcher-death", "supervisor-death"}:
             assert root_launcher is not None
             root_launcher.kill()
             assert root_launcher.wait(timeout=5) == -9
