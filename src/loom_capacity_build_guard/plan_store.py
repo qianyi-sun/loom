@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import text
@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.personal_dev_build_platform_requests import canonical_build_source
 from loom.personal_dev_candidate import CandidateRegistration
+from loom_capacity_agent.admission_convergence import ProtectedAdmissionPlanWork
 from loom_capacity_build_guard.installation_store import (
     BuildGuardInstallationV1,
     RetainedBuildInstallation,
@@ -27,6 +28,7 @@ from loom_capacity_manager.contracts import (
     canonical_bytes,
 )
 from loom_capacity_manager.executable_contracts import (
+    ExecutableAdmissionAcknowledgementV2,
     ExecutableAdmissionPlanProposalV2,
     canonical_executable_bytes,
     canonical_executable_digest,
@@ -94,6 +96,30 @@ class BuildGuardPlanStore:
         if document != installation.document or canonical_bytes(document) != installation.wire_payload:
             raise ValueError("build plan installation receipt changed")
         self._installation = document
+
+    async def authorize_publication(self, plan_id: UUID) -> ProtectedAdmissionPlanWork:
+        """Hold source/plan locks through the caller's manager publication receipt.
+
+        The durable disposition records authorization, not delivery confirmation.
+        Lost delivery replies must retry this exact path or converge closure.
+        """
+        if not self._session.in_transaction():
+            raise ValueError("build publication requires an outer transaction")
+        async with self._session.begin_nested():
+            wire = await self._session.scalar(text(
+                "SELECT loom_capacity_build_guard.authorize_publication(:installation, :plan)"),
+                {"installation": self._installation.id, "plan": plan_id})
+            acknowledgement = ExecutableAdmissionAcknowledgementV2.model_validate_json(wire)
+            if (canonical_executable_bytes(acknowledgement).decode("ascii") != wire
+                or acknowledgement.plan_id != plan_id
+                or acknowledgement.subject_id != self._installation.subject_id
+                or acknowledgement.subject_incarnation != self._installation.subject_incarnation
+                or acknowledgement.reporter_incarnation != self._installation.reporter_incarnation
+                or acknowledgement.protected_admission_sha256 != self._installation.protected_admission_sha256):
+                raise ValueError("build publication acknowledgement binding changed")
+            return ProtectedAdmissionPlanWork(acknowledgement=acknowledgement,
+                idempotency_key=uuid5(NAMESPACE_URL,
+                    f"loom:protected-executable-admission:{canonical_executable_digest(acknowledgement)}"))
 
     async def prepare(self, proposal: ExecutableAdmissionPlanProposalV2, *,
         sources: Mapping[UUID, CandidateRegistration],

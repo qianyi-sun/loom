@@ -158,6 +158,27 @@ requires a caller-owned transaction, and response validation failure rolls back
 its savepoint so a caught error cannot commit unusable holds. This receipt alone
 is not an admission acknowledgement or an execution capability.
 
+Revision `build_guard_0004` authorizes publication for an existing plan only. It
+requires preparation to have committed in a prior transaction, using a protected
+full top-level transaction ID so nested savepoints cannot bypass durability. It
+locks the installation and plan, then sorted source rows and assignments, rechecks
+current source/lease and request holds, and derives the canonical manager
+acknowledgement from those durable records. Assignment IDs, source epochs and
+history sequences cannot be supplied by the caller. Its prepared-plan digest
+matches the typed receipt's canonical internal encoding. Publication replay
+requires the same current checks and exact retained acknowledgement; closure or
+release dispositions prohibit publication. Unlike publication authorization,
+`prepare_plan` still rejects a plan with any disposition.
+
+The publication disposition records authorization, not confirmation of network
+delivery. The caller must keep its outer SERIALIZABLE transaction open through
+the existing manager client's exact receipt validation. A lost response retries
+the same durable publication with the existing protected idempotency namespace,
+or proceeds through closure recovery if current authority has expired. Neither
+publication nor cancellation removes request holds. Closure/release, native
+bootstrap/execution and functioning readiness integration remain required before
+build intake can open.
+
 Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
 preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release
 verification bind the exact historical configuration, acknowledgement and member

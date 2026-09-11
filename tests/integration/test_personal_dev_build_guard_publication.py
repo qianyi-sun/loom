@@ -146,3 +146,17 @@ async def test_publication_requires_preparation_committed_before_outer_transacti
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
     async with sessions.begin() as session:
         await BuildGuardPlanStore(session, installation=retained).authorize_publication(proposal.plan_id)
+
+
+async def test_publication_upgrade_preserves_preexisting_committed_plan(prepared_input, build_guard_database):
+    from alembic import command
+
+    sessions, _engine, retained, proposal, registration, request = prepared_input
+    config, *_ = build_guard_database
+    command.downgrade(config, "build_guard_0003")
+    async with sessions.begin() as session:
+        prepared = await BuildGuardPlanStore(session, installation=retained).prepare(proposal, sources={request.id: registration})
+    command.upgrade(config, "head")
+    async with sessions.begin() as session:
+        work = await BuildGuardPlanStore(session, installation=retained).authorize_publication(proposal.plan_id)
+        assert work.acknowledgement.prepared_plan_digest == prepared.digest

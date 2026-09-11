@@ -14,8 +14,12 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
     """
     version_table = connection.scalar(text("SELECT to_regclass('loom_capacity_build_guard.alembic_version')"))
     revision = connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) if version_table else None
-    parameters = {"schema": SCHEMA, "owner": owner, "agent": agent,
-        "prepare_installed": revision == "build_guard_0003"}
+    callables = []
+    if revision in {"build_guard_0003", "build_guard_0004"}:
+        callables.append(f"{SCHEMA}.prepare_plan(uuid,jsonb,bytea,text,jsonb)")
+    if revision == "build_guard_0004":
+        callables.append(f"{SCHEMA}.authorize_publication(uuid,uuid)")
+    parameters = {"schema": SCHEMA, "owner": owner, "agent": agent, "callables": callables}
     defaults = connection.scalar(text("""
         SELECT EXISTS (
             SELECT 1 FROM pg_default_acl d
@@ -42,7 +46,7 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
             FROM pg_class c JOIN namespace n ON n.oid=c.relnamespace
             UNION ALL
             SELECT p.proowner, COALESCE(p.proacl, acldefault('f', p.proowner)),
-                :prepare_installed AND p.oid=to_regprocedure('loom_capacity_build_guard.prepare_plan(uuid,jsonb,bytea,text,jsonb)')
+                p.oid IN (SELECT to_regprocedure(signature) FROM unnest(CAST(:callables AS text[])) signature)
                 AND p.prosecdef AND p.proconfig=ARRAY['search_path=pg_catalog']::text[]
             FROM pg_proc p JOIN namespace n ON n.oid=p.pronamespace
         )
@@ -74,9 +78,9 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
         if usage is not True:
             raise RuntimeError("build guard required schema privilege is absent")
         helpers = ["reject_evidence_mutation()"]
-        if revision in {"build_guard_0002", "build_guard_0003"}:
+        if revision in {"build_guard_0002", "build_guard_0003", "build_guard_0004"}:
             helpers.append("assert_current_source(uuid,uuid,jsonb,bytea,text)")
-        if revision == "build_guard_0003":
+        if revision in {"build_guard_0003", "build_guard_0004"}:
             helpers.extend(("canonical_plan_json(jsonb)",
                 "assert_plan_fields(jsonb,text[],text[],text[],text[],text[])", "assert_plan_contract(jsonb,bytea)"))
         for signature in helpers:
@@ -87,15 +91,15 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
             """), {"signature": f"{SCHEMA}.{signature}", "owner": owner})
             if present is not True:
                 raise RuntimeError("build guard required helper surface is absent or changed")
-    if revision == "build_guard_0003":
+    for signature in callables:
         surface = connection.scalar(text("""
             SELECT EXISTS (SELECT 1 FROM pg_proc p
-                WHERE p.oid=to_regprocedure('loom_capacity_build_guard.prepare_plan(uuid,jsonb,bytea,text,jsonb)')
+                WHERE p.oid=to_regprocedure(:signature)
                   AND pg_get_userbyid(p.proowner)=:owner
                   AND p.prosecdef AND p.proconfig=ARRAY['search_path=pg_catalog']::text[]
                   AND EXISTS (SELECT 1 FROM aclexplode(p.proacl) a
                     WHERE a.grantee=(SELECT oid FROM pg_roles WHERE rolname=:agent)
                       AND a.privilege_type='EXECUTE' AND NOT a.is_grantable))
-        """), parameters)
+        """), {**parameters, "signature": signature})
         if surface is not True:
-            raise RuntimeError("build guard required preparation surface is absent or changed")
+            raise RuntimeError("build guard required callable surface is absent or changed")
