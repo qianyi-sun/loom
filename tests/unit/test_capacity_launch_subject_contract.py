@@ -1,7 +1,9 @@
 """Bounded transport of exact manager-resolved launch facts."""
 
 import json
+from datetime import UTC, datetime, timedelta
 from importlib import import_module
+from uuid import UUID
 
 import pytest
 
@@ -97,3 +99,57 @@ def test_launch_subject_rejects_oversize_and_noncanonical_transport():
     for payload in (b" " * (1024 * 1024), value.model_dump_json(indent=2).encode("ascii")):
         with pytest.raises(ValueError):
             module.parse_launch_subject(payload)
+
+
+def current_application_observation():
+    module = import_module("loom_capacity_manager.launch_subject_contracts")
+    from loom_capacity_manager.executable_contracts import ExecutableLaunchPermitV2
+    context = typed_context(purpose="application-worker")
+    subject = module.ExecutableLaunchSubjectV3(
+        binding=context.binding, configuration=context.subject.configuration,
+        acknowledgement=context.subject.acknowledgement, authority=context.subject.authority,
+    )
+    now = datetime.now(UTC)
+    return module.CurrentApplicationAllocationV3(
+        subject=subject,
+        permit=ExecutableLaunchPermitV2(
+            binding=subject.binding, permit_id=UUID(int=991), permit_epoch=1,
+            launch_rank=1, expires_at=now + timedelta(seconds=15),
+            bootstrap_registration_epoch=1, bootstrap_evidence_sha256="8" * 64,
+        ),
+        permit_consumed_at=now - timedelta(seconds=1), observed_at=now,
+        expires_at=now + timedelta(seconds=10),
+    )
+
+
+def test_current_application_observation_round_trip():
+    module = import_module("loom_capacity_manager.launch_subject_contracts")
+    value = current_application_observation()
+    assert module.parse_current_application_allocation(module.canonical_current_application_allocation_bytes(value)) == value
+    assert value.executable is False
+
+
+@pytest.mark.parametrize("changed", ("build-purpose", "binding", "schema-alias", "executable-alias", "expired", "overlong", "consumption-after-expiry", "naive"))
+def test_current_application_observation_rejects_invalid_evidence(changed):
+    module = import_module("loom_capacity_manager.launch_subject_contracts")
+    original = current_application_observation()
+    value = original.model_dump(mode="json")
+    if changed == "build-purpose":
+        value["subject"] = response().model_dump(mode="json")
+        value["permit"]["binding"] = value["subject"]["binding"]
+    elif changed == "binding":
+        value["permit"]["binding"]["intent_id"] = str(UUID(int=993))
+    elif changed == "schema-alias":
+        value["schema_version"] = 3.0
+    elif changed == "executable-alias":
+        value["executable"] = 0
+    elif changed == "expired":
+        value["expires_at"] = value["observed_at"]
+    elif changed == "overlong":
+        value["expires_at"] = (original.observed_at + timedelta(seconds=11)).isoformat()
+    elif changed == "consumption-after-expiry":
+        value["permit"]["expires_at"] = value["permit_consumed_at"]
+    else:
+        value["observed_at"] = original.observed_at.replace(tzinfo=None).isoformat()
+    with pytest.raises(ValueError):
+        module.CurrentApplicationAllocationV3.model_validate_json(json.dumps(value))
