@@ -41,6 +41,43 @@ def receipt(request):
         admission_digest=digest,protected_high_water=1)
 
 
+@pytest.mark.parametrize("boundary", ["exact", "subject_id", "subject_incarnation", "intent_id",
+    "slurm_job_id", "ownership_evidence_sha256", "bootstrap_registration_epoch",
+    "protected_registration_epoch", "request_digest", "withdrawal_digest"])
+async def test_client_validates_bound_bootstrap_withdrawal(boundary):
+    from uuid import uuid4
+
+    from loom_capacity_agent.admission import ExecutableWorkerWithdrawalRequestV2, WithdrawnExecutableWorkerV2
+
+    request = ExecutableWorkerWithdrawalRequestV2(operation_id=uuid4(), binding=registration().binding,
+        bootstrap_registration_epoch=1, protected_registration_epoch=2,
+        slurm_job_id="1234", ownership_evidence_sha256="b"*64)
+    digest = canonical_executable_digest(request)
+    expected = WithdrawnExecutableWorkerV2(subject_id=request.binding.subject_id,
+        subject_incarnation=request.binding.subject_incarnation, intent_id=request.binding.intent_id,
+        bootstrap_registration_epoch=1, protected_registration_epoch=2,
+        slurm_job_id="1234", ownership_evidence_sha256="b"*64,
+        request_digest=digest, withdrawal_digest=digest, protected_high_water=3)
+
+    async def handle(outgoing):
+        assert outgoing.url.path.endswith("/withdraw")
+        assert outgoing.content == canonical_executable_bytes(request)
+        changed = expected
+        if boundary != "exact":
+            value = (uuid4() if boundary in {"subject_id", "subject_incarnation", "intent_id"}
+                else 4 if boundary.endswith("epoch") else "9999" if boundary == "slurm_job_id" else "f"*64)
+            changed = expected.model_copy(update={boundary:value})
+        return httpx.Response(200, content=canonical_executable_bytes(changed))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = client_for(http, request)
+        if boundary == "exact":
+            assert await client.withdraw_unregistered_worker(request) == expected
+        else:
+            with pytest.raises(RuntimeError, match="binding"):
+                await client.withdraw_unregistered_worker(request)
+
+
 @pytest.mark.parametrize("boundary", ["exact", "binding", "noncanonical"])
 async def test_client_validates_exact_protected_observation(boundary):
     request = registration()

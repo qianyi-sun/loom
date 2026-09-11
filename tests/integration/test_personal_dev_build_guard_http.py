@@ -103,7 +103,7 @@ async def test_http_revocation_before_preparation_is_committed_and_replayable(pr
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
 
 
-@pytest.mark.parametrize("operation", ["prepare", "observe", "revoke-bootstrap"])
+@pytest.mark.parametrize("operation", ["prepare", "observe", "revoke-bootstrap", "withdraw"])
 @pytest.mark.parametrize("boundary", ["credential", "path-pool", "path-intent", "pool-generation", "executor", "incarnation", "subject", "body", "oversized", "http"])
 async def test_http_rejects_untrusted_admission_without_writes(prepared_input, tmp_path, boundary, operation):
     _factory, engine, _installation, _plan, _source, _request = prepared_input
@@ -126,6 +126,10 @@ async def test_http_rejects_untrusted_admission_without_writes(prepared_input, t
             reply = await client.post(url,content=b"{" if boundary=="body" else b"x"*(1024*1024+1))
         elif operation == "observe":
             reply = await client.post(url,content=canonical_executable_bytes(registration.binding))
+        elif operation == "withdraw":
+            from tests.integration.test_personal_dev_build_guard_withdrawal import withdrawal
+
+            reply = await client.post(url,content=canonical_executable_bytes(withdrawal(physical(registration))))
         elif operation == "revoke-bootstrap":
             from loom_capacity_agent.admission import ExecutablePreparedBootstrapRevocationV2
 
@@ -140,6 +144,7 @@ async def test_http_rejects_untrusted_admission_without_writes(prepared_input, t
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == 0
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.bootstrap_revocations")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_withdrawals")) == 0
 
 
 async def test_http_defaults_closed_without_private_configuration(tmp_path):
@@ -297,9 +302,16 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
         assert observation.bootstrap_registration_epoch == 1
         assert observation.worker_id is None
         assert observation.release is None
-        bound = await client.bind_slurm_job(physical(registration))
+        physical_request = physical(registration)
+        bound = await client.bind_slurm_job(physical_request)
         assert bound.intent_id == binding.intent_id
         assert await client.observe_intent(binding) == observation
+        from tests.integration.test_personal_dev_build_guard_withdrawal import withdrawal
+
+        withdraw = withdrawal(physical_request)
+        withdrawn = await client.withdraw_unregistered_worker(withdraw)
+        assert await client.withdraw_unregistered_worker(withdraw) == withdrawn
+        assert (await client.observe_intent(binding)).withdrawal == withdrawn
         # A valid bearer without its client certificate cannot reach the API.
         context = ssl.create_default_context(cafile=str(ca_path))
         async with httpx.AsyncClient(verify=context,trust_env=False,timeout=2) as unauthenticated:
@@ -308,6 +320,8 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
                     headers={"Authorization":"Bearer executor-secret"},json=preparation(registration,digest))
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == 2
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_withdrawals")) == 1
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
     finally:
         if client is not None and hasattr(client,"aclose"):
             await client.aclose()

@@ -166,7 +166,7 @@ async def test_typed_route_rechecks_inputs_after_construction(tmp_path, boundary
         await router.prepare_worker(request,bootstrap_sha256="b"*64)
 
 
-@pytest.mark.parametrize("method", ["begin_drain", "withdraw_unregistered_worker", "register_worker",
+@pytest.mark.parametrize("method", ["begin_drain", "register_worker",
     "acknowledge_release", "admit_claim"])
 async def test_all_unimplemented_native_consumers_reject_before_transport(tmp_path,method):
     from types import SimpleNamespace
@@ -186,7 +186,7 @@ async def test_all_unimplemented_native_consumers_reject_before_transport(tmp_pa
         await getattr(router,method)(*args,**kwargs)
 
 
-@pytest.mark.parametrize("method", ["bind_slurm_job", "observe_intent", "revoke_prepared_bootstrap"])
+@pytest.mark.parametrize("method", ["bind_slurm_job", "observe_intent", "revoke_prepared_bootstrap", "withdraw_unregistered_worker"])
 @pytest.mark.parametrize("purpose", ["application-worker", "personal-build-worker"])
 async def test_typed_lifecycle_routes_exact_arguments_and_closes(tmp_path,method,purpose):
     from types import SimpleNamespace
