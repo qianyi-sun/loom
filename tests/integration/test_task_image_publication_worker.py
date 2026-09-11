@@ -159,14 +159,19 @@ async def _prepared(
     return job, issuer, signer, Distribution(distribution), clock
 
 
+@pytest.mark.parametrize("startup_delay_seconds", [0, 1])
 @pytest.mark.parametrize("expired_before_claim", [False, True])
 async def test_total_deadline_has_durable_terminal_disposition(
-    registry_authority_session, tls_registry, token_key, expired_before_claim
+    registry_authority_session, tls_registry, token_key, expired_before_claim, startup_delay_seconds
 ):
     values = await _prepared(
         registry_authority_session, tls_registry, token_key, lifetime_seconds=0.5
     )
     job = values[0]
+    # Explicitly simulate setup finishing after the half-second job budget.
+    # This advances the trusted test clock without guessing at machine speed.
+    original_clock = values[4]
+    values = (*values[:4], lambda: original_clock() + timedelta(seconds=startup_delay_seconds))
     if expired_before_claim:
         values = (*values[:4], lambda: job.deadline)
     else:
