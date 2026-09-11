@@ -6,7 +6,6 @@ from testcontainers.minio import MinioContainer
 
 from loom.pipeline.artifact_commit import ArtifactCommitService
 from loom.trajectory.storage import MinioObjectStore
-from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 from tests.integration.pipeline_artifact_testkit import final_producer, plan, upload_all
 
 pytestmark = pytest.mark.docker

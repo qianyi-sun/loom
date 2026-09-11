@@ -15,7 +15,6 @@ from loom.models.trajectory import StepStartEvent
 from loom.trajectory.storage import MinioObjectStore
 from loom.trajectory.writer import TrajectoryWriter
 from loom_benchmark_tool.upload import upload_task_dir
-from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 
 
 @pytest.fixture(scope="module")
