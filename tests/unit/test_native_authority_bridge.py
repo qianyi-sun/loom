@@ -148,3 +148,67 @@ async def test_authority_bridge_cancellation_settles_inflight_client_and_sends_s
             await task
         monitor.close()
         helper.close()
+
+
+@pytest.mark.parametrize("boundary", ["idle-cancel", "backpressure"])
+async def test_authority_bridge_idle_cancellation_and_backpressure_are_bounded(monkeypatch, boundary):
+    module = importlib.import_module("loom_capacity_executor.native_authority_bridge")
+    request = execution_request()
+    calls = []
+    reading = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    original = loop.add_reader
+    removed = []
+    remove_reader = loop.remove_reader
+
+    def add_reader(*args):
+        original(*args)
+        reading.set()
+
+    def remove(descriptor):
+        removed.append(descriptor)
+        return remove_reader(descriptor)
+
+    monkeypatch.setattr(loop, "add_reader", add_reader)
+    monkeypatch.setattr(loop, "remove_reader", remove)
+
+    class Client:
+        async def authorize_execution(self, value, *, worker_credential):
+            calls.append(value)
+            return receipt(value)
+
+    monitor, helper = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    monitor.setblocking(False)
+    helper.setblocking(False)
+    if boundary == "backpressure":
+        helper.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        for _ in range(1024):
+            try:
+                helper.send(b"test-buffer-fill" * 100)
+            except BlockingIOError:
+                break
+        else:
+            pytest.fail("test did not saturate the bounded socket")
+        monitor.send(canonical_bytes(NativeAuthorityRequest(request=request)))
+    task = asyncio.create_task(module.serve_native_execution_authority(helper,
+        claim=request.claim, source_binding_sha256=request.source_binding_sha256,
+        worker_credential="x" * 43, client=Client()))
+    try:
+        async with asyncio.timeout(2):
+            if boundary == "idle-cancel":
+                await reading.wait()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert helper.fileno() in removed
+                response = await loop.sock_recv(monitor, 65536)
+                assert response == canonical_bytes(module.NativeAuthorityStop(kind="renewal-failed"))
+            else:
+                await task
+        assert len(calls) == int(boundary == "backpressure")
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        monitor.close()
+        helper.close()

@@ -1,7 +1,7 @@
 """Disposable real monitor/broker runtime; authority replies are fixture-only."""
 
+import asyncio
 import os
-import signal
 import socket
 import subprocess
 import sys
@@ -13,31 +13,37 @@ from loom_capacity_agent.build_admission import (
     BuildExecutionPermitV1,
     BuildSourceContextV1,
 )
+from loom_capacity_executor.native_authority_bridge import serve_native_execution_authority
 from loom_capacity_executor.native_parent_death import bind_native_parent_death
 from loom_capacity_executor.native_runsc import NativeRunscLayout
 from loom_capacity_executor.native_runtime_broker import NativeBrokerReady
 from loom_capacity_executor.native_runtime_cleanup import reconcile_native_runtime_cleanup
-from loom_capacity_executor.native_supervisor import (
-    NativeAuthorityPermission,
-    NativeAuthorityRequest,
-    supervise_native_execution,
-)
-from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
+from loom_capacity_executor.native_supervisor import supervise_native_execution
+from loom_capacity_manager.contracts import canonical_digest
 
 
 def serve_authority(descriptor, parent_pid, expiry):
     bind_native_parent_death(parent_pid)
-    with socket.socket(fileno=descriptor) as channel:
-        count = 0
-        while wire := channel.recv(65536):
-            count += 1
-            if expiry and count > 1:
-                signal.pause()  # Simulate HTTP blocked while the live client runs.
-            request = NativeAuthorityRequest.model_validate_json(wire).request
+    context = BuildSourceContextV1.model_validate_json(Path("/fixtures/context.json").read_bytes())
+    claim = BuildClaimRequestV1.model_validate_json(Path("/fixtures/claim.json").read_bytes())
+    assert canonical_digest(claim) == context.claim_digest
+
+    class FixtureClient:
+        calls = 0
+
+        async def authorize_execution(self, request, *, worker_credential):
+            assert worker_credential == "x" * 43
+            self.calls += 1
+            if expiry and self.calls > 1:
+                await asyncio.Future()  # Simulate HTTP blocked while the client runs.
             now = datetime.now(UTC)
-            permit = BuildExecutionPermitV1(request=request, request_digest=canonical_digest(request),
+            return BuildExecutionPermitV1(request=request, request_digest=canonical_digest(request),
                 issued_at=now, not_after=now + timedelta(seconds=10))
-            channel.send(canonical_bytes(NativeAuthorityPermission(permit=permit)))
+
+    with socket.socket(fileno=descriptor) as channel:
+        asyncio.run(serve_native_execution_authority(channel, claim=claim,
+            source_binding_sha256=context.source_binding_sha256, worker_credential="x" * 43,
+            client=FixtureClient()))
 
 
 def supervised_build(expiry=False):
