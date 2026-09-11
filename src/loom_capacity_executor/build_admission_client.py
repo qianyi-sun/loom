@@ -25,6 +25,8 @@ from loom_capacity_agent.admission import (
     WithdrawnExecutableWorkerV2,
 )
 from loom_capacity_agent.build_admission import (
+    BuildAllocatedClaimExchangeV1,
+    BuildAllocatedClaimRequestV1,
     BuildClaimExchangeV1,
     BuildClaimReceiptV1,
     BuildClaimRequestV1,
@@ -244,6 +246,18 @@ class BuildAdmissionClient:
         receipt = await self._post(request.binding, "claim", canonical_bytes(exchange), BuildClaimReceiptV1)
         if receipt.request != request or receipt.request_digest != canonical_digest(request):
             raise BuildAdmissionTransportError("native claim receipt binding changed")
+        return receipt
+
+    async def claim_assigned_platform(self, request: BuildAllocatedClaimRequestV1, *, worker_credential: str) -> BuildClaimReceiptV1:
+        # Validate before an envelope's base-typed serialization could silently
+        # omit a caller-selected request_id from a BuildClaimRequestV1 subclass.
+        request = BuildAllocatedClaimRequestV1.model_validate_json(request.model_dump_json())
+        envelope = BuildAllocatedClaimExchangeV1.model_validate_json(BuildAllocatedClaimExchangeV1(
+            claim=request, worker_credential=worker_credential).model_dump_json())
+        receipt = await self._post(envelope.claim.binding, "claim-assigned", canonical_bytes(envelope), BuildClaimReceiptV1)
+        if (receipt.request.model_dump(exclude={"request_id"}) != envelope.claim.model_dump()
+            or receipt.request_digest != canonical_digest(receipt.request)):
+            raise BuildAdmissionTransportError("allocated native claim response binding changed")
         return receipt
 
     async def record_outcome(self, request: BuildOutcomeRequestV1, *, worker_credential: str) -> BuildOutcomeReceiptV1:

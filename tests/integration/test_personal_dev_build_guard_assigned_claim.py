@@ -22,10 +22,17 @@ from tests.integration.test_personal_dev_build_guard_registration import CREDENT
 from tests.integration.test_personal_dev_native_builder_store import sessions as sessions
 
 
-@pytest.mark.parametrize("boundary", ["exact", "credential", "worker", "incarnation", "binding", "cancelled", "expired"])
+@pytest.mark.parametrize("boundary", ["exact", "credential", "worker", "incarnation", "binding", "cancelled", "expired", "drain"])
 async def test_assigned_claim_resolves_only_authenticated_worker_allocation(prepared_input, monkeypatch, boundary):
     factory, engine, installation, _plan, source, platform = prepared_input
     claim = await claim_input(prepared_input, monkeypatch)
+    if boundary == "drain":
+        from loom_capacity_agent.admission import ExecutableDrainRequestV2
+
+        async with factory.begin() as session:
+            await store(session, installation).begin_drain(ExecutableDrainRequestV2(
+                operation_id=uuid4(), binding=claim.binding, worker_id=claim.worker_id,
+                worker_incarnation=claim.worker_incarnation, expected_claim_high_water=0, drain_epoch=3))
     module = import_module("loom_capacity_agent.build_admission")
     payload = claim.model_dump(mode="json", exclude={"request_id"})
     if boundary in {"worker", "incarnation"}:
@@ -141,3 +148,22 @@ async def test_assigned_claim_downgrade_preserves_retained_claim(prepared_input,
     async with factory.begin() as session:
         assert await store(session, installation).claim_platform(claim, worker_credential=CREDENTIAL) == receipt
     command.upgrade(build_guard_database[0], "head")
+
+
+async def test_assigned_claim_rejects_uncommitted_registration(prepared_input, monkeypatch):
+    from loom_capacity_agent.build_admission import BuildAllocatedClaimRequestV1
+    from tests.integration.test_personal_dev_build_guard_registration import (
+        BOOTSTRAP,
+        registration_input,
+    )
+
+    factory, _engine, installation, *_ = prepared_input
+    worker, _physical = await registration_input(prepared_input, monkeypatch)
+    request = BuildAllocatedClaimRequestV1(binding=worker.binding, operation_id=uuid4(),
+        worker_id=worker.worker_id, worker_incarnation=worker.worker_incarnation)
+    async with factory.begin() as session:
+        await store(session, installation).register_worker(worker, bootstrap_capability=BOOTSTRAP)
+        with pytest.raises(DBAPIError, match="worker credential"):
+            await store(session, installation).claim_assigned_platform(request, worker_credential=CREDENTIAL)
+    async with factory.begin() as session:
+        await store(session, installation).claim_assigned_platform(request, worker_credential=CREDENTIAL)

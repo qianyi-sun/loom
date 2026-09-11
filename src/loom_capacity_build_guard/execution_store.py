@@ -27,6 +27,7 @@ from loom_capacity_agent.admission import (
     WithdrawnExecutableWorkerV2,
 )
 from loom_capacity_agent.build_admission import (
+    BuildAllocatedClaimRequestV1,
     BuildClaimReceiptV1,
     BuildClaimRequestV1,
     BuildOutcomeReceiptV1,
@@ -253,6 +254,25 @@ class BuildGuardExecutionStore:
             if (canonical_bytes(receipt).decode("ascii") != returned or receipt.request != request
                 or receipt.request_digest != digest):
                 raise ValueError("native claim receipt changed")
+            return receipt
+
+    async def claim_assigned_platform(self, request: BuildAllocatedClaimRequestV1, *, worker_credential: str) -> BuildClaimReceiptV1:
+        if not self._session.in_transaction():
+            raise ValueError("allocated native claim requires an outer transaction")
+        request = BuildAllocatedClaimRequestV1.model_validate_json(request.model_dump_json())
+        if not isinstance(worker_credential, str) or re.fullmatch(r"[A-Za-z0-9_-]{43,512}", worker_credential) is None:
+            raise ValueError("allocated native claim credential is invalid")
+        wire = canonical_bytes(request)
+        async with self._session.begin_nested():
+            returned = await self._session.scalar(text("""SELECT loom_capacity_build_guard.claim_assigned_platform(
+                :installation,CAST(:payload AS jsonb),:wire,:digest,:credential)"""),
+                {"installation": self._installation.id, "payload": wire.decode("ascii"), "wire": wire,
+                    "digest": sha256(wire).hexdigest(), "credential": sha256(worker_credential.encode("ascii")).hexdigest()})
+            receipt = BuildClaimReceiptV1.model_validate_json(returned)
+            if (canonical_bytes(receipt).decode("ascii") != returned
+                or receipt.request.model_dump(exclude={"request_id"}) != request.model_dump()
+                or receipt.request_digest != canonical_digest(receipt.request)):
+                raise ValueError("allocated native claim receipt changed")
             return receipt
 
     async def authorize_source(self, request: BuildClaimRequestV1, *, worker_credential: str) -> BuildClaimSourceV1:

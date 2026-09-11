@@ -21,6 +21,7 @@ from loom_capacity_agent.admission import (
     PhysicalJobBindingV2,
 )
 from loom_capacity_agent.build_admission import (
+    BuildAllocatedClaimExchangeV1,
     BuildClaimExchangeV1,
     BuildOutcomeExchangeV1,
     BuildPreparationRequestV1,
@@ -47,7 +48,7 @@ async def _admit(
     *,
     pool_id: str,
     intent_id: UUID,
-    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap", "withdraw", "register", "claim", "drain", "outcome", "release", "source", "context"],
+    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap", "withdraw", "register", "claim", "drain", "outcome", "release", "source", "context", "claim-assigned"],
 ) -> Response:
     sessions = getattr(request.app.state, "personal_dev_build_admission_sessions", None)
     verifier = getattr(request.app.state, "personal_dev_build_admission_verifier", None)
@@ -64,7 +65,7 @@ async def _admit(
     ) not in {"native-claims", "native-source"}:
         raise HTTPException(503, "native claims unavailable")
     source_reader = getattr(request.app.state, "personal_dev_build_source_reader", None)
-    if operation_name == "context" and getattr(request.app.state, "personal_dev_build_admission_mode", None) != "native-source":
+    if operation_name in {"context", "claim-assigned"} and getattr(request.app.state, "personal_dev_build_admission_mode", None) != "native-source":
         raise HTTPException(503, "native context unavailable")
     if operation_name == "source" and (
         getattr(request.app.state, "personal_dev_build_admission_mode", None) != "native-source"
@@ -89,6 +90,10 @@ async def _admit(
                     raise HTTPException(413, "build admission request exceeds byte bound")
                 body.extend(chunk)
             try:
+                assigned_claim = (
+                    BuildAllocatedClaimExchangeV1.model_validate_json(bytes(body))
+                    if operation_name == "claim-assigned" else None
+                )
                 source_read = (
                     BuildSourceReadExchangeV1.model_validate_json(bytes(body))
                     if operation_name == "source" else None
@@ -115,7 +120,9 @@ async def _admit(
                     else None
                 )
                 operation = (
-                    source_read.claim
+                    assigned_claim.claim
+                    if assigned_claim is not None
+                    else source_read.claim
                     if source_read is not None
                     else release.release
                     if release is not None
@@ -167,7 +174,10 @@ async def _admit(
                 await session.execute(text("SET LOCAL statement_timeout='10000ms'"))
                 await session.execute(text("SET LOCAL lock_timeout='5000ms'"))
                 store = BuildGuardExecutionStore(session, binding=binding)
-                if release is not None:
+                if assigned_claim is not None:
+                    wire = canonical_bytes(await store.claim_assigned_platform(
+                        assigned_claim.claim, worker_credential=assigned_claim.worker_credential))
+                elif release is not None:
                     wire = canonical_executable_bytes(await store.acknowledge_release(
                         release.release, current_worker_credential=release.worker_credential))
                 elif outcome is not None:
@@ -205,7 +215,7 @@ async def _admit(
             # Context exit commits. Never send a preparation receipt from an
             # uncommitted transaction that could be followed by scheduler submit.
             return Response(wire, media_type="application/json",
-                headers={"Cache-Control": "no-store"} if operation_name == "context" else None)
+                headers={"Cache-Control": "no-store"} if operation_name in {"context", "claim-assigned"} else None)
     except (DBAPIError, ValueError):
         raise HTTPException(409, "build admission evidence unavailable or changed") from None
     except (TimeoutError, PoolTimeoutError, BotoCoreError, ClientError):
@@ -257,6 +267,11 @@ async def register_build_worker(request: Request, pool_id: str, intent_id: UUID)
 @router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/claim")
 async def claim_build_platform(request: Request, pool_id: str, intent_id: UUID) -> Response:
     return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="claim")
+
+
+@router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/claim-assigned")
+async def claim_assigned_build_platform(request: Request, pool_id: str, intent_id: UUID) -> Response:
+    return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="claim-assigned")
 
 
 @router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/drain")

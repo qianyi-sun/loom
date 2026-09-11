@@ -25,6 +25,8 @@ from loom_capacity_agent.admission import (
     PhysicalJobBindingV2,
 )
 from loom_capacity_agent.build_admission import (
+    BuildAllocatedClaimRequestV1,
+    BuildClaimReceiptV1,
     BuildClaimRequestV1,
     BuildOutcomeRequestV1,
     BuildSourceContextV1,
@@ -98,7 +100,7 @@ class TypedAdmissionDirectoryV3(_StrictLaunchV3):
 _BUILD_CONSUMERS = frozenset({
     "prepare_worker", "bind_slurm_job", "observe_intent", "revoke_prepared_bootstrap",
     "withdraw_unregistered_worker", "register_worker", "claim_platform", "begin_drain", "record_outcome", "acknowledge_release",
-    "read_source", "read_source_context",
+    "read_source", "read_source_context", "claim_assigned_platform",
 })
 
 
@@ -235,4 +237,12 @@ class TypedAdmissionRouter:
         receipt = await self._call(claim.binding, "read_source_context", claim, worker_credential=worker_credential)
         if not isinstance(receipt, BuildSourceContextV1):
             raise ValueError("native context route returned an invalid receipt")
+        return receipt
+
+    async def claim_assigned_platform(self, request: BuildAllocatedClaimRequestV1, *, worker_credential: str) -> BuildClaimReceiptV1:
+        if self.purpose(request.binding) != "personal-build-worker":
+            raise ValueError("allocated native claim requires a build-purpose route")
+        receipt = await self._call(request.binding, "claim_assigned_platform", request, worker_credential=worker_credential)
+        if not isinstance(receipt, BuildClaimReceiptV1):
+            raise ValueError("allocated native claim route returned an invalid receipt")
         return receipt

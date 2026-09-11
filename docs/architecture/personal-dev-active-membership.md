@@ -614,6 +614,20 @@ equality check. Context/source reads do not extend leases; neither is permission
 to start a build or publish an artifact. Claim discovery/launcher handoff and
 allocation-contained execution still need their actual runtime connection.
 
+Revision `build_guard_0029` adds `/claim-assigned` under the same intent/pool
+route and explicit `native-source` mode. A registered worker supplies its exact
+binding, worker identity and stable operation ID, not a source request ID.
+Private SQL verifies its committed registration and credential, resolves its
+immutable assigned request, and delegates to the existing native claim procedure.
+This adds no queue-selection policy, capacity or lease authority. The response
+is the existing claim receipt and commits before delivery; lost replies replay
+the same retained claim. Replay after cancellation is historical evidence only,
+and context/source access still fails. Both the client and store reject an
+explicit request ID on this allocated-claim interface instead of silently
+discarding it, and verify all supplied fields plus the returned full claim digest.
+Application-purpose routes cannot use this operation. Startup checks its exact
+private ACL; this operation alone does not launch a worker or enable readiness.
+
 `BuildManagementRuntime` composes installation-scoped terminal recovery, protected
 release publication, final retirement, demand reporting, bootstrap registration
 and plan convergence. Each pass performs cleanup before new admission. Expected

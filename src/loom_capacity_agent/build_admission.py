@@ -28,14 +28,25 @@ class BuildRegistrationRequestV1(StrictV1Model):
         pattern=r"^[A-Za-z0-9_-]+$", repr=False)
 
 
-class BuildClaimRequestV1(StrictV1Model):
-    """Claim only the request already allocated to this registered native worker."""
+class BuildAllocatedClaimRequestV1(StrictV1Model):
+    """The registered worker names itself; management resolves its assigned work."""
 
     binding: ExecutableIntentBindingV2
     operation_id: UUID
-    request_id: UUID
     worker_id: UUID
     worker_incarnation: UUID
+
+
+class BuildClaimRequestV1(BuildAllocatedClaimRequestV1):
+    """Claim only the request already allocated to this registered native worker."""
+
+    request_id: UUID
+
+
+class BuildAllocatedClaimExchangeV1(StrictV1Model):
+    claim: BuildAllocatedClaimRequestV1
+    worker_credential: str = Field(min_length=43, max_length=512,
+        pattern=r"^[A-Za-z0-9_-]+$", repr=False)
 
 
 class BuildClaimReceiptV1(StrictV1Model):
