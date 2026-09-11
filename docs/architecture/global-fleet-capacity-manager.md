@@ -464,10 +464,12 @@ can satisfy its preconditions.
 
 These observations are not trusted reference artifacts or ownership-transfer
 receipts. The runtime package now bundles separate PostgreSQL-major-bound
-legacy-owner and sealed-owner references for application head `0137` and guard
-head `guard_0031`, including the publication-authority, manifest-identity and
-immutable task-source journal objects introduced by application migrations
-`0135`–`0137`. Both PostgreSQL
+legacy-owner and sealed-owner references for application head `0142` and guard
+head `guard_0033`, including the publication/keyset, task-source, personal
+membership, incarnation-storage and build-platform objects introduced by
+application migrations `0135`–`0142`. The trial-writer migration follows the
+native-reader fence (`guard_0031`) and typed-terminal importer (`guard_0032`);
+it does not replace either upstream security boundary. Both PostgreSQL
 majors have independently generated pins; PostgreSQL 17 uses a pinned vanilla
 17.4 image, not an observation of the live CNPG database.
 Catalog SQL selects `daticulocale` on 16 and `datlocale` on 17 before

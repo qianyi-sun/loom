@@ -38,6 +38,7 @@ from loom.personal_dev_capacity_runtime import (
     _new_credentials,
     _role_names,
 )
+from loom.personal_dev_incarnation_storage import PersonalDevStorageBindingV1
 from loom.staging_capacity_database_bootstrap import staging_capacity_identity
 from loom_capacity_manager.contracts import ResourceVectorV1
 from loom_capacity_manager.executable_contracts import (
@@ -1003,13 +1004,26 @@ async def test_capacity_guard_migration_uses_password_free_url_and_private_passf
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("handoff", [False, True])
+@pytest.mark.parametrize(
+    ("handoff", "storage_layout"),
+    [(False, "legacy-name-v1"), (True, "legacy-name-v1"), (True, "incarnation-v1")],
+)
 async def test_personal_role_convergence_after_actual_application_owned_migrations(
     capacity_postgres_url: str,
     handoff: bool,
+    storage_layout: str,
 ) -> None:
     """Use the real personal SQL bootstrap, not administrator-owned test tables."""
     identity = derive_identity(f"appowner-{uuid4().hex[:8]}")
+    if storage_layout == "incarnation-v1":
+        identity = PersonalDevStorageBindingV1(
+            layout="incarnation-v1",
+            environment_name=identity.name,
+            subject_id=uuid4(),
+            subject_incarnation=uuid4(),
+            owner_user_id=uuid4(),
+            owner_team_id=uuid4(),
+        ).identity
     password = uuid4().hex
     database = PsycopgPersonalDevCapacityDatabase(capacity_postgres_url)
     bootstrap = PsycopgSharedFixtureSqlExecutor(capacity_postgres_url)
@@ -1182,8 +1196,23 @@ async def test_personal_role_convergence_after_actual_application_owned_migratio
                         (identity.db_role, signature, new_owner, signature, new_owner),
                     )
                     assert await observed.fetchone() == (False, True, True)
+            if storage_layout == "incarnation-v1":
+                # Owner separation must not bypass the permanent storage fence,
+                # even when a failed provisioning attempt tries to recover.
+                await bound_database.seal(identity)
+                await bound_database.seal(identity)
+                with pytest.raises(PersonalDevCapacityInstallationError):
+                    await bound_database._converge_roles(identity, _new_credentials())
+                async with await psycopg.AsyncConnection.connect(admin_url) as admin:
+                    observed = await admin.execute(
+                        "SELECT count(*) FROM pg_authid WHERE rolname = ANY(%s) "
+                        "AND (rolcanlogin OR rolpassword IS NOT NULL)",
+                        ([identity.db_role, *roles[:6], new_owner],),
+                    )
+                    assert await observed.fetchone() == (0,)
             # Destroy must include this explicitly bound owner, without
             # discovering and adopting arbitrary other roles.
+            await bound_database.destroy(identity)
             await bound_database.destroy(identity)
             async with await psycopg.AsyncConnection.connect(
                 capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
