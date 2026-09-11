@@ -162,3 +162,59 @@ def test_native_launch_rejects_root_outside_its_validity(submitted_at: datetime)
     context = replace(_native_context(), submitted_at=submitted_at)
     with pytest.raises(TrustedLaunchRenderError, match="native execution root"):
         render_launch_request(context)
+
+
+def _native_typed_context(*, purpose: str = "application-worker"):
+    from loom_capacity_executor.launch_policy_set import (
+        PurposeLaunchPolicyV3,
+        canonical_pool_launch_policy_digest,
+        full_launch_profile_digest,
+    )
+    from tests.unit.test_capacity_executor_typed_launch_renderer import typed_context
+
+    context = typed_context(purpose=purpose)
+    profile = OperatorLaunchProfileV2.model_validate(
+        context.profiles[0].model_dump(mode="json") | {"native_execution": native_contract_fixture()}
+    )
+    policy = context.policy.model_copy(update={"entries": (
+        PurposeLaunchPolicyV3(purpose=purpose, profile_sha256=full_launch_profile_digest(profile)),
+    )})
+    digest = canonical_pool_launch_policy_digest(policy)
+    return replace(context, profiles=(profile.model_copy(update={"controller_authority_sha256": digest}),),
+        policy=policy, controller_authority=context.controller_authority.model_copy(
+            update={"controller_authority_sha256": digest}),
+        submitted_at=datetime(2026, 9, 11, tzinfo=UTC))
+
+
+@pytest.mark.parametrize("submitted_at", [
+    datetime(2026, 8, 31, tzinfo=UTC), datetime(2026, 10, 1, tzinfo=UTC),
+])
+def test_typed_native_launch_rejects_inactive_root_before_signing(submitted_at, monkeypatch):
+    from loom_capacity_executor import typed_launch_renderer
+
+    def must_not_sign(*args, **kwargs):
+        pytest.fail("inactive native root reached ownership signing")
+
+    monkeypatch.setattr(typed_launch_renderer, "sign_typed_executable_ownership", must_not_sign)
+    with pytest.raises(TrustedLaunchRenderError, match="native execution root"):
+        typed_launch_renderer.render_typed_signed_launch(
+            replace(_native_typed_context(), submitted_at=submitted_at))
+
+
+def test_typed_native_launch_binds_active_application_profile():
+    from loom_capacity_executor.launch_policy_set import full_launch_profile_digest
+    from loom_capacity_executor.typed_launch_renderer import render_typed_signed_launch
+
+    context = _native_typed_context()
+    rendered = render_typed_signed_launch(context)
+    assert rendered.request.image_digest == context.profiles[0].image_digest
+    assert rendered.ownership_proof.metadata.launch_profile_sha256 == full_launch_profile_digest(context.profiles[0])
+
+
+def test_personal_build_policy_cannot_select_task_image_execution_profile():
+    from loom_capacity_executor.launch_policy_set import validate_typed_runtime_profiles
+
+    context = _native_typed_context(purpose="personal-build-worker")
+    with pytest.raises(ValueError, match="native task-image execution requires application-worker"):
+        validate_typed_runtime_profiles(context.profiles, policy=context.policy,
+            controller_authority_sha256=context.controller_authority.controller_authority_sha256)
