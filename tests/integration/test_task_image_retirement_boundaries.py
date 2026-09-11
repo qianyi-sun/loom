@@ -43,6 +43,25 @@ from tests.integration.test_task_image_retirement_snapshot import ORIGIN, _setup
 from tests.integration.test_task_image_retirement_store import observe, store
 
 
+async def _wait_for_real_idle_abort(factory, session):
+    backend = await session.scalar(text("SELECT pg_backend_pid()"))
+    assert (
+        await session.scalar(
+            text("SELECT current_setting('idle_in_transaction_session_timeout')")
+        )
+        == "1s"
+    )
+    async with factory.kw["bind"].connect() as probe:
+        await probe.execution_options(isolation_level="AUTOCOMMIT")
+        async with asyncio.timeout(3):
+            while await probe.scalar(
+                text("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = :pid)"),
+                {"pid": backend},
+            ):
+                await asyncio.sleep(0.02)
+    return backend
+
+
 async def _observe_positive_semantics(factory, attempt_id, instant):
     # An idle-aborted transaction has not observed or retired anything. This
     # positive pin-semantics test may restart the entire supported operation;
@@ -69,13 +88,7 @@ async def test_positive_observation_retries_one_real_idle_abort(
     async def expire_once(session, *, prepared):
         calls.append(prepared.inventory.attempt_id)
         if len(calls) == 1:
-            backend = await session.scalar(text("SELECT pg_backend_pid()"))
-            assert await session.scalar(text("SHOW idle_in_transaction_session_timeout")) == "1s"
-            async with factory.kw["bind"].connect() as probe:
-                await probe.execution_options(isolation_level="AUTOCOMMIT")
-                async with asyncio.timeout(3):
-                    while await probe.scalar(text("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid=:pid)"), {"pid": backend}):
-                        await asyncio.sleep(0.02)
+            await _wait_for_real_idle_abort(factory, session)
         await original(session, prepared=prepared)
 
     monkeypatch.setattr(module, "revalidate_retirement_inventory", expire_once)
@@ -174,9 +187,12 @@ async def test_nonterminal_and_terminal_execution_pins_require_positive_cleanup(
         assert result.pins == ("execution_lease",) and result.unreferenced_since is None
 
 
+@pytest.mark.parametrize("idle_abort", [False, True])
 async def test_old_completed_retirement_preserves_newer_lease_and_legacy_history(
     registry_authority_session,
     registry_issuer,
+    monkeypatch,
+    idle_abort,
 ):
     factory = registry_authority_session
     async with factory() as session:
@@ -185,6 +201,18 @@ async def test_old_completed_retirement_preserves_newer_lease_and_legacy_history
         await session.commit()
     attempt_id, row_id = UUID(receipt.attempt_id), UUID(receipt.materialization_id)
     instant = NOW + timedelta(hours=1)
+    calls = []
+    if idle_abort:
+        module = store()
+        original = module.revalidate_retirement_inventory
+
+        async def expire_once(session, *, prepared):
+            calls.append(prepared.inventory.attempt_id)
+            if len(calls) == 1:
+                await _wait_for_real_idle_abort(factory, session)
+            await original(session, prepared=prepared)
+
+        monkeypatch.setattr(module, "revalidate_retirement_inventory", expire_once)
     await _observe_positive_semantics(factory, attempt_id, instant)
     async with factory() as session:
         row = await retry_task_image_materialization(session, materialization_id=row_id)
@@ -203,6 +231,8 @@ async def test_old_completed_retirement_preserves_newer_lease_and_legacy_history
     assert (
         await _observe_positive_semantics(factory, attempt_id, instant + timedelta(days=7))
     ).status == "retired"
+    if idle_abort:
+        assert calls == [attempt_id, attempt_id, attempt_id]
     async with factory() as session:
         row = await session.get(TaskImageMaterialization, row_id)
         assert (
@@ -288,7 +318,7 @@ async def test_cancellation_rolls_back_retirement_and_ready_clear(
         await session.commit()
     attempt_id = UUID(receipt.attempt_id)
     instant = NOW + timedelta(hours=1)
-    await observe(factory, attempt_id, instant)
+    await _observe_positive_semantics(factory, attempt_id, instant)
     reached = asyncio.Event()
     original = AsyncSession.flush
 
@@ -463,7 +493,9 @@ async def test_terminal_verifier_pins_after_parent_execution_is_cleaned(
             await session.commit()
             current = await session.get(ServiceExecutionLease, lease.id)
             assert current.deleted_at is not None and current.cleanup_state == "complete"
-        result = await observe(factory, UUID(receipt.attempt_id), NOW + timedelta(days=1))
+        result = await _observe_positive_semantics(
+            factory, UUID(receipt.attempt_id), NOW + timedelta(days=1)
+        )
         if lease is parent:
             assert result.pins == ("execution_lease",)
         else:
