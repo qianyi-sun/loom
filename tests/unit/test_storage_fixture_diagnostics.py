@@ -2,7 +2,11 @@
 
 import pytest
 
-from loom.dev_instance_runtime import CommandResult, DevInstanceRuntimeError, KubernetesResourceVersionConflictError
+from loom.dev_instance_runtime import (
+    CommandResult,
+    DevInstanceRuntimeError,
+    KubernetesResourceVersionConflictError,
+)
 from tests.integration import test_personal_dev_storage_namespace as fixture
 
 
@@ -16,7 +20,7 @@ async def test_failed_fixture_write_preserves_exception_and_safe_diagnostics(mon
             calls.append((argv, stdin))
             if "sh" in argv:
                 raise error
-            if "cat" in argv:
+            if "head" in argv:
                 return CommandResult('Error from server (NotFound): namespaces "private-fixture-name" not found', "")
             if "inspect" in argv:
                 return CommandResult('{"Running":true,"OOMKilled":false,"ExitCode":0}', "")
