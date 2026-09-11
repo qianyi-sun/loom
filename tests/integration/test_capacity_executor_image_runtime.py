@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import socket
@@ -31,6 +32,31 @@ class CapacityExecutorImageRuntimeTest(unittest.TestCase):
             "import loom_capacity_executor.native_installed_worker"],
             capture_output=True, text=True, check=False, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_native_bootstrap_contract_is_installed(self) -> None:
+        from loom_capacity_executor.launch_renderer import NativeTaskImageExecutionV2
+        from loom_capacity_executor.native_worker_bootstrap import (
+            NativeWorkerBootstrap,
+            native_bootstrap_pipe,
+            read_native_bootstrap,
+        )
+
+        native = NativeTaskImageExecutionV2(
+            protocol="loom.task-image-native-execution/v2",
+            launch_protocol="immutable-container-stdin/v1",
+            platform="linux/amd64",
+            root_key_id="test-root",
+            environment="test",
+            root_public_key=base64.urlsafe_b64encode(b"t" * 32).rstrip(b"=").decode(),
+            root_activated_at="2026-09-01T00:00:00Z",
+            root_expires_at="2026-10-01T00:00:00Z",
+        )
+        original = NativeWorkerBootstrap(native_execution=native, worker_credential="t" * 43)
+        descriptor = native_bootstrap_pipe(original)
+        try:
+            self.assertEqual(read_native_bootstrap(descriptor), original)
+        finally:
+            os.close(descriptor)
 
     def test_installer_can_load_its_command_contract(self) -> None:
         result = subprocess.run(

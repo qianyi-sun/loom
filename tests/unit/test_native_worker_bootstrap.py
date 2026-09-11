@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import fcntl
+import json
 import os
 import time
 from pathlib import Path
@@ -111,3 +113,47 @@ def test_invalid_credential_error_does_not_echo_secret() -> None:
             worker_credential=secret,
         ))
     assert secret not in str(caught.value)
+
+
+@pytest.mark.parametrize("mutation", ["duplicate", "bad-root", "oversized"])
+def test_bootstrap_rejects_noncanonical_nested_or_oversized_payload(mutation: str) -> None:
+    wire = encode_native_bootstrap(_bootstrap())
+    body = wire[4:]
+    if mutation == "duplicate":
+        body = b'{"schema":"loom.native-worker-bootstrap/v1",' + body[1:]
+    elif mutation == "bad-root":
+        payload = json.loads(body)
+        payload["native_execution"]["root_public_key"] = "invalid"
+        body = json.dumps(payload).encode()
+    else:
+        body = body + b" " * 4096
+    wire = len(body).to_bytes(4, "big") + body
+    reader, writer = os.pipe()
+    try:
+        # Prevent a fixture deadlock even on a host with an unusually small pipe.
+        os.set_blocking(writer, False)
+        written = os.write(writer, wire)
+        assert written == len(wire)
+    finally:
+        os.close(writer)
+    try:
+        with pytest.raises(NativeBootstrapError, match="unavailable or malformed"):
+            read_native_bootstrap(reader, timeout_seconds=1)
+    finally:
+        os.close(reader)
+
+
+def test_preload_rejects_insufficient_capacity_before_writing_and_closes_pipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptors = os.pipe()
+    monkeypatch.setattr(os, "pipe", lambda: descriptors)
+    monkeypatch.setattr(fcntl, "fcntl", lambda *_: 1)
+    writes: list[bytes] = []
+    monkeypatch.setattr(os, "write", lambda _fd, wire: writes.append(wire))
+    with pytest.raises(NativeBootstrapError, match="unavailable or malformed"):
+        native_bootstrap_pipe(_bootstrap())
+    assert writes == []
+    for descriptor in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
