@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -49,6 +50,7 @@ from tests.loom_cli.rollout.operator.test_protected_migration_component import (
     _rebind_schema3_authority,
 )
 from tests.support.protected_application_deployments import application_manifest, ready_application
+from tests.unit.test_protected_peer_database_connection import _CHILD
 
 
 @pytest.fixture(autouse=True)
@@ -1180,6 +1182,107 @@ def test_subprocess_runner_has_fixed_environment_and_redacted_failure(
             input_payload=b"manifest\n",
             timeout_seconds=5,
         )
+
+
+@pytest.mark.parametrize("maintenance", [False, True])
+def test_subprocess_runner_opens_one_fixed_bounded_staging_peer_channel(
+    monkeypatch, maintenance
+) -> None:
+    runner = SubprocessProtectedApplyCommandRunner()
+    popen = subprocess.Popen
+    calls = []
+    children = []
+    database = "postgres" if maintenance else "loom"
+    child_code = _CHILD.replace('456, "loom", "postgres"', f'456, "{database}", "postgres"')
+
+    def start(argv, **kwargs):
+        calls.append((tuple(argv), kwargs))
+        child = popen([sys.executable, "-u", "-c", child_code, "pg17-client-off"], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setenv("PGPASSWORD", "private-parent-password")
+    monkeypatch.setenv("KUBECONFIG", "/wrong-context")
+    monkeypatch.setattr(
+        "loom_cli.rollout.operator.protected_apply_executor.subprocess.Popen", start
+    )
+    open_peer = (
+        runner.open_staging_peer_maintenance_database
+        if maintenance
+        else runner.open_staging_peer_database
+    )
+    with open_peer() as connection:
+        with connection.transaction():
+            pass
+        assert connection.backend_identity.database == database
+        assert connection.backend_identity.session_user == "postgres"
+    assert len(calls) == 1
+    assert calls[0][0] == (
+        "kubectl",
+        "--namespace",
+        "loom-staging",
+        "exec",
+        "-i",
+        "service/loom-postgres-rw",
+        "--",
+        "sh",
+        "-ceu",
+        f"PGOPTIONS='-c event_triggers=off' exec psql -U postgres -d {database} -qAtX -v ON_ERROR_STOP=1",
+    )
+    assert calls[0][1] == {
+        "env": dict(runner.environment),
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "bufsize": 0,
+    }
+    assert children[0].poll() == 0
+    assert children[0].stdin.closed and children[0].stdout.closed and children[0].stderr.closed
+
+
+@pytest.mark.parametrize("wrong", ["database", "session-user", "server-version"])
+@pytest.mark.parametrize("maintenance", [False, True])
+def test_subprocess_runner_refuses_wrong_peer_target_and_reaps(
+    monkeypatch, wrong, maintenance
+) -> None:
+    runner = SubprocessProtectedApplyCommandRunner()
+    popen = subprocess.Popen
+    children = []
+    database = "postgres" if maintenance else "loom"
+    observed_database = "wrong" if wrong == "database" else database
+    observed_user = "wrong" if wrong == "session-user" else "postgres"
+    child_code = _CHILD.replace(
+        '456, "loom", "postgres"',
+        f'456, "{observed_database}", "{observed_user}"',
+    )
+
+    def start(argv, **kwargs):
+        mode = "normal" if wrong == "server-version" else "pg17-client-off"
+        child = popen([sys.executable, "-u", "-c", child_code, mode], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.operator.protected_apply_executor.subprocess.Popen", start
+    )
+    with pytest.raises(RuntimeError, match="peer identity"):
+        if maintenance:
+            runner.open_staging_peer_maintenance_database()
+        else:
+            runner.open_staging_peer_database()
+    assert len(children) == 1 and children[0].poll() is not None
+
+
+def test_subprocess_runner_peer_start_failure_is_redacted(monkeypatch) -> None:
+    def start(*args, **kwargs):
+        raise OSError("private-child-diagnostic")
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.operator.protected_apply_executor.subprocess.Popen", start
+    )
+    with pytest.raises(RuntimeError, match="peer process failed safely") as caught:
+        SubprocessProtectedApplyCommandRunner().open_staging_peer_database()
+    assert "private-child-diagnostic" not in str(caught.value)
 
 
 def test_subprocess_runner_accepts_multiline_argv_but_rejects_empty_and_nul(
