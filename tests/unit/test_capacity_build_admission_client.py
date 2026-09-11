@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from loom_capacity_agent.admission import PreparedExecutableAdmissionV2
+from loom_capacity_agent.admission import ProtectedIntentObservationV2
 from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
     canonical_executable_bytes,
@@ -34,6 +35,29 @@ def receipt(request):
         subject_incarnation=request.binding.subject_incarnation,intent_id=request.binding.intent_id,
         bootstrap_registration_epoch=1,bootstrap_sha256="b"*64,request_digest=digest,
         admission_digest=digest,protected_high_water=1)
+
+
+@pytest.mark.parametrize("boundary", ["exact", "binding", "noncanonical"])
+async def test_client_validates_exact_protected_observation(boundary):
+    request = registration()
+    expected = ProtectedIntentObservationV2(binding=request.binding, bootstrap_registration_epoch=1)
+
+    async def handle(outgoing):
+        assert outgoing.url.path.endswith("/observe")
+        assert outgoing.content == canonical_executable_bytes(request.binding)
+        result = expected
+        if boundary == "binding":
+            result = result.model_copy(update={"binding":request.binding.model_copy(update={"account_id":"foreign"})})
+        wire = canonical_executable_bytes(result)
+        return httpx.Response(200, content=wire + (b" " if boundary == "noncanonical" else b""))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = client_for(http, request)
+        if boundary == "exact":
+            assert await client.observe_intent(request.binding) == expected
+        else:
+            with pytest.raises(RuntimeError, match=r"binding|invalid"):
+                await client.observe_intent(request.binding)
 
 
 @pytest.mark.parametrize("pool", ["gb10", "oldlab"])

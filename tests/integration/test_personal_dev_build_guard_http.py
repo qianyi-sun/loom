@@ -69,12 +69,13 @@ async def test_http_prepare_bind_and_lost_reply_replay_are_committed(prepared_in
         assert replay.content == bound.content
 
 
+@pytest.mark.parametrize("operation", ["prepare", "observe"])
 @pytest.mark.parametrize("boundary", ["credential", "path-pool", "path-intent", "pool-generation", "executor", "incarnation", "subject", "body", "oversized", "http"])
-async def test_http_rejects_untrusted_admission_without_writes(prepared_input, tmp_path, boundary):
+async def test_http_rejects_untrusted_admission_without_writes(prepared_input, tmp_path, boundary, operation):
     _factory, engine, _installation, _plan, _source, _request = prepared_input
     registration, digest = await admitted(prepared_input)
     app = application(prepared_input,tmp_path)
-    url = route(registration,"prepare")
+    url = route(registration,operation)
     token = "wrong" if boundary=="credential" else "executor-secret"
     if boundary=="path-pool":
         url = url.replace(f"/pools/{registration.binding.pool_id}/", "/pools/foreign/")
@@ -89,6 +90,8 @@ async def test_http_rejects_untrusted_admission_without_writes(prepared_input, t
         headers={"Authorization":f"Bearer {token}"}) as client:
         if boundary in {"body", "oversized"}:
             reply = await client.post(url,content=b"{" if boundary=="body" else b"x"*(1024*1024+1))
+        elif operation == "observe":
+            reply = await client.post(url,content=canonical_executable_bytes(registration.binding))
         else:
             reply = await client.post(url,json=preparation(registration,digest))
     assert reply.status_code in {400,401,403,409,413}, reply.text
@@ -218,8 +221,14 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
             bearer_token_file=token_path,tls_files=tls_files,timeout_seconds=5.0))
         prepared = await client.prepare_worker(registration,bootstrap_sha256=digest)
         assert prepared.intent_id == binding.intent_id
+        observation = await client.observe_intent(binding)
+        assert observation.binding == binding
+        assert observation.bootstrap_registration_epoch == 1
+        assert observation.worker_id is None
+        assert observation.release is None
         bound = await client.bind_slurm_job(physical(registration))
         assert bound.intent_id == binding.intent_id
+        assert await client.observe_intent(binding) == observation
         # A valid bearer without its client certificate cannot reach the API.
         context = ssl.create_default_context(cafile=str(ca_path))
         async with httpx.AsyncClient(verify=context,trust_env=False,timeout=2) as unauthenticated:
