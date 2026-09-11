@@ -185,3 +185,20 @@ async def test_current_bootstrap_does_not_wait_behind_admission_writer(capacity_
         with pytest.raises(DBAPIError, match="could not obtain lock"):
             await asyncio.wait_for(_observe(capacity_guard_database, registration, physical), timeout=2)
     await _observe(capacity_guard_database, registration, physical)
+
+
+@pytest.mark.asyncio
+async def test_executor_client_uses_fresh_bounded_application_observation(capacity_guard_database):
+    from loom_capacity_executor.admission_client import DatabaseExecutableAdmissionClient
+
+    _, registration, request, physical, _ = await _prepared(capacity_guard_database)
+    engine = create_async_engine(_value(capacity_guard_database, "executor_url"), isolation_level="SERIALIZABLE")
+    async with DatabaseExecutableAdmissionClient(
+        engine, subject_id=registration.subject_id, subject_incarnation=registration.subject_incarnation,
+        statement_timeout_ms=1200, lock_timeout_ms=800,
+    ) as client:
+        first = await client.observe_current_bootstrap(physical)
+        assert first.physical_binding == physical
+        await client.withdraw_unregistered_worker(_withdrawal(request))
+        with pytest.raises(DBAPIError, match="current unused bootstrap"):
+            await client.observe_current_bootstrap(physical)
