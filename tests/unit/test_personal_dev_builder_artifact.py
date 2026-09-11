@@ -191,3 +191,35 @@ def test_artifact_verifier_rejects_traversal_without_extracting(tmp_path: Path) 
             max_image_archive_bytes=256 * 1024,
         )
     assert not (tmp_path / "escape").exists()
+
+
+@pytest.mark.parametrize("changed", [None, "candidate_sha", "source_sha256", "archive_sha256",
+    "build_contract_sha256", "attempt_id", "lease_epoch", "platform"])
+def test_bound_artifact_verification_does_not_require_synthetic_registration(tmp_path, changed):
+    from dataclasses import replace
+    from uuid import UUID
+
+    from loom import personal_dev_builder_artifact as module
+
+    registration = _registration()
+    candidate, attempt = registration.candidate, registration.build_attempt
+    binding = module.PersonalDevBuildArtifactBinding(candidate_sha=candidate.candidate_sha,
+        source_sha256=candidate.source_sha256, archive_sha256=candidate.archive_sha256,
+        build_contract_sha256=candidate.build_contract_sha256, attempt_id=attempt.id,
+        lease_epoch=attempt.lease_epoch, platform="linux/amd64")
+    artifact = tmp_path / "artifact.tar"
+    _artifact(artifact)
+    output = tmp_path / "verified"
+    output.mkdir()
+    if changed is not None:
+        replacement = {"attempt_id": UUID(int=42), "lease_epoch": attempt.lease_epoch + 1,
+            "platform": "linux/arm64"}.get(changed, "9" * 64)
+        binding = replace(binding, **{changed: replacement})
+        with pytest.raises(PersonalDevBuildArtifactError):
+            module.verify_bound_personal_dev_build_artifact(artifact, binding,
+                output_directory=output, max_artifact_bytes=1024 * 1024, max_image_archive_bytes=256 * 1024)
+        assert list(output.iterdir()) == []
+    else:
+        result = module.verify_bound_personal_dev_build_artifact(artifact, binding,
+            output_directory=output, max_artifact_bytes=1024 * 1024, max_image_archive_bytes=256 * 1024)
+        assert set(result.images) == set(PERSONAL_DEV_COMPONENTS)
