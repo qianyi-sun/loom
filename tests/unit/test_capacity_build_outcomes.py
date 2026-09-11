@@ -49,10 +49,12 @@ def test_outcome_rejects_invalid_or_ambiguous_archive_evidence(boundary):
 
 def test_artifact_identity_is_claim_specific_and_receipt_is_not_executable():
     claim = claim_request()
-    key = native_build_artifact_key(claim)
+    artifact = BuildArtifactV1(archive_size_bytes=10, archive_sha256="a" * 64)
+    key = native_build_artifact_key(claim, artifact)
     assert str(claim.request_id) in key and str(claim.binding.intent_id) in key and str(claim.operation_id) in key
-    assert key != native_build_artifact_key(claim.model_copy(update={"operation_id": uuid4()}))
-    assert key != native_build_artifact_key(claim.model_copy(update={"binding": claim.binding.model_copy(update={"intent_id": uuid4()})}))
+    assert key != native_build_artifact_key(claim.model_copy(update={"operation_id": uuid4()}), artifact)
+    assert key != native_build_artifact_key(claim.model_copy(update={"binding": claim.binding.model_copy(update={"intent_id": uuid4()})}), artifact)
+    assert key != native_build_artifact_key(claim, artifact.model_copy(update={"archive_sha256": "b" * 64}))
     request = BuildOutcomeRequestV1(claim=claim, operation_id=uuid4(), result="failed")
     receipt = BuildOutcomeReceiptV1(request=request, request_digest=canonical_digest(request))
     assert not receipt.executable and receipt.live_claim_count == 0 and receipt.claim_high_water == 1
