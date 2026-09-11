@@ -1,12 +1,13 @@
 """Purpose-specific management/executor build admission envelopes."""
 
+import base64
 from typing import Annotated, Literal, Self
 from uuid import UUID
 
 from pydantic import Field, model_validator
 
 from loom_capacity_agent.admission import ExecutableReleaseRequestV2, ExecutableWorkerRegistrationV2
-from loom_capacity_manager.contracts import Digest, PositiveQuantity, StrictV1Model
+from loom_capacity_manager.contracts import Digest, PositiveQuantity, Quantity, StrictV1Model
 from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
     ExecutableIntentBindingV2,
@@ -57,6 +58,36 @@ class BuildArtifactV1(StrictV1Model):
 
     archive_sha256: Digest
     archive_size_bytes: PositiveQuantity
+
+
+class BuildSourceReadExchangeV1(BuildClaimExchangeV1):
+    """One bounded source read, authenticated anew on every request."""
+
+    offset: Quantity
+    length: Annotated[int, Field(ge=1, le=1024 * 1024)]
+
+
+class BuildSourceReadReceiptV1(StrictV1Model):
+    """Source bytes only; no object-store coordinates or reusable IO capability."""
+
+    claim_digest: Digest
+    source_binding_sha256: Digest
+    archive_sha256: Digest
+    archive_size_bytes: PositiveQuantity
+    offset: Quantity
+    data_base64: Annotated[str, Field(min_length=4, max_length=1398104, repr=False)]
+
+    @property
+    def data(self) -> bytes:
+        return base64.b64decode(self.data_base64, validate=True)
+
+    @model_validator(mode="after")
+    def _bounded_data(self) -> Self:
+        data = self.data
+        if (not 1 <= len(data) <= 1024 * 1024 or self.offset + len(data) > self.archive_size_bytes
+            or base64.b64encode(data).decode("ascii") != self.data_base64):
+            raise ValueError("native source response bytes are invalid")
+        return self
 
 
 class BuildOutcomeRequestV1(StrictV1Model):

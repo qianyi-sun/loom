@@ -1,14 +1,17 @@
-"""Controller-authenticated native build admission; no application/source grants."""
+"""Controller-authenticated native admission and explicitly enabled bounded source IO."""
 
 from __future__ import annotations
 
 import asyncio
+import base64
 from typing import Literal
 from uuid import UUID
 
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, HTTPException, Request, Response
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from loom_capacity_agent.admission import (
@@ -23,8 +26,11 @@ from loom_capacity_agent.build_admission import (
     BuildPreparationRequestV1,
     BuildRegistrationRequestV1,
     BuildReleaseExchangeV1,
+    BuildSourceReadExchangeV1,
+    BuildSourceReadReceiptV1,
 )
 from loom_capacity_build_guard.execution_store import BuildGuardExecutionStore
+from loom_capacity_build_guard.source_reader import BuildSourceReader
 from loom_capacity_manager.auth import AuthorizationError, CapacityPrincipalVerifier
 from loom_capacity_manager.contracts import canonical_bytes
 from loom_capacity_manager.executable_contracts import (
@@ -41,7 +47,7 @@ async def _admit(
     *,
     pool_id: str,
     intent_id: UUID,
-    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap", "withdraw", "register", "claim", "drain", "outcome", "release"],
+    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap", "withdraw", "register", "claim", "drain", "outcome", "release", "source"],
 ) -> Response:
     sessions = getattr(request.app.state, "personal_dev_build_admission_sessions", None)
     verifier = getattr(request.app.state, "personal_dev_build_admission_verifier", None)
@@ -51,12 +57,18 @@ async def _admit(
         raise HTTPException(503, "build admission unavailable")
     if operation_name in {"register", "drain", "release"} and getattr(
         request.app.state, "personal_dev_build_admission_mode", None
-    ) not in {"native-registration", "native-claims"}:
+    ) not in {"native-registration", "native-claims", "native-source"}:
         raise HTTPException(503, "build registration unavailable")
     if operation_name in {"claim", "outcome"} and getattr(
         request.app.state, "personal_dev_build_admission_mode", None
-    ) != "native-claims":
+    ) not in {"native-claims", "native-source"}:
         raise HTTPException(503, "native claims unavailable")
+    source_reader = getattr(request.app.state, "personal_dev_build_source_reader", None)
+    if operation_name == "source" and (
+        getattr(request.app.state, "personal_dev_build_admission_mode", None) != "native-source"
+        or not isinstance(source_reader, BuildSourceReader)
+    ):
+        raise HTTPException(503, "native source unavailable")
     if request.url.scheme != "https":
         raise HTTPException(403, "build admission requires TLS")
     if len(request.headers.getlist("authorization")) != 1:
@@ -75,6 +87,10 @@ async def _admit(
                     raise HTTPException(413, "build admission request exceeds byte bound")
                 body.extend(chunk)
             try:
+                source_read = (
+                    BuildSourceReadExchangeV1.model_validate_json(bytes(body))
+                    if operation_name == "source" else None
+                )
                 release = (
                     BuildReleaseExchangeV1.model_validate_json(bytes(body))
                     if operation_name == "release" else None
@@ -97,7 +113,9 @@ async def _admit(
                     else None
                 )
                 operation = (
-                    release.release
+                    source_read.claim
+                    if source_read is not None
+                    else release.release
                     if release is not None
                     else outcome.outcome.claim
                     if outcome is not None
@@ -133,6 +151,16 @@ async def _admit(
                 )
             ):
                 raise HTTPException(403, "build admission identity changed")
+            if source_read is not None:
+                assert isinstance(source_reader, BuildSourceReader)
+                source_chunk = await source_reader.read(source_read.claim, worker_credential=source_read.worker_credential,
+                    offset=source_read.offset, length=source_read.length)
+                result = BuildSourceReadReceiptV1(claim_digest=source_chunk.source.claim_digest,
+                    source_binding_sha256=source_chunk.source.source_binding_sha256,
+                    archive_sha256=source_chunk.source.archive_sha256, archive_size_bytes=source_chunk.source.archive_size_bytes,
+                    offset=source_chunk.offset, data_base64=base64.b64encode(source_chunk.data).decode("ascii"))
+                return Response(canonical_bytes(result), media_type="application/json",
+                    headers={"Cache-Control": "no-store"})
             async with sessions.begin() as session:
                 await session.execute(text("SET LOCAL statement_timeout='10000ms'"))
                 await session.execute(text("SET LOCAL lock_timeout='5000ms'"))
@@ -174,13 +202,18 @@ async def _admit(
             return Response(wire, media_type="application/json")
     except (DBAPIError, ValueError):
         raise HTTPException(409, "build admission evidence unavailable or changed") from None
-    except TimeoutError:
+    except (TimeoutError, PoolTimeoutError, BotoCoreError, ClientError):
         raise HTTPException(503, "build admission deadline exceeded") from None
 
 
 @router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/prepare")
 async def prepare_build(request: Request, pool_id: str, intent_id: UUID) -> Response:
     return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="prepare")
+
+
+@router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/source")
+async def read_build_source(request: Request, pool_id: str, intent_id: UUID) -> Response:
+    return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="source")
 
 
 @router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/bind")

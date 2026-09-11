@@ -286,7 +286,8 @@ activation remain to be connected; endpoint presence does not enable build intak
 Service startup can install these private sessions with the optional
 `LOOM_SVC_PERSONAL_DEV_BUILD_ADMISSION_CONFIG_FILE` and its exact
 `LOOM_SVC_PERSONAL_DEV_BUILD_ADMISSION_CONFIG_SHA256`. The canonical V1 document
-has `mode="prepare-bind-only"`, `"native-registration"`, or `"native-claims"`, owner-only `database_url_file` and
+has `mode="prepare-bind-only"`, `"native-registration"`, `"native-claims"`, or
+`"native-source"`, owner-only `database_url_file` and
 `principals_file` paths, and their SHA-256 digests. The database URL requires
 verified PostgreSQL TLS. Startup checks the restricted agent and protected
 admission procedures, and rejects incomplete inputs or privilege drift. The
@@ -552,6 +553,32 @@ retires, the result remains unconfirmed; this transport never silently changes
 authority or invents a new retry key. Legacy application routes are unchanged.
 This is membership transport, not scope installation or native build readiness.
 
+The private admission configuration's explicit `native-source` mode adds bounded
+source reads to `native-claims`; existing modes do not enable this surface.
+Revision `build_guard_0027` checks the exact committed claim, registered worker
+credential, assignment and current source/whole-attempt lease. Historical claim
+replay never renews source access. Drain, physical terminal evidence, any outcome
+for that claim, release, bootstrap revocation or closed assignment rejects access.
+Running work follows its current whole-attempt heartbeat, not the initial plan's
+admission expiry. The procedure grants no new claim or lease extension.
+
+`POST /api/v1/internal/capacity-build/pools/{pool_id}/intents/{intent_id}/source`
+requires the existing exact TLS pool-executor identity plus the scoped worker
+credential. It reads at most 1 MiB per request, using server-derived bucket/key
+and exact S3 range/size checks. A second short private transaction rechecks live
+authority after IO and before returning bytes; cancellation during IO discards
+the response. SQL locks are not held across object-store calls. The response
+contains claim/source digests, offset and base64 bytes, but no object-store
+credentials, coordinates or reusable URLs; responses are non-cacheable.
+
+One service-owned reader bounds concurrent IO. Cancelled requests retain their
+slots until the underlying stream closes; shutdown stops new reads and drains
+IO before closing database/object-store clients. Already delivered source cannot
+be revoked. The allocated runtime must still verify the complete archive digest
+before extraction and separately fence execution and artifact publication.
+This transport does not enable source intake, launch containers or report builder
+readiness. Contained execution, artifact return and live acceptance remain required.
+
 `BuildManagementRuntime` composes installation-scoped terminal recovery, protected
 release publication, final retirement, demand reporting, bootstrap registration
 and plan convergence. Each pass performs cleanup before new admission. Expected
@@ -628,7 +655,7 @@ may requeue only after retirement; artifact-ready/cancelled requests remain
 ineligible for fresh admission. The pool-authenticated `/release` endpoint and
 pinned client require a transport-only worker credential and return only committed,
 canonical release evidence. Typed routing preserves application/build authority;
-only `native-registration` and `native-claims` modes expose native release.
+only `native-registration`, `native-claims` and `native-source` modes expose native release.
 Terminal release without the credential remains management-only, with no pool
 route. Runtime recovery orchestration, source grants and verified artifact publication remain required
 before operational enablement.

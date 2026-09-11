@@ -168,7 +168,7 @@ async def build_personal_build_management_runtime(settings: LoomServiceSettings,
     config = BuildManagementServiceConfigV1.model_validate_json(wire)
     if canonical_bytes(config) != wire:
         raise ValueError("build management configuration must be canonical")
-    if admission is None or admission.mode != "native-claims":
+    if admission is None or admission.mode not in {"native-claims", "native-source"}:
         raise ValueError("build management recovery requires private native claim admission")
     credentials = [(scope.bearer_token.read(), scope.ca.read(), scope.certificate.read(), scope.private_key.read())
         for scope in config.scopes]

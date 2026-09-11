@@ -34,6 +34,8 @@ from loom_capacity_agent.build_admission import (
     BuildPreparationRequestV1,
     BuildRegistrationRequestV1,
     BuildReleaseExchangeV1,
+    BuildSourceReadExchangeV1,
+    BuildSourceReadReceiptV1,
 )
 from loom_capacity_agent.client import (
     DemandReporterConnection,
@@ -89,7 +91,7 @@ def _validate_connection(origin: str, token: str, timeout: float) -> str:
 
 
 class BuildAdmissionClient:
-    """Pool-authenticated native lifecycle; no application DB or source access."""
+    """Pool-authenticated lifecycle and bounded source IO; no application DB access."""
 
     def __init__(self, identity: BuildAdmissionExecutorV1, *, origin: str,
         bearer_token: str, http_client: httpx.AsyncClient, owns_http_client: bool = False,
@@ -137,7 +139,7 @@ class BuildAdmissionClient:
             raise ValueError("build admission executor binding changed")
 
     async def _post(self,binding: ExecutableIntentBindingV2,operation: str,payload: bytes,
-        receipt_type: type[_Receipt],
+        receipt_type: type[_Receipt], *, max_response_bytes: int = _MAX_RESPONSE_BYTES,
     ) -> _Receipt:
         self._assert_binding(binding)
         url = f"{self._origin}/api/v1/internal/capacity-build/pools/{binding.pool_id}/intents/{binding.intent_id}/{operation}"
@@ -149,7 +151,7 @@ class BuildAdmissionClient:
                     raise BuildAdmissionTransportError(f"build admission rejected request with status {response.status_code}")
                 body = bytearray()
                 async for chunk in response.aiter_bytes():
-                    if len(body)+len(chunk) > _MAX_RESPONSE_BYTES:
+                    if len(body)+len(chunk) > max_response_bytes:
                         raise BuildAdmissionTransportError("build admission receipt exceeds byte bound")
                     body.extend(chunk)
         except (httpx.HTTPError,TimeoutError):
@@ -162,6 +164,18 @@ class BuildAdmissionClient:
         except ValueError:
             raise BuildAdmissionTransportError("build admission receipt is invalid") from None
         return cast(_Receipt, receipt)
+
+    async def read_source(self, claim: BuildClaimRequestV1, *, worker_credential: str,
+        offset: int, length: int,
+    ) -> BuildSourceReadReceiptV1:
+        request = BuildSourceReadExchangeV1.model_validate_json(BuildSourceReadExchangeV1(
+            claim=claim, worker_credential=worker_credential, offset=offset, length=length).model_dump_json())
+        receipt = await self._post(request.claim.binding, "source", canonical_bytes(request),
+            BuildSourceReadReceiptV1, max_response_bytes=1400000)
+        if (receipt.claim_digest != canonical_digest(request.claim) or receipt.offset != request.offset
+            or len(receipt.data) != min(request.length, receipt.archive_size_bytes - request.offset)):
+            raise BuildAdmissionTransportError("native source response binding changed")
+        return receipt
 
     async def prepare_worker(self, request: ExecutableBootstrapRegistrationV2, *,
         bootstrap_sha256: str,
