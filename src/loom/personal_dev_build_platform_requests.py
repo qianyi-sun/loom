@@ -75,10 +75,15 @@ def _platforms(platforms: tuple[PersonalDevPlatform, ...]) -> tuple[PersonalDevP
 
 
 def _source(registration: CandidateRegistration) -> str:
+    return hashlib.sha256(canonical_build_source(registration)).hexdigest()
+
+
+def canonical_build_source(registration: CandidateRegistration) -> bytes:
+    """Retain the exact source hash preimage for independent protected SQL checks."""
     candidate, attempt = registration.candidate, registration.build_attempt
     if attempt is None:
         raise ValueError("platform request has no whole-attempt lease")
-    return _digest({"owner_user_id": str(candidate.owner_user_id), "owner_team_id": str(candidate.owner_team_id),
+    return json.dumps({"owner_user_id": str(candidate.owner_user_id), "owner_team_id": str(candidate.owner_team_id),
         "candidate_id": str(candidate.id), "source_generation_id": str(candidate.source_generation_id),
         "candidate_sha256": candidate.candidate_sha, "source_sha256": candidate.source_sha256,
         "archive_sha256": candidate.archive_sha256, "build_contract_sha256": candidate.build_contract_sha256,
@@ -86,7 +91,8 @@ def _source(registration: CandidateRegistration) -> str:
         "archive_size_bytes": candidate.archive_size_bytes,
         "attempt_id": str(attempt.id), "lease_epoch": attempt.lease_epoch, "claimed_by": attempt.claimed_by,
         "subject_id": str(attempt.subject_id), "subject_incarnation": str(attempt.subject_incarnation),
-        "operation_id": str(attempt.operation_id), "operation_epoch": attempt.operation_epoch})
+        "operation_id": str(attempt.operation_id), "operation_epoch": attempt.operation_epoch},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
 
 
 def _bucket(registration: CandidateRegistration, owner: UUID, platform: PersonalDevPlatform, now: datetime) -> DemandBucketV1:

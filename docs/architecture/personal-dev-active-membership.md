@@ -121,6 +121,17 @@ scalar identity pins and the runtime digest shared with platform requests.
 Retention does not activate an installation; the runtime agent cannot call this
 owner interface, and caller rollback also rolls back the retained record.
 
+Revision `build_guard_0002` adds an owner-only source assertion for the eventual
+protected prepare/publication procedures. It hashes the exact retained source
+snapshot bytes against the immutable platform request, then compares their JSON
+fields to the current candidate and build-attempt rows. Installation, parent,
+candidate and request locks remain held by the caller's SERIALIZABLE transaction;
+changed source, replaced/expired lease, installation drift and cancellation fail
+closed. Multi-request callers must first acquire each class of source locks in
+sorted order. This helper has no agent EXECUTE grant and produces no assignment
+or acknowledgement. The protected owner's future invocation requires SELECT and
+row-lock permission on these three management tables; the agent receives neither.
+
 Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
 preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release
 verification bind the exact historical configuration, acknowledgement and member
