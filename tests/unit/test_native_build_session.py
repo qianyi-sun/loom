@@ -1,5 +1,7 @@
 """The mapped session cannot verify artifacts before confirmed runtime cleanup."""
 
+import os
+import socket
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -90,3 +92,53 @@ def test_invalid_session_identity_never_starts_broker(tmp_path, monkeypatch, bou
         module.execute_native_build_session(claim=claim, context=context, layout=layout, workspace=workspace,
             authority=object(), expected_parent_pid=123, max_artifact_bytes=True if boundary == "limit" else 1024**2,
             max_image_archive_bytes=256 * 1024)
+
+
+@pytest.mark.parametrize("boundary", ["exact", "pid", "parent", "claim", "malformed", "dead", "timeout", "body-error"])
+def test_broker_readiness_and_exception_paths_settle_only_owned_child(tmp_path, monkeypatch, boundary):
+    from loom_capacity_executor import native_build_session as module
+    from loom_capacity_executor.native_runtime_broker import NativeBrokerReady
+    from loom_capacity_manager.contracts import canonical_bytes
+
+    layout = NativeRunscLayout(Path("/runtime/runsc"), tmp_path / "state", tmp_path / "bundles", "a" * 64)
+    events = []
+    child = SimpleNamespace(pid=12345, returncode=0 if boundary == "dead" else None)
+    child.poll = lambda: child.returncode
+
+    def kill():
+        events.append("kill")
+        child.returncode = -9
+
+    def wait(**kwargs):
+        events.append("wait")
+        assert child.returncode is not None
+        return child.returncode
+
+    def popen(command, **kwargs):
+        assert command[1:3] == ["-m", "loom_capacity_executor.native_runtime_broker"]
+        assert kwargs["close_fds"] is True and len(kwargs["pass_fds"]) == 1
+        descriptor = kwargs["pass_fds"][0]
+        assert command[-2:] == ["--control-fd", str(descriptor)]
+        ready = NativeBrokerReady(pid=12346 if boundary == "pid" else child.pid,
+            parent_pid=os.getpid() + (1 if boundary == "parent" else 0),
+            claim_digest="f" * 64 if boundary == "claim" else layout.claim_digest)
+        with socket.socket(fileno=os.dup(descriptor)) as channel:
+            channel.send(b"not-json" if boundary == "malformed" else canonical_bytes(ready))
+        return child
+
+    child.kill, child.wait = kill, wait
+    monkeypatch.setattr(module.subprocess, "Popen", popen)
+    if boundary == "timeout":
+        monkeypatch.setattr(module.select, "select", lambda *args: ([], [], []))
+    if boundary == "exact":
+        with module._broker_session(layout) as (channel, observed):
+            assert observed is child and not channel.get_inheritable()
+            events.append("body")
+    else:
+        with pytest.raises((ValueError, RuntimeError)):
+            with module._broker_session(layout):
+                assert boundary == "body-error"
+                events.append("body")
+                raise RuntimeError("injected session exception")
+    assert events == (["body"] if boundary in {"exact", "body-error"} else []) + (
+        [] if boundary == "dead" else ["kill"]) + ["wait"]

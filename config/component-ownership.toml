@@ -690,6 +690,17 @@ attestation_owner = "runtime-payload-provenance"
 runtime_policy = "runtime-payload"
 
 [[components]]
+id = "native-rootless-build-fixture"
+kind = "runtime-payload-image"
+dockerfile = "tests/support/native_kvm/Dockerfile.rootless"
+build_context = "tests/support/native_kvm"
+source_paths = ["tests/support/native_kvm/**"]
+smoke_owner = "task-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
 id = "execution-runtime-fixture"
 kind = "runtime-payload-image"
 dockerfile = "tests/fixtures/execution_runtime_fixture/Dockerfile"

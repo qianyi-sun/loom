@@ -65,7 +65,10 @@ def main():
             # uncertain after a partial delete. Do not put them in the fixture
             # retry list: failure cleanup is outer-container disposal only.
             expiry = identity["root_stop"].endswith("expiry")
-            supervised_build(expiry=expiry)
+            native_session = identity["root_stop"].startswith("monitored-rootless")
+            if native_session:
+                workspace.chmod(0o700)
+            supervised_build(expiry=expiry, native_session=native_session)
             # Production reconciliation already deleted these exact IDs once.
             # Keep independent final empty-list verification, not duplicate writes.
             if expiry:
