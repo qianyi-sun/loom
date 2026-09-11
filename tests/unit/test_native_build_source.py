@@ -48,10 +48,11 @@ def sealed_source(tmp_path):
 
 
 @pytest.mark.parametrize("pool", ["gb10", "oldlab"])
-@pytest.mark.parametrize("boundary", ["exact", "source-binding", "hash", "size", "corrupt", "cancel", "manifest", "request", "pool", "limit"])
+@pytest.mark.parametrize("boundary", ["exact", "renamed", "source-binding", "hash", "size", "corrupt", "cancel", "manifest", "request", "pool", "limit"])
 async def test_native_source_stages_verified_archive_and_cleans_all_paths(sealed_source, pool, boundary):
     module = import_module("loom_capacity_executor.native_build_source")
     registration, archive, workspace = sealed_source
+    retired = workspace.with_name("retired-allocation")
     platform = "linux/arm64" if pool == "gb10" else "linux/amd64"
     worker = native_registration(pool)
     claim = BuildClaimRequestV1(binding=worker.binding, operation_id=uuid4(),
@@ -69,6 +70,10 @@ async def test_native_source_stages_verified_archive_and_cleans_all_paths(sealed
         request = json.loads(outgoing.content)
         calls.append(request)
         offset, length = request["offset"], request["length"]
+        if boundary == "renamed" and offset == 0:
+            workspace.rename(retired)
+            workspace.mkdir(mode=0o700)
+            (workspace / "foreign-data").write_text("preserve")
         if boundary == "cancel" and offset:
             raise asyncio.CancelledError
         data = archive[offset:offset + length]
@@ -92,13 +97,13 @@ async def test_native_source_stages_verified_archive_and_cleans_all_paths(sealed
 
         async def consume():
             async with source(registration, claim=claim, worker_credential="x" * 43, platform=platform) as path:
-                assert boundary == "exact", "unverified source reached the sandbox boundary"
+                assert boundary in {"exact", "renamed"}, "unverified source reached the sandbox boundary"
                 assert path.read_bytes() == archive
                 assert path.stat().st_mode & 0o777 == 0o600
-                assert path.parent.parent.resolve() == workspace
+                assert path.parent.parent.resolve() == (retired if boundary == "renamed" else workspace)
             assert not path.exists()
 
-        if boundary == "exact":
+        if boundary in {"exact", "renamed"}:
             await consume()
         elif boundary == "cancel":
             with pytest.raises(asyncio.CancelledError):
@@ -106,11 +111,43 @@ async def test_native_source_stages_verified_archive_and_cleans_all_paths(sealed
         else:
             with pytest.raises((ValueError, RuntimeError)):
                 await consume()
-    assert list(workspace.iterdir()) == []
+    if boundary == "renamed":
+        assert list(retired.iterdir()) == []
+        assert (workspace / "foreign-data").read_text() == "preserve"
+    else:
+        assert list(workspace.iterdir()) == []
     if boundary in {"request", "pool", "limit"}:
         assert calls == []
-    elif boundary in {"exact", "source-binding", "corrupt", "cancel", "manifest"}:
+    elif boundary in {"exact", "renamed", "source-binding", "corrupt", "cancel", "manifest"}:
         assert len(calls) == 2
+
+
+@pytest.mark.parametrize("boundary", ["symlink", "world-readable"])
+async def test_source_workspace_fails_closed_before_network(sealed_source, monkeypatch, boundary):
+    from unittest.mock import AsyncMock
+
+    module = import_module("loom_capacity_executor.native_build_source")
+    registration, _archive, workspace = sealed_source
+    if boundary == "symlink":
+        alias = workspace.with_name("alias")
+        alias.symlink_to(workspace, target_is_directory=True)
+        workspace = alias
+    else:
+        workspace.chmod(0o755)
+    worker = native_registration()
+    claim = BuildClaimRequestV1(binding=worker.binding, operation_id=uuid4(),
+        request_id=personal_build_work_identity(registration, "linux/arm64")[1], worker_id=worker.worker_id,
+        worker_incarnation=worker.worker_incarnation)
+    async with httpx.AsyncClient() as http:
+        client = client_for(http, claim)
+        read = AsyncMock(side_effect=AssertionError("unsafe workspace reached network"))
+        monkeypatch.setattr(client, "read_source", read)
+        source = module.NativeClaimBuildSource(client=client, workspace=workspace, max_archive_bytes=2 * 1024 * 1024)
+        with pytest.raises((OSError, ValueError)):
+            async with source(registration, claim=claim, worker_credential="x" * 43, platform="linux/arm64"):
+                pytest.fail("unsafe workspace accepted")
+        read.assert_not_awaited()
+    assert list(workspace.iterdir()) == []
 
 
 @pytest.mark.parametrize("thread_failure", [False, True])
