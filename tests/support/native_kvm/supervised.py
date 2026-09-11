@@ -14,6 +14,7 @@ from loom_capacity_agent.build_admission import (
     BuildSourceContextV1,
 )
 from loom_capacity_executor.native_authority_bridge import serve_native_execution_authority
+from loom_capacity_executor.native_build_session import execute_native_build_session
 from loom_capacity_executor.native_parent_death import bind_native_parent_death
 from loom_capacity_executor.native_runsc import NativeRunscLayout
 from loom_capacity_executor.native_runtime_broker import NativeBrokerReady
@@ -46,7 +47,7 @@ def serve_authority(descriptor, parent_pid, expiry):
             client=FixtureClient()))
 
 
-def supervised_build(expiry=False):
+def supervised_build(expiry=False, native_session=False):
     context = BuildSourceContextV1.model_validate_json(Path("/fixtures/context.json").read_bytes())
     claim = BuildClaimRequestV1.model_validate_json(Path("/fixtures/claim.json").read_bytes())
     assert canonical_digest(claim) == context.claim_digest
@@ -59,6 +60,18 @@ def supervised_build(expiry=False):
         children.append(subprocess.Popen([sys.executable, __file__, str(auth_child.fileno()), str(os.getpid()), str(int(expiry))],
             pass_fds=(auth_child.fileno(),)))
         auth_child.close()
+        if native_session:
+            session = execute_native_build_session(claim=claim, context=context, layout=layout,
+                workspace=Path("/tmp/native-work"), authority=authority, expected_parent_pid=os.getppid(),
+                max_artifact_bytes=32 * 1024**2, max_image_archive_bytes=3 * 1024**2)
+            assert session.supervision.broker_reaped and session.cleanup.confirmed, session
+            if expiry:
+                assert session.supervision.reason == "expired" and session.artifact is None, session
+            else:
+                assert session.supervision.client_succeeded and len(session.artifact.images) == 10, session
+                print("native-supervised-build-completed", flush=True)
+            print("native-supervised-cleanup-confirmed", flush=True)
+            return
         broker = subprocess.Popen([sys.executable, "-m", "loom_capacity_executor.native_runtime_broker",
             *layout.arguments(), "--expected-parent", str(os.getpid()), "--control-fd", str(broker_child.fileno())],
             pass_fds=(broker_child.fileno(),))

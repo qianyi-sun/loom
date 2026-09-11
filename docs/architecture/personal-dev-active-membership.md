@@ -2232,6 +2232,14 @@ confirms cleanup, rejects a late child, and emits no artifact. The disposable
 fixture assembles the trusted root filesystem on explicitly executable tmpfs;
 an inherited locked `noexec` mount cannot be relaxed by a rootless gofer. Its
 mapping helpers use exact UID/GID file capabilities instead of set-ID bits.
+`execute_native_build_session` now composes the mapped production lifecycle:
+validate claim/context/layout, byte limits and private workspace; own the fixed
+broker and validate its readiness; supervise execution; settle the broker and
+confirm runtime cleanup; only then verify the bound artifact. Failed execution,
+unreaped supervision or uncertain cleanup returns no artifact. The complete
+rootless success/expiry fixtures exercise this session, with fixture-only authority
+replies. It neither uploads nor records outcomes or releases capacity; trusted
+material, one-shot launch fencing and the outer IO lifecycle remain caller duties.
 These fixtures remain offline (`--network=none`); restricted external
 dependency fetching, protected material/rootless installation, Slurm containment,
 ARM64 supervision, authenticated IO-helper composition and native artifact GC
