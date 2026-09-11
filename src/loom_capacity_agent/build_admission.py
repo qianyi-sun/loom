@@ -42,3 +42,11 @@ class BuildClaimReceiptV1(StrictV1Model):
     request: BuildClaimRequestV1
     request_digest: Digest
     claim_high_water: Literal[1] = 1
+
+
+class BuildClaimExchangeV1(StrictV1Model):
+    """Trusted-wrapper claim authentication, excluded from retained claim bytes."""
+
+    claim: BuildClaimRequestV1
+    worker_credential: str = Field(min_length=43, max_length=512,
+        pattern=r"^[A-Za-z0-9_-]+$", repr=False)

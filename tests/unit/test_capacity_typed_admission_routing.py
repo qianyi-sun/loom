@@ -52,6 +52,23 @@ async def test_application_claim_passes_routing_binding_into_atomic_admission(tm
     close.assert_awaited_once()
 
 
+@pytest.mark.parametrize("pool", ["gb10", "oldlab"])
+async def test_native_claim_cannot_fall_back_to_application_authority(tmp_path, pool):
+    from loom_capacity_agent.build_admission import BuildClaimRequestV1
+
+    module, request, document, path, digest = configured(tmp_path, pool, "application-worker")
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("native claim must not open application transport")
+
+    router = module.TypedAdmissionRouter(path, expected_sha256=digest, executor=document.executor,
+        application_client_factory=unexpected, build_client_factory=unexpected)
+    claim = BuildClaimRequestV1(binding=request.binding, operation_id=uuid4(), request_id=uuid4(),
+        worker_id=uuid4(), worker_incarnation=uuid4())
+    with pytest.raises(ValueError, match="build-purpose"):
+        await router.claim_platform(claim, worker_credential="w" * 43)
+
+
 @pytest.mark.parametrize("pool", ["gb10","oldlab"])
 @pytest.mark.parametrize("purpose", ["application-worker","personal-build-worker"])
 @pytest.mark.parametrize("failure", [False,True])

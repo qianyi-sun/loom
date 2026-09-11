@@ -24,6 +24,7 @@ from loom_capacity_agent.admission import (
     ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
 )
+from loom_capacity_agent.build_admission import BuildClaimRequestV1
 from loom_capacity_agent.claim_guard import ExecutableClaimProposalV2
 from loom_capacity_agent.client import read_owner_only_bytes
 from loom_capacity_executor.admission_client import DatabaseExecutableAdmissionClient
@@ -91,7 +92,7 @@ class TypedAdmissionDirectoryV3(_StrictLaunchV3):
 
 _BUILD_CONSUMERS = frozenset({
     "prepare_worker", "bind_slurm_job", "observe_intent", "revoke_prepared_bootstrap",
-    "withdraw_unregistered_worker", "register_worker",
+    "withdraw_unregistered_worker", "register_worker", "claim_platform",
 })
 
 
@@ -200,3 +201,8 @@ class TypedAdmissionRouter:
 
     async def admit_claim(self, binding: ExecutableIntentBindingV2, proposal: ExecutableClaimProposalV2) -> Any:
         return await self._call(binding, "admit_claim_for_intent", binding, proposal)
+
+    async def claim_platform(self, request: BuildClaimRequestV1, *, worker_credential: str) -> Any:
+        if self.purpose(request.binding) != "personal-build-worker":
+            raise ValueError("native platform claim requires a build-purpose route")
+        return await self._call(request.binding, "claim_platform", request, worker_credential=worker_credential)

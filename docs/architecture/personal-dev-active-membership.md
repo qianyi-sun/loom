@@ -286,13 +286,17 @@ activation remain to be connected; endpoint presence does not enable build intak
 Service startup can install these private sessions with the optional
 `LOOM_SVC_PERSONAL_DEV_BUILD_ADMISSION_CONFIG_FILE` and its exact
 `LOOM_SVC_PERSONAL_DEV_BUILD_ADMISSION_CONFIG_SHA256`. The canonical V1 document
-has `mode="prepare-bind-only"` (or explicit `"native-registration"`), owner-only `database_url_file` and
+has `mode="prepare-bind-only"`, `"native-registration"`, or `"native-claims"`, owner-only `database_url_file` and
 `principals_file` paths, and their SHA-256 digests. The database URL requires
 verified PostgreSQL TLS. Startup checks the restricted agent and protected
 admission procedures, and rejects incomplete inputs or privilege drift. The
 registration mode additionally verifies the private registration procedure and
 its exact privileges before enabling the `register` endpoint; preparation-only
 configuration keeps that endpoint closed.
+The `native-claims` mode also verifies the private claim procedure and enables
+`claim`; registration-only configuration cannot claim work. Both operations
+retain pool/executor authentication. Claim exchange additionally presents the
+opaque registered worker credential, which is never retained in claim payloads.
 The service owns this independent connection pool through normal shutdown and
 partial startup failure; it removes admission access before disposing the pool.
 This configuration never sets builder availability or enables source intake.
@@ -523,7 +527,7 @@ Observation exposes only committed registration. Registration and unregistered
 withdrawal take the same installation/bootstrap/physical locks, so the withdrawal
 path cannot revoke a registered worker. Holds remain charged and retained native
 registration prevents lossy downgrade. Claims are now retained privately, and
-registration has a purpose-specific transport. Native claim transport, registered
+registration and claims have purpose-specific transports. Registered
 drain/release, per-platform outcomes and allocation containment must still be
 connected before public typed execution can be enabled.
 

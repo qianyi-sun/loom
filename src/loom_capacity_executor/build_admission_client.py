@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TypeVar
+from typing import TypeVar, cast
 from uuid import UUID
 
 import httpx
@@ -21,6 +21,9 @@ from loom_capacity_agent.admission import (
     WithdrawnExecutableWorkerV2,
 )
 from loom_capacity_agent.build_admission import (
+    BuildClaimExchangeV1,
+    BuildClaimReceiptV1,
+    BuildClaimRequestV1,
     BuildPreparationRequestV1,
     BuildRegistrationRequestV1,
 )
@@ -40,6 +43,7 @@ from loom_capacity_manager.contracts import (
     PositiveQuantity,
     StrictV1Model,
     canonical_bytes,
+    canonical_digest,
 )
 from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
@@ -49,7 +53,7 @@ from loom_capacity_manager.executable_contracts import (
     canonical_executable_digest,
 )
 
-_Receipt = TypeVar("_Receipt", bound=StrictV2Model)
+_Receipt = TypeVar("_Receipt", bound=StrictV1Model | StrictV2Model)
 _MAX_RESPONSE_BYTES = 64 * 1024
 
 
@@ -144,11 +148,12 @@ class BuildAdmissionClient:
             raise BuildAdmissionTransportError("build admission transport failed") from None
         try:
             receipt = receipt_type.model_validate_json(bytes(body))
-            if canonical_executable_bytes(receipt) != bytes(body):
+            canonical = canonical_bytes(receipt) if isinstance(receipt, StrictV1Model) else canonical_executable_bytes(receipt)
+            if canonical != bytes(body):
                 raise ValueError("noncanonical receipt")
         except ValueError:
             raise BuildAdmissionTransportError("build admission receipt is invalid") from None
-        return receipt
+        return cast(_Receipt, receipt)
 
     async def prepare_worker(self, request: ExecutableBootstrapRegistrationV2, *,
         bootstrap_sha256: str,
@@ -183,6 +188,18 @@ class BuildAdmissionClient:
             or receipt.protected_registration_epoch != request.protected_registration_epoch
             or receipt.request_digest != digest or receipt.registration_digest != digest):
             raise BuildAdmissionTransportError("build admission registration binding changed")
+        return receipt
+
+    async def claim_platform(self, request: BuildClaimRequestV1, *, worker_credential: str) -> BuildClaimReceiptV1:
+        try:
+            exchange = BuildClaimExchangeV1.model_validate_json(BuildClaimExchangeV1(
+                claim=request, worker_credential=worker_credential).model_dump_json())
+        except ValueError:
+            raise ValueError("native claim request is invalid") from None
+        request = exchange.claim
+        receipt = await self._post(request.binding, "claim", canonical_bytes(exchange), BuildClaimReceiptV1)
+        if receipt.request != request or receipt.request_digest != canonical_digest(request):
+            raise BuildAdmissionTransportError("native claim receipt binding changed")
         return receipt
 
     async def bind_slurm_job(self, request: PhysicalJobBindingV2) -> BoundExecutableWorkerV2:

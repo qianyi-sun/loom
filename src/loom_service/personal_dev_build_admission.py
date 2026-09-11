@@ -27,7 +27,7 @@ from loom_service.config import LoomServiceSettings
 
 
 class BuildAdmissionServiceConfigV1(StrictV1Model):
-    mode: Literal["prepare-bind-only", "native-registration"]
+    mode: Literal["prepare-bind-only", "native-registration", "native-claims"]
     database_url_file: str
     database_url_sha256: Digest
     principals_file: str
@@ -54,13 +54,15 @@ class PersonalBuildAdmissionRuntime:
     engine: AsyncEngine
     sessions: async_sessionmaker[AsyncSession]
     verifier: CapacityPrincipalVerifier
-    mode: Literal["prepare-bind-only", "native-registration"]
+    mode: Literal["prepare-bind-only", "native-registration", "native-claims"]
 
     async def aclose(self) -> None:
         await self.engine.dispose()
 
 
-async def _assert_private_agent(connection: AsyncConnection, *, registration_enabled: bool = False) -> None:
+async def _assert_private_agent(connection: AsyncConnection, *, registration_enabled: bool = False,
+    claims_enabled: bool = False,
+) -> None:
     safe = await connection.scalar(
         text("""
         SELECT rolcanlogin AND NOT (rolinherit OR rolsuper OR rolcreatedb OR rolcreaterole
@@ -110,6 +112,8 @@ async def _assert_private_agent(connection: AsyncConnection, *, registration_ena
     )
     if registration_enabled:
         signatures += ("register_worker(uuid,jsonb,bytea,text,text)",)
+    if claims_enabled:
+        signatures += ("claim_platform(uuid,jsonb,bytea,text,text)",)
     for signature in signatures:
         callable_safe = await connection.scalar(
             text("""
@@ -164,7 +168,8 @@ async def build_personal_build_admission_runtime(
         async with asyncio.timeout(30), engine.connect() as connection:
             await connection.execute(text("SET LOCAL statement_timeout='10000ms'"))
             await connection.execute(text("SET LOCAL lock_timeout='5000ms'"))
-            await _assert_private_agent(connection, registration_enabled=config.mode == "native-registration")
+            await _assert_private_agent(connection, registration_enabled=config.mode != "prepare-bind-only",
+                claims_enabled=config.mode == "native-claims")
     except BaseException:
         await engine.dispose()
         raise

@@ -15,7 +15,7 @@ from tests.unit.test_personal_dev_build_admission_runtime import inputs, setting
 
 
 @pytest.mark.parametrize("privileged", [False, True])
-@pytest.mark.parametrize("mode", ["prepare-bind-only", "native-registration"])
+@pytest.mark.parametrize("mode", ["prepare-bind-only", "native-registration", "native-claims"])
 async def test_runtime_accepts_only_private_agent_and_disposes_on_rejection(
     build_guard_database, owner_sessions, tmp_path, monkeypatch, privileged, mode
 ):
@@ -62,7 +62,7 @@ async def test_runtime_accepts_only_private_agent_and_disposes_on_rejection(
         assert disposed == created
 
 
-@pytest.mark.parametrize("boundary", ["foreign-prepare", "foreign-bind", "foreign-register", "owner-login", "owner-createdb", "owner-membership"])
+@pytest.mark.parametrize("boundary", ["foreign-prepare", "foreign-bind", "foreign-register", "foreign-claim", "owner-login", "owner-createdb", "owner-membership"])
 async def test_runtime_rejects_protected_authority_drift(
     build_guard_database, owner_sessions, tmp_path, monkeypatch, boundary
 ):
@@ -75,7 +75,8 @@ async def test_runtime_rejects_protected_authority_drift(
         if boundary.startswith("foreign-"):
             signature = {"foreign-prepare": "prepare_worker(uuid,jsonb,bytea,text,text)",
                 "foreign-bind": "bind_slurm_job(uuid,jsonb,bytea,text)",
-                "foreign-register": "register_worker(uuid,jsonb,bytea,text,text)"}[boundary]
+                "foreign-register": "register_worker(uuid,jsonb,bytea,text,text)",
+                "foreign-claim": "claim_platform(uuid,jsonb,bytea,text,text)"}[boundary]
             connection.exec_driver_sql(f"GRANT USAGE ON SCHEMA loom_capacity_build_guard TO {quote(foreign)}")
             connection.exec_driver_sql(f"GRANT EXECUTE ON FUNCTION loom_capacity_build_guard.{signature} TO {quote(foreign)}")
         elif boundary == "owner-login":
@@ -85,7 +86,7 @@ async def test_runtime_rejects_protected_authority_drift(
         else:
             connection.exec_driver_sql(f"GRANT {quote(foreign)} TO {quote(owner)}")
     document, _, _ = inputs(tmp_path)
-    document["mode"] = "native-registration"
+    document["mode"] = "native-claims"
     configured = settings(tmp_path, document)
     created = []
 

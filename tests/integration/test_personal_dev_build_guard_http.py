@@ -84,6 +84,33 @@ async def test_http_native_registration_commits_and_replays(prepared_input, tmp_
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
 
 
+@pytest.mark.parametrize("boundary", ["mode", "credential", "body", "worker", "duplicate-authorization"])
+async def test_http_claim_failures_retain_no_claim(prepared_input, tmp_path, monkeypatch, boundary):
+    from tests.integration.test_personal_dev_build_guard_claims import claim_input
+    from tests.integration.test_personal_dev_build_guard_registration import CREDENTIAL
+
+    request = await claim_input(prepared_input, monkeypatch)
+    _factory, engine, *_ = prepared_input
+    app = application(prepared_input, tmp_path)
+    app.state.personal_dev_build_admission_mode = "native-registration" if boundary == "mode" else "native-claims"
+    if boundary == "worker":
+        request = request.model_copy(update={"worker_incarnation": uuid4()})
+    envelope = {"schema_version": 1, "claim": request.model_dump(mode="json"),
+        "worker_credential": "x" * 43 if boundary == "credential" else CREDENTIAL}
+    headers = [("Authorization", "Bearer executor-secret")]
+    if boundary == "duplicate-authorization":
+        headers += headers
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://management.test",
+        headers=headers) as client:
+        reply = await client.post(route(request, "claim"),
+            **({"content": b"{"} if boundary == "body" else {"json": envelope}))
+        assert reply.status_code in {400, 401, 409, 503}, reply.text
+        assert CREDENTIAL not in reply.text and "executor-secret" not in reply.text
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_claims")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
+
+
 async def test_http_prepare_bind_and_lost_reply_replay_are_committed(prepared_input, tmp_path):
     _factory, engine, _installation, _plan, _source, _request = prepared_input
     registration, digest = await admitted(prepared_input)
@@ -203,12 +230,19 @@ async def test_real_service_mounts_admission_closed_by_default(monkeypatch):
     assert result.status_code == 503
 
 
-@pytest.mark.parametrize("operation", ["prepare", "register"])
+@pytest.mark.parametrize("operation", ["prepare", "register", "claim"])
 async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_input,tmp_path,monkeypatch,operation):
     from sqlalchemy import event
 
     factory, engine, _installation, _plan, _source, _request = prepared_input
-    if operation == "register":
+    if operation == "claim":
+        from tests.integration.test_personal_dev_build_guard_claims import claim_input
+        from tests.integration.test_personal_dev_build_guard_registration import CREDENTIAL
+
+        registration = await claim_input(prepared_input, monkeypatch)
+        payload = {"schema_version": 1, "claim": registration.model_dump(mode="json"),
+            "worker_credential": CREDENTIAL}
+    elif operation == "register":
         from tests.integration.test_personal_dev_build_guard_registration import (
             BOOTSTRAP,
             registration_input,
@@ -221,11 +255,11 @@ async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_inpu
         registration,digest = await admitted(prepared_input)
         payload = preparation(registration, digest)
     app = application(prepared_input,tmp_path)
-    app.state.personal_dev_build_admission_mode = "native-registration"
+    app.state.personal_dev_build_admission_mode = "native-claims"
     reached_outer_commit = []
     store_completed = []
     store_type = import_module("loom_capacity_build_guard.execution_store").BuildGuardExecutionStore
-    method = "register_worker" if operation == "register" else "prepare_worker"
+    method = {"prepare": "prepare_worker", "register": "register_worker", "claim": "claim_platform"}[operation]
     original = getattr(store_type, method)
 
     async def prepare_then_observe(*args,**kwargs):
@@ -253,8 +287,9 @@ async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_inpu
         assert "admission_digest" not in result.text
         assert "registration_digest" not in result.text
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == (2 if operation == "register" else 0)
-            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_registrations")) == 0
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == (0 if operation == "prepare" else 2)
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_registrations")) == (1 if operation == "claim" else 0)
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_claims")) == 0
     finally:
         event.remove(target,"before_commit",fail_commit)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="https://management.test",
@@ -381,8 +416,6 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
 
                 claim = BuildClaimRequestV1(binding=binding, operation_id=uuid4(), request_id=_request.id,
                     worker_id=worker.worker_id, worker_incarnation=worker.worker_incarnation)
-                # Install the same opaque credential hash in the registered worker.
-                # This fixture's native_registration uses a deterministic hash.
                 claimed = await client.claim_platform(claim, worker_credential="w" * 43)
                 assert claimed.request == claim
                 assert await client.claim_platform(claim, worker_credential="w" * 43) == claimed
@@ -402,6 +435,7 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == 2
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_withdrawals")) == (0 if register else 1)
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_registrations")) == (1 if register else 0)
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_claims")) == (1 if register == "claim" else 0)
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
     finally:
         if client is not None and hasattr(client,"aclose"):
