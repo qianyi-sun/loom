@@ -2113,6 +2113,15 @@ runtime helpers; installed process supervision still needs equivalent proof.
 Both explicit root kill and abrupt death of the attached runsc root launcher
 are exercised. The latter tests gVisor's kernel parent-death binding, not the
 still-unimplemented supervisor-to-launcher death chain or Slurm cleanup.
+`bind_native_parent_death` supplies a dependency-free Linux helper primitive:
+it checks the expected parent before and after setting `PDEATHSIG=SIGKILL`, then
+checks the configured signal. Each fork link must bind separately; privilege
+changes can clear the setting. The disposable KVM test now also exercises a
+supervisor → broker → root wrapper → attached runsc chain using this primitive:
+abrupt supervisor death stops the live pod and rejects a subsequent child.
+This demonstrates the chain in the rootful fixture, not the installed rootless
+worker, a blocked-spawn race, or actual Slurm release. The real supervisor and
+broker remain to be integrated; a successful primitive test does not open intake.
 
 Revision `build_guard_0031` adds a separate native execution-freshness operation.
 The trusted worker submits its exact claim, a new challenge and the verified

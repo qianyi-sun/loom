@@ -73,7 +73,7 @@ def prepare_runtime(tmp_path, arch):
     return runtime
 
 
-@pytest.mark.parametrize("root_stop", ["signal", "launcher-death"])
+@pytest.mark.parametrize("root_stop", ["signal", "launcher-death", "supervisor-death"])
 def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path, root_stop):
     arch = platform.machine()
     if arch not in BUILDERS or not Path("/dev/kvm").exists():
@@ -82,6 +82,12 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
     fixtures, result_dir = tmp_path / "fixtures", tmp_path / "result"
     fixtures.mkdir()
     result_dir.mkdir()
+    helper_modules = fixtures / "helper-modules"
+    helper_modules.mkdir()
+    # Load the exact dependency-free primitive; this outer Python fixture does
+    # not install the executor package's HTTP/database dependencies.
+    shutil.copyfile(ROOT / "src/loom_capacity_executor/native_parent_death.py",
+        helper_modules / "native_parent_death.py")
     image = "ghcr.io/qianyi-sun/loom-personal-dev-builder@" + BUILDERS[arch]
     name = "loom-native-oci-test-" + uuid4().hex
     try:
