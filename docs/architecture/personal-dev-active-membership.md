@@ -2086,6 +2086,24 @@ Docker rootfs export alone is insufficient: it drops the capability xattrs on
 rootfs provisioning must preserve and verify the exact published capabilities.
 This renderer does not enable intake, execute commands or certify a worker.
 
+The versioned client policy is
+`deploy/personal-dev-builder/client-seccomp-v1.json`. It permits ordinary
+Python/buildctl file IO, read-only extended-attribute inspection, constrained
+thread creation and AF_UNIX sockets. Other network socket families, namespace
+creation, mount operations and kernel-control syscalls remain denied. `clone3`
+returns ENOSYS so libc can fall back to the namespace-filtered `clone` call.
+The builder image provisions root-owned empty mountpoints before switching to
+UID 1000; the runtime never makes its root filesystem writable to add them.
+
+`tests/integration/test_native_oci_kvm.py` belongs to the Docker integration lane.
+On a native KVM host it verifies pinned gVisor bytes, exports a digest-pinned
+builder filesystem and overlays current trusted Python for a disposable test.
+It consumes the real rendered bundles and client profile, runs all component
+Dockerfiles with an offline `RUN`, and verifies the complete returned artifact
+and modified-source contents. Missing KVM is a reported skip, not acceptance.
+This fixture is not proof of the newly published builder image, protected rootfs
+installation, rootless host policy, Slurm containment or fleet readiness.
+
 1. Deliver executable delegated **application** membership: versioned policy,
    durable log/projection, authenticated lifecycle endpoint, common allocation
    and executor integration. Existing V2 active-mutation rejection remains.
