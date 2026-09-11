@@ -13,11 +13,16 @@ from tests.unit.test_native_worker_container import _allocation
 def _job(root: Path) -> Path:
     directory = root / _allocation().cgroup_parent.removeprefix("/")
     directory.mkdir(parents=True)
+    for path in (directory, *directory.parents):
+        if path == root:
+            break
+        path.chmod(0o755)
     for name, value in {
         "memory.max": str(_allocation().memory_bytes), "memory.swap.max": "0",
         "pids.max": str(_allocation().pids_max), "cpuset.cpus.effective": "7",
     }.items():
         (directory / name).write_text(value + "\n")
+        (directory / name).chmod(0o644)
     return directory
 
 
