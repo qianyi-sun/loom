@@ -1472,7 +1472,21 @@ cleanup and synchronous parsing. No successful shutdown is inferred from a
 cancelled request or an attempted kill. Abrupt supervisor loss still needs its
 protected service-level process containment and crash-recovery integration.
 
-Protected transport/receiver installation and fixed TLS-supervisor composition,
+The fixed TLS supervisor loads one canonical owner-only policy binding its numeric
+listen address, node/pool/release, certificate files, sorted peer pins and receiver
+process policy. It verifies receiver scope before listening. Configuration never
+selects a command or factory. Its dedicated entrypoint hardens before reading
+configuration, and stop signals request owned shutdown rather than interrupting
+cleanup. Listener and retained child-cleanup failures are observed explicitly;
+shutdown closes connections before joining receiver owners and survives repeated
+cancellation. This is executable local composition, not protected host installation.
+
+Typed-controller production routing still needs an explicit pinned application-only
+receiver/launcher route. The existing default receiver/launcher factory is V2;
+its route digest is not the typed controller's V3 entry digest, even for the same
+database. Neither translating the entry nor relaxing its exact hash is permitted.
+
+Protected transport/receiver installation,
 controller delivery journaling, remote revocation/cleanup convergence and crash-orphan
 retirement still need integration. Do not infer them from local delivery/TLS success
 or mount the whole controller handoff directory to fill the gap. Delivery receipts

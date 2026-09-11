@@ -105,6 +105,7 @@ class NativeBootstrapProcessAdapter:
         self._requests: set[asyncio.Task[bytes]] = set()
         self._cleanups: dict[asyncio.Task[None], tuple[_ReceiverSpawn, _ReceiverIO]] = {}
         self._cleanup_failed = False
+        self._failure = asyncio.Event()
         self._close_task: asyncio.Task[None] | None = None
 
     @property
@@ -118,6 +119,11 @@ class NativeBootstrapProcessAdapter:
             and not self._close_task.cancelled() and self._close_task.exception() is not None)):
             self._close_task = asyncio.create_task(self._close())
         await asyncio.shield(self._close_task)
+
+    async def wait(self) -> None:
+        """Expose retained cleanup failure to the fixed service supervisor."""
+        await self._failure.wait()
+        raise BootstrapDeliveryError(_FAILURE)
 
     async def _close(self) -> None:
         requests = tuple(self._requests)
@@ -226,6 +232,7 @@ class NativeBootstrapProcessAdapter:
         def finished(done: asyncio.Task[None]) -> None:
             if done.cancelled() or done.exception() is not None:
                 self._cleanup_failed = True
+                self._failure.set()
             else:
                 self._cleanups.pop(done, None)
 
