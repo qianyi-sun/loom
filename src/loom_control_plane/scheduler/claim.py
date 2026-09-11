@@ -86,6 +86,7 @@ WITH worker_scope AS (
           WHERE task_image_link.trial_id = t.id
             AND task_image.cpu_arch = ANY(:worker_cpu_arches)
             AND task_image.state = 'ready'
+            AND task_image.ready_publication_operation_id IS NULL
        )
        OR (
          NOT EXISTS (
@@ -319,6 +320,7 @@ WITH candidates AS (
           WHERE task_image_link.trial_id = t.id
             AND task_image.cpu_arch = ANY(:worker_cpu_arches)
             AND task_image.state = 'ready'
+            AND task_image.ready_publication_operation_id IS NULL
        )
        OR (
          NOT EXISTS (

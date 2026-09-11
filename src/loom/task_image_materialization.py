@@ -415,6 +415,9 @@ async def get_trial_task_image_execution_grant(
                 TrialTaskImageMaterialization.trial_id == trial_id,
                 TaskImageMaterialization.cpu_arch.in_(cpu_arches),
                 TaskImageMaterialization.state == "ready",
+                # Native publications require the signed V2 reader and one-use
+                # start authority; this legacy snapshot must never downgrade them.
+                TaskImageMaterialization.ready_publication_operation_id.is_(None),
             )
             .order_by(TaskImageMaterialization.cpu_arch, TaskImageMaterialization.id)
             .limit(1)
