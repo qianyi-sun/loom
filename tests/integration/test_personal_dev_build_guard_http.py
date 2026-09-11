@@ -119,14 +119,29 @@ async def test_real_service_mounts_admission_closed_by_default(monkeypatch):
     assert result.status_code == 503
 
 
-async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_input,tmp_path):
+async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_input,tmp_path,monkeypatch):
     from sqlalchemy import event
 
     factory, engine, _installation, _plan, _source, _request = prepared_input
     registration,digest = await admitted(prepared_input)
     app = application(prepared_input,tmp_path)
+    reached_outer_commit = []
+    store_completed = []
+    store_type = import_module("loom_capacity_build_guard.execution_store").BuildGuardExecutionStore
+    original = store_type.prepare_worker
+
+    async def prepare_then_observe(*args,**kwargs):
+        receipt = await original(*args,**kwargs)
+        store_completed.append(True)
+        return receipt
+
+    monkeypatch.setattr(store_type,"prepare_worker",prepare_then_observe)
 
     def fail_commit(session):
+        if session.in_nested_transaction():
+            return
+        assert store_completed == [True]
+        reached_outer_commit.append(True)
         session.execute(text("SELECT 1/0"))
 
     target = factory.class_.sync_session_class
@@ -136,6 +151,7 @@ async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_inpu
             headers={"Authorization":"Bearer executor-secret"}) as client:
             result = await client.post(route(registration,"prepare"),json=preparation(registration,digest))
         assert result.status_code == 409
+        assert reached_outer_commit == [True]
         assert "admission_digest" not in result.text
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == 0

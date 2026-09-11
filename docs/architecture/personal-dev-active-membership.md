@@ -272,6 +272,16 @@ checks, while the manager's original loader still requires its operator. This
 does not configure an endpoint or grant access by itself. Management database
 credentials and application-worker credentials must never reach build containers.
 
+The management service mounts internal HTTPS `capacity-build/pools/{pool}/intents/
+{intent}/prepare` and `bind` endpoints, unavailable without separately installed
+private sessions and an executor verifier. They authenticate complete pool and
+executor identity, derive the installation lookup from subject/incarnation/
+deployment, and let protected SQL resolve the actual native installation. Requests
+and transactions are bounded; receipts leave only after the outer commit. Database
+diagnostics and credentials never form response bodies. The legacy native-builder
+V1 router is unchanged. Deployment configuration and the pool client's authenticated
+typed route remain to be connected; endpoint presence does not enable build intake.
+
 Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
 preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release
 verification bind the exact historical configuration, acknowledgement and member

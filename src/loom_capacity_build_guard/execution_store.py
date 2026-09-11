@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from uuid import UUID
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,13 +16,22 @@ from loom_capacity_agent.admission import (
 from loom_capacity_build_guard.installation_store import (
     BuildGuardInstallationV1,
     RetainedBuildInstallation,
+    _identity,
 )
 from loom_capacity_manager.contracts import canonical_bytes
 from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
+    ExecutableIntentBindingV2,
     canonical_executable_bytes,
     canonical_executable_digest,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _ExecutionScope:
+    id: UUID
+    subject_id: UUID
+    subject_incarnation: UUID
 
 
 class BuildGuardExecutionStore:
@@ -29,12 +41,25 @@ class BuildGuardExecutionStore:
     authentication route, grant a source/worker credential, or enable readiness.
     """
 
-    def __init__(self, session: AsyncSession, *, installation: RetainedBuildInstallation) -> None:
-        document = BuildGuardInstallationV1.model_validate_json(installation.wire_payload)
-        if document != installation.document or canonical_bytes(document) != installation.wire_payload:
-            raise ValueError("build execution installation receipt changed")
+    def __init__(self, session: AsyncSession, *, installation: RetainedBuildInstallation | None = None,
+        binding: ExecutableIntentBindingV2 | None = None,
+    ) -> None:
+        if (installation is None) == (binding is None):
+            raise ValueError("build execution requires exactly one scope source")
+        if installation is not None:
+            document = BuildGuardInstallationV1.model_validate_json(installation.wire_payload)
+            if document != installation.document or canonical_bytes(document) != installation.wire_payload:
+                raise ValueError("build execution installation receipt changed")
+            scope = _ExecutionScope(document.id, document.subject_id, document.subject_incarnation)
+        else:
+            assert binding is not None
+            binding = ExecutableIntentBindingV2.model_validate_json(binding.model_dump_json())
+            # Derive the lookup identity, never trust a caller-selected installation.
+            # Private SQL still resolves and validates the real installed native facts.
+            scope = _ExecutionScope(_identity(binding.subject_id,binding.subject_incarnation,binding.deployment_generation),
+                binding.subject_id,binding.subject_incarnation)
         self._session = session
-        self._installation = document
+        self._installation = scope
 
     async def prepare_worker(self, request: ExecutableBootstrapRegistrationV2, *,
         bootstrap_sha256: str,
