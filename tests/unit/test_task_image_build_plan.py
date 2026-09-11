@@ -93,6 +93,19 @@ def _row(**changes: object) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
+@pytest.mark.parametrize(
+    "options",
+    [{"docker_build_args": {"VERSION": "1"}}, {"docker_build_target": "runtime"}],
+)
+def test_legacy_rootless_plan_rejects_unsupported_build_inputs(options: dict[str, object]) -> None:
+    task_config = _task_config()
+    environment = task_config["environment"]
+    assert isinstance(environment, dict)
+    environment.update(options)
+    with pytest.raises(ValueError, match="rootless task-image build plan v1 does not support"):
+        derive_task_image_build_plan(_row(task_config=task_config), _authorization())
+
+
 def test_derives_exact_frozen_native_plan_without_url_or_credentials() -> None:
     plan = derive_task_image_build_plan(_row(), _authorization())
 

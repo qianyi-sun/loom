@@ -7,7 +7,7 @@ metadata + environment + per-step config + multi-step aggregation strategy.
 from __future__ import annotations
 
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -67,6 +67,13 @@ class EnvironmentConfig(BaseModel):
     docker_image: str | None = None
     dockerfile: PurePosixPath | None = None
     docker_build_context: PurePosixPath | None = None
+    # Public build inputs, not a mechanism for passing secrets to Docker.
+    docker_build_args: dict[
+        Annotated[str, Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")], str
+    ] = Field(default_factory=dict)
+    docker_build_target: Annotated[
+        str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    ] | None = None
     environment: dict[str, str] = {}
     extra_hosts: dict[str, str] = {}
     dns: list[str] = []
@@ -90,6 +97,14 @@ class EnvironmentConfig(BaseModel):
     storage_mb: int | None = Field(default=None, gt=0)
     gpus: int = Field(default=0, ge=0)
     sidecars: list[TaskSidecarConfig] = []
+
+    @model_validator(mode="after")
+    def _docker_build_options_require_dockerfile(self) -> EnvironmentConfig:
+        if (self.docker_build_args or self.docker_build_target) and self.dockerfile is None:
+            raise ValueError("docker_build_args and docker_build_target require dockerfile")
+        if any("\x00" in value for value in self.docker_build_args.values()):
+            raise ValueError("docker_build_args values cannot contain NUL")
+        return self
 
 
 class AgentDefaults(BaseModel):

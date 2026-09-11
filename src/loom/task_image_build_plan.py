@@ -351,6 +351,11 @@ def derive_task_image_build_plan(
 
     raw_environment = _raw_environment(row.task_config)
     task = TaskConfig.model_validate(row.task_config)
+    if task.environment.docker_build_args or task.environment.docker_build_target:
+        raise ValueError(
+            "rootless task-image build plan v1 does not support "
+            "docker_build_args or docker_build_target; use a builder that supports these inputs"
+        )
     if task.environment.os != "linux":
         raise ValueError("task-image build plan requires a Linux task environment")
     if task.task.id != row.task_id:
