@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.personal_dev_candidate import CandidateRegistration
 from loom_capacity_agent.client import (
+    DemandPublishError,
     ExecutableAdmissionAcknowledgementReceiptV2,
     ExecutableAdmissionPlanClosureAcknowledgementReceiptV2,
 )
@@ -26,6 +27,7 @@ from loom_capacity_build_guard.plan_store import (
     PreparedBuildPlan,
     RetainedBuildClosureV1,
 )
+from loom_capacity_build_guard.publication_discovery import BuildGuardPublicationDiscovery
 from loom_capacity_manager.executable_contracts import (
     ExecutableAdmissionAcknowledgementV2,
     ExecutableAdmissionPlanClosureAcknowledgementV2,
@@ -65,17 +67,58 @@ class BuildPlanCoordinator:
         self._installation = installation
         self._publisher = publisher
         self._timeout = operation_timeout_seconds
+        self._publication_after = UUID(int=0)
+        self._publication_through: UUID | None = None
+        self._publication_lock = asyncio.Lock()
+
+    async def publish_pending(self) -> bool:
+        """Sweep durable preparations, including ones the manager no longer offers.
+
+        The bounded cursor is scan progress, never delivery evidence. A failed
+        item does not starve later items; every finite sweep starts again at zero.
+        All replay still goes through current-source publication authorization.
+        """
+        async with self._publication_lock:
+            async with asyncio.timeout(self._timeout), self._sessions.begin() as session:
+                page = await BuildGuardPublicationDiscovery(session, installation=self._installation).read_pending(
+                    after_plan_id=self._publication_after, through_plan_id=self._publication_through)
+            self._publication_through = page.through_plan_id
+            success = True
+            for pending in page.plans:
+                try:
+                    await self.publish(pending.plan_id, expected_proposal_digest=pending.proposal_digest)
+                except (DemandPublishError, DBAPIError, ValueError, TimeoutError):
+                    success = False
+                # Cancellation propagates without claiming this item progressed.
+                self._publication_after = pending.plan_id
+            if not page.plans or self._publication_after == self._publication_through:
+                self._publication_after, self._publication_through = UUID(int=0), None
+            return success
 
     async def prepare(self, proposal: ExecutableAdmissionPlanProposalV2, *,
-        sources: Mapping[UUID, CandidateRegistration],
+        sources: Mapping[UUID, CandidateRegistration] | None = None,
     ) -> PreparedBuildPlan:
         async with asyncio.timeout(self._timeout), self._sessions.begin() as session:
             prepared = await BuildGuardPlanStore(session, installation=self._installation).prepare(proposal, sources=sources)
         return prepared
 
-    async def publish(self, plan_id: UUID) -> ExecutableAdmissionAcknowledgementReceiptV2:
+    async def converge(self, proposal: ExecutableAdmissionPlanProposalV2) -> ExecutableAdmissionAcknowledgementReceiptV2:
+        """Replay committed authority first; load pending sources only for a new plan."""
+        proposal = ExecutableAdmissionPlanProposalV2.model_validate_json(proposal.model_dump_json())
+        digest = canonical_executable_digest(proposal)
+        try:
+            return await self.publish(proposal.plan_id, expected_proposal_digest=digest)
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) != "P0002":
+                raise
+        await self.prepare(proposal)
+        return await self.publish(proposal.plan_id, expected_proposal_digest=digest)
+
+    async def publish(self, plan_id: UUID, *, expected_proposal_digest: str | None = None) -> ExecutableAdmissionAcknowledgementReceiptV2:
         async with asyncio.timeout(self._timeout), self._sessions.begin() as session:
             work = await BuildGuardPlanStore(session, installation=self._installation).authorize_publication(plan_id)
+            if expected_proposal_digest is not None and work.acknowledgement.proposal_digest != expected_proposal_digest:
+                raise ValueError("build publication retained proposal differs from manager work")
             result = await self._publisher.publish_executable_admission_acknowledgement(
                 work.acknowledgement, idempotency_key=work.idempotency_key)
             if not isinstance(result, ExecutableAdmissionAcknowledgementReceiptV2):

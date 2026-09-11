@@ -3,22 +3,51 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TypeVar
+from collections.abc import AsyncIterator
+from typing import TypeVar, cast
 from uuid import UUID
 
 import httpx
 
 from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
+    DrainedExecutableWorkerV2,
+    ExecutableDrainRequestV2,
     ExecutablePreparedBootstrapRevocationV2,
+    ExecutableReleaseReceiptV2,
+    ExecutableReleaseRequestV2,
+    ExecutableWorkerRegistrationV2,
     ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
     PreparedExecutableAdmissionV2,
     ProtectedIntentObservationV2,
+    RegisteredExecutableWorkerV2,
     RevokedExecutableBootstrapV2,
     WithdrawnExecutableWorkerV2,
 )
-from loom_capacity_agent.build_admission import BuildPreparationRequestV1
+from loom_capacity_agent.build_admission import (
+    BuildAllocatedClaimExchangeV1,
+    BuildAllocatedClaimRequestV1,
+    BuildArtifactV1,
+    BuildClaimExchangeV1,
+    BuildClaimReceiptV1,
+    BuildClaimRequestV1,
+    BuildOutcomeExchangeV1,
+    BuildOutcomeReceiptV1,
+    BuildOutcomeRequestV1,
+    BuildPreparationRequestV1,
+    BuildRegistrationRequestV1,
+    BuildReleaseExchangeV1,
+    BuildSourceContextV1,
+    BuildSourceReadExchangeV1,
+    BuildSourceReadReceiptV1,
+)
+from loom_capacity_agent.build_artifact_stream import (
+    ARTIFACT_STREAM_CONTENT_TYPE,
+    BuildArtifactUploadReceiptV1,
+    BuildArtifactUploadV1,
+    encode_artifact_stream,
+)
 from loom_capacity_agent.client import (
     DemandReporterConnection,
     build_reporter_tls_context,
@@ -35,6 +64,7 @@ from loom_capacity_manager.contracts import (
     PositiveQuantity,
     StrictV1Model,
     canonical_bytes,
+    canonical_digest,
 )
 from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
@@ -44,7 +74,7 @@ from loom_capacity_manager.executable_contracts import (
     canonical_executable_digest,
 )
 
-_Receipt = TypeVar("_Receipt", bound=StrictV2Model)
+_Receipt = TypeVar("_Receipt", bound=StrictV1Model | StrictV2Model)
 _MAX_RESPONSE_BYTES = 64 * 1024
 
 
@@ -72,7 +102,7 @@ def _validate_connection(origin: str, token: str, timeout: float) -> str:
 
 
 class BuildAdmissionClient:
-    """Preparation/physical binding only; no claim, exchange or worker secret."""
+    """Pool-authenticated lifecycle and bounded source IO; no application DB access."""
 
     def __init__(self, identity: BuildAdmissionExecutorV1, *, origin: str,
         bearer_token: str, http_client: httpx.AsyncClient, owns_http_client: bool = False,
@@ -119,30 +149,67 @@ class BuildAdmissionClient:
             or binding.executor_id != identity.executor_id or binding.executor_incarnation != identity.executor_incarnation):
             raise ValueError("build admission executor binding changed")
 
-    async def _post(self,binding: ExecutableIntentBindingV2,operation: str,payload: bytes,
-        receipt_type: type[_Receipt],
+    async def _post(self,binding: ExecutableIntentBindingV2,operation: str,payload: bytes | AsyncIterator[bytes],
+        receipt_type: type[_Receipt], *, max_response_bytes: int = _MAX_RESPONSE_BYTES,
+        content_type: str = "application/json", total_timeout: float | None = None,
     ) -> _Receipt:
         self._assert_binding(binding)
         url = f"{self._origin}/api/v1/internal/capacity-build/pools/{binding.pool_id}/intents/{binding.intent_id}/{operation}"
         try:
-            async with asyncio.timeout(self._timeout), self._http.stream("POST",url,content=payload,
-                headers={"Authorization":f"Bearer {self._token}","Content-Type":"application/json"},
+            async with asyncio.timeout(self._timeout if total_timeout is None else total_timeout), self._http.stream("POST",url,content=payload,
+                headers={"Authorization":f"Bearer {self._token}","Content-Type":content_type},
                 timeout=self._timeout,follow_redirects=False) as response:
                 if response.status_code != 200:
                     raise BuildAdmissionTransportError(f"build admission rejected request with status {response.status_code}")
                 body = bytearray()
                 async for chunk in response.aiter_bytes():
-                    if len(body)+len(chunk) > _MAX_RESPONSE_BYTES:
+                    if len(body)+len(chunk) > max_response_bytes:
                         raise BuildAdmissionTransportError("build admission receipt exceeds byte bound")
                     body.extend(chunk)
         except (httpx.HTTPError,TimeoutError):
             raise BuildAdmissionTransportError("build admission transport failed") from None
         try:
             receipt = receipt_type.model_validate_json(bytes(body))
-            if canonical_executable_bytes(receipt) != bytes(body):
+            canonical = canonical_bytes(receipt) if isinstance(receipt, StrictV1Model) else canonical_executable_bytes(receipt)
+            if canonical != bytes(body):
                 raise ValueError("noncanonical receipt")
         except ValueError:
             raise BuildAdmissionTransportError("build admission receipt is invalid") from None
+        return cast(_Receipt, receipt)
+
+    async def upload_artifact(self, claim: BuildClaimRequestV1, *, worker_credential: str,
+        artifact: BuildArtifactV1, chunks: AsyncIterator[bytes],
+    ) -> BuildArtifactUploadReceiptV1:
+        try:
+            envelope = BuildArtifactUploadV1.model_validate_json(BuildArtifactUploadV1(
+                claim=claim, worker_credential=worker_credential, artifact=artifact).model_dump_json())
+        except ValueError:
+            raise ValueError("native artifact upload envelope is invalid") from None
+        receipt = await self._post(envelope.claim.binding, "artifact", encode_artifact_stream(envelope, chunks),
+            BuildArtifactUploadReceiptV1, content_type=ARTIFACT_STREAM_CONTENT_TYPE, total_timeout=1800)
+        if receipt.claim_digest != canonical_digest(envelope.claim) or receipt.artifact != envelope.artifact:
+            raise BuildAdmissionTransportError("native artifact upload receipt binding changed")
+        return receipt
+
+    async def read_source(self, claim: BuildClaimRequestV1, *, worker_credential: str,
+        offset: int, length: int,
+    ) -> BuildSourceReadReceiptV1:
+        request = BuildSourceReadExchangeV1.model_validate_json(BuildSourceReadExchangeV1(
+            claim=claim, worker_credential=worker_credential, offset=offset, length=length).model_dump_json())
+        receipt = await self._post(request.claim.binding, "source", canonical_bytes(request),
+            BuildSourceReadReceiptV1, max_response_bytes=1400000)
+        if (receipt.claim_digest != canonical_digest(request.claim) or receipt.offset != request.offset
+            or len(receipt.data) != min(request.length, receipt.archive_size_bytes - request.offset)):
+            raise BuildAdmissionTransportError("native source response binding changed")
+        return receipt
+
+    async def read_source_context(self, claim: BuildClaimRequestV1, *, worker_credential: str) -> BuildSourceContextV1:
+        request = BuildClaimExchangeV1.model_validate_json(BuildClaimExchangeV1(
+            claim=claim, worker_credential=worker_credential).model_dump_json())
+        receipt = await self._post(request.claim.binding, "context", canonical_bytes(request), BuildSourceContextV1)
+        if (receipt.claim_digest != canonical_digest(request.claim) or receipt.request_id != request.claim.request_id
+            or request.claim.binding.pool_id != ("gb10" if receipt.platform == "linux/arm64" else "oldlab")):
+            raise BuildAdmissionTransportError("native context response binding changed")
         return receipt
 
     async def prepare_worker(self, request: ExecutableBootstrapRegistrationV2, *,
@@ -158,6 +225,91 @@ class BuildAdmissionClient:
             or receipt.bootstrap_registration_epoch != request.bootstrap_registration_epoch
             or receipt.bootstrap_sha256 != bootstrap_sha256 or receipt.request_digest != digest or receipt.admission_digest != digest):
             raise BuildAdmissionTransportError("build admission preparation receipt binding changed")
+        return receipt
+
+    async def register_worker(self, request: ExecutableWorkerRegistrationV2, *,
+        bootstrap_capability: str,
+    ) -> RegisteredExecutableWorkerV2:
+        try:
+            envelope = BuildRegistrationRequestV1.model_validate_json(BuildRegistrationRequestV1(
+                registration=request, bootstrap_capability=bootstrap_capability).model_dump_json())
+        except ValueError:
+            raise ValueError("build registration request is invalid") from None
+        request = envelope.registration
+        receipt = await self._post(request.binding, "register", canonical_bytes(envelope), RegisteredExecutableWorkerV2)
+        digest = canonical_executable_digest(request)
+        if (receipt.subject_id != request.binding.subject_id or receipt.subject_incarnation != request.binding.subject_incarnation
+            or receipt.intent_id != request.binding.intent_id or receipt.worker_id != request.worker_id
+            or receipt.worker_incarnation != request.worker_incarnation
+            or receipt.predecessor_worker_incarnation != request.predecessor_worker_incarnation
+            or receipt.protected_registration_epoch != request.protected_registration_epoch
+            or receipt.request_digest != digest or receipt.registration_digest != digest):
+            raise BuildAdmissionTransportError("build admission registration binding changed")
+        return receipt
+
+    async def begin_drain(self, request: ExecutableDrainRequestV2) -> DrainedExecutableWorkerV2:
+        request = ExecutableDrainRequestV2.model_validate_json(request.model_dump_json())
+        receipt = await self._post(request.binding, "drain", canonical_executable_bytes(request), DrainedExecutableWorkerV2)
+        digest = canonical_executable_digest(request)
+        if (receipt.subject_id != request.binding.subject_id or receipt.subject_incarnation != request.binding.subject_incarnation
+            or receipt.intent_id != request.binding.intent_id or receipt.worker_id != request.worker_id
+            or receipt.worker_incarnation != request.worker_incarnation or receipt.claim_high_water != request.expected_claim_high_water
+            or receipt.live_claim_count > request.expected_claim_high_water or receipt.drain_epoch != request.drain_epoch
+            or receipt.request_digest != digest or receipt.drain_digest != digest):
+            raise BuildAdmissionTransportError("native drain receipt binding changed")
+        return receipt
+
+    async def claim_platform(self, request: BuildClaimRequestV1, *, worker_credential: str) -> BuildClaimReceiptV1:
+        try:
+            exchange = BuildClaimExchangeV1.model_validate_json(BuildClaimExchangeV1(
+                claim=request, worker_credential=worker_credential).model_dump_json())
+        except ValueError:
+            raise ValueError("native claim request is invalid") from None
+        request = exchange.claim
+        receipt = await self._post(request.binding, "claim", canonical_bytes(exchange), BuildClaimReceiptV1)
+        if receipt.request != request or receipt.request_digest != canonical_digest(request):
+            raise BuildAdmissionTransportError("native claim receipt binding changed")
+        return receipt
+
+    async def claim_assigned_platform(self, request: BuildAllocatedClaimRequestV1, *, worker_credential: str) -> BuildClaimReceiptV1:
+        # Validate before an envelope's base-typed serialization could silently
+        # omit a caller-selected request_id from a BuildClaimRequestV1 subclass.
+        request = BuildAllocatedClaimRequestV1.model_validate_json(request.model_dump_json())
+        envelope = BuildAllocatedClaimExchangeV1.model_validate_json(BuildAllocatedClaimExchangeV1(
+            claim=request, worker_credential=worker_credential).model_dump_json())
+        receipt = await self._post(envelope.claim.binding, "claim-assigned", canonical_bytes(envelope), BuildClaimReceiptV1)
+        if (receipt.request.model_dump(exclude={"request_id"}) != envelope.claim.model_dump()
+            or receipt.request_digest != canonical_digest(receipt.request)):
+            raise BuildAdmissionTransportError("allocated native claim response binding changed")
+        return receipt
+
+    async def record_outcome(self, request: BuildOutcomeRequestV1, *, worker_credential: str) -> BuildOutcomeReceiptV1:
+        try:
+            exchange = BuildOutcomeExchangeV1.model_validate_json(BuildOutcomeExchangeV1(
+                outcome=request, worker_credential=worker_credential).model_dump_json())
+        except ValueError:
+            raise ValueError("native outcome exchange is invalid") from None
+        request = exchange.outcome
+        receipt = await self._post(request.claim.binding, "outcome", canonical_bytes(exchange), BuildOutcomeReceiptV1)
+        if receipt.request != request or receipt.request_digest != canonical_digest(request):
+            raise BuildAdmissionTransportError("native outcome receipt binding changed")
+        return receipt
+
+    async def acknowledge_release(self, request: ExecutableReleaseRequestV2, *, current_worker_credential: str) -> ExecutableReleaseReceiptV2:
+        try:
+            exchange = BuildReleaseExchangeV1.model_validate_json(BuildReleaseExchangeV1(
+                release=request, worker_credential=current_worker_credential).model_dump_json())
+        except ValueError:
+            raise ValueError("native release exchange is invalid") from None
+        request = exchange.release
+        receipt = await self._post(request.binding, "release", canonical_bytes(exchange), ExecutableReleaseReceiptV2)
+        digest = canonical_executable_digest(request)
+        if (receipt.binding != request.binding or receipt.reporter_incarnation != request.reporter_incarnation
+            or receipt.bootstrap_registration_epoch != request.bootstrap_registration_epoch
+            or receipt.protected_registration_epoch != request.protected_registration_epoch
+            or receipt.claim_high_water != request.expected_claim_high_water or receipt.release_epoch != request.release_epoch
+            or receipt.request_digest != digest or receipt.protected_release_sha256 != digest):
+            raise BuildAdmissionTransportError("native release receipt binding changed")
         return receipt
 
     async def bind_slurm_job(self, request: PhysicalJobBindingV2) -> BoundExecutableWorkerV2:

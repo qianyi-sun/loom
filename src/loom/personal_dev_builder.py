@@ -364,27 +364,7 @@ class S3PersonalDevBuildSource:
             or digest.hexdigest() != candidate.archive_sha256
         ):
             raise PersonalDevSourceError("personal-dev source object digest is invalid")
-        manifest = verify_personal_dev_source_snapshot(
-            destination,
-            expected_source_digest=candidate.source_sha256,
-            expected_archive_sha256=candidate.archive_sha256,
-        )
-        if (
-            manifest.source_commit != candidate.source_commit
-            or manifest.dirty is not candidate.dirty
-            or manifest.file_count != len(manifest.files)
-            or json.dumps(
-                asdict(manifest),
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            != json.dumps(
-                dict(candidate.manifest_json),
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        ):
-            raise PersonalDevSourceError("personal-dev source manifest binding is invalid")
+        verify_personal_dev_build_source(candidate, destination)
 
     @asynccontextmanager
     async def __call__(
@@ -397,10 +377,23 @@ class S3PersonalDevBuildSource:
             yield archive
 
 
+def verify_personal_dev_build_source(candidate: PersonalDevCandidateRecord, archive: Path) -> None:
+    """Verify the complete sealed source and candidate manifest without extracting."""
+    manifest = verify_personal_dev_source_snapshot(
+        archive, expected_source_digest=candidate.source_sha256,
+        expected_archive_sha256=candidate.archive_sha256)
+    if (manifest.source_commit != candidate.source_commit or manifest.dirty is not candidate.dirty
+        or manifest.file_count != len(manifest.files)
+        or json.dumps(asdict(manifest), sort_keys=True, separators=(",", ":"))
+            != json.dumps(dict(candidate.manifest_json), sort_keys=True, separators=(",", ":"))):
+        raise PersonalDevSourceError("personal-dev source manifest binding is invalid")
+
+
 __all__ = [
     "PersonalDevBuildAuthority",
     "PersonalDevBuildCoordinator",
     "PersonalDevBuildExecutor",
     "PersonalDevBuildSource",
     "S3PersonalDevBuildSource",
+    "verify_personal_dev_build_source",
 ]

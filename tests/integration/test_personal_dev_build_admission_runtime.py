@@ -15,12 +15,14 @@ from tests.unit.test_personal_dev_build_admission_runtime import inputs, setting
 
 
 @pytest.mark.parametrize("privileged", [False, True])
+@pytest.mark.parametrize("mode", ["prepare-bind-only", "native-registration", "native-claims", "native-source", "native-artifacts"])
 async def test_runtime_accepts_only_private_agent_and_disposes_on_rejection(
-    build_guard_database, owner_sessions, tmp_path, monkeypatch, privileged
+    build_guard_database, owner_sessions, tmp_path, monkeypatch, privileged, mode
 ):
     module = import_module("loom_service.personal_dev_build_admission")
     _config, engine, _owner, _agent, agent_url = build_guard_database
     document, _database, _principals = inputs(tmp_path)
+    document["mode"] = mode
     configured = settings(tmp_path, document)
     created = []
     disposed = []
@@ -53,13 +55,14 @@ async def test_runtime_accepts_only_private_agent_and_disposes_on_rejection(
     else:
         runtime = await module.build_personal_build_admission_runtime(configured)
         assert runtime is not None
+        assert runtime.mode == mode
         assert runtime.verifier.verify_bearer("Bearer executor-secret").pool_id == "oldlab"
         assert runtime.sessions.kw["bind"] is created[0]
         await runtime.aclose()
         assert disposed == created
 
 
-@pytest.mark.parametrize("boundary", ["foreign-prepare", "foreign-bind", "owner-login", "owner-createdb", "owner-membership"])
+@pytest.mark.parametrize("boundary", ["foreign-prepare", "foreign-bind", "foreign-register", "foreign-claim", "foreign-drain", "foreign-outcome", "foreign-release", "foreign-context", "context-missing", "context-revoked", "foreign-assigned", "assigned-missing", "assigned-revoked", "owner-login", "owner-createdb", "owner-membership"])
 async def test_runtime_rejects_protected_authority_drift(
     build_guard_database, owner_sessions, tmp_path, monkeypatch, boundary
 ):
@@ -70,9 +73,25 @@ async def test_runtime_rejects_protected_authority_drift(
     with engine.begin() as connection:
         connection.exec_driver_sql(f"CREATE ROLE {quote(foreign)} LOGIN NOINHERIT")
         if boundary.startswith("foreign-"):
-            signature = "prepare_worker(uuid,jsonb,bytea,text,text)" if boundary == "foreign-prepare" else "bind_slurm_job(uuid,jsonb,bytea,text)"
+            signature = {"foreign-prepare": "prepare_worker(uuid,jsonb,bytea,text,text)",
+                "foreign-bind": "bind_slurm_job(uuid,jsonb,bytea,text)",
+                "foreign-register": "register_worker(uuid,jsonb,bytea,text,text)",
+                "foreign-claim": "claim_platform(uuid,jsonb,bytea,text,text)",
+                "foreign-drain": "begin_drain(uuid,jsonb,bytea,text)",
+                "foreign-outcome": "record_outcome(uuid,jsonb,bytea,text,text)",
+                "foreign-context": "read_source_context(uuid,jsonb,bytea,text,text)",
+                "foreign-assigned": "claim_assigned_platform(uuid,jsonb,bytea,text,text)",
+                "foreign-release": "acknowledge_release(uuid,jsonb,bytea,text,text)"}[boundary]
             connection.exec_driver_sql(f"GRANT USAGE ON SCHEMA loom_capacity_build_guard TO {quote(foreign)}")
             connection.exec_driver_sql(f"GRANT EXECUTE ON FUNCTION loom_capacity_build_guard.{signature} TO {quote(foreign)}")
+        elif boundary == "assigned-missing":
+            connection.exec_driver_sql("DROP FUNCTION loom_capacity_build_guard.claim_assigned_platform(uuid,jsonb,bytea,text,text)")
+        elif boundary == "assigned-revoked":
+            connection.exec_driver_sql(f"REVOKE EXECUTE ON FUNCTION loom_capacity_build_guard.claim_assigned_platform(uuid,jsonb,bytea,text,text) FROM {quote(agent)}")
+        elif boundary == "context-missing":
+            connection.exec_driver_sql("DROP FUNCTION loom_capacity_build_guard.read_source_context(uuid,jsonb,bytea,text,text)")
+        elif boundary == "context-revoked":
+            connection.exec_driver_sql(f"REVOKE EXECUTE ON FUNCTION loom_capacity_build_guard.read_source_context(uuid,jsonb,bytea,text,text) FROM {quote(agent)}")
         elif boundary == "owner-login":
             connection.exec_driver_sql(f"ALTER ROLE {quote(owner)} LOGIN")
         elif boundary == "owner-createdb":
@@ -80,6 +99,7 @@ async def test_runtime_rejects_protected_authority_drift(
         else:
             connection.exec_driver_sql(f"GRANT {quote(foreign)} TO {quote(owner)}")
     document, _, _ = inputs(tmp_path)
+    document["mode"] = "native-source" if "context" in boundary or "assigned" in boundary else "native-claims"
     configured = settings(tmp_path, document)
     created = []
 

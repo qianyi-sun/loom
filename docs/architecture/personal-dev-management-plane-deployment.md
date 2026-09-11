@@ -26,6 +26,15 @@ does not relax them or add an active renderer. Its `membership-v1` service mode
 supports stored application recovery but deliberately leaves the legacy builder
 inert until the allocation-accounted provider and new adoption evidence exist.
 
+The allocation-accounted build path now has a protected
+[owner scope installer](personal-dev-active-membership.md) and service-owned
+recovery loops. The installer produces a digest-pinned additive recovery registry;
+it does not apply Kubernetes resources or enable builds. Its private owner DB
+credential belongs only in the protected installer job, never the management
+service, per-owner deployment, or native worker. The service continues to use
+its separate procedure-only admission credential. Adoption of the emitted
+registry path/digest and startup evidence belongs to the protected rollout.
+
 ## Current boundary
 
 The following repository capabilities already exist:

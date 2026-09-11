@@ -15,6 +15,7 @@ branch_labels = None
 depends_on = None
 SCHEMA = "loom_capacity_build_guard"
 FUNCTION = "retire_request_hold(uuid,jsonb,bytea,text)"
+DISCOVERY = "read_pending_retirements(uuid,bigint,bigint,integer)"
 
 
 def upgrade():
@@ -154,6 +155,47 @@ def upgrade():
     op.execute(f"REVOKE ALL ON FUNCTION {SCHEMA}.hold_retirement_receipt({SCHEMA}.hold_retirements) FROM PUBLIC, {quote(agent)}")
     op.execute(f"REVOKE ALL ON FUNCTION {SCHEMA}.{FUNCTION} FROM PUBLIC")
     op.execute(f"GRANT EXECUTE ON FUNCTION {SCHEMA}.{FUNCTION} TO {quote(agent)}")
+    op.execute(f"""
+        CREATE FUNCTION {SCHEMA}.read_pending_retirements(p_installation uuid,p_after bigint,p_through bigint,p_limit integer)
+        RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $function$
+        DECLARE upper_id bigint; publications jsonb;
+        BEGIN
+            IF current_setting('transaction_isolation') <> 'serializable' THEN
+                RAISE EXCEPTION 'build hold discovery requires serializable transaction';
+            END IF;
+            IF p_after IS NULL OR p_after < 0 OR (p_through IS NOT NULL AND p_through < p_after)
+                OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 64 THEN
+                RAISE EXCEPTION 'build hold discovery pagination bounds changed';
+            END IF;
+            PERFORM 1 FROM {SCHEMA}.installations WHERE id=p_installation FOR UPDATE;
+            IF NOT FOUND THEN RAISE EXCEPTION 'build hold discovery installation is absent'; END IF;
+            IF EXISTS (SELECT 1 FROM {SCHEMA}.release_publication_receipts
+                WHERE installation_id=p_installation AND retention_xid=pg_current_xact_id()) THEN
+                RAISE EXCEPTION 'build hold discovery requires committed acknowledgement';
+            END IF;
+            SELECT COALESCE(p_through,GREATEST(p_after,COALESCE(max(event_id),0))) INTO upper_id
+                FROM {SCHEMA}.release_publication_receipts WHERE installation_id=p_installation;
+            SELECT COALESCE(jsonb_agg({SCHEMA}.protected_release_publication(p_installation,pending.id)::jsonb ORDER BY pending.id),'[]'::jsonb)
+                INTO publications FROM (
+                    SELECT e.id FROM (
+                        SELECT id,intent_id FROM {SCHEMA}.bootstrap_revocations
+                        UNION ALL SELECT id,intent_id FROM {SCHEMA}.worker_withdrawals
+                    ) e JOIN {SCHEMA}.bootstraps b ON b.intent_id=e.intent_id
+                    JOIN {SCHEMA}.release_publication_receipts ack ON ack.event_id=e.id AND ack.installation_id=b.installation_id
+                    JOIN {SCHEMA}.assignments a ON a.submission_intent_id=e.intent_id
+                    JOIN {SCHEMA}.plans p ON p.id=a.plan_id AND p.installation_id=b.installation_id
+                    JOIN {SCHEMA}.request_holds h ON h.request_id=a.request_id AND h.assignment_id=a.id
+                    WHERE b.installation_id=p_installation AND e.id>p_after AND e.id<=upper_id
+                        AND NOT EXISTS (SELECT 1 FROM {SCHEMA}.hold_retirements r WHERE r.intent_id=e.intent_id)
+                    ORDER BY e.id LIMIT p_limit
+                ) pending;
+            RETURN {SCHEMA}.canonical_plan_json(jsonb_build_object('schema_version',1,
+                'installation_id',p_installation,'after_event_id',p_after,'through_event_id',upper_id,
+                'publications',publications,'executable',false));
+        END $function$;
+    """)
+    op.execute(f"REVOKE ALL ON FUNCTION {SCHEMA}.{DISCOVERY} FROM PUBLIC")
+    op.execute(f"GRANT EXECUTE ON FUNCTION {SCHEMA}.{DISCOVERY} TO {quote(agent)}")
 
 
 def downgrade():
@@ -161,5 +203,6 @@ def downgrade():
     op.execute(f"""DO $$ BEGIN IF EXISTS (SELECT 1 FROM {SCHEMA}.hold_retirements) THEN
         RAISE EXCEPTION 'cannot remove build hold retirement with retained evidence'; END IF; END $$""")
     op.execute(f"DROP FUNCTION {SCHEMA}.{FUNCTION}")
+    op.execute(f"DROP FUNCTION {SCHEMA}.{DISCOVERY}")
     op.execute(f"DROP FUNCTION {SCHEMA}.hold_retirement_receipt({SCHEMA}.hold_retirements)")
     op.drop_table("hold_retirements", schema=SCHEMA)

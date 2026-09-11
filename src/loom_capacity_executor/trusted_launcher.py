@@ -9,6 +9,7 @@ import errno
 import fcntl
 import hashlib
 import hmac
+import json
 import os
 import posixpath
 import stat
@@ -16,7 +17,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
@@ -25,12 +26,21 @@ from loom_capacity_agent.admission import PhysicalJobBindingV2
 from loom_capacity_executor.bootstrap_handoff import (
     BootstrapHandoffError,
     claim_bootstrap_handoff_launch,
+    claim_bootstrap_handoff_worker,
     consume_bootstrap_handoff,
     resolve_bootstrap_handoff_physical_binding,
 )
+from loom_capacity_executor.build_admission_client import BuildAdmissionExecutorV1
+from loom_capacity_executor.native_worker_handoff import (
+    NATIVE_WORKER_HANDOFF_ENV,
+    NativeWorkerHandoffV1,
+    sealed_native_worker_handoff,
+)
+from loom_capacity_executor.pinned_admission_transport import PinnedAdmissionFileV1
 from loom_capacity_executor.runtime import RoutedExecutableAdmissionClient
 from loom_capacity_executor.slurm_contracts import SlurmExecutableIdentityV2, SlurmFileIdentityV2
-from loom_capacity_manager.executable_contracts import StrictV2Model
+from loom_capacity_executor.typed_admission import TypedAdmissionRouter
+from loom_capacity_manager.executable_contracts import StrictV2Model, canonical_executable_bytes
 
 WORKER_CREDENTIAL_ENV = "LOOM_EXECUTOR_WORKER_CREDENTIAL"
 _MAX_TRUSTED_CONFIG_BYTES = 64 * 1024
@@ -116,6 +126,20 @@ class TrustedLauncherConfigV2(StrictV2Model):
         return self
 
 
+class NativeTrustedLauncherConfigV3(TrustedLauncherConfigV2):
+    """Explicit native route; never reinterpret an application launcher config."""
+
+    schema_version: Literal[3] = 3  # type: ignore[assignment]
+    executor: BuildAdmissionExecutorV1
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _native_version(cls, value: object) -> object:
+        if type(value) is not int or value != 3:
+            raise ValueError("native launcher schema must be integer3")
+        return value
+
+
 def _candidate_argv(value: tuple[str, ...]) -> tuple[str, ...]:
     if (
         not value
@@ -139,11 +163,28 @@ async def exec_bootstrap_handoff_candidate(
     now: Callable[[], datetime],
     environment: Mapping[str, str] | None = None,
     execvpe: _Execvpe = os.execvpe,
+    native_config: NativeTrustedLauncherConfigV3 | None = None,
 ) -> None:
     """Exchange the bootstrap handoff, claim the exec boundary, and exec candidate code."""
 
     argv = _candidate_argv(tuple(candidate_argv))
+    if native_config is not None:
+        purpose = getattr(admission, "purpose", None)
+        if (native_config.candidate_argv != argv or not callable(purpose)
+            or purpose(physical.binding) != "personal-build-worker"):
+            raise BootstrapHandoffError("native launcher requires exact build-purpose admission")
     await consume_bootstrap_handoff(directory, reference, physical, admission, now=now)
+    if native_config is not None:
+        worker = claim_bootstrap_handoff_worker(directory, reference, physical, admission, now=now)
+        packet = NativeWorkerHandoffV1(registration=worker.registration, physical=worker.physical,
+            worker_credential=worker.worker_credential, executor=native_config.executor,
+            admission=PinnedAdmissionFileV1(path=native_config.admission_directory, sha256=native_config.admission_directory_sha256))
+        with sealed_native_worker_handoff(packet) as descriptor:
+            native_environment = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "LANG": "C.UTF-8", "SLURM_JOB_ID": physical.slurm_job_id,
+                NATIVE_WORKER_HANDOFF_ENV: str(descriptor)}
+            execvpe(candidate_exec_file or argv[0], argv, native_environment)
+        raise BootstrapHandoffError("trusted native launcher candidate exec returned")
     worker_credential = claim_bootstrap_handoff_launch(
         directory,
         reference,
@@ -381,11 +422,17 @@ def _open_verified_candidate(identity: TrustedCandidateExecutableV2) -> int:
     return snapshot_descriptor
 
 
-def _load_trusted_config(identity: SlurmFileIdentityV2) -> TrustedLauncherConfigV2:
+def _load_trusted_config(identity: SlurmFileIdentityV2) -> TrustedLauncherConfigV2 | NativeTrustedLauncherConfigV3:
     payload = _read_verified_file(identity, label="config", executable=False)
     if len(payload) > _MAX_TRUSTED_CONFIG_BYTES:
         raise BootstrapHandoffError("trusted launcher config exceeds its byte bound")
     try:
+        document = json.loads(payload)
+        if isinstance(document, dict) and document.get("schema_version") == 3:
+            config = NativeTrustedLauncherConfigV3.model_validate_json(payload)
+            if canonical_executable_bytes(config) != payload:
+                raise ValueError("native launcher configuration must be canonical")
+            return config
         return TrustedLauncherConfigV2.model_validate_json(payload)
     except ValueError as exc:
         raise BootstrapHandoffError("trusted launcher config is invalid") from exc
@@ -397,6 +444,7 @@ async def run_trusted_launcher(
     environment: Mapping[str, str] | None = None,
     now: Callable[[], datetime],
     admission_factory: _AdmissionFactory = RoutedExecutableAdmissionClient,
+    typed_admission_factory: _AdmissionFactory = TypedAdmissionRouter,
     execvpe: _Execvpe = os.execvpe,
 ) -> None:
     """Run the shipped trusted-wrapper argv/env boundary before candidate exec."""
@@ -406,6 +454,7 @@ async def run_trusted_launcher(
         environment=environment,
         now=now,
         admission_factory=admission_factory,
+        typed_admission_factory=typed_admission_factory,
         execvpe=execvpe,
         verify_launcher=False,
     )
@@ -417,6 +466,7 @@ async def run_trusted_launcher_process(
     environment: Mapping[str, str] | None = None,
     now: Callable[[], datetime],
     admission_factory: _AdmissionFactory = RoutedExecutableAdmissionClient,
+    typed_admission_factory: _AdmissionFactory = TypedAdmissionRouter,
     execvpe: _Execvpe = os.execvpe,
     verify_launcher: bool = True,
 ) -> None:
@@ -452,10 +502,14 @@ async def run_trusted_launcher_process(
             operation_id = UUID(args.operation_id)
         except (TypeError, ValueError) as exc:
             raise BootstrapHandoffError("trusted launcher operation id is invalid") from exc
-        admission = admission_factory(
-            Path(config.admission_directory),
-            expected_directory_sha256=config.admission_directory_sha256,
-        )
+        if isinstance(config, NativeTrustedLauncherConfigV3):
+            admission = typed_admission_factory(Path(config.admission_directory),
+                expected_sha256=config.admission_directory_sha256, executor=config.executor)
+        else:
+            admission = admission_factory(
+                Path(config.admission_directory),
+                expected_directory_sha256=config.admission_directory_sha256,
+            )
         physical = resolve_bootstrap_handoff_physical_binding(
             Path(config.handoff_directory),
             args.bootstrap_handoff,
@@ -475,6 +529,7 @@ async def run_trusted_launcher_process(
             now=now,
             environment=runtime_environment,
             execvpe=execvpe,
+            native_config=config if isinstance(config, NativeTrustedLauncherConfigV3) else None,
         )
     finally:
         os.close(candidate_descriptor)
@@ -492,6 +547,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 __all__ = [
     "WORKER_CREDENTIAL_ENV",
+    "NativeTrustedLauncherConfigV3",
     "TrustedCandidateExecutableV2",
     "TrustedLauncherConfigV2",
     "exec_bootstrap_handoff_candidate",

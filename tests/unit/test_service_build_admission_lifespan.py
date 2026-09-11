@@ -11,8 +11,24 @@ from loom_service.config import LoomServiceSettings
 
 
 @pytest.mark.parametrize("boundary", ["normal", "later-failure", "admission-failure", "unconfigured"])
-def test_service_owns_private_admission_through_startup_and_shutdown(monkeypatch, boundary):
+@pytest.mark.parametrize("mode", ["native-registration", "native-source", "native-artifacts"])
+def test_service_owns_private_admission_through_startup_and_shutdown(monkeypatch, boundary, mode):
+    from loom_capacity_build_guard.artifact_writer import BuildArtifactWriter
+    from loom_capacity_build_guard.source_reader import BuildSourceReader
+
     events = []
+    original_close = BuildSourceReader.aclose
+
+    async def close_source(reader):
+        await original_close(reader)
+        events.append("source-closed")
+
+    monkeypatch.setattr(BuildSourceReader, "aclose", close_source)
+    original_artifact_close = BuildArtifactWriter.aclose
+    async def close_artifact(writer):
+        await original_artifact_close(writer)
+        events.append("artifact-closed")
+    monkeypatch.setattr(BuildArtifactWriter, "aclose", close_artifact)
 
     class Engine:
         async def dispose(self):
@@ -21,7 +37,7 @@ def test_service_owns_private_admission_through_startup_and_shutdown(monkeypatch
     async def close():
         events.append("admission-closed")
 
-    runtime = SimpleNamespace(sessions=object(), verifier=object(), aclose=close)
+    runtime = SimpleNamespace(sessions=object(), verifier=object(), aclose=close, mode=mode)
 
     async def build(settings):
         events.append("admission-built")
@@ -31,6 +47,20 @@ def test_service_owns_private_admission_through_startup_and_shutdown(monkeypatch
 
     async def noop(*args, **kwargs):
         pass
+
+    class Management:
+        def start(self):
+            events.append("management-started")
+
+        async def aclose(self):
+            events.append("management-closed")
+
+    async def build_management(settings, *, admission):
+        if admission is None:
+            return None
+        assert admission is runtime
+        events.append("management-built")
+        return Management()
 
     async def idle(**kwargs):
         events.append("task-started")
@@ -48,6 +78,7 @@ def test_service_owns_private_admission_through_startup_and_shutdown(monkeypatch
     monkeypatch.setattr(service_app, "create_async_engine", lambda *a, **k: Engine())
     monkeypatch.setattr(service_app, "create_minio_client", lambda *a, **k: object())
     monkeypatch.setattr(service_app, "build_personal_build_admission_runtime", build, raising=False)
+    monkeypatch.setattr(service_app, "build_personal_build_management_runtime", build_management, raising=False)
     monkeypatch.setattr(service_app, "install_behavior_pipeline_public_adapter", configure)
     for name in ("batch_run_loop", "taskset_materializer_run_loop", "taskset_gc_run_loop"):
         monkeypatch.setattr(service_app, name, idle)
@@ -67,6 +98,9 @@ def test_service_owns_private_admission_through_startup_and_shutdown(monkeypatch
             if boundary == "normal":
                 assert app.state.personal_dev_build_admission_sessions is runtime.sessions
                 assert app.state.personal_dev_build_admission_verifier is runtime.verifier
+                assert app.state.personal_dev_build_admission_mode == mode
+                assert isinstance(getattr(app.state, "personal_dev_build_source_reader", None), BuildSourceReader) == (mode in {"native-source", "native-artifacts"})
+                assert isinstance(getattr(app.state, "personal_dev_build_artifact_writer", None), BuildArtifactWriter) == (mode == "native-artifacts")
             else:
                 assert getattr(app.state, "personal_dev_build_admission_sessions", None) is None
                 assert getattr(app.state, "personal_dev_build_admission_verifier", None) is None
@@ -74,7 +108,16 @@ def test_service_owns_private_admission_through_startup_and_shutdown(monkeypatch
     assert events[-1] == "service-closed"
     if boundary in {"normal", "later-failure"}:
         assert events.count("admission-closed") == 1
+        assert events.count("management-closed") == 1
+        assert events.index("management-closed") < events.index("admission-closed")
+        if mode in {"native-source", "native-artifacts"}:
+            assert events.count("source-closed") == 1
+            assert events.index("source-closed") < events.index("admission-closed")
+        if mode == "native-artifacts":
+            assert events.count("artifact-closed") == 1
+            assert events.index("artifact-closed") < events.index("admission-closed")
         if boundary == "normal":
+            assert events.count("management-started") == 1
             assert events.count("task-stopped") == 3
             assert max(i for i, event in enumerate(events) if event == "task-stopped") < events.index("admission-closed")
     else:
@@ -83,3 +126,6 @@ def test_service_owns_private_admission_through_startup_and_shutdown(monkeypatch
         assert "task-started" not in events
     assert getattr(app.state, "personal_dev_build_admission_sessions", None) is None
     assert getattr(app.state, "personal_dev_build_admission_verifier", None) is None
+    assert getattr(app.state, "personal_dev_build_admission_mode", None) is None
+    assert getattr(app.state, "personal_dev_build_source_reader", None) is None
+    assert getattr(app.state, "personal_dev_build_artifact_writer", None) is None

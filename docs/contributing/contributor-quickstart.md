@@ -163,6 +163,10 @@ Each root shard has a bounded 40-minute whole-job budget, including environment
 setup, tests, wheel verification, coverage upload, and cleanup. This leaves
 headroom after the observed approximately 29-minute test phase; it does not
 relax per-test timeouts or remove any required checks.
+Each integration shard has a bounded 60-minute whole-job budget. The previous
+40-minute limit interrupted a normally progressing shard at 99%; this headroom
+includes coverage upload and cleanup without changing test selection, per-test
+timeouts, or the requirement for every selected shard to pass.
 `repository-checks` enforces every selected result after the independent lanes
 finish. Docs-only PRs skip the no-input `fast-checks` job and let
 `repository-checks` validate that skipped result directly, avoiding a no-op
@@ -253,6 +257,10 @@ On GitHub, selected non-Docker integration tests are split into two disjoint,
 contiguous ranges of the manifest-owned filename order. Contiguous ordering
 preserves the suite's session-scoped Postgres setup/cleanup contract while the
 two shards start directly after the planner, in parallel with the fast tier.
+The ownership manifest also pins measured slow modules to the shorter shard;
+these whole-file moves preserve filename order within each shard and keep every
+test assigned exactly once. Adjust pins from CI timing evidence, not by omitting
+tests or extending the job budget whenever the distribution becomes uneven.
 The local commands remain serial equivalents so they are easy to reproduce.
 
 Tests using `isolated_migration_postgres_url` receive separate disposable

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal, Self
 
 import httpx
 
@@ -63,7 +63,7 @@ def _invalid_constant(value: str) -> None:
     raise ValueError("non-JSON membership response constant")
 
 
-class CapacityManagerPersonalDevMembershipClient:
+class _CapacityManagerMembershipTransport:
     """No implicit retry, shadow fallback, lease change, or checkpoint refresh."""
 
     def __init__(
@@ -92,7 +92,7 @@ class CapacityManagerPersonalDevMembershipClient:
     def from_files(
         cls,
         connection: PersonalDevCapacityManagerConnection,
-    ) -> CapacityManagerPersonalDevMembershipClient:
+    ) -> Self:
         token = read_owner_only_bearer_token(connection.bearer_token_file)
         tls = build_reporter_tls_context(connection.tls_files)
         return cls(
@@ -115,6 +115,7 @@ class CapacityManagerPersonalDevMembershipClient:
         content: bytes | None = None,
         idempotency_key: str | None = None,
         allow_revision_conflict: bool = False,
+        response_schema_version: Literal[1, 2] = 1,
     ) -> bytes:
         headers = {
             "Authorization": f"Bearer {self._token}",
@@ -158,7 +159,7 @@ class CapacityManagerPersonalDevMembershipClient:
             if not isinstance(payload, dict):
                 raise ValueError("membership response must be an object")
             if status == 200 and (
-                type(payload.get("schema_version")) is not int or payload["schema_version"] != 1
+                type(payload.get("schema_version")) is not int or payload["schema_version"] != response_schema_version
             ):
                 raise ValueError("membership response version is invalid")
         except (ValueError, UnicodeError, RecursionError) as exc:
@@ -168,6 +169,14 @@ class CapacityManagerPersonalDevMembershipClient:
                 raise PersonalDevMembershipRevisionConflictError("membership revision changed")
             raise PersonalDevMembershipError("membership authority or request was rejected")
         return bytes(body)
+
+    async def aclose(self) -> None:
+        if self._owns_http:
+            await self._http.aclose()
+
+
+class CapacityManagerPersonalDevMembershipClient(_CapacityManagerMembershipTransport):
+    """Legacy application membership; typed onboarding uses a separate client."""
 
     async def membership_checkpoint(self) -> PersonalMembershipCheckpointV1:
         payload = await self._exchange("GET", "/v1/personal-memberships/checkpoint")
@@ -292,7 +301,3 @@ class CapacityManagerPersonalDevMembershipClient:
             return response
         except ValueError as exc:
             raise PersonalDevMembershipError("historical subject release is invalid") from exc
-
-    async def aclose(self) -> None:
-        if self._owns_http:
-            await self._http.aclose()

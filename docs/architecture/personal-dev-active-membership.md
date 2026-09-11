@@ -286,13 +286,31 @@ activation remain to be connected; endpoint presence does not enable build intak
 Service startup can install these private sessions with the optional
 `LOOM_SVC_PERSONAL_DEV_BUILD_ADMISSION_CONFIG_FILE` and its exact
 `LOOM_SVC_PERSONAL_DEV_BUILD_ADMISSION_CONFIG_SHA256`. The canonical V1 document
-has `mode="prepare-bind-only"`, owner-only `database_url_file` and
+has `mode="prepare-bind-only"`, `"native-registration"`, `"native-claims"`,
+`"native-source"`, or `"native-artifacts"`, owner-only `database_url_file` and
 `principals_file` paths, and their SHA-256 digests. The database URL requires
 verified PostgreSQL TLS. Startup checks the restricted agent and protected
-prepare/bind procedures, and rejects incomplete inputs or privilege drift.
+admission procedures, and rejects incomplete inputs or privilege drift. The
+registration mode additionally verifies the private registration/drain procedures
+and their exact privileges before enabling `register` and `drain`; preparation-only
+configuration keeps those endpoints closed.
+The `native-claims` mode also verifies the private claim/outcome procedures and
+enables `claim` and `outcome`; registration-only configuration cannot claim work
+or submit results. These operations retain pool/executor authentication. Claim
+and outcome exchanges additionally present the
+opaque registered worker credential, which is never retained in claim payloads.
 The service owns this independent connection pool through normal shutdown and
 partial startup failure; it removes admission access before disposing the pool.
 This configuration never sets builder availability or enables source intake.
+
+The registration endpoint exchanges the sealed bootstrap capability over the same
+pool-authenticated mTLS transport. The trusted wrapper sends only the chosen
+worker credential's hash; the private guard authenticates the actual bootstrap
+capability and retains a committed allocation-bound registration. The pinned
+client checks exact subject, intent, worker incarnation, epoch and request digest
+on every receipt, including replay after a lost reply. The purpose router never
+falls back to application admission. Registration does not grant source access,
+claim work, release a hold, or open the public typed-execution interlock.
 
 Private guard revision `build_guard_0010` adds read-only exact-intent observation
 at the same path with the `observe` suffix. It requires committed preparation,
@@ -459,7 +477,377 @@ requeue. This deliberately does not implement retirement for registered workers:
 that requires durable per-platform outcomes which distinguish successful work,
 retryable failure and cancellation, suppress both pending demand and fresh
 admission when finished, and do not infer an outcome from physical termination.
-Native exchange/claims, outcome handling and runtime orchestration remain incomplete.
+Native claim execution, outcome handling and runtime orchestration remain incomplete.
+
+The management-only `BuildRecoveryCoordinator` connects acknowledged protected
+releases to authenticated manager final-release and native terminal evidence.
+Discovery returns only exact retained assignments/current holds, not unacknowledged
+events or already-retired history. It pages a fixed upper event bound per sweep;
+the process-local cursor is neither durable acknowledgement nor a skip watermark.
+Missing or failed evidence remains pending for the next sweep, and one item cannot
+block the rest of its bounded page. Continuous arrivals cannot extend an active
+sweep indefinitely. Restart safely scans again from zero.
+
+Discovery commits before network requests. The coordinator matches the original
+publication and complete intent binding to the final-release witness, then checks
+bound terminal identity, sequence and digest before committing native import.
+Retirement uses another transaction, so interrupted cleanup replays retained
+terminal evidence. Each item has a bounded deadline; cancellation propagates,
+while item failures return fixed diagnostic categories without exposing response
+contents. Discovery/authority errors do not produce invented success. This adapter
+still needs connection to the management runtime and live concurrent-owner
+acceptance; it issues no source grants or application worker credentials.
+
+`LOOM_SVC_PERSONAL_DEV_BUILD_MANAGEMENT_CONFIG_FILE` and its paired SHA-256 enable
+service-owned **recovery-only** loops for explicitly installed native build
+scopes. Revision `build_guard_0026` checks each scope against exact committed
+installer evidence at startup. The configuration pins separate reporter and
+TLS inputs; clients consume the verified byte snapshots, not later path rereads.
+Parallel scope loops share the private admission connection pool. Shutdown stops
+all loops before closing their clients and then that private engine. Partial
+startup failure closes previously constructed clients too. Neither this
+configuration nor loop health changes builder availability or native readiness.
+The protected scope installer retains and materializes these scopes. Applying
+the resulting pinned configuration to a service remains a separate protected
+rollout; this is not automatic personal-namespace provisioning.
+
+`python -m loom_capacity_build_guard.installer --config-file <private-file>
+--config-sha256 <approved-digest>` consumes an exact owner-only canonical
+`BuildScopeInstallConfigV1`. It joins the retained typed create/update envelope,
+approved release evidence, complete native pool policies, separate management
+and reporter credentials, and private non-login database owner role. Credential
+clients consume verified snapshots. The installer checks retained deployment
+facts before sending membership, then commits guard retention before publishing
+the recovery registry. Output contains only the immutable snapshot path, digest
+and mode.
+Errors do not print connection strings or tokens.
+
+The registry directory must already exist as current-UID-owned `0700` storage
+outside feature source; `management.json` is canonical `0600` data. Directory
+locking and expected-hash comparison fence simultaneous onboarding writers
+before membership submission. Publication retains all existing owners and
+rotated scopes, fsyncs the file, atomically replaces it, and fsyncs the directory.
+Each publication also retains `management-<sha256>.json`; services pin this
+immutable snapshot, never the mutable `management.json` head. Reporter token
+and TLS files are copied from verified bytes into separate digest-named `0600`
+files in this private registry. Rotating installer input paths cannot invalidate
+an older service snapshot. Management tokens and owner database credentials
+are never materialized into the service registry.
+An exact replay also retries directory durability after a lost post-rename sync.
+Neither lost HTTP replies nor failed local output create a fresh request key.
+This path does not install schemas, activate execution, issue grants, enable
+intake, or restart services. The new registry digest must be adopted through
+protected service rollout and startup verification before consumers are running.
+
+Protected onboarding uses `/v2/personal-memberships/checkpoint` and the typed
+`PUT /v2/personal-memberships/{subject_id}` transport. Both require the unbound
+management delegate and exact active V4 operator policy. The mutation shares
+the policy check's authority lock and the existing typed membership transaction;
+build subjects are derived from namespace identity plus owner, not a supplied
+personal namespace string. The checkpoint retains its purpose-neutral V1 wire;
+mutations/results use explicit typed V2 wire. The typed client retains the
+original request, checkpoint and idempotency key, and verifies the exact returned
+event hash against independently pinned preparation/fleet inputs. A lost reply
+can replay unchanged after another owner's revision advances. If its execution
+retires, the result remains unconfirmed; this transport never silently changes
+authority or invents a new retry key. Legacy application routes are unchanged.
+This is membership transport, not scope installation or native build readiness.
+
+The private admission configuration's explicit `native-source` mode adds bounded
+source and compact context reads to `native-claims`; existing modes do not enable
+these surfaces. Startup checks both private procedure ACLs.
+Revision `build_guard_0027` checks the exact committed claim, registered worker
+credential, assignment and current source/whole-attempt lease. Historical claim
+replay never renews source access. Drain, physical terminal evidence, any outcome
+for that claim, release, bootstrap revocation or closed assignment rejects access.
+Running work follows its current whole-attempt heartbeat, not the initial plan's
+admission expiry. The procedure grants no new claim or lease extension.
+
+`POST /api/v1/internal/capacity-build/pools/{pool_id}/intents/{intent_id}/source`
+requires the existing exact TLS pool-executor identity plus the scoped worker
+credential. It reads at most 1 MiB per request, using server-derived bucket/key
+and exact S3 range/size checks. A second short private transaction rechecks live
+authority after IO and before returning bytes; cancellation during IO discards
+the response. SQL locks are not held across object-store calls. The response
+contains claim/source digests, offset and base64 bytes, but no object-store
+credentials, coordinates or reusable URLs; responses are non-cacheable.
+
+One service-owned reader bounds concurrent IO. Cancelled requests retain their
+slots until the underlying stream closes; shutdown stops new reads and drains
+IO before closing database/object-store clients. Already delivered source cannot
+be revoked. The allocated runtime must still verify the complete archive digest
+before extraction and separately fence execution and artifact publication.
+This transport does not enable source intake, launch containers or report builder
+readiness. Contained execution, artifact return and live acceptance remain required.
+
+`NativeClaimBuildSource` consumes a protected launch's `CandidateRegistration`
+through this client. Before IO it binds the claim to the exact platform request
+and pool and enforces the approved source-size limit. Each chunk must match the
+launch's canonical source digest and candidate archive hash/size. It stages in a
+private owner-controlled allocation workspace, anchored by an open directory
+descriptor, and verifies the complete archive and existing candidate manifest
+before yielding any path. It extracts nothing on the host. The yielded path is
+valid only in the caller's context; pass its contents into the sandbox.
+Normal exit, failed transfer/verification and cancellation remove temporary data.
+Cancellation waits for filesystem threads, including a late failing verifier,
+before cleanup.
+
+Revision `build_guard_0028` adds
+`POST /api/v1/internal/capacity-build/pools/{pool_id}/intents/{intent_id}/context`
+under the same TLS pool-executor and worker-credential boundary. Its private
+procedure calls the live source fence and reads the exact candidate/attempt rows
+under the same serializable transaction and locks. The compact response binds
+the claim, platform, source/archive identities and build-attempt metadata; it
+contains no object coordinates, credentials or reusable URL. The existing
+`source_sha256` already identifies the full canonical manifest inside the sealed
+archive, so no second manifest transfer or protocol byte-limit expansion is
+needed. Unicode paths and large manifests remain inside the archive.
+
+`NativeClaimBuildSource.stage_claim` obtains this context through the pinned
+client or purpose-aware router, verifies the exact claim/platform and fixed
+build contract, enforces the protected source-size limit, and uses the same
+private staging/cleanup path. It verifies the complete archive, manifest digest,
+every archived file, source commit and dirty marker before yielding context and
+archive together. It does not fabricate application records or require worker
+database access. Legacy registration-based staging retains its full manifest
+equality check. Context/source reads do not extend leases; neither is permission
+to start a build or publish an artifact. Allocation-contained execution still
+needs its actual runtime connection.
+
+Revision `build_guard_0029` adds `/claim-assigned` under the same intent/pool
+route and explicit `native-source` mode. A registered worker supplies its exact
+binding, worker identity and stable operation ID, not a source request ID.
+Private SQL verifies its committed registration and credential, resolves its
+immutable assigned request, and delegates to the existing native claim procedure.
+This adds no queue-selection policy, capacity or lease authority. The response
+is the existing claim receipt and commits before delivery; lost replies replay
+the same retained claim. Replay after cancellation is historical evidence only,
+and context/source access still fails. Both the client and store reject an
+explicit request ID on this allocated-claim interface instead of silently
+discarding it, and verify all supplied fields plus the returned full claim digest.
+Application-purpose routes cannot use this operation. Startup checks its exact
+private ACL; this operation alone does not launch a worker or enable readiness.
+
+The native trusted launcher explicitly selects configuration V3 and the pinned
+purpose-aware admission router; application V2 remains compatible. After the
+existing one-time launch claim, it transfers the registered worker, physical
+allocation, admission pins, executor identity and scoped worker credential to
+the verified executable through a bounded, write-sealed Linux memfd. The native
+environment contains only fixed PATH/LANG, the exact Slurm job ID and descriptor
+number; it does not inherit controller credentials or feature-controlled values.
+The consumer validates canonical bytes, identity, owner, mode, size and seals,
+then closes the descriptor before any sandbox subprocess. Failed exec closes the
+descriptor without making the one-time launch replayable. A real subprocess test
+verifies descriptor inheritance and consumption, not Slurm/KVM containment.
+`stage_allocated_worker_source` connects that handoff to assigned claim and source
+acquisition. It closes the descriptor first, requires the exact Slurm job ID and
+current process job ancestry, loads the pinned build-purpose router, and derives
+a stable claim operation from the registered identity. Bounded transport retries
+retain that operation; returned claims are checked before complete source staging.
+Consumer failure and cancellation clean the private source workspace. This
+process-ancestry check does not certify child containment. Fresh execution fencing,
+the build/artifact consumer and installed containment remain required before native
+readiness can be enabled.
+
+The sandbox builder's explicit `build-allocated` mode accepts a local source
+archive and capability-free contract, not source/upload URLs. The trusted wrapper
+renders the existing exact sandbox contract from guarded native context and
+protected size limits. Inside the sandbox, the existing restricted gVisor process
+identity check runs first; the consumer creates a fresh private workspace,
+snapshots only a bounded regular no-follow source file, checks the complete
+archive and manifest, and uses the existing BuildKit client and OCI packaging.
+Its fixed `artifacts.tar` output is for the outer trusted worker's upload path.
+Legacy `build` mode remains compatible. Automated checks use real source/archive
+verification with mocked image building; they do not establish installed KVM
+execution or Slurm child containment.
+
+`BuildManagementRuntime` composes installation-scoped terminal recovery, protected
+release publication, final retirement, demand reporting, bootstrap registration
+and plan convergence. Each pass performs cleanup before new admission. Expected
+stage failures do not prevent later cleanup or manager closure processing;
+cancellation and unexpected programming errors propagate. Disabled intake still
+reports accounting and converges closures, but cannot register a bootstrap or
+prepare/publish new admission work. Diagnostics contain fixed stage names, never
+database messages or response contents. The service must still supply the pinned
+installation, exact reporter connection and live intake interlock; loop health
+is not membership readiness, a source grant, or candidate publication authority.
+
+Build-guard revision `build_guard_0025` adds a management-only accepted-artifact
+reader. It binds the current candidate and whole-attempt lease to an exact native
+platform request, committed claim and artifact-ready outcome. Shared private
+source checks retain cancellation, owner and lease fencing; the admission wrapper
+still rejects finished requests. Accepted artifacts remain retrievable after
+worker release while their parent source authority is current.
+
+The trusted exporter can consume this resolver instead of legacy attempt object
+keys. In this mode it derives only the accepted claim- and artifact-digest-specific key, verifies the
+accepted full archive length and SHA-256, then retains existing OCI verification,
+scan-before-publish and final candidate fencing. Missing/mismatched evidence has
+no legacy fallback. An accepted archive is not verified candidate success. Native
+service wiring must select this resolver; adding the adapter does not enable
+native build intake or establish runtime readiness.
+
+Explicit `native-artifacts` admission mode extends the source/claim lifecycle with
+`POST /api/v1/internal/capacity-build/pools/{pool_id}/intents/{intent_id}/artifact`.
+The pinned pool client streams a versioned, bounded canonical envelope followed by
+archive chunks; the scoped worker credential stays inside the TLS body, never in
+a URL or artifact metadata. The service retains exact pool/executor authentication,
+bounded framing and two upload slots, the configured artifact size ceiling, and
+current committed-claim/source fences before storage IO, each multipart part and
+before/after completion. No database locks span storage IO. Metadata required by
+the exporter comes from authenticated source context, not worker assertions.
+
+The writer verifies the entire declared length and SHA-256 before completion and
+uses `personal-dev/native-claims/<request>/<intent>/<claim>/<artifact-sha256>/artifact.tar`.
+Different verified output cannot overwrite an accepted digest's bytes; concurrent
+same-digest writers contain identical verified bytes and metadata. Conditional
+multipart completion is additional protection only: the repository's real MinIO
+fixture was observed to ignore `If-None-Match`. Automated real-MinIO coverage
+checks concurrent identical uploads and distinct output isolation. Export uses
+the digest from the accepted outcome, without a mutable-key fallback.
+
+Cancellation settles outstanding IO and aborts unfinished multipart work,
+including uploads created after cancellation arrives. Service shutdown closes
+intake and drains uploads before disposing storage/database clients. Completion
+followed by lost authority leaves an unaccepted object; it never returns success
+or deletes a concurrent replay's object. Upload acknowledgment is not an outcome,
+OCI validation, publication or readiness. Native-claim object/multipart GC, the
+contained build consumer and whole-attempt runtime composition remain required
+before operational readiness.
+
+Build-guard revision `build_guard_0024` privately rediscovers committed plans
+without a publication or terminal disposition. This recovers lost acknowledgement
+replies even after the manager removes accepted proposals from its work queue.
+A bounded finite sweep replays each exact proposal digest through existing
+publication authorization; it cannot bypass current source, lease or hold checks.
+Failed items remain retryable and cannot starve later admissions. Completely
+retired assignments are omitted only using committed exact retirement evidence,
+not elapsed time or absent holds. Restart begins the scan again; its cursor is
+not delivery evidence. Disabled intake never republishes admission.
+
+Build-guard revision `build_guard_0023` gives absent plan publication a dedicated
+SQLSTATE. `BuildPlanCoordinator.converge` first republishes an existing exact
+proposal, recovering reservations after process restart or lost replies. Only
+explicit plan absence permits new preparation, which loads the requested source
+subset through the private source reader and rechecks it under preparation locks.
+Changed proposal, expired/cancelled source, generic database failure and rejected
+publication cannot create replacement reservations. No application database
+credential or caller-provided source map is required for this convergence path.
+
+Build-guard revision `build_guard_0022` adds bounded management-only discovery of
+held registered workers independently of final release. It returns exact worker
+and optional claim identities, never credentials or source contents. The
+`BuildTerminalRecoveryCoordinator` fetches authenticated native terminal inventory
+outside database transactions, commits import, settles lost claims as interrupted,
+then commits drain and protected terminal release separately. Existing worker
+outcomes and drain snapshots are preserved. A missing terminal witness does
+nothing; deadlines never imply death. Finite scan bounds and per-item retries
+retain unavailable work without starving earlier entries. This pre-release path
+does not wait on final-release evidence, which requires these claims closed first.
+Capacity holds still await protected publication and exact final retirement;
+management runtime orchestration and live acceptance remain required.
+
+Build-guard revision `build_guard_0021` closes registered native workers through
+one immutable protected release. It requires an exact committed drain, claim
+high-water zero/one, and zero *current* live claims; an older drain's live-count
+snapshot is not current release authority. Normal release authenticates the
+worker credential; management-only terminal release instead requires the exact
+committed native terminal import when that credential was lost. Both retain
+bootstrap/credential revocation and byte-exact replay without releasing a hold.
+
+Registered releases join the existing protected outbox and bounded retirement
+discovery as `released` events. After committed manager acknowledgement, final
+hold retirement still requires the manager's exact final-release witness plus
+matching committed physical-terminal evidence. Recovery fetches native terminal
+proof for registered releases as well as unregistered withdrawals. Old retirement
+replay cannot remove a successor assignment's hold. Failed/interrupted requests
+may requeue only after retirement; artifact-ready/cancelled requests remain
+ineligible for fresh admission. The pool-authenticated `/release` endpoint and
+pinned client require a transport-only worker credential and return only committed,
+canonical release evidence. Typed routing preserves application/build authority;
+only `native-registration`, `native-claims`, `native-source` and `native-artifacts` modes expose native release.
+Terminal release without the credential remains management-only, with no pool
+route. Runtime recovery orchestration, source grants and verified artifact publication remain required
+before operational enablement.
+
+Build-guard revision `build_guard_0020` permits management-only lost-result
+settlement from an exact committed native terminal inventory import. It joins
+the installation, bootstrap, physical job, registration and committed claim;
+no worker credential is needed after the physical process has disappeared. A
+missing result becomes `interrupted`, never image success. A previously committed
+worker result is preserved unchanged, including across a racing report/recovery.
+The same immutable outcome history and live-claim accounting apply. Interrupted
+work remains held until authoritative release, then may retry under fresh
+admission. Worker HTTP exchanges cannot assert manager interruption. Downgrade
+refuses retained interruption evidence; release and orchestration remain separate
+steps.
+
+Build-guard revision `build_guard_0019` records immutable per-claim wrapper outcomes:
+`artifact-ready`, `failed`, or `cancelled`. Artifact-ready retains an archive hash
+and size, not verified image success or publication authority. Object identities
+derive from the exact request, intent, claim and artifact digest, separating retry uploads. The
+management exporter must still verify full OCI contents and scan accepted images
+before publication. Results authenticate the registered worker credential and
+exact committed claim, with byte-exact replay even after source expiry.
+
+Committed outcomes remove the live fixed claim, never its held assignment or
+capacity charge. Historical claim high-water remains one. A new drain records
+the actual live count; existing drain receipts remain immutable across outcomes
+and schema upgrades. Artifact-ready and cancelled requests are excluded from
+pending demand and fresh source admission. A failed request can retry only after
+its old hold is authoritatively retired. No outcome writes public candidate
+status, releases capacity, or grants fresh execution. Runtime release integration
+and verified artifact publication remain required before runtime readiness. The
+pool-authenticated outcome route and pinned native
+client retain exact receipt checks, worker-credential separation, and outer-commit
+publication. Typed outcome routing rejects application-purpose subjects.
+
+Build-guard revision `build_guard_0018` adds registered-worker drain. It joins the
+exact committed registration and observed claim high-water under the same locks
+as claim admission. An initial drain advances to epoch 3; exact replay retains
+one immutable receipt. Draining does not depend on fresh source authority and
+never deletes claims or capacity holds. New claims are fenced, while prior claim
+replay remains evidence recovery only. Observation exposes only committed drain.
+The pool-authenticated HTTP route and pinned purpose client expose committed drain
+without application fallback. Held live claims report `cancel-pending`; outcomes
+and physical release remain separate steps. The schema refuses downgrade with
+retained drain evidence.
+
+Build-guard revision `build_guard_0017` adds an immutable claim of the exact
+allocated platform request. It authenticates the registered worker's opaque
+credential against the private hash, requires prior registration commit, and
+rechecks current source/plan/lease authority after blocking operations. One
+registration can claim only its one assignment; no application claim tables or
+source grants are used. Exact replay recovers evidence without renewing authority.
+Committed observation advances that worker's claim high-water from zero to one.
+
+Demand capture now projects actual `FixedClaimV1` entries from held private claims
+using their allocated resources and registered worker incarnation. Current
+assignments may overlap fixed claims, but neither overlaps pending demand.
+Cancellation marks a claim `cancel-pending`; expired or terminal execution remains
+charged as `unknown` until a durable outcome is recorded. Neither case releases
+holds or infers build success. Complete runtime outcome and release orchestration
+remain required before live execution can be enabled. Retained claim
+evidence prevents lossy downgrade.
+
+Build-guard revision `build_guard_0016` adds the private native registration
+consumer for the existing sealed handoff. Only initial bootstrap epoch 1 to
+registration epoch 2 is admitted; predecessor rotation is unsupported. The
+procedure requires exact committed physical Slurm binding, the presented
+bootstrap hash, current bootstrap/source/plan authority, and no retained terminal
+or revocation evidence. It stores only the worker credential hash, in the build
+guard rather than any application worker table. Exact replay preserves original
+identity and survives source expiry as evidence recovery; handoff expiry still
+prevents a late launch. Registration does not itself claim a platform request or
+issue a source capability.
+
+Observation exposes only committed registration. Registration and unregistered
+withdrawal take the same installation/bootstrap/physical locks, so the withdrawal
+path cannot revoke a registered worker. Holds remain charged and retained native
+registration prevents lossy downgrade. Claims are now retained privately, and
+registration, claims, drain, outcomes and release have purpose-specific transports.
+Runtime lifecycle orchestration and allocation containment must still be connected
+before public typed execution can be enabled.
 
 `ActivationRuntimeArtifactV3` and its explicit pinned loader compose the exact
 typed admission file, complete purpose/profile policy, approved profile digest,
@@ -1648,6 +2036,30 @@ allocation-contained execution and authenticated cleanup. Preserve node 2's
 task-image reservation.
 
 ## Implementation boundaries and acceptance
+
+Revision `build_guard_0030` adds the management-only `read_platform_outcome`
+reader. It rechecks the live source/lease/installation and observes the newest
+assignment for that exact platform request. Only absence of a claim or outcome
+is pending; committed failed, cancelled and interrupted outcomes remain distinct.
+An older failed allocation cannot mask its successor. The reader reuses the
+existing protected outcome contract, rejects uncommitted preparation and result
+history, and does not grant source access, execution or physical release.
+
+`NativePersonalDevBuildExecutor` adapts the existing whole-attempt coordinator to
+both native platform requests. It verifies sealed source, commits AMD64 and ARM64
+demand together, waits within a bounded deadline, and invokes trusted publication
+only after both exact artifact-ready outcomes. It requires the exporter to use
+the same native accepted-artifact resolver, checking that binding again before
+publication, to independently recheck and verify both outputs.
+The whole-attempt coordinator retains heartbeat and finalization authority and
+always invokes cleanup; cleanup cancels exact-lease demand, including a race with
+staging, while protected recovery retains physical workers and capacity charges.
+The immutable `NativePersonalDevBuildExecutorRouter` selects an installed owner
+scope for each globally claimed attempt. Unknown owners have no fallback. A
+replacement service router cannot change the cleanup scope of in-flight builds.
+This adapter does not enable membership intake. Allocation-contained KVM runtime,
+native artifact garbage collection and installed service composition still gate
+operational readiness.
 
 1. Deliver executable delegated **application** membership: versioned policy,
    durable log/projection, authenticated lifecycle endpoint, common allocation

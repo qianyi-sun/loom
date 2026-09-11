@@ -45,6 +45,7 @@ from loom_capacity_manager.executable_contracts import (
 )
 from loom_capacity_manager.membership_contracts import (
     PersonalApplicationMemberV1,
+    PersonalMembershipCheckpointV1,
     PersonalReincarnationEvidenceV1,
 )
 from loom_capacity_manager.membership_digest import canonical_membership_event_head
@@ -380,6 +381,46 @@ async def _validated_materialization(
 
 class CapacityTypedMembershipStore:
     """Append exact typed services under one SERIALIZABLE authority lock."""
+
+    async def checkpoint(
+        self, session: AsyncSession, *, actor: str, management: CapacityManagementStore,
+    ) -> PersonalMembershipCheckpointV1:
+        """Authenticate current typed delegation and operator policy, not readiness."""
+        async with _write_transaction(session):
+            authority = (await session.scalars(select(CapacityAuthorityState).where(
+                CapacityAuthorityState.singleton_id == 1,
+            ).with_for_update().execution_options(populate_existing=True))).one_or_none()
+            if authority is None or authority.execution_state != "active":
+                raise ExecutionConflictError("typed membership authority is unavailable")
+            epoch = (await session.scalars(select(CapacityExecutionEpoch).where(
+                CapacityExecutionEpoch.execution_epoch == authority.execution_epoch,
+            ).with_for_update().execution_options(populate_existing=True))).one_or_none()
+            if epoch is None or epoch.manifest_payload.get("schema_version") != 4:
+                raise ExecutionConflictError("execution does not delegate typed membership")
+            history = await _load_typed_history(session, epoch.execution_epoch)
+            preparation = history.preparation
+            if actor != preparation.personal_membership.management_principal_id:
+                raise ExecutionConflictError("execution does not delegate typed membership")
+            current = await management.execution_authority(session)
+            if not isinstance(current, ExecutionAuthorityV2) or current.execution_state != "active":
+                raise ExecutionConflictError("typed membership execution fence changed")
+            await _validated_materialization(session, epoch, history.fleet, history.latest)
+            snapshot = history.snapshot()
+            return PersonalMembershipCheckpointV1(execution=current, namespace_id=snapshot.namespace_id,
+                revision=snapshot.revision, head_sha256=snapshot.head_sha256)
+
+    async def apply_authenticated(
+        self, session: AsyncSession, request: PersonalMembershipMutationV2, *,
+        actor: str, idempotency_key: UUID, management: CapacityManagementStore,
+    ) -> PersonalMembershipResultV2:
+        """Keep operator validation and mutation under the same authority lock.
+
+        A replay may name an earlier revision of this same execution. Do not
+        compare its revision to the current checkpoint before exact replay lookup.
+        """
+        async with _write_transaction(session):
+            await self.checkpoint(session, actor=actor, management=management)
+            return await self.apply(session, request, actor=actor, idempotency_key=idempotency_key)
 
     async def snapshot(
         self, session: AsyncSession, epoch: CapacityExecutionEpoch | int, *, through_revision: int | None = None,

@@ -52,6 +52,73 @@ async def test_application_claim_passes_routing_binding_into_atomic_admission(tm
     close.assert_awaited_once()
 
 
+@pytest.mark.parametrize("pool", ["gb10", "oldlab"])
+@pytest.mark.parametrize("operation", ["claim", "outcome", "source"])
+async def test_native_claim_cannot_fall_back_to_application_authority(tmp_path, pool, operation):
+    from loom_capacity_agent.build_admission import BuildClaimRequestV1, BuildOutcomeRequestV1
+
+    module, request, document, path, digest = configured(tmp_path, pool, "application-worker")
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("native claim must not open application transport")
+
+    router = module.TypedAdmissionRouter(path, expected_sha256=digest, executor=document.executor,
+        application_client_factory=unexpected, build_client_factory=unexpected)
+    claim = BuildClaimRequestV1(binding=request.binding, operation_id=uuid4(), request_id=uuid4(),
+        worker_id=uuid4(), worker_incarnation=uuid4())
+    with pytest.raises(ValueError, match="build-purpose"):
+        if operation == "source":
+            await router.read_source(claim, worker_credential="w" * 43, offset=0, length=10)
+        elif operation == "outcome":
+            await router.record_outcome(BuildOutcomeRequestV1(claim=claim, operation_id=uuid4(), result="failed"), worker_credential="w" * 43)
+        else:
+            await router.claim_platform(claim, worker_credential="w" * 43)
+
+
+@pytest.mark.parametrize("pool", ["oldlab", "gb10"])
+@pytest.mark.parametrize("boundary", ["exact", "failure", "invalid", "changed-root"])
+async def test_native_source_uses_pinned_route_and_closes_per_read(tmp_path, pool, boundary):
+    import base64
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from loom_capacity_agent.build_admission import BuildClaimRequestV1, BuildSourceReadReceiptV1
+    from loom_capacity_manager.contracts import canonical_digest
+
+    module, request, document, path, digest = configured(tmp_path, pool, "personal-build-worker")
+    claim = BuildClaimRequestV1(binding=request.binding, operation_id=uuid4(), request_id=uuid4(),
+        worker_id=uuid4(), worker_incarnation=uuid4())
+    receipt = BuildSourceReadReceiptV1(claim_digest=canonical_digest(claim), source_binding_sha256="a" * 64,
+        archive_sha256="b" * 64, archive_size_bytes=20, offset=4, data_base64=base64.b64encode(b"source").decode("ascii"))
+    read = AsyncMock(return_value=object() if boundary == "invalid" else receipt,
+        side_effect=RuntimeError("lost read") if boundary == "failure" else None)
+    close = AsyncMock()
+    opened = []
+
+    def build(identity, connection):
+        assert identity == document.executor and connection == document.entries[0].build
+        opened.append(connection)
+        return SimpleNamespace(read_source=read, aclose=close)
+
+    def application(*args, **kwargs):
+        pytest.fail("source read must never use application authority")
+
+    router = module.TypedAdmissionRouter(path, expected_sha256=digest, executor=document.executor,
+        application_client_factory=application, build_client_factory=build)
+    if boundary == "changed-root":
+        path.write_bytes(path.read_bytes() + b" ")
+    if boundary == "exact":
+        assert await router.read_source(claim, worker_credential="w" * 43, offset=4, length=6) == receipt
+    else:
+        with pytest.raises((ValueError, RuntimeError)):
+            await router.read_source(claim, worker_credential="w" * 43, offset=4, length=6)
+    if boundary == "changed-root":
+        assert opened == []
+    else:
+        read.assert_awaited_once_with(claim, worker_credential="w" * 43, offset=4, length=6)
+        close.assert_awaited_once()
+
+
 @pytest.mark.parametrize("pool", ["gb10","oldlab"])
 @pytest.mark.parametrize("purpose", ["application-worker","personal-build-worker"])
 @pytest.mark.parametrize("failure", [False,True])
@@ -119,7 +186,7 @@ async def test_typed_route_rejects_drift_before_creating_clients(tmp_path,bounda
         client = module.TypedAdmissionRouter(path,expected_sha256=digest,executor=document.executor,
             application_client_factory=unexpected,build_client_factory=unexpected)
         if boundary == "unsupported":
-            await client.begin_drain(type("Drain",(),{"binding":request.binding})())
+            await client.admit_claim(request.binding, object())
         else:
             changed = request.model_copy(update={"binding":request.binding.model_copy(update=changes.get(boundary,{}))})
             await client.prepare_worker(changed,bootstrap_sha256="b"*64)
@@ -166,9 +233,7 @@ async def test_typed_route_rechecks_inputs_after_construction(tmp_path, boundary
         await router.prepare_worker(request,bootstrap_sha256="b"*64)
 
 
-@pytest.mark.parametrize("method", ["begin_drain", "register_worker",
-    "acknowledge_release", "admit_claim"])
-async def test_all_unimplemented_native_consumers_reject_before_transport(tmp_path,method):
+async def test_application_claim_rejects_native_route_before_transport(tmp_path):
     from types import SimpleNamespace
 
     module,request,document,path,digest = configured(tmp_path,"gb10","personal-build-worker")
@@ -179,14 +244,11 @@ async def test_all_unimplemented_native_consumers_reject_before_transport(tmp_pa
     router = module.TypedAdmissionRouter(path,expected_sha256=digest,executor=document.executor,
         application_client_factory=unexpected,build_client_factory=unexpected)
     value = SimpleNamespace(binding=request.binding)
-    args = (request.binding,value) if method == "admit_claim" else (value,)
-    kwargs = {"bootstrap_capability":"secret"} if method == "register_worker" else (
-        {"current_worker_credential":"secret"} if method == "acknowledge_release" else {})
     with pytest.raises(RuntimeError,match="not implemented"):
-        await getattr(router,method)(*args,**kwargs)
+        await router.admit_claim(request.binding, value)
 
 
-@pytest.mark.parametrize("method", ["bind_slurm_job", "observe_intent", "revoke_prepared_bootstrap", "withdraw_unregistered_worker"])
+@pytest.mark.parametrize("method", ["bind_slurm_job", "observe_intent", "revoke_prepared_bootstrap", "withdraw_unregistered_worker", "register_worker", "begin_drain"])
 @pytest.mark.parametrize("purpose", ["application-worker", "personal-build-worker"])
 async def test_typed_lifecycle_routes_exact_arguments_and_closes(tmp_path,method,purpose):
     from types import SimpleNamespace
@@ -195,8 +257,11 @@ async def test_typed_lifecycle_routes_exact_arguments_and_closes(tmp_path,method
     value = request.binding if method == "observe_intent" else SimpleNamespace(binding=request.binding)
     events = []
 
-    async def operation(incoming):
+    options = {"bootstrap_capability": "b" * 43} if method == "register_worker" else {}
+
+    async def operation(incoming, **kwargs):
         assert incoming is value
+        assert kwargs == options
         events.append(method)
         return "receipt"
 
@@ -208,5 +273,5 @@ async def test_typed_lifecycle_routes_exact_arguments_and_closes(tmp_path,method
 
     router = module.TypedAdmissionRouter(path,expected_sha256=digest,executor=document.executor,
         application_client_factory=factory,build_client_factory=factory)
-    assert await getattr(router,method)(value) == "receipt"
+    assert await getattr(router,method)(value, **options) == "receipt"
     assert events == [method,"closed"]

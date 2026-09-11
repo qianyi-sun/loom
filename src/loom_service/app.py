@@ -61,6 +61,7 @@ from loom_service.metrics import (
     HTTP_REQUESTS_TOTAL,
 )
 from loom_service.personal_dev_build_admission import build_personal_build_admission_runtime
+from loom_service.personal_dev_build_management import build_personal_build_management_runtime
 from loom_service.personal_dev_builder import (
     build_personal_dev_builder_runtime,
     personal_dev_builder_run_loop,
@@ -359,9 +360,12 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         )
         build_admission = await build_personal_build_admission_runtime(settings)
         app.state._owned_personal_dev_build_admission = build_admission
+        build_management = await build_personal_build_management_runtime(settings, admission=build_admission)
+        app.state._owned_personal_dev_build_management = build_management
         if build_admission is not None:
             app.state.personal_dev_build_admission_sessions = build_admission.sessions
             app.state.personal_dev_build_admission_verifier = build_admission.verifier
+            app.state.personal_dev_build_admission_mode = build_admission.mode
         admin_secret_verifier = _load_admin_secret_verifier(settings)
         if settings.pipeline_stage1_smoke_public_key_file is not None:
             app.state.pipeline_stage1_smoke_verifier = load_stage1_smoke_signature_verifier(
@@ -375,6 +379,19 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             endpoint_url=settings.minio_endpoint,
         )
         app.state._owned_service_minio_client = minio_client
+        if build_admission is not None and build_admission.mode in {"native-source", "native-artifacts"}:
+            from loom_capacity_build_guard.source_reader import BuildSourceReader
+
+            app.state.personal_dev_build_source_reader = BuildSourceReader(
+                session_factory=build_admission.sessions, object_store=minio_client)
+            app.state._owned_personal_dev_build_source_reader = app.state.personal_dev_build_source_reader
+        if build_admission is not None and build_admission.mode == "native-artifacts":
+            from loom_capacity_build_guard.artifact_writer import BuildArtifactWriter
+
+            app.state.personal_dev_build_artifact_writer = BuildArtifactWriter(
+                session_factory=build_admission.sessions, object_store=minio_client,
+                max_artifact_bytes=settings.personal_dev_builder_max_artifact_bytes)
+            app.state._owned_personal_dev_build_artifact_writer = app.state.personal_dev_build_artifact_writer
         personal_dev_task: asyncio.Task[None] | None = None
         personal_dev_builder_task: asyncio.Task[None] | None = None
         personal_dev_artifact_gc_task: asyncio.Task[None] | None = None
@@ -485,6 +502,8 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         app.state.personal_dev_candidate_limits = personal_dev_candidate_limits
         app.state.personal_dev_builder_available = personal_dev_builder_runtime is not None
         install_behavior_pipeline_public_adapter(app=app, settings=settings)
+        if build_management is not None:
+            build_management.start()
         if personal_dev_capacity_runtime is not None:
             app.state.personal_dev_capacity_status_reader = (
                 personal_dev_capacity_runtime.status_reader
@@ -644,7 +663,13 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             # access before closing its resources, including failed startup.
             app.state.personal_dev_build_admission_sessions = None
             app.state.personal_dev_build_admission_verifier = None
+            app.state.personal_dev_build_admission_mode = None
+            app.state.personal_dev_build_source_reader = None
+            app.state.personal_dev_build_artifact_writer = None
             for attribute in (
+                "_owned_personal_dev_build_artifact_writer",
+                "_owned_personal_dev_build_source_reader",
+                "_owned_personal_dev_build_management",
                 "_owned_personal_dev_build_admission",
                 "_owned_service_gateway_client",
                 "_owned_service_http_client",

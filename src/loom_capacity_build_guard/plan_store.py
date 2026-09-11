@@ -185,15 +185,26 @@ class BuildGuardPlanStore:
                     f"loom:protected-executable-admission:{canonical_executable_digest(acknowledgement)}"))
 
     async def prepare(self, proposal: ExecutableAdmissionPlanProposalV2, *,
-        sources: Mapping[UUID, CandidateRegistration],
+        sources: Mapping[UUID, CandidateRegistration] | None = None,
     ) -> PreparedBuildPlan:
         if not self._session.in_transaction():
             raise ValueError("build plan preparation requires an outer transaction")
         proposal = ExecutableAdmissionPlanProposalV2.model_validate_json(proposal.model_dump_json())
         allowances = {item.protected_attempt_id: item for item in proposal.allowances}
-        if not allowances or set(sources) != set(allowances):
+        if not allowances or (sources is not None and set(sources) != set(allowances)):
             raise ValueError("build plan requires the complete source set")
-        source_wire = {key: canonical_build_source(value).decode("ascii") for key, value in sources.items()}
+        if sources is None:
+            current = await self._session.scalar(text("SELECT loom_capacity_build_guard.read_pending_sources(:installation)"),
+                {"installation": self._installation.id})
+            if not isinstance(current, dict) or any(not isinstance(current.get(str(key)), dict) for key in allowances):
+                raise ValueError("build plan current source set is unavailable")
+            source_wire = {key: json.dumps(current[str(key)], sort_keys=True, separators=(",", ":"),
+                ensure_ascii=True, allow_nan=False) for key in allowances}
+        else:
+            source_wire = {key: canonical_build_source(value).decode("ascii") for key, value in sources.items()}
+        source_epochs = {key: json.loads(value).get("lease_epoch") for key, value in source_wire.items()}
+        if any(type(epoch) is not int or not 0 < epoch < 2**63 for epoch in source_epochs.values()):
+            raise ValueError("build plan current source lease epoch changed")
         wire = canonical_executable_bytes(proposal)
         # A malformed database response must not leave unusable immutable holds,
         # even if the caller catches the error and commits its outer transaction.
@@ -212,14 +223,12 @@ class BuildGuardPlanStore:
                 raise ValueError("build plan receipt assignment set or proposal changed")
             for item in receipt.assignments:
                 allowance = allowances[item.request_id]
-                attempt = sources[item.request_id].build_attempt
-                assert attempt is not None
                 if (item.id.int == 0 or item.plan_id != proposal.plan_id
                     or item.allowance_id != allowance.allowance_id
                     or item.submission_intent_id != allowance.submission_intent_id
                     or item.shape_instance_id != allowance.shape_instance_id
                     or item.shape_slot_index != allowance.shape_slot_index
-                    or item.execution_generation != attempt.lease_epoch
+                    or item.execution_generation != source_epochs[item.request_id]
                     or item.source_canonical_json != source_wire[item.request_id]
                     or item.source_binding_sha256 != sha256(source_wire[item.request_id].encode("ascii")).hexdigest()
                     or item.runtime_installation_sha256 != self._installation.runtime_installation_sha256

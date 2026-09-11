@@ -853,25 +853,83 @@ def run_personal_dev_sandbox_build(
     _upload_artifact(upload, artifact, expected_max_bytes=contract.max_artifact_bytes)
 
 
+def _snapshot_allocated_source(source: Path, destination: Path, contract: PersonalDevSandboxBuildContract) -> None:
+    """Snapshot a bounded regular input inside the already-restricted sandbox."""
+    descriptor = os.open(source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != contract.archive_size_bytes:
+            raise PersonalDevSandboxBuildError("allocated source file binding is invalid")
+        output = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        try:
+            observed, digest = 0, hashlib.sha256()
+            while data := os.read(descriptor, min(1024 * 1024, contract.archive_size_bytes - observed + 1)):
+                observed += len(data)
+                if observed > contract.archive_size_bytes:
+                    raise PersonalDevSandboxBuildError("allocated source exceeded its bound")
+                digest.update(data)
+                pending = memoryview(data)
+                while pending:
+                    written = os.write(output, pending)
+                    if written <= 0:
+                        raise PersonalDevSandboxBuildError("allocated source copy made no progress")
+                    pending = pending[written:]
+            if observed != contract.archive_size_bytes or digest.hexdigest() != contract.archive_sha256:
+                raise PersonalDevSandboxBuildError("allocated source archive binding changed")
+            os.fsync(output)
+        finally:
+            os.close(output)
+    finally:
+        os.close(descriptor)
+
+
+def run_allocated_personal_dev_sandbox_build(
+    *, contract_file: Path, source_archive: Path, workspace: Path,
+    buildctl_path: Path = _BUILDCTL_PATH, buildkit_address: str = _BUILDKIT_ADDRESS,
+) -> Path:
+    """Build from local input with no source/upload capability in the sandbox.
+
+    The trusted outer runtime supplies input and collects artifacts.tar. It must
+    contain the client and separate BuildKit sandbox, fence execution, upload the
+    artifact and prove cleanup; this function cannot enable host execution.
+    """
+    _verify_client_identity()
+    contract = PersonalDevSandboxBuildContract.parse(_read_file(contract_file, max_bytes=1024 * 1024))
+    workspace.mkdir(mode=0o700)
+    private_source = workspace / "source.tar"
+    _snapshot_allocated_source(source_archive, private_source, contract)
+    source_directory = workspace / "source"
+    _extract_verified_source(private_source, source_directory, contract)
+    images = _build_images(contract, source_directory=source_directory, output_directory=workspace / "images",
+        buildctl_path=buildctl_path, buildkit_address=buildkit_address)
+    artifact = workspace / "artifacts.tar"
+    create_personal_dev_build_artifact(contract, images, artifact, consume_image_archives=True)
+    return artifact
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
     build = subparsers.add_parser("build")
-    build.add_argument("--contract-file", type=Path, required=True)
     build.add_argument("--capability-directory", type=Path, required=True)
-    build.add_argument("--workspace", type=Path, required=True)
-    build.add_argument(
-        "--buildctl-path",
-        type=Path,
-        default=_BUILDCTL_PATH,
-    )
-    build.add_argument("--buildkit-address", default=_BUILDKIT_ADDRESS)
-    build.add_argument("--native-buildkit-address")
+    allocated = subparsers.add_parser("build-allocated")
+    allocated.add_argument("--source-archive", type=Path, required=True)
+    for command in (build, allocated):
+        command.add_argument("--contract-file", type=Path, required=True)
+        command.add_argument("--workspace", type=Path, required=True)
+        command.add_argument("--buildctl-path", type=Path, default=_BUILDCTL_PATH)
+        command.add_argument("--buildkit-address", default=_BUILDKIT_ADDRESS)
+        command.add_argument("--native-buildkit-address")
     args = parser.parse_args(argv)
     buildkit_address = _select_buildkit_address(
         buildkit_address=args.buildkit_address,
         native_buildkit_address=args.native_buildkit_address,
     )
+    if args.command == "build-allocated":
+        run_allocated_personal_dev_sandbox_build(contract_file=args.contract_file,
+            source_archive=args.source_archive, workspace=args.workspace,
+            buildctl_path=args.buildctl_path, buildkit_address=buildkit_address)
+        return 0
     run_personal_dev_sandbox_build(
         contract_file=args.contract_file,
         capability_directory=args.capability_directory,
@@ -894,5 +952,6 @@ __all__ = [
     "PersonalDevSandboxBuildError",
     "create_personal_dev_build_artifact",
     "main",
+    "run_allocated_personal_dev_sandbox_build",
     "run_personal_dev_sandbox_build",
 ]
