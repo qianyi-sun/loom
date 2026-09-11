@@ -233,7 +233,8 @@ async def test_typed_route_rechecks_inputs_after_construction(tmp_path, boundary
         await router.prepare_worker(request,bootstrap_sha256="b"*64)
 
 
-async def test_application_claim_rejects_native_route_before_transport(tmp_path):
+@pytest.mark.parametrize("method", ["observe_current_bootstrap", "admit_claim"])
+async def test_all_unimplemented_native_consumers_reject_before_transport(tmp_path,method):
     from types import SimpleNamespace
 
     module,request,document,path,digest = configured(tmp_path,"gb10","personal-build-worker")
@@ -244,8 +245,9 @@ async def test_application_claim_rejects_native_route_before_transport(tmp_path)
     router = module.TypedAdmissionRouter(path,expected_sha256=digest,executor=document.executor,
         application_client_factory=unexpected,build_client_factory=unexpected)
     value = SimpleNamespace(binding=request.binding)
+    args = (request.binding, value) if method == "admit_claim" else (value,)
     with pytest.raises(RuntimeError,match="not implemented"):
-        await router.admit_claim(request.binding, value)
+        await getattr(router, method)(*args)
 
 
 @pytest.mark.parametrize("method", ["bind_slurm_job", "observe_intent", "revoke_prepared_bootstrap", "withdraw_unregistered_worker", "register_worker", "begin_drain"])
@@ -275,3 +277,19 @@ async def test_typed_lifecycle_routes_exact_arguments_and_closes(tmp_path,method
         application_client_factory=factory,build_client_factory=factory)
     assert await getattr(router,method)(value, **options) == "receipt"
     assert events == [method,"closed"]
+
+
+@pytest.mark.parametrize("pool", ["oldlab", "gb10"])
+async def test_current_bootstrap_routes_only_application_credentials(tmp_path, pool):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    module, request, document, path, digest = configured(tmp_path, pool, "application-worker")
+    observe = AsyncMock(return_value="current-evidence")
+    close = AsyncMock()
+    router = module.TypedAdmissionRouter(path, expected_sha256=digest, executor=document.executor,
+        application_client_factory=lambda *args, **kwargs: SimpleNamespace(
+            observe_current_bootstrap=observe, aclose=close))
+    assert await router.observe_current_bootstrap(request) == "current-evidence"
+    observe.assert_awaited_once_with(request)
+    close.assert_awaited_once()
