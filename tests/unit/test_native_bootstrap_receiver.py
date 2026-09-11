@@ -22,7 +22,7 @@ def private_delivery(delivery, request):
     return delivery
 
 
-def _probe(delivery, *, injected=""):
+def _probe(delivery, *, injected="", operation="deliver"):
     config = {"directory": str(delivery.node), "observation": delivery.admission.current.model_dump_json(),
         "route": delivery.admission.route_sha256, "now": delivery.now.isoformat()}
     return f"""
@@ -51,15 +51,15 @@ def factory():
         target_node=binding.node_ids[0], pool_id=binding.pool_id,
         trusted_release_sha256=binding.execution.trusted_fleet_release_sha256,
         admission=Admission(), now=lambda: datetime.fromisoformat(config['now']))
-result = receiver_process.run_native_bootstrap_receiver_process(factory)
+result = receiver_process.run_native_bootstrap_receiver_process(factory, operation={operation!r})
 assert stat.S_ISCHR(os.fstat(0).st_mode)
 assert os.read(0, 1) == b''
 raise SystemExit(result)
 """
 
 
-async def _run(delivery, payload, *, injected=""):
-    process = await asyncio.create_subprocess_exec(sys.executable, "-B", "-c", _probe(delivery, injected=injected),
+async def _run(delivery, payload, *, injected="", operation="deliver"):
+    process = await asyncio.create_subprocess_exec(sys.executable, "-B", "-c", _probe(delivery, injected=injected, operation=operation),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(payload), 10)
@@ -199,4 +199,24 @@ receiver_process._read_delivery_stdin = forbidden_read
 """
     code, stdout, stderr = await _run(private_delivery, payload, injected=injected)
     assert (code, stdout, stderr) == (2, b"", b"native bootstrap receiver refused\n")
+    assert list(private_delivery.node.iterdir()) == []
+
+
+async def test_status_process_returns_unknown_or_exact_historical_receipt(private_delivery):
+    module, payload, _receiver = objects(private_delivery)
+    expected = module.expected_native_delivery_receipt(payload)
+    query = module.encode_native_delivery_query(private_delivery.physical, expected)
+    assert await _run(private_delivery, query, operation="status") == (0, b"null\n", b"")
+    assert list(private_delivery.node.iterdir()) == []
+    code, _stdout, stderr = await _run(private_delivery, payload)
+    assert code == 0, stderr.decode()
+    code, stdout, stderr = await _run(private_delivery, query, operation="status")
+    assert code == 0 and stderr == b""
+    assert json.loads(stdout) == expected.model_dump(mode="json", by_alias=True)
+
+
+@pytest.mark.parametrize("operation", ("execute", "delete", "renew"))
+async def test_receiver_process_refuses_other_operations(private_delivery, operation):
+    _module, payload, _receiver = objects(private_delivery)
+    assert await _run(private_delivery, payload, operation=operation) == (2, b"", b"native bootstrap receiver refused\n")
     assert list(private_delivery.node.iterdir()) == []
