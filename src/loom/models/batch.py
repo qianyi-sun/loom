@@ -16,6 +16,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from loom.agent_runtime import AgentVersion
 from loom.models.types import ModelSpec
 
 
@@ -29,6 +30,7 @@ class Combination(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     agent_name: str = Field(min_length=1)
+    agent_version: AgentVersion | None = None
     # Required: the rule "every trial states which model" from PR-E
     # applies per-Combination. `null` is allowed when the agent
     # doesn't call an LLM (oracle, in-box runtimes), but the field

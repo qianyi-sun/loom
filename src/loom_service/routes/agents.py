@@ -11,6 +11,7 @@ from typing import Any
 
 from fastapi import APIRouter
 
+from loom.agent_runtime_registry import list_agent_runtimes
 from loom_service.agent_catalog import list_agents
 from loom_service.dependencies import SessionAndCtx
 
@@ -19,8 +20,11 @@ router = APIRouter()
 
 @router.get("/agents")
 async def list_agents_route(sc: SessionAndCtx) -> dict[str, Any]:
-    # Auth happens inside `authed_session`; this route doesn't query
-    # the DB, but the dep still opens + closes a session at request
-    # teardown for the bearer-token verify.
-    _ = sc
-    return {"items": [a.to_dict() for a in list_agents()]}
+    session, _ = sc
+    versions: dict[str, list[dict[str, str]]] = {}
+    for release in await list_agent_runtimes(session):
+        versions.setdefault(release.agent_name, []).append(release.public_metadata())
+    return {"items": [
+        {**agent.to_dict(), "versions": versions.get(agent.name, [])}
+        for agent in list_agents()
+    ]}

@@ -66,7 +66,7 @@ def _import_terminus2() -> tuple[type, type]:
         from harbor.models.agent.context import AgentContext
     except ImportError as exc:
         raise AgentError(
-            "terminus-2 requires harbor@527d50d preinstalled in the worker image",
+            f"terminus-2 requires harbor@{HARBOR_COMPAT_SHA} preinstalled in the controller image",
         ) from exc
     return Terminus2, AgentContext
 

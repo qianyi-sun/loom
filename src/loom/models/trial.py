@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from loom.agent_runtime import AgentVersion
 from loom.family_run.spec import FamilyRunSpec
 from loom.models.mcp import MCPConnection
 from loom.models.networking import NetworkPolicy
@@ -196,6 +197,7 @@ class TrialConfig(BaseModel):
     # (oracle, in-box runtimes) — the field must still appear in
     # the payload, just as a literal null.
     agent_name: str = Field(min_length=1)
+    agent_version: AgentVersion | None = None
     agent_model: ModelSpec | None
 
     # #672 family-runs: optional per-batch override merged with the

@@ -446,15 +446,26 @@ class PostgresCatalogStore:
                             for row in agent_batch
                         ]
                         agent_insert = pg_insert(AgentModel).values(agent_values)
-                        await session.execute(
+                        updated = set((await session.execute(
                             agent_insert.on_conflict_do_update(
                                 index_elements=["name", "version"],
                                 set_={
                                     "mode": agent_insert.excluded.mode,
                                     "spec": agent_insert.excluded.spec,
                                 },
-                            ),
-                        )
+                                where=(AgentModel.mode != "native-runtime")
+                                & (agent_insert.excluded.mode != "native-runtime"),
+                            ).returning(AgentModel.name, AgentModel.version),
+                        )).all())
+                        for value in agent_values:
+                            key = (value["name"], value["version"])
+                            if key in updated:
+                                continue
+                            existing = await session.get(AgentModel, key, populate_existing=True)
+                            if existing is None or (existing.mode, existing.spec) != (
+                                value["mode"], value["spec"],
+                            ):
+                                raise ValueError("catalog cannot overwrite a published agent version")
 
                 if rows.tasks:
                     for task_batch in _batched(

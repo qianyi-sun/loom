@@ -15,6 +15,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import insert, select, text, update
 
+from loom.agent_runtime import AgentRuntimeReleaseV1
+from loom.agent_runtime_registry import AgentRuntimeConflictError, register_agent_runtime
 from loom.auth import FAMILY_ORCHESTRATOR_SCOPES, AuthContext, verify_bearer_token
 from loom.db.schema import (
     AdminAuditEvent,
@@ -23,6 +25,7 @@ from loom.db.schema import (
     Token,
     WorkerPoolAutoscalerPolicy,
 )
+from loom.execution_image_admission import ImageAdmissionError, ImageAdmissionKeyring
 from loom_control_plane.execution_admission import (
     fetch_execution_admission_status,
     upsert_execution_admission_policy,
@@ -641,6 +644,27 @@ async def issue_task_image_registry_gc_token(
         "token": raw,
         "token_hash_prefix": token_hash.hex()[:8],
     }
+
+
+@router.put("/agents/{name}/versions/{version}")
+async def register_agent_runtime_route(
+    name: str, version: str, payload: AgentRuntimeReleaseV1, request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    await _require_admin_scope(request, authorization, "admin:tokens")
+    if (name, version) != (payload.agent_name, payload.agent_version):
+        raise HTTPException(status_code=400, detail="agent release identity differs from request path")
+    try:
+        keyring = ImageAdmissionKeyring.from_json(
+            request.app.state.settings.execution_image_admission_public_keys_json,
+        )
+        async with request.app.state.session_factory() as session, session.begin():
+            await register_agent_runtime(session, payload, keyring=keyring)
+    except AgentRuntimeConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ImageAdmissionError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return payload.public_metadata() | {"agent_name": name}
 
 
 @router.post("/task-image-materializations/{materialization_id}/retry")

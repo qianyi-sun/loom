@@ -152,6 +152,7 @@ def _combination_part(
             "agent_name": trial_config.get("agent_name")
             or ((trial_config.get("agent") or {}).get("name") if isinstance(trial_config.get("agent"), dict) else None)
             or "default",
+            "agent_version": trial_config.get("agent_version"),
             "agent_model": trial_config.get("agent_model")
             or ((trial_config.get("agent") or {}).get("model") if isinstance(trial_config.get("agent"), dict) else None),
             "n_per_task": n_per_task,
@@ -162,6 +163,8 @@ def _combination_part(
     desc_items: list[str] = []
     for combo in combo_dicts:
         agent = str(combo.get("agent_name") or "default")
+        if combo.get("agent_version"):
+            agent += "@" + str(combo["agent_version"])
         model = combo.get("agent_model")
         routed_model_id = str(
             combo.get("provider_model_id") or provider_model_id or "",

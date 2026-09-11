@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -13,6 +14,33 @@ import pytest
 import loom_cli.environment_state as environment_state
 from loom_cli.__main__ import main
 from loom_cli.environment_state import StateDrift
+from tests.support.agent_runtime import release
+
+
+@pytest.mark.parametrize("status", [200, 409])
+def test_agent_runtime_register_preserves_release_and_redacts_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], status: int,
+) -> None:
+    item = release()
+    payload = item.model_dump(mode="json")
+    path = tmp_path / "release.json"
+    path.write_text(json.dumps(payload))
+    token = "loom_admin_test_runtime_registry_secret"
+    monkeypatch.setenv("RUNTIME_ADMIN_TOKEN", token)
+
+    def put(url, *, json, headers, timeout):
+        assert url == f"http://cp/admin/agents/terminus-2/versions/{item.agent_version}"
+        assert json == payload
+        assert headers == {"Authorization": f"Bearer {token}"}
+        return httpx.Response(status, json=item.public_metadata() if status == 200 else {"detail": token})
+
+    monkeypatch.setattr("loom_cli.admin_cmd.httpx.put", put)
+    assert main(["admin", "agent-runtime", "register", "--release", str(path),
+                 "--cp-url", "http://cp", "--admin-token", "env:RUNTIME_ADMIN_TOKEN"]) == (0 if status == 200 else 2)
+    output = capsys.readouterr()
+    assert token not in output.out + output.err
+    if status == 200:
+        assert json.loads(output.out) == item.public_metadata()
 
 
 class _StubResponse:
@@ -2280,7 +2308,6 @@ def test_environment_state_check_passes_worker_token_without_leaking_secret(
 # ──────────────────────────────────────────────────────────────────────
 
 
-from pathlib import Path  # noqa: E402
 
 _TEAM_ID = "00000000-0000-0000-0000-000000000aaa"
 

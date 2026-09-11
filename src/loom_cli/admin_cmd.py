@@ -2228,6 +2228,28 @@ def _rewrap_secret_store(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def _register_agent_runtime(args: argparse.Namespace) -> int:
+    from loom.agent_runtime import AgentRuntimeReleaseV1
+
+    try:
+        release = AgentRuntimeReleaseV1.model_validate_json(Path(args.release).read_text())
+        token = _resolve_admin_token(args.admin_token)
+        response = httpx.put(
+            args.cp_url.rstrip("/") + f"/admin/agents/{release.agent_name}/versions/{release.agent_version}",
+            json=release.model_dump(mode="json"),
+            headers={"Authorization": f"Bearer {token}"}, timeout=30,
+        )
+        result = assert_2xx(response, action="register published agent runtime")
+    except (OSError, ValueError, SecretSourceError, HttpStatusError):
+        sys.stderr.write("error: invalid or conflicting published agent runtime release\n")
+        return 2
+    except httpx.RequestError:
+        sys.stderr.write("error: control plane unavailable\n")
+        return 2
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def dispatch(argv: list[str]) -> int:
     """Entry point invoked from `loom_cli.__main__` when `argv[0]` is
     `admin`. Returns the process exit code."""
@@ -2252,6 +2274,13 @@ def dispatch(argv: list[str]) -> int:
     add_capacity_control_plane_subparser(sub)
     add_personal_dev_control_plane_subparser(sub)
     add_pipeline_admin_subparser(sub)
+
+    p_agents = sub.add_parser("agent-runtime", help="Register a trusted published native runtime.")
+    agent_commands = p_agents.add_subparsers(dest="agent_runtime_command", required=True)
+    p_register = agent_commands.add_parser("register")
+    p_register.add_argument("--release", required=True, help="Published agent-runtime-release.json file.")
+    _add_common_args(p_register)
+    p_register.set_defaults(handler=_register_agent_runtime)
 
     p_env_diagnostics = sub.add_parser(
         "env-diagnostics",

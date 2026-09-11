@@ -322,6 +322,7 @@ def _trial_row(
         "no_call_message": llm_evidence["no_call_message"],
         "no_call_retryable": llm_evidence["no_call_retryable"],
         "agent_name": agent_name,
+        "agent_version": t.config.get("agent_version"),
         "model": model,
         "visibility": t.visibility,
         "share_status": t.share_status,

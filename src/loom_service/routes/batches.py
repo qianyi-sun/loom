@@ -13,6 +13,7 @@ Routes:
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import and_, func, or_, select, update
 
+from loom.agent_runtime_registry import resolve_agent_runtimes
 from loom.auth import AuthContext
 from loom.data_lifecycle_registry import ensure_batch_lifecycle_authority
 from loom.db.schema import (
@@ -56,6 +58,7 @@ from loom.service_execution_backend import NEBIUS_BACKEND, NEBIUS_LOGICAL_POOL_I
 from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
     automatic_service_execution_rejections,
+    freeze_agent_runtime_releases,
     load_service_execution_runtime_profile,
     runtime_profile_rejections,
 )
@@ -410,6 +413,7 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
     trial_config: dict[str, Any],
     combinations: Sequence[Combination | dict[str, Any]],
     runtime_profile_json: str,
+    resolve_versions: bool = True,
 ) -> ServiceExecutionRuntimeProfileV1 | None:
     """Require fresh execution capacity or a compatible cold-start policy.
 
@@ -417,6 +421,16 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
     remains distinct from a fresh worker and therefore never changes the
     backend catalog's ``available`` truth value.
     """
+    selection_configs = [
+        combo.model_dump(mode="json") if isinstance(combo, Combination) else combo
+        for combo in combinations
+    ] or [trial_config]
+    selections = [
+        (str(item.get("agent_name", "")), item.get("agent_version"))
+        for item in selection_configs
+    ]
+    if any(version is not None for _, version in selections) and backend != NEBIUS_BACKEND:
+        raise HTTPException(status_code=400, detail="agent_version requires the native Nebius backend")
     task_rows = (
         await session.execute(
             select(Task.id, Task.config, Task.source_provenance).where(Task.id.in_(list(task_ids))),
@@ -433,6 +447,12 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
         parsed_trials: tuple[TrialConfig, ...] | None = None
         parsed_trial_error = False
         profile = load_service_execution_runtime_profile(runtime_profile_json)
+        if profile is not None and resolve_versions:
+            try:
+                releases = await resolve_agent_runtimes(session, selections)
+                profile = freeze_agent_runtime_releases(profile, releases)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         incompatible_task_ids: list[str] = []
         rejection_reasons: dict[str, list[str]] = {}
         automatic_profile_used = False
@@ -442,6 +462,8 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
             provenance = task_entry[1] if task_entry is not None else {}
             binding = task_config.service_execution if task_config is not None else None
             reasons: tuple[str, ...] = ()
+            if binding is not None and any(version is not None for _, version in selections):
+                raise HTTPException(status_code=400, detail="agent_version requires automatic native execution")
             if binding is None and task_config is not None:
                 automatic_profile_used = True
                 if parsed_trials is None:
@@ -452,6 +474,7 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
                                     {
                                         **trial_config,
                                         "agent_name": combination.agent_name,
+                                        "agent_version": combination.agent_version,
                                         "agent_model": (
                                             combination.agent_model.model_dump(mode="json")
                                             if combination.agent_model is not None
@@ -970,7 +993,7 @@ async def _create_batch_record(
         # Multi-combination batch. trial_config MUST NOT carry
         # agent_name / agent_model / n_per_task in this shape —
         # those live on each Combination.
-        for forbidden in ("agent_name", "agent_model"):
+        for forbidden in ("agent_name", "agent_model", "agent_version"):
             if forbidden in trial_config:
                 _reject_submission(
                     reason="invalid_input",
@@ -1579,9 +1602,10 @@ async def admin_create_batch_on_behalf(
 def _derive_combination_label(combo: Combination) -> str:
     """Default label `"{agent_name}"` or
     `"{agent_name}/{provider}/{name}"` when a model is set."""
+    name = combo.agent_name + (f"@{combo.agent_version}" if combo.agent_version else "")
     if combo.agent_model is None:
-        return combo.agent_name
-    return f"{combo.agent_name}/{combo.agent_model.provider}/{combo.agent_model.name}"
+        return name
+    return f"{name}/{combo.agent_model.provider}/{combo.agent_model.name}"
 
 
 @router.get("/batches")
@@ -2750,7 +2774,8 @@ async def rerun_failed_batch(
         task_ids=valid_rerun_task_ids,
         trial_config=b.trial_config,
         combinations=b.combinations or [],
-        runtime_profile_json=request.app.state.settings.service_execution_runtime_profile_json,
+        runtime_profile_json=json.dumps(b.service_execution_runtime_profile or {}),
+        resolve_versions=False,
     )
     agent_task_pairs: list[tuple[str, str]] = []
     combinations = list(b.combinations or [])
