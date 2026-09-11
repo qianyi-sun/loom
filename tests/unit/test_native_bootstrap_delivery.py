@@ -207,3 +207,40 @@ async def test_delivery_never_replaces_an_empty_destination_created_during_publi
         await receiver.receive(payload)
     assert final.stat().st_ino == identity[0]
     assert list(final.iterdir()) == []
+
+
+async def test_worker_waits_for_complete_delivery_on_its_own_filesystem(delivery):
+    module, payload, receiver = objects(delivery)
+    waiting = asyncio.create_task(module.wait_native_bootstrap_delivery(delivery.node,
+        delivery.lease.reference, now=lambda: delivery.now, timeout_seconds=1))
+    try:
+        receipt = await receiver.receive(payload)
+        directory = await waiting
+    finally:
+        if not waiting.done():
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+    assert module.read_native_delivery_receipt(directory, delivery.lease.reference) == receipt
+
+
+async def test_worker_delivery_wait_is_bounded_and_never_uses_controller_files(delivery):
+    module, _payload, _receiver = objects(delivery)
+    with pytest.raises(ValueError, match="delivery"):
+        await module.wait_native_bootstrap_delivery(delivery.node, delivery.lease.reference,
+            now=lambda: delivery.now, timeout_seconds=0.01)
+    assert (delivery.controller / delivery.lease.reference).is_file()
+    assert list(delivery.node.iterdir()) == []
+
+
+async def test_worker_never_accepts_partial_or_expired_delivery(delivery):
+    module, payload, receiver = objects(delivery)
+    receipt = await receiver.receive(payload)
+    directory = module.native_delivery_directory(delivery.node, delivery.lease.reference)
+    delivery.now = receipt.expires_at
+    with pytest.raises(ValueError):
+        await module.wait_native_bootstrap_delivery(delivery.node, delivery.lease.reference,
+            now=lambda: delivery.now, timeout_seconds=0.01)
+    (directory / "delivery-receipt.json").unlink()
+    with pytest.raises(ValueError):
+        await module.wait_native_bootstrap_delivery(delivery.node, delivery.lease.reference,
+            now=lambda: _NOW, timeout_seconds=0.01)
