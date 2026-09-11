@@ -649,6 +649,18 @@ process-ancestry check does not certify child containment. Fresh execution fenci
 the build/artifact consumer and installed containment remain required before native
 readiness can be enabled.
 
+The sandbox builder's explicit `build-allocated` mode accepts a local source
+archive and capability-free contract, not source/upload URLs. The trusted wrapper
+renders the existing exact sandbox contract from guarded native context and
+protected size limits. Inside the sandbox, the existing restricted gVisor process
+identity check runs first; the consumer creates a fresh private workspace,
+snapshots only a bounded regular no-follow source file, checks the complete
+archive and manifest, and uses the existing BuildKit client and OCI packaging.
+Its fixed `artifacts.tar` output is for the outer trusted worker's upload path.
+Legacy `build` mode remains compatible. Automated checks use real source/archive
+verification with mocked image building; they do not establish installed KVM
+execution or Slurm child containment.
+
 `BuildManagementRuntime` composes installation-scoped terminal recovery, protected
 release publication, final retirement, demand reporting, bootstrap registration
 and plan convergence. Each pass performs cleanup before new admission. Expected

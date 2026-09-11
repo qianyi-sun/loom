@@ -1,6 +1,5 @@
 """Allocated builds enter the restricted sandbox without storage capabilities."""
 
-import json
 import os
 from importlib import import_module
 
@@ -8,11 +7,14 @@ import pytest
 
 from loom import personal_dev_sandbox_builder as sandbox
 from loom.personal_dev_builder_artifact import verify_personal_dev_build_artifact
-from loom.personal_dev_builder_manifest import PersonalDevBuilderManifestConfig, personal_dev_builder_contract
+from loom.personal_dev_builder_manifest import (
+    PersonalDevBuilderManifestConfig,
+    personal_dev_builder_contract,
+)
 from loom.personal_dev_candidate import PERSONAL_DEV_COMPONENTS
+from tests.unit.test_capacity_build_admission_client import native_registration
 from tests.unit.test_native_build_context import claim_for, context_for
 from tests.unit.test_native_build_source import sealed_source as sealed_source
-from tests.unit.test_capacity_build_admission_client import native_registration
 from tests.unit.test_personal_dev_builder_artifact import _oci_archive
 
 
@@ -92,7 +94,7 @@ async def test_allocated_sandbox_consumes_verified_local_source_and_emits_bound_
             result[component] = path, digest
         return result
     monkeypatch.setattr(sandbox, "_build_images", build)
-    run = getattr(sandbox, "run_allocated_personal_dev_sandbox_build")
+    run = sandbox.run_allocated_personal_dev_sandbox_build
     if boundary == "exact":
         result = run(contract_file=contract_file, source_archive=incoming, workspace=workspace)
         assert result == workspace / "artifacts.tar"
@@ -119,3 +121,23 @@ def test_allocated_sandbox_cli_uses_no_capability_arguments(monkeypatch):
         "--source-archive", "/input/source.tar", "--workspace", "/workspace/build"]) == 0
     assert len(calls) == 1 and "capability_directory" not in calls[0]
     assert str(calls[0]["source_archive"]) == "/input/source.tar"
+
+
+@pytest.mark.parametrize("boundary", ["contract", "artifact-bool", "image-bool", "image-limit", "source-limit"])
+async def test_native_sandbox_contract_rejects_changed_contract_or_invalid_limits(sealed_source, boundary):
+    module = import_module("loom_capacity_executor.native_sandbox_contract")
+    registration, _archive, _workspace = sealed_source
+    context = bound_context(registration, "gb10")
+    artifact_limit, image_limit = 2 * 1024 * 1024, 256 * 1024
+    if boundary == "contract":
+        context = context.model_copy(update={"build_contract_sha256": "f" * 64})
+    elif boundary == "artifact-bool":
+        artifact_limit = True
+    elif boundary == "image-bool":
+        image_limit = True
+    elif boundary == "image-limit":
+        image_limit = artifact_limit + 1
+    elif boundary == "source-limit":
+        artifact_limit = 1
+    with pytest.raises((ValueError, RuntimeError)):
+        module.render_native_sandbox_contract(context, max_artifact_bytes=artifact_limit, max_image_archive_bytes=image_limit)
