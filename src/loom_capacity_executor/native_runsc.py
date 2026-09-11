@@ -55,6 +55,8 @@ class NativeRunscLayout:
             return (*prefix, "state", identity)
         if operation == "delete":
             return (*prefix, "delete", "--force", identity)
+        if operation == "list" and role == "pause":
+            return (*prefix, "list", "--format=json")
         if operation == "ready" and role == "buildkit":
             return (*prefix, "exec", identity, "/usr/bin/test", "-S", "/var/run/loom-buildkit/buildkitd.sock")
         raise ValueError("native runtime operation is invalid")
@@ -97,7 +99,7 @@ def layout_parser() -> argparse.ArgumentParser:
 
 def main() -> NoReturn:
     parser = layout_parser()
-    parser.add_argument("--operation", choices=("start", "state", "ready", "delete"), required=True)
+    parser.add_argument("--operation", choices=("start", "state", "ready", "delete", "list"), required=True)
     parser.add_argument("--role", choices=("pause", "buildkit", "client"), required=True)
     parser.add_argument("--deadline", type=int, required=True)
     args = parser.parse_args()
