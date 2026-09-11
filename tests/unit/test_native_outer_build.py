@@ -17,8 +17,8 @@ from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 from tests.unit.test_native_rootless_runtime import spec_file
 
 
-@pytest.mark.parametrize("mode", ["success", "failed", "oversize", "wrong-claim", "malformed", "artifact-mismatch",
-    "uncertain", "upload-error", "early-upload-reply", "outcome-error", "cancel"])
+@pytest.mark.parametrize("mode", ["success", "failed", "oversize", "stdout-flood", "wrong-claim", "malformed", "artifact-mismatch",
+    "uncertain", "upload-error", "early-upload-reply", "outcome-error", "cancel", "authority-cleanup-cancel"])
 async def test_outer_io_matches_stream_and_result_before_upload_or_outcome(tmp_path, monkeypatch, mode):
     module = import_module("loom_capacity_executor.native_outer_build")
     _runtime, spec, spec_path, _digest = spec_file(tmp_path)
@@ -37,6 +37,8 @@ async def test_outer_io_matches_stream_and_result_before_upload_or_outcome(tmp_p
     archive.write_bytes(b"artifact bytes" * 10000)
     processes, calls = [], []
     started = asyncio.Event()
+    authority_cleanup, allow_authority_cleanup = asyncio.Event(), asyncio.Event()
+    authority_settled = []
     original = asyncio.create_subprocess_exec
     child_mode = mode if mode not in {"upload-error", "outcome-error", "early-upload-reply"} else "success"
 
@@ -58,6 +60,14 @@ async def test_outer_io_matches_stream_and_result_before_upload_or_outcome(tmp_p
 
     class Client:
         async def authorize_execution(self, *args, **kwargs):
+            if mode == "authority-cleanup-cancel":
+                try:
+                    await asyncio.Future()
+                finally:
+                    authority_cleanup.set()
+                    await allow_authority_cleanup.wait()
+                    authority_settled.append(True)
+                return
             pytest.fail("transport fixture requested execution authority")
 
         async def upload_artifact(self, claim, *, worker_credential, artifact, chunks):
@@ -86,7 +96,16 @@ async def test_outer_io_matches_stream_and_result_before_upload_or_outcome(tmp_p
             client=Client(), worker_credential="w" * 43) as owner:
             task = asyncio.create_task(module.run_native_outer_build(owner, spec_path=spec_path,
                 expected_sha256=hashlib.sha256(wire).hexdigest(), artifact_workspace=spool, timeout_seconds=5))
-            if mode == "cancel":
+            if mode == "authority-cleanup-cancel":
+                await asyncio.wait_for(authority_cleanup.wait(), 3)
+                task.cancel()
+                await asyncio.sleep(0)  # Let cancellation reach the await boundary, not an elapsed-time guess.
+                task.cancel()
+                allow_authority_cleanup.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert authority_settled == [True], "repeated cancellation interrupted IO cleanup"
+            elif mode == "cancel":
                 await asyncio.wait_for(started.wait(), 2)
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
@@ -95,17 +114,22 @@ async def test_outer_io_matches_stream_and_result_before_upload_or_outcome(tmp_p
                 result = await task
                 assert result.request.claim == spec.claim
             else:
-                with pytest.raises((RuntimeError, ValueError, OSError, ExceptionGroup)):
+                with pytest.raises((RuntimeError, ValueError, OSError, ExceptionGroup)) as failure:
                     await task
+                assert not isinstance(failure.value, TimeoutError), "launcher cleanup timed out"
         assert all(process.returncode is not None for process in processes)
         assert list(spool.iterdir()) == []
         assert calls == (["upload", "outcome"] if mode in {"success", "outcome-error"} else ["outcome"] if mode == "failed"
             else ["upload"] if mode in {"upload-error", "early-upload-reply"} else [])
     finally:
+        allow_authority_cleanup.set()
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         for process in processes:
             if process.returncode is None:
                 process.kill()
+            if process.stdout is not None:
+                while await process.stdout.read(65536):
+                    pass
             await process.wait()
