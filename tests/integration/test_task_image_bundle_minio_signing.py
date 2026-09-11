@@ -30,7 +30,7 @@ from loom_task_image_authority.bundle_s3_signing import (
 )
 
 pytestmark = [pytest.mark.docker, pytest.mark.timeout(120)]
-IMAGE = "minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
+IMAGE = "quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
 KEYS = ("revision/task.toml", "revision/a space+%.toml", "revision/café.toml", "revision/literal%2Fkey")
 FORM_PREFIX_KEY = "revision space+/literal%2Fkey"
 PAYLOAD = b"disposable-exact-bundle-content"

@@ -213,6 +213,7 @@ def test_oldlab_transport_uses_only_fixed_host_pid_installer_channel(
                 "/usr/bin/docker",
                 "run",
                 "--rm",
+                "--interactive",
                 "--user",
                 "0:0",
                 "--privileged",

@@ -193,6 +193,21 @@ writer and workload inventory, its operation journal, and #906's acceptance gate
 
 ## Controller-local Slurm inventory and active execution
 
+OLDLAB's installed controller channel passes canonical request bytes to the
+digest-pinned executor installer through Docker's attached stdin
+(`--interactive`, without a TTY). The fixed command validator requires that
+attachment for discovery, prerequisites, credentials, and prepared-executor
+operations. Passing input to the Docker client alone does not deliver it to
+the container. A disposable nonprivileged Docker regression covers all ten
+operations; it proves byte delivery, not host admission or fleet activation.
+The installer itself remains network-isolated. For `/host` operations, fixed
+host commands use the validated host PID 1's network and UTS namespaces through
+host `nsenter` after `chroot`; the controller hostname is read through that same
+channel. Sharing a PID namespace or filesystem root alone does not supply host
+networking or hostname identity. The executor image integration test verifies
+this boundary inside a disposable container with its own root and namespaces,
+without mounting the real host or invoking Slurm.
+
 The separate `loom_capacity_pool_executor` namespace in the Loom wheel can
 capture one controller-local Slurm 23.11 snapshot with only `scontrol show
 nodes --json` and `squeue --json`. It brackets the node read with two queue

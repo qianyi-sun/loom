@@ -1107,6 +1107,67 @@ def test_prepared_controller_cli_bounds_stdin_for_every_operation(
     assert failure.value.code == 2
 
 
+@pytest.mark.parametrize("host_root", ["/", "/host"])
+def test_controller_cli_binds_only_host_commands_to_validated_host_namespaces(
+    monkeypatch: pytest.MonkeyPatch, host_root: str,
+) -> None:
+    observed: dict[str, Any] = {}
+    calls: list[tuple[str, ...]] = []
+
+    class Runner:
+        def run(self, argv: tuple[str, ...]) -> CommandResult:
+            calls.append(argv)
+            return CommandResult(0, "TRT-EAI-OLDLAB-1.example.test\n", "")
+
+    def capture_installer(**kwargs: Any) -> object:
+        observed.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(installer_module, "_validate_host_root", lambda _root: None)
+    monkeypatch.setattr(installer_module, "SubprocessRunner", Runner)
+    monkeypatch.setattr(installer_module, "ControllerInstaller", capture_installer)
+    monkeypatch.setattr(installer_module, "_controller_discovery_operation", lambda *_args: b"{}\n")
+    monkeypatch.setattr(
+        installer_module.sys, "stdin", type("Input", (), {"buffer": io.BytesIO(b"{}\n")})(),
+    )
+
+    assert installer_module.main([
+        "--host-root", host_root, "--operation", "discover-controller",
+    ]) == 0
+    if host_root == "/":
+        assert calls == []
+        assert observed["context"].command_prefix == ()
+        assert observed["hostname"] is None
+    else:
+        prefix = (
+            "/usr/sbin/chroot", "/host", "/usr/bin/nsenter",
+            "--target", "1", "--net", "--uts", "--",
+        )
+        assert calls == [(*prefix, "/usr/bin/hostname")]
+        assert observed["context"].command_prefix == prefix
+        assert observed["hostname"] == "TRT-EAI-OLDLAB-1"
+
+
+@pytest.mark.parametrize("hostname", ["", "name\njunk\n", "name \n", "-name\n"])
+def test_controller_cli_refuses_malformed_host_hostname_before_installer_construction(
+    monkeypatch: pytest.MonkeyPatch, hostname: str,
+) -> None:
+    class Runner:
+        def run(self, _argv: tuple[str, ...]) -> CommandResult:
+            return CommandResult(0, hostname, "")
+
+    def unexpected_installer(**_kwargs: Any) -> object:
+        pytest.fail("unvalidated hostname reached the installer")
+
+    monkeypatch.setattr(installer_module, "_validate_host_root", lambda _root: None)
+    monkeypatch.setattr(installer_module, "SubprocessRunner", Runner)
+    monkeypatch.setattr(installer_module, "ControllerInstaller", unexpected_installer)
+
+    with pytest.raises(SystemExit) as failure:
+        installer_module.main(["--host-root", "/host", "--operation", "discover-controller"])
+    assert failure.value.code == 2
+
+
 def test_installer_publishes_an_immutable_release_but_leaves_every_unit_inert(
     tmp_path: Path,
 ) -> None:
