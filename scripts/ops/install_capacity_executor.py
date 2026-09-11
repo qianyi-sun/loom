@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import ipaddress
 import json
 import os
@@ -54,8 +55,23 @@ else:
             CapacityExecutorReleaseError,
             verify_release,
         )
-    except ModuleNotFoundError:  # Installed helper is colocated with the verifier.
-        from capacity_executor_release import CapacityExecutorReleaseError, verify_release
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"scripts", "scripts.ops", "scripts.ops.capacity_executor_release"}:
+            raise
+        # The protected broker uses -I: neither cwd, PYTHONPATH nor this script's
+        # directory is importable. Load only the verifier beside this verified
+        # installer, without broadening the interpreter's module search path.
+        _verifier_path = Path(__file__).resolve().with_name("capacity_executor_release.py")
+        _verifier_spec = importlib.util.spec_from_file_location(
+            "_loom_capacity_executor_release", _verifier_path,
+        )
+        if _verifier_spec is None or _verifier_spec.loader is None:
+            raise ImportError("capacity executor sibling verifier is unavailable") from None
+        _verifier = importlib.util.module_from_spec(_verifier_spec)
+        sys.modules[_verifier_spec.name] = _verifier
+        _verifier_spec.loader.exec_module(_verifier)
+        CapacityExecutorReleaseError = _verifier.CapacityExecutorReleaseError
+        verify_release = _verifier.verify_release
 
 _MAX_ARCHIVE_MEMBERS = 4096
 _MAX_ARCHIVE_FILE_BYTES = 1024 * 1024 * 1024
