@@ -44,8 +44,12 @@ def main():
     shutil.copyfile("/test-support/client_probe.py", rootfs / "opt/client_probe.py")
     shutil.copyfile("/test-support/lifecycle_probe.py", rootfs / "opt/lifecycle_probe.py")
     workspace = Path("/tmp/native-work")
-    workspace.mkdir(mode=0o755)
-    shutil.copytree(fixtures / "input", workspace / "input")
+    if prepare_only:
+        assert workspace.stat().st_mode & 0o777 == 0o700
+        assert (workspace / "input").stat().st_mode & 0o777 == 0o555
+    else:
+        workspace.mkdir(mode=0o755)
+        shutil.copytree(fixtures / "input", workspace / "input")
     output = workspace / "output"
     output.mkdir(mode=0o700)
     os.chown(output, 1000, 1000)

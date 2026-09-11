@@ -12,12 +12,14 @@ from pathlib import Path
 
 from loom_capacity_agent.build_admission import BuildClaimRequestV1, BuildSourceContextV1
 from loom_capacity_executor.native_artifact_transfer import receive_native_artifact
+from loom_capacity_executor.native_build_source import NativeStagedBuildSource
 from loom_capacity_executor.native_rootless_runtime import (
     NativeRootlessResultV1,
     NativeRootlessSpecV1,
     exec_native_rootless_runtime,
 )
 from loom_capacity_executor.native_runsc import NativeRunscLayout
+from loom_capacity_executor.native_runtime_input import prepare_native_runtime_input
 from loom_capacity_manager.contracts import canonical_bytes
 
 
@@ -59,6 +61,10 @@ async def main():
     expiry = json.loads(Path("/fixtures/identity.json").read_bytes())["root_stop"].endswith("expiry")
     # Trusted disposable material preparation needs the same static UID mapping
     # to restore rootfs capabilities. It starts no feature/runtime process.
+    runtime_workspace = Path("/tmp/native-work")
+    runtime_workspace.mkdir(mode=0o700)
+    await prepare_native_runtime_input(NativeStagedBuildSource(context, Path("/fixtures/input/source.tar")),
+        workspace=runtime_workspace, max_artifact_bytes=32 * 1024**2, max_image_archive_bytes=3 * 1024**2)
     subprocess.run(["/usr/bin/rootlesskit", "--net=none", "--subid-source=static",
         "--state-dir=/tmp/rootless-preparation", sys.executable, "/test-support/execute.py", "prepare"],
         check=True, timeout=60)
