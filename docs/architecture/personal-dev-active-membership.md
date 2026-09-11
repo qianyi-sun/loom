@@ -461,6 +461,25 @@ retryable failure and cancellation, suppress both pending demand and fresh
 admission when finished, and do not infer an outcome from physical termination.
 Native exchange/claims, outcome handling and runtime orchestration remain incomplete.
 
+The management-only `BuildRecoveryCoordinator` connects acknowledged unregistered
+revocations to authenticated manager final-release and native terminal evidence.
+Discovery returns only exact retained assignments/current holds, not unacknowledged
+events or already-retired history. It pages a fixed upper event bound per sweep;
+the process-local cursor is neither durable acknowledgement nor a skip watermark.
+Missing or failed evidence remains pending for the next sweep, and one item cannot
+block the rest of its bounded page. Continuous arrivals cannot extend an active
+sweep indefinitely. Restart safely scans again from zero.
+
+Discovery commits before network requests. The coordinator matches the original
+publication and complete intent binding to the final-release witness, then checks
+bound terminal identity, sequence and digest before committing native import.
+Retirement uses another transaction, so interrupted cleanup replays retained
+terminal evidence. Each item has a bounded deadline; cancellation propagates,
+while item failures return fixed diagnostic categories without exposing response
+contents. Discovery/authority errors do not produce invented success. This adapter
+still needs connection to the management runtime and live concurrent-owner
+acceptance; it issues no source grants or application worker credentials.
+
 `ActivationRuntimeArtifactV3` and its explicit pinned loader compose the exact
 typed admission file, complete purpose/profile policy, approved profile digest,
 execution fence and controller-local manifest. Assembly verifies route executor,

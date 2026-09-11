@@ -43,6 +43,7 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
             f"{SCHEMA}.acknowledge_protected_release(uuid,jsonb,bytea,text,text)"))
     if revision == "build_guard_0015":
         callables.append(f"{SCHEMA}.retire_request_hold(uuid,jsonb,bytea,text)")
+        callables.append(f"{SCHEMA}.read_pending_retirements(uuid,bigint,bigint,integer)")
     parameters = {"schema": SCHEMA, "owner": owner, "agent": agent, "callables": callables}
     defaults = connection.scalar(text("""
         SELECT EXISTS (
