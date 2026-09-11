@@ -985,6 +985,13 @@ def test_personal_dev_builder_image_binds_rootless_sidecar_prerequisites() -> No
     assert '"deploy/personal-dev-builder/loom-personal-dev-buildkitd"' in ownership
 
 
+def test_personal_dev_builder_provisions_readonly_native_mountpoints() -> None:
+    dockerfile = _read("deploy/Dockerfile.personal-dev-builder")
+    assert "mkdir -p /input /output /var/run/loom-buildkit /var/lib/loom-buildkit" in dockerfile
+    assert "chmod 0755 /input /output /var/run/loom-buildkit /var/lib/loom-buildkit" in dockerfile
+    assert dockerfile.index("mkdir -p /input") < dockerfile.index("USER 1000:1000")
+
+
 def test_rootless_sidecar_launcher_execs_only_the_fixed_buildkit_command(
     tmp_path: Path,
 ) -> None:
