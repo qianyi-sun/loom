@@ -26,6 +26,7 @@ _POLL_INTERVAL_SECONDS = 0.1
 # unprivileged worker trust a slice it did not create.
 _SLICE_UNIT_RE = re.compile(r"^loom-job-[1-9][0-9]*\.slice$")
 _SUPPORTED_DOCKER_DRIVERS = frozenset({"cgroupfs", "systemd"})
+_POSITIVE_MEMORY_BYTES_RE = re.compile(r"^[1-9][0-9]{0,18}$")
 
 
 class SlurmJobCgroupError(ValueError):
@@ -276,6 +277,15 @@ def _parse_cpu_set(spec: str) -> frozenset[int]:
     return frozenset(cpus)
 
 
+def _memory_ceiling_bytes(value: str) -> int | None:
+    """Accept only a finite positive kernel memory limit, never ``max``."""
+
+    if _POSITIVE_MEMORY_BYTES_RE.fullmatch(value) is None:
+        return None
+    parsed = int(value)
+    return parsed if parsed <= (1 << 63) - 1 else None
+
+
 def discover_docker_cgroup_parent(
     *,
     docker_driver: str,
@@ -295,8 +305,8 @@ def discover_docker_cgroup_parent(
     the slice's own cgroup limits and requiring them to bind the live allocation:
     the slice cpuset must be a non-empty subset of the job's allocated CPUs, its
     ``pids.max`` must equal the guard-applied aggregate ceiling, and its
-    ``memory.max`` must be finite.  There is no fallback to Docker's default
-    parent.
+    ``memory.max`` must be finite, positive, and no larger than the live Slurm
+    job's own memory ceiling. There is no fallback to Docker's default parent.
     """
 
     if docker_driver not in _SUPPORTED_DOCKER_DRIVERS:
@@ -338,11 +348,19 @@ def discover_docker_cgroup_parent(
     expected_slice_path = root / _slice_cgroup_subpath(slice_unit).relative_to("/")
     deadline = time.monotonic() + float(wait_seconds)
     while True:
+        # Read again on every convergence attempt: an earlier, larger ceiling
+        # must not admit a stale slice after the allocation limit has changed.
+        allocation_memory_max = _memory_ceiling_bytes(_read_cgroup_scalar(
+            host_job_path / "memory.max", description="the Slurm job memory ceiling",
+        ))
+        if allocation_memory_max is None:
+            raise SlurmJobCgroupError("the Slurm job memory ceiling is not finite and positive")
         reason = _slice_binding_shortfall(
             expected_slice_path=expected_slice_path,
             root=root,
             allocation_cpus=allocation_cpus,
             pids_max=pids_max,
+            allocation_memory_max=allocation_memory_max,
         )
         if reason is None:
             return slice_unit
@@ -358,6 +376,7 @@ def _slice_binding_shortfall(
     root: Path,
     allocation_cpus: frozenset[int],
     pids_max: int,
+    allocation_memory_max: int,
 ) -> str | None:
     """Return why the guard-owned slice does not yet bind the allocation, or None."""
 
@@ -392,6 +411,11 @@ def _slice_binding_shortfall(
         return "the guard-owned systemd slice pids.max does not bind the aggregate ceiling"
     if slice_memory_max == "max":
         return "the guard-owned systemd slice memory ceiling is unbounded"
+    slice_memory_bytes = _memory_ceiling_bytes(slice_memory_max)
+    if slice_memory_bytes is None:
+        return "the guard-owned systemd slice memory ceiling is not finite and positive"
+    if slice_memory_bytes > allocation_memory_max:
+        return "the guard-owned systemd slice memory ceiling exceeds the Slurm allocation"
     return None
 
 

@@ -79,6 +79,22 @@ def test_docker_parent_cgroupfs_returns_raw_job_path(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize("memory_max", ["max", None])
+def test_cgroupfs_keeps_inherited_memory_limit_compatibility(
+    tmp_path: Path, memory_max: str | None,
+) -> None:
+    proc_cgroup, root = _cgroup_fixture(tmp_path)
+    job_memory = root / "system.slice/slurmstepd.scope/job_123/memory.max"
+    if memory_max is None:
+        job_memory.unlink()
+    else:
+        job_memory.write_text(memory_max, encoding="utf-8")
+    assert discover_docker_cgroup_parent(
+        docker_driver="cgroupfs", job_id="123", pids_max=3072,
+        proc_cgroup=proc_cgroup, cgroup_root=root,
+    ) == "/system.slice/slurmstepd.scope/job_123"
+
+
 def test_docker_parent_systemd_returns_bound_slice(tmp_path: Path) -> None:
     proc_cgroup, root = _cgroup_fixture(tmp_path)
     _write_slice(root)
@@ -107,7 +123,10 @@ def test_systemd_memory_ceiling_must_fit_live_allocation(
     ) == "loom-job-123.slice"
 
 
-@pytest.mark.parametrize("memory_max", ["1073741825", "2147483648", "0", "-1", "", "garbage"])
+@pytest.mark.parametrize("memory_max", [
+    "1073741825", "2147483648", "0", "-1", "", "garbage", "1.5", "1e3",
+    "+1", "01", "١", "9223372036854775808",
+])
 def test_systemd_refuses_oversized_or_invalid_memory_ceiling(
     tmp_path: Path, memory_max: str,
 ) -> None:
@@ -159,6 +178,34 @@ def test_systemd_waits_for_memory_ceiling_to_converge(
         proc_cgroup=proc_cgroup, cgroup_root=root,
     ) == "loom-job-123.slice"
     assert sleeps == pytest.approx([0.1])
+
+
+def test_systemd_rechecks_allocation_memory_after_guard_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc_cgroup, root = _cgroup_fixture(tmp_path)
+    nested = _write_slice(root, memory_max="2147483648")
+    job_memory = root / "system.slice/slurmstepd.scope/job_123/memory.max"
+    now = 100.0
+    sleeps: list[float] = []
+    monkeypatch.setattr(cgroup_module.time, "monotonic", lambda: now)
+
+    def converge_and_resize(delay: float) -> None:
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+        # The slice now fits the *old* allocation but not the live one.
+        (nested / "memory.max").write_text("1073741824", encoding="utf-8")
+        job_memory.write_text("536870912", encoding="utf-8")
+
+    monkeypatch.setattr(cgroup_module.time, "sleep", converge_and_resize)
+    with pytest.raises(SlurmJobCgroupError, match="exceeds the Slurm allocation"):
+        discover_docker_cgroup_parent(
+            docker_driver="systemd", job_id="123", pids_max=3072, wait_seconds=0.2,
+            proc_cgroup=proc_cgroup, cgroup_root=root,
+        )
+    assert sum(sleeps) == pytest.approx(0.2)
+    assert all(0 < delay <= 0.1 for delay in sleeps)
 
 
 def test_docker_parent_rejects_unknown_driver(tmp_path: Path) -> None:
