@@ -262,7 +262,7 @@ def worker_fakes(*, driver_rc: int = 0) -> Bundle:
     return Bundle(deps, store, order)
 
 
-def advanced_epoch_resume_fakes() -> tuple[Bundle, DriverEnvelope]:
+def advanced_epoch_resume_fakes(state_root: Path | None = None) -> tuple[Bundle, DriverEnvelope]:
     bundle = worker_fakes()
     envelope = replace(valid_envelope(), attempt_number=2, resume=True)
     pointer = ActivePointer(
@@ -271,6 +271,8 @@ def advanced_epoch_resume_fakes() -> tuple[Bundle, DriverEnvelope]:
         unit_name=f"loom-staging-rollout-{envelope.request_id}-2.service",
         status="pending",
     )
+    if state_root is not None:
+        bundle.deps.state_root = state_root
     bundle.store.envelope = envelope
     bundle.store.active = pointer
     bundle.store.active_history = [pointer]
@@ -304,13 +306,14 @@ def test_attempt_claims_guard_and_validates_original_binding_before_store_or_dri
 
 
 def test_attempt_accepts_exact_advanced_epoch_resume_before_driver_lock(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bundle, envelope = advanced_epoch_resume_fakes()
+    bundle, envelope = advanced_epoch_resume_fakes(tmp_path / "state")
     guard = FakeMutationGuard(bundle.order, mutation_epoch=8)
 
     def find_recovery(state_root: Path, **bindings: object) -> int:
-        assert state_root == Path("/var/lib/loom-staging-rollout")
+        assert state_root == tmp_path / "state"
         assert bindings == {
             "request_id": REQUEST_ID,
             "through_attempt": 1,
@@ -332,10 +335,11 @@ def test_attempt_accepts_exact_advanced_epoch_resume_before_driver_lock(
 
 @pytest.mark.parametrize("recovery_attempt", [None, 1])
 def test_attempt_rejects_unproven_or_over_advanced_epoch_resume_before_driver_lock(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     recovery_attempt: int | None,
 ) -> None:
-    bundle, envelope = advanced_epoch_resume_fakes()
+    bundle, envelope = advanced_epoch_resume_fakes(tmp_path / "state")
     guard = FakeMutationGuard(
         bundle.order,
         mutation_epoch=8 if recovery_attempt is None else 9,
@@ -1731,7 +1735,11 @@ def test_attempt_uses_original_retained_guard_at_live_advanced_epoch(tmp_path, m
     guard = FakeMutationGuard(bundle.order)
     original = _guard(_plan(tmp_path))
     guard.assert_ready = lambda _: (
-        replace(original, database_backend_pid=9999) if outcome == "successor" else original
+        type(original).build(
+                **{k: v for k, v in original.to_dict().items()
+                   if k not in {"schema_version", "evidence_digest", "database_backend_pid"}},
+                database_backend_pid=9999,
+            ) if outcome == "successor" else original
     )
     calls = []
 

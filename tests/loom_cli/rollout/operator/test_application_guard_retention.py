@@ -319,8 +319,11 @@ def _pending_resume(tmp_path, *, acknowledge=True, claim_epoch=True):
         journal.retain_application_guard(plan, guard=guard)
         if acknowledge:
             application_guard_is_retained(
-                tmp_path / "state", request_id=plan.request_id,
-                service_uid=os.getuid(), guard=guard, acknowledge=True,
+                tmp_path / "state",
+                request_id=plan.request_id,
+                service_uid=os.getuid(),
+                guard=guard,
+                acknowledge=True,
             )
         raise RuntimeError("interrupted")
 
@@ -336,10 +339,14 @@ def _resume_guard(tmp_path, plan, **overrides):
     from loom_cli.rollout.operator.protected_application_guard_retention import (
         retained_application_guard_for_resume,
     )
+
     bindings = dict(
-        request_id=plan.request_id, service_uid=os.getuid(),
-        recovery_attempt=plan.attempt_number, candidate_sha=plan.candidate_sha,
-        candidate_tree=plan.candidate_tree, attestation_digest=plan.attestation_digest,
+        request_id=plan.request_id,
+        service_uid=os.getuid(),
+        recovery_attempt=plan.attempt_number,
+        candidate_sha=plan.candidate_sha,
+        candidate_tree=plan.candidate_tree,
+        attestation_digest=plan.attestation_digest,
         starting_mutation_epoch=plan.starting_mutation_epoch,
     )
     bindings.update(overrides)
@@ -353,24 +360,40 @@ def test_resume_reads_exact_original_guard_from_acknowledged_component(tmp_path)
     assert {path: path.read_bytes() for path in before} == before
 
 
-@pytest.mark.parametrize("change", [
-    "attempt", "no-recovery", "candidate", "tree", "attestation", "epoch",
-    "no-ack", "no-epoch-terminal", "plan", "guard",
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "attempt",
+        "no-recovery",
+        "candidate",
+        "tree",
+        "attestation",
+        "epoch",
+        "no-ack",
+        "no-epoch-terminal",
+        "plan",
+        "guard",
+    ],
+)
 def test_resume_refuses_retention_without_exact_original_recovery_binding(tmp_path, change):
     import json
 
     plan, journal, guard = _pending_resume(
-        tmp_path, acknowledge=change != "no-ack", claim_epoch=change != "no-epoch-terminal",
+        tmp_path,
+        acknowledge=change != "no-ack",
+        claim_epoch=change != "no-epoch-terminal",
     )
     overrides = {
-        "attempt": {"recovery_attempt": 2}, "no-recovery": {"recovery_attempt": None},
-        "candidate": {"candidate_sha": "c" * 40}, "tree": {"candidate_tree": "c" * 40},
+        "attempt": {"recovery_attempt": 2},
+        "no-recovery": {"recovery_attempt": None},
+        "candidate": {"candidate_sha": "c" * 40},
+        "tree": {"candidate_tree": "c" * 40},
         "attestation": {"attestation_digest": "c" * 64},
         "epoch": {"starting_mutation_epoch": guard.mutation_epoch + 1},
     }.get(change, {})
     if change in {"plan", "guard"}:
         from loom_cli.rollout.operator.protected_apply_journal import ComponentIntent
+
         root = journal.attempt_root.parent.parent
         path = root / "application-guard-retention.json"
         record = json.loads(path.read_text())
@@ -384,14 +407,22 @@ def test_resume_refuses_retention_without_exact_original_recovery_binding(tmp_pa
         else:
             # A self-consistent guard record must still match the admitted plan.
             record["guard"] = MutationGuardEvidence.build(
-                **{k: v for k, v in guard.to_dict().items()
-                   if k not in {"schema_version", "evidence_digest", "candidate_tree"}},
+                **{
+                    k: v
+                    for k, v in guard.to_dict().items()
+                    if k not in {"schema_version", "evidence_digest", "candidate_tree"}
+                },
                 candidate_tree="c" * 40,
             ).to_dict()
         path.write_text(json.dumps(record))
-        (root / "application-guard-retention-ack.json").write_text(json.dumps({
-            "schema_version": 1, "intent_digest": record["intent"]["intent_digest"],
-            "guard_evidence_digest": record["guard"]["evidence_digest"],
-        }))
+        (root / "application-guard-retention-ack.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "intent_digest": record["intent"]["intent_digest"],
+                    "guard_evidence_digest": record["guard"]["evidence_digest"],
+                }
+            )
+        )
     with pytest.raises((RuntimeError, ValueError), match="application guard"):
         _resume_guard(tmp_path, plan, **overrides)
