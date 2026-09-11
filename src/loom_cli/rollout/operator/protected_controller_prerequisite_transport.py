@@ -245,6 +245,7 @@ class FixedOldlabControllerPrerequisiteInvoker:
             _OLDLAB_DOCKER,
             "run",
             "--rm",
+            "--interactive",
             "--user",
             "0:0",
             "--privileged",

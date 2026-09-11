@@ -46,6 +46,7 @@ _OLDLAB_CONTROLLER_PREFIX = (
     "/usr/bin/docker",
     "run",
     "--rm",
+    "--interactive",
     "--user",
     "0:0",
     "--privileged",

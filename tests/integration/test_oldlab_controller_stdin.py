@@ -53,53 +53,72 @@ def _echo_in_unprivileged_container(
     command.remove("--pid=host")
     for option in ("--mount", "--entrypoint"):
         index = command.index(option)
-        del command[index:index + 2]
+        del command[index : index + 2]
     command[command.index("--user") + 1] = "65534:65534"
     image_index = next(
-        index for index, value in enumerate(command)
+        index
+        for index, value in enumerate(command)
         if value.startswith("localhost:5000/loom-capacity-executor@sha256:")
     )
     command[image_index:] = [_BUSYBOX, "cat"]
     return subprocess.run(
-        command, cwd=cwd, env=dict(env), input=input,
-        capture_output=True, text=True, check=False, timeout=min(timeout, 60),
+        command,
+        cwd=cwd,
+        env=dict(env),
+        input=input,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=min(timeout, 60),
     )
 
 
 @pytest.mark.parametrize(
     "operation",
     [
-        "discover-controller", "observe-prerequisite", "converge-prerequisite",
-        "observe-credential", "publish-credential", "observe-prepared",
-        "converge-prepared-files", "enable-prepared-timer", "run-prepared-tick",
+        "discover-controller",
+        "observe-prerequisite",
+        "converge-prerequisite",
+        "observe-credential",
+        "publish-credential",
+        "observe-prepared",
+        "converge-prepared-files",
+        "enable-prepared-timer",
+        "run-prepared-tick",
         "disable-prepared-timer",
     ],
 )
 def test_oldlab_controller_delivers_canonical_request_to_container(
-    tmp_path: Path, operation: str,
+    tmp_path: Path,
+    operation: str,
 ) -> None:
     commands = InstalledPreflightCommands(
-        _config(tmp_path), _environment(),
+        _config(tmp_path),
+        _environment(),
         run_subprocess=_echo_in_unprivileged_container,
     )
     prerequisite_invoker = FixedOldlabControllerPrerequisiteInvoker(
-        run=commands.oldlab_controller, image=_IMAGE,
+        run=commands.oldlab_controller,
+        image=_IMAGE,
     )
     if operation == "discover-controller":
         payload = ControllerDiscoveryRequest(
-            schema_version=1, pool_id="oldlab",
+            schema_version=1,
+            pool_id="oldlab",
             transport_authority_sha256=prerequisite_invoker.authority_sha256,
         ).to_bytes()
         result = prerequisite_invoker(operation, payload)
     elif operation in {"observe-credential", "publish-credential"}:
         payload = _payload(tmp_path, "oldlab").to_bytes()
         result = FixedOldlabPoolCredentialInvoker(
-            run=commands.oldlab_controller, image=_IMAGE,
+            run=commands.oldlab_controller,
+            image=_IMAGE,
         )(operation, payload)
     else:
         prepared = _request(tmp_path, pool_id="oldlab")
         prerequisite = replace(
-            prepared.prerequisite, image=_IMAGE,
+            prepared.prerequisite,
+            image=_IMAGE,
             transport_authority_sha256=prerequisite_invoker.authority_sha256,
         )
         if operation in {"observe-prerequisite", "converge-prerequisite"}:
@@ -107,11 +126,13 @@ def test_oldlab_controller_delivers_canonical_request_to_container(
             result = prerequisite_invoker(operation, payload)
         else:
             payload = replace(
-                prepared, prerequisite=prerequisite,
+                prepared,
+                prerequisite=prerequisite,
                 transport_authority_sha256=prerequisite_invoker.authority_sha256,
             ).to_bytes()
             result = FixedOldlabPreparedControllerInvoker(
-                run=commands.oldlab_controller, image=_IMAGE,
+                run=commands.oldlab_controller,
+                image=_IMAGE,
             )(operation, payload)
 
     assert result.returncode == 0, result.stderr

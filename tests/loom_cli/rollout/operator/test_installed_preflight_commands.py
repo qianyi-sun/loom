@@ -294,6 +294,7 @@ def test_oldlab_controller_runs_only_the_fixed_host_namespace_channel(
         "/usr/bin/docker",
         "run",
         "--rm",
+        "--interactive",
         "--user",
         "0:0",
         "--privileged",
@@ -328,15 +329,20 @@ def test_oldlab_controller_runs_only_the_fixed_host_namespace_channel(
             "timeout": 1500,
         }
     ]
+    with pytest.raises(ValueError, match="OLDLAB controller"):
+        commands.oldlab_controller(
+            tuple(value for value in argv if value != "--interactive"),
+            '{"schema_version":1}\n',
+        )
     with pytest.raises(ValueError, match="OLDLAB controller command is outside authority"):
         commands.oldlab_controller(
-            (*argv[:7], "--network=host", *argv[8:]),
+            tuple("--network=host" if value == "--network=none" else value for value in argv),
             '{"schema_version":1}\n',
         )
     cluster_image = "192.168.50.13:5000/loom-capacity-executor@sha256:" + "a" * 64
     with pytest.raises(ValueError, match="OLDLAB controller command is outside authority"):
         commands.oldlab_controller(
-            (*argv[:15], cluster_image, *argv[16:]),
+            tuple(cluster_image if value == image else value for value in argv),
             '{"schema_version":1}\n',
         )
 
@@ -371,6 +377,7 @@ def test_oldlab_controller_admits_each_fixed_prepared_installer_operation(
         "/usr/bin/docker",
         "run",
         "--rm",
+        "--interactive",
         "--user",
         "0:0",
         "--privileged",
@@ -404,6 +411,7 @@ def test_oldlab_controller_bounds_payload_and_output(tmp_path: Path) -> None:
         "/usr/bin/docker",
         "run",
         "--rm",
+        "--interactive",
         "--user",
         "0:0",
         "--privileged",

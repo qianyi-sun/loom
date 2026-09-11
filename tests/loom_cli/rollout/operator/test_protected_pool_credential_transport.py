@@ -246,6 +246,7 @@ def test_oldlab_controller_transport_binds_fixed_image_and_host_pid_channel(
         "/usr/bin/docker",
         "run",
         "--rm",
+        "--interactive",
         "--user",
         "0:0",
         "--privileged",
