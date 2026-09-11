@@ -75,7 +75,7 @@ def test_native_refuses_untrusted_controls(tmp_path, tamper):
             pytest.fail("untrusted controls must refuse admission")
 
 
-@pytest.mark.parametrize("tamper", ["limits", "directory", "symlink-parent"])
+@pytest.mark.parametrize("tamper", ["limits", "directory", "symlink-parent", "writable-parent"])
 def test_opened_native_cgroup_cannot_be_replaced_during_handoff(tmp_path, tamper):
     from loom_capacity_executor.native_worker_cgroup import open_native_cgroup
     from loom_capacity_executor.native_worker_container import NativeContainerError
@@ -84,6 +84,8 @@ def test_opened_native_cgroup_cannot_be_replaced_during_handoff(tmp_path, tamper
     with open_native_cgroup(_allocation(), cgroup_root=tmp_path, trusted_uid=os.geteuid()) as opened:
         if tamper == "limits":
             (directory / "memory.max").write_text("max\n")
+        elif tamper == "writable-parent":
+            directory.parent.chmod(0o777)
         else:
             directory.rename(directory.with_name("retired"))
             if tamper == "directory":
@@ -92,3 +94,70 @@ def test_opened_native_cgroup_cannot_be_replaced_during_handoff(tmp_path, tamper
                 directory.symlink_to(directory.with_name("retired"), target_is_directory=True)
         with pytest.raises(NativeContainerError, match="cgroup"):
             opened.assert_current()
+
+
+def test_native_control_owner_is_checked_independently_of_directory(tmp_path, monkeypatch):
+    from loom_capacity_executor.native_worker_cgroup import open_native_cgroup
+    from loom_capacity_executor.native_worker_container import NativeContainerError
+
+    directory = _job(tmp_path)
+    identity = (directory / "memory.max").stat().st_ino
+    fstat = os.fstat
+
+    def changed_owner(descriptor):
+        result = fstat(descriptor)
+        if result.st_ino != identity:
+            return result
+        fields = list(result)
+        fields[4] = os.geteuid() + 1
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "fstat", changed_owner)
+    with pytest.raises(NativeContainerError, match="control is not protected"):
+        with open_native_cgroup(_allocation(), cgroup_root=tmp_path, trusted_uid=os.geteuid()):
+            pytest.fail("foreign-owned control must refuse admission")
+
+
+@pytest.mark.parametrize("kind", ["fifo", "directory"])
+def test_native_control_must_be_regular_and_never_blocks_on_fifo(tmp_path, kind):
+    from loom_capacity_executor.native_worker_cgroup import open_native_cgroup
+    from loom_capacity_executor.native_worker_container import NativeContainerError
+
+    directory = _job(tmp_path)
+    control = directory / "memory.max"
+    control.unlink()
+    if kind == "fifo":
+        os.mkfifo(control, mode=0o600)
+    else:
+        control.mkdir(mode=0o700)
+    with pytest.raises(NativeContainerError, match="control is not protected"):
+        with open_native_cgroup(_allocation(), cgroup_root=tmp_path, trusted_uid=os.geteuid()):
+            pytest.fail("nonregular control must refuse admission")
+
+
+@pytest.mark.parametrize("failure", ["entry", "body"])
+def test_native_cgroup_descriptors_close_on_every_failure(tmp_path, monkeypatch, failure):
+    from loom_capacity_executor.native_worker_cgroup import open_native_cgroup
+    from loom_capacity_executor.native_worker_container import NativeContainerError
+
+    directory = _job(tmp_path)
+    open_descriptor, close_descriptor = os.open, os.close
+    live: set[int] = set()
+
+    def tracked_open(*args, **kwargs):
+        descriptor = open_descriptor(*args, **kwargs)
+        live.add(descriptor)
+        return descriptor
+
+    def tracked_close(descriptor):
+        live.remove(descriptor)
+        close_descriptor(descriptor)
+
+    if failure == "entry":
+        (directory / "memory.max").write_text("max\n")
+    monkeypatch.setattr(os, "open", tracked_open)
+    monkeypatch.setattr(os, "close", tracked_close)
+    with pytest.raises(NativeContainerError):
+        with open_native_cgroup(_allocation(), cgroup_root=tmp_path, trusted_uid=os.geteuid()):
+            raise NativeContainerError("body failed")
+    assert not live
