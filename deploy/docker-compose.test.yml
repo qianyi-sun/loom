@@ -19,7 +19,9 @@ services:
       retries: 20
 
   minio:
-    image: minio/minio
+    # Reviewed multi-architecture pin from personal-dev-external-images.json.
+    # Docker Hub's minio/minio repository no longer permits anonymous pulls.
+    image: quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: loomtest
