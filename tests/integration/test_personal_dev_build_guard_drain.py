@@ -155,7 +155,7 @@ async def test_corrupt_drain_receipt_rolls_back_fence_and_downgrade_refuses_evid
         assert (await store(session, installation).observe_intent(request.binding)).drain is None
         await store(session, installation).begin_drain(request)
     for statement in ("UPDATE loom_capacity_build_guard.worker_drains SET payload=payload",
-        "DELETE FROM loom_capacity_build_guard.worker_drains", "TRUNCATE loom_capacity_build_guard.worker_drains"):
+        "DELETE FROM loom_capacity_build_guard.worker_drains", "TRUNCATE loom_capacity_build_guard.worker_drains CASCADE"):
         with engine.begin() as connection, pytest.raises(DBAPIError, match="append-only"):
             connection.execute(text(statement))
     with pytest.raises(DBAPIError, match="retained evidence"):

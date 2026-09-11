@@ -50,14 +50,24 @@ async def test_discovery_requires_committed_ack_and_excludes_retired_holds(prepa
         assert (await retirement(session, installation).read_pending()).publications == ()
 
 
-@pytest.mark.parametrize("kind", ["prepared-revoked", "withdrawn"])
-async def test_recovery_commits_terminal_before_retiring_without_network_locks(prepared_input, kind):
+@pytest.mark.parametrize("kind", ["prepared-revoked", "withdrawn", "released"])
+async def test_recovery_commits_terminal_before_retiring_without_network_locks(prepared_input, monkeypatch, kind):
     factory, engine, installation, *_ = prepared_input
     terminal = None
-    if kind == "withdrawn":
-        terminal, physical = await terminal_input(prepared_input)
-        async with factory.begin() as session:
-            await store(session, installation).withdraw_unregistered_worker(withdrawal(physical))
+    if kind in {"withdrawn", "released"}:
+        if kind == "released":
+            from tests.integration.test_personal_dev_build_guard_registered_release import (
+                registered_release_input,
+            )
+            from tests.integration.test_personal_dev_build_guard_registration import CREDENTIAL
+
+            request, _claim, terminal, _drain = await registered_release_input(prepared_input, monkeypatch)
+            async with factory.begin() as session:
+                await store(session, installation).acknowledge_release(request, current_worker_credential=CREDENTIAL)
+        else:
+            terminal, physical = await terminal_input(prepared_input)
+            async with factory.begin() as session:
+                await store(session, installation).withdraw_unregistered_worker(withdrawal(physical))
         async with factory.begin() as session:
             publication = await outbox(session, installation).read_next()
             await outbox(session, installation).acknowledge(publication,

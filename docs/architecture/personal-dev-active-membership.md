@@ -497,6 +497,25 @@ contents. Discovery/authority errors do not produce invented success. This adapt
 still needs connection to the management runtime and live concurrent-owner
 acceptance; it issues no source grants or application worker credentials.
 
+Build-guard revision `build_guard_0021` closes registered native workers through
+one immutable protected release. It requires an exact committed drain, claim
+high-water zero/one, and zero *current* live claims; an older drain's live-count
+snapshot is not current release authority. Normal release authenticates the
+worker credential; management-only terminal release instead requires the exact
+committed native terminal import when that credential was lost. Both retain
+bootstrap/credential revocation and byte-exact replay without releasing a hold.
+
+Registered releases join the existing protected outbox and bounded retirement
+discovery as `released` events. After committed manager acknowledgement, final
+hold retirement still requires the manager's exact final-release witness plus
+matching committed physical-terminal evidence. Recovery fetches native terminal
+proof for registered releases as well as unregistered withdrawals. Old retirement
+replay cannot remove a successor assignment's hold. Failed/interrupted requests
+may requeue only after retirement; artifact-ready/cancelled requests remain
+ineligible for fresh admission. Protected release transport, runtime recovery
+orchestration, source grants and verified artifact publication remain required
+before operational enablement.
+
 Build-guard revision `build_guard_0020` permits management-only lost-result
 settlement from an exact committed native terminal inventory import. It joins
 the installation, bootstrap, physical job, registration and committed claim;
@@ -506,8 +525,8 @@ worker result is preserved unchanged, including across a racing report/recovery.
 The same immutable outcome history and live-claim accounting apply. Interrupted
 work remains held until authoritative release, then may retry under fresh
 admission. Worker HTTP exchanges cannot assert manager interruption. Downgrade
-refuses retained interruption evidence; registered release and orchestration
-remain separate required steps.
+refuses retained interruption evidence; release and orchestration remain separate
+steps.
 
 Build-guard revision `build_guard_0019` records immutable per-claim wrapper outcomes:
 `artifact-ready`, `failed`, or `cancelled`. Artifact-ready retains an archive hash
@@ -523,8 +542,8 @@ the actual live count; existing drain receipts remain immutable across outcomes
 and schema upgrades. Artifact-ready and cancelled requests are excluded from
 pending demand and fresh source admission. A failed request can retry only after
 its old hold is authoritatively retired. No outcome writes public candidate
-status, releases capacity, or grants fresh execution. Registered release and
-verified artifact publication remain required before runtime readiness. The
+status, releases capacity, or grants fresh execution. Runtime release integration
+and verified artifact publication remain required before runtime readiness. The
 pool-authenticated outcome route and pinned native
 client retain exact receipt checks, worker-credential separation, and outer-commit
 publication. Typed outcome routing rejects application-purpose subjects.

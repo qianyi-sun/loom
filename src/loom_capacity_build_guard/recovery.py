@@ -1,4 +1,4 @@
-"""Bounded management-only recovery of unregistered native build allocations."""
+"""Bounded management-only final recovery of native build allocations."""
 
 import asyncio
 from dataclasses import dataclass
@@ -104,7 +104,7 @@ class BuildRecoveryCoordinator:
             or witness.protected_release != publication.release
             or witness.protected_acknowledgement_sha256 != publication.publication_digest):
             raise ValueError("build recovery manager witness does not match pending authority")
-        if publication.event_kind == "withdrawn":
+        if publication.event_kind in {"withdrawn", "released"}:
             terminal = await self._manager.get_build_terminal_inventory_evidence(publication.release.binding.intent_id)
             if terminal is None:
                 return None

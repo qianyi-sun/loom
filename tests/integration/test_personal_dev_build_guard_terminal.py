@@ -161,7 +161,7 @@ async def test_terminal_retention_is_private_immutable_and_blocks_downgrade(prep
             async with session.begin_nested():
                 await session.execute(text("SELECT * FROM loom_capacity_build_guard.terminal_inventory"))
     for statement in ("UPDATE loom_capacity_build_guard.terminal_inventory SET payload=payload",
-        "DELETE FROM loom_capacity_build_guard.terminal_inventory", "TRUNCATE loom_capacity_build_guard.terminal_inventory"):
+        "DELETE FROM loom_capacity_build_guard.terminal_inventory", "TRUNCATE loom_capacity_build_guard.terminal_inventory CASCADE"):
         with pytest.raises(DBAPIError):
             with engine.begin() as connection:
                 connection.execute(text(statement))

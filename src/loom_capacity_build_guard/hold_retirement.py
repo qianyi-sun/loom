@@ -1,4 +1,4 @@
-"""Retire unregistered native holds only from authenticated manager evidence.
+"""Retire native holds only from authenticated manager evidence.
 
 The management reporter fetches the witness over the authenticated manager
 transport. Structural parsing is not signature verification. This procedure is
@@ -81,7 +81,7 @@ class BuildGuardHoldRetirementStore:
         for publication in page.publications:
             binding = publication.release.binding
             if (not previous < publication.event_id <= page.through_event_id
-                or publication.event_kind not in {"prepared-revoked", "withdrawn"}
+                or publication.event_kind not in {"prepared-revoked", "withdrawn", "released"}
                 or binding.subject_id != self._installation.subject_id
                 or binding.subject_incarnation != self._installation.subject_incarnation
                 or binding.deployment_generation != self._installation.deployment_generation

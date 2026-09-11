@@ -65,8 +65,10 @@ async def registered_release_input(values, monkeypatch, *, result="failed", drai
 
 @pytest.mark.parametrize("result", ["unclaimed", "artifact-ready", "failed", "cancelled", "interrupted"])
 async def test_registered_release_retirement_and_correct_post_release_demand(prepared_input, monkeypatch, result):
-    factory, engine, installation, *_ = prepared_input
-    request, claim, terminal, _drain = await registered_release_input(prepared_input, monkeypatch, result=result)
+    from loom_capacity_build_guard.plan_store import BuildGuardPlanStore
+
+    factory, engine, installation, plan, source, platform = prepared_input
+    request, _claim, terminal, _drain = await registered_release_input(prepared_input, monkeypatch, result=result)
     async with factory.begin() as session:
         released = await store(session, installation).acknowledge_release(request, current_worker_credential=CREDENTIAL)
         assert released.binding == request.binding and released.live_claim_count == 0
@@ -98,6 +100,24 @@ async def test_registered_release_retirement_and_correct_post_release_demand(pre
         assert report.fixed_claims == report.current_assignments == ()
         assert bool(report.pending_unassigned) == (result in {"unclaimed", "failed", "interrupted"})
         assert (await retirement(session, installation).read_pending()).publications == ()
+    binding = plan.shapes[0].binding.model_copy(update={"intent_id": uuid4(), "tranche_id": uuid4(),
+        "shape_instance_id": plan.shapes[0].binding.shape_instance_id + "-retry"})
+    successor = plan.model_copy(update={"plan_id": uuid4(), "proposal_id": uuid4(), "admission_incarnation": uuid4(),
+        "shapes": (plan.shapes[0].model_copy(update={"binding": binding}),),
+        "allowances": (plan.allowances[0].model_copy(update={"allowance_id": uuid4(),
+            "submission_intent_id": binding.intent_id, "shape_instance_id": binding.shape_instance_id}),)})
+    async with factory.begin() as session:
+        following = BuildGuardPlanStore(session, installation=installation)
+        if result in {"unclaimed", "failed", "interrupted"}:
+            await following.prepare(successor, sources={platform.id: source})
+        else:
+            with pytest.raises(DBAPIError, match="live lease changed"):
+                await following.prepare(successor, sources={platform.id: source})
+    async with factory.begin() as session:
+        # Old terminal replay must not retire a successor assignment.
+        assert await retirement(session, installation).retire(witness) == receipt
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == int(result in {"unclaimed", "failed", "interrupted"})
 
 
 @pytest.mark.parametrize("boundary", ["credential", "live", "no-drain", "reporter", "epoch", "water", "binding", "replay"])
@@ -146,3 +166,64 @@ async def test_manager_can_release_terminal_worker_without_lost_credential(prepa
                     terminal_inventory_sha256="f" * 64 if boundary == "wrong-proof" else canonical_executable_digest(terminal))
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_releases")) == int(boundary == "exact")
+
+
+async def test_registered_release_requires_current_count_not_historical_drain_count(prepared_input, monkeypatch):
+    factory, _engine, installation, *_ = prepared_input
+    request, claim, _terminal, drain = await registered_release_input(prepared_input, monkeypatch, result="live")
+    async with factory.begin() as session:
+        historical = await store(session, installation).begin_drain(drain)
+        assert historical.live_claim_count == 1
+        await store(session, installation).record_outcome(outcome_request(claim), worker_credential=CREDENTIAL)
+        with pytest.raises(DBAPIError, match="committed outcome"):
+            await store(session, installation).acknowledge_release(request, current_worker_credential=CREDENTIAL)
+    async with factory.begin() as session:
+        released = await store(session, installation).acknowledge_release(request, current_worker_credential=CREDENTIAL)
+        assert released.live_claim_count == 0
+    async with factory.begin() as session:
+        observed = await store(session, installation).observe_intent(request.binding)
+        assert observed.drain == historical and observed.release == released
+
+
+async def test_registered_release_corrupt_receipt_rolls_back_and_history_blocks_downgrade(prepared_input, monkeypatch, build_guard_database):
+    from alembic import command
+
+    factory, engine, installation, *_ = prepared_input
+    request, _claim, _terminal, _drain = await registered_release_input(prepared_input, monkeypatch)
+    async with factory.begin() as session:
+        original = session.scalar
+
+        async def corrupt(statement, *args, **kwargs):
+            result = await original(statement, *args, **kwargs)
+            return result.replace(str(request.reporter_incarnation), str(uuid4())) if "acknowledge_release(" in str(statement) else result
+
+        monkeypatch.setattr(session, "scalar", corrupt)
+        with pytest.raises(ValueError, match="receipt"):
+            await store(session, installation).acknowledge_release(request, current_worker_credential=CREDENTIAL)
+    async with factory.begin() as session:
+        assert (await store(session, installation).observe_intent(request.binding)).release is None
+        await store(session, installation).acknowledge_release(request, current_worker_credential=CREDENTIAL)
+    for statement in ("UPDATE loom_capacity_build_guard.worker_releases SET payload=payload",
+        "DELETE FROM loom_capacity_build_guard.worker_releases", "TRUNCATE loom_capacity_build_guard.worker_releases"):
+        with engine.begin() as connection, pytest.raises(DBAPIError, match="append-only"):
+            connection.execute(text(statement))
+    with pytest.raises(DBAPIError, match="retained evidence"):
+        command.downgrade(build_guard_database[0], "build_guard_0020")
+
+
+@pytest.mark.parametrize("boundary", ["worker-grant", "terminal-grant", "public", "search-path", "helper"])
+def test_registered_release_privilege_drift_is_rejected(build_guard_database, boundary):
+    from alembic import command
+
+    config, engine, _owner, agent, _url = build_guard_database
+    command.upgrade(config, "head")
+    signature = "loom_capacity_build_guard.acknowledge_release(uuid,jsonb,bytea,text,text)"
+    statements = {"worker-grant": f"REVOKE EXECUTE ON FUNCTION {signature} FROM {engine.dialect.identifier_preparer.quote(agent)}",
+        "terminal-grant": f"REVOKE EXECUTE ON FUNCTION loom_capacity_build_guard.release_terminal_worker(uuid,jsonb,bytea,text,text) FROM {engine.dialect.identifier_preparer.quote(agent)}",
+        "public": f"GRANT EXECUTE ON FUNCTION {signature} TO PUBLIC",
+        "search-path": f"ALTER FUNCTION {signature} SET search_path=public",
+        "helper": "ALTER FUNCTION loom_capacity_build_guard.native_release(uuid,jsonb,bytea,text,text,text) SECURITY DEFINER"}
+    with engine.begin() as connection:
+        connection.execute(text(statements[boundary]))
+    with pytest.raises(RuntimeError, match=r"privilege|surface"):
+        command.upgrade(config, "head")

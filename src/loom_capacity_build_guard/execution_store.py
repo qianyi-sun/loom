@@ -15,6 +15,8 @@ from loom_capacity_agent.admission import (
     DrainedExecutableWorkerV2,
     ExecutableDrainRequestV2,
     ExecutablePreparedBootstrapRevocationV2,
+    ExecutableReleaseReceiptV2,
+    ExecutableReleaseRequestV2,
     ExecutableWorkerRegistrationV2,
     ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
@@ -49,6 +51,19 @@ class _ExecutionScope:
     id: UUID
     subject_id: UUID
     subject_incarnation: UUID
+
+
+def native_release_receipt(returned: str, request: ExecutableReleaseRequestV2) -> ExecutableReleaseReceiptV2:
+    receipt = ExecutableReleaseReceiptV2.model_validate_json(returned)
+    digest = canonical_executable_digest(request)
+    if (canonical_executable_bytes(receipt).decode("ascii") != returned or receipt.binding != request.binding
+        or receipt.reporter_incarnation != request.reporter_incarnation
+        or receipt.bootstrap_registration_epoch != request.bootstrap_registration_epoch
+        or receipt.protected_registration_epoch != request.protected_registration_epoch
+        or receipt.release_epoch != request.release_epoch or receipt.claim_high_water != request.expected_claim_high_water
+        or receipt.request_digest != digest or receipt.protected_release_sha256 != digest):
+        raise ValueError("native release receipt changed")
+    return receipt
 
 
 class BuildGuardExecutionStore:
@@ -186,6 +201,20 @@ class BuildGuardExecutionStore:
             if canonical_bytes(receipt).decode("ascii") != returned or receipt.request != request or receipt.request_digest != digest:
                 raise ValueError("native outcome receipt changed")
             return receipt
+
+    async def acknowledge_release(self, request: ExecutableReleaseRequestV2, *, current_worker_credential: str) -> ExecutableReleaseReceiptV2:
+        if not self._session.in_transaction():
+            raise ValueError("native release requires an outer transaction")
+        request = ExecutableReleaseRequestV2.model_validate_json(request.model_dump_json())
+        if not isinstance(current_worker_credential, str) or re.fullmatch(r"[A-Za-z0-9_-]{43,512}", current_worker_credential) is None:
+            raise ValueError("native release credential is invalid")
+        wire = canonical_executable_bytes(request)
+        async with self._session.begin_nested():
+            returned = await self._session.scalar(text("""SELECT loom_capacity_build_guard.acknowledge_release(
+                :installation,CAST(:payload AS jsonb),:wire,:digest,:credential)"""),
+                {"installation": self._installation.id, "payload": wire.decode("ascii"), "wire": wire,
+                    "digest": canonical_executable_digest(request), "credential": sha256(current_worker_credential.encode("ascii")).hexdigest()})
+            return native_release_receipt(returned, request)
 
     async def read_outcome(self, claim: BuildClaimRequestV1) -> BuildOutcomeReceiptV1 | None:
         if not self._session.in_transaction():

@@ -11,11 +11,13 @@ from uuid import UUID, uuid5
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom_capacity_agent.admission import ExecutableReleaseReceiptV2, ExecutableReleaseRequestV2
 from loom_capacity_agent.build_admission import (
     BuildClaimRequestV1,
     BuildInterruptedOutcomeRequestV1,
     BuildOutcomeReceiptV1,
 )
+from loom_capacity_build_guard.execution_store import native_release_receipt
 from loom_capacity_build_guard.installation_store import (
     BuildGuardInstallationV1,
     RetainedBuildInstallation,
@@ -59,6 +61,22 @@ class BuildGuardTerminalStore:
             raise ValueError("build terminal installation receipt changed")
         self._session = session
         self._installation = document
+
+    async def release_terminal_worker(self, request: ExecutableReleaseRequestV2, *, terminal_inventory_sha256: str) -> ExecutableReleaseReceiptV2:
+        """Management-only release after exact terminal import, without a lost secret."""
+        if not self._session.in_transaction():
+            raise ValueError("native terminal release requires an outer transaction")
+        request = ExecutableReleaseRequestV2.model_validate_json(request.model_dump_json())
+        if (not isinstance(terminal_inventory_sha256, str) or len(terminal_inventory_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in terminal_inventory_sha256)):
+            raise ValueError("native terminal release inventory digest is invalid")
+        wire = canonical_executable_bytes(request)
+        async with self._session.begin_nested():
+            returned = await self._session.scalar(text("""SELECT loom_capacity_build_guard.release_terminal_worker(
+                :installation,CAST(:payload AS jsonb),:wire,:digest,:terminal)"""),
+                {"installation": self._installation.id, "payload": wire.decode("ascii"), "wire": wire,
+                    "digest": canonical_executable_digest(request), "terminal": terminal_inventory_sha256})
+            return native_release_receipt(returned, request)
 
     async def settle_interrupted(self, claim: BuildClaimRequestV1, *, terminal_inventory_sha256: str) -> BuildOutcomeReceiptV1:
         """Settle a lost result only from a previously committed terminal import.
