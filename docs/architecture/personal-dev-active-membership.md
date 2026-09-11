@@ -2197,6 +2197,16 @@ the same verifier; native workers need not fabricate database records. Both path
 check the exact candidate, source/archive/build-contract digests, attempt, lease
 epoch and platform before extracting the complete OCI image set. This binding is
 expected content identity, never runtime, publication or physical-release authority.
+Manifest identity fields require exact JSON types as well as values; boolean or
+floating-point equivalents of integer schema versions and epochs are rejected.
+`serve_native_execution_authority` adapts the existing pinned admission client
+to the monitor's bounded sequenced-packet protocol in a separate IO helper. It
+forwards only the consumed claim and source binding, validates the exact returned
+permit, and never sends worker credentials to the monitor. Failure sends a bounded
+stop message without retries; silence or a stuck helper still expires independently
+in the monitor. The disposable supervised KVM fixture uses this adapter with a
+fixture-only authority client, including a blocked renewal. This is not installed
+helper composition or an authenticated live-service acceptance result.
 These fixtures remain rootful and offline (`--network=none`); restricted external
 dependency fetching, protected material/rootless installation, Slurm containment,
 ARM64 supervision, authenticated IO-helper composition and native artifact GC
