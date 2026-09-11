@@ -709,8 +709,11 @@ original guard's existing connection for that epoch, with lock checks before and
 after its fixed SELECT. It opens no new database connection while admission is
 closed. Stale replies, changed identities, unknown request fields and lock loss
 refuse; a bounded SELECT timeout preserves a still-healthy guard for retry.
-A failed resumed launch cannot release the retained guard. Ordinary
-resumes still acquire their own guard; completed retention restores those normal
+A failed resumed launch cannot release the retained guard. A worker still records
+its failed or cancelled attempt when guard release is refused for pending handoff,
+so another resume can use the same journal. It cannot record success while that
+retention remains pending; the refusal does not prove the guard is still healthy.
+Ordinary resumes still acquire their own guard; completed retention restores those normal
 semantics. The installed composition still needs admission recovery before any
 fresh database connection when the application database is closed; guard selection
 alone does not provide that recovery or complete the ownership handoff.

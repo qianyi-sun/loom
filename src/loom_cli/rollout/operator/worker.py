@@ -67,7 +67,7 @@ from .resume_runtime_upgrade import (
     AdmittedResumeRuntimeUpgrade,
     build_installed_resume_runtime_upgrade_authority,
 )
-from .staging_mutation_guard import MutationGuardManager
+from .staging_mutation_guard import MutationGuardManager, MutationGuardRetainedError
 from .store import RequestStore
 from .systemd import MUTATION_GUARD_CLIENT_OPERATION_TIMEOUT_SECONDS, SystemdUserManager
 
@@ -556,7 +556,7 @@ def _run_attempt_owned(
     dependencies: WorkerDependencies,
     *,
     signals: _SignalController | None = None,
-    release_guard: Callable[[], None],
+    release_guard: Callable[[], bool],
 ) -> int:
     """Run one immutable attempt while holding the full-driver lifecycle lock."""
     pointer = ActivePointer(
@@ -720,7 +720,12 @@ def _run_attempt_owned(
                 ),
             )
             return_code = 1
-        release_guard()
+        if not release_guard() and return_code == 0:
+            terminal_event = _event(
+                envelope, dependencies=dependencies, event="attempt_failed", status="failed",
+                reason="application_handoff_pending",
+            )
+            return_code = 1
         dependencies.store.append_event(terminal_event)
         dependencies.lifecycle.release_active(running_pointer)
         return return_code
@@ -737,10 +742,16 @@ def run_attempt(
     guard_owned = False
     release_attempted = False
 
-    def release_guard() -> None:
+    def release_guard() -> bool:
         nonlocal release_attempted
         release_attempted = True
-        _release_mutation_guard(dependencies, envelope.request_id)
+        try:
+            _release_mutation_guard(dependencies, envelope.request_id)
+        except MutationGuardRetainedError:
+            # Record failure/cancellation while preserving the original guard.
+            # This condition cannot publish success or prove guard survival.
+            return False
+        return True
 
     try:
         guard_owned = True

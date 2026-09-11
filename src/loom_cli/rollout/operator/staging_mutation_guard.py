@@ -114,6 +114,10 @@ class MutationGuardError(RuntimeError):
     """Raised when request-bound mutation coordination cannot be proven safe."""
 
 
+class MutationGuardRetainedError(MutationGuardError):
+    """Release refused by pending handoff; never evidence that recovery completed."""
+
+
 class CommandResult(Protocol):
     @property
     def returncode(self) -> int: ...
@@ -1048,7 +1052,7 @@ class MutationGuardManager:
         if application_guard_is_retained(
             self.config.state_root, request_id=request_id, service_uid=self.service_uid,
         ):
-            raise MutationGuardError("application handoff still retains the original mutation guard")
+            raise MutationGuardRetainedError("application handoff still retains the original mutation guard")
         candidate_sha, candidate_tree = self.resolve_candidate(selected_config)
         evidence = self.systemd.stop_mutation_guard(
             request_id,
@@ -1749,6 +1753,7 @@ __all__ = [
     "MutationGuardError",
     "MutationGuardEvidence",
     "MutationGuardManager",
+    "MutationGuardRetainedError",
     "guard_evidence_path",
     "hold_request_guard",
     "main",

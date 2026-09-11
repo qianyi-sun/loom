@@ -1797,3 +1797,18 @@ def test_pending_handoff_still_records_failed_final_admission():
     assert bundle.store.events[-1].event == "attempt_failed"
     assert "final-admission" in bundle.store.events[-1].reason
     assert "driver-run" not in bundle.order
+
+
+
+def test_pending_handoff_records_cancellation_without_releasing_guard():
+    from loom_cli.rollout.operator.staging_mutation_guard import MutationGuardRetainedError
+
+    bundle = worker_fakes()
+    guard = FakeMutationGuard(bundle.order, release_error=MutationGuardRetainedError("handoff pending"))
+    dependencies = replace(bundle.deps, mutation_guard=guard)
+    assert run_attempt(valid_envelope(), dependencies,
+                       signals=worker_module._SignalController(requested=True)) == 130
+    assert bundle.store.active is None
+    assert bundle.store.events[-1].event == "cancelled"
+    assert "driver-run" not in bundle.order
+    assert guard.released == [REQUEST_ID]
