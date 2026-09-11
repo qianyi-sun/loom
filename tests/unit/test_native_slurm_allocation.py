@@ -1,9 +1,12 @@
 """Native allocation identity comes from versioned live scheduler facts."""
 
 import json
+import subprocess
+import sys
 from copy import deepcopy
 from datetime import UTC, datetime
 from importlib import import_module
+from pathlib import Path
 
 import pytest
 
@@ -41,11 +44,43 @@ def _fixture(tmp_path):
     return fake, request, _document(request, fake.backend().authority.local_uid)
 
 
-def test_native_observation_binds_live_incarnation_and_exact_allocation(tmp_path):
+def _parse(module, mode, wire, request, uid):
+    if mode == "executor":
+        return module.parse_native_allocation(wire, request=request, job_id="101", expected_uid=uid, observed_at=_NOW)
+    source = Path(module.__file__).with_name("native_containment_protocol.py")
+    assert source.is_file(), "root verifier needs one standalone shared protocol implementation"
+    expected = {
+        "job_id": "101", "cluster": request.cluster, "hostname": request.nodes[0],
+        "submitter": request.submitter, "uid": uid, "account": request.account,
+        "partition": request.partition, "qos": request.qos, "cpus": request.cpus,
+        "memory_bytes": request.memory_bytes, "ownership_token": request.ownership_token,
+    }
+    # Exercise the exact source without site packages, cwd imports or PYTHONPATH.
+    probe = """
+import json, runpy, sys
+from datetime import datetime
+namespace = runpy.run_path(sys.argv[1])
+value = json.load(sys.stdin)
+try:
+    facts = namespace['parse_native_scheduler_record'](value['raw'], expected=value['expected'], observed_at=datetime.fromisoformat(value['observed_at']))
+except namespace['NativeSlurmObservationError']:
+    sys.exit(3)
+print(json.dumps(facts, default=lambda value: value.isoformat()))
+"""
+    result = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", probe, str(source)],
+        input=json.dumps({"raw": wire, "expected": expected, "observed_at": _NOW.isoformat()}),
+        capture_output=True, text=True, check=False, timeout=5)
+    if result.returncode == 3:
+        raise module.NativeSlurmObservationError("standalone scheduler rejected input")
+    assert result.returncode == 0, result.stderr
+    return module.NativeSlurmAllocationV1.model_validate_json(result.stdout)
+
+
+@pytest.mark.parametrize("mode", ("executor", "standalone"))
+def test_native_observation_binds_live_incarnation_and_exact_allocation(tmp_path, mode):
     module = import_module("loom_capacity_executor.native_slurm_allocation")
     fake, request, raw = _fixture(tmp_path)
-    observed = module.parse_native_allocation(json.dumps(raw), request=request, job_id="101",
-        expected_uid=fake.backend().authority.local_uid, observed_at=_NOW)
+    observed = _parse(module, mode, json.dumps(raw), request, fake.backend().authority.local_uid)
     assert observed.job_id == "101"
     assert observed.submitted_at == datetime.fromtimestamp(int(_NOW.timestamp()) - 60, UTC)
     assert observed.started_at == datetime.fromtimestamp(int(_NOW.timestamp()) - 30, UTC)
@@ -57,6 +92,7 @@ def test_native_observation_binds_live_incarnation_and_exact_allocation(tmp_path
     assert observed.requeue is False and observed.restart_count == 0
 
 
+@pytest.mark.parametrize("mode", ("executor", "standalone"))
 @pytest.mark.parametrize("boundary", [
     "job", "uid", "user", "account", "cluster", "partition", "qos", "ownership", "node",
     "state", "state-flags", "cpus", "memory", "tres-cpus", "tres-nodes", "gpu", "duplicate-tres",
@@ -64,7 +100,7 @@ def test_native_observation_binds_live_incarnation_and_exact_allocation(tmp_path
     "unset-time", "infinite-time", "future-start", "reversed-times", "boolean-time", "parser",
     "duplicate-job", "error", "warning", "duplicate-json", "oversize", "non-batch",
 ])
-def test_native_observation_rejects_ambiguous_or_foreign_facts(tmp_path, boundary):
+def test_native_observation_rejects_ambiguous_or_foreign_facts(tmp_path, boundary, mode):
     module = import_module("loom_capacity_executor.native_slurm_allocation")
     fake, request, raw = _fixture(tmp_path)
     job = raw["jobs"][0]
@@ -104,8 +140,7 @@ def test_native_observation_rejects_ambiguous_or_foreign_facts(tmp_path, boundar
     elif boundary == "oversize":
         wire += " " * (1024 * 1024)
     with pytest.raises(module.NativeSlurmObservationError):
-        module.parse_native_allocation(wire, request=request, job_id="101",
-            expected_uid=fake.backend().authority.local_uid, observed_at=_NOW)
+        _parse(module, mode, wire, request, fake.backend().authority.local_uid)
 
 
 async def test_backend_reads_only_exact_versioned_job_through_pinned_commands(tmp_path):
