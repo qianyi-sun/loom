@@ -14,6 +14,8 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
+import urllib3
+from minio import Minio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from testcontainers.core.wait_strategies import HttpWaitStrategy
@@ -73,17 +75,49 @@ def independent_minio_endpoints() -> Iterator[tuple[MinioContainer, MinioContain
         yield spool, canonical
 
 
-def _store(container: MinioContainer) -> MinioObjectStore:
+def _store(container: MinioContainer, *, outage: bool = False) -> MinioObjectStore:
     config = container.get_config()
     return MinioObjectStore(
         endpoint_url=f"http://{config['endpoint']}",
         access_key=config["access_key"],
         secret_key=config["secret_key"],
-        connect_timeout=0.2,
-        read_timeout=0.2,
+        # A healthy multipart completion may take longer than 200 ms on CI.
+        # Only the deliberate canonical outage needs aggressive transport timeouts.
+        connect_timeout=0.2 if outage else 5,
+        read_timeout=0.2 if outage else 5,
         operation_timeout=10,
         operation_attempts=1,
     )
+
+
+async def _wait_for_minio_bucket(container: MinioContainer, bucket: str) -> None:
+    config = container.get_config()
+    # The SDK default retries honor Retry-After (including long startup 503s),
+    # which can outlive an outer polling loop. This loop owns the only retries.
+    transport = urllib3.PoolManager(
+        timeout=urllib3.Timeout(connect=0.5, read=0.5), retries=False,
+    )
+    client = Minio(
+        config["endpoint"],
+        access_key=config["access_key"],
+        secret_key=config["secret_key"],
+        secure=False,
+        region="us-east-1",
+        http_client=transport,
+    )
+    try:
+        async with asyncio.timeout(10):
+            while True:
+                try:
+                    if await asyncio.to_thread(client.bucket_exists, bucket):
+                        return
+                except Exception:
+                    pass  # The same persisted bucket may be unavailable during restart.
+                await asyncio.sleep(0.1)
+    except TimeoutError:
+        pytest.fail("disposable canonical MinIO bucket did not become ready within 10s")
+    finally:
+        transport.clear()
 
 
 @pytest.mark.parametrize(
@@ -408,6 +442,7 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             body=b"canonical-endpoint-sentinel",
         )
         canonical_docker = canonical_container.get_wrapped_container()
+        canonical_store = _store(canonical_container, outage=True)
         await asyncio.to_thread(canonical_docker.stop, timeout=1)
         try:
             assert await materializer().run_once()
@@ -425,18 +460,7 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 assert await source_store.get_object(bucket="artifacts", key=key) == expected
         finally:
             await asyncio.to_thread(canonical_docker.start)
-        for attempt in range(100):
-            try:
-                if await asyncio.to_thread(
-                    canonical_container.get_client().bucket_exists, "artifacts"
-                ):
-                    break
-            except Exception:
-                if attempt == 99:
-                    raise
-            await asyncio.sleep(0.1)
-        else:
-            pytest.fail("disposable canonical MinIO did not restart")
+        await _wait_for_minio_bucket(canonical_container, "artifacts")
         # Docker may allocate a new ephemeral host port on container restart;
         # reconnect the fresh worker to that same canonical container/storage.
         canonical_store = _store(canonical_container)
