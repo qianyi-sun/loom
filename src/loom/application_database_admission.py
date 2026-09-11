@@ -96,7 +96,7 @@ class ApplicationDatabaseCoordinationGuard:
 
 
 def _read_coordination_guard(
-    connection: ApplicationDatabaseConnection, *, target: ApplicationDatabaseAdmissionTarget,
+    connection: ApplicationDatabaseConnection, *, target: ApplicationDatabaseAdmissionTarget | ApplicationDatabaseHandoffBackend,
     backend_pid: int, application_name: str,
 ) -> ApplicationDatabaseCoordinationGuard:
     connection.execute("SELECT pg_catalog.pg_stat_clear_snapshot()")
@@ -328,7 +328,7 @@ def capture_application_database_admission(
 
 def _require_handoff_identity(
     connection: ApplicationDatabaseConnection,
-    target: ApplicationDatabaseAdmissionTarget,
+    target: ApplicationDatabaseAdmissionTarget | ApplicationDatabaseHandoffBackend,
     handoff_backend: ApplicationDatabaseHandoffBackend,
 ) -> None:
     if (
