@@ -1509,6 +1509,8 @@ idle SERIALIZABLE session and owns its short transaction through commit: reusing
 an existing transaction could label a pre-withdrawal snapshot as current. Contended
 admission locking fails immediately for caller-level retry. Historical binding
 replay and historical intent observation retain their separate existing contracts.
+The bounded database client and pinned application routes expose this observation;
+typed build routes reject it before opening any credential-bearing transport.
 This response is unsigned local snapshot evidence, not a containment lease; a
 trusted issuer must still combine it with fresh manager/execution and scheduler
 incarnation evidence, and the node guard must independently authenticate the

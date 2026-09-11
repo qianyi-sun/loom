@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 
 from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
+    CurrentExecutableBootstrapV2,
     DrainedExecutableWorkerV2,
     ExecutableDrainRequestV2,
     ExecutablePreparedBootstrapRevocationV2,
@@ -241,6 +242,21 @@ class DatabaseExecutableAdmissionClient:
         result = await self._store_call("bind_slurm_job", request)
         assert isinstance(result, BoundExecutableWorkerV2)
         return result
+
+    async def observe_current_bootstrap(self, request: PhysicalJobBindingV2) -> CurrentExecutableBootstrapV2:
+        """Use the store's owned fresh snapshot, never the generic outer transaction."""
+        try:
+            async with asyncio.timeout(self._operation_timeout_seconds):
+                async with self._factory() as session:
+                    store = ExecutableAdmissionStore(
+                        session, subject_id=self.subject_id, subject_incarnation=self.subject_incarnation,
+                    )
+                    return await store.observe_current_bootstrap(
+                        request, statement_timeout_ms=self._statement_timeout_ms,
+                        lock_timeout_ms=self._lock_timeout_ms,
+                    )
+        except TimeoutError as exc:
+            raise ExecutableAdmissionClientError("protected admission transaction timed out") from exc
 
     async def register_worker(
         self,

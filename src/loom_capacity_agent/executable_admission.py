@@ -239,6 +239,9 @@ class ExecutableAdmissionStore:
     async def observe_current_bootstrap(
         self,
         request: PhysicalJobBindingV2,
+        *,
+        statement_timeout_ms: int = 10_000,
+        lock_timeout_ms: int = 5_000,
     ) -> CurrentExecutableBootstrapV2:
         """Read unused pre-registration evidence in a fresh owned transaction.
 
@@ -251,7 +254,14 @@ class ExecutableAdmissionStore:
             raise TypeError("current bootstrap observation requires its physical binding")
         if self._session.in_transaction():
             raise ExecutableAdmissionError("current bootstrap observation requires a fresh owned transaction")
+        if any(type(value) is not int or not 1 <= value <= 60_000
+               for value in (statement_timeout_ms, lock_timeout_ms)):
+            raise ExecutableAdmissionError("current bootstrap timeouts must be integers from 1 to 60000 ms")
         async with self._session.begin():
+            # SET does not establish a PostgreSQL data snapshot. The following
+            # observation is the first data read in this owned transaction.
+            await self._session.execute(text(f"SET LOCAL lock_timeout = '{lock_timeout_ms}ms'"))
+            await self._session.execute(text(f"SET LOCAL statement_timeout = '{statement_timeout_ms}ms'"))
             receipt = await self._invoke(
                 "observe_current_executable_bootstrap", request, CurrentExecutableBootstrapV2,
             )
