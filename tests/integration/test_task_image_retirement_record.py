@@ -157,7 +157,7 @@ async def test_retired_attempt_blocks_inactive_downgrade(
     with pytest.raises(DBAPIError, match="retirement authority cannot be discarded"):
         command.downgrade(_config(isolated_migration_postgres_url), "0134")
     async with registry_authority_session() as session:
-        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0140"
+        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0141"
         assert await session.scalar(select(_model().retired_at)) is not None
 
 
@@ -194,7 +194,7 @@ async def test_retirement_downgrade_fails_fast_on_parent_and_record_writers(
         with engine.connect() as connection:
             assert (
                 connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "0140"
+                == "0141"
             )
     finally:
         engine.dispose()

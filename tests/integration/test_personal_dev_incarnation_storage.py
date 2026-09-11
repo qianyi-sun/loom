@@ -193,11 +193,11 @@ async def test_storage_migration_preserves_rows_and_rejects_lossy_downgrade(isol
             )
         before = await snapshot()
         if layout == "incarnation-v1":
-            with pytest.raises(DBAPIError, match="cannot downgrade 0140"):
-                await asyncio.to_thread(command.downgrade, config, "0139")
+            with pytest.raises(DBAPIError, match="cannot downgrade 0141"):
+                await asyncio.to_thread(command.downgrade, config, "0140")
         else:
-            await asyncio.to_thread(command.downgrade, config, "0139")
-            await asyncio.to_thread(command.upgrade, config, "0140")
+            await asyncio.to_thread(command.downgrade, config, "0140")
+            await asyncio.to_thread(command.upgrade, config, "0141")
         assert await snapshot() == before
     finally:
         await engine.dispose()

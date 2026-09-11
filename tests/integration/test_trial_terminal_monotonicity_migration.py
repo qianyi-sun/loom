@@ -107,7 +107,7 @@ async def test_terminal_trial_guard_downgrade_fails_fast_on_busy_trials(isolated
         with engine.connect() as connection:
             assert (
                 connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "0140"
+                == "0141"
             )
     finally:
         engine.dispose()
