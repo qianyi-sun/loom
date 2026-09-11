@@ -11,19 +11,24 @@ import pytest
 
 from loom.application_handoff_completion import ApplicationHandoffDatabaseOutcome
 from loom.staging_mutation_coordination import rollout_guard_application_name
-from loom_cli.rollout.operator.protected_application_guard_retention import application_guard_is_retained
-from tests.loom_cli.rollout.operator.test_application_admission_recovery import (
-    _component, _handoff, _target,
+from loom_cli.rollout.operator.protected_application_guard_retention import (
+    application_guard_is_retained,
 )
-from tests.loom_cli.rollout.operator.test_application_admission_recovery import _guard as _database_guard
+from tests.loom_cli.rollout.operator.test_application_admission_recovery import (
+    _component,
+    _handoff,
+    _target,
+)
+from tests.loom_cli.rollout.operator.test_application_admission_recovery import (
+    _guard as _database_guard,
+)
 from tests.loom_cli.rollout.operator.test_application_guard_retention import _guard, _setup
 from tests.loom_cli.rollout.operator.test_application_workloads import _patched, _workload
 
 
 class Runner:
-    environment = {"KUBECONFIG": "/fixture"}
-
     def __init__(self, guard, database_guard):
+        self.environment = {"KUBECONFIG": "/fixture"}
         self.guard = database_guard
         self.objects = [_workload(name=name) for name in (
             "loom-capacity-agent", "loom-control-plane", "loom-family-orchestrator",
@@ -119,9 +124,12 @@ def _context(tmp_path):
 
 @pytest.mark.parametrize("interruption", [None, "pause", "restore"])
 def test_workload_runtime_recovers_partial_patches_and_keeps_guard_cron_suspended(tmp_path, interruption):
-    from loom_cli.rollout.operator.protected_application_workload_runtime import pause_application_workloads, restore_application_workloads
+    from loom_cli.rollout.operator.protected_application_workload_runtime import (
+        pause_application_workloads,
+        restore_application_workloads,
+    )
 
-    plan, journal, evidence, saved, runner, admit = _context(tmp_path)
+    plan, journal, evidence, _saved, runner, admit = _context(tmp_path)
     original = copy.deepcopy(runner.objects)
     if interruption == "pause":
         runner.fail_after = 2
@@ -151,7 +159,9 @@ def test_workload_runtime_recovers_partial_patches_and_keeps_guard_cron_suspende
 
 
 def test_late_cronjob_child_is_journaled_and_paused_before_drain_succeeds(tmp_path):
-    from loom_cli.rollout.operator.protected_application_workload_runtime import pause_application_workloads
+    from loom_cli.rollout.operator.protected_application_workload_runtime import (
+        pause_application_workloads,
+    )
 
     plan, journal, evidence, _, runner, admit = _context(tmp_path)
     runner.late_job = True
@@ -168,7 +178,9 @@ def test_late_cronjob_child_is_journaled_and_paused_before_drain_succeeds(tmp_pa
 
 @pytest.mark.parametrize("blocker", ["hpa", "foreign-pod", "guard", "cron-uid"])
 def test_workload_runtime_refuses_unknown_writers_before_any_patch(tmp_path, blocker):
-    from loom_cli.rollout.operator.protected_application_workload_runtime import pause_application_workloads
+    from loom_cli.rollout.operator.protected_application_workload_runtime import (
+        pause_application_workloads,
+    )
 
     plan, journal, evidence, _, runner, admit = _context(tmp_path)
     if blocker == "guard":
