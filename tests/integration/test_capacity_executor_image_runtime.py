@@ -149,15 +149,25 @@ def _assert_fixed_native_receiver_process_adapter(image: str) -> None:
         expires_at=datetime(2026, 8, 13, tzinfo=UTC))
     query = encode_native_delivery_query(physical, expected)
     script = """
-import asyncio, hashlib, os, stat, sys
+import asyncio, hashlib, os, socket, stat, sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+from loom_capacity_executor.build_admission_client import BuildAdmissionExecutorV1
 from loom_capacity_executor.native_bootstrap_delivery import parse_native_delivery_query, _canonical
-from loom_capacity_executor.native_bootstrap_process_adapter import NativeBootstrapProcessAdapter, NativeBootstrapReceiverProcessPolicy
+from loom_capacity_executor.native_bootstrap_process_adapter import NativeBootstrapReceiverProcessPolicy
 from loom_capacity_executor.native_bootstrap_receiver import NativeBootstrapReceiverConfigV1
+from loom_capacity_executor.native_bootstrap_supervisor import NativeBootstrapSupervisorConfigV1, NativeBootstrapSupervisorPeerV1, load_native_bootstrap_supervisor_config, run_native_bootstrap_supervisor
+from loom_capacity_executor.native_bootstrap_transport import NativeBootstrapTLSIdentity, NativeBootstrapTLSClient, NativeBootstrapRoute, NativeBootstrapTransportLimits
 from loom_capacity_executor.native_worker_bootstrap import _disable_bootstrap_dumps
-from loom_capacity_executor.runtime import canonical_admission_directory_digest
+from loom_capacity_executor.pinned_admission_transport import PinnedAdmissionFileV1
 from loom_capacity_executor.slurm_contracts import SlurmFileIdentityV2
 from loom_capacity_executor.trusted_launcher import TrustedCandidateExecutableV2
+from loom_capacity_executor.typed_admission import TypedAdmissionDirectoryV3
+from loom_capacity_manager.executable_contracts import canonical_executable_bytes
 _disable_bootstrap_dumps()
 raw = sys.stdin.buffer.read(65537)
 query = parse_native_delivery_query(raw)
@@ -165,9 +175,16 @@ binding = query.physical.binding
 base = Path('/run/loom-receiver')
 admission = base / 'admission'
 admission.mkdir(mode=0o700)
+executor = BuildAdmissionExecutorV1(pool_id=binding.pool_id, pool_generation=binding.pool_generation,
+    executor_id=binding.executor_id, executor_incarnation=binding.executor_incarnation)
+routes_wire = canonical_executable_bytes(TypedAdmissionDirectoryV3(executor=executor, entries=()))
+routes_path = admission / 'routes.json'
+routes_path.write_bytes(routes_wire)
+routes_path.chmod(0o600)
 config = NativeBootstrapReceiverConfigV1(directory=str(base), target_node=binding.node_ids[0],
     pool_id=binding.pool_id, trusted_release_sha256=binding.execution.trusted_fleet_release_sha256,
-    admission_directory=str(admission), admission_directory_sha256=canonical_admission_directory_digest(admission))
+    admission_directory=str(routes_path), admission_directory_sha256=hashlib.sha256(routes_wire).hexdigest(),
+    typed_application_executor=executor)
 wire = _canonical(config)
 path = base / 'receiver.json'
 path.write_bytes(wire)
@@ -178,24 +195,89 @@ policy = NativeBootstrapReceiverProcessPolicy(
     interpreter=TrustedCandidateExecutableV2(path=str(interpreter), sha256=hashlib.sha256(interpreter.read_bytes()).hexdigest(),
         owner_uid=info.st_uid, mode=stat.S_IMODE(info.st_mode)),
     configuration=SlurmFileIdentityV2(path=str(path), sha256=hashlib.sha256(wire).hexdigest(), owner_uid=os.geteuid()))
+now = datetime.now(timezone.utc)
+def issue(name, *, issuer=None, issuer_key=None, ca=False, server=False):
+    key = ec.generate_private_key(ec.SECP256R1())
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+    builder = (x509.CertificateBuilder().subject_name(subject)
+        .issuer_name(issuer.subject if issuer else subject).public_key(key.public_key())
+        .serial_number(x509.random_serial_number()).not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(hours=1)).add_extension(x509.BasicConstraints(ca=ca, path_length=0 if ca else None), critical=True))
+    if not ca:
+        builder = builder.add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH if server else ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False)
+    if server:
+        builder = builder.add_extension(x509.SubjectAlternativeName([x509.DNSName('localhost')]), critical=False)
+    return key, builder.sign(issuer_key or key, hashes.SHA256())
+def pin(name, wire):
+    path = base / name
+    path.write_bytes(wire)
+    path.chmod(0o600)
+    return PinnedAdmissionFileV1(path=str(path), sha256=hashlib.sha256(wire).hexdigest())
+ca_key, ca = issue('disposable-test-ca', ca=True)
+ca_pin = pin('ca.pem', ca.public_bytes(serialization.Encoding.PEM))
+def identity(name, server):
+    key, cert = issue(name, issuer=ca, issuer_key=ca_key, server=server)
+    cert_pin = pin(name + '.pem', cert.public_bytes(serialization.Encoding.PEM))
+    key_pin = pin(name + '.key', key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    return NativeBootstrapTLSIdentity(ca=ca_pin, certificate=cert_pin, private_key=key_pin), hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest()
+server_identity, server_pin = identity('localhost', True)
+client_identity, client_pin = identity('controller', False)
+with socket.socket() as reservation:
+    reservation.bind(('127.0.0.1', 0))
+    port = reservation.getsockname()[1]
+supervisor = NativeBootstrapSupervisorConfigV1(listen_address='127.0.0.1', listen_port=port,
+    target_node=binding.node_ids[0], pool_id=binding.pool_id, trusted_release_sha256=binding.execution.trusted_fleet_release_sha256,
+    identity=server_identity, receiver=policy,
+    peers=(NativeBootstrapSupervisorPeerV1(certificate_sha256=client_pin, pool_id=binding.pool_id,
+        executor_id=binding.executor_id, executor_incarnation=binding.executor_incarnation,
+        operations=('deliver', 'status'), expires_at=now + timedelta(minutes=10)),))
+config_wire = _canonical(supervisor)
+config_path = base / 'supervisor.json'
+config_path.write_bytes(config_wire)
+config_path.chmod(0o600)
+supervisor = load_native_bootstrap_supervisor_config(SlurmFileIdentityV2(path=str(config_path),
+    sha256=hashlib.sha256(config_wire).hexdigest(), owner_uid=os.geteuid()))
 async def exercise():
-    adapter = NativeBootstrapProcessAdapter(policy)
+    stop = asyncio.Event()
+    service = asyncio.create_task(run_native_bootstrap_supervisor(supervisor, stop))
+    route = NativeBootstrapRoute(address='127.0.0.1', port=port, hostname='localhost',
+        target_node=binding.node_ids[0], pool_id=binding.pool_id, trusted_release_sha256=binding.execution.trusted_fleet_release_sha256,
+        server_certificate_sha256=server_pin, expires_at=now + timedelta(minutes=10))
+    client = NativeBootstrapTLSClient(route=route, identity=client_identity, limits=NativeBootstrapTransportLimits(total_seconds=3.0))
     try:
-        assert await adapter.observe_receipt(raw) is None
-        assert adapter.active_operations == 0
+        deadline = asyncio.get_running_loop().time() + 15
+        while True:
+            try:
+                assert await client.observe_receipt(raw) is None
+                break
+            except ValueError:
+                if service.done():
+                    await service
+                    raise AssertionError('supervisor stopped unexpectedly')
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise
+                await asyncio.sleep(0.02)
     finally:
-        await adapter.aclose()
-    assert adapter.active_operations == 0
+        await client.aclose()
+        stop.set()
+        await asyncio.wait_for(service, 10)
+    assert asyncio.all_tasks() == {asyncio.current_task()}
 asyncio.run(exercise())
-print('fixed-receiver-status-unknown')
+print('fixed-receiver-tls-status-unknown')
 """
-    result = subprocess.run(["docker", "run", "--rm", "--interactive", "--read-only", "--network=none",
+    container = subprocess.check_output(["docker", "create", "--interactive", "--read-only", "--network=none",
         "--cpus=1", "--memory=512m", "--pids-limit=32", "--user=65532:65532",
         "--tmpfs=/run/loom-receiver:rw,nosuid,nodev,noexec,mode=0700,uid=65532,gid=65532",
         "--entrypoint=/usr/local/bin/python", image, "-I", "-B", "-c", script],
-        input=query, capture_output=True, check=False, timeout=45)
-    assert result.returncode == 0, result.stderr.decode()
-    assert result.stdout == b"fixed-receiver-status-unknown\n" and result.stderr == b""
+        text=True, timeout=15).strip()
+    assert re.fullmatch(r"[0-9a-f]{64}", container)
+    try:
+        result = subprocess.run(["docker", "start", "--attach", "--interactive", container],
+            input=query, capture_output=True, check=False, timeout=45)
+        assert result.returncode == 0, result.stderr.decode()
+        assert result.stdout == b"fixed-receiver-tls-status-unknown\n" and result.stderr == b""
+    finally:
+        subprocess.run(["docker", "container", "rm", "--force", container], capture_output=True, check=True, timeout=30)
 
 
 def _assert_native_image_environment_is_removed(image: str) -> None:
