@@ -1635,14 +1635,21 @@ def create_app(
         pool_id: str,
         request: Request,
         cleanup_only: bool = False,
+        cleanup_intent_id: UUID | None = None,
         actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
     ) -> Any:
         binding = executor_binding(actor, pool_id=pool_id)
+        if cleanup_intent_id is not None and (not cleanup_only or cleanup_intent_id.int == 0):
+            raise HTTPException(status_code=422, detail="exact intent selection requires cleanup-only")
         session_factory, executions = execution_runtime(request)
         try:
             async with session_factory() as session:
-                result = (await executions.next_pool_work(session, binding, cleanup_only=True)
-                    if cleanup_only else await executions.next_pool_work(session, binding))
+                if cleanup_intent_id is not None:
+                    result = await executions.next_pool_work(session, binding,
+                        cleanup_only=True, cleanup_intent_id=cleanup_intent_id)
+                else:
+                    result = (await executions.next_pool_work(session, binding, cleanup_only=True)
+                        if cleanup_only else await executions.next_pool_work(session, binding))
             return jsonable_encoder(result)
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc

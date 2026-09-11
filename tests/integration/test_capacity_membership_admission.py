@@ -41,8 +41,9 @@ async def _personal_plan(  # type: ignore[no-untyped-def]
     *,
     base_pending: bool = False,
     reporter_token_sha256: str | None = None,
+    ceiling: int = 1,
 ):
-    fixture, active = await _active_v3(session, owner_submission_rate_per_minute=8)
+    fixture, active = await _active_v3(session, owner_submission_rate_per_minute=8, ceiling=ceiling)
     request = _request(active)
     if reporter_token_sha256 is not None:
         request = request.model_copy(

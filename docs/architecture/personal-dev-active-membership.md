@@ -352,10 +352,16 @@ uses a failed preparation or local expiry as cancellation authority. Revocation
 is journaled before sending, committed before handoff deletion, and observed
 before logical close. A pending preparation is explicitly marked revoked, never
 falsely confirmed; restart recognizes only its exact matching pending revocation
-and resumes deletion/supersession after crashes. Physical or ambiguous submissions
-still require separate terminal cleanup. Discovery of the exact manager-authored
-close during pending-preparation replay remains to be connected; the public typed
-execution interlock stays closed.
+and resumes deletion/supersession after crashes. The revoked-preparation event
+and its dependencies survive checkpoint/compaction until protected release.
+Pending native preparation polls manager work with `cleanup_only=true` and an
+exact `cleanup_intent_id`. This selector filters within the authenticated pool,
+executor and execution epoch; it cannot request new capacity. The client rejects
+responses that ignore the selector. Replay requires a close with the exact
+binding, bootstrap epoch/evidence and next command sequence before revoking.
+An absent close or another owner's work does not authorize cancellation. Physical
+or ambiguous submissions still require separate terminal cleanup; the public
+typed execution interlock stays closed.
 
 Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
 preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release

@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import UUID, uuid5
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, true, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1133,6 +1133,7 @@ class CapacityExecutionStore:
         executor: PreparedExecutorBindingV2,
         *,
         cleanup_only: bool = False,
+        cleanup_intent_id: UUID | None = None,
     ) -> (
         ExecutableReservationProposalV2
         | ExecutableIntentBindingV2
@@ -1143,6 +1144,10 @@ class CapacityExecutionStore:
     ):
         if type(cleanup_only) is not bool:
             raise ValueError("cleanup-only work selection must be boolean")
+        if cleanup_intent_id is not None and (
+            not cleanup_only or not isinstance(cleanup_intent_id, UUID) or cleanup_intent_id.int == 0
+        ):
+            raise ValueError("exact cleanup selection requires cleanup-only and a nonzero intent UUID")
         async with _write_transaction(session):
             authority = await self._lock_authority(session)
             if authority.execution_state == "shadow":
@@ -1173,6 +1178,8 @@ class CapacityExecutionStore:
                                 == executor.executor_incarnation,
                                 CapacityExecutableIntent.pool_id == executor.pool_id,
                                 CapacityExecutableIntent.state != "released",
+                                CapacityExecutableIntent.intent_id == cleanup_intent_id
+                                if cleanup_intent_id is not None else true(),
                             )
                             .order_by(
                                 CapacityExecutableIntent.allocation_epoch,

@@ -132,6 +132,7 @@ class _ManagerClient(Protocol):
 
     async def next_executable_work(
         self, command_sequence: int, *, cleanup_only: bool = False,
+        cleanup_intent_id: UUID | None = None,
     ) -> ExecutablePoolWorkV2 | None: ...
 
     async def accept_executable_reservation(
@@ -1474,6 +1475,19 @@ class ExecutablePoolExecutor:
                 or canonical_executable_bytes(registration) != payload
             ):
                 raise JournalRegressionError("protected bootstrap replay changed")
+            if self._native_admission(registration.binding):
+                cleanup = await self.client.next_executable_work(
+                    checkpoint.command_sequence, cleanup_only=True,
+                    cleanup_intent_id=registration.binding.intent_id,
+                )
+                if cleanup is not None:
+                    if (not isinstance(cleanup, ExecutableIntentCloseV2)
+                        or cleanup.binding != registration.binding
+                        or cleanup.bootstrap_registration_epoch != registration.bootstrap_registration_epoch
+                        or cleanup.bootstrap_evidence_sha256 != registration.bootstrap_evidence_sha256
+                        or cleanup.command_sequence != checkpoint.command_sequence + 1):
+                        raise JournalRegressionError("native preparation cleanup authority changed")
+                    return await self._close(cleanup, checkpoint)
             prepared = await self.admission.prepare_worker(
                 registration,
                 bootstrap_sha256=proposal.bootstrap_sha256,

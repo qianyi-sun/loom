@@ -108,10 +108,15 @@ class FakeManager:
             executable=True,
         )
 
-    async def next_executable_work(self, command_sequence: int, *, cleanup_only: bool = False) -> object | None:
+    async def next_executable_work(self, command_sequence: int, *, cleanup_only: bool = False,
+        cleanup_intent_id: UUID | None = None) -> object | None:
         assert command_sequence == self.command_sequence
         if self.reject_work_fetch:
             raise AssertionError("durable central request must replay before work fetch")
+        if cleanup_intent_id is not None:
+            assert cleanup_only
+            if isinstance(self.work, ExecutableIntentCloseV2) and self.work.binding.intent_id != cleanup_intent_id:
+                return None
         return self.work
 
     def _transition(self, command_sequence: int, payload: dict[str, object]) -> SimpleNamespace:

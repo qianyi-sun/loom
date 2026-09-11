@@ -23,7 +23,8 @@ async def test_exact_cleanup_query_rejects_ignored_selector(response_kind):
             value = close.model_copy(update={"binding":binding.model_copy(update={"intent_id":uuid4()})})
         elif response_kind == "increase":
             value = binding
-        return httpx.Response(200,json=None if response_kind == "absent" else value.model_dump(mode="json"))
+        return (httpx.Response(200,content=b"null") if response_kind == "absent"
+            else httpx.Response(200,json=value.model_dump(mode="json")))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         client = ExecutableCapacityExecutorClient(_executable_registration(),manager_origin="https://manager.test",

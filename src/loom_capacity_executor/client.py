@@ -814,16 +814,22 @@ class ExecutableCapacityExecutorClient:
         command_sequence: int,
         *,
         cleanup_only: bool = False,
+        cleanup_intent_id: UUID | None = None,
     ) -> ExecutablePoolWorkV2 | None:
         if type(command_sequence) is not int or command_sequence < 0:
             raise ValueError("executable command high-water is invalid")
         if type(cleanup_only) is not bool:
             raise ValueError("cleanup-only work selection must be boolean")
+        if cleanup_intent_id is not None and (
+            not cleanup_only or not isinstance(cleanup_intent_id, UUID) or cleanup_intent_id.int == 0
+        ):
+            raise ValueError("exact cleanup selection requires cleanup-only and a nonzero intent UUID")
         status_code, response_content = await _stream_response_bounded(
             self._http,
             "GET",
             f"{self._manager_origin}/v2/executors/{self.registration.pool_id}/work"
-            + ("?cleanup_only=true" if cleanup_only else ""),
+            + ("?cleanup_only=true" if cleanup_only else "")
+            + (f"&cleanup_intent_id={cleanup_intent_id}" if cleanup_intent_id is not None else ""),
             headers={"Authorization": f"Bearer {self._bearer_token}"},
             body_label="work",
         )
@@ -843,6 +849,12 @@ class ExecutableCapacityExecutorClient:
             raise ExecutorTransportError("capacity manager work is invalid") from exc
         if cleanup_only and not isinstance(work, (ExecutableIntentCloseV2, ExecutablePartialReleaseV2)):
             raise ExecutorTransportError("capacity manager returned new work to cleanup-only executor")
+        if cleanup_intent_id is not None:
+            bindings = ((work.binding,) if isinstance(work, ExecutableIntentCloseV2)
+                else tuple(item.binding for item in work.releases) if isinstance(work, ExecutablePartialReleaseV2)
+                else ())
+            if not bindings or any(binding.intent_id != cleanup_intent_id for binding in bindings):
+                raise ExecutorTransportError("capacity manager ignored exact cleanup intent selection")
         self._assert_contract_binding(work)
         work_sequence = getattr(work, "command_sequence", None)
         if work_sequence is not None and work_sequence != command_sequence + 1:
