@@ -11,7 +11,8 @@ from loom_capacity_executor.native_oci_bundles import NativeOciBundlePolicy
 from tests.unit.test_native_rootless_runtime import spec_file
 
 
-@pytest.mark.parametrize("fault", [None, "reused-output", "reused-bundles", "write-error"])
+@pytest.mark.parametrize("fault", [None, "reused-output", "reused-bundles", "write-error",
+    "replace-root", "replace-role", "replace-config", "replace-output", "short-write", "replace-before-open"])
 def test_mapped_oci_material_is_fixed_readonly_and_failure_scoped(tmp_path, monkeypatch, fault):
     module = import_module("loom_capacity_executor.native_oci_material")
     _runtime, spec, _path, _digest = spec_file(tmp_path)
@@ -45,11 +46,48 @@ def test_mapped_oci_material_is_fixed_readonly_and_failure_scoped(tmp_path, monk
     monkeypatch.setattr(module, "_require_mapped_root", lambda: None)
     monkeypatch.setattr(module.os, "fstat", metadata)
     monkeypatch.setattr(module.os, "fchown", chown)
+    original_write = module.os.write
+    replacement = None
+    if fault == "replace-before-open":
+        original_open = module.os.open
+        replacement = workspace / "output"
+        replaced = False
+
+        def replace_before_open(path, flags, *args, **kwargs):
+            nonlocal replaced
+            if path == "output" and not replaced:
+                replaced = True
+                replacement.rename(workspace / "output-original")
+                replacement.mkdir(mode=0o755)
+                (replacement / "keep").write_text("foreign")
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(module.os, "open", replace_before_open)
+    elif fault is not None and fault.startswith("replace-"):
+        replacement = {"replace-root": bundle_root, "replace-role": bundle_root / "pause",
+            "replace-config": bundle_root / "pause/config.json", "replace-output": workspace / "output"}[fault]
+        replaced = False
+
+        def replace_during_write(fd, wire):
+            nonlocal replaced
+            if not replaced:
+                replaced = True
+                replacement.rename(replacement.with_name(replacement.name + "-original"))
+                if fault == "replace-config":
+                    replacement.write_text("foreign")
+                else:
+                    replacement.mkdir()
+                    (replacement / "keep").write_text("foreign")
+            return original_write(fd, wire)
+
+        monkeypatch.setattr(module.os, "write", replace_during_write)
+    if fault == "short-write":
+        monkeypatch.setattr(module.os, "write", lambda fd, wire: original_write(fd, wire[:7]))
     if fault == "write-error":
         def failed_write(*args):
             raise OSError("fixture bundle write failed")
         monkeypatch.setattr(module.os, "write", failed_write)
-    if fault is None:
+    if fault in {None, "short-write"}:
         bundles = module.prepare_native_oci_material(spec.context, policy=policy, bundle_root=bundle_root)
         for role in ("pause", "buildkit", "client"):
             target = bundle_root / role / "config.json"
@@ -67,9 +105,15 @@ def test_mapped_oci_material_is_fixed_readonly_and_failure_scoped(tmp_path, monk
             module.prepare_native_oci_material(spec.context, policy=policy, bundle_root=bundle_root)
         if fault in {"reused-output", "reused-bundles"}:
             assert (foreign / "keep").read_text() == "foreign"
-        if fault != "reused-bundles":
+        if replacement is not None:
+            kept = replacement if fault == "replace-config" else replacement / "keep"
+            assert kept.read_text() == "foreign"
+            if fault == "replace-before-open":
+                assert replacement.stat().st_mode & 0o777 == 0o755
+                assert (replacement.stat().st_dev, replacement.stat().st_ino) not in owners
+        if fault not in {"reused-bundles", "replace-root", "replace-role", "replace-config"}:
             assert not bundle_root.exists()
-        if fault != "reused-output":
+        if fault not in {"reused-output", "replace-output", "replace-before-open"}:
             assert not (workspace / "output").exists()
         assert not (workspace / "buildkit-run").exists()
     assert (workspace / "input/keep").read_text() == "staged source"
