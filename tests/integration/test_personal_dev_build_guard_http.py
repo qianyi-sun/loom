@@ -203,7 +203,8 @@ async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_inpu
         assert (await client.post(route(registration,"prepare"),json=preparation(registration,digest))).status_code == 200
 
 
-async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepared_input,tmp_path):
+@pytest.mark.parametrize("pinned", [False,True])
+async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepared_input,tmp_path,pinned):
     import asyncio
     import socket
     import ssl
@@ -255,8 +256,19 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
         binding = registration.binding
         identity = BuildAdmissionExecutorV1(pool_id=binding.pool_id,pool_generation=binding.pool_generation,
             executor_id=binding.executor_id,executor_incarnation=binding.executor_incarnation)
-        client = BuildAdmissionClient.from_files(identity,DemandReporterConnection(manager_origin=origin,
-            bearer_token_file=token_path,tls_files=tls_files,timeout_seconds=5.0))
+        if pinned:
+            from hashlib import sha256
+
+            from loom_capacity_executor.pinned_admission_transport import PinnedBuildAdmissionConnectionV1
+
+            paths = {"bearer_token":token_path,"ca":ca_path,
+                "certificate":tls_files.certificate_file,"private_key":tls_files.private_key_file}
+            config = PinnedBuildAdmissionConnectionV1.model_validate({"origin":origin,
+                **{name:{"path":str(path),"sha256":sha256(path.read_bytes()).hexdigest()} for name,path in paths.items()}})
+            client = BuildAdmissionClient.from_pinned_files(identity,config)
+        else:
+            client = BuildAdmissionClient.from_files(identity,DemandReporterConnection(manager_origin=origin,
+                bearer_token_file=token_path,tls_files=tls_files,timeout_seconds=5.0))
         prepared = await client.prepare_worker(registration,bootstrap_sha256=digest)
         assert prepared.intent_id == binding.intent_id
         observation = await client.observe_intent(binding)
