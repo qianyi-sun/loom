@@ -7,12 +7,13 @@ from importlib import import_module
 import pytest
 
 
-@pytest.mark.parametrize("fault", [None, "existing", "unexpected-capability", "symlink", "mode", "unmapped"])
+@pytest.mark.parametrize("fault", [None, "existing", "unexpected-capability", "symlink", "mode", "unmapped", "replace-root"])
 def test_mapper_capabilities_are_fixed_validated_and_read_back(tmp_path, monkeypatch, fault):
     module = import_module("loom_capacity_executor.native_mapper_capabilities")
     root = tmp_path / "rootfs"
     (root / "usr/bin").mkdir(parents=True)
-    root.chmod(0o755)
+    for directory in (root, root / "usr", root / "usr/bin"):
+        directory.chmod(0o755)
     for name in ("newuidmap", "newgidmap"):
         target = root / "usr/bin" / name
         target.write_bytes(b"trusted mapped helper")
@@ -48,6 +49,10 @@ def test_mapper_capabilities_are_fixed_validated_and_read_back(tmp_path, monkeyp
         assert name == "security.capability"
         values[helper_name(fd)] = value
         writes.append(helper_name(fd))
+        if fault == "replace-root" and len(writes) == 1:
+            root.rename(tmp_path / "retained-root")
+            root.mkdir(mode=0o755)
+            (root / "keep").write_text("foreign")
 
     if fault != "unmapped":
         monkeypatch.setattr(module, "_require_mapped_root", lambda: None)
@@ -59,6 +64,11 @@ def test_mapper_capabilities_are_fixed_validated_and_read_back(tmp_path, monkeyp
         assert values == expected
         assert writes == ([] if fault == "existing" else ["newuidmap", "newgidmap"])
     else:
-        with pytest.raises((ValueError, RuntimeError, OSError)):
+        message = {"unexpected-capability": "capability changed", "mode": "helper metadata changed",
+            "unmapped": "mapped root", "replace-root": "changed"}.get(fault)
+        with pytest.raises((ValueError, RuntimeError, OSError), match=message):
             module.restore_native_mapper_capabilities(root)
-        assert writes == [], "all helper metadata must be validated before any mutation"
+        if fault == "replace-root":
+            assert list(root.iterdir()) == [root / "keep"]
+        else:
+            assert writes == [], "all helper metadata must be validated before any mutation"
