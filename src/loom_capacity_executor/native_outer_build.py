@@ -174,8 +174,9 @@ async def run_native_outer_build(owner: NativeAllocatedIO, *, spec_path: Path, e
 ) -> BuildOutcomeReceiptV1:
     """Caller retains allocated IO and preverified material/one-shot scope.
 
-    Requires already provisioned mapped rootfs/output/runtime material; this is
-    not an installer. No credential/client/source proc-FD crosses to the child.
+    V1 requires prepared mapped material; V2 supplies an authenticated release
+    policy for preparation in the mapped launch. Neither installs host tooling.
+    No credential/client/source proc-FD crosses to the child.
     Uncertain cleanup or ambiguous writes fail to management recovery, not release.
     """
     if type(timeout_seconds) is not int or timeout_seconds <= 0:

@@ -1,8 +1,9 @@
-"""Fixed credential-free RootlessKit exec boundary for preverified native material.
+"""Fixed credential-free RootlessKit exec boundary for authenticated native material.
 
 The outer allocated IO process owns the unreaped launcher and existing one-shot
 fence, sealed inputs, authenticated channels, upload and outcome. This executable
-does not install material or prove Slurm containment/physical capacity release.
+prepares attempt-local V2 material but does not install host tooling or prove
+Slurm containment/physical capacity release.
 """
 
 from __future__ import annotations
@@ -106,7 +107,7 @@ class NativeRootlessSpecV2(_NativeRootlessSpec, StrictV2Model):
 
 
 NativeRootlessSpec = NativeRootlessSpecV1 | NativeRootlessSpecV2
-_SPEC_ADAPTER = TypeAdapter(NativeRootlessSpec)
+_SPEC_ADAPTER: TypeAdapter[NativeRootlessSpec] = TypeAdapter(NativeRootlessSpec)
 
 
 class NativeRootlessResultV1(StrictV1Model):

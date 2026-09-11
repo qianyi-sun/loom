@@ -52,18 +52,28 @@ def prepare_native_rootless_material(spec: NativeRootlessSpecV2) -> None:
     with ExitStack() as stack:
         parent = _open_directory(material.parent, stack)
         metadata = os.fstat(parent)
-        if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o7777 != 0o700:
+        if ((metadata.st_uid, metadata.st_gid) != (os.geteuid(), os.getegid())
+            or metadata.st_mode & 0o7777 != 0o700):
             raise ValueError("native material attempt parent must be private and owned")
         os.mkdir("material", mode=0o700, dir_fd=parent)
         created = os.stat("material", dir_fd=parent, follow_symlinks=False)
         directory = _open_directory(material, stack)
         if _identity(created) != _identity(os.fstat(directory)):
             raise ValueError("native material directory changed before preparation")
+
+        def unchanged() -> None:
+            reopened = _open_directory(material, stack)
+            observed = os.fstat(reopened)
+            if (_identity(observed) != _identity(created) or observed.st_mode & 0o7777 != 0o700
+                or (observed.st_uid, observed.st_gid) != (os.geteuid(), os.getegid())):
+                raise ValueError("native material directory changed during preparation")
+
+        unchanged()
         unpack_native_rootfs_archive(archive=Path(spec.material.archive), destination=material / "rootfs",
             expected_sha256=spec.material.archive_sha256, expected_size_bytes=spec.material.archive_size_bytes,
             max_unpacked_bytes=spec.material.max_unpacked_bytes, max_entries=spec.material.max_entries)
+        unchanged()
         restore_native_mapper_capabilities(material / "rootfs")
+        unchanged()
         prepare_native_oci_material(spec.context, policy=spec.material.policy(workspace), bundle_root=material / "bundles")
-        reopened = _open_directory(material, stack)
-        if _identity(os.fstat(reopened)) != _identity(created):
-            raise ValueError("native material directory changed during preparation")
+        unchanged()

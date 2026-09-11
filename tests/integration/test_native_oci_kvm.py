@@ -190,7 +190,7 @@ def test_unprivileged_rootlesskit_launches_fixed_native_kvm_runtime(tmp_path):
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
 
 
-@pytest.mark.parametrize("root_stop", ["signal", "launcher-death", "supervisor-death", "monitored", "monitored-expiry", "monitored-rootless", "monitored-rootless-expiry", "monitored-rootless-outer", "monitored-rootless-outer-expiry"])
+@pytest.mark.parametrize("root_stop", ["signal", "launcher-death", "supervisor-death", "monitored", "monitored-expiry", "monitored-rootless", "monitored-rootless-expiry", "monitored-rootless-outer", "monitored-rootless-outer-expiry", "monitored-rootless-outer-v2", "monitored-rootless-outer-v2-expiry"])
 def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path, root_stop):
     arch = platform.machine()
     if arch not in BUILDERS or not Path("/dev/kvm").exists():
@@ -209,8 +209,16 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
         helper_modules / "native_parent_death.py")
     image = "ghcr.io/qianyi-sun/loom-personal-dev-builder@" + BUILDERS[arch]
     name = "loom-native-oci-test-" + uuid4().hex
+    material_v2 = "-v2" in root_stop
     try:
         checked("docker", "create", "--name", name, image, capture_output=True)
+        if material_v2:
+            # Fixture-only current-source overlay BEFORE export and digest. The
+            # production V2 launch has no overlay hook or preparation subprocess.
+            for module in ("__init__", "personal_dev_builder_artifact", "personal_dev_candidate",
+                "personal_dev_sandbox_builder", "personal_dev_source"):
+                checked("docker", "cp", str(ROOT / "src/loom" / (module + ".py")),
+                    name + ":/opt/loom-personal-dev-builder/loom/" + module + ".py", capture_output=True)
         with (fixtures / "rootfs.tar").open("wb") as output:
             checked("docker", "export", name, stdout=output)
     finally:
@@ -227,7 +235,8 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
         str(ROOT / "tests/support/native_kvm/step.c"), "-o", str(repo / "step"))
     (repo / "payload").write_text("committed\n")
     for dockerfile in _DOCKERFILES.values():
-        (repo / dockerfile).write_text("FROM scratch\nCOPY step /step\nCOPY payload /payload\nRUN [\"/step\"]\n")
+        step = '["/step", "--wait"]' if material_v2 and root_stop.endswith("expiry") else '["/step"]'
+        (repo / dockerfile).write_text("FROM scratch\nCOPY step /step\nCOPY payload /payload\nRUN " + step + "\n")
     checked("git", "init", "-q", str(repo))
     checked("git", "-C", str(repo), "add", ".")
     checked("git", "-C", str(repo), "-c", "user.name=Test", "-c", "user.email=test@example.com",
@@ -249,8 +258,9 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
     (fixtures / "context.json").write_text(context.model_dump_json())
     wire = (ROOT / "deploy/personal-dev-builder/client-seccomp-v1.json").read_bytes()
     (fixtures / "client-seccomp.json").write_bytes(wire)
-    policy = NativeOciBundlePolicy(rootfs=Path("/tmp/native-material/rootfs" if root_stop.startswith("monitored-rootless-outer")
-        else "/tmp/native-rootfs"), workspace=Path("/tmp/native-work"),
+    policy = NativeOciBundlePolicy(rootfs=Path("/tmp/native-attempt/material/rootfs" if material_v2 else
+        "/tmp/native-material/rootfs" if root_stop.startswith("monitored-rootless-outer") else "/tmp/native-rootfs"),
+        workspace=Path("/tmp/native-attempt/work" if material_v2 else "/tmp/native-work"),
         client_seccomp=wire, client_seccomp_sha256=hashlib.sha256(wire).hexdigest(),
         tmp_bytes=64 * 1024**2, buildkit_state_bytes=1024**3)
     bundles = render_native_oci_bundles(context, policy)
@@ -311,7 +321,10 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
     assert "native-allocated-runtime-cleanup-ok" in output.stdout
     if "-outer" in root_stop:
-        assert "native-production-oci-material-ready" in output.stdout
+        if material_v2:
+            assert "native-v2-one-launch-session-settled" in output.stdout
+        else:
+            assert "native-production-oci-material-ready" in output.stdout
         assert "native-outer-io-session-settled" in output.stdout
     if root_stop.endswith("expiry"):
         assert "native-supervised-expiry-stopped-live-client" in output.stdout

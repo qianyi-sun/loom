@@ -2116,8 +2116,28 @@ only tracked inodes and preserves staged input and foreign replacements. The
 outer KVM fixture uses this production assembly for actual build execution;
 its V1 expiry case still explicitly substitutes a fixture-only lifetime probe.
 Assembly does not authenticate the installed release, launch a feature, or
-provide a one-launch installed worker entrypoint. SIGKILL scratch recovery and
-unmodified-client expiry acceptance remain separate obligations.
+provide an installed worker entrypoint. SIGKILL scratch recovery remains a
+separate obligation.
+
+`NativeRootlessSpecV2` explicitly composes bounded preparation into one mapped
+launch. V1 retains its existing preprepared-material semantics and rejects the
+new material fields. V2 binds archive digest/size, entry/unpacked bounds and exact
+client seccomp bytes/digest; material/rootfs/bundles and runsc state use fixed,
+disjoint attempt-local paths outside RootlessKit's removable state. After parent
+binding and canonical spec validation, mapped preparation unpacks, restores fixed
+mapper capabilities and assembles OCI material before creating any broker or
+requesting execution permission. Directory identity is rechecked between stages;
+errors stop execution, close the activation channels and retain partial scratch
+for allocation recovery. The original-UID caller must still authenticate immutable
+installed release/runtime provenance before launch: mapped overflow ownership
+cannot establish host-root trust. V2 alone does not enable installed intake.
+The V2 KVM fixture exercises the unchanged production client for both successful
+builds and expiry during a long-lived feature Dockerfile `RUN`. A read-only
+original-UID fixture observer confirms the guest step in the exact sidecar before
+synthetic authority withholds renewal. Post-run readback verifies exact rendered
+configs, empty runtime inventory, rejected late launch and no artifact publication
+on expiry. This establishes offline runtime behavior, not Slurm death-chain or
+multi-owner installed acceptance.
 
 The versioned client policy is
 `deploy/personal-dev-builder/client-seccomp-v1.json`. It permits ordinary
