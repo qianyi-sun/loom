@@ -708,8 +708,14 @@ The database completion sequence now composes the guarded transfer, reopening
 and original-password login restoration. `complete_application_handoff_database`
 requires the saved target, exact current handoff peer, original guard, original
 credential and fixed schema ACL profile. A sealed retry first serializes closure
-against an uncertain reopen, verifies the drain, and validates or performs the
-ownership transfer. Reopening then requires committed successor ownership and
+against an uncertain reopen and verifies the drain. Before validating or performing
+ownership transfer, it also checks startup locks across databases, prepared work,
+and surviving client sessions outside the application database. Only the exact
+handoff peer, original guard and current maintenance peer are exempt; an idle
+foreign client is not evidence that its queued work has retired. Refusal never
+signals those clients. Native background/replication processes still require the
+enclosing admitted SQL profile and manager/external-writer exclusion.
+Reopening then requires committed successor ownership and
 checks the original guard before and after the admission change. Login restoration
 also checks that guard inside its transaction. An already-restored retry only
 observes the exact ordinary login and trusted schema; it never reseals the account
