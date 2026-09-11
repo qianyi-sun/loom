@@ -1477,7 +1477,7 @@ def _resume(
         guard_transferred = False
         try:
             if retained_guard is not None:
-                guard_evidence = mutation_guard.assert_ready(request_id)
+                guard_evidence = mutation_guard.assert_ready(request_id, candidate_config=effective_config)
                 if guard_evidence != retained_guard:
                     return _safe_error(dependencies, "original application mutation guard changed")
             else:
@@ -1485,7 +1485,10 @@ def _resume(
                     request_id, candidate_config=effective_config,
                 )
                 guard_acquired = True
-            observed_epoch = read_mutation_epoch()
+            observed_epoch = (
+                mutation_guard.observe_retained_epoch(retained_guard, candidate_config=effective_config)
+                if retained_guard is not None else read_mutation_epoch()
+            )
             if (
                 type(observed_epoch) is not int
                 or guard_evidence.request_id != request_id
