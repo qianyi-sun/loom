@@ -7,12 +7,16 @@ retirement. The original PostgreSQL backend and lock must survive unchanged.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import io
 import json
+import platform
 import select
 import socket
+import ssl
 import subprocess
 import tarfile
+import tempfile
 import time
 from contextlib import contextmanager
 
@@ -211,6 +215,58 @@ def _replace_manager(argv, kube, pod, *, expected_manager):
             lambda value: value != old_inode, "manager executable was not replaced",
         )
         assert hashlib.sha256(execute("cat", "/proc/1/exe")).hexdigest() == binary_sha
+
+
+@pytest.mark.timeout(900)
+@pytest.mark.skipif(platform.machine() not in {"x86_64", "amd64"}, reason="protected primary profile is amd64")
+def test_production_stream_and_tls_transport_replaces_actual_cnpg_preserving_guard(cnpg_probe):
+    """Actual pinned manager + real TLS/header/body limits, not full handoff admission."""
+    from loom_cli.rollout.operator.protected_apply_executor import (
+        SubprocessProtectedApplyCommandRunner,
+    )
+    from loom_cli.rollout.operator.protected_cnpg_manager_replacement import (
+        CNPG_MANAGER_SHA256,
+        CNPG_MANAGER_SIZE,
+    )
+    from loom_cli.rollout.operator.protected_cnpg_manager_transport import (
+        _capture_binary,
+        _forward_port,
+        _UpdateChannel,
+    )
+    from loom_cli.rollout.operator.protected_cnpg_manager_transport import (
+        _child as transport_child,
+    )
+
+    argv, kube, pod, expected_manager = cnpg_probe
+    assert len(expected_manager) == CNPG_MANAGER_SIZE
+    assert hashlib.sha256(expected_manager).hexdigest() == CNPG_MANAGER_SHA256
+    # Every process is additionally pinned by argv to the disposable kubeconfig.
+    command = argv("version", "--client")
+    assert command[:2] == ["kubectl", "--kubeconfig"]
+    environment = {**SubprocessProtectedApplyCommandRunner().environment, "KUBECONFIG": command[2]}
+    def execute(*args):
+        return kube("exec", pod, "-c", "postgres", "--", *args)
+
+    original_inode = execute("stat", "-Lc", "%d:%i", "/proc/1/exe").strip()
+    with _child(argv("exec", "-i", pod, "-c", "postgres", "--", "psql",
+                     "-XAtq", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom")) as guard:
+        query = "SELECT pg_backend_pid() || '|' || pg_postmaster_start_time() || '|' || pg_try_advisory_lock(5498691230183247727)"
+        before = _query(guard, query)
+        assert before.endswith("|true")
+        with tempfile.TemporaryFile(mode="w+b") as binary:
+            with transport_child(argv("exec", pod, "-c", "postgres", "--", "cat", "/proc/1/exe"), environment) as source:
+                _capture_binary(source, binary)
+            certificate = execute("cat", "/controller/certificates/server.crt").decode("ascii")
+            with transport_child(argv("port-forward", f"pod/{pod}", ":8000", "--address=127.0.0.1"), environment) as forward:
+                port = _forward_port(forward)
+                try:
+                    _UpdateChannel(binary, port, ssl.PEM_cert_to_DER_cert(certificate)).issue()
+                except (OSError, http.client.HTTPException):
+                    pass  # Ambiguous transport result must be reconciled below.
+        _eventually(lambda: execute("stat", "-Lc", "%d:%i", "/proc/1/exe").strip(),
+                    lambda value: value != original_inode, "production stream did not replace executable")
+        assert execute("cat", "/proc/1/exe") == expected_manager
+        assert _query(guard, query) == before
 
 
 @pytest.mark.timeout(900)
