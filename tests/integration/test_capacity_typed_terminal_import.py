@@ -156,7 +156,7 @@ def test_typed_terminal_import_migration_preserves_authority_and_reverses_empty_
         command.downgrade(config, "guard_0030")
         with engine.connect() as connection:
             legacy = connection.execute(query, {"signature": signature}).one()
-            assert "guard_0031: exact" not in legacy[0]
+            assert "guard_0032: exact" not in legacy[0]
             assert legacy[1:] == before[1:]
         command.upgrade(config, "head")
         with engine.connect() as connection:
@@ -174,7 +174,7 @@ def test_typed_terminal_import_refuses_downgrade_with_retained_evidence(
     seeded = _seed_claimed_protected_trial(capacity_guard_database, monkeypatch, tmp_path)
     payload = typed_payload(seeded)
     asyncio.run(_import_terminal_inventory_payload(capacity_guard_database, seeded, payload))
-    with pytest.raises(RuntimeError, match="cannot downgrade guard_0031"):
+    with pytest.raises(RuntimeError, match="cannot downgrade guard_0032"):
         command.downgrade(_guard_config(capacity_guard_database), "guard_0030")
     engine = create_engine(_value(capacity_guard_database, "admin_url"))
     try:
@@ -185,7 +185,7 @@ def test_typed_terminal_import_refuses_downgrade_with_retained_evidence(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0031"
+                == "guard_0032"
             )
             assert (
                 connection.execute(

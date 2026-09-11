@@ -175,7 +175,7 @@ def test_0135_downgrade_refuses_used_publication_authority(
             )
             assert (
                 connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "0141"
+                == "0142"
             )
     finally:
         engine.dispose()

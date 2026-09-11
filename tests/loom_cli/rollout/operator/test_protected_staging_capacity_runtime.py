@@ -560,7 +560,7 @@ class _DatabaseRunner:
                 return b"absent\n"
             return b"loom_capacity_guard.capacity_guard_alembic_version\n"
         if "version_num" in joined:
-            return b"guard_0031\n"
+            return b"guard_0032\n"
         if "current_protected_runtime_registration" in joined:
             if self.protected_roles_sealed and not self.allow_sealed_runtime_impersonation:
                 raise RuntimeError("injected sealed runtime role")

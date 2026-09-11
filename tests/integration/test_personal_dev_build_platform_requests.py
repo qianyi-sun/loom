@@ -255,7 +255,7 @@ async def test_sql_preserves_request_identity_and_recovery_history(sessions, tmp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancelled", (False, True))
-async def test_0141_rollback_refuses_any_retained_request(sessions, tmp_path, isolated_migration_postgres_url, cancelled):
+async def test_0142_rollback_refuses_any_retained_request(sessions, tmp_path, isolated_migration_postgres_url, cancelled):
     module = import_module("loom.personal_dev_build_platform_requests")
     registration = await _seed_running_attempt(sessions, now=_NOW)
     member, runtime = build_service(tmp_path, registration)
@@ -265,22 +265,22 @@ async def test_0141_rollback_refuses_any_retained_request(sessions, tmp_path, is
         if cancelled:
             await module.cancel_platform_requests(session, registration, member=member, runtime=runtime,
                 platforms=("linux/arm64",), now=_NOW + timedelta(seconds=1))
-    with pytest.raises(DBAPIError, match="cannot downgrade 0141"):
-        await asyncio.to_thread(command.downgrade, _config(isolated_migration_postgres_url), "0140")
+    with pytest.raises(DBAPIError, match="cannot downgrade 0142"):
+        await asyncio.to_thread(command.downgrade, _config(isolated_migration_postgres_url), "0141")
     async with sessions() as session:
-        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0141"
+        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0142"
         assert await session.scalar(text("SELECT count(*) FROM personal_dev_build_platform_requests")) == 1
 
 
-def test_0141_empty_rollback_and_model_parity(isolated_migration_postgres_url):
+def test_0142_empty_rollback_and_model_parity(isolated_migration_postgres_url):
     from loom.db.schema import PersonalDevBuildPlatformRequest
 
     config = _config(isolated_migration_postgres_url)
     engine = create_engine(isolated_migration_postgres_url)
     try:
-        command.downgrade(config, "0140")
+        command.downgrade(config, "0141")
         assert not inspect(engine).has_table("personal_dev_build_platform_requests")
-        command.upgrade(config, "0141")
+        command.upgrade(config, "0142")
         inspector = inspect(engine)
         columns = inspector.get_columns("personal_dev_build_platform_requests")
         expected = PersonalDevBuildPlatformRequest.__table__.columns
@@ -289,7 +289,7 @@ def test_0141_empty_rollback_and_model_parity(isolated_migration_postgres_url):
         assert {item["name"] for item in inspector.get_check_constraints("personal_dev_build_platform_requests")} == {
             "personal_build_request_identity_check", "personal_build_request_digest_check", "personal_build_request_time_check"}
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0141"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0142"
             assert connection.scalar(text("SELECT count(*) FROM pg_trigger WHERE tgrelid = 'personal_dev_build_platform_requests'::regclass AND NOT tgisinternal")) == 2
     finally:
         engine.dispose()

@@ -1,15 +1,15 @@
 """Retain owner/installation/lease-bound native build demand, without admission.
 
-Revision ID: 0141
-Revises: 0140
+Revision ID: 0142
+Revises: 0141
 """
 
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0141"
-down_revision = "0140"
+revision = "0142"
+down_revision = "0141"
 branch_labels = None
 depends_on = None
 _TABLE = "personal_dev_build_platform_requests"
@@ -65,7 +65,7 @@ def downgrade() -> None:
     op.execute("LOCK TABLE public.personal_dev_build_platform_requests IN ACCESS EXCLUSIVE MODE")
     op.execute("""DO $block$ BEGIN
         IF EXISTS (SELECT 1 FROM public.personal_dev_build_platform_requests) THEN
-          RAISE EXCEPTION 'cannot downgrade 0141 with retained personal build platform requests';
+          RAISE EXCEPTION 'cannot downgrade 0142 with retained personal build platform requests';
         END IF;
         END $block$""")
     op.drop_table(_TABLE)

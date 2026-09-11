@@ -86,7 +86,7 @@ _GUARD_MIGRATION_RESOURCES = {
     "capacity_guard_migrations/versions/guard_0029_protected_pending_cancellation.py",
     "capacity_guard_migrations/versions/guard_0030_application_trigger_schema_usage.py",
     "capacity_guard_migrations/versions/guard_0031_native_reader_fence.py",
-    "capacity_guard_migrations/versions/guard_0031_typed_terminal_inventory.py",
+    "capacity_guard_migrations/versions/guard_0032_typed_terminal_inventory.py",
 }
 _PROFILE = _REPO_ROOT / "deploy/dev-fleet/capacity-control-plane.toml"
 _MANAGER_IMAGE = "ghcr.io/qianyi-sun/loom-capacity-manager@sha256:" + "a" * 64
@@ -276,7 +276,7 @@ def test_installed_wheel_renders_capacity_manifests_outside_checkout(
     )
     assert probe.returncode == 0, probe.stderr
     probe_result = json.loads(probe.stdout)
-    assert probe_result.pop("guard_head") == "guard_0031"
+    assert probe_result.pop("guard_head") == "guard_0032"
     loaded_paths = [Path(value).resolve() for value in probe_result.values()]
     assert all(path.is_relative_to(installed_purelib) for path in loaded_paths)
     assert not any(path.is_relative_to(_REPO_ROOT) for path in loaded_paths)

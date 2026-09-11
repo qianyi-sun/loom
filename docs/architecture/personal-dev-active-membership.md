@@ -1563,7 +1563,7 @@ digests are preserved through the protected SQL call. The client streams up to
 the shared 8 MiB terminal-evidence contract bound and rejects error responses
 without reading their bodies; unrelated receipt bounds remain unchanged.
 
-Protected migration `guard_0031` extends the existing agent-only SQL importer
+Protected migration `guard_0032` extends the existing agent-only SQL importer
 without adding privileges or admission authority. Exact typed versions,
 application purpose, subject reference and delegated owner/manifest provenance
 remain joined to the existing local registration, live claim and physical worker.
@@ -1589,7 +1589,7 @@ the durable caller must select unassigned platform requests under the current
 fence and include assignments and cleanup-unproven commitments in the same
 snapshot. Removing pending demand is not physical release. Intake stays disabled.
 
-Migration `0141` adds management-owned durable platform requests. Staging locks
+Migration `0142` adds management-owned durable platform requests. Staging locks
 and re-reads the whole build lease and source candidate, binds the exact owner,
 build-service incarnation/deployment, approved runtime installation and native
 platform, and atomically retains both requested platforms. Concurrent retries

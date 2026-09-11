@@ -2524,7 +2524,7 @@ async def test_guard_0020_downgrade_serializes_committing_executable_evidence(
             await downgrade_task
         await executor_engine.dispose()
 
-    assert version == "guard_0031"
+    assert version == "guard_0032"
     assert evidence == 1
 
 

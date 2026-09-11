@@ -1,7 +1,7 @@
 """Preserve typed application terminal evidence in the protected importer.
 
-Revision ID: guard_0031
-Revises: guard_0030
+Revision ID: guard_0032
+Revises: guard_0031
 
 Manager authentication owns historical allocation and signature verification.
 This importer still owns exact local registration, attempt, claim and worker
@@ -13,8 +13,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "guard_0031"
-down_revision: str | Sequence[str] | None = "guard_0030"
+revision: str = "guard_0032"
+down_revision: str | Sequence[str] | None = "guard_0031"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -23,7 +23,7 @@ _SIGNATURE = (
 )
 _MARKER = "          SELECT registration.* INTO v_registration"
 _TYPED_CHECK = """
-          -- guard_0031: exact application-only typed provenance, never admission.
+          -- guard_0032: exact application-only typed provenance, never admission.
           IF p_payload->>'schema_version' = '3' AND (
             jsonb_typeof(v_metadata->'subject_authority') = 'object'
             AND v_metadata ?& ARRAY['schema_version','binding','subject_authority',
@@ -173,7 +173,7 @@ def downgrade() -> None:
     )
     if retained:
         raise RuntimeError(
-            "cannot downgrade guard_0031 while typed terminal inventory evidence exists"
+            "cannot downgrade guard_0032 while typed terminal inventory evidence exists"
         )
     # A function invocation can outlive CREATE OR REPLACE. Leave the V2 table
     # constraint at the old head so an already-running typed import cannot
