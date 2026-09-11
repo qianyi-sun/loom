@@ -2041,6 +2041,15 @@ def test_root_test_shard_timeout_has_bounded_growth_headroom() -> None:
     assert 40 <= timeout_minutes <= 45
 
 
+def test_integration_shard_timeout_has_bounded_growth_headroom() -> None:
+    workflow = _workflow(".github/workflows/ci.yml")
+
+    # Run34616503769 shard1 was cancelled at99% by its40-minute job limit,
+    # while still making normal test progress. Preserve room for completion,
+    # coverage upload and cleanup without reducing the selected test set.
+    assert 50 <= workflow["jobs"]["integration"]["timeout-minutes"] <= 60
+
+
 def test_ci_supports_merge_queue_merge_group_event() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
     on_config = _workflow_on(workflow)
