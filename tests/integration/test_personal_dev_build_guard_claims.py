@@ -231,7 +231,7 @@ async def test_claim_evidence_cannot_be_mutated_or_downgraded(prepared_input, mo
     with pytest.raises(DBAPIError, match="retained evidence"):
         command.downgrade(build_guard_database[0], "build_guard_0016")
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0019"
+        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0020"
 
 
 @pytest.mark.parametrize("boundary", ["grant", "public", "search-path", "helper"])

@@ -1,6 +1,6 @@
 """Purpose-specific management/executor build admission envelopes."""
 
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
 from pydantic import Field, model_validator
@@ -74,8 +74,17 @@ class BuildOutcomeRequestV1(StrictV1Model):
         return self
 
 
+class BuildInterruptedOutcomeRequestV1(StrictV1Model):
+    """Management-only physical-terminal settlement, never a worker report."""
+
+    claim: BuildClaimRequestV1
+    operation_id: UUID
+    result: Literal["interrupted"] = "interrupted"
+    terminal_inventory_sha256: Digest
+
+
 class BuildOutcomeReceiptV1(StrictV1Model):
-    request: BuildOutcomeRequestV1
+    request: Annotated[BuildOutcomeRequestV1 | BuildInterruptedOutcomeRequestV1, Field(discriminator="result")]
     request_digest: Digest
     claim_high_water: Literal[1] = 1
     live_claim_count: Literal[0] = 0

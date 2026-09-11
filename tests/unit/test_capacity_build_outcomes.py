@@ -8,6 +8,8 @@ from pydantic import ValidationError
 from loom_capacity_agent.build_admission import (
     BuildArtifactV1,
     BuildClaimRequestV1,
+    BuildInterruptedOutcomeRequestV1,
+    BuildOutcomeExchangeV1,
     BuildOutcomeReceiptV1,
     BuildOutcomeRequestV1,
     native_build_artifact_key,
@@ -106,3 +108,14 @@ async def test_outcome_client_rejects_invalid_credentials_before_transport(crede
     async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected)) as http:
         with pytest.raises(ValueError):
             await client_for(http, request.claim).record_outcome(request, worker_credential=credential)
+
+
+def test_worker_exchange_cannot_assert_manager_terminal_interruption():
+    import json
+
+    request = BuildInterruptedOutcomeRequestV1(claim=claim_request(), operation_id=uuid4(), terminal_inventory_sha256="a" * 64)
+    receipt = BuildOutcomeReceiptV1(request=request, request_digest=canonical_digest(request))
+    assert BuildOutcomeReceiptV1.model_validate_json(canonical_bytes(receipt)) == receipt
+    with pytest.raises(ValidationError):
+        BuildOutcomeExchangeV1.model_validate_json(json.dumps({"schema_version": 1,
+            "outcome": request.model_dump(mode="json"), "worker_credential": "w" * 43}))

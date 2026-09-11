@@ -497,6 +497,18 @@ contents. Discovery/authority errors do not produce invented success. This adapt
 still needs connection to the management runtime and live concurrent-owner
 acceptance; it issues no source grants or application worker credentials.
 
+Build-guard revision `build_guard_0020` permits management-only lost-result
+settlement from an exact committed native terminal inventory import. It joins
+the installation, bootstrap, physical job, registration and committed claim;
+no worker credential is needed after the physical process has disappeared. A
+missing result becomes `interrupted`, never image success. A previously committed
+worker result is preserved unchanged, including across a racing report/recovery.
+The same immutable outcome history and live-claim accounting apply. Interrupted
+work remains held until authoritative release, then may retry under fresh
+admission. Worker HTTP exchanges cannot assert manager interruption. Downgrade
+refuses retained interruption evidence; registered release and orchestration
+remain separate required steps.
+
 Build-guard revision `build_guard_0019` records immutable per-claim wrapper outcomes:
 `artifact-ready`, `failed`, or `cancelled`. Artifact-ready retains an archive hash
 and size, not verified image success or publication authority. Object identities
@@ -511,9 +523,9 @@ the actual live count; existing drain receipts remain immutable across outcomes
 and schema upgrades. Artifact-ready and cancelled requests are excluded from
 pending demand and fresh source admission. A failed request can retry only after
 its old hold is authoritatively retired. No outcome writes public candidate
-status, releases capacity, or grants fresh execution. Lost-result terminal
-settlement, registered release and verified artifact publication remain required
-before runtime readiness. The pool-authenticated outcome route and pinned native
+status, releases capacity, or grants fresh execution. Registered release and
+verified artifact publication remain required before runtime readiness. The
+pool-authenticated outcome route and pinned native
 client retain exact receipt checks, worker-credential separation, and outer-commit
 publication. Typed outcome routing rejects application-purpose subjects.
 

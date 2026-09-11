@@ -185,6 +185,6 @@ async def test_revocation_requires_prior_bootstrap_commit_and_prevents_own_downg
     with pytest.raises(DBAPIError, match="retained evidence"):
         command.downgrade(config, "build_guard_0010")
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0019"
+        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0020"
     async with factory.begin() as session:
         assert (await store(session, installation).observe_intent(request.binding)).prepared_revocation == receipt

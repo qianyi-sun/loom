@@ -6,11 +6,16 @@ This interface is deliberately absent from pool-executor admission HTTP routes.
 """
 
 from typing import Literal
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom_capacity_agent.build_admission import (
+    BuildClaimRequestV1,
+    BuildInterruptedOutcomeRequestV1,
+    BuildOutcomeReceiptV1,
+)
 from loom_capacity_build_guard.installation_store import (
     BuildGuardInstallationV1,
     RetainedBuildInstallation,
@@ -21,6 +26,7 @@ from loom_capacity_manager.contracts import (
     PositiveQuantity,
     StrictV1Model,
     canonical_bytes,
+    canonical_digest,
 )
 from loom_capacity_manager.executable_contracts import (
     ExecutableIntentBindingV2,
@@ -53,6 +59,30 @@ class BuildGuardTerminalStore:
             raise ValueError("build terminal installation receipt changed")
         self._session = session
         self._installation = document
+
+    async def settle_interrupted(self, claim: BuildClaimRequestV1, *, terminal_inventory_sha256: str) -> BuildOutcomeReceiptV1:
+        """Settle a lost result only from a previously committed terminal import.
+
+        This is management-only recovery, not an executor HTTP operation. A prior
+        worker outcome wins unchanged; terminal evidence never implies success.
+        """
+        if not self._session.in_transaction():
+            raise ValueError("native interruption requires an outer transaction")
+        claim = BuildClaimRequestV1.model_validate_json(claim.model_dump_json())
+        request = BuildInterruptedOutcomeRequestV1(claim=claim,
+            operation_id=uuid5(claim.operation_id, f"native-terminal:{terminal_inventory_sha256}"),
+            terminal_inventory_sha256=terminal_inventory_sha256)
+        wire, digest = canonical_bytes(request), canonical_digest(request)
+        async with self._session.begin_nested():
+            returned = await self._session.scalar(text("""SELECT loom_capacity_build_guard.settle_interrupted_claim(
+                :installation,CAST(:payload AS jsonb),:wire,:digest)"""),
+                {"installation": self._installation.id, "payload": wire.decode("ascii"), "wire": wire, "digest": digest})
+            receipt = BuildOutcomeReceiptV1.model_validate_json(returned)
+            if (canonical_bytes(receipt).decode("ascii") != returned or receipt.request.claim != claim
+                or receipt.request_digest != canonical_digest(receipt.request)
+                or (isinstance(receipt.request, BuildInterruptedOutcomeRequestV1) and receipt.request != request)):
+                raise ValueError("native interruption receipt changed")
+            return receipt
 
     async def import_evidence(self, evidence: ExecutableTerminalInventoryEvidenceV3) -> ImportedBuildTerminalEvidenceV1:
         if not self._session.in_transaction():
