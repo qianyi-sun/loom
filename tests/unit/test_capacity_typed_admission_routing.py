@@ -35,6 +35,23 @@ def configured(tmp_path,pool,purpose):
     return module,request,document,path,sha256(wire).hexdigest()
 
 
+@pytest.mark.parametrize("pool", ["oldlab", "gb10"])
+async def test_application_claim_passes_routing_binding_into_atomic_admission(tmp_path, pool):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    module, request, document, path, digest = configured(tmp_path, pool, "application-worker")
+    proposal = object()
+    admit = AsyncMock(return_value=None)
+    close = AsyncMock()
+    router = module.TypedAdmissionRouter(path, expected_sha256=digest, executor=document.executor,
+        application_client_factory=lambda *args, **kwargs: SimpleNamespace(
+            admit_claim_for_intent=admit, aclose=close))
+    assert await router.admit_claim(request.binding, proposal) is None
+    admit.assert_awaited_once_with(request.binding, proposal)
+    close.assert_awaited_once()
+
+
 @pytest.mark.parametrize("pool", ["gb10","oldlab"])
 @pytest.mark.parametrize("purpose", ["application-worker","personal-build-worker"])
 @pytest.mark.parametrize("failure", [False,True])
