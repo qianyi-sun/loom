@@ -775,6 +775,16 @@ rotate the verifier, including after a lost commit acknowledgement. This phase
 currently accepts nonempty printable non-space ASCII credentials up to 1024
 characters; unsupported credentials refuse rather than being normalized.
 
+`observe_application_runtime_login` uses the same identity, authority, schema and
+credential checks in an explicitly read-only transaction. It distinguishes a
+still-sealed runtime from an already-restored original login without executing
+role DDL. This lets recovery reconcile a lost restoration acknowledgement without
+rotating credentials or treating open database admission as completion. Either
+state requires the exact separated ownership and trusted ACL profile; drift
+refuses. This is only the database portion of handoff evidence: workload recovery,
+original-guard continuity and safe fence release still require the enclosing
+protected component.
+
 Admission and ownership transfer retain strict password-absence defaults. An
 explicit `runtime_password`, recovered from the protected original credential,
 allows only a matching bounded SCRAM verifier on the still-`NOLOGIN` former
