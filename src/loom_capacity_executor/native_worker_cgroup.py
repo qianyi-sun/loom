@@ -14,7 +14,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from loom_capacity_executor.native_worker_container import NativeContainerError, NativeWorkerAllocation
+from loom_capacity_executor.native_worker_container import (
+    NativeContainerError,
+    NativeWorkerAllocation,
+)
 
 _MAX_CONTROL_BYTES = 4096
 _QUANTITY = re.compile(r"[1-9][0-9]{0,18}", re.ASCII)
@@ -55,6 +58,7 @@ class NativeWorkerCgroup:
     descriptor: int
     identity: tuple[int, int]
     trusted_uid: int
+    directory_chain: tuple[tuple[Path, tuple[int, int]], ...]
 
     def _read(self, name: str) -> str:
         descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
@@ -71,6 +75,9 @@ class NativeWorkerCgroup:
             os.close(descriptor)
 
     def _assert_identity(self) -> None:
+        for path, identity in self.directory_chain:
+            if _directory(path.lstat(), self.trusted_uid) != identity:
+                raise NativeContainerError("native cgroup parent identity changed during launch")
         if (self.path.resolve(strict=True) != self.path
             or _directory(self.path.lstat(), self.trusted_uid) != self.identity
             or _directory(os.fstat(self.descriptor), self.trusted_uid) != self.identity):
@@ -104,16 +111,18 @@ def open_native_cgroup(
         if cgroup_root.resolve(strict=True) != cgroup_root:
             raise NativeContainerError("native cgroup mount path is not canonical")
         descriptor = os.open(cgroup_root, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY)
-        _directory(os.fstat(descriptor), trusted_uid)
+        chain = [(cgroup_root, _directory(os.fstat(descriptor), trusted_uid))]
+        path = cgroup_root
         relative = Path(allocation.cgroup_parent.removeprefix("/"))
         for component in relative.parts:
             child = os.open(component, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY,
                 dir_fd=descriptor)
             os.close(descriptor)
             descriptor = child
-            _directory(os.fstat(descriptor), trusted_uid)
+            path /= component
+            chain.append((path, _directory(os.fstat(descriptor), trusted_uid)))
         identity = _directory(os.fstat(descriptor), trusted_uid)
-        opened = NativeWorkerCgroup(allocation, cgroup_root / relative, descriptor, identity, trusted_uid)
+        opened = NativeWorkerCgroup(allocation, path, descriptor, identity, trusted_uid, tuple(chain))
         opened.assert_current()
     except OSError:
         if descriptor is not None:
