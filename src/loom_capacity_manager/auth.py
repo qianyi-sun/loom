@@ -291,13 +291,20 @@ class CapacityPrincipalVerifier:
         return cls._from_file(path, registry_type=_RegistryDocument)
 
     @classmethod
-    def from_pool_executor_file(cls, path: Path) -> CapacityPrincipalVerifier:
+    def from_pool_executor_file(cls, path: Path, *, expected_sha256: str | None = None) -> CapacityPrincipalVerifier:
         """Load a separate controller-only admission registry, never operator keys."""
-        return cls._from_file(path, registry_type=_PoolExecutorRegistryDocument)
+        return cls._from_file(path, registry_type=_PoolExecutorRegistryDocument,expected_sha256=expected_sha256)
 
     @classmethod
-    def _from_file(cls, path: Path, *, registry_type: type[_UniqueRegistryDocument]) -> CapacityPrincipalVerifier:
+    def _from_file(cls, path: Path, *, registry_type: type[_UniqueRegistryDocument],
+        expected_sha256: str | None = None,
+    ) -> CapacityPrincipalVerifier:
         raw = _read_owner_only_file(path)
+        if expected_sha256 is not None and (
+            re.fullmatch(r"[0-9a-f]{64}",expected_sha256) is None
+            or not hmac.compare_digest(hashlib.sha256(raw).hexdigest(),expected_sha256)
+        ):
+            raise PrincipalRegistryError("principal registry digest changed")
         try:
             document = registry_type.model_validate_json(raw)
         except (ValidationError, ValueError, json.JSONDecodeError) as exc:

@@ -70,6 +70,8 @@ class LoomServiceSettings(BaseSettings):
     personal_dev_activation_key_id: str = "personal-dev-agent-v1"
     personal_dev_activation_public_key_file: Path | None = None
     personal_dev_activation_public_key_sha256: str = ""
+    personal_dev_build_admission_config_file: Path | None = None
+    personal_dev_build_admission_config_sha256: str = ""
     personal_dev_builder_docker_path: Path = Path("/usr/bin/docker")
     personal_dev_builder_enabled: bool = False
     personal_dev_builder_global_concurrency: int = 4
