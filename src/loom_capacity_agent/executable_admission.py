@@ -9,7 +9,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
@@ -252,7 +252,9 @@ class ExecutableAdmissionStore:
         """
         if not isinstance(request, PhysicalJobBindingV2):
             raise TypeError("current bootstrap observation requires its physical binding")
-        if self._session.in_transaction():
+        if self._session.in_transaction() or (
+            isinstance(self._session.bind, AsyncConnection) and self._session.bind.in_transaction()
+        ):
             raise ExecutableAdmissionError("current bootstrap observation requires a fresh owned transaction")
         if any(type(value) is not int or not 1 <= value <= 60_000
                for value in (statement_timeout_ms, lock_timeout_ms)):
