@@ -15,39 +15,41 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
     version_table = connection.scalar(text("SELECT to_regclass('loom_capacity_build_guard.alembic_version')"))
     revision = connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) if version_table else None
     callables = []
-    if revision in {"build_guard_0003", "build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+    if revision in {"build_guard_0003", "build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
         callables.append(f"{SCHEMA}.prepare_plan(uuid,jsonb,bytea,text,jsonb)")
-    if revision in {"build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+    if revision in {"build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
         callables.append(f"{SCHEMA}.authorize_publication(uuid,uuid)")
-    if revision in {"build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+    if revision in {"build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
         callables.extend((f"{SCHEMA}.close_plan(uuid,jsonb,bytea,text)",
             f"{SCHEMA}.authorize_closure_publication(uuid,uuid)"))
-    if revision in {"build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+    if revision in {"build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
         callables.extend((f"{SCHEMA}.capture_demand(uuid,bigint,jsonb)", f"{SCHEMA}.read_demand(uuid)"))
-    if revision in {"build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+    if revision in {"build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
         callables.append(f"{SCHEMA}.read_pending_sources(uuid)")
-    if revision in {"build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+    if revision in {"build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
         callables.extend((f"{SCHEMA}.register_bootstrap(uuid,jsonb,bytea,text)", f"{SCHEMA}.authorize_bootstrap_publication(uuid,uuid)"))
-    if revision in {"build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+    if revision in {"build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
         callables.extend((f"{SCHEMA}.prepare_worker(uuid,jsonb,bytea,text,text)", f"{SCHEMA}.bind_slurm_job(uuid,jsonb,bytea,text)"))
-    if revision in {"build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+    if revision in {"build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
         callables.append(f"{SCHEMA}.observe_intent(uuid,jsonb,bytea,text)")
-    if revision in {"build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+    if revision in {"build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
         callables.append(f"{SCHEMA}.revoke_prepared_bootstrap(uuid,jsonb,bytea,text)")
-    if revision in {"build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+    if revision in {"build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
         callables.append(f"{SCHEMA}.withdraw_unregistered_worker(uuid,jsonb,bytea,text)")
-    if revision in {"build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+    if revision in {"build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
         callables.append(f"{SCHEMA}.import_terminal_inventory(uuid,jsonb,bytea,text)")
-    if revision in {"build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+    if revision in {"build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
         callables.extend((f"{SCHEMA}.read_next_protected_release(uuid)",
             f"{SCHEMA}.acknowledge_protected_release(uuid,jsonb,bytea,text,text)"))
-    if revision in {"build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+    if revision in {"build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
         callables.append(f"{SCHEMA}.retire_request_hold(uuid,jsonb,bytea,text)")
         callables.append(f"{SCHEMA}.read_pending_retirements(uuid,bigint,bigint,integer)")
-    if revision in {"build_guard_0016", "build_guard_0017"}:
+    if revision in {"build_guard_0016", "build_guard_0017", "build_guard_0018"}:
         callables.append(f"{SCHEMA}.register_worker(uuid,jsonb,bytea,text,text)")
-    if revision == "build_guard_0017":
+    if revision in {"build_guard_0017", "build_guard_0018"}:
         callables.append(f"{SCHEMA}.claim_platform(uuid,jsonb,bytea,text,text)")
+    if revision == "build_guard_0018":
+        callables.append(f"{SCHEMA}.begin_drain(uuid,jsonb,bytea,text)")
     parameters = {"schema": SCHEMA, "owner": owner, "agent": agent, "callables": callables}
     defaults = connection.scalar(text("""
         SELECT EXISTS (
@@ -107,35 +109,37 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
         if usage is not True:
             raise RuntimeError("build guard required schema privilege is absent")
         helpers = ["reject_evidence_mutation()"]
-        if revision in {"build_guard_0002", "build_guard_0003", "build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+        if revision in {"build_guard_0002", "build_guard_0003", "build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
             helpers.append("assert_current_source(uuid,uuid,jsonb,bytea,text)")
-        if revision in {"build_guard_0003", "build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+        if revision in {"build_guard_0003", "build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
             helpers.extend(("canonical_plan_json(jsonb)",
                 "assert_plan_fields(jsonb,text[],text[],text[],text[],text[])", "assert_plan_contract(jsonb,bytea)"))
-        if revision in {"build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+        if revision in {"build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
             helpers.append("assert_native_closure_plan(jsonb,jsonb)")
-        if revision in {"build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+        if revision in {"build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
             helpers.append("demand_timestamp(timestamptz)")
-        if revision in {"build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+        if revision in {"build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
             helpers.append("assert_bootstrap(jsonb,bytea,text,jsonb)")
-        if revision in {"build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+        if revision in {"build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
             helpers.append(f"execution_receipt({SCHEMA}.execution_events)")
-        if revision in {"build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+        if revision in {"build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
             helpers.extend(("assert_bootstrap_not_revoked(uuid)", f"bootstrap_revocation_receipt({SCHEMA}.bootstrap_revocations)", "observe_bootstrap_revocation(uuid,jsonb)"))
-        if revision in {"build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+        if revision in {"build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
             helpers.extend((f"worker_withdrawal_receipt({SCHEMA}.worker_withdrawals)",
                 "observe_worker_withdrawal(uuid,jsonb)"))
-        if revision in {"build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+        if revision in {"build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
             helpers.append(f"terminal_inventory_receipt({SCHEMA}.terminal_inventory)")
-        if revision in {"build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+        if revision in {"build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
             helpers.append("protected_release_publication(uuid,bigint)")
-        if revision in {"build_guard_0015", "build_guard_0016", "build_guard_0017"}:
+        if revision in {"build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018"}:
             helpers.append(f"hold_retirement_receipt({SCHEMA}.hold_retirements)")
-        if revision in {"build_guard_0016", "build_guard_0017"}:
+        if revision in {"build_guard_0016", "build_guard_0017", "build_guard_0018"}:
             helpers.extend((f"worker_registration_receipt({SCHEMA}.worker_registrations)", "observe_registered_worker(uuid,jsonb)"))
-        if revision == "build_guard_0017":
+        if revision in {"build_guard_0017", "build_guard_0018"}:
             helpers.extend((f"native_claim_receipt({SCHEMA}.platform_claims)",
                 "native_claim_high_water(uuid)", "fixed_native_claims(uuid)"))
+        if revision == "build_guard_0018":
+            helpers.extend((f"native_drain_receipt({SCHEMA}.worker_drains)", "native_worker_drain(uuid)"))
         for signature in helpers:
             present = connection.scalar(text("""
                 SELECT EXISTS (SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure(:signature)

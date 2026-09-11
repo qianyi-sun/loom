@@ -496,6 +496,15 @@ contents. Discovery/authority errors do not produce invented success. This adapt
 still needs connection to the management runtime and live concurrent-owner
 acceptance; it issues no source grants or application worker credentials.
 
+Build-guard revision `build_guard_0018` adds registered-worker drain. It joins the
+exact committed registration and observed claim high-water under the same locks
+as claim admission. An initial drain advances to epoch 3; exact replay retains
+one immutable receipt. Draining does not depend on fresh source authority and
+never deletes claims or capacity holds. New claims are fenced, while prior claim
+replay remains evidence recovery only. Observation exposes only committed drain.
+Held live claims report `cancel-pending`; outcome and release remain separate
+unfinished steps. The schema refuses downgrade with retained drain evidence.
+
 Build-guard revision `build_guard_0017` adds an immutable claim of the exact
 allocated platform request. It authenticates the registered worker's opaque
 credential against the private hash, requires prior registration commit, and

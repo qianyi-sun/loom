@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
+    DrainedExecutableWorkerV2,
+    ExecutableDrainRequestV2,
     ExecutablePreparedBootstrapRevocationV2,
     ExecutableWorkerRegistrationV2,
     ExecutableWorkerWithdrawalRequestV2,
@@ -140,6 +142,26 @@ class BuildGuardExecutionStore:
                 or receipt.worker_incarnation != request.worker_incarnation or receipt.predecessor_worker_incarnation is not None
                 or receipt.protected_registration_epoch != 2 or receipt.request_digest != digest or receipt.registration_digest != digest):
                 raise ValueError("build registration receipt changed")
+            return receipt
+
+    async def begin_drain(self, request: ExecutableDrainRequestV2) -> DrainedExecutableWorkerV2:
+        """Fence new native work, retaining live claims and all capacity charges."""
+        if not self._session.in_transaction():
+            raise ValueError("native drain requires an outer transaction")
+        request = ExecutableDrainRequestV2.model_validate_json(request.model_dump_json())
+        wire, digest = canonical_executable_bytes(request), canonical_executable_digest(request)
+        async with self._session.begin_nested():
+            returned = await self._session.scalar(text("""SELECT loom_capacity_build_guard.begin_drain(
+                :installation,CAST(:payload AS jsonb),:wire,:digest)"""),
+                {"installation": self._installation.id, "payload": wire.decode("ascii"), "wire": wire, "digest": digest})
+            receipt = DrainedExecutableWorkerV2.model_validate_json(returned)
+            if (canonical_executable_bytes(receipt).decode("ascii") != returned
+                or receipt.subject_id != request.binding.subject_id or receipt.subject_incarnation != request.binding.subject_incarnation
+                or receipt.intent_id != request.binding.intent_id or receipt.worker_id != request.worker_id
+                or receipt.worker_incarnation != request.worker_incarnation or receipt.claim_high_water != request.expected_claim_high_water
+                or receipt.live_claim_count != request.expected_claim_high_water or receipt.drain_epoch != request.drain_epoch
+                or receipt.request_digest != digest or receipt.drain_digest != digest):
+                raise ValueError("native drain receipt changed")
             return receipt
 
     async def claim_platform(self, request: BuildClaimRequestV1, *, worker_credential: str) -> BuildClaimReceiptV1:
