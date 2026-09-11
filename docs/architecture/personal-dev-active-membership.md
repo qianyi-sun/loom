@@ -206,6 +206,23 @@ time passes. Only an explicit protected missing-record result permits retaining
 a new closure. This coordinator is not yet a complete demand/native-runtime loop
 and does not advertise readiness.
 
+Revision `build_guard_0006` retains a bounded latest demand report and monotonic
+reporter high-water per installation. Capture independently checks the complete
+current source set, excludes held requests from pending buckets, and derives held
+assignments from immutable plans even after cancellation or source expiry. It
+locks only bounded live/held work, not completed unheld history. Reports use the
+immutable platform-request creation time as their submission timestamp. Older
+configuration generations and backward observation times cannot replace newer
+state. The agent has no direct reporter-table writes.
+
+The demand coordinator commits capture before returning a report and retries only
+whole local transactions rejected for serialization conflict or deadlock, with a
+bounded attempt count and time budget. It does not retry ambiguous connection
+outcomes or publish externally during those retries. This revision covers the
+pre-bootstrap pending/assigned lifecycle; native claims do not exist yet, so no
+worker identities or fixed claims are fabricated. Demand publication, actual
+native claim projection and runtime readiness remain to be connected.
+
 Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
 preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release
 verification bind the exact historical configuration, acknowledgement and member
