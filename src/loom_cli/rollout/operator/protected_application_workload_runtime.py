@@ -226,6 +226,25 @@ def _observe(plan: FinalGatePlan, runner: ApplicationWorkloadRunner, guard: Muta
     return objects, active
 
 
+def _require_saved_guard_cron(saved: tuple[ApplicationWorkload, ...], guard: MutationGuardEvidence) -> None:
+    cron = [item for item in saved if item.kind == "CronJob" and item.name == APPLICATION_CRONJOB]
+    if (len(cron) != 1 or cron[0].uid != guard.cronjob_uid
+            or cron[0].original_value is not True or not cron[0].original_present):
+        raise RuntimeError("application workload baseline would change the guard-owned CronJob suspension")
+
+
+def _require_recovered_endpoints(saved: tuple[ApplicationWorkload, ...],
+                                 objects: Mapping[tuple[str, str], dict[str, object]]) -> None:
+    if set(objects) - {(item.kind, item.name) for item in saved}:
+        raise RuntimeError("application workload inventory changed during recovery")
+    for item in saved:
+        current = objects.get((item.kind, item.name))
+        if current is None and item.kind == "Job":
+            continue
+        if current is None or item.patch(current, recovering=True) is not None:
+            raise RuntimeError("application workload original endpoint changed after readiness")
+
+
 def _patch(plan: FinalGatePlan, journal: ProtectedApplyJournal, runner: ApplicationWorkloadRunner,
            guard: MutationGuardEvidence, saved: ApplicationWorkload, current: Mapping[str, object],
            *, recovering: bool) -> bool:
@@ -253,6 +272,8 @@ def pause_application_workloads(plan: FinalGatePlan, *, journal: ProtectedApplyJ
     while True:
         _live_guard(plan, journal, runner, guard)
         saved = journal.read_application_workloads(plan)
+        if saved:
+            _require_saved_guard_cron(saved, guard)
         objects, active = _observe(plan, runner, guard, saved)
         if not saved:
             journal.record_application_workloads(plan, workloads=tuple(
@@ -263,6 +284,7 @@ def pause_application_workloads(plan: FinalGatePlan, *, journal: ProtectedApplyJ
                 if key not in known:
                     journal.record_application_workload_job(plan, workload=ApplicationWorkload.capture(document))
         saved = journal.read_application_workloads(plan)
+        _require_saved_guard_cron(saved, guard)
         changed = False
         for item in sorted(saved, key=lambda value: ({"CronJob": 0, "Job": 1, "Deployment": 2}[value.kind], value.name)):
             current = objects.get((item.kind, item.name))
@@ -286,6 +308,7 @@ def restore_application_workloads(plan: FinalGatePlan, *, journal: ProtectedAppl
     saved = journal.read_application_workloads(plan)
     if not saved:
         raise RuntimeError("application workload recovery lacks its original inventory")
+    _require_saved_guard_cron(saved, guard)
     outcome = runner.recover_and_complete_staging_application_database(plan, journal=journal, guard=guard)
     original = journal.read_application_admission_recovery()
     if (original is None or type(outcome) is not ApplicationHandoffDatabaseOutcome
@@ -311,6 +334,8 @@ def restore_application_workloads(plan: FinalGatePlan, *, journal: ProtectedAppl
                                                 _mapping(_mapping(current["spec"])["template"]))
                 ready = deployment_is_ready(desired, runner=runner, environment=runner.environment, timeout_seconds=30) and ready
         if not changed and ready:
+            verified, _ = _observe(plan, runner, guard, saved)
+            _require_recovered_endpoints(saved, verified)
             _live_guard(plan, journal, runner, guard)
             return
         if time.monotonic() >= deadline:
