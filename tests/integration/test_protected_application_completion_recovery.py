@@ -11,15 +11,20 @@ import psycopg
 import pytest
 
 from loom.application_handoff_completion import complete_application_handoff_database
-from loom_cli.rollout.operator.protected_application_guard_retention import application_guard_is_retained
+from loom_cli.rollout.operator.protected_application_guard_retention import (
+    application_guard_is_retained,
+)
 from loom_cli.rollout.operator.protected_apply_executor import SubprocessProtectedApplyCommandRunner
-from loom_cli.rollout.operator.staging_mutation_guard import MutationGuardEvidence, _HEALTH_SQL
+from loom_cli.rollout.operator.staging_mutation_guard import _HEALTH_SQL, MutationGuardEvidence
 from tests.integration.test_application_handoff_completion import _closed
 from tests.integration.test_application_ownership_transfer import (
     transfer_database,  # noqa: F401
     transfer_postgres_url,  # noqa: F401
 )
-from tests.integration.test_protected_peer_database_connection import _peer, peer_postgres  # noqa: F401
+from tests.integration.test_protected_peer_database_connection import (  # noqa: F401
+    _peer,
+    peer_postgres,
+)
 from tests.loom_cli.rollout.operator.test_application_admission_recovery import _component
 from tests.loom_cli.rollout.operator.test_application_credential_recovery import _Runner, _sources
 from tests.loom_cli.rollout.operator.test_application_guard_retention import _guard
@@ -34,7 +39,7 @@ def transfer_postgres(peer_postgres):  # noqa: F811
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transfer_database", ["protected-staging"], indirect=True)
-@pytest.mark.parametrize("interruption", ["closed", "restored", "peer-publication", "login-ack"])
+@pytest.mark.parametrize("interruption", ["closed", "restored", "peer-publication", "login-ack", "live-old-peer", "guard-loss"])
 async def test_recovery_completes_without_reclosing_a_restored_database(
     transfer_database, transfer_postgres, tmp_path, monkeypatch, interruption,  # noqa: F811
 ):
@@ -56,7 +61,10 @@ async def test_recovery_completes_without_reclosing_a_restored_database(
         evidence = MutationGuardEvidence.build(**values)
         if interruption == "restored":
             complete_application_handoff_database(original_peer, maintenance=maintenance, **arguments)
-        original_peer.close()
+        if interruption != "live-old-peer":
+            original_peer.close()
+        if interruption == "guard-loss":
+            assert database_guard.execute("SELECT pg_advisory_unlock(5498691230183247727)").fetchone() == (True,)
         class Runner(_Runner):
             fail_login_ack = interruption == "login-ack"
             def open_staging_peer_maintenance_database(self):
@@ -95,6 +103,13 @@ async def test_recovery_completes_without_reclosing_a_restored_database(
             journal.record_application_manager_replacement(identity=replace(_manager(), executable_inode=101))
             outcomes.append(recover(runner, plan, journal=journal, guard=evidence))
             raise RuntimeError("workloads and CNPG fence remain pending")
+        if interruption in {"live-old-peer", "guard-loss"}:
+            with pytest.raises(RuntimeError, match=r"surviving or unknown peers|coordination guard"):
+                journal.execute(plan, [_component(apply)])
+            assert outcomes == []
+            assert not list(journal.root.rglob("application-handoff-*-peer.json"))
+            assert maintenance.execute("SELECT datallowconn FROM pg_database WHERE datname='loom'").fetchone() == (False,)
+            return
         if interruption in {"peer-publication", "login-ack"}:
             with pytest.raises(RuntimeError):
                 journal.execute(plan, [_component(apply)])

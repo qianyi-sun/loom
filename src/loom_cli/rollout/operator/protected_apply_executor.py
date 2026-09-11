@@ -254,6 +254,83 @@ class SubprocessProtectedApplyCommandRunner:
             plan, journal=journal, runner=self, connection=connection, guard=guard,
         )
 
+    def recover_and_complete_staging_application_database(
+        self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal,
+        guard: MutationGuardEvidence,
+    ) -> ApplicationHandoffDatabaseOutcome:
+        """Recover one journaled peer and finish SQL without resealing a restored login.
+
+        Retains the same original external authority and guard. This fixed
+        operation performs no CNPG/workload recovery or component completion.
+        A successful database outcome leaves admission open; uncertain failures
+        attempt guarded reclosure only while roles remain sealed. An already
+        restored role refuses that cleanup rather than being silently resealed.
+        """
+        from loom.application_handoff_completion import application_handoff_recovery_login_enabled
+
+        from .protected_application_credential_recovery import (
+            recover_application_runtime_credential,
+        )
+        from .protected_application_database_completion import _require_completion_authority
+
+        original = _require_completion_authority(plan, journal=journal, guard=guard)
+        assert original.coordination_guard is not None
+        credential = recover_application_runtime_credential(plan, journal=journal, runner=self)
+        records = journal.read_application_handoff_recoveries()
+        ordinal = len(records) if records and records[-1][1] is None else len(records) + 1
+        journal.prepare_application_handoff_recovery(ordinal=ordinal)
+        prior = records[ordinal - 2][1] if ordinal > 1 else None
+        lost = prior.handoff_backend if prior is not None else original.handoff_backend
+        completed = False
+        try:
+            with self.open_staging_peer_maintenance_database() as maintenance:
+                restored = application_handoff_recovery_login_enabled(
+                    maintenance, target=original.target, handoff_backend=lost,
+                    coordination_guard=original.coordination_guard, provisioner_role="postgres",
+                )
+                if not restored:
+                    reclose_application_database_for_handoff_recovery(
+                        maintenance, target=original.target, provisioner_role="postgres",
+                        handoff_backend=lost, coordination_guard=original.coordination_guard,
+                        runtime_password=credential.password,
+                    )
+                    reopen_application_database_for_handoff_recovery(
+                        maintenance, target=original.target, provisioner_role="postgres",
+                        handoff_backend=lost, coordination_guard=original.coordination_guard,
+                        runtime_password=credential.password,
+                    )
+                with self.open_staging_peer_database() as peer:
+                    identity = peer.backend_identity
+                    if identity.database != original.target.database or identity.session_user != "postgres":
+                        raise PeerDatabaseTransportError("application completion recovery peer changed")
+                    backend = ApplicationDatabaseHandoffBackend(
+                        identity.backend_pid, identity.backend_started_at, identity.system_identifier,
+                        identity.server_started_at, identity.database_oid,
+                    )
+                    journal.record_application_handoff_replacement(ordinal=ordinal, handoff_backend=backend)
+                    if not restored:
+                        reclose_application_database_for_handoff_recovery(
+                            maintenance, target=original.target, provisioner_role="postgres",
+                            handoff_backend=backend, coordination_guard=original.coordination_guard,
+                            runtime_password=credential.password,
+                        )
+                    outcome = self.complete_staging_application_database(
+                        plan, journal=journal, connection=peer, guard=guard,
+                    )
+                    completed = True
+                    return outcome
+        finally:
+            if not completed:
+                # Fresh maintenance also reconciles a poisoned/lost transport.
+                # LOGIN restoration is deliberately never undone speculatively:
+                # its exact source/schema reconciliation happens on the next retry.
+                with self.open_staging_peer_maintenance_database() as cleanup:
+                    reclose_application_database_for_handoff_recovery(
+                        cleanup, target=original.target, provisioner_role="postgres",
+                        handoff_backend=lost, coordination_guard=original.coordination_guard,
+                        runtime_password=credential.password,
+                    )
+
     def issue_staging_manager_replacement(
         self, *, journal: ProtectedApplyJournal, runtime_password: str | None = None,
     ) -> bool:

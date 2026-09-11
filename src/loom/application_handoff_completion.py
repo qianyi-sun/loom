@@ -18,6 +18,7 @@ from loom.application_database_admission import (
     ApplicationDatabaseAdmissionTarget,
     ApplicationDatabaseCoordinationGuard,
     ApplicationDatabaseHandoffBackend,
+    _maintenance_transaction,
     _require_coordination_guard,
     _require_handoff_identity,
     reclose_application_database_for_handoff_recovery,
@@ -162,3 +163,53 @@ def complete_application_handoff_database(
     if not login_enabled():
         raise RuntimeError("application handoff completion login changed")
     return ApplicationHandoffDatabaseOutcome(target, coordination_guard)
+
+
+def application_handoff_recovery_login_enabled(
+    maintenance: ApplicationDatabaseConnection, *, target: ApplicationDatabaseAdmissionTarget,
+    handoff_backend: ApplicationDatabaseHandoffBackend,
+    coordination_guard: ApplicationDatabaseCoordinationGuard, provisioner_role: str,
+) -> bool:
+    """Route a journaled lost-peer recovery without claiming schema completion.
+
+    A live previous or unknown privileged peer refuses. A restored route permits
+    only opening the fixed replacement peer for full read-only schema/credential
+    verification. It never authorizes SQL mutation or treats LOGIN as a terminal.
+    Sealed routes still require serialized reclosure and the exact loss-drain
+    before any reopening. Other administrator/DDL writers remain excluded by the
+    enclosing authority; these observations do not establish that exclusion.
+    """
+    with _maintenance_transaction(maintenance, database=target.database, provisioner_role=provisioner_role):
+        _require_handoff_identity(maintenance, target, handoff_backend)
+        _require_coordination_guard(maintenance, target, coordination_guard)
+        state = maintenance.execute(application_sql(
+            "SELECT a.rolcanlogin,d.datallowconn,d.datdba={} "
+            "FROM pg_catalog.pg_database d CROSS JOIN pg_catalog.pg_control_system() s "
+            "JOIN pg_catalog.pg_roles a ON a.rolname={} JOIN pg_catalog.pg_roles b ON b.rolname={} "
+            "WHERE d.oid={} AND d.datname={} AND a.oid={} AND b.oid={} AND s.system_identifier::text={}",
+            target.successor_oid, target.owner_role, target.successor_role,
+            target.database_oid, target.database, target.owner_oid, target.successor_oid,
+            target.system_identifier,
+        )).fetchone()
+        if state is None or len(state) != 3 or any(type(value) is not bool for value in state):
+            raise RuntimeError("application completion recovery target changed")
+        if state[0] and (not state[1] or not state[2]):
+            raise RuntimeError("application completion recovery login precedes ownership or admission")
+        if maintenance.execute(application_sql(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE locktype='object' "
+            "AND classid='pg_catalog.pg_database'::regclass AND objid={} AND mode='RowExclusiveLock')",
+            target.database_oid,
+        )).fetchone() != (False,):
+            raise RuntimeError("application completion recovery startup is pending")
+        maintenance.execute("SELECT pg_catalog.pg_stat_clear_snapshot()")
+        if maintenance.execute(application_sql(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE "
+            "(pid={} AND backend_start={}::pg_catalog.timestamptz) OR "
+            "(datid={} AND usesysid IS DISTINCT FROM {} AND pid<>{})) OR "
+            "EXISTS (SELECT 1 FROM pg_catalog.pg_prepared_xacts WHERE database={})",
+            handoff_backend.pid, handoff_backend.started_at, target.database_oid,
+            target.owner_oid, coordination_guard.backend.pid, target.database,
+        )).fetchone() != (False,):
+            raise RuntimeError("application completion recovery has surviving or unknown peers")
+        _require_coordination_guard(maintenance, target, coordination_guard)
+        return state[0] is True
