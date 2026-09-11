@@ -75,7 +75,7 @@ def _oci_archive(*, architecture: str) -> tuple[bytes, str]:
     return output.getvalue(), "sha256:" + manifest_digest
 
 
-def _artifact(path: Path, *, platform: str = "linux/amd64") -> None:
+def _artifact(path: Path, *, platform: str = "linux/amd64", manifest_overrides: dict[str, object] | None = None) -> None:
     registration = _registration()
     architecture = platform.rsplit("/", 1)[1]
     archives: dict[str, bytes] = {}
@@ -104,6 +104,7 @@ def _artifact(path: Path, *, platform: str = "linux/amd64") -> None:
         "platform": platform,
         "components": components,
     }
+    manifest.update(manifest_overrides or {})
     with tarfile.open(path, mode="w", format=tarfile.USTAR_FORMAT) as artifact:
         manifest_payload = _canonical(manifest)
         info = tarfile.TarInfo("manifest.json")
@@ -191,6 +192,33 @@ def test_artifact_verifier_rejects_traversal_without_extracting(tmp_path: Path) 
             max_image_archive_bytes=256 * 1024,
         )
     assert not (tmp_path / "escape").exists()
+
+
+@pytest.mark.parametrize("field,value", [("schema_version", True), ("schema_version", 1.0),
+    ("lease_epoch", True), ("lease_epoch", 1.0)])
+@pytest.mark.parametrize("adapter", ["registration", "native"])
+def test_artifact_identity_rejects_equivalent_non_integer_wire_types(tmp_path, field, value, adapter):
+    from loom import personal_dev_builder_artifact as module
+
+    registration = _registration()
+    candidate, attempt = registration.candidate, registration.build_attempt
+    if field == "lease_epoch" and type(value) is float:
+        value = float(attempt.lease_epoch)
+    artifact = tmp_path / "artifact.tar"
+    _artifact(artifact, manifest_overrides={field: value})
+    output = tmp_path / "verified"
+    output.mkdir()
+    limits = dict(output_directory=output, max_artifact_bytes=1024 * 1024, max_image_archive_bytes=256 * 1024)
+    with pytest.raises(PersonalDevBuildArtifactError, match="binding"):
+        if adapter == "registration":
+            module.verify_personal_dev_build_artifact(artifact, registration, platform="linux/amd64", **limits)
+        else:
+            binding = module.PersonalDevBuildArtifactBinding(candidate_sha=candidate.candidate_sha,
+                source_sha256=candidate.source_sha256, archive_sha256=candidate.archive_sha256,
+                build_contract_sha256=candidate.build_contract_sha256, attempt_id=attempt.id,
+                lease_epoch=attempt.lease_epoch, platform="linux/amd64")
+            module.verify_bound_personal_dev_build_artifact(artifact, binding, **limits)
+    assert list(output.iterdir()) == []
 
 
 @pytest.mark.parametrize("changed", [None, "candidate_sha", "source_sha256", "archive_sha256",
