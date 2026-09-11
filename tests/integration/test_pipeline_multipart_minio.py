@@ -7,13 +7,13 @@ from testcontainers.minio import MinioContainer
 from loom.pipeline.artifact_commit import ArtifactCommitService
 from loom.trajectory.storage import MinioObjectStore
 from tests.integration.pipeline_artifact_testkit import final_producer, plan, upload_all
+from tests.support.minio import MINIO_TEST_IMAGE
 
 pytestmark = pytest.mark.docker
 
 
 async def test_real_minio_multipart_commit_and_readback() -> None:
-    # Upstream publishes on Quay; retain testcontainers' exact release.
-    with MinioContainer("quay.io/minio/minio:RELEASE.2022-12-02T19-19-22Z").waiting_for(
+    with MinioContainer(MINIO_TEST_IMAGE).waiting_for(
         HttpWaitStrategy(9000, "/minio/health/cluster")
     ) as container:
         config = container.get_config()

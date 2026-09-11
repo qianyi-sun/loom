@@ -53,6 +53,7 @@ from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from tests.integration.pipeline_orchestrator_fixtures import orchestrator_seed  # noqa: F401
 from tests.integration.taskset_fixtures import tasksets_minio, tasksets_setup  # noqa: F401
+from tests.support.minio import MINIO_TEST_IMAGE
 
 
 @pytest.fixture(autouse=True)
@@ -746,7 +747,7 @@ def shared_minio() -> Iterator[MinioContainer]:
     """Module-scoped MinIO so we don't pay container-start cost per
     test. Routes that exercise the boto3 path (trajectory, atif)
     share this."""
-    with MinioContainer().waiting_for(HttpWaitStrategy(9000, "/minio/health/cluster")) as m:
+    with MinioContainer(MINIO_TEST_IMAGE).waiting_for(HttpWaitStrategy(9000, "/minio/health/cluster")) as m:
         yield m
 
 

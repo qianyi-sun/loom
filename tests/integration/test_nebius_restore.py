@@ -30,6 +30,7 @@ from loom.nebius_restore import (
     snapshot_sql,
     verify_restored_records,
 )
+from tests.support.minio import MINIO_TEST_IMAGE
 
 pytestmark = pytest.mark.docker
 
@@ -48,8 +49,7 @@ def test_real_acl_dump_restores_without_source_roles_and_verifies_s3(tmp_path, m
     root = Path(__file__).resolve().parents[2]
     with (
         PostgresContainer("postgres:16") as source,
-        # Upstream publishes on Quay; retain testcontainers' exact release.
-        MinioContainer("quay.io/minio/minio:RELEASE.2022-12-02T19-19-22Z").waiting_for(
+        MinioContainer(MINIO_TEST_IMAGE).waiting_for(
             HttpWaitStrategy(9000, "/minio/health/cluster")
         ) as storage,
     ):
