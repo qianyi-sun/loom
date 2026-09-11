@@ -5,6 +5,8 @@ import io
 import json
 import os
 import stat
+import subprocess
+import sys
 import tarfile
 from pathlib import Path
 from typing import Any
@@ -65,6 +67,45 @@ _UNITS = (
     "loom-capacity-pool-executor-active.timer",
 )
 _TMPFILES = b"d /run/loom-capacity-executor 0700 loom_capacity_executor loom_capacity_executor -\n"
+
+
+@pytest.mark.parametrize("colocated", [False, True], ids=["candidate-tree", "installed-helpers"])
+def test_installer_supports_broker_isolation_without_ambient_imports(tmp_path: Path, colocated: bool) -> None:
+    installer = _REPO_ROOT / "scripts/ops/install_capacity_executor.py"
+    if colocated:
+        helper_directory = tmp_path / "installed helpers"
+        helper_directory.mkdir()
+        for name in ("install_capacity_executor.py", "capacity_executor_release.py"):
+            (helper_directory / name).write_bytes((_REPO_ROOT / "scripts/ops" / name).read_bytes())
+        installer = helper_directory / installer.name
+    ambient = tmp_path / "ambient"
+    ambient.mkdir()
+    for name in ("scripts.py", "capacity_executor_release.py"):
+        (ambient / name).write_text("raise AssertionError('ambient helper imported')\n")
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", str(installer), "--help"],
+        cwd=ambient, env={**os.environ, "PYTHONPATH": str(ambient)}, capture_output=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr.decode()
+    assert b"discover-controller" in result.stdout
+    assert not result.stderr
+    if colocated:
+        assert not (installer.parent / "__pycache__").exists()
+
+
+def test_isolated_installer_does_not_fall_back_when_sibling_verifier_is_missing(tmp_path: Path) -> None:
+    installer = tmp_path / "install_capacity_executor.py"
+    installer.write_bytes((_REPO_ROOT / "scripts/ops" / installer.name).read_bytes())
+    ambient = tmp_path / "ambient"
+    ambient.mkdir()
+    (ambient / "capacity_executor_release.py").write_text("raise AssertionError('ambient helper imported')\n")
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", str(installer), "--help"],
+        cwd=ambient, env={**os.environ, "PYTHONPATH": str(ambient)}, capture_output=True, timeout=30,
+    )
+    assert result.returncode != 0
+    assert b"ambient helper imported" not in result.stderr
+    assert b"capacity_executor_release" in result.stderr
 
 
 def _tar(entries: tuple[tuple[str, bytes | None, int, str], ...]) -> io.BytesIO:
@@ -507,7 +548,10 @@ def _context(tmp_path: Path) -> InstallContext:
     )
 
 
-def _controller_request(tmp_path: Path) -> ControllerPrerequisiteRequest:
+def _controller_request(tmp_path: Path, pool_id: str = "oldlab") -> ControllerPrerequisiteRequest:
+    architecture = "arm64" if pool_id == "gb10" else "amd64"
+    cluster = "trt-gb10" if pool_id == "gb10" else "trt-oldlab"
+    hostname = "gx10-01c7" if pool_id == "gb10" else "TRT-EAI-OLDLAB-1"
     executable_paths = {
         name: f"/usr/bin/{name}"
         for name in ("sacct", "sacctmgr", "sbatch", "scancel", "scontrol", "squeue")
@@ -521,7 +565,7 @@ def _controller_request(tmp_path: Path) -> ControllerPrerequisiteRequest:
         executable_sha256[name] = hashlib.sha256(path.read_bytes()).hexdigest()
     slurm_conf = tmp_path / "etc/slurm/slurm.conf"
     slurm_conf.parent.mkdir(parents=True)
-    slurm_conf.write_text("ClusterName=trt-oldlab\n", encoding="ascii")
+    slurm_conf.write_text(f"ClusterName={cluster}\n", encoding="ascii")
     slurm_conf.chmod(0o644)
     for directory in (
         tmp_path / "usr",
@@ -534,28 +578,32 @@ def _controller_request(tmp_path: Path) -> ControllerPrerequisiteRequest:
     profile = load_capacity_pool_executor_profile(
         _REPO_ROOT / "deploy/dev-fleet/capacity-pool-executor.toml.example"
     )
-    template = profile.pools[1].model_dump(mode="python")
-    targets = tuple(f"trt-eai-oldlab-{index}" for index in range(3, 6))
+    template = next(pool for pool in profile.pools if pool.pool_id == pool_id).model_dump(mode="python")
+    targets = (
+        tuple(f"trt-gb10-{index}" for index in (1, *range(3, 16)))
+        if pool_id == "gb10"
+        else tuple(f"trt-eai-oldlab-{index}" for index in range(3, 6))
+    )
     exemplar = template["inventory"]["nodes"][0]
     template.update(
         {
             "controller_authority_sha256": "5" * 64,
-            "controller_host": "TRT-EAI-OLDLAB-1",
+            "controller_host": hostname,
             "local_uid": os.geteuid(),
             "partition": "loom-staging",
-            "slurm_cluster": "trt-oldlab",
+            "slurm_cluster": cluster,
             "slurm_executables": executable_paths,
         }
     )
     template["inventory"].update(
         {
-            "controller_cluster": "trt-oldlab",
+            "controller_cluster": cluster,
             "nodes": [
                 {
                     **exemplar,
                     "node_id": node_id,
-                    "pool_id": "oldlab",
-                    "features": ("amd64",),
+                    "pool_id": pool_id,
+                    "features": (architecture,),
                 }
                 for node_id in targets
             ],
@@ -566,20 +614,28 @@ def _controller_request(tmp_path: Path) -> ControllerPrerequisiteRequest:
             "slurm_conf_sha256": configuration_sha256["slurm.conf"],
             "job_visibility_evidence_sha256": (
                 controller_job_visibility_evidence_sha256(
-                    pool_id="oldlab",
-                    partition_fields={"AllowGroups": "loom-rollout"},
-                    association_fields=(),
+                    pool_id=pool_id,
+                    partition_fields={
+                        "AllowGroups": "loom-rollout",
+                        "AllowAccounts": "loom-staging",
+                        "AllowQos": "loom-staging",
+                    },
+                    association_fields=(
+                        ("trt-gb10", "loom-staging", "loom_capacity_executor",
+                         "loom-staging", "loom-staging", "loom-staging")
+                        if pool_id == "gb10" else ()
+                    ),
                 )
             ),
         }
     )
     template["local_authority_sha256"] = controller_local_authority_sha256(
-        pool_id="oldlab",
-        architecture="amd64",
-        controller_hostname="TRT-EAI-OLDLAB-1",
+        pool_id=pool_id,
+        architecture=architecture,
+        controller_hostname=hostname,
         service_uid=os.geteuid(),
         service_gid=os.getegid(),
-        slurm_cluster="trt-oldlab",
+        slurm_cluster=cluster,
         partition="loom-staging",
         target_nodes=targets,
         executable_sha256=executable_sha256,
@@ -588,15 +644,15 @@ def _controller_request(tmp_path: Path) -> ControllerPrerequisiteRequest:
     )
     binding = CapacityPoolExecutorBinding.model_validate(template)
     return ControllerPrerequisiteRequest(
-        pool_id="oldlab",
+        pool_id=pool_id,
         source_sha=_SOURCE_SHA,
-        architecture="amd64",
+        architecture=architecture,
         image=_IMAGE,
         service_user="loom_capacity_executor",
         binding=binding,
         credential_metadata_sha256={
-            "pool-executor-oldlab": "6" * 64,
-            "pool-ownership-oldlab": "7" * 64,
+            f"pool-executor-{pool_id}": "6" * 64,
+            f"pool-ownership-{pool_id}": "7" * 64,
         },
         transport_authority_sha256="8" * 64,
     )
@@ -1722,12 +1778,15 @@ def test_oldlab_discovery_rejects_partition_without_exact_group_admission(
         )
 
 
+@pytest.mark.parametrize("includes_builder", [False, True])
 def test_gb10_discovery_accepts_exact_executor_account_partition_and_qos(
     tmp_path: Path,
+    includes_builder: bool,
 ) -> None:
     """Catch rejecting the dedicated executor's exact GB10 Slurm admission."""
-    _controller_request(tmp_path)
+    request = _controller_request(tmp_path, "gb10")
     targets = tuple(f"trt-gb10-{index}" for index in (1, *range(3, 16)))
+    partition_nodes = tuple(f"trt-gb10-{index}" for index in range(1, 16)) if includes_builder else targets
     association = (
         "trt-gb10|loom-staging|loom_capacity_executor|loom-staging|loom-staging|loom-staging|"
     )
@@ -1735,9 +1794,9 @@ def test_gb10_discovery_accepts_exact_executor_account_partition_and_qos(
         tmp_path,
         image_architecture="arm64",
         slurm_cluster="trt-gb10",
-        slurm_nodes=targets,
+        slurm_nodes=partition_nodes,
         slurm_metadata_cluster="trt-gb10",
-        slurm_metadata_nodes=targets,
+        slurm_metadata_nodes=partition_nodes,
         manager_route_source="192.168.60.11",
         partition_allow_groups="ALL",
         partition_allow_accounts="loom-staging",
@@ -1775,6 +1834,70 @@ def test_gb10_discovery_accepts_exact_executor_account_partition_and_qos(
         )
     )
     assert not any(Path(call[0]).name == "usermod" for call in runner.calls)
+    assert "trt-gb10-2" not in evidence.target_nodes
+    # The consumer must accept the same partition without widening its binding.
+    assert installer.observe_prerequisite(request) is None
+
+
+@pytest.mark.parametrize("operation", ["discover", "observe"])
+@pytest.mark.parametrize("drift", ["missing-worker", "extra-node", "duplicate-builder"])
+def test_gb10_partition_drift_still_rejects(
+    tmp_path: Path, operation: str, drift: str,
+) -> None:
+    request = _controller_request(tmp_path, "gb10")
+    nodes = tuple(f"trt-gb10-{index}" for index in range(1, 16))
+    if drift == "missing-worker":
+        nodes = nodes[1:]
+    elif drift == "extra-node":
+        nodes += ("trt-gb10-16",)
+    else:
+        nodes += ("trt-gb10-2",)
+    runner = FakeHostRunner(
+        tmp_path, image_architecture="arm64", slurm_cluster="trt-gb10",
+        slurm_nodes=nodes, partition_allow_groups="ALL",
+        partition_allow_accounts="loom-staging", partition_allow_qos="loom-staging",
+    )
+    runner.group_present = runner.user_present = True
+    installer = ControllerInstaller(
+        context=_context(tmp_path), runner=runner, machine="aarch64",
+        hostname="gx10-01c7", effective_uid=0,
+    )
+    with pytest.raises(CapacityExecutorInstallError, match="Slurm authority drifted"):
+        if operation == "discover":
+            installer.discover_controller(ControllerDiscoveryRequest(
+                schema_version=1, pool_id="gb10", transport_authority_sha256="8" * 64,
+            ))
+        else:
+            installer.observe_prerequisite(request)
+
+
+@pytest.mark.parametrize("drift", ["missing-builder", "extra-node", "duplicate-node"])
+def test_gb10_discovery_requires_metadata_for_the_observed_partition(
+    tmp_path: Path, drift: str,
+) -> None:
+    _controller_request(tmp_path, "gb10")
+    nodes = tuple(f"trt-gb10-{index}" for index in range(1, 16))
+    metadata_nodes = nodes
+    if drift == "missing-builder":
+        metadata_nodes = tuple(node for node in nodes if node != "trt-gb10-2")
+    elif drift == "extra-node":
+        metadata_nodes += ("trt-gb10-16",)
+    else:
+        metadata_nodes += ("trt-gb10-2",)
+    runner = FakeHostRunner(
+        tmp_path, slurm_cluster="trt-gb10", slurm_nodes=nodes,
+        slurm_metadata_nodes=metadata_nodes, partition_allow_groups="ALL",
+        partition_allow_accounts="loom-staging", partition_allow_qos="loom-staging",
+    )
+    runner.group_present = runner.user_present = True
+    installer = ControllerInstaller(
+        context=_context(tmp_path), runner=runner, machine="aarch64",
+        hostname="gx10-01c7", effective_uid=0,
+    )
+    with pytest.raises(CapacityExecutorInstallError, match="Slurm metadata drifted"):
+        installer.discover_controller(ControllerDiscoveryRequest(
+            schema_version=1, pool_id="gb10", transport_authority_sha256="8" * 64,
+        ))
 
 
 def test_gb10_discovery_requires_exact_executor_account_partition_and_qos(

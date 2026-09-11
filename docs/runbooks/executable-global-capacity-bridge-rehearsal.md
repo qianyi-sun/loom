@@ -271,7 +271,19 @@ wheel into the image interpreter. The installer imports protected CLI contracts
 before it creates the host virtual environment; having a wheelhouse alone is
 insufficient. Both architecture builds execute the installer help and reject an
 invalid discovery request as the unprivileged image user, without host mounts or
-scheduler access. A missing import must fail the image build, before installation.
+scheduler access. These checks use the broker's `-I -B` isolated-interpreter
+flags. The installer loads its release verifier from the exact sibling file;
+it must not depend on the working directory, `PYTHONPATH`, or adding the helper
+directory to `sys.path`. Keep both helpers together in the verified release.
+A missing import must fail the image build, before installation.
+
+GB10's canonical `loom-staging` partition includes nodes 1–15, while the
+executor's trial inventory excludes reserved builder `trt-gb10-2`. Discovery
+and prerequisite readback accept this partition or the exact 14 eligible nodes;
+they reject missing workers, duplicate nodes, and any other extra node. Slurm
+metadata must describe the same observed partition. Discovery evidence and
+executor bindings retain only the 14 eligible nodes; this does not change
+partition configuration or authorize trial placement on the builder.
 
 ```bash
 executor_source_sha=1111111111111111111111111111111111111111

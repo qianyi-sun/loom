@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import ipaddress
 import json
 import os
@@ -54,8 +55,23 @@ else:
             CapacityExecutorReleaseError,
             verify_release,
         )
-    except ModuleNotFoundError:  # Installed helper is colocated with the verifier.
-        from capacity_executor_release import CapacityExecutorReleaseError, verify_release
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"scripts", "scripts.ops", "scripts.ops.capacity_executor_release"}:
+            raise
+        # The protected broker uses -I: neither cwd, PYTHONPATH nor this script's
+        # directory is importable. Load only the verifier beside this verified
+        # installer, without broadening the interpreter's module search path.
+        _verifier_path = Path(__file__).resolve().with_name("capacity_executor_release.py")
+        _verifier_spec = importlib.util.spec_from_file_location(
+            "_loom_capacity_executor_release", _verifier_path,
+        )
+        if _verifier_spec is None or _verifier_spec.loader is None:
+            raise ImportError("capacity executor sibling verifier is unavailable") from None
+        _verifier = importlib.util.module_from_spec(_verifier_spec)
+        sys.modules[_verifier_spec.name] = _verifier
+        _verifier_spec.loader.exec_module(_verifier)
+        CapacityExecutorReleaseError = _verifier.CapacityExecutorReleaseError
+        verify_release = _verifier.verify_release
 
 _MAX_ARCHIVE_MEMBERS = 4096
 _MAX_ARCHIVE_FILE_BYTES = 1024 * 1024 * 1024
@@ -141,6 +157,18 @@ _MANAGER_ROUTE_TARGET = "192.168.50.103"
 
 class CapacityExecutorInstallError(RuntimeError):
     """The controller installation could not converge without weakening safety."""
+
+
+def _partition_nodes_match(
+    pool_id: str, nodes: tuple[str, ...], target_nodes: tuple[str, ...],
+) -> bool:
+    """Allow only the fixed reserved builder beyond the executor's node set."""
+    observed = set(nodes)
+    targets = set(target_nodes)
+    return len(nodes) == len(observed) and (
+        observed == targets
+        or (pool_id == "gb10" and observed == targets | {"trt-gb10-2"})
+    )
 
 
 def _canonical_json_bytes(value: object) -> bytes:
@@ -903,7 +931,7 @@ class ControllerInstaller:
             label="Slurm node inventory",
         )
         nodes = tuple(line.strip() for line in nodes_output.splitlines() if line.strip())
-        if len(nodes) != len(set(nodes)) or set(nodes) != set(request.target_nodes):
+        if not _partition_nodes_match(request.pool_id, nodes, request.target_nodes):
             raise CapacityExecutorInstallError("controller prerequisite Slurm authority drifted")
         job_visibility_evidence_sha256 = self._job_visibility_evidence(
             pool_id=request.pool_id,
@@ -1009,7 +1037,7 @@ class ControllerInstaller:
             label="Slurm node inventory",
         )
         nodes = tuple(line.strip() for line in nodes_output.splitlines() if line.strip())
-        if len(nodes) != len(set(nodes)) or set(nodes) != set(expected_nodes):
+        if not _partition_nodes_match(request.pool_id, nodes, expected_nodes):
             raise CapacityExecutorInstallError("controller discovery Slurm authority drifted")
         job_visibility_evidence_sha256 = self._job_visibility_evidence(
             pool_id=request.pool_id,
@@ -1068,7 +1096,7 @@ class ControllerInstaller:
         if (
             any(not isinstance(node, str) for node in metadata_nodes)
             or len(metadata_nodes) != len(set(metadata_nodes))
-            or set(metadata_nodes) != set(expected_nodes)
+            or set(metadata_nodes) != set(nodes)
         ):
             raise CapacityExecutorInstallError("controller discovery Slurm metadata drifted")
         route_output = self._bounded_stdout(

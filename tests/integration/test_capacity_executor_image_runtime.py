@@ -24,7 +24,7 @@ class CapacityExecutorImageRuntimeTest(unittest.TestCase):
 
     def test_installer_can_load_its_command_contract(self) -> None:
         result = subprocess.run(
-            [sys.executable, "-B", str(_INSTALLER), "--help"],
+            [sys.executable, "-I", "-B", str(_INSTALLER), "--help"],
             capture_output=True, text=True, check=False, timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -33,7 +33,7 @@ class CapacityExecutorImageRuntimeTest(unittest.TestCase):
 
     def test_invalid_discovery_reaches_validation_without_host_access(self) -> None:
         result = subprocess.run(
-            [sys.executable, "-B", str(_INSTALLER), "--operation", "discover-controller"],
+            [sys.executable, "-I", "-B", str(_INSTALLER), "--operation", "discover-controller"],
             input="{}\n", capture_output=True, text=True, check=False, timeout=30,
         )
         self.assertEqual(result.returncode, 2, result.stderr)
