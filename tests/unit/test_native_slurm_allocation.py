@@ -7,8 +7,8 @@ from importlib import import_module
 
 import pytest
 
-from tests.unit.test_capacity_executor_slurm_backend import slurm_launch_request_fixture
 from tests.support.fake_slurm import FakeSlurm
+from tests.unit.test_capacity_executor_slurm_backend import slurm_launch_request_fixture
 
 _NOW = datetime(2026, 9, 11, 12, tzinfo=UTC)
 
@@ -105,3 +105,28 @@ def test_native_observation_rejects_ambiguous_or_foreign_facts(tmp_path, boundar
     with pytest.raises(module.NativeSlurmObservationError):
         module.parse_native_allocation(wire, request=request, job_id="101",
             expected_uid=fake.backend().authority.local_uid, observed_at=_NOW)
+
+
+async def test_backend_reads_only_exact_versioned_job_through_pinned_commands(tmp_path):
+    fake, request, raw = _fixture(tmp_path)
+    epoch = int(datetime.now(UTC).timestamp())
+    raw["jobs"][0]["submit_time"] = _number(epoch - 60)
+    raw["jobs"][0]["start_time"] = _number(epoch - 30)
+    # The fake process still exercises real fd-bound execution and authority
+    # probes; only its exact scheduler response is a disposable fixture.
+    fake._state["native_job_output"] = json.dumps(raw)
+    fake._write_state()
+    before = datetime.now(UTC)
+    observed = await fake.backend().observe_native_allocation(request, job_id="101")
+    assert observed.job_id == "101"
+    assert before <= observed.observed_at <= datetime.now(UTC)
+    assert fake.calls[-1].argv == ("--json=v0.0.40", "--clusters=oldlab", "show", "job", "101")
+    assert not fake.sbatch_calls and not fake.scancel_calls
+
+
+@pytest.mark.parametrize("job_id", ["0", "1_2", "1.batch", "--all", "01"])
+async def test_backend_rejects_nonphysical_job_identity_before_reading(tmp_path, job_id):
+    fake, request, _ = _fixture(tmp_path)
+    with pytest.raises(ValueError):
+        await fake.backend().observe_native_allocation(request, job_id=job_id)
+    assert not fake.calls
