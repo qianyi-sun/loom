@@ -104,3 +104,43 @@ async def test_http_defaults_closed_without_private_configuration(tmp_path):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="https://management.test") as client:
         result = await client.post(f"/api/v1/internal/capacity-build/pools/gb10/intents/{uuid4()}/prepare",content=b"{}")
     assert result.status_code == 503
+
+
+async def test_real_service_mounts_admission_closed_by_default(monkeypatch):
+    from loom_service.app import create_app
+    from loom_service.config import LoomServiceSettings
+    from tests.unit.test_service_root_landing import _base_env
+
+    for name,value in _base_env().items():
+        monkeypatch.setenv(name,value)
+    app = create_app(LoomServiceSettings(_env_file=None))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="https://management.test") as client:
+        result = await client.post(f"/api/v1/internal/capacity-build/pools/gb10/intents/{uuid4()}/prepare",content=b"{}")
+    assert result.status_code == 503
+
+
+async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_input,tmp_path):
+    from sqlalchemy import event
+
+    factory, engine, _installation, _plan, _source, _request = prepared_input
+    registration,digest = await admitted(prepared_input)
+    app = application(prepared_input,tmp_path)
+
+    def fail_commit(session):
+        session.execute(text("SELECT 1/0"))
+
+    target = factory.class_.sync_session_class
+    event.listen(target,"before_commit",fail_commit)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="https://management.test",
+            headers={"Authorization":"Bearer executor-secret"}) as client:
+            result = await client.post(route(registration,"prepare"),json=preparation(registration,digest))
+        assert result.status_code == 409
+        assert "admission_digest" not in result.text
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == 0
+    finally:
+        event.remove(target,"before_commit",fail_commit)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="https://management.test",
+        headers={"Authorization":"Bearer executor-secret"}) as client:
+        assert (await client.post(route(registration,"prepare"),json=preparation(registration,digest))).status_code == 200
