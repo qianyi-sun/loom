@@ -329,6 +329,22 @@ release; no management build-guard package or database adapter is added to that
 image. The installed-runtime probe imports the client when present, while preserving
 compatibility with older immutable releases that predate it.
 
+The pinned transport constructor consumes the exact hashed owner-only credential
+bytes and trusts only the configured CA. Certificate/key loading uses sealed
+memory snapshots, preventing a file replacement between hashing and TLS loading.
+The separate canonical V3 admission directory pins the executor, unique subject
+incarnation, configuration/deployment/candidate generations, full candidate digest,
+account, purpose and protected-admission digest. Application routes carry their
+private database-file pin; build routes carry separate HTTPS/mTLS/token pins.
+Every operation rereads the directory and checks its immutable root and exact
+binding before creating a client, which is disposed even after a lost reply.
+Purpose resolution does not require an unexpired manager launch permit, preserving
+cleanup access after cancellation/expiry. The backend still validates protected
+installation authority. Unsupported native lifecycle methods reject before loading
+credentials; they never fall back to application admission. This router is not
+yet wired into an activation artifact: V2 remains unchanged and typed execution
+stays disabled until all lifecycle and allocation-contained consumers are complete.
+
 Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
 preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release
 verification bind the exact historical configuration, acknowledgement and member

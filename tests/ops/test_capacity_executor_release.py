@@ -32,7 +32,7 @@ def test_build_admission_imports_from_executor_release_package_set(tmp_path: Pat
     # No site initialization/.pth/editable checkouts: only actual release source
     # packages plus installed third-party dependencies may satisfy the imports.
     result = subprocess.run([sys.executable,"-I","-S","-c",
-        "import sys; sys.path[:0]=sys.argv[1:]; import loom_capacity_executor.build_admission_client",
+        "import sys; sys.path[:0]=sys.argv[1:]; import loom_capacity_executor.build_admission_client; import loom_capacity_executor.typed_admission",
         str(tmp_path),sysconfig.get_path("purelib"),sysconfig.get_path("platlib")],
         cwd=tmp_path,check=False,capture_output=True,text=True)
     assert result.returncode == 0,result.stderr

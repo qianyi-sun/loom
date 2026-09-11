@@ -9,7 +9,10 @@ from fastapi import FastAPI
 from sqlalchemy import text
 
 from loom_capacity_manager.auth import CapacityPrincipalVerifier
-from loom_capacity_manager.executable_contracts import canonical_executable_bytes
+from loom_capacity_manager.executable_contracts import (
+    canonical_executable_bytes,
+    canonical_executable_digest,
+)
 from tests.integration.test_personal_dev_build_guard_execution import admitted, physical
 from tests.integration.test_personal_dev_build_guard_installations import (
     owner_sessions as owner_sessions,
@@ -203,7 +206,7 @@ async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_inpu
         assert (await client.post(route(registration,"prepare"),json=preparation(registration,digest))).status_code == 200
 
 
-@pytest.mark.parametrize("pinned", [False,True])
+@pytest.mark.parametrize("pinned", [False,True,"typed"])
 async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepared_input,tmp_path,pinned):
     import asyncio
     import socket
@@ -267,7 +270,23 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
                 "certificate":tls_files.certificate_file,"private_key":tls_files.private_key_file}
             config = PinnedBuildAdmissionConnectionV1.model_validate({"origin":origin,
                 **{name:{"path":str(path),"sha256":sha256(path.read_bytes()).hexdigest()} for name,path in paths.items()}})
-            client = BuildAdmissionClient.from_pinned_files(identity,config)
+            if pinned == "typed":
+                from loom_capacity_executor.typed_admission import (
+                    TypedAdmissionDirectoryV3,
+                    TypedAdmissionEntryV3,
+                    TypedAdmissionRouter,
+                )
+
+                entry = TypedAdmissionEntryV3(subject_id=binding.subject_id,subject_incarnation=binding.subject_incarnation,
+                    configuration_epoch=binding.execution.configuration_epoch,deployment_generation=binding.deployment_generation,
+                    candidate_generation=binding.candidate_generation,candidate_sha256=canonical_executable_digest(binding.candidate),
+                    account_id=binding.account_id,purpose="personal-build-worker",protected_admission_sha256="a"*64,build=config)
+                directory = TypedAdmissionDirectoryV3(executor=identity,entries=(entry,))
+                wire = canonical_executable_bytes(directory)
+                path = _write(tmp_path/"typed-admission.json",wire)
+                client = TypedAdmissionRouter(path,expected_sha256=sha256(wire).hexdigest(),executor=identity)
+            else:
+                client = BuildAdmissionClient.from_pinned_files(identity,config)
         else:
             client = BuildAdmissionClient.from_files(identity,DemandReporterConnection(manager_origin=origin,
                 bearer_token_file=token_path,tls_files=tls_files,timeout_seconds=5.0))
@@ -290,7 +309,7 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == 2
     finally:
-        if client is not None:
+        if client is not None and hasattr(client,"aclose"):
             await client.aclose()
         server.should_exit = True
         try:

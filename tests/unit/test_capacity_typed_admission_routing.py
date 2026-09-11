@@ -7,15 +7,19 @@ from uuid import uuid4
 
 import pytest
 
-from loom_capacity_manager.executable_contracts import canonical_executable_bytes, canonical_executable_digest
+from loom_capacity_manager.executable_contracts import (
+    canonical_executable_bytes,
+    canonical_executable_digest,
+)
 from tests.unit.test_capacity_agent_client import _owner_file
 from tests.unit.test_capacity_build_admission_client import registration
 from tests.unit.test_capacity_build_pinned_transport import pinned_inputs
+from tests.unit.test_capacity_executor_typed_launch_renderer import typed_context
 
 
 def configured(tmp_path,pool,purpose):
     module = import_module("loom_capacity_executor.typed_admission")
-    request = registration(pool)
+    request = registration(pool).model_copy(update={"binding": typed_context(pool=pool,purpose=purpose).binding})
     binding = request.binding
     database = _owner_file(tmp_path/"database-url",b"postgresql+psycopg://executor:private@database.test/app?sslmode=verify-full")
     entry = module.TypedAdmissionEntryV3(subject_id=binding.subject_id,subject_incarnation=binding.subject_incarnation,
@@ -76,14 +80,15 @@ async def test_typed_route_uses_exact_purpose_and_always_closes_client(tmp_path,
 
 
 @pytest.mark.parametrize("boundary", ["subject","incarnation","account","candidate-generation","deployment-generation",
-    "configuration","candidate","pool","executor","root","noncanonical","unsupported"])
+    "configuration","candidate","pool","pool-generation","executor-id","executor","root","noncanonical","unsupported"])
 async def test_typed_route_rejects_drift_before_creating_clients(tmp_path,boundary):
     module,request,document,path,digest = configured(tmp_path,"gb10","personal-build-worker")
     changes = {"subject":{"subject_id":uuid4()},"incarnation":{"subject_incarnation":uuid4()},
         "account":{"account_id":"foreign"},"candidate-generation":{"candidate_generation":99},
         "deployment-generation":{"deployment_generation":99},"configuration":{"execution":request.binding.execution.model_copy(update={"configuration_epoch":99})},
         "candidate":{"candidate":request.binding.candidate.model_copy(update={"publication_sha256":"f"*64})},
-        "pool":{"pool_id":"oldlab"},"executor":{"executor_incarnation":uuid4()}}
+        "pool":{"pool_id":"oldlab"},"pool-generation":{"pool_generation":99},
+        "executor-id":{"executor_id":"foreign"},"executor":{"executor_incarnation":uuid4()}}
 
     def unexpected(*args,**kwargs):
         pytest.fail("invalid typed routing must not create a credential-bearing client")
@@ -105,7 +110,7 @@ async def test_typed_route_rejects_drift_before_creating_clients(tmp_path,bounda
 
 @pytest.mark.parametrize("boundary", ["duplicate","mixed","purpose","foreign-executor"])
 def test_typed_directory_rejects_ambiguous_authority(tmp_path,boundary):
-    module,_request,document,path,digest = configured(tmp_path,"gb10","personal-build-worker")
+    module,_request,document,path,_digest = configured(tmp_path,"gb10","personal-build-worker")
     payload = document.model_dump(mode="json")
     if boundary == "duplicate":
         payload["entries"].append(payload["entries"][0])
@@ -119,3 +124,72 @@ def test_typed_directory_rejects_ambiguous_authority(tmp_path,boundary):
     path.write_bytes(wire)
     with pytest.raises((ValueError,RuntimeError)):
         module.TypedAdmissionRouter(path,expected_sha256=sha256(wire).hexdigest(),executor=document.executor)
+
+
+@pytest.mark.parametrize("boundary", ["root", "database", "database-mode"])
+async def test_typed_route_rechecks_inputs_after_construction(tmp_path, boundary):
+    from pathlib import Path
+
+    module,request,document,path,digest = configured(tmp_path,"oldlab","application-worker")
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("changed route must not create a client")
+
+    router = module.TypedAdmissionRouter(path,expected_sha256=digest,executor=document.executor,
+        application_client_factory=unexpected,build_client_factory=unexpected)
+    if boundary == "root":
+        path.write_bytes(path.read_bytes() + b" ")
+    else:
+        credential = Path(document.entries[0].database.path)
+        if boundary == "database":
+            credential.write_bytes(b"foreign-database")
+        else:
+            credential.chmod(0o644)
+    with pytest.raises((ValueError,RuntimeError,OSError)):
+        await router.prepare_worker(request,bootstrap_sha256="b"*64)
+
+
+@pytest.mark.parametrize("method", ["begin_drain", "withdraw_unregistered_worker", "register_worker",
+    "acknowledge_release", "admit_claim"])
+async def test_all_unimplemented_native_consumers_reject_before_transport(tmp_path,method):
+    from types import SimpleNamespace
+
+    module,request,document,path,digest = configured(tmp_path,"gb10","personal-build-worker")
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("unsupported native consumer must not open transport")
+
+    router = module.TypedAdmissionRouter(path,expected_sha256=digest,executor=document.executor,
+        application_client_factory=unexpected,build_client_factory=unexpected)
+    value = SimpleNamespace(binding=request.binding)
+    args = (request.binding,value) if method == "admit_claim" else (value,)
+    kwargs = {"bootstrap_capability":"secret"} if method == "register_worker" else (
+        {"current_worker_credential":"secret"} if method == "acknowledge_release" else {})
+    with pytest.raises(RuntimeError,match="not implemented"):
+        await getattr(router,method)(*args,**kwargs)
+
+
+@pytest.mark.parametrize("method", ["bind_slurm_job", "observe_intent", "revoke_prepared_bootstrap"])
+@pytest.mark.parametrize("purpose", ["application-worker", "personal-build-worker"])
+async def test_typed_lifecycle_routes_exact_arguments_and_closes(tmp_path,method,purpose):
+    from types import SimpleNamespace
+
+    module,request,document,path,digest = configured(tmp_path,"gb10",purpose)
+    value = request.binding if method == "observe_intent" else SimpleNamespace(binding=request.binding)
+    events = []
+
+    async def operation(incoming):
+        assert incoming is value
+        events.append(method)
+        return "receipt"
+
+    async def close():
+        events.append("closed")
+
+    def factory(*args, **kwargs):
+        return SimpleNamespace(**{method:operation,"aclose":close})
+
+    router = module.TypedAdmissionRouter(path,expected_sha256=digest,executor=document.executor,
+        application_client_factory=factory,build_client_factory=factory)
+    assert await getattr(router,method)(value) == "receipt"
+    assert events == [method,"closed"]
