@@ -15,6 +15,10 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
     version_table = connection.scalar(text("SELECT to_regclass('loom_capacity_build_guard.alembic_version')"))
     revision = connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) if version_table else None
     callables = []
+    if revision == "build_guard_0022":
+        callables.append(f"{SCHEMA}.read_pending_native_workers(uuid,bigint,bigint,integer)")
+        # This read-only extension retains the exact 0021 surface and helpers.
+        revision = "build_guard_0021"
     if revision in {"build_guard_0003", "build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018", "build_guard_0019", "build_guard_0020", "build_guard_0021"}:
         callables.append(f"{SCHEMA}.prepare_plan(uuid,jsonb,bytea,text,jsonb)")
     if revision in {"build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018", "build_guard_0019", "build_guard_0020", "build_guard_0021"}:

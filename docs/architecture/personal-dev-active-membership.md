@@ -497,6 +497,19 @@ contents. Discovery/authority errors do not produce invented success. This adapt
 still needs connection to the management runtime and live concurrent-owner
 acceptance; it issues no source grants or application worker credentials.
 
+Build-guard revision `build_guard_0022` adds bounded management-only discovery of
+held registered workers independently of final release. It returns exact worker
+and optional claim identities, never credentials or source contents. The
+`BuildTerminalRecoveryCoordinator` fetches authenticated native terminal inventory
+outside database transactions, commits import, settles lost claims as interrupted,
+then commits drain and protected terminal release separately. Existing worker
+outcomes and drain snapshots are preserved. A missing terminal witness does
+nothing; deadlines never imply death. Finite scan bounds and per-item retries
+retain unavailable work without starving earlier entries. This pre-release path
+does not wait on final-release evidence, which requires these claims closed first.
+Capacity holds still await protected publication and exact final retirement;
+management runtime orchestration and live acceptance remain required.
+
 Build-guard revision `build_guard_0021` closes registered native workers through
 one immutable protected release. It requires an exact committed drain, claim
 high-water zero/one, and zero *current* live claims; an older drain's live-count

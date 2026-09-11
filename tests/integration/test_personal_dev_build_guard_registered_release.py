@@ -227,3 +227,38 @@ def test_registered_release_privilege_drift_is_rejected(build_guard_database, bo
         connection.execute(text(statements[boundary]))
     with pytest.raises(RuntimeError, match=r"privilege|surface"):
         command.upgrade(config, "head")
+
+
+async def test_worker_and_terminal_release_race_retains_one_winner(prepared_input, monkeypatch):
+    import asyncio
+
+    factory, engine, installation, *_ = prepared_input
+    worker_request, _claim, terminal, _drain = await registered_release_input(prepared_input, monkeypatch)
+    manager_request = worker_request.model_copy(update={"operation_id": uuid4()})
+    digest = canonical_executable_digest(terminal)
+    async with factory.begin() as session:
+        await terminal_store(session, installation).import_evidence(terminal)
+    ready = [asyncio.Event(), asyncio.Event()]
+
+    async def compete(index):
+        try:
+            async with factory.begin() as session:
+                ready[index].set()
+                await ready[1-index].wait()
+                if index:
+                    return await terminal_store(session, installation).release_terminal_worker(manager_request,
+                        terminal_inventory_sha256=digest)
+                return await store(session, installation).acknowledge_release(worker_request,
+                    current_worker_credential=CREDENTIAL)
+        except DBAPIError as exc:
+            return exc
+
+    async with asyncio.timeout(10):
+        results = await asyncio.gather(compete(0), compete(1))
+    winners = [result for result in results if not isinstance(result, DBAPIError)]
+    assert len(winners) == 1
+    async with factory.begin() as session:
+        assert (await store(session, installation).observe_intent(worker_request.binding)).release == winners[0]
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_releases")) == 1
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
