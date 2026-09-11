@@ -901,6 +901,7 @@ class ApplicationRecoveryView:
     ] | None
     workloads: tuple[ApplicationWorkload, ...] = ()
     workloads_restoring: bool = False
+    owner_creations: tuple[tuple[ApplicationOwnerCreationIntent, int | None], ...] = ()
 
 
 class ProtectedApplyJournal:
@@ -1031,7 +1032,10 @@ class ProtectedApplyJournal:
         restoring = self._read_workload_restoration(root, expected, workloads, durable=False)
         if names != {path.name for path in root.iterdir() if path.name.startswith("application-")}:
             raise ProtectedApplyJournalError("application recovery view changed during restoration read")
-        return ApplicationRecoveryView(expected, admission, recoveries, manager, workloads, restoring)
+        owners = self._read_application_owner_creations(root, expected, durable=False)
+        if names != {path.name for path in root.iterdir() if path.name.startswith("application-")}:
+            raise ProtectedApplyJournalError("application recovery view changed during owner read")
+        return ApplicationRecoveryView(expected, admission, recoveries, manager, workloads, restoring, owners)
 
     def _sync_application_recovery(self, root: Path, filename: str) -> None:
         # A prior publisher can exit after making its link visible but BEFORE
@@ -1360,6 +1364,11 @@ class ProtectedApplyJournal:
     ) -> tuple[tuple[ApplicationOwnerCreationIntent, int | None], ...]:
         self.require_application_credential_context(plan)
         root, component = self._application_admission_context()
+        return self._read_application_owner_creations(root, component, durable=True)
+
+    def _read_application_owner_creations(
+        self, root: Path, component: ComponentIntent, *, durable: bool,
+    ) -> tuple[tuple[ApplicationOwnerCreationIntent, int | None], ...]:
         names = {path.name for path in root.iterdir() if path.name.startswith("application-owner-")}
         allowed = {f"application-owner-{i:02d}-{suffix}.json" for i in range(1, MAX_OWNER_CREATIONS + 1)
                    for suffix in ("intent", "oid")}
@@ -1375,7 +1384,8 @@ class ProtectedApplyJournal:
             if intent.ordinal != i or intent.previous_record_digest != previous:
                 raise ProtectedApplyJournalError("application owner creation chain changed")
             consumed.add(name)
-            self._sync_application_recovery(root, name)
+            if durable:
+                self._sync_application_recovery(root, name)
             oid = None
             if receipt in names:
                 value = self._read(root / receipt)
@@ -1387,7 +1397,8 @@ class ProtectedApplyJournal:
                     raise ProtectedApplyJournalError("application owner creation OID receipt changed")
                 oid = candidate
                 consumed.add(receipt)
-                self._sync_application_recovery(root, receipt)
+                if durable:
+                    self._sync_application_recovery(root, receipt)
             records.append((intent, oid))
             previous = admission_record_digest({"intent": intent.to_dict(), "role_oid": oid})
         if names != consumed:
