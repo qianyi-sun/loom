@@ -1009,7 +1009,9 @@ class MutationGuardManager:
                 ) from validation_error
             raise
 
-    def assert_ready(self, request_id: str) -> MutationGuardEvidence:
+    def assert_ready(
+        self, request_id: str, *, candidate_config: OperatorConfig | None = None,
+    ) -> MutationGuardEvidence:
         status = self.systemd.show_mutation_guard(request_id)
         if status is None or not status.is_running or status.main_pid < 1:
             raise MutationGuardError("mutation guard unit is not ready")
@@ -1019,7 +1021,22 @@ class MutationGuardManager:
         )
         if evidence.guard_pid != status.main_pid:
             raise MutationGuardError("mutation guard process identity drifted")
-        return self._validate(evidence, request_id=request_id, state="ready")
+        candidate_sha, candidate_tree = self.resolve_candidate(
+            self.config if candidate_config is None else candidate_config,
+        )
+        return self._validate(evidence, request_id=request_id, state="ready",
+                              candidate_sha=candidate_sha, candidate_tree=candidate_tree)
+
+    def observe_retained_epoch(
+        self, guard: MutationGuardEvidence, *, candidate_config: OperatorConfig | None = None,
+    ) -> int:
+        """Read live epoch without a new connection while admission is closed."""
+        from .protected_application_guard_probe import probe_retained_epoch
+
+        return probe_retained_epoch(
+            self.config, guard=guard, service_uid=self.service_uid,
+            assert_ready=lambda: self.assert_ready(guard.request_id, candidate_config=candidate_config),
+        )
 
     def release(
         self,
@@ -1471,6 +1488,14 @@ def hold_request_guard(
                                 raise MutationGuardError(
                                     "mutation guard deadline expired during retained application handoff"
                                 )
+                            from .protected_application_guard_probe import (
+                                answer_retained_epoch_probe,
+                            )
+
+                            answer_retained_epoch_probe(
+                                config, guard=ready, service_uid=service_uid, query=query,
+                                assert_healthy=lambda: _require_lock_health(query, backend_pid=backend_pid),
+                            )
                             sleep(1.0)
                             continue
                         if stop_requested():

@@ -430,9 +430,11 @@ def test_resume_refuses_retention_without_exact_original_recovery_binding(tmp_pa
 
 def test_retained_epoch_probe_uses_original_guard_and_rejects_stale_reply(tmp_path):
     from loom_cli.rollout.operator.protected_application_guard_probe import (
-        answer_retained_epoch_probe, probe_retained_epoch,
+        answer_retained_epoch_probe,
+        probe_retained_epoch,
     )
-    plan, _, guard = _pending_resume(tmp_path)
+
+    _plan, _, guard = _pending_resume(tmp_path)
     config = replace(_config(tmp_path), state_root=tmp_path / "state")
     guard_module._publish_evidence(config, guard, service_uid=os.getuid())
     queries = []
@@ -447,15 +449,24 @@ def test_retained_epoch_probe_uses_original_guard_and_rejects_stale_reply(tmp_pa
     def sleep(_):
         sleeps.append(1)
         answer_retained_epoch_probe(
-            config, guard=guard, service_uid=os.getuid(), query=query,
+            config,
+            guard=guard,
+            service_uid=os.getuid(),
+            query=query,
             assert_healthy=lambda: health.append(1),
         )
 
     for _ in range(2):
-        assert probe_retained_epoch(
-            config, guard=guard, service_uid=os.getuid(),
-            assert_ready=lambda: guard, sleep=sleep,
-        ) == 8
+        assert (
+            probe_retained_epoch(
+                config,
+                guard=guard,
+                service_uid=os.getuid(),
+                assert_ready=lambda: guard,
+                sleep=sleep,
+            )
+            == 8
+        )
     # A second fresh nonce cannot consume the first answer, even with identical epoch.
     assert len(sleeps) == 2 and len(queries) == 2 and len(health) == 4
 
@@ -463,7 +474,8 @@ def test_retained_epoch_probe_uses_original_guard_and_rejects_stale_reply(tmp_pa
 @pytest.mark.parametrize("failure", ["not-retained", "lost", "replaced", "query", "malformed"])
 def test_retained_epoch_probe_never_reacquires_or_uses_an_unhealthy_response(tmp_path, failure):
     from loom_cli.rollout.operator.protected_application_guard_probe import (
-        answer_retained_epoch_probe, probe_retained_epoch,
+        answer_retained_epoch_probe,
+        probe_retained_epoch,
     )
     from loom_cli.rollout.operator.staging_mutation_guard import MutationGuardError
 
@@ -489,11 +501,116 @@ def test_retained_epoch_probe_never_reacquires_or_uses_an_unhealthy_response(tmp
 
     def sleep(_):
         answer_retained_epoch_probe(
-            config, guard=guard, service_uid=os.getuid(), query=query,
+            config,
+            guard=guard,
+            service_uid=os.getuid(),
+            query=query,
             assert_healthy=lambda: None,
         )
 
     with pytest.raises((ValueError, RuntimeError)):
-        probe_retained_epoch(config, guard=guard, service_uid=os.getuid(),
-                             assert_ready=ready, sleep=sleep)
+        probe_retained_epoch(
+            config, guard=guard, service_uid=os.getuid(), assert_ready=ready, sleep=sleep
+        )
     assert len(queries) == (1 if failure in {"query", "malformed"} else 0)
+
+
+@pytest.mark.parametrize("at_query", [False, True])
+def test_epoch_probe_completion_race_restores_normal_guard_release(tmp_path, at_query):
+    from loom_cli.rollout.operator.protected_application_guard_probe import (
+        _paths,
+        _publish,
+        answer_retained_epoch_probe,
+    )
+
+    plan, journal, guard = _pending_resume(tmp_path)
+    config = _config(tmp_path)
+    guard_module._publish_evidence(config, guard, service_uid=os.getuid())
+    request, response = _paths(config, guard, os.getuid())
+    _publish(
+        request, {"schema_version": 1, "guard_digest": guard.evidence_digest, "nonce": "a" * 32}
+    )
+
+    def complete():
+        from tests.loom_cli.rollout.operator.test_protected_apply_journal import _Backend
+
+        component = replace(
+            _component(lambda _: None),
+            classify=lambda _: ComponentObservation(
+                ComponentState.EXACT,
+                "3" * 64,
+                8,
+            ),
+        )
+        backend = _Backend()
+        backend.states["mutation-epoch-claim"] = ComponentState.EXACT
+        journal.execute(plan, [backend.component("mutation-epoch-claim", 0), component])
+
+    def query(_):
+        assert at_query
+        complete()
+        return ({"mutation_epoch": 8},)
+
+    if not at_query:
+        complete()
+    answer_retained_epoch_probe(
+        config, guard=guard, service_uid=os.getuid(), query=query, assert_healthy=lambda: None
+    )
+    assert not response.exists()
+    assert not application_guard_is_retained(
+        config.state_root, request_id=plan.request_id, service_uid=os.getuid()
+    )
+
+
+@pytest.mark.parametrize("change", ["sql-request", "bad-reply", "stale-reply", "lost-lock"])
+def test_epoch_probe_refuses_unknown_messages_and_lost_lock(tmp_path, change):
+    from loom_cli.rollout.operator.protected_application_guard_probe import (
+        _paths,
+        _publish,
+        answer_retained_epoch_probe,
+        probe_retained_epoch,
+    )
+
+    _plan, _journal, guard = _pending_resume(tmp_path)
+    config = _config(tmp_path)
+    guard_module._publish_evidence(config, guard, service_uid=os.getuid())
+    request, response = _paths(config, guard, os.getuid())
+    clock = [0.0]
+    queries = []
+
+    def health():
+        if change == "lost-lock":
+            raise RuntimeError("original lock lost")
+
+    def query(_):
+        queries.append(1)
+        return ({"mutation_epoch": 8},)
+
+    def sleep(_):
+        import json
+
+        challenge = json.loads(request.read_text())
+        if change == "bad-reply":
+            _publish(response, {**challenge, "guard_digest": "c" * 64, "epoch": 8})
+        elif change == "stale-reply":
+            _publish(response, {**challenge, "nonce": "f" * 32, "epoch": 8})
+            clock[0] += 20.0
+        else:
+            if change == "sql-request":
+                _publish(
+                    request, {**challenge, "sql": "ALTER DATABASE loom ALLOW_CONNECTIONS true"}
+                )
+            answer_retained_epoch_probe(
+                config, guard=guard, service_uid=os.getuid(), query=query, assert_healthy=health
+            )
+
+    with pytest.raises((RuntimeError, ValueError)):
+        probe_retained_epoch(
+            config,
+            guard=guard,
+            service_uid=os.getuid(),
+            assert_ready=lambda: guard,
+            sleep=sleep,
+            monotonic=lambda: clock[0],
+        )
+    assert queries == []

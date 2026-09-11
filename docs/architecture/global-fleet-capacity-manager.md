@@ -704,7 +704,12 @@ Broker and worker resume can select that same original guard only when the
 acknowledged pending component matches the exact advanced-epoch recovery plan,
 attempt, candidate, tree and original starting epoch. They compare the full live
 supervised guard evidence and separately require the database epoch at starting
-plus one. A failed resumed launch cannot release the retained guard. Ordinary
+plus one. A fresh nonce challenge through a private runtime mailbox asks only the
+original guard's existing connection for that epoch, with lock checks before and
+after its fixed SELECT. It opens no new database connection while admission is
+closed. Stale replies, changed identities, unknown request fields and lock loss
+refuse; a bounded SELECT timeout preserves a still-healthy guard for retry.
+A failed resumed launch cannot release the retained guard. Ordinary
 resumes still acquire their own guard; completed retention restores those normal
 semantics. The installed composition still needs admission recovery before any
 fresh database connection when the application database is closed; guard selection

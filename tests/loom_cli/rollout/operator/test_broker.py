@@ -3806,7 +3806,8 @@ def test_resume_reuses_only_original_retained_guard(tmp_path, monkeypatch, outco
         )
         return original
 
-    def ready(request_id):
+    def ready(request_id, *, candidate_config):
+        assert candidate_config == deps.config
         calls.append(request_id)
         if outcome == "lost":
             raise RuntimeError("original guard lost")
@@ -3822,7 +3823,13 @@ def test_resume_reuses_only_original_retained_guard(tmp_path, monkeypatch, outco
         raise RuntimeError("injected launch failure")
 
     guard.assert_ready = ready
-    deps.dependencies.read_mutation_epoch = lambda: 9 if outcome == "epoch" else 8
+    def probe(evidence, *, candidate_config):
+        assert candidate_config == deps.config
+        assert evidence == original
+        return 9 if outcome == "epoch" else 8
+
+    guard.observe_retained_epoch = probe
+    deps.dependencies.read_mutation_epoch = lambda: pytest.fail("fresh database connection during retention")
     monkeypatch.setattr(broker_module, "find_advanced_epoch_attempt", lambda *a, **k: 1)
     monkeypatch.setattr(broker_module, "retained_application_guard_for_resume", retained, raising=False)
     if outcome == "launch-failure":

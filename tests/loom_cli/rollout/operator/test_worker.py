@@ -1751,9 +1751,12 @@ def test_attempt_uses_original_retained_guard_at_live_advanced_epoch(tmp_path, m
 
     monkeypatch.setattr(worker_module, "find_advanced_epoch_attempt", lambda *a, **k: 1)
     monkeypatch.setattr(worker_module, "retained_application_guard_for_resume", retained, raising=False)
-    dependencies = replace(bundle.deps, mutation_guard=guard,
-                           read_mutation_epoch=(None if outcome == "missing-epoch-reader"
-                                                else lambda: 9 if outcome == "epoch" else 8))
+    if outcome != "missing-epoch-reader":
+        def probe(evidence):
+            assert evidence == original
+            return 9 if outcome == "epoch" else 8
+        guard.observe_retained_epoch = probe
+    dependencies = replace(bundle.deps, mutation_guard=guard)
     if outcome == "run":
         assert run_attempt(envelope, dependencies) == 0
         assert "driver-run" in bundle.order
