@@ -1,15 +1,15 @@
 """Persist explicit personal-dev capacity membership lifecycle state.
 
-Revision ID: 0138
-Revises: 0137
+Revision ID: 0139
+Revises: 0138
 """
 
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0138"
-down_revision = "0137"
+revision = "0139"
+down_revision = "0138"
 branch_labels = None
 depends_on = None
 
@@ -347,7 +347,7 @@ def downgrade() -> None:
                        WHERE capacity_mode <> 'shadow-v1')
                OR EXISTS (SELECT 1 FROM dev_instances
                           WHERE accepted_capacity_mode <> 'shadow-v1') THEN
-                RAISE EXCEPTION 'cannot downgrade 0138 with membership lifecycle records';
+                RAISE EXCEPTION 'cannot downgrade 0139 with membership lifecycle records';
             END IF;
         END $$;
         """
