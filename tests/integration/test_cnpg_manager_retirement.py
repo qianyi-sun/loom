@@ -124,7 +124,7 @@ def pinned_manager():
 
 
 @pytest.fixture
-def cnpg_probe(tmp_path, pinned_manager):
+def cnpg_probe(tmp_path, pinned_manager, request):
     response = requests.get(
         f"https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/{_SOURCE}/releases/cnpg-1.25.1.yaml",
         timeout=30,
@@ -136,7 +136,9 @@ def cnpg_probe(tmp_path, pinned_manager):
     original_image = "ghcr.io/cloudnative-pg/cloudnative-pg:1.25.1"
     assert response.text.count(original_image) == 2
     manifest = response.text.replace(original_image, _OPERATOR)
-    container = _start_k3s()
+    staging = getattr(request, "param", None) == "staging-profile"
+    namespace, cluster_name = ("loom-staging", "loom-postgres") if staging else ("default", "probe")
+    container = _start_k3s(node_name="trt-eai-oldlab-4" if staging else None)
     try:
         result = _eventually(
             lambda: container.exec(["cat", "/etc/rancher/k3s/k3s.yaml"]),
@@ -146,6 +148,9 @@ def cnpg_probe(tmp_path, pinned_manager):
         config["clusters"][0]["cluster"]["server"] = (
             f"https://127.0.0.1:{container.get_exposed_port(6443)}"
         )
+        if staging:
+            for context in config["contexts"]:
+                context["context"]["namespace"] = namespace
         config_path = tmp_path / "disposable-kubeconfig"
         config_path.write_text(yaml.safe_dump(config))
         config_path.chmod(0o600)
@@ -168,14 +173,16 @@ def cnpg_probe(tmp_path, pinned_manager):
         kube("apply", "--server-side", "-f", "-", data=manifest.encode(), timeout=120)
         kube("-n", "cnpg-system", "rollout", "status", "deployment/cnpg-controller-manager",
              "--timeout=300s", timeout=310)
+        if staging:
+            kube("create", "namespace", namespace)
         kube("apply", "-f", "-", data=yaml.safe_dump({
             "apiVersion": "postgresql.cnpg.io/v1", "kind": "Cluster",
-            "metadata": {"name": "probe", "namespace": "default"},
+            "metadata": {"name": cluster_name, "namespace": namespace},
             "spec": {"instances": 1, "imageName": _POSTGRES, "storage": {"size": "1Gi"},
                      "bootstrap": {"initdb": {"database": "loom", "owner": "loom"}}},
         }).encode())
-        kube("wait", "--for=condition=Ready", "cluster/probe", "--timeout=300s", timeout=310)
-        pods = json.loads(kube("get", "pods", "-l", "cnpg.io/cluster=probe", "-o", "json"))["items"]
+        kube("wait", "--for=condition=Ready", f"cluster/{cluster_name}", "--timeout=300s", timeout=310)
+        pods = json.loads(kube("get", "pods", "-l", f"cnpg.io/cluster={cluster_name}", "-o", "json"))["items"]
         assert len(pods) == 1
         bootstrap = [entry for entry in pods[0]["spec"]["initContainers"]
                      if entry["name"] == "bootstrap-controller"]
@@ -427,3 +434,77 @@ def test_replaced_cnpg_reaches_client_retirement_with_original_readonly_guard(cn
             _eventually(retired, bool, "safe reconciliation retained an unknown client", seconds=30)
             assert _read_coordination_guard(maintenance, target=target, backend_pid=saved.backend.pid,
                                             application_name=name) == saved
+
+
+@pytest.mark.timeout(900)
+@pytest.mark.parametrize("cnpg_probe", ["staging-profile"], indirect=True)
+def test_staging_primary_runtime_admission_reads_actual_pinned_processes(cnpg_probe):
+    from loom_cli.rollout.operator.protected_apply_executor import (
+        SubprocessProtectedApplyCommandRunner,
+    )
+    from loom_cli.rollout.operator.protected_cnpg_runtime_admission import (
+        observe_cnpg_primary_runtime,
+    )
+
+    argv, kube, pod, _manager = cnpg_probe
+    class Runner(SubprocessProtectedApplyCommandRunner):
+        def capture_stdout(self, args, *, env, timeout_seconds):
+            assert args[0] == "kubectl"
+            return subprocess.run(argv(*args[1:]), env=env, check=True, capture_output=True,
+                                  timeout=timeout_seconds).stdout
+    cluster = json.loads(kube("get", "cluster/loom-postgres", "-o", "json"))
+    first = observe_cnpg_primary_runtime(Runner(), cluster_uid=cluster["metadata"]["uid"], pod_name=pod)
+    second = observe_cnpg_primary_runtime(Runner(), cluster_uid=cluster["metadata"]["uid"], pod_name=pod)
+    assert first == second
+    assert first.manager.node_name == "trt-eai-oldlab-4"
+    assert first.postgres_pid > 1 and first.postgres_started_ticks > 0
+
+
+@pytest.mark.timeout(900)
+@pytest.mark.parametrize('cnpg_probe', ['staging-profile'], indirect=True)
+def test_cnpg_effective_sql_admission_rejects_unconfigured_database_writers(cnpg_probe):
+    from loom_cli.rollout.operator.protected_cnpg_sql_admission import (
+        require_cnpg_effective_sql_profile,
+    )
+
+    from loom_cli.rollout.operator.protected_peer_database_connection import PeerDatabaseConnection
+    from tests.integration.test_application_database_admission import _handoff
+
+    argv, _kube, pod, _manager = cnpg_probe
+    def peer(database):
+        return PeerDatabaseConnection(subprocess.Popen(
+            argv('exec', '-i', pod, '-c', 'postgres', '--', 'env', 'PGOPTIONS=-c event_triggers=off',
+                 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=0', '-U', 'postgres', '-d', database),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
+        ), query_timeout_seconds=10)
+
+    with peer('loom') as application, peer('postgres') as maintenance:
+        original = _handoff(application)
+        def check(connection=maintenance, database='postgres'):
+            return require_cnpg_effective_sql_profile(connection, database=database, original=original)
+        assert check() == check()
+        check(application, 'loom')
+        cases = [
+            ('CREATE EXTENSION hstore', 'DROP EXTENSION hstore'),
+            ("ALTER ROLE loom SET session_preload_libraries='foreign_hook'", 'ALTER ROLE loom RESET session_preload_libraries'),
+            ("CREATE FUNCTION public.foreign_hook() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$", 'DROP FUNCTION public.foreign_hook()'),
+            ("CREATE PUBLICATION foreign_pub", 'DROP PUBLICATION foreign_pub'),
+            ('CREATE ROLE foreign_superuser SUPERUSER NOLOGIN', 'DROP ROLE foreign_superuser'),
+        ]
+        for create, cleanup in cases:
+            try:
+                with maintenance.transaction():
+                    maintenance.execute(create)
+                with pytest.raises(RuntimeError, match='CNPG SQL'):
+                    check()
+            finally:
+                with maintenance.transaction():
+                    maintenance.execute(cleanup)
+            assert check()
+        with maintenance.transaction():
+            maintenance.execute("SET session_preload_libraries='foreign_hook'")
+        with pytest.raises(RuntimeError, match='CNPG SQL'):
+            check()
+        with maintenance.transaction():
+            maintenance.execute('RESET session_preload_libraries')
+        assert check()

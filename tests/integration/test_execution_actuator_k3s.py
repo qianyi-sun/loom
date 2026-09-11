@@ -255,7 +255,7 @@ def _executable_lease(
     )
 
 
-def _start_k3s() -> object:
+def _start_k3s(*, node_name: str | None = None) -> object:
     from testcontainers.core.container import DockerContainer
 
     container = (
@@ -270,6 +270,7 @@ def _start_k3s() -> object:
                 "--disable=servicelb",
                 "--tls-san=127.0.0.1",
                 "--write-kubeconfig-mode=644",
+                *([] if node_name is None else [f"--node-name={node_name}"]),
             ]
         )
         .with_kwargs(privileged=True)

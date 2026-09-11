@@ -62,21 +62,37 @@ def test_primary_rejects_executable_or_volume_injection(pod, change):
     from loom_cli.rollout.operator.protected_cnpg_runtime_admission import admit_cnpg_primary_pod
     spec = pod['spec']
     container = spec['containers'][0]
-    if change == 'env': container['env'].append({'name': 'LD_PRELOAD', 'value': '/controller/hook.so'})
-    elif change == 'init-env': spec['initContainers'][0]['env'] = [{'name': 'LD_PRELOAD', 'value': '/controller/hook.so'}]
-    elif change == 'host': spec['hostPID'] = True
-    elif change == 'ephemeral': spec['ephemeralContainers'] = [{'name': 'foreign'}]
-    elif change == 'sidecar': spec['containers'].append(deepcopy(container))
-    elif change == 'image': pod['status']['containerStatuses'][0]['imageID'] = 'foreign:latest'
-    elif change == 'init-image': pod['status']['initContainerStatuses'][0]['imageID'] = 'foreign:latest'
-    elif change == 'mount': container['volumeMounts'].append({'name': 'scratch-data', 'mountPath': '/usr/lib'})
-    elif change == 'volume': spec['volumes'][1] = {'name': 'scratch-data', 'hostPath': {'path': '/tmp'}}
-    elif change == 'lifecycle': container['lifecycle'] = {'postStart': {'exec': {'command': ['sh', '-c', 'false']}}}
-    elif change == 'security': container['securityContext']['readOnlyRootFilesystem'] = False
-    elif change == 'owner': pod['metadata']['ownerReferences'][0]['uid'] = '33333333-3333-4333-8333-333333333333'
-    elif change == 'node': spec['nodeName'] = 'trt-eai-oldlab-2'
-    elif change == 'args': container['args'] = ['--foreign']
-    elif change == 'duplicate-env': container['env'].append(deepcopy(container['env'][0]))
-    elif change == 'device': container['volumeDevices'] = [{'name': 'pgdata', 'devicePath': '/dev/foreign'}]
+    if change == 'env':
+        container['env'].append({'name': 'LD_PRELOAD', 'value': '/controller/hook.so'})
+    elif change == 'init-env':
+        spec['initContainers'][0]['env'] = [{'name': 'LD_PRELOAD', 'value': '/controller/hook.so'}]
+    elif change == 'host':
+        spec['hostPID'] = True
+    elif change == 'ephemeral':
+        spec['ephemeralContainers'] = [{'name': 'foreign'}]
+    elif change == 'sidecar':
+        spec['containers'].append(deepcopy(container))
+    elif change == 'image':
+        pod['status']['containerStatuses'][0]['imageID'] = 'foreign:latest'
+    elif change == 'init-image':
+        pod['status']['initContainerStatuses'][0]['imageID'] = 'foreign:latest'
+    elif change == 'mount':
+        container['volumeMounts'].append({'name': 'scratch-data', 'mountPath': '/usr/lib'})
+    elif change == 'volume':
+        spec['volumes'][1] = {'name': 'scratch-data', 'hostPath': {'path': '/tmp'}}
+    elif change == 'lifecycle':
+        container['lifecycle'] = {'postStart': {'exec': {'command': ['sh', '-c', 'false']}}}
+    elif change == 'security':
+        container['securityContext']['readOnlyRootFilesystem'] = False
+    elif change == 'owner':
+        pod['metadata']['ownerReferences'][0]['uid'] = '33333333-3333-4333-8333-333333333333'
+    elif change == 'node':
+        spec['nodeName'] = 'trt-eai-oldlab-2'
+    elif change == 'args':
+        container['args'] = ['--foreign']
+    elif change == 'duplicate-env':
+        container['env'].append(deepcopy(container['env'][0]))
+    elif change == 'device':
+        container['volumeDevices'] = [{'name': 'pgdata', 'devicePath': '/dev/foreign'}]
     with pytest.raises((ValueError, RuntimeError), match='CNPG'):
         admit_cnpg_primary_pod(pod, cluster_uid='11111111-1111-4111-8111-111111111111')
