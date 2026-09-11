@@ -51,6 +51,7 @@ from loom_service.taskset_gc import (
 )
 from loom_service.taskset_intake import delete_task_set, get_latest_job, rebuild_task_set
 from loom_service.taskset_materializer import run_once
+from tests.support.minio import MINIO_TEST_IMAGE
 
 _MANIFEST_INLINE = """
 apiVersion: loom.taskset/v1
@@ -242,7 +243,7 @@ def _unsafe_traversal_bundle_tar_bytes() -> bytes:
 
 @pytest.fixture(scope="module")
 def materialization_minio() -> MinioContainer:
-    with MinioContainer() as m:
+    with MinioContainer(image=MINIO_TEST_IMAGE) as m:
         yield m
 
 

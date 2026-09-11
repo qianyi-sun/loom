@@ -1,0 +1,271 @@
+"""Exercise the dedicated receiver's actual process-wide secret boundary."""
+
+import asyncio
+import hashlib
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from tests.unit.test_native_bootstrap_delivery import delivery as delivery
+from tests.unit.test_native_bootstrap_delivery import objects
+
+
+@pytest.fixture
+def private_delivery(delivery, request):
+    # Unlike the storage tests, this entrypoint must refuse writable ancestors
+    # such as /tmp and /dev/shm. Use an actual protected user-owned namespace.
+    tree = tempfile.TemporaryDirectory(prefix="loom-native-receiver-test-", dir=Path.home())
+    request.addfinalizer(tree.cleanup)
+    delivery.node = Path(tree.name)
+    return delivery
+
+
+def _probe(delivery, *, injected="", operation="deliver"):
+    config = {"directory": str(delivery.node), "observation": delivery.admission.current.model_dump_json(),
+        "route": delivery.admission.route_sha256, "now": delivery.now.isoformat()}
+    return f"""
+import asyncio, ctypes, json, os, resource, stat, sys
+from datetime import datetime
+from pathlib import Path
+from loom_capacity_agent.admission import CurrentExecutableBootstrapV2
+from loom_capacity_executor.native_bootstrap_delivery import NativeBootstrapReceiver
+from loom_capacity_executor import native_bootstrap_receiver as receiver_process
+config = json.loads({json.dumps(config)!r})
+{injected}
+def factory():
+    assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
+    assert ctypes.CDLL(None).prctl(3, 0, 0, 0, 0) == 0
+    observation = CurrentExecutableBootstrapV2.model_validate_json(config['observation'])
+    class Admission:
+        def bootstrap_handoff_route_sha256(self, binding):
+            return config['route']
+        async def observe_current_bootstrap(self, physical):
+            assert physical == observation.physical_binding
+            assert stat.S_ISCHR(os.fstat(0).st_mode)
+            assert os.read(0, 1) == b''
+            return observation
+    binding = observation.physical_binding.binding
+    return NativeBootstrapReceiver(directory=Path(config['directory']),
+        target_node=binding.node_ids[0], pool_id=binding.pool_id,
+        trusted_release_sha256=binding.execution.trusted_fleet_release_sha256,
+        admission=Admission(), now=lambda: datetime.fromisoformat(config['now']))
+result = receiver_process.run_native_bootstrap_receiver_process(factory, operation={operation!r})
+assert stat.S_ISCHR(os.fstat(0).st_mode)
+assert os.read(0, 1) == b''
+raise SystemExit(result)
+"""
+
+
+async def _run(delivery, payload, *, injected="", operation="deliver"):
+    process = await asyncio.create_subprocess_exec(sys.executable, "-B", "-c", _probe(delivery, injected=injected, operation=operation),
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(payload), 10)
+        return process.returncode, stdout, stderr
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+
+
+async def test_receiver_process_hardens_before_factory_and_detaches_before_admission(private_delivery):
+    module, payload, _receiver = objects(private_delivery)
+    code, stdout, stderr = await _run(private_delivery, payload)
+    assert code == 0, stderr.decode()
+    assert stderr == b""
+    receipt = module.read_native_delivery_receipt(module.native_delivery_directory(private_delivery.node,
+        private_delivery.lease.reference), private_delivery.lease.reference)
+    assert json.loads(stdout) == receipt.model_dump(mode="json", by_alias=True)
+    secret = json.loads(payload)["record"]["capability"].encode()
+    assert secret not in stdout + stderr
+
+
+@pytest.mark.parametrize("mutation", ("empty", "truncated", "trailing", "oversize", "malformed"))
+async def test_receiver_process_rejects_bad_input_without_secret_diagnostics(private_delivery, mutation):
+    _module, payload, _receiver = objects(private_delivery)
+    if mutation == "empty":
+        payload = b""
+    elif mutation == "truncated":
+        payload = payload[:-1]
+    elif mutation == "trailing":
+        payload += b"\n"
+    elif mutation == "oversize":
+        payload += b"a" * (256 * 1024)
+    else:
+        payload = b'{"capability":"private-input-never-log"}'
+    code, stdout, stderr = await _run(private_delivery, payload)
+    assert code == 2
+    assert stdout == b""
+    assert stderr == b"native bootstrap receiver refused\n"
+    assert list(private_delivery.node.iterdir()) == []
+
+
+async def test_receiver_process_refuses_writable_ancestor_before_read(delivery):
+    _module, payload, _receiver = objects(delivery)
+    injected = """
+def forbidden_read(*args, **kwargs):
+    raise AssertionError('must reject destination before reading capability')
+receiver_process._read_delivery_stdin = forbidden_read
+"""
+    code, stdout, stderr = await _run(delivery, payload, injected=injected)
+    assert code == 2
+    assert stdout == b""
+    assert stderr == b"native bootstrap receiver refused\n"
+    assert list(delivery.node.iterdir()) == []
+
+
+async def test_receiver_process_requires_eof_within_deadline(private_delivery):
+    _module, payload, _receiver = objects(private_delivery)
+    injected = """
+read_input = receiver_process._read_delivery_stdin
+receiver_process._read_delivery_stdin = lambda: read_input(timeout_seconds=0.05)
+"""
+    process = await asyncio.create_subprocess_exec(sys.executable, "-B", "-c", _probe(private_delivery, injected=injected),
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        process.stdin.write(payload)
+        await process.stdin.drain()
+        await asyncio.wait_for(process.wait(), 10)
+        assert process.returncode == 2
+        assert await process.stdout.read() == b""
+        assert await process.stderr.read() == b"native bootstrap receiver refused\n"
+        assert list(private_delivery.node.iterdir()) == []
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+
+
+async def test_receiver_hardening_failure_never_constructs_admission_or_reads(private_delivery):
+    _module, payload, _receiver = objects(private_delivery)
+    injected = """
+def fail_hardening():
+    raise OSError('private-detail-never-log')
+receiver_process._disable_bootstrap_dumps = fail_hardening
+"""
+    code, stdout, stderr = await _run(private_delivery, payload, injected=injected)
+    assert code == 2
+    assert stdout == b""
+    assert stderr == b"native bootstrap receiver refused\n"
+    assert list(private_delivery.node.iterdir()) == []
+
+
+@pytest.mark.parametrize("exception", ("RuntimeError", "asyncio.CancelledError", "SystemExit", "BaseException"))
+async def test_receiver_exception_is_sanitized_after_stdin_detach(private_delivery, exception):
+    _module, payload, _receiver = objects(private_delivery)
+    injected = f"""
+async def failed_receive(self, raw):
+    raise {exception}('private-adapter-credential-never-log')
+NativeBootstrapReceiver.receive = failed_receive
+"""
+    code, stdout, stderr = await _run(private_delivery, payload, injected=injected)
+    assert code == 2
+    assert stdout == b""
+    assert stderr == b"native bootstrap receiver refused\n"
+    assert list(private_delivery.node.iterdir()) == []
+
+
+async def test_receiver_replays_retained_delivery_after_output_failure(private_delivery):
+    module, payload, _receiver = objects(private_delivery)
+    injected = """
+def failed_output(raw):
+    raise BrokenPipeError('private-transport-detail-never-log')
+receiver_process._write_receipt_stdout = failed_output
+"""
+    code, stdout, stderr = await _run(private_delivery, payload, injected=injected)
+    assert (code, stdout, stderr) == (2, b"", b"native bootstrap receiver refused\n")
+    directory = module.native_delivery_directory(private_delivery.node, private_delivery.lease.reference)
+    before = {path.name: (path.stat().st_ino, path.read_bytes()) for path in directory.iterdir()}
+    code, stdout, stderr = await _run(private_delivery, payload)
+    assert code == 0, stderr.decode()
+    assert json.loads(stdout)["executable"] is False
+    assert before == {path.name: (path.stat().st_ino, path.read_bytes()) for path in directory.iterdir()}
+
+
+async def test_receiver_rejects_symlink_ancestor_before_input(private_delivery):
+    base = private_delivery.node
+    destination = base / "actual"
+    destination.mkdir(mode=0o700)
+    (base / "alias").symlink_to(destination, target_is_directory=True)
+    (destination / "node").mkdir(mode=0o700)
+    private_delivery.node = base / "alias" / "node"
+    _module, payload, _receiver = objects(private_delivery)
+    injected = """
+def forbidden_read(*args, **kwargs):
+    raise AssertionError('must reject symlink ancestry before reading capability')
+receiver_process._read_delivery_stdin = forbidden_read
+"""
+    code, stdout, stderr = await _run(private_delivery, payload, injected=injected)
+    assert (code, stdout, stderr) == (2, b"", b"native bootstrap receiver refused\n")
+    assert list(private_delivery.node.iterdir()) == []
+
+
+async def test_status_process_returns_unknown_or_exact_historical_receipt(private_delivery):
+    module, payload, _receiver = objects(private_delivery)
+    expected = module.expected_native_delivery_receipt(payload)
+    query = module.encode_native_delivery_query(private_delivery.physical, expected)
+    assert await _run(private_delivery, query, operation="status") == (0, b"null\n", b"")
+    assert list(private_delivery.node.iterdir()) == []
+    code, _stdout, stderr = await _run(private_delivery, payload)
+    assert code == 0, stderr.decode()
+    code, stdout, stderr = await _run(private_delivery, query, operation="status")
+    assert code == 0 and stderr == b""
+    assert json.loads(stdout) == expected.model_dump(mode="json", by_alias=True)
+
+
+@pytest.mark.parametrize("operation", ("execute", "delete", "renew"))
+async def test_receiver_process_refuses_other_operations(private_delivery, operation):
+    _module, payload, _receiver = objects(private_delivery)
+    assert await _run(private_delivery, payload, operation=operation) == (2, b"", b"native bootstrap receiver refused\n")
+    assert list(private_delivery.node.iterdir()) == []
+
+
+@pytest.mark.parametrize("change", (None, "digest", "scope", "extra-argument"))
+async def test_fixed_receiver_entrypoint_loads_pinned_local_configuration(private_delivery, change):
+    module, payload, _receiver = objects(private_delivery)
+    binding = private_delivery.physical.binding
+    admission_directory = private_delivery.node / "admission"
+    admission_directory.mkdir(mode=0o700)
+    config = {"schema": "loom.native-bootstrap-receiver-config/v1", "directory": str(private_delivery.node),
+        "target_node": binding.node_ids[0] if change != "scope" else "foreign",
+        "pool_id": binding.pool_id, "trusted_release_sha256": binding.execution.trusted_fleet_release_sha256,
+        "admission_directory": str(admission_directory), "admission_directory_sha256": "a" * 64}
+    wire = json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    config_path = private_delivery.node / "receiver.json"
+    config_path.write_bytes(wire)
+    config_path.chmod(0o600)
+    argv = ["--configuration", str(config_path), "--configuration-sha256",
+        hashlib.sha256(wire).hexdigest() if change != "digest" else "f" * 64,
+        "--configuration-owner-uid", str(config_path.stat().st_uid), "--operation", "deliver"]
+    if change == "extra-argument":
+        argv += ["--execute", "private-argument-never-log"]
+    probe = _probe(private_delivery).replace(
+        "result = receiver_process.run_native_bootstrap_receiver_process(factory, operation='deliver')",
+        f"""
+def admission_factory(directory, *, expected_directory_sha256):
+    assert directory == Path({str(admission_directory)!r})
+    assert expected_directory_sha256 == 'a' * 64
+    return factory().admission
+receiver_process.RoutedExecutableAdmissionClient = admission_factory
+receiver_process.datetime = type('Clock', (), {{'now': staticmethod(lambda tz: datetime.fromisoformat(config['now']))}})
+result = receiver_process.main({argv!r})
+""")
+    process = await asyncio.create_subprocess_exec(sys.executable, "-B", "-c", probe,
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(payload), 10)
+        if change is None:
+            assert process.returncode == 0, stderr.decode()
+            assert json.loads(stdout) == module.expected_native_delivery_receipt(payload).model_dump(mode="json", by_alias=True)
+            assert stderr == b""
+        else:
+            assert process.returncode == 2
+            assert stdout == b"" and stderr == b"native bootstrap receiver refused\n"
+            assert not module.native_delivery_directory(private_delivery.node, private_delivery.lease.reference).exists()
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await process.wait()

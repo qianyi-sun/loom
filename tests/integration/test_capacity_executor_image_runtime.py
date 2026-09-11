@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import json
+import os
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -22,6 +30,36 @@ class CapacityExecutorImageRuntimeTest(unittest.TestCase):
     # Pytest builds the real image below; unittest runs these cases inside it.
     __test__ = False
 
+    def test_native_bootstrap_contract_is_installed(self) -> None:
+        from loom_capacity_executor.native_worker_launch import run_native_worker_on_host
+        from loom_control_plane.slurm_job_cgroup import discover_docker_cgroup_parent
+
+        self.assertTrue(callable(run_native_worker_on_host))
+        self.assertTrue(callable(discover_docker_cgroup_parent))
+        from loom_capacity_executor.launch_renderer import NativeTaskImageExecutionV2
+        from loom_capacity_executor.native_worker_bootstrap import (
+            NativeWorkerBootstrap,
+            native_bootstrap_pipe,
+            read_native_bootstrap,
+        )
+
+        native = NativeTaskImageExecutionV2(
+            protocol="loom.task-image-native-execution/v2",
+            launch_protocol="immutable-container-stdin/v1",
+            platform="linux/amd64",
+            root_key_id="test-root",
+            environment="test",
+            root_public_key=base64.urlsafe_b64encode(b"t" * 32).rstrip(b"=").decode(),
+            root_activated_at="2026-09-01T00:00:00Z",
+            root_expires_at="2026-10-01T00:00:00Z",
+        )
+        original = NativeWorkerBootstrap(native_execution=native, worker_credential="t" * 43)
+        descriptor = native_bootstrap_pipe(original)
+        try:
+            self.assertEqual(read_native_bootstrap(descriptor), original)
+        finally:
+            os.close(descriptor)
+
     def test_installer_can_load_its_command_contract(self) -> None:
         result = subprocess.run(
             [sys.executable, "-I", "-B", str(_INSTALLER), "--help"],
@@ -30,6 +68,26 @@ class CapacityExecutorImageRuntimeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("discover-controller", result.stdout)
         self.assertIn("converge-prerequisite", result.stdout)
+
+    def test_native_receiver_installed_process_hardens_and_sanitizes_exit(self) -> None:
+        probe = """
+import ctypes, os, resource, stat
+from loom_capacity_executor.native_bootstrap_receiver import run_native_bootstrap_receiver_process
+from loom_capacity_executor.native_bootstrap_transport import _assert_private_process
+def factory():
+    assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
+    assert ctypes.CDLL(None).prctl(3, 0, 0, 0, 0) == 0
+    _assert_private_process()
+    raise SystemExit('disposable-private-admission-detail')
+result = run_native_bootstrap_receiver_process(factory)
+assert stat.S_ISCHR(os.fstat(0).st_mode) and os.read(0, 1) == b''
+raise SystemExit(result)
+"""
+        result = subprocess.run([sys.executable, "-I", "-B", "-c", probe],
+            input=b"disposable-capability-bytes", capture_output=True, check=False, timeout=30)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, b"")
+        self.assertEqual(result.stderr, b"native bootstrap receiver refused\n")
 
     def test_invalid_discovery_reaches_validation_without_host_access(self) -> None:
         result = subprocess.run(
@@ -53,11 +111,374 @@ def test_capacity_executor_image_build() -> None:
             capture_output=True, text=True, check=False, timeout=900,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+        _assert_fixed_native_receiver_process_adapter(image)
+        _assert_native_docker_stdin_is_not_retained(image)
+        _assert_native_image_environment_is_removed(image)
+        asyncio.run(_assert_native_attachment_loss_needs_container_cleanup(image))
     finally:
         subprocess.run(
             ["docker", "image", "rm", image],
             capture_output=True, check=False, timeout=30,
         )
+
+
+def _assert_fixed_native_receiver_process_adapter(image: str) -> None:
+    """Actual pinned interpreter, installed module and fixed config; no DB authority.
+
+    A historical status lookup needs no live admission credential. Its unknown
+    response proves this process composition, not delivery or native activation.
+    """
+    from uuid import UUID, uuid5
+
+    from loom_capacity_executor.native_bootstrap_delivery import (
+        NativeBootstrapDeliveryReceiptV1,
+        encode_native_delivery_query,
+    )
+    from loom_capacity_manager.executable_contracts import canonical_executable_digest
+    from tests.unit.test_capacity_executor_bootstrap_handoff import _physical
+    from tests.unit.test_capacity_executor_launch_renderer import launch_context_fixture
+
+    binding = launch_context_fixture().binding
+    physical = _physical(binding).model_copy(update={"operation_id": uuid5(
+        UUID("cb359b0c-a844-4bc5-9592-a4c35e344f3d"), f"physical-bind:{binding.intent_id}")})
+    digest = canonical_executable_digest(binding)
+    expected = NativeBootstrapDeliveryReceiptV1(target_node=binding.node_ids[0],
+        reference=digest + ".json", binding_sha256=digest,
+        physical_binding_sha256=canonical_executable_digest(physical),
+        bootstrap_sha256="a" * 64, source_payload_sha256="b" * 64,
+        expires_at=datetime(2026, 8, 13, tzinfo=UTC))
+    query = encode_native_delivery_query(physical, expected)
+    script = """
+import asyncio, hashlib, os, socket, stat, sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+from loom_capacity_executor.build_admission_client import BuildAdmissionExecutorV1
+from loom_capacity_executor.native_bootstrap_delivery import parse_native_delivery_query, _canonical
+from loom_capacity_executor.native_bootstrap_process_adapter import NativeBootstrapReceiverProcessPolicy
+from loom_capacity_executor.native_bootstrap_receiver import NativeBootstrapReceiverConfigV1
+from loom_capacity_executor.native_bootstrap_supervisor import NativeBootstrapSupervisorConfigV1, NativeBootstrapSupervisorPeerV1, load_native_bootstrap_supervisor_config, run_native_bootstrap_supervisor
+from loom_capacity_executor.native_bootstrap_transport import NativeBootstrapTLSIdentity, NativeBootstrapTLSClient, NativeBootstrapRoute, NativeBootstrapTransportLimits
+from loom_capacity_executor.native_worker_bootstrap import _disable_bootstrap_dumps
+from loom_capacity_executor.pinned_admission_transport import PinnedAdmissionFileV1
+from loom_capacity_executor.slurm_contracts import SlurmFileIdentityV2
+from loom_capacity_executor.trusted_launcher import TrustedCandidateExecutableV2
+from loom_capacity_executor.typed_admission import TypedAdmissionDirectoryV3
+from loom_capacity_manager.executable_contracts import canonical_executable_bytes
+_disable_bootstrap_dumps()
+raw = sys.stdin.buffer.read(65537)
+query = parse_native_delivery_query(raw)
+binding = query.physical.binding
+base = Path('/run/loom-receiver')
+admission = base / 'admission'
+admission.mkdir(mode=0o700)
+executor = BuildAdmissionExecutorV1(pool_id=binding.pool_id, pool_generation=binding.pool_generation,
+    executor_id=binding.executor_id, executor_incarnation=binding.executor_incarnation)
+routes_wire = canonical_executable_bytes(TypedAdmissionDirectoryV3(executor=executor, entries=()))
+routes_path = admission / 'routes.json'
+routes_path.write_bytes(routes_wire)
+routes_path.chmod(0o600)
+config = NativeBootstrapReceiverConfigV1(directory=str(base), target_node=binding.node_ids[0],
+    pool_id=binding.pool_id, trusted_release_sha256=binding.execution.trusted_fleet_release_sha256,
+    admission_directory=str(routes_path), admission_directory_sha256=hashlib.sha256(routes_wire).hexdigest(),
+    typed_application_executor=executor)
+wire = _canonical(config)
+path = base / 'receiver.json'
+path.write_bytes(wire)
+path.chmod(0o600)
+interpreter = Path(sys.executable).resolve(strict=True)
+info = interpreter.stat()
+policy = NativeBootstrapReceiverProcessPolicy(
+    interpreter=TrustedCandidateExecutableV2(path=str(interpreter), sha256=hashlib.sha256(interpreter.read_bytes()).hexdigest(),
+        owner_uid=info.st_uid, mode=stat.S_IMODE(info.st_mode)),
+    configuration=SlurmFileIdentityV2(path=str(path), sha256=hashlib.sha256(wire).hexdigest(), owner_uid=os.geteuid()))
+now = datetime.now(timezone.utc)
+def issue(name, *, issuer=None, issuer_key=None, ca=False, server=False):
+    key = ec.generate_private_key(ec.SECP256R1())
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+    builder = (x509.CertificateBuilder().subject_name(subject)
+        .issuer_name(issuer.subject if issuer else subject).public_key(key.public_key())
+        .serial_number(x509.random_serial_number()).not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(hours=1)).add_extension(x509.BasicConstraints(ca=ca, path_length=0 if ca else None), critical=True))
+    if not ca:
+        builder = builder.add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH if server else ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False)
+    if server:
+        builder = builder.add_extension(x509.SubjectAlternativeName([x509.DNSName('localhost')]), critical=False)
+    return key, builder.sign(issuer_key or key, hashes.SHA256())
+def pin(name, wire):
+    path = base / name
+    path.write_bytes(wire)
+    path.chmod(0o600)
+    return PinnedAdmissionFileV1(path=str(path), sha256=hashlib.sha256(wire).hexdigest())
+ca_key, ca = issue('disposable-test-ca', ca=True)
+ca_pin = pin('ca.pem', ca.public_bytes(serialization.Encoding.PEM))
+def identity(name, server):
+    key, cert = issue(name, issuer=ca, issuer_key=ca_key, server=server)
+    cert_pin = pin(name + '.pem', cert.public_bytes(serialization.Encoding.PEM))
+    key_pin = pin(name + '.key', key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    return NativeBootstrapTLSIdentity(ca=ca_pin, certificate=cert_pin, private_key=key_pin), hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest()
+server_identity, server_pin = identity('localhost', True)
+client_identity, client_pin = identity('controller', False)
+with socket.socket() as reservation:
+    reservation.bind(('127.0.0.1', 0))
+    port = reservation.getsockname()[1]
+supervisor = NativeBootstrapSupervisorConfigV1(listen_address='127.0.0.1', listen_port=port,
+    target_node=binding.node_ids[0], pool_id=binding.pool_id, trusted_release_sha256=binding.execution.trusted_fleet_release_sha256,
+    identity=server_identity, receiver=policy,
+    peers=(NativeBootstrapSupervisorPeerV1(certificate_sha256=client_pin, pool_id=binding.pool_id,
+        executor_id=binding.executor_id, executor_incarnation=binding.executor_incarnation,
+        operations=('deliver', 'status'), expires_at=now + timedelta(minutes=10)),))
+config_wire = _canonical(supervisor)
+config_path = base / 'supervisor.json'
+config_path.write_bytes(config_wire)
+config_path.chmod(0o600)
+supervisor = load_native_bootstrap_supervisor_config(SlurmFileIdentityV2(path=str(config_path),
+    sha256=hashlib.sha256(config_wire).hexdigest(), owner_uid=os.geteuid()))
+async def exercise():
+    stop = asyncio.Event()
+    service = asyncio.create_task(run_native_bootstrap_supervisor(supervisor, stop))
+    route = NativeBootstrapRoute(address='127.0.0.1', port=port, hostname='localhost',
+        target_node=binding.node_ids[0], pool_id=binding.pool_id, trusted_release_sha256=binding.execution.trusted_fleet_release_sha256,
+        server_certificate_sha256=server_pin, expires_at=now + timedelta(minutes=10))
+    client = NativeBootstrapTLSClient(route=route, identity=client_identity, limits=NativeBootstrapTransportLimits(total_seconds=3.0))
+    try:
+        deadline = asyncio.get_running_loop().time() + 15
+        while True:
+            try:
+                assert await client.observe_receipt(raw) is None
+                break
+            except ValueError:
+                if service.done():
+                    await service
+                    raise AssertionError('supervisor stopped unexpectedly')
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise
+                await asyncio.sleep(0.02)
+    finally:
+        await client.aclose()
+        stop.set()
+        await asyncio.wait_for(service, 10)
+    assert asyncio.all_tasks() == {asyncio.current_task()}
+asyncio.run(exercise())
+print('fixed-receiver-tls-status-unknown')
+"""
+    container = subprocess.check_output(["docker", "create", "--interactive", "--read-only", "--network=none",
+        "--cpus=1", "--memory=512m", "--pids-limit=32", "--user=65532:65532",
+        "--tmpfs=/run/loom-receiver:rw,nosuid,nodev,noexec,mode=0700,uid=65532,gid=65532",
+        "--entrypoint=/usr/local/bin/python", image, "-I", "-B", "-c", script],
+        text=True, timeout=15).strip()
+    assert re.fullmatch(r"[0-9a-f]{64}", container)
+    try:
+        result = subprocess.run(["docker", "start", "--attach", "--interactive", container],
+            input=query, capture_output=True, check=False, timeout=45)
+        assert result.returncode == 0, result.stderr.decode()
+        assert result.stdout == b"fixed-receiver-tls-status-unknown\n" and result.stderr == b""
+    finally:
+        subprocess.run(["docker", "container", "rm", "--force", container], capture_output=True, check=True, timeout=30)
+
+
+def _assert_native_image_environment_is_removed(image: str) -> None:
+    """Exercise production environment flags against inherited Docker image ENV.
+
+    Uses a disposable diagnostic command, not the actual worker, so this is
+    loader/environment-mechanism evidence rather than protected registration.
+    """
+    from loom_capacity_executor.native_worker_container import (
+        PreparedNativeImage,
+        native_create_argv,
+    )
+    from tests.unit.test_native_worker_container import _allocation
+
+    cli = shutil.which("docker")
+    assert cli is not None
+    derived = f"loom-native-env-test:{uuid4().hex}"
+    container = None
+    try:
+        build = subprocess.run([cli, "build", "--quiet", "--tag", derived, "-"],
+            input=(f"FROM {image}\nENV LD_PRELOAD=/invalid.so PYTHONHOME=/invalid "
+                   "PYTHONPATH=/invalid DOCKER_HOST=tcp://foreign:2375\n").encode(),
+            capture_output=True, check=False, timeout=60)
+        assert build.returncode == 0, build.stderr.decode()
+        actual = json.loads(subprocess.check_output([cli, "image", "inspect", derived], timeout=15))[0]
+        prepared = PreparedNativeImage(image_id=actual["Id"],
+            platform=f"{actual['Os']}/{actual['Architecture']}",
+            inherited_environment=tuple(item.split("=", 1)[0] for item in actual["Config"]["Env"]))
+        environment_flags = [arg for arg in native_create_argv(prepared, _allocation(),
+            name="loom-native-env-test", ownership="a" * 64) if arg.startswith("--env=")]
+        diagnostic = (
+            "import os; assert not ({'LD_PRELOAD','PYTHONHOME','PYTHONPATH'} & os.environ.keys()); "
+            "assert os.environ['DOCKER_HOST']=='unix:///var/run/docker.sock'; print('isolated')"
+        )
+        container = subprocess.check_output([cli, "container", "create", "--read-only",
+            "--network=none", "--entrypoint=/usr/local/bin/python", *environment_flags,
+            actual["Id"], "-I", "-c", diagnostic], env={}, timeout=15).decode().strip()
+        assert re.fullmatch(r"[0-9a-f]{64}", container)
+        inspected = json.loads(subprocess.check_output([cli, "container", "inspect", container], env={}, timeout=15))[0]
+        # Docker retains bare names in Config.Env as explicit unset markers;
+        # only NAME=value becomes a process environment variable. The actual
+        # Python startup below proves loader/config variables are unavailable.
+        installed_environment = dict(item.split("=", 1) for item in inspected["Config"]["Env"] if "=" in item)
+        assert not ({"LD_PRELOAD", "PYTHONHOME", "PYTHONPATH"} & installed_environment.keys())
+        started = subprocess.run([cli, "container", "start", "--attach", container], env={},
+            capture_output=True, check=False, timeout=30)
+        assert started.returncode == 0, started.stderr.decode()
+        assert started.stdout.strip() == b"isolated"
+    finally:
+        if container is not None:
+            subprocess.run([cli, "container", "rm", "--force", container], capture_output=True, check=True, timeout=30)
+        subprocess.run([cli, "image", "rm", derived], capture_output=True, check=False, timeout=30)
+
+
+def _assert_native_docker_stdin_is_not_retained(image: str) -> None:
+    """Exercise the installed production decoder through actual Docker restart.
+
+    This certifies transport semantics only: it is not worker registration,
+    Slurm containment, root attestation or execution-start acceptance.
+    """
+    from loom_capacity_executor.native_worker_bootstrap import (
+        NativeWorkerBootstrap,
+        encode_native_bootstrap,
+    )
+    from tests.unit.test_capacity_executor_native_launch_profile import native_profile_fixture
+
+    native = native_profile_fixture().native_execution
+    assert native is not None
+    now = datetime.now(UTC).replace(microsecond=0)
+    native = native.model_copy(update={
+        "root_activated_at": (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "root_expires_at": (now + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    })
+    credential = "test-native-bootstrap-" + uuid4().hex
+    configuration_secret = "test-native-config-" + uuid4().hex
+    wire = encode_native_bootstrap(NativeWorkerBootstrap(
+        native_execution=native, worker_credential=credential,
+        canonical_worker_settings=json.dumps(
+            {"minio_secret_key": configuration_secret}, sort_keys=True, separators=(",", ":"),
+        ),
+    ))
+    image_id = subprocess.check_output(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+        text=True, timeout=15,
+    ).strip()
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)
+    script = """import ctypes, os, resource
+from loom_capacity_executor.native_worker_bootstrap import consume_native_worker_bootstrap, NativeBootstrapError
+try:
+    bootstrap = consume_native_worker_bootstrap()
+except NativeBootstrapError:
+    print('refused')
+    raise SystemExit(65)
+assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
+assert ctypes.CDLL(None).prctl(3, 0, 0, 0, 0) == 0
+assert os.fstat(0).st_rdev == os.makedev(1, 3)
+assert os.read(0, 1) == b''
+assert set(bootstrap.worker_settings()) == {'minio_secret_key'}
+print('accepted')
+"""
+    container = subprocess.check_output(
+        ["docker", "create", "--interactive", "--restart=no", "--read-only",
+         "--network=none", "--cpus=0.25", "--memory=256m", "--pids-limit=32",
+         "--entrypoint=/usr/local/bin/python", image_id, "-I", "-c", script],
+        text=True, timeout=15,
+    ).strip()
+    assert re.fullmatch(r"[0-9a-f]{64}", container)
+    try:
+        first = subprocess.run(
+            ["docker", "start", "--attach", "--interactive", container],
+            input=wire, capture_output=True, check=False, timeout=30,
+        )
+        assert first.returncode == 0, first.stderr.decode()
+        assert first.stdout.strip() == b"accepted"
+        restarted = subprocess.run(
+            ["docker", "start", "--attach", "--interactive", container],
+            input=b"", capture_output=True, check=False, timeout=30,
+        )
+        assert restarted.returncode == 65, restarted.stderr.decode()
+        assert restarted.stdout.strip() == b"refused"
+        for command in (["docker", "inspect", container], ["docker", "logs", container]):
+            retained = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
+            assert credential.encode() not in retained
+            assert configuration_secret.encode() not in retained
+    finally:
+        subprocess.run(
+            ["docker", "rm", "--force", container], capture_output=True, check=True, timeout=30,
+        )
+
+
+async def _assert_native_attachment_loss_needs_container_cleanup(image: str) -> None:
+    """Use a diagnostic container to exercise real attachment and exact cleanup."""
+    from loom_capacity_executor.native_worker_container import (
+        FixedDockerCLI,
+        remove_native_container,
+    )
+    from loom_capacity_executor.native_worker_launch import (
+        native_daemon_cgroup_driver,
+        run_attached_native_worker,
+    )
+    from tests.unit.test_worker_native_entrypoint import _configured_bootstrap
+
+    executable = shutil.which("docker")
+    assert executable is not None
+    descriptor = os.open(executable, os.O_RDONLY | os.O_CLOEXEC)
+    with tempfile.TemporaryDirectory(prefix="loom-native-cli-test-") as configuration:
+        cli = FixedDockerCLI(executable=f"/proc/self/fd/{descriptor}", descriptor=descriptor,
+            config_directory=configuration)
+        container = None
+        attached = None
+        try:
+            daemon = cli.json("info", "--format={{json .}}")
+            assert isinstance(daemon, dict)
+            if daemon.get("CgroupVersion") == "2" and daemon.get("CgroupDriver") == "cgroupfs":
+                assert native_daemon_cgroup_driver(cli) == "cgroupfs"
+            else:
+                # A diagnostic container can exercise Docker's attachment mechanics
+                # on this host, but the actual native preflight must refuse its
+                # incompatible topology. Do not turn transport proof into Slurm
+                # containment acceptance or weaken the native check for this test.
+                from loom_capacity_executor.native_worker_container import NativeContainerError
+
+                with pytest.raises(NativeContainerError, match="cgroupfs"):
+                    native_daemon_cgroup_driver(cli)
+            diagnostic = (
+                "from loom_capacity_executor.native_worker_bootstrap import consume_native_worker_bootstrap; "
+                "consume_native_worker_bootstrap(); import time; time.sleep(120)"
+            )
+            container = cli.call("container", "create", "--interactive", "--restart=no", "--read-only",
+                "--network=none", "--cpus=0.25", "--memory=256m", "--pids-limit=32",
+                "--entrypoint=/usr/local/bin/python", image, "-I", "-c", diagnostic).decode().strip()
+            assert re.fullmatch(r"[0-9a-f]{64}", container)
+            attached = asyncio.create_task(run_attached_native_worker(cli, container, _configured_bootstrap()))
+            for _attempt in range(100):
+                await asyncio.sleep(0.1)
+                if cli.json("container", "inspect", container)[0]["State"]["Running"]:
+                    break
+            else:
+                raise AssertionError("diagnostic container never started")
+            attached.cancel()
+            try:
+                await attached
+            except asyncio.CancelledError:
+                pass
+            else:
+                raise AssertionError("attachment ended before cancellation")
+            # Killing/reaping Docker's attached CLI is explicitly NOT cleanup.
+            assert cli.json("container", "inspect", container)[0]["State"]["Running"]
+            remove_native_container(cli, container)
+            assert not cli.call("container", "ls", "--all", "--quiet", f"--filter=id={container}").strip()
+            container = None
+        finally:
+            if attached is not None and not attached.done():
+                attached.cancel()
+                try:
+                    await attached
+                except asyncio.CancelledError:
+                    pass
+            if container is not None:
+                remove_native_container(cli, container)
+            os.close(descriptor)
 
 
 if __name__ == "__main__":

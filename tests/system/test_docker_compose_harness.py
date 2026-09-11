@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tomllib
@@ -12,6 +13,17 @@ import pytest
 import yaml
 
 from tests.system import docker_compose
+
+
+def test_compose_uses_verified_public_minio_release() -> None:
+    compose = yaml.safe_load(docker_compose.COMPOSE_FILE.read_text(encoding="utf-8"))
+    pinned = json.loads((docker_compose.REPO_ROOT /
+        "deploy/dev-fleet/personal-dev-external-images.json").read_text(encoding="utf-8"))
+    # The Docker Hub repository is no longer anonymously pullable. Reuse the
+    # existing reviewed, multi-architecture public release rather than latest.
+    image = compose["services"]["minio"]["image"]
+    assert image == pinned["images"]["minio"]["reference"]
+    assert image.startswith("quay.io/minio/minio@sha256:")
 
 
 def test_compose_uses_one_test_only_step_jwt_signing_key() -> None:

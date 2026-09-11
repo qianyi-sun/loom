@@ -2074,6 +2074,8 @@ async def _protect_bootstrap(
     bootstrap_sha256: str,
     request: ExecutableBootstrapRegistrationV2 | None = None,
     cpu_arch: str = "x86_64",
+    proposal_epoch: int = 1,
+    expires_at: datetime | None = None,
 ) -> ExecutableBootstrapRegistrationV2:
     template = request or _bootstrap(
         registration.subject_id,
@@ -2096,9 +2098,9 @@ async def _protect_bootstrap(
     proposal = ExecutableBootstrapProposalV2(
         binding=template.binding,
         command_sequence=template.command_sequence,
-        proposal_epoch=1,
+        proposal_epoch=proposal_epoch,
         bootstrap_sha256=bootstrap_sha256,
-        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        expires_at=expires_at or datetime.now(UTC) + timedelta(minutes=5),
     )
     async with _serializable_agent_session(database) as session:
         protected = await ProtectedExecutableBootstrapCoordinator(
@@ -2524,7 +2526,7 @@ async def test_guard_0020_downgrade_serializes_committing_executable_evidence(
             await downgrade_task
         await executor_engine.dispose()
 
-    assert version == "guard_0032"
+    assert version == "guard_0033"
     assert evidence == 1
 
 

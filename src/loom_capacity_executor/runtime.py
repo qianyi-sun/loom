@@ -786,6 +786,9 @@ class RoutedExecutableAdmissionClient:
     async def bind_slurm_job(self, request: PhysicalJobBindingV2) -> Any:
         return await self._call(request.binding, "bind_slurm_job", request)
 
+    async def observe_current_bootstrap(self, request: PhysicalJobBindingV2) -> Any:
+        return await self._call(request.binding, "observe_current_bootstrap", request)
+
     async def observe_intent(self, binding: ExecutableIntentBindingV2) -> Any:
         return await self._call(binding, "observe_intent", binding)
 

@@ -18,6 +18,11 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from loom_capacity_executor.native_slurm_allocation import (
+    NativeSlurmAllocationV1,
+    NativeSlurmObservationError,
+    parse_native_allocation,
+)
 from loom_capacity_executor.slurm_contracts import (
     MAX_ACCOUNTING_RECORDS,
     MAX_GENERIC_TRES,
@@ -816,6 +821,26 @@ class AsyncSlurmBackend:
         )
         return self._parse_observations(output)
 
+    async def observe_native_allocation(
+        self, request: SlurmLaunchRequestV2, *, job_id: str,
+    ) -> NativeSlurmAllocationV1:
+        """Read one physical native allocation; never reuse historical inventory."""
+        if not isinstance(request, SlurmLaunchRequestV2):
+            raise TypeError("native Slurm observation requires a typed launch request")
+        identity = SlurmSubmissionV2(cluster=request.cluster, job_id=job_id)
+        self._assert_launch(request)
+        await self.validate_authority()
+        # Stamp before the read so a slow command cannot refresh evidence age.
+        observed_at = datetime.now(UTC)
+        raw = await self._run_text(self.authority.executables.scontrol, (
+            "--json=v0.0.40", f"--clusters={identity.cluster}", "show", "job", identity.job_id,
+        ))
+        try:
+            return parse_native_allocation(raw, request=request, job_id=identity.job_id,
+                expected_uid=self.authority.local_uid, observed_at=observed_at)
+        except NativeSlurmObservationError as exc:
+            raise SlurmOutputError(str(exc)) from None
+
     async def submit(self, request: SlurmLaunchRequestV2) -> SlurmSubmissionV2:
         if not isinstance(request, SlurmLaunchRequestV2):
             raise TypeError("Slurm submit requires typed SlurmLaunchRequestV2")
@@ -860,6 +885,8 @@ class AsyncSlurmBackend:
             )
         if request.features:
             arguments.append(f"--constraint={'&'.join(request.features)}")
+        if request.native_lifetime == "single-use-no-requeue/v1":
+            arguments.append("--no-requeue")
         arguments.extend(
             (
                 f"--time={_time_argument(request.time_limit_seconds)}",

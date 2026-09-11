@@ -14,11 +14,12 @@ from loom.models.trajectory import StepStartEvent
 from loom.trajectory.storage import MinioObjectStore
 from loom.trajectory.writer import TrajectoryWriter
 from loom_benchmark_tool.upload import upload_task_dir
+from tests.support.minio import MINIO_TEST_IMAGE
 
 
 @pytest.fixture(scope="module")
 def minio() -> Iterator[MinioContainer]:
-    with MinioContainer() as m:
+    with MinioContainer(image=MINIO_TEST_IMAGE) as m:
         yield m
 
 

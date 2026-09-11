@@ -1373,6 +1373,366 @@ shadow campaign must separately isolate queue membership, output authority and
 readiness effects. This composition does not activate production to simulate a
 shadow campaign or replace execution trust, capacity-fairness and rollback gates.
 
+### Native protected-worker launch composition (inactive)
+
+`OperatorLaunchProfileV2.native_execution` optionally binds the native protocol,
+platform, environment and execution-root public bytes/lifetime into both the
+launch-policy and approved-profile-set digests. The enclosing profile already
+pins the worker image, launcher, launcher configuration and release. Legacy
+profiles omit the new field from canonical serialization, preserving their
+existing authority hashes; they do not acquire native eligibility. Rendering
+refuses roots outside their validity at submission. Actual launch must recheck
+validity after any Slurm queue delay.
+The typed renderer applies the same pre-signing lifetime fence. Its policy set
+also rejects native task-image execution profiles assigned to personal-development
+build workers; those are a different purpose from application trial workers.
+
+Controller and node bootstrap storage are separate. Slurm carries only the
+handoff reference; the controller-local private directory is not implicitly
+shared with workers. The native delivery exporter emits only the original
+job-scoped bootstrap capability, ownership binding and physical reference.
+It never exports `.used`, `.credential` or `.launched` state, worker credentials,
+manager credentials or signing keys. A configured node receiver checks its
+node/pool/release and protected admission route, independently fetches current
+unused-bootstrap authority, and validates the exact physical identity, capability
+hash and original expiry. Delivery cannot extend bootstrap validity.
+
+The receiver stages private files and publishes a complete per-reference node
+directory with atomic no-replace semantics, including refusal to replace an
+empty concurrent destination. Durable non-secret receipts bind the original
+payload and physical reference. Retry reestablishes directory fsync and returns
+the same historical receipt even after the node consumed its capability; it must
+never recreate capability files after `.launched`. Worker credentials are generated
+and retained only on the node. Native trusted launch waits a bounded interval
+for complete local delivery and compares the receipt to its independently
+reconstructed physical reference before invoking the native runtime. Legacy
+launch retains its existing path. Two-filesystem and concurrent-receiver tests
+exercise this storage composition, not live host transport authentication.
+
+Historical recovery also supports an exact, capability-free status query containing
+the physical reference and expected receipt. It remains valid after bootstrap
+expiry/consumption without rereading unused-bootstrap authority or renewing it.
+A missing directory is an unknown delivery outcome, not proof of nonexecution or
+safe cleanup. Scope conflicts, an unreadable directory or a missing/corrupt receipt
+are refusals, not absence. Returned receipts retain `executable=false`.
+
+The dedicated one-shot receiver process applies and reads back dump protections
+before constructing its fixed configuration/admission factory or reading secret
+input. A descriptor-relative walk requires root/receiver-owned, non-group/world-
+writable, nonsymlink destination ancestry; sticky temporary directories are not
+an installation namespace. It reads a bounded EOF-terminated pipe, replaces stdin
+with `/dev/null` before admission, and emits only a bounded historical receipt.
+Invalid input, cancellation and adapter exceptions produce one generic error,
+never exception details. Lost output does not roll back published delivery: an
+exact retry returns the existing receipt. This process API requires a fixed
+authenticated supervisor and protected local factory; it is not a network listener
+or permission to choose a receiver from request bytes.
+
+The node-directed transport uses dedicated-CA mutual TLS 1.3 plus exact leaf
+certificate pins and protocol ALPN. A client validates its configured numeric
+destination, hostname, node/pool/release, certificate pin and expiry before sending
+capability bytes. Node peer pins authorize only an exact pool, controller executor
+and incarnation, a bounded validity interval and the fixed delivery/status operations.
+TLS keys are digest-pinned owner-only snapshots loaded only after the supervisor
+process passes dump-protection checks. Session tickets are disabled. No SSH shell,
+remote command, forwarded identity or ambient proxy is involved.
+
+One connection carries a nine-byte header (magic `LNB1`, operation `D` or `S`,
+four-byte unsigned big-endian body length) and one canonical request. A reply uses
+`LNR1` with `R` plus the exact receipt, or empty `U` (unknown status only) or `F`
+(refusal). Request bodies are bounded to 256 KiB for delivery and 64 KiB for status;
+receipts are at most 4 KiB. TLS half-close is not used as message framing. The
+receiver child still gets a bounded EOF-terminated pipe. No second operation is
+executed on the connection, and lost responses do not cause automatic reissuance.
+
+Connection slots are reserved before TLS handshakes, operation concurrency and the
+client pending-request queue are bounded, and one absolute deadline covers each
+exchange. Explicit monotonic checks reject results from non-yielding operations
+that overrun that deadline. Actual interruption of blocking filesystem operations
+requires the isolated receiver-process adapter; elapsed-time rejection alone is
+not proof of interruption. Socket ownership survives cancellation, and listener
+failure closes the socket and is exposed through `wait()` for the fixed supervisor.
+
+The fixed process adapter opens a verified sealed interpreter snapshot before
+serving requests and runs only the isolated receiver module with pinned local
+configuration flags, an empty environment and private bounded pipes. The receiver
+loads a canonical, owner-only configuration and a digest-pinned admission directory
+after dump protection. Neither a packet nor an environment variable selects a
+factory, executable or configuration. The installed interpreter prefix, shared
+libraries and module tree must also be immutable; sealing the ELF alone does not
+authenticate those dependencies.
+
+The adapter retains spawn handoffs and cleanup owners across cancellation. A
+timeout is an unknown operation outcome, not evidence of rollback or reaping.
+Unreaped children continue to count against capacity. Kill, reap or pipe-cleanup
+failure blocks further admission and keeps the interpreter descriptor open;
+explicit shutdown can retry the same owned handles and reports failure until
+cleanup succeeds. Responses are checked against the original deadline after
+cleanup and synchronous parsing. No successful shutdown is inferred from a
+cancelled request or an attempted kill. Abrupt supervisor loss still needs its
+protected service-level process containment and crash-recovery integration.
+
+The fixed TLS supervisor loads one canonical owner-only policy binding its numeric
+listen address, node/pool/release, certificate files, sorted peer pins and receiver
+process policy. It verifies receiver scope before listening. Configuration never
+selects a command or factory. Its dedicated entrypoint hardens before reading
+configuration, and stop signals request owned shutdown rather than interrupting
+cleanup. Listener and retained child-cleanup failures are observed explicitly;
+shutdown closes connections before joining receiver owners and survives repeated
+cancellation. This is executable local composition, not protected host installation.
+
+Receiver and native launcher configs can explicitly pin a typed application
+executor identity. In this mode the admission path names an independently pinned
+application-only V3 directory document; the node verifies the exact executor,
+subject, candidate, account and purpose before accessing a credential. Original
+entry bytes, including credential path and digest, stay identical to the controller's
+entry, so bootstrap route hashes match without translation. The node directory
+may have its own path/digest and omit unrelated entries, but installation must
+project the original application credential paths/bytes under equivalent protection.
+Build-purpose entries are rejected before client creation. Only current-bootstrap
+observation, exact route readback and worker registration are exposed. An explicit
+typed selection never falls back to V2. Launcher configs omit both application
+options when absent, preserving the original canonical bytes of existing V2 and
+personal-build V3 documents. The personal-build V3 launcher rejects application
+native policies; its typed build route and sealed-descriptor handoff remain
+separate from this application-only node transport.
+
+Protected transport/receiver installation,
+controller delivery journaling, remote revocation/cleanup convergence and crash-orphan
+retirement still need integration. Do not infer them from local delivery/TLS success
+or mount the whole controller handoff directory to fill the gap. Delivery receipts
+are not root cgroup preparation, registration or runtime-start authority.
+
+The native bootstrap codec transfers the bounded credential/root document through
+a memory-only, EOF-terminated pipe, not container environment or retained files.
+Preloading checks the pipe's actual capacity and atomic-write limit. Reading
+requires canonical framing, a byte bound and a deadline; missing, delayed,
+trailing or replayed input fails closed. Image tests exercise the installed
+decoder through Docker stdin and a manual restart, and check that container
+inspection/logs do not retain the credential. These prove transport semantics,
+not actual worker registration or native execution authority.
+
+The dedicated-process consumption function additionally sets and reads back
+`RLIMIT_CORE=(0,0)` and Linux `PR_SET_DUMPABLE=0` before reading the secret. It
+checks root validity against its own startup clock and replaces stdin with the
+verified `/dev/null` device before returning. If replacement fails, fd 0 is
+closed, including when hardening failed before any credential read. Subprocess
+tests inject open, duplication and device-validation failures; installed-image
+tests exercise dumpability, stdin detachment and restart refusal. These are
+startup primitives, not yet the fixed launcher or worker settings composition.
+
+The worker-side `loom_worker.native_main` entrypoint consumes this handoff before
+constructing settings, metrics or the worker loop. Its optional canonical settings
+subdocument is limited to 2 KiB inside the unchanged 4 KiB total frame ceiling;
+frames without settings remain useful only for transport diagnostics and cannot
+start a worker. Reserved credential/root fields and external-source overrides
+are rejected. The native settings subclass uses initialization values only, with
+dotenv disabled; credentials pass directly into secret-valued fields and the
+public root stays in process settings, excluded from serialization. The ordinary
+worker entrypoint and its environment configuration remain unchanged. Subprocess
+tests exercise the production startup path with the worker-loop boundary replaced;
+they are not evidence of actual protected registration.
+
+The trusted launcher now has an opt-in native worker branch in its pinned config.
+The candidate executable is the verified Docker executable snapshot and accepts
+no command suffix. A fixed Unix endpoint and empty operator-owned Docker config
+replace ambient CLI configuration. Image prefetch and actual digest/platform
+readback precede capability exchange. Allocation-derived pool, hostname,
+candidate, concurrency and resource limits replace caller settings; conflicting
+settings fail before exchange. The complete bootstrap is size-checked with the
+maximum credential length before consuming the launch marker. The host adapter
+currently supports CPU-only trial allocations on OLDLAB and GB10, refusing GPU,
+pipeline, singleton/sandbox and worker-vLLM modes until their equivalent native
+admission paths exist. Phase 1 keeps its existing supported modes.
+
+Native host launch requires Docker's `cgroupfs` driver on unified cgroup v2 and
+the actual delegated Slurm job ancestor. The native allocation model refuses a
+systemd slice, foreign job, traversal, or a batch-step path in place of that
+aggregate ancestor. Daemon capability is checked before image prefetch or
+bootstrap consumption. The same exact ancestor is passed to worker creation and
+bound into its settings for trial/sidecar children. An independently capped
+systemd sibling is not an alternative: assigning the full allocation limits to
+both branches duplicates the aggregate budget and loses Slurm ancestry. Legacy
+Phase 1's systemd bridge remains separately supported. No launcher changes daemon
+configuration; compatible native runtime provisioning requires reviewed drained
+node/deployment evidence without disrupting the existing service. Actual process
+ancestry, cancellation and positive descendant cleanup still require live proof;
+daemon/pull overhead is not made allocation-contained by container placement.
+
+Before bootstrap exchange, the launcher opens the exact job ancestor through
+descriptor-relative, no-follow traversal and retains its directory descriptor.
+Bounded control-file reads require protected root ownership, finite positive
+aggregate memory within the allocation, the exact PID ceiling, an effective CPU
+set within the allocation, and zero swap allowance. Parent directory identities
+and permissions are rechecked along with these controls after registration,
+after consuming the launch marker, and after container creation before attachment.
+Drift prevents startup; a known created container still receives exact-ID cleanup.
+These checks establish launch-time readback, not cgroup preparation authority,
+continuous enforcement, post-start process ancestry, or positive descendant cleanup.
+
+The fixed container invocation uses an absolute isolated Python entrypoint, a
+read-only root, a non-root user, explicit Docker parent/resource limits, no
+restart or healthcheck, and only the Docker socket and per-launch scratch bind.
+Image ENV is explicitly removed or replaced before Python starts. Control-command
+output is incrementally bounded on both streams; attached worker output streams
+without accumulating supervisor buffers. A native-only termination latch handles
+SIGTERM, SIGHUP and SIGINT even while a synchronous Docker operation is reading;
+repeated signals do not interrupt the subsequent bounded exact-ID cleanup.
+SIGKILL and host loss still require administrator-owned cleanup. The scoped credential/root/settings
+arrive only through the private EOF-terminated stdin pipe. After its marker is
+consumed, launch is never retried. A known created container is removed by exact
+ID with responsive-daemon absence readback, including attachment failures.
+An uncertain create response still requires administrator-owned allocation
+inventory/cleanup: instantaneous absence cannot exclude delayed creation.
+Each invocation gets fresh private scratch with retained inode identities. A
+proven pre-create failure removes only its still-matching empty directories,
+allowing an unconsumed handoff to retry without reusing stale files. After a
+possible create, scratch data is retained until allocation/runtime cleanup; worker-container
+removal alone does not authorize deleting files still used by trial descendants.
+Durable descendant-cleanup admission and scratch retirement remain part of the
+unfinished native runtime/retention composition, not proof supplied by this launcher.
+
+The complete native adapter remains incomplete. The new entrypoint advertises no
+native capability and still uses the existing V1-only worker loop. Owner-projected
+eligibility, authenticated native claims and one-use trial start remain unwired.
+The checked-in legacy Slurm cgroup guard recognizes only
+`loom-cgroup-v1:pids=<N>` comments, whereas the protected executor submits its
+ownership token as the entire comment. That guard does not provision native
+protected-worker parents. Its presence inventory now uses the all-state node
+queue separately from its admission results: failed per-job readback, missing
+resource facts, suspended/completing jobs, and unknown comments do not authorize
+teardown of an existing slice. Positively terminal legacy jobs do not keep their
+slices alive during Slurm's terminal-record retention interval. Only readable RUNNING legacy opt-ins acquire or
+resize a slice. This prevents an admission failure from disrupting an existing
+allocation; it neither authenticates a protected job nor proves positive runtime
+cleanup or permits an independent slice creator. A coordinated owner-authenticated
+guard adapter must delegate the real Slurm job subtree for native workers, not
+create a substitute systemd slice. Pre-registration admission must verify the
+current protected physical binding and unrevoked bootstrap plus fresh scheduler
+incarnation/node/resource facts. Historical intent observation and the pre-submit
+ownership signature are insufficient. Any purpose-specific signed delegation
+must cover this post-bind authority; it grants containment preparation, never a
+second worker registration or trial start. This adapter is still required before
+host launch acceptance; neither the signed ownership
+comment nor the legacy guard's opt-in format may be silently replaced.
+
+`guard_0033` adds an executor-only unused-bootstrap observation. It matches the
+entire persisted physical request, current local agent/candidate binding, prepared
+bootstrap and latest protected bootstrap epoch, checks the database clock against
+the original expiry, and refuses every later registration or terminal admission
+event. It records no start or new admission event. The Python adapter requires an
+idle SERIALIZABLE session and owns its short transaction through commit: reusing
+an existing transaction could label a pre-withdrawal snapshot as current. Contended
+admission locking fails immediately for caller-level retry. Historical binding
+replay and historical intent observation retain their separate existing contracts.
+Evidence age is conservatively stamped at transaction start, never after a read
+or lock delay; expiry is separately checked against the current database clock.
+The bounded database client and pinned application routes expose this observation;
+typed build routes reject it before opening any credential-bearing transport.
+This response is unsigned local snapshot evidence, not a containment lease; a
+trusted issuer must still combine it with fresh manager/execution and scheduler
+incarnation evidence, and the node guard must independently authenticate the
+result. Direct SQL callers likewise own snapshot freshness. Containment renewal,
+root delegation, and positive cleanup are not implemented by this observation.
+
+The manager's separate `current-application-allocation` observation is for
+post-submission preparation. The existing `launch-subject` endpoint remains
+pre-submit-only: consuming its permit changes the intent to `submitting-unknown`,
+and the original permit may expire while Slurm retains the allocation. The new
+observation does not reconsume a permit or reapply latest-plan/headroom/rate
+admission to already charged work. It rechecks the exact current executor and
+execution fence, operator policy, subject/reporter generation and application
+purpose, then reconstructs the consumed permit and its immutable command receipt.
+Closing, released, quarantined, draining, terminal and unknown observations fail
+closed. An inventory-known Slurm identity is retained for comparison with the
+local physical binding and fresh scheduler evidence; physical identity fields
+alone are not terminal evidence.
+
+This API owns a fresh SERIALIZABLE transaction through commit, rejects ambient
+or externally owned transactions, and refreshes retained ORM objects. Its lock
+order is authority, execution/executor, then intent. Lock/statement waits are
+bounded and timeouts require a whole-read retry. Snapshot age starts at the
+transaction timestamp; validity is at most ten seconds and never exceeds the
+executor lease. The bounded authenticated client rechecks exact intent, expiry
+and future timestamps against its own clock. These are unsigned manager facts
+with `executable=false`, not root admission, a new allocation, or a runtime start.
+The containment issuer must still combine them with current unused-bootstrap
+and scheduler evidence, and the node guard must authenticate its delegation.
+
+Native scheduler readback is a separate versioned contract, not an extension of
+retained V2 inventory records. The existing digest-pinned command runner requests
+one exact job using `scontrol --json=v0.0.40`; the parser rejects partial/error
+responses, duplicate JSON/TRES keys, arrays, heterogeneous or requeued jobs,
+non-running state, unset/infinite timestamps and any allocation/ownership mismatch.
+It records scheduler submission/start times and UID as well as exact resources;
+the caller timestamps before the query so a slow response cannot renew freshness.
+Approved native profiles now render an optional single-use scheduler lifetime and
+submit with `--no-requeue`. Legacy profiles omit the new field entirely, preserving
+their exact serialized request and scheduler arguments. This prevents scheduler
+restart from reusing a consumed native bootstrap, but does not implement durable
+descendant cleanup or root delegation. No lease is issued by this readback.
+
+The native scheduler primitives now live in one stdlib-only protocol module,
+shared with the executor's strict model adapter. The future node verifier can
+install these same bytes and run with `python -I -S -B`, without importing the
+repository, site configuration, or an independent copy of the scheduler parser.
+Matched malformed-input fixtures exercise both imported and isolated execution.
+
+The module's Ed25519 verification primitive uses standard OpenSSL, not custom
+cryptography. It opens a root-owned, non-writable executable through protected
+directory descriptors, checks its configured digest and ELF format, then runs a
+sealed snapshot. Message, signature and public key use bounded, sealed, seekable
+descriptors; no temporary paths or streamed Ed25519 input are assumed. Arguments,
+environment and provider selection are fixed, diagnostics discarded, and verifier
+time bounded. Interrupted cleanup signals only a still-unreaped owned process;
+a PID already reaped by `Popen.wait` is no longer safe to signal. The interpreter,
+dynamic libraries and default provider remain root-managed OS dependencies, not
+dependencies authenticated by the executable hash alone.
+
+The shared module also verifies a closed, canonical, bounded preparation envelope
+against an independently installed root policy. The signature has a fixed
+preparation-only domain and purpose. Its policy digest binds the environment,
+pool/execution/executor incarnations, release, node, scheduler scope, issuer key
+and approved profile/PID caps. The payload binds the exact intent, physical and
+unused-bootstrap references, observation digests, grant ID/generation, ownership,
+resources and scheduler submission/start incarnation. Its validity is at most ten
+seconds, within the policy interval. Own-clock expiry and scheduler observation
+age are checked before crypto and again before returning; clock rollback fails
+closed. Tests exercise real signatures and complete isolated stdlib execution.
+
+The controller-only preparation issuer fetches current manager, application
+bootstrap and pinned scheduler observations itself. Its input is the physical
+reference, existing signed ownership proof and caller-owned durable grant identity,
+not caller-supplied unsigned observation JSON. It verifies ownership against the
+configured key, revalidates the complete current binding/purpose and approved
+native profile set, and bounds the signature by all observation ages, bootstrap,
+policy and native execution-root deadlines. The complete read sequence is bounded;
+failed or cancelled reads cannot yield a packet, and signing does not hold database
+locks. Consumed permit expiry is not reapplied to an already allocated job.
+
+This issuer is not yet wired into the executor lifecycle or exposed as a signing
+endpoint. Protected policy loading, atomic versioned installation, durable grant
+identity/replay admission, retained cgroup preparation and cleanup remain missing.
+The existing root guard remains the sole lifecycle owner. Expired preparation
+authority must block new preparation without removing existing resource limits.
+
+Installed-image diagnostic tests cover transport, loader-environment clearing and
+Docker client-loss cleanup, not actual protected worker registration acceptance.
+The worker container and all descendants require verified allocation containment.
+Docker client loss is not container termination. Unique in-memory execution
+ownership, durable grant finalization/start consumption and positive owned
+cleanup remain necessary before native readiness can reach any worker. No
+profile parsing, successful bootstrap or signature alone enables execution.
+
+The shared Docker-parent discovery also rejects a systemd slice whose memory
+ceiling exceeds the live Slurm job ceiling. Both values must be finite positive
+byte counts; an unverifiable job ceiling fails closed, and a stale slice may
+converge only within the existing bounded wait. The job ceiling is reread on
+every attempt. This is a trial-worker launch check, not proof that the sibling
+systemd slice is a Slurm descendant or that its lifetime cleanup is correct.
+The native rootless builder still requires its separate exact allocation-
+descendant containment and positive cleanup proofs.
+
 ## Completion and subsequent activation
 
 D2 acceptance requires real streamed-registry fixtures, PostgreSQL concurrency

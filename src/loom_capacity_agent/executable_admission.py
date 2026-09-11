@@ -9,10 +9,11 @@ from uuid import UUID
 
 from pydantic import BaseModel
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
+    CurrentExecutableBootstrapV2,
     DrainedExecutableWorkerV2,
     ExecutableDrainRequestV2,
     ExecutablePreparedBootstrapRevocationV2,
@@ -233,6 +234,44 @@ class ExecutableAdmissionStore:
             or receipt.binding_digest != receipt.request_digest
         ):
             raise ExecutableAdmissionError("protected physical binding receipt changed")
+        return receipt
+
+    async def observe_current_bootstrap(
+        self,
+        request: PhysicalJobBindingV2,
+        *,
+        statement_timeout_ms: int = 10_000,
+        lock_timeout_ms: int = 5_000,
+    ) -> CurrentExecutableBootstrapV2:
+        """Read unused pre-registration evidence in a fresh owned transaction.
+
+        The response is not durable admission and cannot replace fresh manager or
+        scheduler evidence. Repeated calls recheck current state, unlike bind replay.
+        Never invoke inside an existing transaction: SERIALIZABLE can legally
+        retain a snapshot from before revocation. Return only after owned commit.
+        """
+        if not isinstance(request, PhysicalJobBindingV2):
+            raise TypeError("current bootstrap observation requires its physical binding")
+        if self._session.in_transaction() or (
+            isinstance(self._session.bind, AsyncConnection) and self._session.bind.in_transaction()
+        ):
+            raise ExecutableAdmissionError("current bootstrap observation requires a fresh owned transaction")
+        if any(type(value) is not int or not 1 <= value <= 60_000
+               for value in (statement_timeout_ms, lock_timeout_ms)):
+            raise ExecutableAdmissionError("current bootstrap timeouts must be integers from 1 to 60000 ms")
+        async with self._session.begin():
+            # SET does not establish a PostgreSQL data snapshot. The following
+            # observation is the first data read in this owned transaction.
+            await self._session.execute(text(f"SET LOCAL lock_timeout = '{lock_timeout_ms}ms'"))
+            await self._session.execute(text(f"SET LOCAL statement_timeout = '{statement_timeout_ms}ms'"))
+            receipt = await self._invoke(
+                "observe_current_executable_bootstrap", request, CurrentExecutableBootstrapV2,
+            )
+            if receipt.physical_binding != request or (
+                self._registration is not None
+                and receipt.agent_incarnation != self._registration.agent_incarnation
+            ):
+                raise ExecutableAdmissionError("current bootstrap observation binding changed")
         return receipt
 
     async def register_worker(

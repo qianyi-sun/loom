@@ -40,14 +40,15 @@ from tests.integration.test_service_execution_leases import (
     _runtime_result_payload,
     _seed_ready_trial,
 )
+from tests.support.minio import MINIO_TEST_IMAGE
 
 
 @pytest.fixture
 def independent_minio_endpoints() -> Iterator[tuple[MinioContainer, MinioContainer]]:
     label = {"loom.test": "service-execution-spool-materialization"}
     with (
-        MinioContainer().with_kwargs(labels=label) as spool,
-        MinioContainer().with_kwargs(labels=label) as canonical,
+        MinioContainer(image=MINIO_TEST_IMAGE).with_kwargs(labels=label) as spool,
+        MinioContainer(image=MINIO_TEST_IMAGE).with_kwargs(labels=label) as canonical,
     ):
         assert spool.get_config()["endpoint"] != canonical.get_config()["endpoint"]
         spool.get_client().make_bucket("artifacts")
