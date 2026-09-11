@@ -38,6 +38,7 @@ from loom.db.schema import (
     TrialEvent,
 )
 from loom.execution_runtime_contract import ExecutionRuntimeResultV1
+from loom.llm_call_ledger import read_service_execution_llm_calls
 from loom.models.task import TaskConfig
 from loom.models.trajectory import (
     LLMCallEvent,
@@ -59,7 +60,11 @@ from loom.pipeline.artifact_commit import (
     ArtifactManifestV1,
 )
 from loom.pipeline.keys import canonical_document
-from loom.service_execution_terminus_trace import parse_terminus_events, terminus_usage
+from loom.service_execution_terminus_trace import (
+    parse_terminus_events,
+    reconcile_terminus_ledger,
+    terminus_usage,
+)
 from loom.trajectory.atif import project_to_atif
 from loom.trajectory.object_identity import TrajectoryObjectIdentity
 from loom.trajectory.storage import ObjectStore
@@ -258,6 +263,7 @@ def build_canonical_events(
     runtime_result: ExecutionRuntimeResultV1,
     trace_body: bytes | None,
     verifier_body: bytes | None,
+    gateway_calls: list[dict[str, Any]] | None = None,
 ) -> tuple[TrajectoryEvent, ...]:
     """Validate the lossless source trace and project it to Loom event rows."""
 
@@ -267,6 +273,10 @@ def build_canonical_events(
         native_events = parse_terminus_events(
             trace_body, trial=trial_config, trial_id=trial_id,
         ) if terminus else []
+        if terminus and gateway_calls is not None:
+            native_events = reconcile_terminus_ledger(
+                native_events, gateway_calls, trial_config, trial_id,
+            )
     except ValueError as exc:
         raise MaterializationIntegrityError("trajectory_invalid") from exc
     step_id = "agent" if terminus else task_config.steps[0].name if task_config.steps else "main"
@@ -446,6 +456,10 @@ def build_canonical_atif(
     # interrupted before its final observation; do not erase them as bad input.
     document = Terminus2TrajectoryMapper.project_to_atif(
         events, task_id=task_id, agent_name=agent_name, agent_version=agent_version,
+    )
+    model = next((event.model for event in events if isinstance(event, LLMCallEvent)), None)
+    document["accounting"] = terminus_usage(
+        list(events), TrialConfig(agent_name=agent_name, agent_model=model),
     )
     document.update({
         "trajectory_id": generic.trajectory_id,
@@ -634,6 +648,9 @@ class ServiceExecutionMaterializer:
                 "output_manifest_sha256": lease.output_manifest_sha256,
                 "output_marker_sha256": lease.output_marker_sha256,
             }
+            gateway_calls = (await read_service_execution_llm_calls(
+                session, lease, generation=lease.output_generation,
+            )) if trial.config.get("agent_name") == "terminus-2" else None
             trial_config_raw = trial.config
             trial_result_raw = trial.result
             trial_task_id = trial.task_id
@@ -830,7 +847,36 @@ class ServiceExecutionMaterializer:
             runtime_result=runtime_result,
             trace_body=trace_body,
             verifier_body=derivation_inputs.get(_VERIFIER_PATH),
+            gateway_calls=gateway_calls,
         )
+        if gateway_calls is not None:
+            # Preserve the immutable runtime projection as source evidence. The
+            # canonical accounting is independently derived from the DB ledger.
+            corrected = {
+                _TRACE_PATH: _canonical_jsonl(events),
+                _USAGE_PATH: canonical_document(terminus_usage(list(events), trial_config)),
+                "accounting/gateway-calls.json": canonical_document({
+                    "schema_version": "loom.gateway-lease-ledger.v1", "calls": gateway_calls,
+                }),
+            }
+            for item in list(materialized):
+                if item.relative_path in corrected:
+                    source_evidence.append(MaterializedFile(
+                        relative_path="source/" + item.relative_path,
+                        media_type=item.media_type, size_bytes=item.size_bytes,
+                        sha256=item.sha256, key=item.key,
+                    ))
+                    materialized.remove(item)
+            for path, body in corrected.items():
+                key = destination_prefix + "canonical/" + path
+                await self._canonical_store.put_object_with_metadata(
+                    bucket=self._artifacts_bucket, key=key, body=body,
+                )
+                materialized.append(MaterializedFile(
+                    relative_path=path,
+                    media_type="application/x-ndjson" if path.endswith(".jsonl") else "application/json",
+                    size_bytes=len(body), sha256=_digest(body), key=key,
+                ))
         events_body = _canonical_jsonl(events)
         atif_body = build_canonical_atif(
             events,
@@ -965,6 +1011,9 @@ class ServiceExecutionMaterializer:
                 **(artifact.artifact_metadata or {}),
                 "materialization_state": "committed",
                 "materialized_at": now.isoformat(),
+                **({"accounting_source": "gateway_lease_ledger"} if any(
+                    item.relative_path == "accounting/gateway-calls.json" for item in result.files
+                ) else {}),
             }
             trial.trajectory_index = {
                 "schema_version": "1",

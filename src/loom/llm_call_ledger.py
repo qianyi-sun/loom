@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from loom.db.schema import LlmCall
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from loom.db.schema import LlmCall, ServiceExecutionLease
 from loom.request_params import coerce_request_params
 
 
@@ -40,4 +43,48 @@ def serialize_llm_call(r: LlmCall, *, include_provider_log: bool = True) -> dict
             for key, value in (r.provider_extras or {}).items()
             if key != "_loom_raw_provider_log"
         }
+    return payload
+
+
+async def read_service_execution_llm_calls(
+    session: AsyncSession, lease: ServiceExecutionLease, *, generation: int | None = None,
+) -> list[dict[str, Any]]:
+    """Read the authoritative agent ledger for exactly one tenant/lease/generation.
+
+    Export only accounting fields, never provider request/response logs or headers.
+    The same scope serves the active Pod and terminal canonical materialization.
+    """
+    binding = LlmCall.provider_extras["_loom_raw_provider_log"]["service_execution"]
+    rows = (await session.scalars(select(LlmCall).where(
+        LlmCall.team_id == lease.team_id,
+        LlmCall.trial_id == lease.trial_id,
+        LlmCall.step_id == "agent",
+        binding["lease_id"].astext == str(lease.id),
+        binding["generation"].astext == str(generation if generation is not None else lease.generation),
+    ).order_by(LlmCall.captured_at, LlmCall.id))).all()
+    return [serialize_execution_accounting_call(row) for row in rows]
+
+
+def serialize_execution_accounting_call(row: LlmCall) -> dict[str, Any]:
+    payload = serialize_llm_call(row, include_provider_log=False)
+    extras = row.provider_extras or {}
+    # Arbitrary provider strings and nested objects are not exportable evidence.
+    payload["provider_extras"] = {
+        key: value for key, value in extras.items()
+        if isinstance(value, int | float) and not isinstance(value, bool)
+    }
+    payload["call_status"] = "failed" if extras.get("_loom_call_status") == "failed" else "completed"
+    if payload["call_status"] == "failed":
+        payload["provider_extras"]["_loom_call_status"] = "failed"
+    raw = extras.get("_loom_raw_provider_log")
+    response = raw.get("response") if isinstance(raw, dict) else None
+    body = response.get("body") if isinstance(response, dict) else None
+    choices = body.get("choices") if isinstance(body, dict) else None
+    reason = (
+        choices[0].get("finish_reason")
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+    )
+    payload["finish_reason"] = reason if isinstance(reason, str) and reason in {
+        "stop", "length", "tool_calls", "function_call", "content_filter",
+    } else None
     return payload

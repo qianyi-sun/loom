@@ -1,0 +1,226 @@
+"""A discarded length response is still a real, billable Gateway request."""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from uuid import uuid4
+
+import pytest
+
+from loom.db.schema import LlmCall
+from loom.execution_runtime_contract import ExecutionRuntimeResultV1
+from loom.llm_call_ledger import serialize_execution_accounting_call
+from loom.models.trajectory import (
+    LLMCallEvent,
+    Terminus2CommandEvent,
+    Terminus2TerminalObservationEvent,
+    Terminus2TurnEvent,
+    Terminus2UserPromptEvent,
+)
+from loom.models.trial import TrialConfig
+from loom.service_execution_terminus_trace import reconcile_terminus_ledger, terminus_usage
+from loom.trajectory.llm_call_events import llm_call_row_to_event
+from loom_control_plane.service_execution_materializer import (
+    build_canonical_atif,
+    build_canonical_events,
+)
+from tests.unit.test_service_execution_materialization import _REVISION, _RUNTIME_IMAGE, _TASK_IMAGE
+from tests.unit.test_service_execution_terminus_plan import _inputs
+
+
+def _case():
+    trial_id = uuid4()
+    trial = TrialConfig(
+        agent_name="terminus-2", agent_model={"provider": "openai", "name": "glm-5.2"}
+    )
+    now = datetime(2026, 9, 10, tzinfo=UTC)
+    base = {"trial_id": trial_id, "step_id": "agent", "seq": 0, "emitted_at": now}
+    events = [Terminus2UserPromptEvent(**base, prompt_id="p", harbor_step_id=1, message="Solve")]
+    rows = []
+    for index, (prompt, completion) in enumerate(
+        [
+            (906, 8192),
+            (968, 183),
+            (1483, 1477),
+            (2230, 1330),
+            (3842, 238),
+            (4064, 468),
+        ]
+    ):
+        rows.append(
+            {
+                "id": str(uuid4()),
+                "trial_id": str(trial_id),
+                "step_id": "agent",
+                "dialect": "openai_facade",
+                "model": "glm-5.2",
+                "input_tokens": prompt,
+                "output_tokens": completion,
+                "cost_usd": 0.01,
+                "rate_card_hash": "test-rate",
+                "provider_extras": {},
+                "captured_at": (now + timedelta(seconds=index)).isoformat(),
+                "finish_reason": "length" if index == 0 else "stop",
+                "attempt": 1,
+            }
+        )
+        if index == 0:
+            continue  # Harbor discarded this response; there is no native step.
+        events.extend(
+            [
+                llm_call_row_to_event(rows[-1], trial_id=trial_id, seq=0),
+                Terminus2TurnEvent(
+                    **base,
+                    turn_id=f"t{index}",
+                    turn_index=index - 1,
+                    gateway_request_id=rows[-1]["id"],
+                    parse_state="ok",
+                    completion_state="continue",
+                    harbor_step_id=index + 1,
+                    analysis="inspect",
+                    plan="list",
+                ),
+                Terminus2CommandEvent(
+                    **base,
+                    turn_id=f"t{index}",
+                    command_batch_id=f"b{index}",
+                    command_id=f"c{index}",
+                    index=0,
+                    keystrokes="ls\n",
+                    duration_sec=0.1,
+                ),
+                Terminus2TerminalObservationEvent(
+                    **base,
+                    turn_id=f"t{index}",
+                    command_batch_id=f"b{index}",
+                    observation_id=f"o{index}",
+                    text="ok",
+                    capture_source="incremental",
+                    byte_len=2,
+                    truncated=False,
+                    completeness="full",
+                    content_hash="fixture",
+                    redaction_applied=False,
+                    is_aggregate=False,
+                ),
+            ]
+        )
+    return (
+        trial,
+        trial_id,
+        [event.model_copy(update={"seq": i}) for i, event in enumerate(events)],
+        rows,
+    )
+
+
+def test_truncated_request_counts_without_inventing_a_harbor_turn():
+    trial, trial_id, native, rows = _case()
+    assert terminus_usage(native, trial)["call_count"] == 5
+    events = reconcile_terminus_ledger(native, rows, trial, trial_id)
+    usage = terminus_usage(events, trial)
+    assert usage["call_count"] == 6
+    assert usage["totals"]["input_tokens"] == 13493
+    assert usage["totals"]["output_tokens"] == 11888
+    assert usage["totals"]["cost_usd"] == pytest.approx(0.06)
+    assert usage["gateway_request_ids"] == [row["id"] for row in rows]
+    assert events[0].finish_reason == "length"
+    assert events[0].messages == []  # No invented content for the discarded response.
+    assert [
+        event.model_dump(exclude={"seq"}) for event in events if not isinstance(event, LLMCallEvent)
+    ] == [
+        event.model_dump(exclude={"seq"}) for event in native if not isinstance(event, LLMCallEvent)
+    ]
+    runtime = ExecutionRuntimeResultV1.model_validate(
+        {
+            "schema_version": "loom.execution-runtime-result.v1",
+            "runtime_contract_sha256": "sha256:" + "1" * 64,
+            "candidate_sha": "1" * 40,
+            "task_revision_sha256": _REVISION,
+            "command_identity_sha256": "sha256:" + "2" * 64,
+            "execution_role": "attempt",
+            "container_roles": ["execution", "agent", "verifier"],
+            "task_image_ref": _TASK_IMAGE,
+            "runtime_image_ref": _RUNTIME_IMAGE,
+            "runtime_binary_sha256": "sha256:" + "3" * 64,
+            "execution_class_id": "linux-amd64-cpu-pod-v1",
+            "status": "succeeded",
+            "started_at": native[0].emitted_at,
+            "finished_at": native[-1].emitted_at,
+            "phases": [],
+            "outputs": [],
+            "verifier_rewards": {"passed": 1},
+            "partial_evidence": False,
+        }
+    )
+    canonical = build_canonical_events(
+        trial_id=trial_id,
+        task_id="task",
+        task_config=_inputs()[0],
+        trial_config=trial,
+        runtime_result=runtime,
+        gateway_calls=rows,
+        trace_body=b"\n".join(event.model_dump_json().encode() for event in native),
+        verifier_body=b'{"rewards":{"passed":1}}',
+    )
+    assert terminus_usage(list(canonical), trial) == usage
+    assert canonical[-1].final_state == "succeeded"
+    atif = json.loads(
+        build_canonical_atif(canonical, task_id="task", agent_name="terminus-2", agent_version="2")
+    )
+    assert atif["accounting"] == usage
+    assert len(atif["steps"]) == 6  # Initial user + five actual agent turns.
+    assert sum(len(step.get("tool_calls", [])) for step in atif["steps"]) == 5
+    assert reconcile_terminus_ledger(events, rows, trial, trial_id) == events
+
+
+@pytest.mark.parametrize("damage", ["missing", "duplicate", "trial", "step", "model", "tokens"])
+def test_ledger_reconciliation_rejects_cross_identity_and_incomplete_or_false_usage(damage):
+    trial, trial_id, events, rows = _case()
+    if damage == "missing":
+        rows.pop()
+    elif damage == "duplicate":
+        rows.append(rows[-1])
+    elif damage == "trial":
+        rows[-1]["trial_id"] = str(uuid4())
+    elif damage == "step":
+        rows[-1]["step_id"] = "verifier"
+    elif damage == "model":
+        rows[-1]["model"] = "other"
+    else:
+        rows[-1]["input_tokens"] += 1
+    with pytest.raises(ValueError):
+        reconcile_terminus_ledger(events, rows, trial, trial_id)
+
+
+def test_safe_export_preserves_failed_retry_usage_without_provider_logs():
+    row = LlmCall(
+        id=uuid4(),
+        trial_id=uuid4(),
+        step_id="agent",
+        model="glm-5.2",
+        dialect="openai_facade",
+        input_tokens=4,
+        output_tokens=2,
+        cost_usd=Decimal("0.01"),
+        rate_card_hash="rate",
+        captured_at=datetime.now(UTC),
+        attempt=2,
+        provider_extras={
+            "reasoning_tokens": 2,
+            "_loom_call_status": "failed",
+            "private_debug": "secret",
+            "nested": {"credential": "secret"},
+            "_loom_raw_provider_log": {
+                "request": {"headers": {"Authorization": "secret"}},
+                "response": {"body": {"choices": [{"finish_reason": "length"}]}},
+            },
+        },
+    )
+    safe = serialize_execution_accounting_call(row)
+    assert "secret" not in json.dumps(safe)
+    assert safe["finish_reason"] == "length" and safe["call_status"] == "failed"
+    event = llm_call_row_to_event(safe, trial_id=row.trial_id, seq=0)
+    assert event.attempt == 2 and event.output_tokens == 2
+    assert event.thinking_tokens == 2

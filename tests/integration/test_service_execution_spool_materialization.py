@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tarfile
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -18,9 +19,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from testcontainers.core.wait_strategies import HttpWaitStrategy
 from testcontainers.minio import MinioContainer
 
-from loom.db.schema import Artifact, ServiceExecutionLease, Task, Trial, TrialEvent
+from loom.db.schema import Artifact, LlmCall, ServiceExecutionLease, Task, Trial, TrialEvent
 from loom.pipeline.artifact_commit import ArtifactCommitService, PartReceiptV1
 from loom.pipeline.keys import canonical_document, digest_bytes
+from loom.service_execution_terminus_trace import terminus_usage
 from loom.trajectory.storage import MinioObjectStore
 from loom_control_plane.artifact_commit_runtime import SqlArtifactCommitRepository
 from loom_control_plane.service_execution import (
@@ -74,7 +76,11 @@ def _store(container: MinioContainer) -> MinioObjectStore:
     )
 
 
+@pytest.mark.parametrize("terminus,legacy_repair", [(False, False), (True, False), (True, True)])
 async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
+    terminus: bool,
+    legacy_repair: bool,
+    monkeypatch: pytest.MonkeyPatch,
     isolated_migration_postgres_url: str,
     independent_minio_endpoints: tuple[MinioContainer, MinioContainer],
 ) -> None:
@@ -219,6 +225,39 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             ),
             "verifier/output.json": b'{"rewards":{"passed":1.0}}',
         }
+        if terminus:
+            from tests.unit.test_service_execution_terminus_accounting import _case
+
+            config, _, native, ledger = _case()
+            native = [event.model_copy(update={"trial_id": trial_id}) for event in native]
+            payloads["trajectory/events.jsonl"] = b"\n".join(event.model_dump_json().encode() for event in native)
+            payloads["accounting/usage.json"] = canonical_document(terminus_usage(native, config))
+            async with sessions() as session:
+                trial = await session.get(Trial, trial_id)
+                trial.config = config.model_dump(mode="json")
+                for row in ledger:
+                    session.add(LlmCall(
+                        id=UUID(row["id"]), team_id=lease.team_id, trial_id=trial_id, step_id="agent",
+                        model=row["model"], dialect=row["dialect"], input_tokens=row["input_tokens"],
+                        output_tokens=row["output_tokens"], cost_usd=row["cost_usd"], rate_card_hash="test-rate",
+                        captured_at=datetime.fromisoformat(row["captured_at"]), attempt=row["attempt"],
+                        provider_extras={"_loom_raw_provider_log": {
+                            "service_execution": {"lease_id": str(lease.id), "generation": 1},
+                            "response": {"body": {"choices": [{"finish_reason": row["finish_reason"]}]}},
+                        }},
+                    ))
+                await session.commit()
+        if legacy_repair:
+            from loom_control_plane import service_execution_materializer as materializer_module
+
+            ledger_reader = materializer_module.read_service_execution_llm_calls
+
+            async def legacy_without_ledger(*args, **kwargs):
+                return None
+
+            # Reproduce the deployed pre-fix projection while retaining all six
+            # authoritative Gateway rows for the later correction.
+            monkeypatch.setattr(materializer_module, "read_service_execution_llm_calls", legacy_without_ledger)
         result = _runtime_result_payload(lease, started_at=now)
         result.update(
             outputs=[
@@ -399,8 +438,8 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             assert artifact.lifecycle_authority_id is not None
             files = artifact.storage["files"]
             evidence = artifact.storage["source_evidence"]
-            assert {item["relative_path"] for item in files} == set(payloads)
-            assert len(evidence) == 3
+            assert {item["relative_path"] for item in files} == set(payloads) | ({"accounting/gateway-calls.json"} if terminus and not legacy_repair else set())
+            assert len(evidence) == (5 if terminus and not legacy_repair else 3)
             assert trial.trajectory_index is not None
             trajectory_index = trial.trajectory_index
             events = list(
@@ -410,8 +449,63 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                     )
                 )
             )
-            assert len(events) == 7
-            assert len({event.seq for event in events}) == 7
+            assert len(events) == (27 if legacy_repair else 28 if terminus else 7)
+            assert len({event.seq for event in events}) == len(events)
+
+        if legacy_repair:
+            from loom_control_plane.service_execution_accounting_repair import repair_accounting
+            from loom_service.delivery_export import (
+                build_canonical_trial_bundle_archive,
+                canonical_bundle_from_artifact,
+            )
+
+            monkeypatch.setattr(materializer_module, "read_service_execution_llm_calls", ledger_reader)
+            original_objects = {
+                (item["bucket"], item["key"]): await canonical_store.get_object(bucket=item["bucket"], key=item["key"])
+                for item in [*files, *evidence]
+            }
+            for name in ("trajectory", "atif"):
+                key = trajectory_index[f"{name}_uri"].removeprefix("s3://trajectories/")
+                original_objects[("trajectories", key)] = await canonical_store.get_object(bucket="trajectories", key=key)
+            preserved = (trial.state, trial.finished_at, trial.result, trial.attempt_count,
+                         current.materialization_state, current.materialization_committed_at,
+                         current.source_retain_until, current.output_manifest_sha256,
+                         current.canonical_trajectory_sha256, current.canonical_atif_sha256)
+            old_usage = next(item for item in files if item["relative_path"] == "accounting/usage.json")
+            assert json.loads(original_objects[(old_usage["bucket"], old_usage["key"])])["call_count"] == 5
+            kwargs = dict(session_factory=sessions, store=canonical_store, artifacts_bucket="artifacts",
+                          trajectories_bucket="trajectories", lease_id=lease.id, team_id=lease.team_id)
+            prepared = await repair_accounting(**kwargs)
+            assert prepared["status"] == "prepared" and prepared["usage"]["call_count"] == 6
+            assert (await repair_accounting(**kwargs, apply=True))["status"] == "corrected"
+            assert (await repair_accounting(**kwargs, apply=True))["status"] == "already_corrected"
+            async with sessions() as session:
+                trial = await session.get(Trial, trial_id)
+                current = await session.get(ServiceExecutionLease, lease.id)
+                artifact = await session.get(Artifact, artifact.id)
+                assert trial is not None and current is not None and artifact is not None
+                assert preserved == (trial.state, trial.finished_at, trial.result, trial.attempt_count,
+                                     current.materialization_state, current.materialization_committed_at,
+                                     current.source_retain_until, current.output_manifest_sha256,
+                         current.canonical_trajectory_sha256, current.canonical_atif_sha256)
+                files, evidence = artifact.storage["files"], artifact.storage["source_evidence"]
+                trajectory_index = trial.trajectory_index
+                corrected_events = list((await session.scalars(select(TrialEvent).where(TrialEvent.trial_id == trial_id))).all())
+                assert len(corrected_events) == 28
+                assert sum(event.kind == "llm_call" for event in corrected_events) == 6
+                bundle = canonical_bundle_from_artifact(artifact, trial=trial)
+                assert bundle is not None
+            archive = build_canonical_trial_bundle_archive(client=canonical_store._client, bundle=bundle)
+            try:
+                with tarfile.open(fileobj=archive.body, mode="r:gz") as tar:
+                    corrected_usage = json.load(tar.extractfile("files/accounting/usage.json"))
+                    assert corrected_usage["call_count"] == 6
+                    assert sum(corrected_usage["totals"][key] for key in ("input_tokens", "output_tokens")) == 25381
+                    assert json.load(tar.extractfile("source/accounting/usage.json"))["call_count"] == 5
+            finally:
+                archive.body.close()
+            for (bucket, key), expected in original_objects.items():
+                assert await canonical_store.get_object(bucket=bucket, key=key) == expected
 
         # Compute is gone and source GC is now ACK-authorized. Canonical files,
         # raw trace/accounting, source evidence, and derived ATIF remain readable.
@@ -428,13 +522,26 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             downloaded = await canonical_store.get_object(bucket=item["bucket"], key=item["key"])
             assert digest_bytes(downloaded) == item["sha256"]
             assert len(downloaded) == item["size_bytes"]
-            if item["relative_path"] in payloads:
-                assert downloaded == payloads[item["relative_path"]]
+            path = item["relative_path"]
+            if terminus and path == "accounting/usage.json":
+                usage = json.loads(downloaded)
+                assert usage["call_count"] == 6
+                assert usage["totals"]["input_tokens"] + usage["totals"]["output_tokens"] == 25381
+            elif terminus and path == "trajectory/events.jsonl":
+                assert sum(json.loads(line)["kind"] == "llm_call" for line in downloaded.splitlines()) == 6
+            elif path in payloads:
+                assert downloaded == payloads[path]
+            elif path.startswith("source/") and path.removeprefix("source/") in payloads:
+                assert downloaded == payloads[path.removeprefix("source/")]
         for name in ("trajectory", "atif"):
             key = trajectory_index[f"{name}_uri"].removeprefix("s3://trajectories/")
             downloaded = await canonical_store.get_object(bucket="trajectories", key=key)
             if name == "atif":
-                assert json.loads(downloaded)["schema_version"] == "1.7"
+                document = json.loads(downloaded)
+                assert document["schema_version"] == ("harbor-tb2-v2-projection" if terminus else "1.7")
+                if terminus:
+                    assert document["accounting"]["call_count"] == 6
+                    assert len(document["steps"]) == 6
             else:
                 assert b'"kind":"llm_call"' in downloaded
         assert (
