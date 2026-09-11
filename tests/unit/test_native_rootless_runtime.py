@@ -7,8 +7,6 @@ import socket
 import subprocess
 import sys
 from importlib import import_module
-from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -75,7 +73,7 @@ def test_spec_requires_canonical_private_bound_identity(tmp_path, boundary):
             module.read_native_rootless_spec(path, expected_sha256=digest)
 
 
-@pytest.mark.parametrize("boundary", ["exact", "reused-state", "wrong-socket", "same-fd"])
+@pytest.mark.parametrize("boundary", ["exact", "swapped-low-fds", "reused-state", "wrong-socket", "same-fd"])
 def test_launcher_fixed_exec_and_collision_safe_socket_passage(tmp_path, boundary):
     _module, _spec, path, digest = spec_file(tmp_path)
     if boundary == "reused-state":
@@ -102,14 +100,23 @@ def valid(fd):
     try: os.fstat(fd); return True
     except OSError: return False
 m.os.execve = observed
+authority, artifact = int(sys.argv[4]), int(sys.argv[5])
+if sys.argv[6] == 'swapped-low-fds':
+    import fcntl
+    a = fcntl.fcntl(authority, fcntl.F_DUPFD_CLOEXEC, 10)
+    b = fcntl.fcntl(artifact, fcntl.F_DUPFD_CLOEXEC, 10)
+    os.dup2(a, 4); os.dup2(b, 3)
+    authority, artifact = 4, 3
+extra = os.open(sys.argv[1], os.O_RDONLY)
+os.dup2(extra, 97, inheritable=True)
 m.exec_native_rootless_runtime(Path(sys.argv[1]), expected_sha256=sys.argv[2],
-    expected_parent_pid=int(sys.argv[3]), authority_fd=int(sys.argv[4]), artifact_fd=int(sys.argv[5]))
+    expected_parent_pid=int(sys.argv[3]), authority_fd=authority, artifact_fd=artifact)
 """
         result = subprocess.run([sys.executable, "-c", script, str(path), digest, str(os.getpid()),
-            str(authority.fileno()), str(artifact_fd)], pass_fds=(authority.fileno(), artifact.fileno()),
+            str(authority.fileno()), str(artifact_fd), boundary], pass_fds=(authority.fileno(), artifact.fileno()),
             capture_output=True, text=True, timeout=10, check=False,
             env={**os.environ, "UNTRUSTED_SECRET": "must-not-inherit", "LISTEN_FDS": "99"})
-        if boundary == "exact":
+        if boundary in {"exact", "swapped-low-fds"}:
             assert result.returncode == 0, result.stderr
             observed = json.loads(result.stdout)
             assert observed["executable"] == "/usr/bin/rootlesskit"
@@ -135,17 +142,56 @@ m.exec_native_rootless_runtime(Path(sys.argv[1]), expected_sha256=sys.argv[2],
             channel.close()
 
 
-@pytest.mark.parametrize("boundary", ["success", "expired", "uncertain", "activation", "parent"])
+@pytest.mark.parametrize("boundary", ["exact", "wrong-type", "unconnected"])
+def test_mapped_activation_validates_real_descriptors_and_disables_inheritance(tmp_path, boundary):
+    spec_file(tmp_path)
+    authority, authority_peer = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    artifact, artifact_peer = socket.socketpair(socket.AF_UNIX,
+        socket.SOCK_SEQPACKET if boundary == "wrong-type" else socket.SOCK_STREAM)
+    if boundary == "unconnected":
+        artifact.close()
+        artifact = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    script = """
+import fcntl, os, socket, sys
+from loom_capacity_executor.native_rootless_runtime import _activation_channels
+copies = [fcntl.fcntl(int(fd), fcntl.F_DUPFD_CLOEXEC, 10) for fd in sys.argv[1:]]
+for source, destination in zip(copies, (3, 4)): os.dup2(source, destination, inheritable=True)
+with_channels = _activation_channels()
+for channel, message in zip(with_channels, (b'authority', b'artifact')):
+    assert not channel.get_inheritable()
+    channel.send(message)
+    channel.close()
+for fd in (3, 4):
+    try: os.fstat(fd)
+    except OSError: pass
+    else: raise AssertionError('activation original leaked')
+"""
+    try:
+        result = subprocess.run([sys.executable, "-c", script, str(authority.fileno()), str(artifact.fileno())],
+            pass_fds=(authority.fileno(), artifact.fileno()), capture_output=True, timeout=10, check=False)
+        if boundary == "exact":
+            assert result.returncode == 0, result.stderr
+            assert authority_peer.recv(32) == b"authority"
+            assert artifact_peer.recv(32) == b"artifact"
+        else:
+            assert result.returncode != 0
+    finally:
+        for channel in (authority, authority_peer, artifact, artifact_peer):
+            channel.close()
+
+
+@pytest.mark.parametrize("boundary", ["success", "expired", "uncertain", "activation", "parent",
+    "session-error", "send-error", "unreaped-artifact"])
 def test_mapped_entry_validates_chain_before_session_and_exports_only_verified_artifact(tmp_path, monkeypatch, boundary):
+    from loom.personal_dev_builder_artifact import VerifiedPersonalDevBuildArtifact
+    from loom_capacity_agent.build_admission import BuildArtifactV1
     from loom_capacity_executor.native_build_session import NativeBuildSessionResult
     from loom_capacity_executor.native_runtime_cleanup import NativeRuntimeCleanupResult
     from loom_capacity_executor.native_supervisor import NativeSupervisionResult
-    from loom_capacity_agent.build_admission import BuildArtifactV1
 
     module, spec, path, digest = spec_file(tmp_path)
     artifact_value = BuildArtifactV1(archive_sha256="e" * 64, archive_size_bytes=123)
-    verified = SimpleNamespace(archive_path=path.parent / "output/build/artifacts.tar",
-        archive_sha256=artifact_value.archive_sha256, archive_size_bytes=artifact_value.archive_size_bytes)
+    verified = VerifiedPersonalDevBuildArtifact(platform=spec.context.platform, manifest_sha256="e" * 64, images={})
     events = []
     authority, authority_peer = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     artifact, artifact_peer = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -162,15 +208,20 @@ def test_mapped_entry_validates_chain_before_session_and_exports_only_verified_a
         assert kwargs["claim"] == spec.claim and kwargs["context"] == spec.context
         assert kwargs["authority"] is authority and kwargs["expected_parent_pid"] == 321
         events.append("session")
-        return NativeBuildSessionResult(NativeSupervisionResult(boundary != "expired", "test", True),
-            NativeRuntimeCleanupResult(boundary != "uncertain", "test"), verified if boundary == "success" else None)
+        if boundary == "session-error":
+            raise RuntimeError("session failed")
+        return NativeBuildSessionResult(NativeSupervisionResult(boundary != "expired", "test", boundary != "unreaped-artifact"),
+            NativeRuntimeCleanupResult(boundary != "uncertain", "test"),
+            verified if boundary in {"success", "send-error", "unreaped-artifact"} else None)
 
     async def send(channel, **kwargs):
         assert events == ["parent", "session"]
-        assert channel is artifact and kwargs["archive"] == verified.archive_path
+        assert channel is artifact and kwargs["archive"] == path.parent / "output/build/artifacts.tar"
         assert kwargs["claim_digest"] == spec.context.claim_digest
         assert kwargs["source_binding_sha256"] == spec.context.source_binding_sha256
         events.append("send")
+        if boundary == "send-error":
+            raise RuntimeError("send failed")
         return artifact_value
 
     monkeypatch.setenv("LISTEN_PID", str(os.getpid() + (boundary == "activation")))
@@ -184,6 +235,11 @@ def test_mapped_entry_validates_chain_before_session_and_exports_only_verified_a
             with pytest.raises((ValueError, RuntimeError)):
                 module.run_native_mapped_runtime(path, expected_sha256=digest, expected_rootless_pid=123)
             assert "session" not in events
+        elif boundary in {"session-error", "send-error", "unreaped-artifact"}:
+            with pytest.raises((ValueError, RuntimeError)):
+                module.run_native_mapped_runtime(path, expected_sha256=digest, expected_rootless_pid=123)
+            assert events == ["parent", "session"] + (["send"] if boundary == "send-error" else [])
+            assert authority.fileno() == artifact.fileno() == -1
         else:
             result = module.run_native_mapped_runtime(path, expected_sha256=digest, expected_rootless_pid=123)
             assert result.claim_digest == spec.context.claim_digest

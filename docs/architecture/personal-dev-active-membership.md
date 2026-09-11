@@ -2251,6 +2251,27 @@ and settled cancellation-safe writes. These are transport facts, not OCI
 publication authority. Upload must retain that scope and open directory descriptor;
 the `/proc/self/fd/...` path is not portable to another process. The expiry fixture
 still proves a live client stopped, exact cleanup and no exported artifact.
+`native_rootless_runtime` provides the fixed credential-free launch/mapped
+entrypoint. A bounded canonical owner-only specification binds claim, source,
+preverified layout and limits. It rejects reused state, creates only a fresh
+private `workspace/rootlesskit` directory (RootlessKit removes that directory),
+checks two connected UNIX socket types, remaps them collision-safely to activation
+FDs 3/4 and closes all other non-stdio descriptors. It clears environment and
+working directory before executing the pinned packaged RootlessKit with fixed
+offline/static-mapping flags and isolated installed Python. The mapped target
+checks activation PID/count and the documented keeper PID against the original
+RootlessKit grandparent, then binds parent death before starting any broker.
+The keeper marker may be missing or metadata-valid but empty during RootlessKit's
+create-before-write window; only those states get a bounded five-second wait.
+Malformed identities and adoption fail closed. Its canonical stdout result
+contains local execution/cleanup and artifact transport observations only; outer
+IO must bound capture and match them to the received stream and existing upload
+protocol. No local result substitutes for publication or physical release.
+The full IO-split fixture exercises that entrypoint from installed source with
+isolated imports. Separate trusted same-mapping preparation and readback passes
+restore fixture rootfs capabilities and independently verify cleanup/late-start
+rejection; these are not a protected worker installer. Actual subreaper adoption
+and mapping-time parent death still require kernel/Slurm acceptance coverage.
 These fixtures remain offline (`--network=none`); restricted external
 dependency fetching, protected material/rootless installation, Slurm containment,
 ARM64 supervision, authenticated IO-helper composition and native artifact GC
