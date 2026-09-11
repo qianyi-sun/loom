@@ -392,6 +392,10 @@ is issued, and no terminal/release receipt is fabricated. Future native worker
 exchange must check this fence under the same locks. The pool-authenticated HTTP
 route, pinned client and typed router preserve the exact request and receipt;
 runtime initialization verifies the installed procedure and narrow privileges.
+The reporter has an explicit build-only V3 terminal-evidence fetch method;
+application recovery still rejects build evidence. Both paths retain bounded
+authenticated transport and exact subject/intent/candidate checks. Fetching is
+not protected import, local signature verification or capacity-release authority.
 
 `ActivationRuntimeArtifactV3` and its explicit pinned loader compose the exact
 typed admission file, complete purpose/profile policy, approved profile digest,

@@ -30,7 +30,7 @@ async def test_native_terminal_client_preserves_only_build_purpose(pool, purpose
                 await client.get_build_terminal_inventory_evidence(evidence.binding.intent_id)
 
 
-@pytest.mark.parametrize("boundary", ["none", "intent", "subject", "incarnation", "deployment", "candidate", "noncanonical", "redirect"])
+@pytest.mark.parametrize("boundary", ["none", "intent", "subject", "incarnation", "deployment", "candidate", "whitespace", "invalid", "redirect"])
 async def test_native_terminal_client_retains_response_fences(boundary):
     configuration, evidence = typed_terminal(purpose="personal-build-worker")
     intent_id = evidence.binding.intent_id
@@ -46,13 +46,32 @@ async def test_native_terminal_client_retains_response_fences(boundary):
             return httpx.Response(200, content=b"null")
         if boundary == "redirect":
             return httpx.Response(302, headers={"Location":"https://foreign.test"})
-        return httpx.Response(200, content=canonical_executable_bytes(evidence) + (b" " if boundary == "noncanonical" else b""))
+        if boundary == "invalid":
+            return httpx.Response(200, content=b"{}")
+        return httpx.Response(200, content=canonical_executable_bytes(evidence) + (b" " if boundary == "whitespace" else b""))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         client = DemandReporterClient(configuration, manager_origin="https://capacity.internal",
             bearer_token="reporter-secret", http_client=http)
         if boundary == "none":
             assert await client.get_build_terminal_inventory_evidence(intent_id) is None
+        elif boundary == "whitespace":
+            # The manager endpoint is ordinary JSON, not a canonical wire file.
+            # Evidence digests still use canonical serialization after parsing.
+            assert await client.get_build_terminal_inventory_evidence(intent_id) == evidence
         else:
             with pytest.raises(DemandPublishError):
                 await client.get_build_terminal_inventory_evidence(intent_id)
+
+
+async def test_native_terminal_client_rejects_legacy_evidence():
+    from tests.unit.test_capacity_agent_client import _configuration, _terminal_inventory_evidence
+
+    configuration = _configuration()
+    evidence = _terminal_inventory_evidence(configuration)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, content=canonical_executable_bytes(evidence)))) as http:
+        client = DemandReporterClient(configuration, manager_origin="https://capacity.internal",
+            bearer_token="reporter-secret", http_client=http)
+        with pytest.raises(DemandPublishError, match="build"):
+            await client.get_build_terminal_inventory_evidence(evidence.binding.intent_id)

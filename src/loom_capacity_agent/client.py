@@ -51,6 +51,7 @@ from loom_capacity_manager.grant_contracts import (
 )
 from loom_capacity_manager.typed_inventory_contracts import (
     MAX_TERMINAL_INVENTORY_EVIDENCE_BYTES,
+    ExecutableTerminalInventoryEvidenceV3,
     TerminalInventoryEvidence,
     parse_terminal_inventory_evidence,
 )
@@ -434,7 +435,34 @@ class DemandReporterClient:
         self,
         intent_id: UUID,
     ) -> TerminalInventoryEvidence | None:
-        """Fetch one manager-verified physical terminal witness for this subject."""
+        """Fetch an application witness; never import build-purpose authority."""
+        evidence = await self._get_terminal_inventory_evidence(intent_id)
+        if evidence is None:
+            return None
+        try:
+            return application_terminal_evidence(evidence)
+        except ValueError as exc:
+            raise DemandPublishError("application terminal inventory evidence is invalid") from exc
+
+    async def get_build_terminal_inventory_evidence(
+        self,
+        intent_id: UUID,
+    ) -> ExecutableTerminalInventoryEvidenceV3 | None:
+        """Fetch typed native evidence; the build guard must still join local pins."""
+        evidence = await self._get_terminal_inventory_evidence(intent_id)
+        if evidence is None:
+            return None
+        if (not isinstance(evidence, ExecutableTerminalInventoryEvidenceV3)
+            or evidence.record.ownership_proof is None
+            or evidence.record.ownership_proof.metadata.subject_authority.purpose != "personal-build-worker"):
+            raise DemandPublishError("build terminal inventory evidence is invalid")
+        return evidence
+
+    async def _get_terminal_inventory_evidence(
+        self,
+        intent_id: UUID,
+    ) -> TerminalInventoryEvidence | None:
+        """Shared bounded authenticated transport, never a purpose admission gate."""
 
         if not isinstance(intent_id, UUID):
             raise DemandPublishError("terminal inventory intent id must be a UUID")
@@ -475,10 +503,6 @@ class DemandReporterClient:
             raise DemandPublishError(
                 "capacity manager returned invalid terminal inventory evidence"
             ) from exc
-        try:
-            evidence = application_terminal_evidence(evidence)
-        except ValueError as exc:
-            raise DemandPublishError("application terminal inventory evidence is invalid") from exc
         binding = evidence.binding
         if (
             binding.intent_id != intent_id
