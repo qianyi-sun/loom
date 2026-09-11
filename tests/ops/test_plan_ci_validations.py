@@ -616,7 +616,7 @@ def test_codeowners_is_not_static_documentation() -> None:
     assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
 
 
-def test_migration_change_selects_integration_images_and_staging() -> None:
+def test_migration_change_selects_both_integration_tiers_images_and_staging() -> None:
     plan = plan_validations(
         changed_paths=["migrations/versions/1234_add_runtime_state.py"],
         labels=set(),
@@ -625,6 +625,7 @@ def test_migration_change_selects_integration_images_and_staging() -> None:
 
     assert plan.selected_heavy_checks() == {
         "integration",
+        "integration_docker",
         "images",
         "staging_smoke",
     }
