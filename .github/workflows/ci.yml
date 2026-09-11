@@ -1035,6 +1035,9 @@ jobs:
           uv sync --locked --all-packages --extra dev --python 3.11
           uv pip check --python .venv/bin/python
 
+      - name: Prepare pinned MinIO fixture images
+        run: uv run --no-sync python -m tests.support.minio_images
+
       - name: Pytest — integration (fast tier, no docker)
         shell: bash
         env:
@@ -1098,6 +1101,9 @@ jobs:
         run: |
           uv sync --locked --all-packages --extra dev --python 3.11
           uv pip check --python .venv/bin/python
+
+      - name: Prepare pinned MinIO fixture images
+        run: uv run --no-sync python -m tests.support.minio_images
 
       - name: Pytest — integration (docker tier)
         shell: bash
