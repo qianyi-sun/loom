@@ -2104,6 +2104,27 @@ and modified-source contents. Missing KVM is a reported skip, not acceptance.
 This fixture is not proof of the newly published builder image, protected rootfs
 installation, rootless host policy, Slurm containment or fleet readiness.
 
+Revision `build_guard_0031` adds a separate native execution-freshness operation.
+The trusted worker submits its exact claim, a new challenge and the verified
+source-binding digest. The private guard rechecks the committed registration,
+assignment, installation, held request and live whole-attempt source under the
+existing locks; drain, cancellation, outcome, terminal and release states reject
+permission. Its receipt echoes the exact request and grants at most ten seconds,
+capped by the current source lease. The HTTPS reply follows transaction commit,
+is not cacheable, and contains no storage or worker credentials.
+
+This is a stateless freshness check, not another capacity grant or proof of
+single execution. A future installed one-shot worker must prove exclusion across
+crash/requeue/restart, retain a terminal stop latch, and use mandatory Linux
+`CLOCK_BOOTTIME` captured before the request to subtract all transport time.
+Permission arrival cannot start a fresh lifetime; late renewals cannot revive
+cleanup. Revocation is bounded by the remaining permission window, not
+instantaneous. An independent deadline monitor and exact runtime cleanup remain
+required, with physical capacity charged until manager terminal/release proof.
+The route requires `native-execution`, which production service configuration
+currently rejects. Isolated route tests exercise it without opening installed
+execution; source/claim receipts remain inert and no runtime launcher is enabled.
+
 1. Deliver executable delegated **application** membership: versioned policy,
    durable log/projection, authenticated lifecycle endpoint, common allocation
    and executor integration. Existing V2 active-mutation rejection remains.
