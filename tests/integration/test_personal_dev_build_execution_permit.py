@@ -12,8 +12,12 @@ from loom_capacity_agent.build_admission import BuildExecutionRequestV1, BuildOu
 from loom_capacity_manager.contracts import canonical_digest
 from tests.integration.test_personal_dev_build_guard_claims import claim_input
 from tests.integration.test_personal_dev_build_guard_execution import store
-from tests.integration.test_personal_dev_build_guard_installations import owner_sessions as owner_sessions
-from tests.integration.test_personal_dev_build_guard_migrations import build_guard_database as build_guard_database
+from tests.integration.test_personal_dev_build_guard_installations import (
+    owner_sessions as owner_sessions,
+)
+from tests.integration.test_personal_dev_build_guard_migrations import (
+    build_guard_database as build_guard_database,
+)
 from tests.integration.test_personal_dev_build_guard_prepare import prepared_input as prepared_input
 from tests.integration.test_personal_dev_build_guard_registration import CREDENTIAL
 from tests.integration.test_personal_dev_native_builder_store import sessions as sessions
@@ -131,3 +135,29 @@ async def test_native_permission_http_boundary(prepared_input, tmp_path, monkeyp
                 await client.authorize_execution(request,
                     worker_credential="x" * 43 if boundary == "credential" else CREDENTIAL)
             assert responses[0].status_code == {"disabled": 503, "controller": 401, "http": 403}.get(boundary, 409)
+
+
+@pytest.mark.parametrize("boundary", ["string-schema", "float-schema", "boolean-schema", "unknown-field", "wire", "digest"])
+async def test_permission_sql_rejects_malformed_envelope_without_python_validation(prepared_input, monkeypatch, boundary):
+    import hashlib
+    import json
+
+    factory, _engine, installation, _plan, _source, platform = prepared_input
+    claim = await claim_input(prepared_input, monkeypatch)
+    async with factory.begin() as session:
+        await store(session, installation).claim_platform(claim, worker_credential=CREDENTIAL)
+    request = BuildExecutionRequestV1(claim=claim, challenge=uuid4(), source_binding_sha256=platform.source_binding_sha256)
+    value = request.model_dump(mode="json")
+    if boundary in {"string-schema", "float-schema", "boolean-schema"}:
+        value["schema_version"] = {"string-schema": "1", "float-schema": 1.0, "boolean-schema": True}[boundary]
+    if boundary == "unknown-field":
+        value["command"] = "forbidden"
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    wire = payload.encode() + (b" " if boundary == "wire" else b"")
+    with pytest.raises(DBAPIError):
+        async with factory.begin() as session:
+            await session.scalar(text("""SELECT loom_capacity_build_guard.authorize_execution(
+                :installation,CAST(:payload AS jsonb),:wire,:digest,:credential)"""),
+                {"installation": installation.id, "payload": payload, "wire": wire,
+                    "digest": "f" * 64 if boundary == "digest" else hashlib.sha256(wire).hexdigest(),
+                    "credential": hashlib.sha256(CREDENTIAL.encode()).hexdigest()})
