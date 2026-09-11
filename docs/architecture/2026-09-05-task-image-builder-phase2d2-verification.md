@@ -1481,10 +1481,18 @@ cleanup. Listener and retained child-cleanup failures are observed explicitly;
 shutdown closes connections before joining receiver owners and survives repeated
 cancellation. This is executable local composition, not protected host installation.
 
-Typed-controller production routing still needs an explicit pinned application-only
-receiver/launcher route. The existing default receiver/launcher factory is V2;
-its route digest is not the typed controller's V3 entry digest, even for the same
-database. Neither translating the entry nor relaxing its exact hash is permitted.
+Receiver and native launcher configs can explicitly pin a typed application
+executor identity. In this mode the admission path names an independently pinned
+application-only V3 directory document; the node verifies the exact executor,
+subject, candidate, account and purpose before accessing a credential. Original
+entry bytes, including credential path and digest, stay identical to the controller's
+entry, so bootstrap route hashes match without translation. The node directory
+may have its own path/digest and omit unrelated entries, but installation must
+project the original application credential paths/bytes under equivalent protection.
+Build-purpose entries are rejected before client creation. Only current-bootstrap
+observation, exact route readback and worker registration are exposed. An explicit
+typed selection never falls back to V2. Legacy configs omit the new optional field
+from serialization and keep the existing V2 factory and canonical bytes.
 
 Protected transport/receiver installation,
 controller delivery journaling, remote revocation/cleanup convergence and crash-orphan
