@@ -31,9 +31,10 @@ from tests.unit.test_native_build_source import sealed_source as sealed_source
 
 
 @pytest.mark.parametrize("pool", ["gb10", "oldlab"])
+@pytest.mark.parametrize("view", ["source", "io"])
 @pytest.mark.parametrize("boundary", ["exact", "lost-reply", "unavailable", "retry-cancel", "job", "cgroup", "purpose",
     "receipt", "source", "cancel", "consumer"])
-async def test_allocated_worker_owns_handoff_claims_exact_work_and_cleans(sealed_source, tmp_path, monkeypatch, pool, boundary):
+async def test_allocated_worker_owns_handoff_claims_exact_work_and_cleans(sealed_source, tmp_path, monkeypatch, pool, boundary, view):
     module = import_module("loom_capacity_executor.native_allocated_worker")
     registration, archive, workspace = sealed_source
     router_module, bootstrap, document, route, digest = configured(tmp_path, pool,
@@ -100,7 +101,8 @@ async def test_allocated_worker_owns_handoff_claims_exact_work_and_cleans(sealed
         with sealed_native_worker_handoff(packet) as descriptor:
             inherited = os.dup(descriptor)
             async def consume():
-                async with module.stage_allocated_worker_source(inherited,
+                scope_factory = module.allocated_worker_io if view == "io" else module.stage_allocated_worker_source
+                async with scope_factory(inherited,
                     job_id="9999" if boundary == "job" else worker.slurm_job_id,
                     workspace=workspace, max_archive_bytes=2 * 1024 * 1024, admission_factory=factory) as staged:
                     assert boundary in {"exact", "lost-reply", "consumer"}
