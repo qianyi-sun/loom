@@ -176,7 +176,7 @@ def test_late_cronjob_child_is_journaled_and_paused_before_drain_succeeds(tmp_pa
         journal.execute(plan, [_component(apply)])
 
 
-@pytest.mark.parametrize("blocker", ["hpa", "foreign-pod", "guard", "cron-uid"])
+@pytest.mark.parametrize("blocker", ["hpa", "foreign-pod", "projected-secret", "guard", "cron-uid"])
 def test_workload_runtime_refuses_unknown_writers_before_any_patch(tmp_path, blocker):
     from loom_cli.rollout.operator.protected_application_workload_runtime import (
         pause_application_workloads,
@@ -194,6 +194,9 @@ def test_workload_runtime_refuses_unknown_writers_before_any_patch(tmp_path, blo
         runner.objects.append({"kind": "Pod", "metadata": {"name": "foreign-writer", "uid": str(uuid4())},
             "spec": {"containers": [{"name": "foreign", "env": [{"name": "DB_URL", "valueFrom": {"secretKeyRef": {"name": "loom-secrets", "key": "cp-db-url"}}}]}]},
             "status": {"phase": "Running"}})
+        if blocker == "projected-secret":
+            runner.objects[-1]["spec"] = {"containers": [{"name": "foreign"}], "volumes": [
+                {"name": "credentials", "projected": {"sources": [{"secret": {"name": "loom-secrets"}}]}}]}
     def apply(_):
         admit()
         with pytest.raises((ValueError, RuntimeError)):
@@ -201,6 +204,32 @@ def test_workload_runtime_refuses_unknown_writers_before_any_patch(tmp_path, blo
         assert runner.patch_calls == []
         raise RuntimeError("writer refused")
     with pytest.raises(RuntimeError, match="writer refused"):
+        journal.execute(plan, [_component(apply)])
+
+
+def test_recovery_refuses_a_deleted_saved_job_with_surviving_active_pods(tmp_path):
+    from loom_cli.rollout.operator.protected_application_workload_runtime import (
+        pause_application_workloads,
+        restore_application_workloads,
+    )
+
+    plan, journal, evidence, _, runner, admit = _context(tmp_path)
+    job = _workload("Job", "loom-staging-data-lifecycle-456", False)
+    job["metadata"]["ownerReferences"] = [{"apiVersion": "batch/v1", "kind": "CronJob", "controller": True,
+                                            "name": "loom-staging-data-lifecycle", "uid": runner.guard_cron_uid}]
+    runner.objects.append(job)
+
+    def apply(_):
+        admit()
+        pause_application_workloads(plan, journal=journal, runner=runner, guard=evidence)
+        runner.objects.remove(next(obj for obj in runner.objects if obj["kind"] == "Job"))
+        runner.objects.append({"kind": "Pod", "metadata": {"name": "orphan-job-pod", "uid": str(uuid4()),
+            "ownerReferences": [{"kind": "Job", "name": job["metadata"]["name"], "uid": job["metadata"]["uid"], "controller": True}]},
+            "spec": {"containers": [{"name": "still-running"}]}, "status": {"phase": "Running"}})
+        with pytest.raises(RuntimeError, match="deleted Job"):
+            restore_application_workloads(plan, journal=journal, runner=runner, guard=evidence)
+        raise RuntimeError("orphan refused")
+    with pytest.raises(RuntimeError, match="orphan refused"):
         journal.execute(plan, [_component(apply)])
 
 
