@@ -7,8 +7,10 @@ import httpx
 import pytest
 
 from loom_capacity_agent.admission import (
+    ExecutablePreparedBootstrapRevocationV2,
     PreparedExecutableAdmissionV2,
     ProtectedIntentObservationV2,
+    RevokedExecutableBootstrapV2,
 )
 from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
@@ -60,6 +62,39 @@ async def test_client_validates_exact_protected_observation(boundary):
         else:
             with pytest.raises(RuntimeError, match=r"binding|invalid"):
                 await client.observe_intent(request.binding)
+
+
+@pytest.mark.parametrize("boundary", ["exact", "binding", "digest", "epoch"])
+async def test_client_validates_unbound_bootstrap_revocation(boundary):
+    from uuid import uuid4
+
+    registration_request = registration()
+    request = ExecutablePreparedBootstrapRevocationV2(operation_id=uuid4(), binding=registration_request.binding,
+        bootstrap_registration_epoch=1, protected_registration_epoch=2)
+    digest = canonical_executable_digest(request)
+    receipt = RevokedExecutableBootstrapV2(binding=request.binding, reporter_incarnation=uuid4(),
+        bootstrap_registration_epoch=1, protected_registration_epoch=2, request_digest=digest,
+        protected_release_sha256=digest, protected_high_water=3)
+
+    async def handle(outgoing):
+        assert outgoing.url.path.endswith("/revoke-bootstrap")
+        assert outgoing.content == canonical_executable_bytes(request)
+        result = receipt
+        if boundary == "binding":
+            result = result.model_copy(update={"binding":request.binding.model_copy(update={"account_id":"foreign"})})
+        elif boundary == "digest":
+            result = result.model_copy(update={"protected_release_sha256":"c"*64})
+        elif boundary == "epoch":
+            result = result.model_copy(update={"protected_registration_epoch":3})
+        return httpx.Response(200, content=canonical_executable_bytes(result))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = client_for(http, registration_request)
+        if boundary == "exact":
+            assert await client.revoke_prepared_bootstrap(request) == receipt
+        else:
+            with pytest.raises(RuntimeError, match="binding"):
+                await client.revoke_prepared_bootstrap(request)
 
 
 @pytest.mark.parametrize("pool", ["gb10", "oldlab"])

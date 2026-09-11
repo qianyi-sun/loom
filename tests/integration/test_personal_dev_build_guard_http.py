@@ -69,6 +69,34 @@ async def test_http_prepare_bind_and_lost_reply_replay_are_committed(prepared_in
         assert replay.content == bound.content
 
 
+async def test_http_revocation_before_preparation_is_committed_and_replayable(prepared_input, tmp_path):
+    from loom_capacity_agent.admission import ExecutablePreparedBootstrapRevocationV2
+    from loom_capacity_executor.build_admission_client import BuildAdmissionClient, BuildAdmissionExecutorV1
+
+    _factory, engine, _installation, _plan, _source, platform_request = prepared_input
+    registration, _digest = await admitted(prepared_input)
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE personal_dev_build_platform_requests SET cancelled_at=now() WHERE id=:id"), {"id":platform_request.id})
+    app = application(prepared_input, tmp_path)
+    # Use the production client and real private SQL. TLS transport itself is
+    # separately covered by the loopback mTLS test in this module.
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as http:
+        binding = registration.binding
+        identity = BuildAdmissionExecutorV1(pool_id=binding.pool_id,pool_generation=binding.pool_generation,
+            executor_id=binding.executor_id,executor_incarnation=binding.executor_incarnation)
+        client = BuildAdmissionClient(identity, origin="https://management.test",
+            bearer_token="executor-secret", http_client=http)
+        request = ExecutablePreparedBootstrapRevocationV2(operation_id=uuid4(), binding=registration.binding,
+            bootstrap_registration_epoch=1, protected_registration_epoch=2)
+        receipt = await client.revoke_prepared_bootstrap(request)
+        assert await client.revoke_prepared_bootstrap(request) == receipt
+        assert (await client.observe_intent(request.binding)).prepared_revocation == receipt
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.bootstrap_revocations")) == 1
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == 0
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
+
+
 @pytest.mark.parametrize("operation", ["prepare", "observe"])
 @pytest.mark.parametrize("boundary", ["credential", "path-pool", "path-intent", "pool-generation", "executor", "incarnation", "subject", "body", "oversized", "http"])
 async def test_http_rejects_untrusted_admission_without_writes(prepared_input, tmp_path, boundary, operation):
