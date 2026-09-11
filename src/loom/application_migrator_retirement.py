@@ -154,11 +154,13 @@ def _require_target(
     )).fetchone() != (True,):
         raise ApplicationMigratorRetirementError("application migrator owner is not sealed")
     _require_coordination_guard(connection, target, guard)
-    if connection.execute(application_sql(
+    # Roles are cluster-wide. An already-authenticated startup in another
+    # database can still carry this login before publishing its session row.
+    # Refuse every pending database startup before trusting role-wide statistics.
+    if connection.execute(
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE locktype='object' "
-        "AND classid='pg_catalog.pg_database'::regclass AND objid={} AND mode='RowExclusiveLock')",
-        target.database_oid,
-    )).fetchone() != (False,):
+        "AND classid='pg_catalog.pg_database'::regclass AND mode='RowExclusiveLock')"
+    ).fetchone() != (False,):
         raise ApplicationMigratorRetirementError("application migrator database startup is still pending")
 
 
