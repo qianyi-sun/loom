@@ -19,10 +19,19 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+)
 
+from loom_capacity_executor.build_admission_client import BuildAdmissionExecutorV1
+from loom_capacity_executor.native_application_admission import ApplicationBootstrapAdmission
 from loom_capacity_executor.native_bootstrap_delivery import (
     _MAX_DELIVERY_BYTES,
     BootstrapDeliveryError,
@@ -51,6 +60,14 @@ class NativeBootstrapReceiverConfigV1(BaseModel):
     trusted_release_sha256: Digest
     admission_directory: Annotated[str, Field(max_length=4096)]
     admission_directory_sha256: Digest
+    typed_application_executor: BuildAdmissionExecutorV1 | None = None
+
+    @model_serializer(mode="wrap")
+    def _preserve_legacy_wire(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        payload = cast(dict[str, Any], handler(self))
+        if self.typed_application_executor is None:
+            payload.pop("typed_application_executor", None)
+        return payload
 
     @field_validator("directory", "admission_directory")
     @classmethod
@@ -68,9 +85,15 @@ def _load_fixed_receiver(identity: SlurmFileIdentityV2) -> NativeBootstrapReceiv
     config = NativeBootstrapReceiverConfigV1.model_validate_json(raw)
     if raw != _canonical(config):
         raise BootstrapDeliveryError("native receiver configuration is not canonical")
-    with _protected_destination(Path(config.admission_directory)):
-        admission = RoutedExecutableAdmissionClient(Path(config.admission_directory),
-            expected_directory_sha256=config.admission_directory_sha256)
+    admission: ApplicationBootstrapAdmission | RoutedExecutableAdmissionClient
+    if config.typed_application_executor is not None:
+        with _protected_destination(Path(config.admission_directory).parent):
+            admission = ApplicationBootstrapAdmission(Path(config.admission_directory),
+                expected_sha256=config.admission_directory_sha256, executor=config.typed_application_executor)
+    else:
+        with _protected_destination(Path(config.admission_directory)):
+            admission = RoutedExecutableAdmissionClient(Path(config.admission_directory),
+                expected_directory_sha256=config.admission_directory_sha256)
     return NativeBootstrapReceiver(directory=Path(config.directory), target_node=config.target_node,
         pool_id=config.pool_id, trusted_release_sha256=config.trusted_release_sha256,
         admission=admission, now=lambda: datetime.now(UTC))

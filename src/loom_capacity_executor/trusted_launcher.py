@@ -17,10 +17,16 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import (
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from loom_capacity_agent.admission import PhysicalJobBindingV2
 from loom_capacity_executor.bootstrap_handoff import (
@@ -31,6 +37,7 @@ from loom_capacity_executor.bootstrap_handoff import (
     resolve_bootstrap_handoff_physical_binding,
 )
 from loom_capacity_executor.build_admission_client import BuildAdmissionExecutorV1
+from loom_capacity_executor.native_application_admission import ApplicationBootstrapAdmission
 from loom_capacity_executor.native_worker_container import NativeWorkerContainerPolicyV2
 from loom_capacity_executor.native_worker_handoff import (
     NATIVE_WORKER_HANDOFF_ENV,
@@ -111,6 +118,14 @@ class TrustedLauncherConfigV2(StrictV2Model):
     candidate_image_digest: Annotated[str, Field(max_length=512, pattern=_IMAGE_DIGEST_PATTERN)]
     candidate_argv: Annotated[tuple[str, ...], Field(min_length=1, max_length=128)]
     native_worker: NativeWorkerContainerPolicyV2 | None = None
+    typed_application_executor: BuildAdmissionExecutorV1 | None = None
+
+    @model_serializer(mode="wrap")
+    def _preserve_legacy_wire(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        payload = cast(dict[str, Any], handler(self))
+        if self.typed_application_executor is None:
+            payload.pop("typed_application_executor", None)
+        return payload
 
     @field_validator("handoff_directory", "admission_directory")
     @classmethod
@@ -131,6 +146,8 @@ class TrustedLauncherConfigV2(StrictV2Model):
             raise ValueError("trusted launcher candidate argv differs from executable identity")
         if self.native_worker is not None and self.candidate_argv != (self.candidate_executable.path,):
             raise ValueError("native trusted launcher accepts no candidate command suffix")
+        if self.typed_application_executor is not None and self.native_worker is None:
+            raise ValueError("typed node bootstrap requires the native worker branch")
         return self
 
 
@@ -446,6 +463,13 @@ def _load_trusted_config(identity: SlurmFileIdentityV2) -> TrustedLauncherConfig
         raise BootstrapHandoffError("trusted launcher config is invalid") from exc
 
 
+def _launcher_admission(config: TrustedLauncherConfigV2, legacy_factory: _AdmissionFactory) -> object:
+    if config.typed_application_executor is not None:
+        return ApplicationBootstrapAdmission(Path(config.admission_directory),
+            expected_sha256=config.admission_directory_sha256, executor=config.typed_application_executor)
+    return legacy_factory(Path(config.admission_directory), expected_directory_sha256=config.admission_directory_sha256)
+
+
 async def run_trusted_launcher(
     argv: Sequence[str],
     *,
@@ -514,10 +538,7 @@ async def run_trusted_launcher_process(
             admission = typed_admission_factory(Path(config.admission_directory),
                 expected_sha256=config.admission_directory_sha256, executor=config.executor)
         else:
-            admission = admission_factory(
-                Path(config.admission_directory),
-                expected_directory_sha256=config.admission_directory_sha256,
-            )
+            admission = _launcher_admission(config, admission_factory)
         handoff_directory = Path(config.handoff_directory)
         if config.native_worker is not None:
             from loom_capacity_executor.native_bootstrap_delivery import (

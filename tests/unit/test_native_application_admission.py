@@ -1,8 +1,10 @@
 """Node bootstrap keeps the controller's typed application entry identity."""
 
 import hashlib
+from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from types import SimpleNamespace
+from uuid import UUID, uuid5
 
 import pytest
 
@@ -66,12 +68,14 @@ async def test_node_application_route_refuses_other_authority_before_credentials
         await node.observe_current_bootstrap(request)
 
 
-def test_fixed_receiver_selects_explicit_typed_application_route(private_delivery):
+def _receiver(private_delivery, request, document, path, digest):
     from loom_capacity_executor.native_bootstrap_delivery import _canonical
-    from loom_capacity_executor.native_bootstrap_receiver import NativeBootstrapReceiverConfigV1, _load_fixed_receiver
+    from loom_capacity_executor.native_bootstrap_receiver import (
+        NativeBootstrapReceiverConfigV1,
+        _load_fixed_receiver,
+    )
     from loom_capacity_executor.slurm_contracts import SlurmFileIdentityV2
 
-    _typed, request, document, path, digest = configured(private_delivery.node, "oldlab", "application-worker")
     binding = request.binding
     config = NativeBootstrapReceiverConfigV1(directory=str(private_delivery.node), target_node=binding.node_ids[0],
         pool_id=binding.pool_id, trusted_release_sha256=binding.execution.trusted_fleet_release_sha256,
@@ -81,6 +85,13 @@ def test_fixed_receiver_selects_explicit_typed_application_route(private_deliver
     config_path.write_bytes(wire)
     config_path.chmod(0o600)
     receiver = _load_fixed_receiver(SlurmFileIdentityV2(path=str(config_path), sha256=hashlib.sha256(wire).hexdigest(), owner_uid=config_path.stat().st_uid))
+    return config, receiver
+
+
+def test_fixed_receiver_selects_explicit_typed_application_route(private_delivery):
+    _typed, request, document, path, digest = configured(private_delivery.node, "oldlab", "application-worker")
+    config, receiver = _receiver(private_delivery, request, document, path, digest)
+    binding = request.binding
     assert receiver.admission.bootstrap_handoff_route_sha256(binding) == canonical_executable_digest(document.entries[0])
     assert "typed_application_executor" in config.model_dump(mode="json")
 
@@ -96,7 +107,10 @@ def test_legacy_receiver_config_serialization_does_not_add_typed_authority(tmp_p
 
 def test_native_launcher_selects_typed_application_without_legacy_fallback(tmp_path):
     from loom_capacity_executor.trusted_launcher import TrustedLauncherConfigV2, _launcher_admission
-    from tests.unit.test_capacity_executor_bootstrap_handoff import _trusted_candidate_config_payload, _write_candidate
+    from tests.unit.test_capacity_executor_bootstrap_handoff import (
+        _trusted_candidate_config_payload,
+        _write_candidate,
+    )
     from tests.unit.test_worker_native_entrypoint import _configured_bootstrap
 
     _typed, request, document, path, digest = configured(tmp_path, "gb10", "application-worker")
@@ -122,3 +136,55 @@ def test_native_launcher_selects_typed_application_without_legacy_fallback(tmp_p
     original["native_worker"] = None
     with pytest.raises(ValueError):
         TrustedLauncherConfigV2.model_validate(original)
+
+
+async def test_typed_controller_delivery_and_node_consumption_preserve_route(private_delivery, monkeypatch):
+    from loom_capacity_agent.admission import CurrentExecutableBootstrapV2
+    from loom_capacity_executor.bootstrap_handoff import (
+        bind_bootstrap_handoff_ownership,
+        claim_bootstrap_handoff_launch,
+        consume_bootstrap_handoff,
+    )
+    from loom_capacity_executor.native_application_admission import (
+        DatabaseExecutableAdmissionClient,
+    )
+    from loom_capacity_executor.native_bootstrap_delivery import (
+        export_native_bootstrap,
+        native_delivery_directory,
+    )
+    from tests.unit.test_capacity_executor_bootstrap_handoff import _Admission, _physical
+
+    typed, request, document, path, digest = configured(private_delivery.node, "gb10", "application-worker")
+    controller = typed.TypedAdmissionRouter(path, expected_sha256=digest, executor=document.executor)
+    binding = request.binding
+    physical = _physical(binding).model_copy(update={"operation_id": uuid5(
+        UUID("cb359b0c-a844-4bc5-9592-a4c35e344f3d"), f"physical-bind:{binding.intent_id}")})
+    now = datetime.now(UTC)
+    lease = private_delivery.store.prepare(binding, bootstrap_registration_epoch=1,
+        expires_at=now + timedelta(minutes=5), trusted_launcher_release_sha256=binding.execution.trusted_fleet_release_sha256,
+        protected_admission_route_sha256=controller.bootstrap_handoff_route_sha256(binding))
+    bind_bootstrap_handoff_ownership(private_delivery.controller, lease.reference, binding,
+        bootstrap_registration_epoch=1, ownership_evidence_sha256=physical.ownership_evidence_sha256,
+        trusted_launcher_release_sha256=binding.execution.trusted_fleet_release_sha256, now=lambda: now)
+    closes = []
+
+    class Backend(_Admission):
+        async def observe_current_bootstrap(self, requested):
+            assert requested == physical
+            return CurrentExecutableBootstrapV2(physical_binding=physical, agent_incarnation=UUID(int=81),
+                bootstrap_sha256=lease.bootstrap_sha256, observed_at=datetime.now(UTC),
+                bootstrap_expires_at=now + timedelta(minutes=5), request_digest=canonical_executable_digest(physical))
+
+        async def aclose(self):
+            closes.append(True)
+
+    backend = Backend()
+    monkeypatch.setattr(DatabaseExecutableAdmissionClient, "from_database_url_bytes", staticmethod(lambda *args, **kwargs: backend))
+    _config, receiver = _receiver(private_delivery, request, document, path, digest)
+    payload = export_native_bootstrap(private_delivery.store, physical, now=lambda: now)
+    receipt = await receiver.receive(payload)
+    directory = native_delivery_directory(private_delivery.node, lease.reference)
+    credential = await consume_bootstrap_handoff(directory, lease.reference, physical, receiver.admission, now=lambda: now)
+    assert claim_bootstrap_handoff_launch(directory, lease.reference, physical, receiver.admission, now=lambda: now) == credential
+    assert receipt.reference == lease.reference and receipt.executable is False
+    assert len(backend.requests) == 1 and len(closes) == 2
