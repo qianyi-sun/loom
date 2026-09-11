@@ -95,7 +95,7 @@ async def test_native_source_stages_verified_archive_and_cleans_all_paths(sealed
                 assert boundary == "exact", "unverified source reached the sandbox boundary"
                 assert path.read_bytes() == archive
                 assert path.stat().st_mode & 0o777 == 0o600
-                assert path.parent.parent == workspace
+                assert path.parent.parent.resolve() == workspace
             assert not path.exists()
 
         if boundary == "exact":
@@ -111,3 +111,61 @@ async def test_native_source_stages_verified_archive_and_cleans_all_paths(sealed
         assert calls == []
     elif boundary in {"exact", "source-binding", "corrupt", "cancel", "manifest"}:
         assert len(calls) == 2
+
+
+@pytest.mark.parametrize("thread_failure", [False, True])
+async def test_cancelled_verification_finishes_before_removing_source(sealed_source, monkeypatch, thread_failure):
+    from threading import Event
+    from unittest.mock import AsyncMock
+
+    from loom_capacity_agent.build_admission import BuildSourceReadReceiptV1
+
+    module = import_module("loom_capacity_executor.native_build_source")
+    registration, archive, workspace = sealed_source
+    worker = native_registration()
+    claim = BuildClaimRequestV1(binding=worker.binding, operation_id=uuid4(),
+        request_id=personal_build_work_identity(registration, "linux/arm64")[1], worker_id=worker.worker_id,
+        worker_incarnation=worker.worker_incarnation)
+    started, finish = Event(), Event()
+    paths = []
+
+    def verify(candidate, path):
+        paths.append(path)
+        started.set()
+        assert finish.wait(5)
+        assert path.read_bytes() == archive
+        if thread_failure:
+            raise RuntimeError("verification failed after cancellation")
+
+    async def read_source(claim, *, offset, length, **kwargs):
+        return BuildSourceReadReceiptV1(claim_digest=canonical_digest(claim),
+            source_binding_sha256=hashlib.sha256(canonical_build_source(registration)).hexdigest(),
+            archive_sha256=registration.candidate.archive_sha256, archive_size_bytes=len(archive), offset=offset,
+            data_base64=base64.b64encode(archive[offset:offset+length]).decode("ascii"))
+
+    monkeypatch.setattr(module, "verify_personal_dev_build_source", verify)
+    async with httpx.AsyncClient() as http:
+        client = client_for(http, claim)
+        monkeypatch.setattr(client, "read_source", AsyncMock(side_effect=read_source))
+        source = module.NativeClaimBuildSource(client=client, workspace=workspace, max_archive_bytes=2 * 1024 * 1024)
+
+        async def consume():
+            async with source(registration, claim=claim, worker_credential="x" * 43, platform="linux/arm64"):
+                pytest.fail("cancelled source must never reach consumer")
+
+        task = asyncio.create_task(consume())
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            # Once cancellation has been delivered, the pending verifier still
+            # owns its file. A second cancellation cannot trigger early cleanup.
+            await asyncio.sleep(0)
+            assert paths[0].is_file() and not task.done()
+            task.cancel()
+            await asyncio.sleep(0)
+            assert paths[0].is_file() and not task.done()
+        finally:
+            finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert list(workspace.iterdir()) == []
