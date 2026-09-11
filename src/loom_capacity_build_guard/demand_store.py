@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.personal_dev_build_platform_requests import canonical_build_source
 from loom.personal_dev_candidate import CandidateRegistration
+from loom_capacity_agent.client import DemandPublishReceiptV1, DemandReporterClient
 from loom_capacity_build_guard.installation_store import (
     BuildGuardInstallationV1,
     RetainedBuildInstallation,
@@ -51,6 +52,21 @@ class BuildDemandCoordinator:
                     if attempt == 2 or getattr(exc.orig, "sqlstate", None) not in {"40001", "40P01"}:
                         raise
         raise AssertionError("bounded demand transaction retry did not return or raise")
+
+    async def publish_latest(self, publisher: DemandReporterClient) -> DemandPublishReceiptV1 | None:
+        """Deliver the last committed observation without recapture or network locks.
+
+        A lost reply leaves the same sequence and canonical bytes available for
+        replay after restart. A later capture may supersede it: the manager's
+        monotonic reporter fence rejects delivery reordered across processes.
+        This reports demand only; acceptance grants no readiness or execution.
+        """
+        async with asyncio.timeout(30):
+            async with self._sessions.begin() as session:
+                snapshot = await BuildGuardDemandStore(session, installation=self._installation).read_latest()
+            if snapshot is None:
+                return None
+            return await publisher.publish(snapshot)
 
 
 class BuildGuardDemandStore:

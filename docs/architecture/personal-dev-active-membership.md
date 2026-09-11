@@ -220,8 +220,14 @@ whole local transactions rejected for serialization conflict or deadlock, with a
 bounded attempt count and time budget. It does not retry ambiguous connection
 outcomes or publish externally during those retries. This revision covers the
 pre-bootstrap pending/assigned lifecycle; native claims do not exist yet, so no
-worker identities or fixed claims are fabricated. Demand publication, actual
-native claim projection and runtime readiness remain to be connected.
+worker identities or fixed claims are fabricated. `publish_latest` reads the last
+committed report, closes its database transaction, then sends the exact canonical
+bytes through the authenticated reporter client. Missing observations cause no
+publication; lost or invalid replies leave the same sequence available for replay
+after restart. Newer captures supersede older observations, with reordered delivery
+fenced by the manager's existing reporter high-water. Publication grants neither
+readiness nor execution. Actual management source loading, native claim projection
+and the runtime loop remain to be connected.
 
 Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
 preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release

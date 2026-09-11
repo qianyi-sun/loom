@@ -9,8 +9,12 @@ from sqlalchemy import text
 from loom_capacity_agent.client import DemandPublishError, DemandReporterClient
 from loom_capacity_build_guard.demand_store import BuildDemandCoordinator
 from loom_capacity_manager.contracts import DemandSnapshotV1, canonical_bytes, canonical_digest
-from tests.integration.test_personal_dev_build_guard_installations import owner_sessions as owner_sessions
-from tests.integration.test_personal_dev_build_guard_migrations import build_guard_database as build_guard_database
+from tests.integration.test_personal_dev_build_guard_installations import (
+    owner_sessions as owner_sessions,
+)
+from tests.integration.test_personal_dev_build_guard_migrations import (
+    build_guard_database as build_guard_database,
+)
 from tests.integration.test_personal_dev_build_guard_prepare import prepared_input as prepared_input
 from tests.integration.test_personal_dev_native_builder_store import sessions as sessions
 from tests.unit.test_capacity_agent_client import _configuration
