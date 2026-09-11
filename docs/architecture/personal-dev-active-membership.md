@@ -226,8 +226,17 @@ bytes through the authenticated reporter client. Missing observations cause no
 publication; lost or invalid replies leave the same sequence available for replay
 after restart. Newer captures supersede older observations, with reordered delivery
 fenced by the manager's existing reporter high-water. Publication grants neither
-readiness nor execution. Actual management source loading, native claim projection
-and the runtime loop remain to be connected.
+readiness nor execution.
+
+Revision `build_guard_0007` adds a bounded private current-source reader. Demand
+capture can load actual active requests through this procedure in the same
+serializable transaction, without direct source-table access for the runtime agent.
+The canonical source encoding matches management staging, including Unicode
+escaping. Capture still independently locks and checks the complete source set
+against the original staged hashes; observation cannot rebind changed source,
+manufacture work, or turn held work back into pending work. Explicit source maps
+remain supported for callers already holding exact source evidence. Native claim
+projection and the runtime loop remain to be connected.
 
 Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
 preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release

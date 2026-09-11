@@ -102,7 +102,8 @@ async def test_capture_rejects_configuration_regression(prepared_input):
         assert await store_type(session, installation=retained).read_latest() == first
 
 
-async def test_two_owner_reports_capture_concurrently_without_cross_owner_demand(prepared_input, sessions, owner_sessions, tmp_path):
+@pytest.mark.parametrize("load_current", [False, True])
+async def test_two_owner_reports_capture_concurrently_without_cross_owner_demand(prepared_input, sessions, owner_sessions, tmp_path, load_current):
     import asyncio
     from datetime import UTC, datetime
     from uuid import uuid4
@@ -131,7 +132,8 @@ async def test_two_owner_reports_capture_concurrently_without_cross_owner_demand
         second_installation = await BuildGuardInstallationStore(session, expected_owner_role=owner).retain(member=member, runtime=runtime)
 
     async def capture(installation, request, source):
-        return await coordinator_type(agent_sessions, installation=installation).capture(configuration_generation=1, sources={request.id: source})
+        return await coordinator_type(agent_sessions, installation=installation).capture(configuration_generation=1,
+            sources=None if load_current else {request.id: source})
 
     first, second = await asyncio.gather(capture(first_installation, first_request, first_source),
         capture(second_installation, second_request, second_source))

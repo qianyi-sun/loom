@@ -37,22 +37,28 @@ async def test_direct_sql_rejects_pending_overflow_without_replacing_retained_re
             "digest": sha256(source).hexdigest(), "bucket": "build-"+sha256(request_id.bytes).hexdigest()})
     # Valid bulk fixture: unique attempts of the same candidate, each with its
     # own immutable request and canonical source hash. No guards are disabled.
-    with engine.begin() as connection:
-        connection.execute(text("""INSERT INTO personal_dev_candidate_build_attempts
-            SELECT (jsonb_populate_record(NULL::personal_dev_candidate_build_attempts,
-                to_jsonb(a) || jsonb_build_object('id',CAST(:attempt AS uuid),'attempt_sequence',CAST(:sequence AS integer)))).*
-            FROM personal_dev_candidate_build_attempts a WHERE id=:parent"""), rows)
-        connection.execute(text("""INSERT INTO personal_dev_build_platform_requests
-            SELECT (jsonb_populate_record(NULL::personal_dev_build_platform_requests,
-                to_jsonb(r) || jsonb_build_object('id',CAST(:id AS uuid),'attempt_id',CAST(:attempt AS uuid),
-                    'bucket_id',CAST(:bucket AS text),'source_binding_sha256',CAST(:digest AS text)))).*
-            FROM personal_dev_build_platform_requests r WHERE id=:request"""), rows)
+    def seed(batch):
+        with engine.begin() as connection:
+            connection.execute(text("""INSERT INTO personal_dev_candidate_build_attempts
+                SELECT (jsonb_populate_record(NULL::personal_dev_candidate_build_attempts,
+                    to_jsonb(a) || jsonb_build_object('id',CAST(:attempt AS uuid),'attempt_sequence',CAST(:sequence AS integer)))).*
+                FROM personal_dev_candidate_build_attempts a WHERE id=:parent"""), batch)
+            connection.execute(text("""INSERT INTO personal_dev_build_platform_requests
+                SELECT (jsonb_populate_record(NULL::personal_dev_build_platform_requests,
+                    to_jsonb(r) || jsonb_build_object('id',CAST(:id AS uuid),'attempt_id',CAST(:attempt AS uuid),
+                        'bucket_id',CAST(:bucket AS text),'source_binding_sha256',CAST(:digest AS text)))).*
+                FROM personal_dev_build_platform_requests r WHERE id=:request"""), batch)
+    seed(rows[:-1])
+    boundary = await BuildDemandCoordinator(sessions, installation=retained).capture(configuration_generation=1)
+    assert len(boundary.pending_unassigned) == 2048
+    assert boundary.sequence == original.sequence+1
+    seed(rows[-1:])
     async with sessions.begin() as session:
         with pytest.raises(DBAPIError, match="pending requests exceed bound"):
             async with session.begin_nested():
                 await session.scalar(text("SELECT loom_capacity_build_guard.capture_demand(:id,1,CAST(:sources AS jsonb))"),
                     {"id": retained.id, "sources": json.dumps(sources)})
-        assert await BuildGuardDemandStore(session, installation=retained).read_latest() == original
+        assert await BuildGuardDemandStore(session, installation=retained).read_latest() == boundary
 
 
 async def test_valid_large_assignment_report_fits_demand_storage_and_reads_back(prepared_input):

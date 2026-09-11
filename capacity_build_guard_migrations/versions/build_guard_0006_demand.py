@@ -8,8 +8,6 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql as pg
 
-from capacity_build_guard_migrations.versions.build_guard_0001_assignments import _payload
-
 revision = "build_guard_0006"
 down_revision = "build_guard_0005"
 branch_labels = None
@@ -26,7 +24,15 @@ def upgrade():
         sa.Column("configuration_generation", sa.BigInteger(), nullable=False),
         sa.Column("source_observed_at", pg.TIMESTAMP(timezone=True), nullable=False),
         sa.CheckConstraint("sequence > 0 AND configuration_generation > 0"),
-        *_payload(), schema=SCHEMA)
+        sa.Column("payload", pg.JSONB(), nullable=False),
+        sa.Column("wire_payload", sa.LargeBinary(), nullable=False),
+        sa.Column("payload_sha256", sa.Text(), nullable=False),
+        # Demand reports have their own 8MiB contract, unlike 1MiB evidence.
+        sa.CheckConstraint("octet_length(wire_payload) BETWEEN 2 AND 8388608 "
+            "AND jsonb_typeof(payload) = 'object' "
+            "AND convert_from(wire_payload, 'UTF8')::jsonb = payload "
+            "AND encode(sha256(wire_payload), 'hex') = payload_sha256",
+            name="build_guard_demand_payload_check"), schema=SCHEMA)
     op.execute(f"""
         CREATE FUNCTION {SCHEMA}.demand_timestamp(value timestamptz) RETURNS text
         LANGUAGE sql IMMUTABLE SECURITY INVOKER SET search_path=pg_catalog AS $$
@@ -99,8 +105,8 @@ def upgrade():
                     AND a.state='running' AND a.finished_at IS NULL AND a.lease_epoch=r.attempt_lease_epoch
                     AND a.lease_expires_at>observed AND c.status='building' AND c.artifact_state='retained'
                     AND NOT EXISTS (SELECT 1 FROM {SCHEMA}.request_holds h WHERE h.request_id=r.id)
-                LIMIT 10001) active_requests;
-            IF cardinality(pending_ids)>10000 THEN RAISE EXCEPTION 'build demand pending requests exceed bound'; END IF;
+                LIMIT 2049) active_requests;
+            IF cardinality(pending_ids)>2048 THEN RAISE EXCEPTION 'build demand pending requests exceed bound'; END IF;
             SELECT coalesce(array_agg(id),ARRAY[]::uuid[]) INTO lock_request_ids FROM (
                 SELECT unnest(pending_ids) AS id UNION
                 SELECT h.request_id FROM {SCHEMA}.request_holds h
@@ -130,7 +136,7 @@ def upgrade():
                     AND NOT EXISTS (SELECT 1 FROM {SCHEMA}.request_holds h WHERE h.request_id=r.id)
                 ORDER BY r.bucket_id LOOP
                 expected_sources := array_append(expected_sources,request.id::text);
-                IF cardinality(expected_sources)>10000 OR NOT p_sources ? request.id::text THEN
+                IF cardinality(expected_sources)>2048 OR NOT p_sources ? request.id::text THEN
                     RAISE EXCEPTION 'build demand complete source set changed or exceeds bound';
                 END IF;
                 source_wire := convert_to(p_sources->>request.id::text,'UTF8');

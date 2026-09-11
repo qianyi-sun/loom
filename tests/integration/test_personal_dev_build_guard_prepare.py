@@ -31,14 +31,22 @@ from tests.unit.test_personal_dev_build_admission import admission_input
 
 @pytest.fixture(params=["gb10", "oldlab"])
 async def prepared_input(build_guard_database, owner_sessions, sessions, tmp_path, request):
+    pool, source_claimant = request.param if isinstance(request.param, tuple) else (request.param, None)
     _config, engine, owner, _agent, agent_url = build_guard_database
     now = datetime.now(UTC)
     registration = await _seed_running_attempt(sessions, now=now)
+    if source_claimant is not None:
+        from dataclasses import replace
+
+        async with sessions.begin() as session:
+            await session.execute(text("UPDATE personal_dev_candidate_build_attempts SET claimed_by=:claimant WHERE id=:id"),
+                {"claimant": source_claimant, "id": registration.build_attempt.id})
+        registration = replace(registration, build_attempt=replace(registration.build_attempt, claimed_by=source_claimant))
     member, runtime = build_service(tmp_path, registration)
     async with sessions.begin() as session:
         requests = await stage_platform_requests(session, registration,
             member=member, runtime=runtime,
-            platforms=("linux/arm64" if request.param == "gb10" else "linux/amd64",), now=now)
+            platforms=("linux/arm64" if pool == "gb10" else "linux/amd64",), now=now)
     owner_factory, _ = owner_sessions
     with engine.begin() as connection:
         quote = engine.dialect.identifier_preparer.quote
@@ -47,7 +55,7 @@ async def prepared_input(build_guard_database, owner_sessions, sessions, tmp_pat
     async with owner_factory.begin() as session:
         await session.execute(text(f"SET LOCAL ROLE {owner}"))
         retained = await BuildGuardInstallationStore(session, expected_owner_role=owner).retain(member=member, runtime=runtime)
-    values = admission_input(tmp_path, pool=request.param)
+    values = admission_input(tmp_path, pool=pool)
     proposal = values["proposal"]
     shape = proposal.shapes[0]
     shape = shape.model_copy(update={"binding": shape.binding.model_copy(update={"account_id": member.configuration.account_id})})

@@ -29,6 +29,18 @@ async def test_capture_loads_real_sources_and_excludes_held_work(prepared_input)
     assert second.sequence == first.sequence+1
 
 
+async def test_same_installation_concurrent_capture_retains_monotonic_sequence(prepared_input):
+    import asyncio
+
+    sessions, _engine, retained, _proposal, _registration, request = prepared_input
+    first, second = await asyncio.gather(*(
+        BuildDemandCoordinator(sessions, installation=retained).capture(configuration_generation=1) for _ in range(2)))
+    assert {first.sequence, second.sequence} == {1, 2}
+    assert first.subject_id == second.subject_id == retained.document.subject_id
+    assert first.pending_unassigned == second.pending_unassigned
+    assert first.pending_unassigned[0].attempt_ids == (str(request.id),)
+
+
 @pytest.mark.parametrize("terminal", ["cancelled", "expired", "finished"])
 async def test_capture_does_not_load_inactive_sources(prepared_input, terminal):
     sessions, engine, retained, _proposal, registration, request = prepared_input
@@ -48,12 +60,20 @@ async def test_capture_does_not_load_inactive_sources(prepared_input, terminal):
 async def test_source_loading_does_not_rebind_changed_source_to_staged_request(prepared_input):
     sessions, engine, retained, _proposal, registration, _request = prepared_input
     with engine.begin() as connection:
-        connection.execute(text("UPDATE personal_dev_candidates SET object_key=object_key || '-changed' WHERE id=:id"),
+        connection.execute(text("UPDATE personal_dev_candidates SET archive_size_bytes=archive_size_bytes+1 WHERE id=:id"),
             {"id": registration.candidate.id})
     with pytest.raises(DBAPIError, match="source"):
         await BuildDemandCoordinator(sessions, installation=retained).capture(configuration_generation=1)
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.reporter_state")) == 0
+
+
+@pytest.mark.parametrize("prepared_input", [(pool, 'caf\u00e9/\U0001f680/"quoted"') for pool in ("gb10", "oldlab")], indirect=True)
+async def test_loaded_source_uses_original_unicode_canonical_encoding(prepared_input):
+    sessions, _engine, retained, _proposal, registration, request = prepared_input
+    assert registration.build_attempt.claimed_by == 'caf\u00e9/\U0001f680/"quoted"'
+    snapshot = await BuildDemandCoordinator(sessions, installation=retained).capture(configuration_generation=1)
+    assert snapshot.pending_unassigned[0].attempt_ids == (str(request.id),)
 
 
 @pytest.mark.parametrize("boundary", ["missing", "execute", "search-path", "grant-option"])

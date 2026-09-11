@@ -1,6 +1,6 @@
 """Protected pending/held observation before native claim admission is installed.
 
-Management supplies complete current source snapshots; SQL independently checks
+The private guard loads current source snapshots; SQL independently checks
 that set, excludes holds from pending and derives assignments from retained plans.
 This is not worker readiness and must grow actual fixed-claim projection together
 with the purpose-specific native bootstrap/claim implementation.
@@ -39,7 +39,7 @@ class BuildDemandCoordinator:
         self._installation = installation
 
     async def capture(self, *, configuration_generation: int,
-        sources: Mapping[UUID, CandidateRegistration],
+        sources: Mapping[UUID, CandidateRegistration] | None = None,
     ) -> DemandSnapshotV1:
         async with asyncio.timeout(30):
             for attempt in range(3):
@@ -88,16 +88,29 @@ class BuildGuardDemandStore:
         return snapshot
 
     async def capture(self, *, configuration_generation: int,
-        sources: Mapping[UUID, CandidateRegistration],
+        sources: Mapping[UUID, CandidateRegistration] | None = None,
     ) -> DemandSnapshotV1:
         if not self._session.in_transaction():
             raise ValueError("build demand requires an outer transaction")
         if type(configuration_generation) is not int or not 0 < configuration_generation <= 2**63-1:
             raise ValueError("build demand configuration generation is invalid")
-        if any(not isinstance(key, UUID) or key.int == 0 for key in sources):
+        if sources is not None and any(not isinstance(key, UUID) or key.int == 0 for key in sources):
             raise ValueError("build demand sources require exact request UUIDs")
-        source_wire = {str(key): canonical_build_source(value).decode("ascii") for key,value in sources.items()}
         async with self._session.begin_nested():
+            if sources is None:
+                current = await self._session.scalar(text("SELECT loom_capacity_build_guard.read_pending_sources(:installation)"),
+                    {"installation": self._installation.id})
+                if not isinstance(current, dict) or any(
+                    not isinstance(key, str) or str(UUID(key)) != key or UUID(key).int == 0 or not isinstance(value, dict)
+                    for key, value in current.items()
+                ):
+                    raise ValueError("build demand current source response changed")
+                # Match canonical_build_source, including Unicode escaping, rather
+                # than using the native plan's intentionally ASCII-only encoder.
+                source_wire = {key: json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+                    for key, value in current.items()}
+            else:
+                source_wire = {str(key): canonical_build_source(value).decode("ascii") for key,value in sources.items()}
             wire = await self._session.scalar(text("""
                 SELECT loom_capacity_build_guard.capture_demand(:installation, :generation, CAST(:sources AS jsonb))
             """), {"installation": self._installation.id, "generation": configuration_generation,
