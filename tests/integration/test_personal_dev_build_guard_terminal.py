@@ -17,8 +17,12 @@ from loom_capacity_manager.executable_contracts import (
 from loom_capacity_manager.ownership import sign_typed_executable_ownership
 from loom_capacity_manager.typed_inventory_contracts import ExecutableTerminalInventoryEvidenceV3
 from tests.integration.test_personal_dev_build_guard_execution import admitted, physical, store
-from tests.integration.test_personal_dev_build_guard_installations import owner_sessions as owner_sessions
-from tests.integration.test_personal_dev_build_guard_migrations import build_guard_database as build_guard_database
+from tests.integration.test_personal_dev_build_guard_installations import (
+    owner_sessions as owner_sessions,
+)
+from tests.integration.test_personal_dev_build_guard_migrations import (
+    build_guard_database as build_guard_database,
+)
 from tests.integration.test_personal_dev_build_guard_prepare import prepared_input as prepared_input
 from tests.integration.test_personal_dev_native_builder_store import sessions as sessions
 from tests.unit.test_capacity_agent_typed_terminal import typed_terminal
@@ -165,7 +169,7 @@ async def test_terminal_retention_is_private_immutable_and_blocks_downgrade(prep
         command.downgrade(build_guard_database[0], "build_guard_0012")
 
 
-@pytest.mark.parametrize("boundary", ["schema", "extra", "state", "purpose", "resources", "execution", "sequence", "noncanonical"])
+@pytest.mark.parametrize("boundary", ["schema", "string-schema", "record-string-schema", "extra", "state", "kind", "purpose", "resources", "execution", "sequence", "noncanonical", "journal", "nested"])
 async def test_terminal_direct_sql_rejects_forged_evidence(prepared_input, boundary):
     from hashlib import sha256
 
@@ -174,10 +178,16 @@ async def test_terminal_direct_sql_rejects_forged_evidence(prepared_input, bound
     payload = json.loads(canonical_executable_bytes(evidence))
     if boundary == "schema":
         payload["schema_version"] = 3.0
+    elif boundary == "string-schema":
+        payload["schema_version"] = "3"
+    elif boundary == "record-string-schema":
+        payload["record"]["schema_version"] = "3"
     elif boundary == "extra":
         payload["release_capacity"] = True
     elif boundary == "state":
         payload["record"]["state"] = "active"
+    elif boundary == "kind":
+        payload["record"]["physical_kind"] = "worker"
     elif boundary == "purpose":
         payload["record"]["ownership_proof"]["metadata"]["subject_authority"]["purpose"] = "application-worker"
     elif boundary == "resources":
@@ -186,6 +196,10 @@ async def test_terminal_direct_sql_rejects_forged_evidence(prepared_input, bound
         payload["inventory_execution"]["writer_epoch"] += 1
     elif boundary == "sequence":
         payload["inventory_sequence"] = True
+    elif boundary == "journal":
+        payload["journal_digest"] = "f"*64
+    elif boundary == "nested":
+        payload["record"]["ownership_proof"]["metadata"]["subject_authority"]["membership"] = None
     wire = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
     if boundary == "noncanonical":
         wire += b" "
@@ -195,3 +209,46 @@ async def test_terminal_direct_sql_rejects_forged_evidence(prepared_input, bound
                 await session.scalar(text("""SELECT loom_capacity_build_guard.import_terminal_inventory(
                     :installation,CAST(:payload AS jsonb),:wire,:digest)"""),
                     {"installation": installation.id, "payload": wire.decode("ascii"), "wire": wire, "digest": sha256(wire).hexdigest()})
+
+
+async def test_terminal_import_survives_withdrawal_and_expired_source(prepared_input):
+    from tests.integration.test_personal_dev_build_guard_withdrawal import withdrawal
+
+    factory, engine, installation, _plan, source, _request = prepared_input
+    evidence, request = await terminal_input(prepared_input)
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE personal_dev_candidate_build_attempts SET lease_expires_at=now()-interval '1 second' WHERE id=:id"),
+            {"id": source.build_attempt.id})
+    async with factory.begin() as session:
+        await store(session, installation).withdraw_unregistered_worker(withdrawal(request))
+    async with factory.begin() as session:
+        receipt = await terminal_store(session, installation).import_evidence(evidence)
+    async with factory.begin() as session:
+        assert await terminal_store(session, installation).import_evidence(evidence) == receipt
+        observed = await store(session, installation).observe_intent(evidence.binding)
+        assert observed.withdrawal is not None and observed.release is None
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
+
+
+async def test_concurrent_terminal_import_retains_one_exact_receipt(prepared_input):
+    import asyncio
+
+    factory, engine, installation, *_ = prepared_input
+    evidence, _ = await terminal_input(prepared_input)
+
+    async def compete():
+        try:
+            async with factory.begin() as session:
+                return await terminal_store(session, installation).import_evidence(evidence)
+        except DBAPIError as exc:
+            assert exc.orig.sqlstate == "40001"
+            return None
+
+    receipts = [item for item in await asyncio.gather(compete(), compete()) if item is not None]
+    assert receipts and all(item == receipts[0] for item in receipts)
+    async with factory.begin() as session:
+        assert await terminal_store(session, installation).import_evidence(evidence) == receipts[0]
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.terminal_inventory")) == 1
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
