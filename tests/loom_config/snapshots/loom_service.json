@@ -284,6 +284,16 @@
     "default": "''",
     "required": false
   },
+  "personal_dev_build_management_config_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
+  "personal_dev_build_management_config_sha256": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
   "personal_dev_builder_docker_path": {
     "annotation": "<class 'pathlib.Path'>",
     "default": "PosixPath('/usr/bin/docker')",
