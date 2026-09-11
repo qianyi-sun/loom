@@ -951,6 +951,30 @@ rejected, and the original backend, postmaster and advisory lock still survive.
 This verifies the closed-database replacement mechanism, not complete handoff or
 retirement of all other privileged writers.
 
+The protected runner now has a narrowly scoped `issue_staging_manager_replacement`
+transport for the pinned amd64 manager on OLDLAB3–5. It requires an active
+component's immutable original-admission intent. A private subordinate dispatch
+record is flushed before the single upload attempt; an already-issued operation
+never uploads again, including after timeout, EOF, or process interruption.
+The saved receipt admits only a changed executable inode on the same device,
+Pod UID, container, node, restart count and process start time. It does not prove
+harmful SQL retirement. Read-only classification can inspect these process
+recovery records through an exact plan/component/ordinal/implementation/input
+binding, without entering active apply or acquiring publication authority.
+
+Binary capture streams into a private temporary file with the independently
+pinned size and SHA-256; the generic command runner's smaller bounds are unchanged.
+The upload uses one exact Pod's loopback tunnel, pins the server's public TLS
+certificate read over authenticated Kubernetes, and never follows redirects,
+ambient proxies, or automatic retries. Process and closed-database/original-guard
+checks, plus durable dispatch, precede the final TLS connection: CNPG permits
+only three seconds for headers and twenty seconds for the request. The connection
+stays open for receipt/EOF rather than discarding potentially buffered TLS data.
+Real local TLS deadline tests cover slow validation and journal writes, and a
+disposable pinned-CNPG test exercises the actual 61 MB stream while preserving
+the original backend, postmaster and advisory lock. These are transport tests;
+the full installed handoff component is still required before live invocation.
+
 This mechanism does not supply a live replacement caller or complete retirement
 authority. The upstream replacement waits explicitly for log pipelines, not every
 SQL/API operation. Other pending SQL, controller/API writers, actual executable

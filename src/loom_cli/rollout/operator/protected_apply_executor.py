@@ -234,6 +234,19 @@ class SubprocessProtectedApplyCommandRunner:
         """
         return self._open_staging_peer(maintenance=False)
 
+    def issue_staging_manager_replacement(
+        self, *, journal: ProtectedApplyJournal, runtime_password: str | None = None,
+    ) -> bool:
+        """Issue once under the enclosing admitted handoff; never claim retirement.
+
+        The enclosing installed component must retain exclusive administrator
+        and original supervised guard authority. No CLI or candidate-selected
+        transport target is exposed. Reconciliation is mandatory on every result.
+        """
+        from .protected_cnpg_manager_transport import issue_staging_manager_replacement
+
+        return issue_staging_manager_replacement(self, journal=journal, runtime_password=runtime_password)
+
     def open_staging_peer_maintenance_database(self) -> PeerDatabaseConnection:
         """Keep fixed maintenance access available while application admission is closed.
 
