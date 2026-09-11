@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 from loom_execution_capacity_collector.contracts import (
     CapacityPlacement,
@@ -30,13 +31,41 @@ def vector(value: ResourceTotals) -> tuple[int, int, int]:
     return value.cpu_millis, value.memory_mib, value.storage_mib
 
 
+def _mentions_label(value: Any, labels: set[str]) -> bool:
+    """Conservatively include selectors, affinity and topology label references."""
+    if isinstance(value, dict):
+        return any(key in labels or _mentions_label(child, labels) for key, child in value.items())
+    if isinstance(value, list):
+        return any(_mentions_label(child, labels) for child in value)
+    return isinstance(value, str) and value in labels
+
+
+def _compatible_node_template(current: CapacityPlacement, old: CapacityPlacement) -> bool:
+    new_template, old_template = current.node_group.template, old.node_group.template
+    new_labels, old_labels = new_template.get("labels", {}), old_template.get("labels", {})
+    if any(not isinstance(labels, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str) for key, value in labels.items()
+    ) for labels in (new_labels, old_labels)):
+        return False
+    if new_template == old_template:
+        return True
+    if {k: v for k, v in new_template.items() if k != "labels"} != {
+        k: v for k, v in old_template.items() if k != "labels"
+    }:
+        return False
+    if any(key not in new_labels or new_labels[key] != value for key, value in old_labels.items()):
+        return False  # Removing/changing labels still needs a matching observed sample.
+    added = set(new_labels) - set(old_labels)
+    return not any(_mentions_label(daemon.scheduling, added) for daemon in current.daemonsets)
+
+
 def compatible_template(current: CapacityPlacement, old: CapacityPlacement) -> bool:
     return (
         current.node_group.id == old.node_group.id
-        and current.node_group.template == old.node_group.template
         and current.node_group.raw_node == old.node_group.raw_node
         and sorted(current.daemonsets, key=lambda row: row.uid)
         == sorted(old.daemonsets, key=lambda row: row.uid)
+        and _compatible_node_template(current, old)
     )
 
 

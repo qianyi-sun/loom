@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -228,3 +229,55 @@ async def test_native_admission_preserves_existing_resource_and_freshness_bounda
         async with sessions() as session, session.begin():
             await reserve_native_task_image_capacity(session, attempt_id=attempt_id,
                                                     now=now + timedelta(days=1) if invalid == "stale_observation" else now)
+
+
+@pytest.mark.parametrize("uses_added_label", [False, True])
+async def test_native_cold_admission_reuses_history_only_for_unused_added_labels(native_setup, uses_added_label):
+    sessions, owned = native_setup
+    now = datetime.now(UTC)
+    async with sessions() as session, session.begin():
+        pair = await _seed_ready_trial(session, now=now)
+        historical = placement_fixture(target_id=pair[1].target_id, nodes=1)
+        historical["node_group"]["template"]["labels"] = {}
+        historical["daemonsets"] = [{
+            "uid": "resident", "generation": 1,
+            "requests": {"cpu_millis": 100, "memory_mib": 100, "storage_mib": 0},
+            "scheduling": {"node_selector": {
+                "loom.nebius/node-os" if uses_added_label else "kubernetes.io/os": "linux",
+            }},
+        }]
+        historical["template_samples"][0].update(
+            daemonsets={"resident": 1}, daemonset_slots=1,
+            daemonset_requests=historical["daemonsets"][0]["requests"],
+        )
+        await _record(session, pair[1].target_id, now + timedelta(seconds=1), historical)
+        current = deepcopy(historical)
+        current["nodes"] = []
+        current["template_samples"] = []
+        current["node_group"]["node_count"] = 0
+        current["node_group"]["template"]["labels"] = {
+            "loom.nebius/node-os": "linux", "loom.nebius/node-arch": "amd64",
+        }
+        for quota in current["quota_resources"].values():
+            quota["used"] = 0
+        await _record(session, pair[1].target_id, now + timedelta(seconds=2), current)
+        attempt_id, _ = await _native(session, owned, pair, now, cpu=1000)
+        attempt = await session.get(TaskImageMaterializationAttempt, attempt_id)
+        attempt.native_build = {**attempt.native_build, "resources": {
+            "vcpu_millis": 1000, "memory_mib": 2048, "storage_mib": 16384,
+        }}
+    if uses_added_label:
+        with pytest.raises(ExecutionProvisioningBlockedError, match="node_allocatable_unknown"):
+            async with sessions() as session, session.begin():
+                await reserve_native_task_image_capacity(session, attempt_id=attempt_id, now=now + timedelta(seconds=3))
+        async with sessions() as session:
+            attempt = await session.get(TaskImageMaterializationAttempt, attempt_id)
+            assert not attempt.native_build.get("capacity_reserved_at")
+    else:
+        async with sessions() as session, session.begin():
+            decision = await reserve_native_task_image_capacity(session, attempt_id=attempt_id, now=now + timedelta(seconds=3))
+            assert decision["capacity_reserved_at"]
+            assert decision["resources"] == {"vcpu_millis": 1000, "memory_mib": 2048, "storage_mib": 16384}
+        async with sessions() as session:
+            attempt = await session.get(TaskImageMaterializationAttempt, attempt_id)
+            assert attempt.native_build["capacity_reserved_at"] == decision["capacity_reserved_at"]

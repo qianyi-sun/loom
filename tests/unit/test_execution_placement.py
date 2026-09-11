@@ -173,3 +173,96 @@ def test_duplicate_pending_pod_authority_is_visible_instead_of_silently_deduplic
     placement = CapacityPlacement.model_validate(data)
     with pytest.raises(PlacementUnavailableError, match="duplicate_pod_identity"):
         plan_placement(placement, [("lease:1", _resources())], sample=cold_sample(placement))
+
+
+_ADDED_LABELS = {"loom.nebius/node-os": "linux", "loom.nebius/node-arch": "amd64"}
+
+
+def _label_history(scheduling=None):
+    data = placement_fixture(target_id="label-history")
+    data["node_group"]["template"]["labels"] = {"existing": "kept"}
+    data["daemonsets"] = [{
+        "uid": "resident", "generation": 1,
+        "requests": _resources(100, 100, 0).model_dump(),
+        "scheduling": scheduling or {"node_selector": {"kubernetes.io/os": "linux"}},
+    }]
+    data["template_samples"][0].update(
+        daemonsets={"resident": 1}, daemonset_slots=1,
+        daemonset_requests=_resources(100, 100, 0).model_dump(),
+    )
+    old = CapacityPlacement.model_validate(data)
+    data = deepcopy(data)
+    data["nodes"] = []
+    data["node_group"]["node_count"] = 0
+    data["template_samples"] = []
+    data["node_group"]["template"]["labels"].update(_ADDED_LABELS)
+    return old, data
+
+
+def test_cold_native_build_reuses_measured_sample_after_unused_label_additions():
+    old, data = _label_history()
+    current = CapacityPlacement.model_validate(data)
+    sample = cold_sample(current, [old])
+    assert sample is not None
+    assert sample.allocatable == old.template_samples[0].allocatable
+    assert sample.daemonset_requests == old.template_samples[0].daemonset_requests
+    plan = plan_placement(current, [("task-image:build:2", _resources(1000, 2048, 16384))], sample=sample)
+    assert plan.additional_nodes == 1
+
+
+@pytest.mark.parametrize("scheduling", [
+    {"node_selector": {"loom.nebius/node-os": "linux"}},
+    *({"affinity": {"node_affinity": {"required_during_scheduling_ignored_during_execution": {
+        "node_selector_terms": [{"match_expressions": [{"key": "loom.nebius/node-arch", "operator": operator, "values": []}]}],
+    }}}} for operator in ("In", "NotIn", "Exists", "DoesNotExist", "Gt", "Lt")),
+    {"affinity": {"pod_affinity": {"required_during_scheduling_ignored_during_execution": [
+        {"topology_key": "loom.nebius/node-os"},
+    ]}}},
+    {"topology_spread_constraints": [{"topology_key": "loom.nebius/node-arch"}]},
+    {"topology_spread_constraints": [{"match_label_keys": ["loom.nebius/node-os"]}]},
+])
+def test_added_labels_referenced_by_daemonset_scheduling_require_new_samples(scheduling):
+    old, data = _label_history(scheduling)
+    assert cold_sample(CapacityPlacement.model_validate(data), [old]) is None
+
+
+@pytest.mark.parametrize("labels", [None, [], "invalid", {"existing": "kept", "new": None},
+                                   {"existing": "changed"}, {}, {"new": "value"}])
+def test_label_compatibility_rejects_malformed_changed_or_removed_labels(labels):
+    old, data = _label_history()
+    data["node_group"]["template"]["labels"] = labels
+    assert cold_sample(CapacityPlacement.model_validate(data), [old]) is None
+    malformed_old = old.model_copy(update={"node_group": old.node_group.model_copy(update={
+        "template": {**old.node_group.template, "labels": labels},
+    })})
+    if not isinstance(labels, dict) or any(not isinstance(v, str) for v in labels.values()):
+        _, valid = _label_history()
+        assert cold_sample(CapacityPlacement.model_validate(valid), [malformed_old]) is None
+        assert cold_sample(CapacityPlacement.model_validate(data), [malformed_old]) is None
+
+
+@pytest.mark.parametrize("field,value", [
+    ("preset", "other"), ("platform", "other"), ("os", "other"),
+    ("kubernetes_version", "1.34"), ("max_pods", 128), ("boot_disk_type", "other"),
+    ("boot_disk_mib", 2048), ("taints", [{"key": "dedicated", "effect": "NO_SCHEDULE"}]),
+])
+def test_label_additions_do_not_hide_material_template_changes(field, value):
+    old, data = _label_history()
+    data["node_group"]["template"][field] = value
+    assert cold_sample(CapacityPlacement.model_validate(data), [old]) is None
+
+
+@pytest.mark.parametrize("change", ["group", "raw_node", "daemon_generation", "daemon_requests", "daemon_scheduling"])
+def test_label_additions_preserve_group_resource_and_daemonset_boundaries(change):
+    old, data = _label_history()
+    if change == "group":
+        data["node_group"]["id"] = "different-group"
+    elif change == "raw_node":
+        data["node_group"]["raw_node"]["cpu_millis"] += 1000
+    elif change == "daemon_generation":
+        data["daemonsets"][0]["generation"] += 1
+    elif change == "daemon_requests":
+        data["daemonsets"][0]["requests"]["cpu_millis"] += 100
+    else:
+        data["daemonsets"][0]["scheduling"] = {}
+    assert cold_sample(CapacityPlacement.model_validate(data), [old]) is None

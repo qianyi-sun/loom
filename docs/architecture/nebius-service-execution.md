@@ -274,6 +274,20 @@ capacity is insufficient or unknown, or when the autoscaler is stalled or
 unknown. Existing fresh allocatable capacity does not require theoretical
 provider scale headroom.
 
+At zero nodes, admission can reuse measured allocatable capacity and resident
+DaemonSet overhead from a historical observation of the same node group, raw
+resource shape, node template, and DaemonSet revisions, requests and scheduling.
+Adding custom node-template labels does not invalidate that sample when every
+old label retains its value and none of the added keys appears anywhere in the
+observed DaemonSet scheduling data. This includes selector keys, affinity label
+references, and topology keys. The scan deliberately treats any exact occurrence
+in scheduling data as relevant; it does not attempt to prove equivalent selector
+expressions. Label deletion or value changes, malformed labels, other template
+changes (including OS, Kubernetes version, Pod slots and taints), or DaemonSet
+changes still require a matching observed sample. Without one, admission waits
+with `execution_capacity_node_allocatable_unknown`. This rule reuses measured
+capacity; it does not invent a bootstrap capacity estimate.
+
 Each successful decision is an immutable, lease-bound
 `execution_provisioning_authorizations` row. Database transitions retain
 whether it is authorized, Pending, Unschedulable, image-pull blocked, running,
