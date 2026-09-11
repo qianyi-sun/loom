@@ -48,6 +48,7 @@ from .protected_application_admission_recovery import (
     require_replacement_identity,
 )
 from .protected_application_credential_recovery import ApplicationCredentialRecoveryBinding
+from .protected_application_workloads import ApplicationWorkload, validate_workload_inventory
 from .protected_cnpg_fence_recovery import (
     CNPGFenceCreateIntent,
     CNPGFenceObjectReceipt,
@@ -894,6 +895,7 @@ class ApplicationRecoveryView:
     manager_replacement: tuple[
         CNPGManagerReplacementIntent, bool, CNPGManagerReplacementReceipt | None
     ] | None
+    workloads: tuple[ApplicationWorkload, ...] = ()
 
 
 class ProtectedApplyJournal:
@@ -1018,7 +1020,10 @@ class ProtectedApplyJournal:
         )
         if names != {path.name for path in root.iterdir() if path.name.startswith("application-")}:
             raise ProtectedApplyJournalError("application recovery view changed during read")
-        return ApplicationRecoveryView(expected, admission, recoveries, manager)
+        workloads = self._read_application_workloads(root, expected, durable=False)
+        if names != {path.name for path in root.iterdir() if path.name.startswith("application-")}:
+            raise ProtectedApplyJournalError("application recovery view changed during workload read")
+        return ApplicationRecoveryView(expected, admission, recoveries, manager, workloads)
 
     def _sync_application_recovery(self, root: Path, filename: str) -> None:
         # A prior publisher can exit after making its link visible but BEFORE
@@ -1154,6 +1159,86 @@ class ProtectedApplyJournal:
             or plan.checkpoint_component_sha256 is None
         ):
             raise ProtectedApplyJournalError("application credential plan binding changed")
+
+    def _read_application_workloads(
+        self, root: Path, intent: ComponentIntent, *, durable: bool,
+    ) -> tuple[ApplicationWorkload, ...]:
+        late = sorted(root.glob("application-workload-job-*.json"))
+        if len(late) > 120:
+            raise ProtectedApplyJournalError("application workload inventory is unbounded")
+        try:
+            original = self._read(root / "application-workloads.json")
+        except FileNotFoundError:
+            if late:
+                raise ProtectedApplyJournalError("application workloads lack their original inventory") from None
+            return ()
+        try:
+            if (set(original) != {"schema_version", "intent_digest", "workloads"}
+                    or type(original.get("schema_version")) is not int or original["schema_version"] != 1
+                    or original["intent_digest"] != intent.intent_digest
+                    or not isinstance(original["workloads"], list)):
+                raise ValueError("invalid original workload inventory")
+            values = original["workloads"]
+            if any(not isinstance(value, dict) for value in values):
+                raise ValueError("invalid workload record")
+            workloads = [ApplicationWorkload.from_dict(value) for value in values]
+            validate_workload_inventory(tuple(workloads))
+            if durable:
+                self._sync_application_recovery(root, "application-workloads.json")
+            for path in late:
+                record = self._read(path)
+                if (set(record) != {"schema_version", "intent_digest", "workload"}
+                        or type(record.get("schema_version")) is not int or record["schema_version"] != 1
+                        or record["intent_digest"] != intent.intent_digest
+                        or not isinstance(record["workload"], dict)):
+                    raise ValueError("invalid late workload record")
+                workload = ApplicationWorkload.from_dict(record["workload"])
+                if workload.kind != "Job" or path.name != f"application-workload-job-{workload.uid}.json":
+                    raise ValueError("late workload identity changed")
+                workloads.append(workload)
+                if durable:
+                    self._sync_application_recovery(root, path.name)
+            return validate_workload_inventory(tuple(workloads))
+        except (ValueError, TypeError, KeyError):
+            raise ProtectedApplyJournalError("application workload inventory changed or is invalid") from None
+
+    def read_application_workloads(self, plan: FinalGatePlan) -> tuple[ApplicationWorkload, ...]:
+        self.require_application_credential_context(plan)
+        root, intent = self._application_admission_context()
+        return self._read_application_workloads(root, intent, durable=True)
+
+    def record_application_workloads(
+        self, plan: FinalGatePlan, *, workloads: tuple[ApplicationWorkload, ...],
+    ) -> None:
+        """Persist every original fixed writer before any workload is paused."""
+        self.require_application_credential_context(plan)
+        root, intent = self._application_admission_context()
+        if intent.component_id != "application-ownership-handoff":
+            raise ProtectedApplyJournalError("application workloads require the original handoff component")
+        values = validate_workload_inventory(workloads)
+        record = {"schema_version": 1, "intent_digest": intent.intent_digest,
+                  "workloads": [value.to_dict() for value in values]}
+        self._publish_or_match(root / "application-workloads.json", record)
+        self._read_application_workloads(root, intent, durable=True)
+
+    def record_application_workload_job(self, plan: FinalGatePlan, *, workload: ApplicationWorkload) -> None:
+        """Append a late owned Job; never recapture a paused parent's replicas."""
+        self.require_application_credential_context(plan)
+        root, intent = self._application_admission_context()
+        original = self._read_application_workloads(root, intent, durable=True)
+        if not original:
+            raise ProtectedApplyJournalError("application workload Job requires the original inventory")
+        if intent.component_id != "application-ownership-handoff" or workload.kind != "Job":
+            raise ProtectedApplyJournalError("application workload late extension must be an owned Job")
+        for known in original:
+            if (known.kind, known.name) == (workload.kind, workload.name) or known.uid == workload.uid:
+                if known != workload:
+                    raise ProtectedApplyJournalError("application workload saved Job cannot be replaced")
+                return
+        validate_workload_inventory((*original, workload))
+        record = {"schema_version": 1, "intent_digest": intent.intent_digest, "workload": workload.to_dict()}
+        self._publish_or_match(root / f"application-workload-job-{workload.uid}.json", record)
+        self._read_application_workloads(root, intent, durable=True)
 
     def retain_application_guard(self, plan: FinalGatePlan, *, guard: MutationGuardEvidence) -> None:
         """Publish retention before sealing; acknowledgement is separately required."""
