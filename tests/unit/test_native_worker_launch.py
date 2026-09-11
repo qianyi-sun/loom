@@ -15,6 +15,24 @@ from tests.unit.test_native_worker_container import _allocation, _prepared
 from tests.unit.test_worker_native_entrypoint import _configured_bootstrap
 
 
+@pytest.fixture(autouse=True)
+def native_cgroup(tmp_path, monkeypatch):
+    import os
+
+    from loom_capacity_executor import native_worker_launch as launch
+    from loom_capacity_executor.native_worker_cgroup import open_native_cgroup
+    from tests.unit.test_native_worker_cgroup import _job
+
+    root = tmp_path / "cgroups"
+    root.mkdir(mode=0o700)
+    directory = _job(root)
+    # Real production directory/control checks against a disposable filesystem.
+    # No production bypass flag is exposed by the launcher.
+    monkeypatch.setattr(launch, "open_native_cgroup", lambda allocation: open_native_cgroup(
+        allocation, cgroup_root=root, trusted_uid=os.geteuid()), raising=False)
+    return directory
+
+
 def _handoff(tmp_path):
     directory = tmp_path / "handoff"
     directory.mkdir(mode=0o700)
@@ -393,3 +411,66 @@ async def test_stop_during_registration_does_not_burn_launch_marker(tmp_path, mo
     assert admission.requests
     assert not cli.calls
     assert not (directory / reference).with_suffix(".launched").exists()
+
+
+@pytest.mark.parametrize("phase", ["before-handoff", "during-registration", "during-marker", "after-create"])
+async def test_cgroup_drift_never_starts_native_worker(tmp_path, monkeypatch, native_cgroup, phase):
+    from loom_capacity_executor import native_worker_launch as launch
+    from loom_capacity_executor.native_worker_container import NativeContainerError, NativeWorkerContainerPolicyV2
+
+    directory, reference, physical, bootstrap = _handoff(tmp_path)
+    policy = NativeWorkerContainerPolicyV2(native_execution=bootstrap.native_execution,
+        canonical_worker_settings=bootstrap.canonical_worker_settings,
+        docker_config_directory="/etc/loom/empty-docker", pids_max=128)
+    admission, cli, attached = _Admission(), CLI(), []
+
+    def drift():
+        (native_cgroup / "memory.max").write_text("max\n")
+
+    if phase == "before-handoff":
+        drift()
+    elif phase == "during-registration":
+        register = admission.register_worker
+
+        async def drifting_register(*args, **kwargs):
+            result = await register(*args, **kwargs)
+            drift()
+            return result
+
+        admission.register_worker = drifting_register
+    elif phase == "during-marker":
+        consume = launch.claim_bootstrap_handoff_launch
+
+        def drifting_consume(*args, **kwargs):
+            credential = consume(*args, **kwargs)
+            drift()
+            return credential
+
+        monkeypatch.setattr(launch, "claim_bootstrap_handoff_launch", drifting_consume)
+    else:
+        inspect = cli.json
+
+        def drifting_inspect(*args, **kwargs):
+            result = inspect(*args, **kwargs)
+            drift()
+            return result
+
+        cli.json = drifting_inspect
+
+    async def attach(*args):
+        attached.append(args)
+        return 0
+
+    monkeypatch.setattr(launch, "run_attached_native_worker", attach)
+    monkeypatch.setattr(launch, "_disable_bootstrap_dumps", lambda: None)
+    with pytest.raises(NativeContainerError, match="cgroup"):
+        await launch.launch_native_worker_once(directory=directory, reference=reference,
+            physical=physical, admission=admission, policy=policy, cli=cli, image=_prepared(),
+            allocation=_allocation(), now=lambda: _NOW)
+    assert not attached
+    if phase != "after-create":
+        assert not cli.calls
+    else:
+        assert any(call[:3] == ("container", "rm", "--force") for call in cli.calls)
+    assert bool(admission.requests) == (phase != "before-handoff")
+    assert (directory / reference).with_suffix(".launched").exists() == (phase in {"during-marker", "after-create"})
