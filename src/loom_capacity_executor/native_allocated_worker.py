@@ -20,6 +20,7 @@ from loom_capacity_agent.build_admission import (
     BuildClaimRequestV1,
 )
 from loom_capacity_executor.build_admission_client import BuildAdmissionTransportError
+from loom_capacity_executor.native_allocated_io import NativeAllocatedIO, scoped_native_allocated_io
 from loom_capacity_executor.native_build_source import (
     NativeClaimBuildSource,
     NativeStagedBuildSource,
@@ -47,10 +48,10 @@ def allocated_claim_request(worker: ExecutableWorkerRegistrationV2) -> BuildAllo
 
 
 @asynccontextmanager
-async def stage_allocated_worker_source(
+async def allocated_worker_io(
     descriptor: int, *, job_id: str, workspace: Path, max_archive_bytes: int,
     admission_factory: Callable[..., TypedAdmissionRouter] = TypedAdmissionRouter,
-) -> AsyncIterator[NativeAllocatedSource]:
+) -> AsyncIterator[NativeAllocatedIO]:
     """Own the exec handoff and stage only management-assigned source.
 
 The descriptor is consumed before configuration, cgroup, or network operations.
@@ -85,4 +86,17 @@ Terminal/lost workers remain the management recovery loop's responsibility.
         or receipt.request_digest != canonical_digest(receipt.request)):
         raise ValueError("native worker assigned claim identity changed")
     async with source.stage_claim(receipt.request, worker_credential=packet.worker_credential) as staged:
-        yield NativeAllocatedSource(claim=receipt.request, source=staged)
+        async with scoped_native_allocated_io(claim=receipt.request, source=staged,
+            client=router, worker_credential=packet.worker_credential) as owner:
+            yield owner
+
+
+@asynccontextmanager
+async def stage_allocated_worker_source(
+    descriptor: int, *, job_id: str, workspace: Path, max_archive_bytes: int,
+    admission_factory: Callable[..., TypedAdmissionRouter] = TypedAdmissionRouter,
+) -> AsyncIterator[NativeAllocatedSource]:
+    """Source-only compatibility view; authenticated IO remains scoped inside."""
+    async with allocated_worker_io(descriptor, job_id=job_id, workspace=workspace,
+        max_archive_bytes=max_archive_bytes, admission_factory=admission_factory) as owner:
+        yield NativeAllocatedSource(claim=owner.claim, source=owner.source)

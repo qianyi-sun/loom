@@ -8,10 +8,17 @@ from uuid import uuid4
 
 import pytest
 
-from loom_capacity_agent.build_admission import BuildArtifactV1, BuildOutcomeReceiptV1, BuildOutcomeRequestV1
+from loom_capacity_agent.build_admission import (
+    BuildArtifactV1,
+    BuildOutcomeReceiptV1,
+    BuildOutcomeRequestV1,
+)
 from loom_capacity_agent.build_artifact_stream import BuildArtifactUploadReceiptV1
 from loom_capacity_executor.native_build_source import NativeStagedBuildSource
-from loom_capacity_executor.native_supervisor import NativeAuthorityPermission, NativeAuthorityRequest
+from loom_capacity_executor.native_supervisor import (
+    NativeAuthorityPermission,
+    NativeAuthorityRequest,
+)
 from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 from tests.unit.test_native_build_context import context_for
 from tests.unit.test_native_execution_deadline import receipt
@@ -121,3 +128,67 @@ async def test_allocated_authority_scope_settles_inflight_operations(tmp_path, b
             await asyncio.gather(task, return_exceptions=True)
         monitor.close()
         helper.close()
+
+
+@pytest.mark.parametrize("operation", ["upload", "outcome"])
+async def test_scope_repeated_cancellation_waits_for_inflight_write_cleanup(tmp_path, operation):
+    module = import_module("loom_capacity_executor.native_allocated_io")
+    claim = execution_request().claim
+    source = NativeStagedBuildSource(context_for(claim), tmp_path / "source.tar")
+    artifact = BuildArtifactV1(archive_sha256="e" * 64, archive_size_bytes=1)
+    outcome = BuildOutcomeRequestV1(claim=claim, operation_id=uuid4(), result="failed")
+    entered, cancelling, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    events, owners, operations = [], [], []
+
+    class Client:
+        async def upload_artifact(self, *args, **kwargs):
+            await self.blocked()
+
+        async def record_outcome(self, *args, **kwargs):
+            await self.blocked()
+
+        async def blocked(self):
+            entered.set()
+            try:
+                await asyncio.Future()
+            finally:
+                cancelling.set()
+                await release.wait()
+                events.append("write-settled")
+
+    async def chunks():
+        yield b"x"
+
+    async def scoped():
+        try:
+            async with module.scoped_native_allocated_io(claim=claim, source=source,
+                client=Client(), worker_credential="w" * 43) as owner:
+                owners.append(owner)
+                pending = asyncio.create_task(owner.upload_artifact(artifact, chunks=chunks()) if operation == "upload"
+                    else owner.record_outcome(outcome))
+                operations.append(pending)
+                await entered.wait()
+                await asyncio.Future()
+        finally:
+            events.append("source-cleanup")
+
+    task = asyncio.create_task(scoped())
+    try:
+        async with asyncio.timeout(2):
+            await entered.wait()
+            task.cancel()
+            await cancelling.wait()
+            task.cancel()  # Cancellation of owner cleanup must not cut IO settlement short.
+            assert events == [] and not task.done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert events == ["write-settled", "source-cleanup"]
+        assert operations[0].cancelled()
+        with pytest.raises(RuntimeError, match="closed"):
+            await owners[0].record_outcome(outcome)
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, *operations, return_exceptions=True)

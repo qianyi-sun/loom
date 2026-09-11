@@ -2272,6 +2272,17 @@ isolated imports. Separate trusted same-mapping preparation and readback passes
 restore fixture rootfs capabilities and independently verify cleanup/late-start
 rejection; these are not a protected worker installer. Actual subreaper adoption
 and mapping-time parent death still require kernel/Slurm acceptance coverage.
+`allocated_worker_io` retains the consumed handoff's authenticated client and
+credential in a scoped outer IO object while the assigned source stays staged.
+It serves only that claim/source's authority channel, uploads through the existing
+claim-bound stream and validates exact historical-outcome receipts. It adds no
+write retry, launcher or release authority. Scope exit closes admission to new
+operations, cancels and settles in-flight operations even during repeated caller
+cancellation, then lets the surrounding source context clean up. The older
+source-only staging entrypoint remains a compatibility view. The IO object and
+its descriptor-scoped source path must never be sent into the mapped runtime;
+full composition must still copy sealed input and settle the launcher while
+retaining the received-artifact scope through upload/outcome.
 These fixtures remain offline (`--network=none`); restricted external
 dependency fetching, protected material/rootless installation, Slurm containment,
 ARM64 supervision, authenticated IO-helper composition and native artifact GC
