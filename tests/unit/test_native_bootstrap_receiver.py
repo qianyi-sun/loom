@@ -152,7 +152,7 @@ receiver_process._disable_bootstrap_dumps = fail_hardening
     assert list(private_delivery.node.iterdir()) == []
 
 
-@pytest.mark.parametrize("exception", ("RuntimeError", "asyncio.CancelledError"))
+@pytest.mark.parametrize("exception", ("RuntimeError", "asyncio.CancelledError", "SystemExit", "BaseException"))
 async def test_receiver_exception_is_sanitized_after_stdin_detach(private_delivery, exception):
     _module, payload, _receiver = objects(private_delivery)
     injected = f"""
