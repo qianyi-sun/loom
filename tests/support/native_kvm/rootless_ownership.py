@@ -12,6 +12,13 @@ def main():
     mode = sys.argv[1]
     if mode == "feature":
         assert os.getuid() == 1000
+        for descriptor in (3, 4):
+            try:
+                os.fstat(descriptor)
+            except OSError:
+                pass
+            else:
+                raise AssertionError("fixture worker inherited a private IO channel")
         artifact.parent.mkdir(mode=0o700)
         artifact.write_bytes(b"fixture-artifact")
     elif mode == "mapped":

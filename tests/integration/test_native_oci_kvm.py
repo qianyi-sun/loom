@@ -79,6 +79,31 @@ def prepare_runtime(tmp_path, arch):
     return runtime
 
 
+@pytest.mark.parametrize("mode", ["export", "kill", "kill-unbound"])
+def test_rootless_activation_channels_transfer_private_artifact_and_observe_parent_death(mode):
+    if platform.machine() != "x86_64":
+        pytest.skip("rootless transport fixture currently requires AMD64")
+    name = "loom-rootless-transport-" + uuid4().hex
+    try:
+        result = checked("docker", "run", "--rm", "--init", "--name", name,
+            "--network=none", "--cpus=1", "--memory=256m", "--pids-limit=64",
+            "--user=1000:1000", "--cap-drop=ALL", "--cap-add=SETUID", "--cap-add=SETGID",
+            "--security-opt=apparmor=unconfined", "--security-opt=seccomp=unconfined", "--read-only",
+            "--tmpfs=/tmp:rw,nodev,size=64m,mode=1777",
+            "--mount", f"type=bind,src={ROOT / 'tests/support/native_kvm'},dst=/test-support,readonly",
+            "--mount", f"type=bind,src={ROOT / 'src'},dst=/trusted-src,readonly",
+            "--entrypoint=/usr/bin/python3", "ghcr.io/qianyi-sun/loom-personal-dev-builder@" + BUILDERS["x86_64"],
+            "/test-support/rootless_transport.py", mode, capture_output=True, text=True)
+        expected = {"export": "rootless-private-artifact-transfer-ok",
+            "kill": "rootless-parent-death-stopped-mapped-child",
+            "kill-unbound": "rootless-unbound-child-survival-detected"}
+        assert expected[mode] in result.stdout
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(f"rootless transport prerequisite failed:\n{exc.stdout}\n{exc.stderr}")
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
+
+
 def test_rootless_private_output_requires_mapped_reader():
     """Mode-0700 mapped output is not readable by the original outer UID."""
     if platform.machine() != "x86_64":
