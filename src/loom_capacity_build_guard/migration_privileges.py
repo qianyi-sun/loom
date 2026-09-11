@@ -15,6 +15,11 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
     version_table = connection.scalar(text("SELECT to_regclass('loom_capacity_build_guard.alembic_version')"))
     revision = connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) if version_table else None
     callables = []
+    additional_helpers = []
+    if revision == "build_guard_0025":
+        callables.append(f"{SCHEMA}.read_accepted_artifact(uuid,uuid,jsonb,bytea,text)")
+        additional_helpers.append("assert_live_source(uuid,uuid,jsonb,bytea,text)")
+        revision = "build_guard_0024"
     if revision == "build_guard_0024":
         callables.append(f"{SCHEMA}.read_pending_publications(uuid,uuid,uuid,integer)")
         revision = "build_guard_0023"
@@ -126,7 +131,7 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
         usage = connection.scalar(text("SELECT has_schema_privilege(:agent, :schema, 'USAGE')"), parameters)
         if usage is not True:
             raise RuntimeError("build guard required schema privilege is absent")
-        helpers = ["reject_evidence_mutation()"]
+        helpers = ["reject_evidence_mutation()", *additional_helpers]
         if revision in {"build_guard_0002", "build_guard_0003", "build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018", "build_guard_0019", "build_guard_0020", "build_guard_0021"}:
             helpers.append("assert_current_source(uuid,uuid,jsonb,bytea,text)")
         if revision in {"build_guard_0003", "build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010", "build_guard_0011", "build_guard_0012", "build_guard_0013", "build_guard_0014", "build_guard_0015", "build_guard_0016", "build_guard_0017", "build_guard_0018", "build_guard_0019", "build_guard_0020", "build_guard_0021"}:

@@ -508,6 +508,21 @@ database messages or response contents. The service must still supply the pinned
 installation, exact reporter connection and live intake interlock; loop health
 is not membership readiness, a source grant, or candidate publication authority.
 
+Build-guard revision `build_guard_0025` adds a management-only accepted-artifact
+reader. It binds the current candidate and whole-attempt lease to an exact native
+platform request, committed claim and artifact-ready outcome. Shared private
+source checks retain cancellation, owner and lease fencing; the admission wrapper
+still rejects finished requests. Accepted artifacts remain retrievable after
+worker release while their parent source authority is current.
+
+The trusted exporter can consume this resolver instead of legacy attempt object
+keys. In this mode it derives only the accepted claim-specific key, verifies the
+accepted full archive length and SHA-256, then retains existing OCI verification,
+scan-before-publish and final candidate fencing. Missing/mismatched evidence has
+no legacy fallback. An accepted archive is not verified candidate success. Native
+service wiring must select this resolver; adding the adapter does not enable
+native build intake or establish runtime readiness.
+
 Build-guard revision `build_guard_0024` privately rediscovers committed plans
 without a publication or terminal disposition. This recovers lost acknowledgement
 replies even after the manager removes accepted proposals from its work queue.
