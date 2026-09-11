@@ -14,8 +14,15 @@ import pytest
 
 from loom.personal_dev_build_platform_requests import canonical_build_source
 from loom_capacity_agent.admission import PhysicalJobBindingV2
-from loom_capacity_agent.build_admission import BuildClaimReceiptV1, BuildClaimRequestV1, BuildSourceReadReceiptV1
-from loom_capacity_executor.native_worker_handoff import NativeWorkerHandoffV1, sealed_native_worker_handoff
+from loom_capacity_agent.build_admission import (
+    BuildClaimReceiptV1,
+    BuildClaimRequestV1,
+    BuildSourceReadReceiptV1,
+)
+from loom_capacity_executor.native_worker_handoff import (
+    NativeWorkerHandoffV1,
+    sealed_native_worker_handoff,
+)
 from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 from tests.unit.test_capacity_build_admission_client import client_for, native_registration
 from tests.unit.test_capacity_typed_admission_routing import configured
@@ -24,7 +31,7 @@ from tests.unit.test_native_build_source import sealed_source as sealed_source
 
 
 @pytest.mark.parametrize("pool", ["gb10", "oldlab"])
-@pytest.mark.parametrize("boundary", ["exact", "lost-reply", "unavailable", "job", "cgroup", "purpose",
+@pytest.mark.parametrize("boundary", ["exact", "lost-reply", "unavailable", "retry-cancel", "job", "cgroup", "purpose",
     "receipt", "source", "cancel", "consumer"])
 async def test_allocated_worker_owns_handoff_claims_exact_work_and_cleans(sealed_source, tmp_path, monkeypatch, pool, boundary):
     module = import_module("loom_capacity_executor.native_allocated_worker")
@@ -41,25 +48,30 @@ async def test_allocated_worker_owns_handoff_claims_exact_work_and_cleans(sealed
     inherited = None
     def cgroup(path):
         assert path == Path("/proc/self/cgroup")
-        return PurePosixPath(f"/system.slice/slurmstepd.scope/job_{'9999' if boundary == 'cgroup' else worker.slurm_job_id}/step_batch/user/task_0")
-    monkeypatch.setattr(module, "_unified_cgroup_path", cgroup)
-
-    async def handle(outgoing):
         with pytest.raises(OSError):
             os.fstat(inherited)
+        return PurePosixPath(f"/system.slice/slurmstepd.scope/job_{'9999' if boundary == 'cgroup' else worker.slurm_job_id}/step_batch/user/task_0")
+    monkeypatch.setattr(module, "_unified_cgroup_path", cgroup)
+    if boundary == "retry-cancel":
+        async def cancel_backoff(delay):
+            assert delay == 0.2
+            raise asyncio.CancelledError
+        monkeypatch.setattr(module.asyncio, "sleep", cancel_backoff)
+
+    async def handle(outgoing):
         body = json.loads(outgoing.content)
         assert body["worker_credential"] == packet.worker_credential
         calls.append(outgoing.url.path)
         if outgoing.url.path.endswith("/claim-assigned"):
             claims.append(body["claim"])
             assert "request_id" not in body["claim"]
-            claim = BuildClaimRequestV1.model_validate({**body["claim"], "request_id": request_id})
-            if boundary == "unavailable" or (boundary == "lost-reply" and len(claims) == 1):
+            claim = BuildClaimRequestV1.model_validate_json(json.dumps({**body["claim"], "request_id": str(request_id)}))
+            if boundary in {"unavailable", "retry-cancel"} or (boundary == "lost-reply" and len(claims) == 1):
                 raise httpx.ReadError("reply lost after commit")
             if boundary == "receipt":
                 claim = claim.model_copy(update={"worker_incarnation": uuid4()})
             return httpx.Response(200, content=canonical_bytes(BuildClaimReceiptV1(request=claim, request_digest=canonical_digest(claim))))
-        claim = BuildClaimRequestV1.model_validate(body["claim"])
+        claim = BuildClaimRequestV1.model_validate_json(json.dumps(body["claim"]))
         context = context_for(claim).model_copy(update={
             "source_binding_sha256": hashlib.sha256(canonical_build_source(registration)).hexdigest(),
             "source_sha256": registration.candidate.source_sha256,
@@ -101,7 +113,7 @@ async def test_allocated_worker_owns_handoff_claims_exact_work_and_cleans(sealed
                         raise RuntimeError("consumer failed")
             if boundary in {"exact", "lost-reply"}:
                 await consume()
-            elif boundary == "cancel":
+            elif boundary in {"cancel", "retry-cancel"}:
                 with pytest.raises(asyncio.CancelledError):
                     await consume()
             else:
@@ -114,6 +126,8 @@ async def test_allocated_worker_owns_handoff_claims_exact_work_and_cleans(sealed
     assert all(not path.exists() for path in staged_paths)
     if boundary in {"job", "cgroup", "purpose"}:
         assert calls == []
+    if boundary == "retry-cancel":
+        assert len(claims) == len(calls) == 1
     if boundary in {"lost-reply", "unavailable"}:
         assert len(claims) == (2 if boundary == "lost-reply" else 3)
         assert all(claim == claims[0] for claim in claims)

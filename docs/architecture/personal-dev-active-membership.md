@@ -639,8 +639,15 @@ The consumer validates canonical bytes, identity, owner, mode, size and seals,
 then closes the descriptor before any sandbox subprocess. Failed exec closes the
 descriptor without making the one-time launch replayable. A real subprocess test
 verifies descriptor inheritance and consumption, not Slurm/KVM containment.
-The runtime claim/source/build/artifact consumer and installed containment remain
-required before native readiness can be enabled.
+`stage_allocated_worker_source` connects that handoff to assigned claim and source
+acquisition. It closes the descriptor first, requires the exact Slurm job ID and
+current process job ancestry, loads the pinned build-purpose router, and derives
+a stable claim operation from the registered identity. Bounded transport retries
+retain that operation; returned claims are checked before complete source staging.
+Consumer failure and cancellation clean the private source workspace. This
+process-ancestry check does not certify child containment. Fresh execution fencing,
+the build/artifact consumer and installed containment remain required before native
+readiness can be enabled.
 
 `BuildManagementRuntime` composes installation-scoped terminal recovery, protected
 release publication, final retirement, demand reporting, bootstrap registration
