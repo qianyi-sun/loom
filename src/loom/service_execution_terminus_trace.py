@@ -9,6 +9,7 @@ from pydantic import TypeAdapter
 
 from loom.models.trajectory import LLMCallEvent, TrajectoryEvent
 from loom.models.trial import TrialConfig
+from loom.trajectory.llm_call_events import llm_call_row_to_event
 
 _EVENT: TypeAdapter[TrajectoryEvent] = TypeAdapter(TrajectoryEvent)
 _COUNTERS = (
@@ -54,3 +55,44 @@ def terminus_usage(events: list[TrajectoryEvent], trial: TrialConfig) -> dict[st
             "duration_sec": sum(call.duration_sec for call in calls),
         },
     }
+
+
+def reconcile_terminus_ledger(
+    events: list[TrajectoryEvent], rows: list[dict[str, Any]],
+    trial: TrialConfig, trial_id: UUID,
+) -> list[TrajectoryEvent]:
+    """Complete request accounting without manufacturing Harbor turns/commands.
+
+    Harbor may discard a truncated response or retry internally. The Gateway
+    ledger owns request count and usage; native events own the accepted turns.
+    Unmatched requests remain synthetic LLMCallEvents with no invented content.
+    Callers must read rows through the tenant/lease/generation-scoped query.
+    """
+    calls: dict[str, LLMCallEvent] = {}
+    for row in rows:
+        call_id = str(row.get("id") or "")
+        if (not call_id or call_id in calls or row.get("trial_id") != str(trial_id)
+                or row.get("step_id") != "agent"):
+            raise ValueError("Gateway ledger has invalid or duplicate call identity")
+        call = llm_call_row_to_event(row, trial_id=trial_id, seq=0)
+        if call.model != trial.agent_model:
+            raise ValueError("Gateway ledger has another model identity")
+        if row.get("finish_reason"):
+            call = call.model_copy(update={"finish_reason": row["finish_reason"]})
+        calls[call_id] = call
+    linked: set[str] = set()
+    for event in events:
+        if event.trial_id != trial_id or event.step_id != "agent":
+            raise ValueError("Terminus trace has another Trial or step identity")
+        if isinstance(event, LLMCallEvent):
+            matched = calls.get(event.gateway_request_id)
+            if matched is None or event.gateway_request_id in linked:
+                raise ValueError("Terminus trace call is absent or duplicated in Gateway ledger")
+            if (event.input_tokens, event.output_tokens) != (matched.input_tokens, matched.output_tokens):
+                raise ValueError("Terminus trace tokens differ from Gateway ledger")
+            linked.add(event.gateway_request_id)
+    # Accounting events stand independently of Harbor's accepted-step sequence.
+    # Keep all native messages, turns, commands and observations untouched.
+    result: list[TrajectoryEvent] = list(calls.values())
+    result.extend(event for event in events if not isinstance(event, LLMCallEvent))
+    return [event.model_copy(update={"seq": seq}) for seq, event in enumerate(result)]

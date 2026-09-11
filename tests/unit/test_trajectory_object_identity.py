@@ -167,3 +167,23 @@ def test_resolver_rejects_untrusted_or_noncanonical_uri(
             trial_id=trial_id,
             filename="events.jsonl",
         )
+
+
+def test_resolver_accepts_scoped_accounting_correction() -> None:
+    team_id, trial_id, correction_id = uuid4(), uuid4(), uuid4()
+    key = f"{team_id}/{trial_id}/attempts/1/accounting-v2/{correction_id}/atif.json"
+    assert resolve_trajectory_object_key(
+        uri=f"s3://trajectories/{key}", expected_bucket="trajectories",
+        team_id=team_id, trial_id=trial_id, filename="atif.json",
+    ) == key
+
+
+@pytest.mark.parametrize("correction", ["accounting-v2/no-uuid", "other/00000000-0000-0000-0000-000000000000",
+                                          "accounting-v2/ABCDEF00-0000-0000-0000-000000000000"])
+def test_resolver_rejects_invalid_accounting_corrections(correction: str) -> None:
+    team_id, trial_id = uuid4(), uuid4()
+    with pytest.raises(ValueError, match="trajectory object URI"):
+        resolve_trajectory_object_key(
+            uri=f"s3://trajectories/{team_id}/{trial_id}/attempts/1/{correction}/atif.json",
+            expected_bucket="trajectories", team_id=team_id, trial_id=trial_id, filename="atif.json",
+        )

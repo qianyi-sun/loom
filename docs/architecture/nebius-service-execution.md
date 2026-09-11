@@ -534,6 +534,25 @@ loading full legacy Trial payloads. Integrity failure keeps the bundle
 unavailable and returns a sanitized error; it never falls back to a partial
 answer file.
 
+For Terminus-2, Harbor's accepted turns are distinct from Gateway requests:
+a length-truncated response or an internal retry can consume tokens without
+producing a Harbor step. Canonical materialization reads the Gateway ledger by
+team, Trial, agent step, lease and committed output generation. It reconciles
+native call identities and token counts, retains every request as an accounting
+LLM event, and leaves the original Harbor turns, commands and observations intact.
+`files/accounting/usage.json`, `files/accounting/gateway-calls.json` and the ATIF
+top-level `accounting` field cover all those requests. ATIF per-step metrics cover
+only the linked native steps; summing them is not total request usage. The ledger
+export contains safe accounting metadata, never raw provider logs or headers.
+USD values remain recorded pricing snapshots, not evidence of settled billing.
+
+The original runtime trace and usage remain available under
+`source/trajectory/events.jsonl` and `source/accounting/usage.json`, alongside
+the unchanged source manifests. Already-published affected Trials can be corrected
+with the bounded operator command described in
+[the accounting repair runbook](../ops/nebius-accounting-repair.md), without
+rerunning the workload or overwriting its original objects.
+
 Event and command payloads are database-bounded at 64 KiB. An execution lease
 accepts at most 10,000 event ordinals and 20,000 projected history transitions;
 operator projections also return at most 500 event and 500 history rows. These

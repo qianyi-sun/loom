@@ -7,11 +7,10 @@ from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from sqlalchemy import select
 from starlette.responses import Response, StreamingResponse
 
-from loom.db.schema import LlmCall, ServiceExecutionLease, ServiceExecutionTarget, Trial
-from loom.llm_call_ledger import serialize_llm_call
+from loom.db.schema import ServiceExecutionLease, ServiceExecutionTarget, Trial
+from loom.llm_call_ledger import read_service_execution_llm_calls as read_lease_calls
 from loom.pipeline.artifact_commit import ArtifactCommitError
 from loom_control_plane.service_execution_output import (
     ServiceExecutionBrokerError,
@@ -148,18 +147,11 @@ async def read_service_execution_llm_calls(
             trial = await session.get(Trial, lease.trial_id)
             if trial is None or trial.team_id != lease.team_id or trial.attempt_count != lease.attempt:
                 raise ServiceExecutionBrokerError("execution_generation_fenced")
-            binding = LlmCall.provider_extras["_loom_raw_provider_log"]["service_execution"]
-            rows = (await session.execute(select(LlmCall).where(
-                LlmCall.team_id == lease.team_id,
-                LlmCall.trial_id == lease.trial_id,
-                LlmCall.step_id == "agent",
-                binding["lease_id"].astext == str(lease.id),
-                binding["generation"].astext == str(lease.generation),
-            ).order_by(LlmCall.captured_at, LlmCall.id))).scalars().all()
+            rows = await read_lease_calls(session, lease)
             return {
                 "trial_id": str(lease.trial_id), "team_id": str(lease.team_id),
                 "step_id": "agent",
-                "items": [serialize_llm_call(row, include_provider_log=False) for row in rows],
+                "items": rows,
             }
     except ServiceExecutionBrokerError as exc:
         raise _broker_http(exc) from exc
