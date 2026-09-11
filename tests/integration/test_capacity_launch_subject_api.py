@@ -2,14 +2,20 @@
 
 from unittest.mock import AsyncMock
 
-from loom_capacity_manager.launch_subject_contracts import canonical_launch_subject_bytes
+from loom_capacity_manager.launch_subject_contracts import (
+    canonical_current_application_allocation_bytes,
+    canonical_launch_subject_bytes,
+)
 from tests.integration.test_capacity_manager_api import (
     _v2_executor_headers,
 )
 from tests.integration.test_capacity_manager_api import (
     execution_preparation_api_context as execution_preparation_api_context,
 )
-from tests.unit.test_capacity_launch_subject_contract import response
+from tests.unit.test_capacity_launch_subject_contract import (
+    current_application_observation,
+    response,
+)
 
 
 def test_cleanup_only_work_route_preserves_executor_authorization(execution_preparation_api_context, monkeypatch):
@@ -40,3 +46,18 @@ def test_launch_subject_route_requires_pool_actor_and_returns_canonical_facts(
     assert actual.status_code == 200, actual.text
     assert actual.content == canonical_launch_subject_bytes(value)
     assert resolve.await_args.kwargs["intent_id"] == value.binding.intent_id
+
+
+def test_current_application_allocation_route_requires_exact_pool_actor(execution_preparation_api_context, monkeypatch):
+    client, app, *_ = execution_preparation_api_context
+    value = current_application_observation()
+    resolve = AsyncMock(return_value=value)
+    monkeypatch.setattr(app.state.execution_store, "current_application_allocation", resolve, raising=False)
+    path = f"/v3/executors/oldlab/intents/{value.subject.binding.intent_id}/current-application-allocation"
+    assert client.get(path).status_code == 401
+    assert client.get(path, headers=_v2_executor_headers("gb10")).status_code == 403
+    resolve.assert_not_awaited()
+    actual = client.get(path, headers=_v2_executor_headers("oldlab"))
+    assert actual.status_code == 200, actual.text
+    assert actual.content == canonical_current_application_allocation_bytes(value)
+    assert resolve.await_args.kwargs["intent_id"] == value.subject.binding.intent_id
