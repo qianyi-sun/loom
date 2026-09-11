@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from loom.execution_image_admission import SignedImageAdmissionV1
-
-AgentVersion = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")]
+from loom.models.types import AgentVersion
 
 
 class AgentRuntimeBindingV1(BaseModel):

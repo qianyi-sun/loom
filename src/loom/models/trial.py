@@ -8,12 +8,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from loom.agent_runtime import AgentVersion
 from loom.family_run.spec import FamilyRunSpec
 from loom.models.mcp import MCPConnection
 from loom.models.networking import NetworkPolicy
 from loom.models.skill import SkillRef
-from loom.models.types import ModelSpec, VerifierEnvMode
+from loom.models.types import AgentVersion, ModelSpec, VerifierEnvMode
 from loom.request_params import sanitize_request_extras
 
 MixPolicy = Literal["student_teacher_student", "beta_mixture"]

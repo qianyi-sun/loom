@@ -15,7 +15,8 @@ def test_native_controller_import_has_no_storage_or_database_side_effects() -> N
             "import sys; import loom.service_execution_sandbox_task; "
             "assert not any(name in sys.modules for name in "
             "('loom.db.schema', 'loom.trajectory.writer', 'loom.agent.litellm', "
-            "'loom.security.secret_store', 'boto3', 'sqlalchemy'))",
+            "'loom.security.secret_store', 'boto3', 'sqlalchemy', "
+            "'loom.execution_image_admission', 'rfc8785'))",
         ],
         check=True,
     )

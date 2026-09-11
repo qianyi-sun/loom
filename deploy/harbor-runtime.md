@@ -27,5 +27,10 @@ The opt-in test requires Docker, Go and the local prepared task image. It uses
 isolated local containers and a loopback model stub; no external model calls.
 It covers reward and trajectory, private verifier inputs, task-file import
 poisoning, current-user tool probes, and missing tools with zero recorded usage.
-Only the fixture and evidence are mounted into the controller. Candidate wiring,
-public publication and runtime-version selection are separate integration work.
+Only the fixture and evidence are mounted into the controller. Native platform
+candidates use this image as their default controller. Independent publication
+and per-Trial selection are described in
+[Harbor runtime versions](../docs/runbooks/harbor-runtime-versions.md).
+
+Shared Trial scalars stay in `loom.models.types`; reading a Trial inside the
+controller must not import publication admission, database or worker packages.

@@ -16,8 +16,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from loom.agent_runtime import AgentVersion
-from loom.models.types import ModelSpec
+from loom.models.types import AgentVersion, ModelSpec
 
 
 class Combination(BaseModel):
