@@ -323,10 +323,22 @@ def plan_validations(
     docker_exact = {
         "src/loom/driver/docker.py",
         ".github/workflows/ci.yml",
+        "tests/support/guard_fixture.py",
+        "tests/support/minio_images.py",
     }
     docker_prefixes = (
         "src/loom_worker/",
         "src/loom/sandbox",
+        # The real cross-language authority/guard flow is Docker-owned. Keep
+        # source-only changes to its components and schema selecting that lane.
+        "src/loom_task_image_builder_guard/",
+        "src/loom_task_image_authority/",
+        "cmd/loom-task-image-builder-supervisor/",
+        "src/loom_control_plane/task_image_",
+        "src/loom/task_image_",
+        "src/loom/db/",
+        "src/loom/security/",
+        "migrations/",
         "packages/loom-launcher/",
         "tests/integration/",
     )
