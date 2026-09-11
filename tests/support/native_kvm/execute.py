@@ -58,6 +58,40 @@ def main():
     logs = []
     root_launcher = None
     try:
+        if identity["root_stop"].startswith("monitored"):
+            from supervised import supervised_build
+
+            started.extend((sandbox_id, buildkit_id, client_id))
+            expiry = identity["root_stop"] == "monitored-expiry"
+            supervised_build(expiry=expiry)
+            # Broker reaping does not prove sentry/gofer termination. In the
+            # disposable init-reaped fixture, observe complete stopped/absent
+            # runtime state before deletion; never retry a failed mutation.
+            deadline = time.monotonic() + 10
+            while True:
+                observed = json.loads(subprocess.run([*runtime, "list", "--format=json"],
+                    check=True, capture_output=True, text=True, timeout=5).stdout) or []
+                by_id = {item["id"]: item["status"] for item in observed}
+                if all(by_id.get(name, "absent") in {"stopped", "absent"} for name in started):
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("supervised broker stop left live runtime state")
+                time.sleep(0.05)
+            if expiry:
+                pulse = output / "lifecycle-pulse"
+                stopped = pulse.read_bytes()
+                assert int(stopped) > 0, "deadline test never reached a live sandbox client"
+                late = subprocess.run([*runtime, "run", "--bundle=/fixtures/client", late_id],
+                    capture_output=True, timeout=5)
+                started.append(late_id)
+                assert late.returncode != 0 and pulse.read_bytes() == stopped
+                print("native-supervised-expiry-stopped-live-client", flush=True)
+                return
+            shutil.copyfile(output / "build/artifacts.tar", "/result/artifacts.tar")
+            os.chmod("/result/artifacts.tar", 0o644)
+            assert list((output / "build/images").iterdir()) == []
+            print("native-allocated-client-artifact-ok", flush=True)
+            return  # The same exact cleanup below is still mandatory.
         for component, name in (("pause", sandbox_id), ("buildkit", buildkit_id)):
             started.append(name)
             log = open("/tmp/" + component + ".log", "w+")
