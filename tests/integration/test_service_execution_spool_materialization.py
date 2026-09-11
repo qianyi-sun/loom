@@ -54,6 +54,7 @@ from tests.integration.test_service_execution_leases import (
     _runtime_result_payload,
     _seed_ready_trial,
 )
+from tests.support.minio import MINIO_TEST_IMAGE
 
 
 @pytest.fixture

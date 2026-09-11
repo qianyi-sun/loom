@@ -29,6 +29,7 @@ from loom.db.schema import (
 )
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from tests.support.minio import MINIO_TEST_IMAGE
 
 _MANIFEST_YAML = """
 apiVersion: loom.taskset/v1
