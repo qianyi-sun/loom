@@ -496,6 +496,24 @@ contents. Discovery/authority errors do not produce invented success. This adapt
 still needs connection to the management runtime and live concurrent-owner
 acceptance; it issues no source grants or application worker credentials.
 
+Build-guard revision `build_guard_0019` records immutable per-claim wrapper outcomes:
+`artifact-ready`, `failed`, or `cancelled`. Artifact-ready retains an archive hash
+and size, not verified image success or publication authority. Object identities
+derive from the exact request, intent and claim, separating retry uploads. The
+management exporter must still verify full OCI contents and scan accepted images
+before publication. Results authenticate the registered worker credential and
+exact committed claim, with byte-exact replay even after source expiry.
+
+Committed outcomes remove the live fixed claim, never its held assignment or
+capacity charge. Historical claim high-water remains one. A new drain records
+the actual live count; existing drain receipts remain immutable across outcomes
+and schema upgrades. Artifact-ready and cancelled requests are excluded from
+pending demand and fresh source admission. A failed request can retry only after
+its old hold is authoritatively retired. No outcome writes public candidate
+status, releases capacity, or grants fresh execution. Lost-result terminal
+settlement, registered release, native outcome transport and verified artifact
+publication remain required before runtime readiness.
+
 Build-guard revision `build_guard_0018` adds registered-worker drain. It joins the
 exact committed registration and observed claim high-water under the same locks
 as claim admission. An initial drain advances to epoch 3; exact replay retains
@@ -503,8 +521,9 @@ one immutable receipt. Draining does not depend on fresh source authority and
 never deletes claims or capacity holds. New claims are fenced, while prior claim
 replay remains evidence recovery only. Observation exposes only committed drain.
 The pool-authenticated HTTP route and pinned purpose client expose committed drain
-without application fallback. Held live claims report `cancel-pending`; outcome and release remain separate
-unfinished steps. The schema refuses downgrade with retained drain evidence.
+without application fallback. Held live claims report `cancel-pending`; outcomes
+and physical release remain separate steps. The schema refuses downgrade with
+retained drain evidence.
 
 Build-guard revision `build_guard_0017` adds an immutable claim of the exact
 allocated platform request. It authenticates the registered worker's opaque
@@ -518,9 +537,10 @@ Demand capture now projects actual `FixedClaimV1` entries from held private clai
 using their allocated resources and registered worker incarnation. Current
 assignments may overlap fixed claims, but neither overlaps pending demand.
 Cancellation marks a claim `cancel-pending`; expired or terminal execution remains
-charged as `unknown`. Neither case releases holds or infers build success. Durable
-outcomes and registered drain/release remain required before live execution can
-be enabled. Retained claim evidence prevents lossy downgrade.
+charged as `unknown` until a durable outcome is recorded. Neither case releases
+holds or infers build success. Registered release and complete runtime outcome
+delivery remain required before live execution can be enabled. Retained claim
+evidence prevents lossy downgrade.
 
 Build-guard revision `build_guard_0016` adds the private native registration
 consumer for the existing sealed handoff. Only initial bootstrap epoch 1 to
@@ -537,9 +557,9 @@ Observation exposes only committed registration. Registration and unregistered
 withdrawal take the same installation/bootstrap/physical locks, so the withdrawal
 path cannot revoke a registered worker. Holds remain charged and retained native
 registration prevents lossy downgrade. Claims are now retained privately, and
-registration and claims have purpose-specific transports. Registered
-drain/release, per-platform outcomes and allocation containment must still be
-connected before public typed execution can be enabled.
+registration, claims and drain have purpose-specific transports. Registered
+release, outcome delivery and allocation containment must still be connected
+before public typed execution can be enabled.
 
 `ActivationRuntimeArtifactV3` and its explicit pinned loader compose the exact
 typed admission file, complete purpose/profile policy, approved profile digest,

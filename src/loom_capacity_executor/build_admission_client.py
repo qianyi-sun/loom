@@ -199,7 +199,7 @@ class BuildAdmissionClient:
         if (receipt.subject_id != request.binding.subject_id or receipt.subject_incarnation != request.binding.subject_incarnation
             or receipt.intent_id != request.binding.intent_id or receipt.worker_id != request.worker_id
             or receipt.worker_incarnation != request.worker_incarnation or receipt.claim_high_water != request.expected_claim_high_water
-            or receipt.live_claim_count != request.expected_claim_high_water or receipt.drain_epoch != request.drain_epoch
+            or receipt.live_claim_count > request.expected_claim_high_water or receipt.drain_epoch != request.drain_epoch
             or receipt.request_digest != digest or receipt.drain_digest != digest):
             raise BuildAdmissionTransportError("native drain receipt binding changed")
         return receipt

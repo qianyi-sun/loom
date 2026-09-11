@@ -137,7 +137,8 @@ async def test_client_authenticates_exact_native_platform_claim(pool, boundary):
 
 
 @pytest.mark.parametrize("boundary", ["exact", "worker", "count", "digest"])
-async def test_client_validates_registered_native_drain(boundary):
+@pytest.mark.parametrize("live_count", [0, 1])
+async def test_client_validates_registered_native_drain(boundary, live_count):
     from uuid import uuid4
 
     from loom_capacity_agent.admission import DrainedExecutableWorkerV2, ExecutableDrainRequestV2
@@ -150,7 +151,7 @@ async def test_client_validates_registered_native_drain(boundary):
     expected = DrainedExecutableWorkerV2(subject_id=worker.binding.subject_id,
         subject_incarnation=worker.binding.subject_incarnation, intent_id=worker.binding.intent_id,
         worker_id=worker.worker_id, worker_incarnation=worker.worker_incarnation,
-        claim_high_water=1, live_claim_count=1, drain_epoch=3, request_digest=digest,
+        claim_high_water=1, live_claim_count=live_count, drain_epoch=3, request_digest=digest,
         drain_digest=digest, protected_high_water=4)
 
     async def handle(outgoing):
@@ -160,7 +161,7 @@ async def test_client_validates_registered_native_drain(boundary):
         if boundary == "worker":
             result = result.model_copy(update={"worker_incarnation": uuid4()})
         elif boundary == "count":
-            result = result.model_copy(update={"live_claim_count": 0})
+            result = result.model_copy(update={"live_claim_count": 2})
         elif boundary == "digest":
             result = result.model_copy(update={"drain_digest": "f" * 64})
         return httpx.Response(200, content=canonical_executable_bytes(result))

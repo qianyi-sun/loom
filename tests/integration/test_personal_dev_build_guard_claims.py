@@ -225,13 +225,13 @@ async def test_claim_evidence_cannot_be_mutated_or_downgraded(prepared_input, mo
     async with factory.begin() as session:
         await store(session, installation).claim_platform(request, worker_credential=CREDENTIAL)
     for statement in ("UPDATE loom_capacity_build_guard.platform_claims SET request_id=request_id",
-        "DELETE FROM loom_capacity_build_guard.platform_claims", "TRUNCATE loom_capacity_build_guard.platform_claims"):
+        "DELETE FROM loom_capacity_build_guard.platform_claims", "TRUNCATE loom_capacity_build_guard.platform_claims CASCADE"):
         with engine.begin() as connection, pytest.raises(DBAPIError, match="append-only"):
             connection.execute(text(statement))
     with pytest.raises(DBAPIError, match="retained evidence"):
         command.downgrade(build_guard_database[0], "build_guard_0016")
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0018"
+        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0019"
 
 
 @pytest.mark.parametrize("boundary", ["grant", "public", "search-path", "helper"])

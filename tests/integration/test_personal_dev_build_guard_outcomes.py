@@ -12,8 +12,12 @@ from loom_capacity_manager.contracts import canonical_digest
 from tests.integration.test_personal_dev_build_guard_claims import claim_input
 from tests.integration.test_personal_dev_build_guard_drain import drain_input
 from tests.integration.test_personal_dev_build_guard_execution import store
-from tests.integration.test_personal_dev_build_guard_installations import owner_sessions as owner_sessions
-from tests.integration.test_personal_dev_build_guard_migrations import build_guard_database as build_guard_database
+from tests.integration.test_personal_dev_build_guard_installations import (
+    owner_sessions as owner_sessions,
+)
+from tests.integration.test_personal_dev_build_guard_migrations import (
+    build_guard_database as build_guard_database,
+)
 from tests.integration.test_personal_dev_build_guard_prepare import prepared_input as prepared_input
 from tests.integration.test_personal_dev_build_guard_registration import CREDENTIAL
 from tests.integration.test_personal_dev_native_builder_store import sessions as sessions
@@ -54,6 +58,7 @@ async def test_native_outcome_closes_work_but_preserves_hold_and_historical_drai
             assert drained == historical and drained.live_claim_count == 1
         else:
             assert drained.live_claim_count == 0 and drained.claim_high_water == 1
+    async with factory.begin() as session:
         assert (await store(session, installation).observe_intent(claim.binding)).claim_high_water == 1
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
@@ -130,3 +135,132 @@ async def test_outcome_corrupt_receipt_rollback_and_immutable_history(prepared_i
             connection.execute(text(statement))
     with pytest.raises(DBAPIError, match="retained evidence"):
         command.downgrade(build_guard_database[0], "build_guard_0018")
+
+
+@pytest.mark.parametrize("result", ["artifact-ready", "failed", "cancelled"])
+async def test_completed_request_fences_source_admission_but_failed_work_can_retry_after_release(prepared_input, monkeypatch, owner_sessions, result):
+    from loom.personal_dev_build_platform_requests import canonical_build_source
+
+    factory, _engine, installation, _plan, source, platform = prepared_input
+    _drain, claim = await drain_input(prepared_input, monkeypatch, claimed=True)
+    async with factory.begin() as session:
+        await store(session, installation).record_outcome(outcome_request(claim, result=result), worker_credential=CREDENTIAL)
+    owner_factory, role = owner_sessions
+    async with owner_factory.begin() as session:
+        await session.execute(text(f"SET LOCAL ROLE {role}"))
+        finished = await session.scalar(text("SELECT loom_capacity_build_guard.native_request_finished(:request)"), {"request": platform.id})
+        assert finished is (result != "failed")
+        wire = canonical_build_source(source)
+        statement = text("""SELECT loom_capacity_build_guard.assert_current_source(
+            :installation,:request,CAST(:payload AS jsonb),:wire,:digest)""")
+        parameters = {"installation": installation.id, "request": platform.id, "payload": wire.decode("ascii"),
+            "wire": wire, "digest": platform.source_binding_sha256}
+        if result == "failed":
+            assert await session.scalar(statement, parameters) is not None
+        else:
+            with pytest.raises(DBAPIError, match="live lease changed"):
+                await session.scalar(statement, parameters)
+
+
+async def test_native_outcome_and_drain_serialize_without_changing_old_receipt(prepared_input, monkeypatch):
+    import asyncio
+
+    factory, _engine, installation, *_ = prepared_input
+    drain, claim = await drain_input(prepared_input, monkeypatch, claimed=True)
+    outcome = outcome_request(claim)
+    ready = [asyncio.Event(), asyncio.Event()]
+
+    async def compete(index):
+        try:
+            async with factory.begin() as session:
+                ready[index].set()
+                await ready[1-index].wait()
+                if index:
+                    return await store(session, installation).begin_drain(drain)
+                return await store(session, installation).record_outcome(outcome, worker_credential=CREDENTIAL)
+        except DBAPIError as exc:
+            assert getattr(exc.orig, "sqlstate", None) == "40001"
+            return None
+
+    completed, drained = await asyncio.gather(compete(0), compete(1))
+    assert completed is not None or drained is not None
+    async with factory.begin() as session:
+        final_outcome = await store(session, installation).record_outcome(outcome, worker_credential=CREDENTIAL)
+        if completed is not None:
+            assert completed == final_outcome
+    async with factory.begin() as session:
+        final_drain = await store(session, installation).begin_drain(drain)
+        if drained is not None:
+            assert drained == final_drain
+        else:
+            assert final_drain.live_claim_count == 0
+        report = await BuildGuardDemandStore(session, installation=installation).capture(configuration_generation=1)
+        assert report.fixed_claims == () and len(report.current_assignments) == 1
+
+
+async def test_migration_preserves_pre_outcome_drain_receipts(prepared_input, monkeypatch, build_guard_database):
+    from alembic import command
+
+    factory, _engine, installation, *_ = prepared_input
+    # No outcome exists: downgrade preserves registration and claim history.
+    command.downgrade(build_guard_database[0], "build_guard_0018")
+    drain, claim = await drain_input(prepared_input, monkeypatch, claimed=True)
+    async with factory.begin() as session:
+        before = await store(session, installation).begin_drain(drain)
+    command.upgrade(build_guard_database[0], "head")
+    async with factory.begin() as session:
+        assert await store(session, installation).begin_drain(drain) == before
+        await store(session, installation).record_outcome(outcome_request(claim), worker_credential=CREDENTIAL)
+    async with factory.begin() as session:
+        assert await store(session, installation).begin_drain(drain) == before
+
+
+@pytest.mark.parametrize("boundary", ["grant", "public", "search-path", "helper"])
+def test_native_outcome_privilege_drift_is_rejected(build_guard_database, boundary):
+    from alembic import command
+
+    config, engine, _owner, agent, _url = build_guard_database
+    command.upgrade(config, "head")
+    signature = "loom_capacity_build_guard.record_outcome(uuid,jsonb,bytea,text,text)"
+    statements = {"grant": f"REVOKE EXECUTE ON FUNCTION {signature} FROM {engine.dialect.identifier_preparer.quote(agent)}",
+        "public": f"GRANT EXECUTE ON FUNCTION {signature} TO PUBLIC",
+        "search-path": f"ALTER FUNCTION {signature} SET search_path=public",
+        "helper": "ALTER FUNCTION loom_capacity_build_guard.native_live_claim_count(uuid) SECURITY DEFINER"}
+    with engine.begin() as connection:
+        connection.execute(text(statements[boundary]))
+    with pytest.raises(RuntimeError, match=r"privilege|surface"):
+        command.upgrade(config, "head")
+
+
+@pytest.mark.parametrize("boundary", ["success", "missing-result", "null-artifact", "failure-artifact", "extra-artifact", "negative-size", "bool-size", "overflow-size", "bad-digest", "credential"])
+async def test_raw_sql_outcome_cannot_bypass_wrapper_contract(prepared_input, monkeypatch, boundary):
+    import json
+    from hashlib import sha256
+
+    factory, engine, installation, *_ = prepared_input
+    _drain, claim = await drain_input(prepared_input, monkeypatch, claimed=True)
+    payload = outcome_request(claim).model_dump(mode="json")
+    if boundary == "success":
+        payload["result"] = "success"
+    elif boundary == "missing-result":
+        del payload["result"]
+    elif boundary == "null-artifact":
+        payload["artifact"] = None
+    elif boundary == "failure-artifact":
+        payload["result"] = "failed"
+    elif boundary == "extra-artifact":
+        payload["artifact"]["url"] = "https://foreign.invalid/artifact"
+    elif boundary == "bad-digest":
+        payload["artifact"]["archive_sha256"] = "z" * 64
+    elif boundary != "credential":
+        payload["artifact"]["archive_size_bytes"] = {"negative-size": -1, "bool-size": True, "overflow-size": 2**63}[boundary]
+    wire = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii")
+    async with factory.begin() as session:
+        with pytest.raises(DBAPIError):
+            await session.scalar(text("""SELECT loom_capacity_build_guard.record_outcome(
+                :installation,CAST(:payload AS jsonb),:wire,:digest,:credential)"""),
+                {"installation": installation.id, "payload": wire.decode("ascii"), "wire": wire,
+                    "digest": sha256(wire).hexdigest(), "credential": "x" * 64 if boundary == "credential" else sha256(CREDENTIAL.encode("ascii")).hexdigest()})
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_outcomes")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1

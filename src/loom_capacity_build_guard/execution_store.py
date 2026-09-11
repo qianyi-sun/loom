@@ -24,7 +24,12 @@ from loom_capacity_agent.admission import (
     RevokedExecutableBootstrapV2,
     WithdrawnExecutableWorkerV2,
 )
-from loom_capacity_agent.build_admission import BuildClaimReceiptV1, BuildClaimRequestV1
+from loom_capacity_agent.build_admission import (
+    BuildClaimReceiptV1,
+    BuildClaimRequestV1,
+    BuildOutcomeReceiptV1,
+    BuildOutcomeRequestV1,
+)
 from loom_capacity_build_guard.installation_store import (
     BuildGuardInstallationV1,
     RetainedBuildInstallation,
@@ -159,9 +164,45 @@ class BuildGuardExecutionStore:
                 or receipt.subject_id != request.binding.subject_id or receipt.subject_incarnation != request.binding.subject_incarnation
                 or receipt.intent_id != request.binding.intent_id or receipt.worker_id != request.worker_id
                 or receipt.worker_incarnation != request.worker_incarnation or receipt.claim_high_water != request.expected_claim_high_water
-                or receipt.live_claim_count != request.expected_claim_high_water or receipt.drain_epoch != request.drain_epoch
+                or receipt.live_claim_count > request.expected_claim_high_water or receipt.drain_epoch != request.drain_epoch
                 or receipt.request_digest != digest or receipt.drain_digest != digest):
                 raise ValueError("native drain receipt changed")
+            return receipt
+
+    async def record_outcome(self, request: BuildOutcomeRequestV1, *, worker_credential: str) -> BuildOutcomeReceiptV1:
+        """Retain exact worker results, not candidate success or physical release."""
+        if not self._session.in_transaction():
+            raise ValueError("native outcome requires an outer transaction")
+        request = BuildOutcomeRequestV1.model_validate_json(request.model_dump_json())
+        if not isinstance(worker_credential, str) or re.fullmatch(r"[A-Za-z0-9_-]{43,512}", worker_credential) is None:
+            raise ValueError("native outcome credential is invalid")
+        wire, digest = canonical_bytes(request), canonical_digest(request)
+        async with self._session.begin_nested():
+            returned = await self._session.scalar(text("""SELECT loom_capacity_build_guard.record_outcome(
+                :installation,CAST(:payload AS jsonb),:wire,:digest,:credential)"""),
+                {"installation": self._installation.id, "payload": wire.decode("ascii"), "wire": wire,
+                    "digest": digest, "credential": sha256(worker_credential.encode("ascii")).hexdigest()})
+            receipt = BuildOutcomeReceiptV1.model_validate_json(returned)
+            if canonical_bytes(receipt).decode("ascii") != returned or receipt.request != request or receipt.request_digest != digest:
+                raise ValueError("native outcome receipt changed")
+            return receipt
+
+    async def read_outcome(self, claim: BuildClaimRequestV1) -> BuildOutcomeReceiptV1 | None:
+        if not self._session.in_transaction():
+            raise ValueError("native outcome observation requires an outer transaction")
+        claim = BuildClaimRequestV1.model_validate_json(claim.model_dump_json())
+        wire = canonical_bytes(claim)
+        async with self._session.begin_nested():
+            returned = await self._session.scalar(text("""SELECT loom_capacity_build_guard.read_outcome(
+                :installation,CAST(:payload AS jsonb),:wire,:digest)"""),
+                {"installation": self._installation.id, "payload": wire.decode("ascii"), "wire": wire,
+                    "digest": canonical_digest(claim)})
+            if returned is None:
+                return None
+            receipt = BuildOutcomeReceiptV1.model_validate_json(returned)
+            if (canonical_bytes(receipt).decode("ascii") != returned or receipt.request.claim != claim
+                or receipt.request_digest != canonical_digest(receipt.request)):
+                raise ValueError("native outcome observation receipt changed")
             return receipt
 
     async def claim_platform(self, request: BuildClaimRequestV1, *, worker_credential: str) -> BuildClaimReceiptV1:
