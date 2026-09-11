@@ -104,6 +104,17 @@ class NativeExecutionDeadline:
                 self._fail("protocol-error")
             return self._deadline
 
+    def poll_deadline(self) -> int:
+        """Poll expiry while awaiting a reply; this never grants execution."""
+        with self._lock:
+            self._check()
+            deadlines = ([] if self._deadline is None else [self._deadline])
+            if self._pending is not None:
+                deadlines.append(self._pending[1] + _MAX_LIFETIME_NS)
+            if not deadlines:
+                self._fail("protocol-error")
+            return min(deadlines)
+
     def stop(self, reason: str) -> None:
         with self._lock:
             if reason not in _STOP_REASONS:

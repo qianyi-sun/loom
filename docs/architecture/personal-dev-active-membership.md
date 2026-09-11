@@ -2147,6 +2147,24 @@ subtracts transport and validation delay, refuses renewals across an expired
 older permission, and never falls back to a suspend-blind clock. This helper
 does not schedule its own timer, start/kill children, persist one-shot exclusion,
 or prove physical release; the independent runtime watchdog must consume it.
+`supervise_native_execution` now consumes it in a bounded local monitor, separate
+from blocking authority IO and runtime spawning. Its precreated helpers exchange
+canonical, size-limited UNIX sequenced packets; descriptor transfer, EOF,
+backpressure and malformed or unsolicited replies fail closed. Each fixed
+pause → BuildKit → client start carries an absolute BOOTTIME deadline for the
+broker to recheck before spawning. The monitor polls at most 50 ms apart and
+checks expiry after waking, before starts, and before accepting client completion.
+It reads a queued cancellation behind a permit before progressing; the single
+outstanding-request contract bounds that drain to two frames without starving
+expiry. It always kills and reaps its exact broker child on return. Its result
+reports only observed client success and broker reaping, not artifact acceptance,
+complete runtime cleanup or physical release. The caller retains the authority
+channel and must settle any pending reply before a subsequent artifact phase.
+The fixed runtime broker, helper setup/death binding and installed orchestration
+are not yet connected. Real helper-process tests prove deadline behavior under
+blocked IO, silence, protocol failures and queued cancellation, while simulated
+BOOTTIME jumps cover queued starts and completion after suspend-like expiry.
+They do not establish installed rootless or Slurm containment.
 The route requires `native-execution`, which production service configuration
 currently rejects. Isolated route tests exercise it without opening installed
 execution; source/claim receipts remain inert and no runtime launcher is enabled.
