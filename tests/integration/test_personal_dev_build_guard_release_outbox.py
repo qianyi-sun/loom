@@ -56,6 +56,10 @@ async def test_native_outbox_commit_replay_and_ack_preserve_holds(prepared_input
         assert await outbox(session, installation).read_next() == publication
         checkpoint = await outbox(session, installation).acknowledge(publication,
             manager_acknowledgement_digest=publication.publication_digest)
+        # A newly retained receipt cannot advance the cursor before commit.
+        # A later transaction replaying that receipt may advance it (below).
+        with pytest.raises(DBAPIError, match="committed"):
+            await outbox(session, installation).read_next()
     async with factory.begin() as session:
         assert await outbox(session, installation).acknowledge(publication,
             manager_acknowledgement_digest=publication.publication_digest) == checkpoint
@@ -172,9 +176,17 @@ async def test_outbox_concurrent_ack_and_committed_cursor(prepared_input):
     async with factory.begin() as session:
         publication = await outbox(session, installation).read_next()
 
+    snapshots_ready = asyncio.Barrier(2)
+
     async def acknowledge():
         try:
             async with factory.begin() as session:
+                # gather() alone permits the second caller to start after the
+                # first commits, making it a valid replay instead of a race.
+                # Establish both SERIALIZABLE snapshots before either writes.
+                await session.scalar(text("SELECT pg_current_snapshot()"))
+                async with asyncio.timeout(10):
+                    await snapshots_ready.wait()
                 receipt = await outbox(session, installation).acknowledge(publication,
                     manager_acknowledgement_digest=publication.publication_digest)
                 with pytest.raises(DBAPIError, match="committed"):
