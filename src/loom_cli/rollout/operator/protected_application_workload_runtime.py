@@ -132,7 +132,7 @@ def _runtime_secret(value: object) -> bool:
         return True
     # A whole Secret mounted as files can supply the same credentials.
     ref = value.get("secret")
-    if isinstance(ref, dict) and ref.get("secretName") == "loom-secrets":
+    if isinstance(ref, dict) and (ref.get("secretName") == "loom-secrets" or ref.get("name") == "loom-secrets"):
         return True
     return any(_runtime_secret(item) for item in value.values())
 
@@ -214,12 +214,15 @@ def _observe(plan: FinalGatePlan, runner: ApplicationWorkloadRunner, guard: Muta
                 raise ValueError("application workload ReplicaSet identity is invalid")
             roots[uid] = ("ReplicaSet", name)
     roots.update({item.uid: (item.kind, item.name) for item in saved})
+    missing_jobs = {item.uid for item in saved if item.kind == "Job" and (item.kind, item.name) not in objects}
     active = False
     for document in lists["Pod"]:
         if not _active_pod(document):
             continue
         owner = _owner(document)
         if owner is not None and roots.get(owner[2]) == owner[:2]:
+            if owner[0] == "Job" and owner[2] in missing_jobs:
+                raise RuntimeError("application workload deleted Job still has an active Pod")
             active = True
         elif _runtime_secret(document.get("spec")):
             raise RuntimeError("application workload has an unowned live database client Pod")
