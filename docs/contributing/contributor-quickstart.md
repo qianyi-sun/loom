@@ -257,6 +257,10 @@ On GitHub, selected non-Docker integration tests are split into two disjoint,
 contiguous ranges of the manifest-owned filename order. Contiguous ordering
 preserves the suite's session-scoped Postgres setup/cleanup contract while the
 two shards start directly after the planner, in parallel with the fast tier.
+The ownership manifest also pins measured slow modules to the shorter shard;
+these whole-file moves preserve filename order within each shard and keep every
+test assigned exactly once. Adjust pins from CI timing evidence, not by omitting
+tests or extending the job budget whenever the distribution becomes uneven.
 The local commands remain serial equivalents so they are easy to reproduce.
 
 Tests using `isolated_migration_postgres_url` receive separate disposable

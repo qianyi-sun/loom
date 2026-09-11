@@ -81,6 +81,12 @@ pins = [
   { path = "tests/integration/test_executable_global_capacity_bridge.py", shard_index = 1 },
   { path = "tests/integration/test_capacity_manager_migrate.py", shard_index = 1 },
   { path = "tests/integration/test_migration_task_set_materialization_jobs.py", shard_index = 1 },
+  # PR #1930 run 34621281870: 3548s / 2353s test time. These whole modules
+  # accounted for ~519s in shard 1; preserve coverage and the 60-minute budget.
+  { path = "tests/integration/test_personal_dev_build_guard_http.py", shard_index = 1 },
+  { path = "tests/integration/test_capacity_manager_execution_store.py", shard_index = 1 },
+  { path = "tests/integration/test_capacity_final_release_witness.py", shard_index = 1 },
+  { path = "tests/integration/test_capacity_typed_terminal_sql.py", shard_index = 1 },
 ]
 
 [[execution_policies]]
