@@ -1,0 +1,83 @@
+"""Protected native build preparation/physical retention, never worker exchange."""
+
+from __future__ import annotations
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from loom_capacity_agent.admission import (
+    BoundExecutableWorkerV2,
+    PhysicalJobBindingV2,
+    PreparedExecutableAdmissionV2,
+)
+from loom_capacity_build_guard.installation_store import (
+    BuildGuardInstallationV1,
+    RetainedBuildInstallation,
+)
+from loom_capacity_manager.contracts import canonical_bytes
+from loom_capacity_manager.executable_contracts import (
+    ExecutableBootstrapRegistrationV2,
+    canonical_executable_bytes,
+    canonical_executable_digest,
+)
+
+
+class BuildGuardExecutionStore:
+    """Call private management procedures inside a caller-owned transaction.
+
+    These receipts are compatible with the executor journal, but do not wire its
+    authentication route, grant a source/worker credential, or enable readiness.
+    """
+
+    def __init__(self, session: AsyncSession, *, installation: RetainedBuildInstallation) -> None:
+        document = BuildGuardInstallationV1.model_validate_json(installation.wire_payload)
+        if document != installation.document or canonical_bytes(document) != installation.wire_payload:
+            raise ValueError("build execution installation receipt changed")
+        self._session = session
+        self._installation = document
+
+    async def prepare_worker(self, request: ExecutableBootstrapRegistrationV2, *,
+        bootstrap_sha256: str,
+    ) -> PreparedExecutableAdmissionV2:
+        if not self._session.in_transaction():
+            raise ValueError("build worker preparation requires an outer transaction")
+        request = ExecutableBootstrapRegistrationV2.model_validate_json(request.model_dump_json())
+        wire = canonical_executable_bytes(request)
+        digest = canonical_executable_digest(request)
+        async with self._session.begin_nested():
+            returned = await self._session.scalar(text("""SELECT loom_capacity_build_guard.prepare_worker(
+                :installation,CAST(:payload AS jsonb),:wire,:digest,:bootstrap)"""),
+                {"installation":self._installation.id,"payload":wire.decode("ascii"),"wire":wire,
+                    "digest":digest,"bootstrap":bootstrap_sha256})
+            receipt = PreparedExecutableAdmissionV2.model_validate_json(returned)
+            if (canonical_executable_bytes(receipt).decode("ascii") != returned
+                or receipt.subject_id != self._installation.subject_id
+                or receipt.subject_incarnation != self._installation.subject_incarnation
+                or receipt.intent_id != request.binding.intent_id
+                or receipt.bootstrap_registration_epoch != request.bootstrap_registration_epoch
+                or receipt.bootstrap_sha256 != bootstrap_sha256
+                or receipt.request_digest != digest or receipt.admission_digest != digest):
+                raise ValueError("build worker preparation receipt changed")
+            return receipt
+
+    async def bind_slurm_job(self, request: PhysicalJobBindingV2) -> BoundExecutableWorkerV2:
+        if not self._session.in_transaction():
+            raise ValueError("build physical binding requires an outer transaction")
+        request = PhysicalJobBindingV2.model_validate_json(request.model_dump_json())
+        wire = canonical_executable_bytes(request)
+        digest = canonical_executable_digest(request)
+        async with self._session.begin_nested():
+            returned = await self._session.scalar(text("""SELECT loom_capacity_build_guard.bind_slurm_job(
+                :installation,CAST(:payload AS jsonb),:wire,:digest)"""),
+                {"installation":self._installation.id,"payload":wire.decode("ascii"),"wire":wire,"digest":digest})
+            receipt = BoundExecutableWorkerV2.model_validate_json(returned)
+            if (canonical_executable_bytes(receipt).decode("ascii") != returned
+                or receipt.subject_id != self._installation.subject_id
+                or receipt.subject_incarnation != self._installation.subject_incarnation
+                or receipt.intent_id != request.binding.intent_id
+                or receipt.bootstrap_registration_epoch != request.bootstrap_registration_epoch
+                or receipt.slurm_job_id != request.slurm_job_id
+                or receipt.ownership_evidence_sha256 != request.ownership_evidence_sha256
+                or receipt.request_digest != digest or receipt.binding_digest != digest):
+                raise ValueError("build physical binding receipt changed")
+            return receipt

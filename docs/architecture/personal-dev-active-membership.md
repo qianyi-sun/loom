@@ -252,6 +252,19 @@ must use manager-owned cleanup and a new intent. Later native binding and claims
 must match this exact hash/evidence plus admitted work and physical scheduler
 ownership; none of those capabilities is enabled by bootstrap retention alone.
 
+Revision `build_guard_0009` adds protected native preparation and physical job
+retention. New preparation joins the committed bootstrap hash/evidence to the
+exact admitted shape and held assignment, requires committed publication, and
+rechecks current source and leases. Exact retained preparation replay survives
+cancellation and expiry so a lost reply cannot strand the executor's cleanup
+journal. Physical binding requires prior committed preparation and pins the
+exact pool/job and ownership digest; it remains recordable after cancellation
+because the scheduler job may already exist. Neither operation releases a hold
+or grants a worker/source credential. Append-only receipts use the existing
+executor protocol and a database-generated high-water sequence. Purpose-specific
+executor authentication, contained execution, claims and physical release remain
+unconnected; typed runtime activation and readiness stay interlocked.
+
 Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
 preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release
 verification bind the exact historical configuration, acknowledgement and member
