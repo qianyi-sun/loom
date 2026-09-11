@@ -138,6 +138,61 @@ def test_native_launcher_selects_typed_application_without_legacy_fallback(tmp_p
         TrustedLauncherConfigV2.model_validate(original)
 
 
+@pytest.mark.parametrize("version", (2, 3))
+def test_existing_launcher_config_keeps_original_canonical_bytes(tmp_path, version):
+    import json
+
+    from loom_capacity_executor.slurm_contracts import SlurmFileIdentityV2
+    from loom_capacity_executor.trusted_launcher import _load_trusted_config
+    from loom_capacity_manager.executable_contracts import canonical_executable_bytes
+    from tests.unit.test_capacity_executor_bootstrap_handoff import (
+        _trusted_candidate_config_payload,
+        _write_candidate,
+    )
+
+    _typed, _request, document, _path, _digest = configured(tmp_path, "gb10", "personal-build-worker")
+    candidate = tmp_path / "candidate"
+    _write_candidate(candidate)
+    original = _trusted_candidate_config_payload(handoff_directory=tmp_path,
+        admission_directory=tmp_path, candidate_path=candidate)
+    if version == 3:
+        original.update(schema_version=3, executor=document.executor.model_dump(mode="json"))
+    # Encode the pre-existing document, not the expanded model under test.
+    wire = json.dumps(original, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    path = tmp_path / "launcher.json"
+    path.write_bytes(wire)
+    path.chmod(0o600)
+    config = _load_trusted_config(SlurmFileIdentityV2(path=str(path),
+        sha256=hashlib.sha256(wire).hexdigest(), owner_uid=path.stat().st_uid))
+    assert canonical_executable_bytes(config) == wire
+
+
+@pytest.mark.parametrize("typed", (False, True))
+def test_personal_build_launcher_refuses_application_native_policy(tmp_path, typed):
+    from loom_capacity_executor.trusted_launcher import NativeTrustedLauncherConfigV3
+    from tests.unit.test_capacity_executor_bootstrap_handoff import (
+        _trusted_candidate_config_payload,
+        _write_candidate,
+    )
+    from tests.unit.test_worker_native_entrypoint import _configured_bootstrap
+
+    _module, _request, document, _path, _digest = configured(tmp_path, "gb10", "personal-build-worker")
+    candidate = tmp_path / "candidate"
+    _write_candidate(candidate)
+    original = _trusted_candidate_config_payload(handoff_directory=tmp_path,
+        admission_directory=tmp_path, candidate_path=candidate)
+    bootstrap = _configured_bootstrap()
+    original.update(schema_version=3, executor=document.executor,
+        candidate_argv=(str(candidate),), native_worker={
+            "native_execution": bootstrap.native_execution,
+            "canonical_worker_settings": bootstrap.canonical_worker_settings,
+            "docker_config_directory": "/etc/loom/empty-docker", "pids_max": 128})
+    if typed:
+        original["typed_application_executor"] = document.executor
+    with pytest.raises(ValueError, match="application"):
+        NativeTrustedLauncherConfigV3.model_validate(original)
+
+
 async def test_typed_controller_delivery_and_node_consumption_preserve_route(private_delivery, monkeypatch):
     from loom_capacity_agent.admission import CurrentExecutableBootstrapV2
     from loom_capacity_executor.bootstrap_handoff import (
