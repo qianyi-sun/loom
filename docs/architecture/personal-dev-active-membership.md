@@ -2112,7 +2112,7 @@ verifies empty runtime state after cleanup. Its init process reaps detached
 runtime helpers; installed process supervision still needs equivalent proof.
 Both explicit root kill and abrupt death of the attached runsc root launcher
 are exercised. The latter tests gVisor's kernel parent-death binding, not the
-still-unimplemented supervisor-to-launcher death chain or Slurm cleanup.
+installed supervisor-to-launcher death chain or Slurm cleanup.
 `bind_native_parent_death` supplies a dependency-free Linux helper primitive:
 it checks the expected parent before and after setting `PDEATHSIG=SIGKILL`, then
 checks the configured signal. Each fork link must bind separately; privilege
