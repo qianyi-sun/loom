@@ -26,6 +26,7 @@ from pydantic import Field, field_validator, model_validator
 from loom_capacity_executor.launch_renderer import NativeTaskImageExecutionV2
 from loom_capacity_executor.native_worker_bootstrap import NativeWorkerBootstrap
 from loom_capacity_manager.executable_contracts import StrictV2Model
+from loom_control_plane.slurm_job_cgroup import _slurm_job_scope
 
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}", re.ASCII)
 _CONTAINER_ID = re.compile(r"[0-9a-f]{64}", re.ASCII)
@@ -122,6 +123,7 @@ class NativeWorkerAllocation:
     def __post_init__(self) -> None:
         try:
             path = PurePosixPath(self.scratch_directory)
+            parent = PurePosixPath(self.cgroup_parent)
             if (
                 str(UUID(self.intent_id)) != self.intent_id
                 or self.pool_id not in {"oldlab", "gb10"}
@@ -129,6 +131,8 @@ class NativeWorkerAllocation:
                 or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", self.candidate_sha) is None
                 or re.fullmatch(r"[1-9][0-9]*", self.job_id) is None
                 or not self.cgroup_parent or any(char in self.cgroup_parent for char in "\0\n\r,")
+                or not parent.is_absolute() or str(parent) != self.cgroup_parent
+                or ".." in parent.parts or _slurm_job_scope(parent, self.job_id) != parent
                 or not path.is_relative_to("/var/lib/loom/native-workers")
                 or path == PurePosixPath("/var/lib/loom/native-workers")
                 or str(path) != self.scratch_directory or ".." in path.parts

@@ -1429,6 +1429,20 @@ currently supports CPU-only trial allocations on OLDLAB and GB10, refusing GPU,
 pipeline, singleton/sandbox and worker-vLLM modes until their equivalent native
 admission paths exist. Phase 1 keeps its existing supported modes.
 
+Native host launch requires Docker's `cgroupfs` driver on unified cgroup v2 and
+the actual delegated Slurm job ancestor. The native allocation model refuses a
+systemd slice, foreign job, traversal, or a batch-step path in place of that
+aggregate ancestor. Daemon capability is checked before image prefetch or
+bootstrap consumption. The same exact ancestor is passed to worker creation and
+bound into its settings for trial/sidecar children. An independently capped
+systemd sibling is not an alternative: assigning the full allocation limits to
+both branches duplicates the aggregate budget and loses Slurm ancestry. Legacy
+Phase 1's systemd bridge remains separately supported. No launcher changes daemon
+configuration; compatible native runtime provisioning requires reviewed drained
+node/deployment evidence without disrupting the existing service. Actual process
+ancestry, cancellation and positive descendant cleanup still require live proof;
+daemon/pull overhead is not made allocation-contained by container placement.
+
 The fixed container invocation uses an absolute isolated Python entrypoint, a
 read-only root, a non-root user, explicit Docker parent/resource limits, no
 restart or healthcheck, and only the Docker socket and per-launch scratch bind.
@@ -1464,8 +1478,15 @@ teardown of an existing slice. Positively terminal legacy jobs do not keep their
 slices alive during Slurm's terminal-record retention interval. Only readable RUNNING legacy opt-ins acquire or
 resize a slice. This prevents an admission failure from disrupting an existing
 allocation; it neither authenticates a protected job nor proves positive runtime
-cleanup or permits an independent slice creator. A coordinated owner-authenticated guard adapter
-is still required before host launch acceptance; neither the signed ownership
+cleanup or permits an independent slice creator. A coordinated owner-authenticated
+guard adapter must delegate the real Slurm job subtree for native workers, not
+create a substitute systemd slice. Pre-registration admission must verify the
+current protected physical binding and unrevoked bootstrap plus fresh scheduler
+incarnation/node/resource facts. Historical intent observation and the pre-submit
+ownership signature are insufficient. Any purpose-specific signed delegation
+must cover this post-bind authority; it grants containment preparation, never a
+second worker registration or trial start. This adapter is still required before
+host launch acceptance; neither the signed ownership
 comment nor the legacy guard's opt-in format may be silently replaced.
 Installed-image diagnostic tests cover transport, loader-environment clearing and
 Docker client-loss cleanup, not actual protected worker registration acceptance.
