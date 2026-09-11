@@ -1428,9 +1428,34 @@ exact retry returns the existing receipt. This process API requires a fixed
 authenticated supervisor and protected local factory; it is not a network listener
 or permission to choose a receiver from request bytes.
 
-The fixed confidential controller-to-node transport, protected receiver installation,
+The node-directed transport uses dedicated-CA mutual TLS 1.3 plus exact leaf
+certificate pins and protocol ALPN. A client validates its configured numeric
+destination, hostname, node/pool/release, certificate pin and expiry before sending
+capability bytes. Node peer pins authorize only an exact pool, controller executor
+and incarnation, a bounded validity interval and the fixed delivery/status operations.
+TLS keys are digest-pinned owner-only snapshots loaded only after the supervisor
+process passes dump-protection checks. Session tickets are disabled. No SSH shell,
+remote command, forwarded identity or ambient proxy is involved.
+
+One connection carries a nine-byte header (magic `LNB1`, operation `D` or `S`,
+four-byte unsigned big-endian body length) and one canonical request. A reply uses
+`LNR1` with `R` plus the exact receipt, or empty `U` (unknown status only) or `F`
+(refusal). Request bodies are bounded to 256 KiB for delivery and 64 KiB for status;
+receipts are at most 4 KiB. TLS half-close is not used as message framing. The
+receiver child still gets a bounded EOF-terminated pipe. No second operation is
+executed on the connection, and lost responses do not cause automatic reissuance.
+
+Connection slots are reserved before TLS handshakes, operation concurrency and the
+client pending-request queue are bounded, and one absolute deadline covers each
+exchange. Explicit monotonic checks reject results from non-yielding operations
+that overrun that deadline. Actual interruption of blocking filesystem operations
+requires the isolated receiver-process adapter; elapsed-time rejection alone is
+not proof of interruption. Socket ownership survives cancellation, and listener
+failure closes the socket and is exposed through `wait()` for the fixed supervisor.
+
+Protected transport/receiver installation and fixed process-adapter composition,
 controller delivery journaling, remote revocation/cleanup convergence and crash-orphan
-retirement still need integration. Do not infer them from local delivery success
+retirement still need integration. Do not infer them from local delivery/TLS success
 or mount the whole controller handoff directory to fill the gap. Delivery receipts
 are not root cgroup preparation, registration or runtime-start authority.
 
