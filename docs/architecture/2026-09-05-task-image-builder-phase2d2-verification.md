@@ -860,6 +860,48 @@ The runtime authority never loads the production Ed25519 private key. A
 service/KMS implementation and its authenticated transport must be available
 and verified before composing the publication worker in production.
 
+### Dedicated signer transport
+
+`publication_transport.HTTPSPublicationSigner` implements the existing signer
+protocol over one fixed `POST /v1/publications/sign` operation. Trusted service
+composition supplies an origin-only HTTPS URL, a dedicated server CA and a
+client TLS certificate/key. The connection requires TLS 1.3, verifies the server
+hostname, and presents the authority's client identity. The remote service must
+authorize that identity using a dedicated client CA and constrain its operation
+to the publication schema/domain. A certificate shared with node guards or
+allocations is not suitable. The client's TLS authentication key is distinct
+from publication and execution signing keys; neither signing key enters the
+authority process or a task allocation.
+
+The client rejects noncanonical or invalid unsigned publication input before
+network I/O. Tasks cannot choose an endpoint, algorithm, credential or arbitrary
+signing bytes. It does not use environment proxies, redirect, decompress or
+retry. Each call owns one connection, with bounded concurrency and a monotonic
+deadline that includes queue time (five seconds by default, at most ten). Raw
+headers are bounded to 32 KiB by default (64 KiB maximum), total wire bytes to
+1 MiB and the body to the caller's limit, never above the existing 128 KiB signer
+reply ceiling. Raw framing checks reject duplicate/list content lengths,
+transfer encoding combined with content length, and folded headers before HTTP
+parser normalization. Informational responses, trailers, non-JSON and compressed
+bodies are rejected. Close cancels and joins active and queued operations; cancellation,
+deadline expiry and connect-handoff races retain socket disposal ownership.
+
+Connection/deadline failures and HTTP 429/502/503/504 report transient failure to
+the durable publication worker; authentication and malformed protocol responses
+do not become catch-all retries. Errors contain neither response bodies nor
+credentials. Successful transport returns untrusted envelope bytes: the existing
+signature verifier still checks canonical identity, key, distribution snapshot,
+epoch and clock, and the final transaction independently rechecks mutable state.
+Real loopback mutual-TLS tests exercise that exact verifier path, identity refusal,
+response limits and cancellation cleanup. They use generated disposable keys,
+not a provisioned production signer.
+
+This client does not activate publication. The authenticated signing service,
+signed-keyset distribution adapter, worker envelope/keyset verification, one-use
+start authority and protected native acceptance remain required before runtime
+composition. No default adapter, signing key, distributed keyset counter or
+provider switch is installed by this transport increment.
+
 The publication migration can downgrade only an empty, inactive installation:
 no keys, envelopes, jobs, registry credentials or candidates, and zero
 keyset/revocation counters. A state-first, nonwaiting table-lock set precedes
