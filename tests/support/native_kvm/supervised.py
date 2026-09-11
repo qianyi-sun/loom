@@ -47,7 +47,7 @@ def serve_authority(descriptor, parent_pid, expiry):
             client=FixtureClient()))
 
 
-def supervised_build(expiry=False, native_session=False):
+def supervised_build(expiry=False, native_session=False, outer_authority=None):
     context = BuildSourceContextV1.model_validate_json(Path("/fixtures/context.json").read_bytes())
     claim = BuildClaimRequestV1.model_validate_json(Path("/fixtures/claim.json").read_bytes())
     assert canonical_digest(claim) == context.claim_digest
@@ -57,8 +57,12 @@ def supervised_build(expiry=False, native_session=False):
     channel, broker_child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     children = []
     try:
-        children.append(subprocess.Popen([sys.executable, __file__, str(auth_child.fileno()), str(os.getpid()), str(int(expiry))],
-            pass_fds=(auth_child.fileno(),)))
+        if outer_authority is None:
+            children.append(subprocess.Popen([sys.executable, __file__, str(auth_child.fileno()), str(os.getpid()), str(int(expiry))],
+                pass_fds=(auth_child.fileno(),)))
+        else:
+            authority.close()
+            authority = outer_authority
         auth_child.close()
         if native_session:
             session = execute_native_build_session(claim=claim, context=context, layout=layout,
