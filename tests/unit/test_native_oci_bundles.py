@@ -26,6 +26,28 @@ def inputs(pool="oldlab"):
 
 
 @pytest.mark.parametrize("pool", ["oldlab", "gb10"])
+def test_shipped_native_client_profile_accepts_threads_but_not_namespace_creation(pool):
+    from dataclasses import replace
+
+    module, context, policy = inputs(pool)
+    path = Path(__file__).resolve().parents[2] / "deploy/personal-dev-builder/client-seccomp-v1.json"
+    wire = path.read_bytes()
+    policy = replace(policy, client_seccomp=wire, client_seccomp_sha256=hashlib.sha256(wire).hexdigest())
+    profile = json.loads(module.render_native_oci_bundles(context, policy).client)["linux"]["seccomp"]
+    assert profile["defaultAction"] == "SCMP_ACT_ERRNO"
+    assert profile["defaultErrnoRet"] == 1
+    entries = profile["syscalls"]
+    allowed = {name for entry in entries if entry["action"] == "SCMP_ACT_ALLOW" for name in entry["names"]}
+    assert {"read", "write", "execve", "prctl", "clone", "futex"} <= allowed
+    assert not allowed & {"unshare", "setns", "mount", "ptrace", "bpf", "clone3", "io_uring_setup"}
+    clone = next(entry for entry in entries if "clone" in entry["names"])
+    assert clone["args"] == [{"index": 0, "op": "SCMP_CMP_MASKED_EQ", "value": 0x7E020000, "valueTwo": 0}]
+    # libc must get ENOSYS to fall back to the filtered clone syscall.
+    assert next(entry for entry in entries if "clone3" in entry["names"]) == {
+        "names": ["clone3"], "action": "SCMP_ACT_ERRNO", "errnoRet": 38}
+
+
+@pytest.mark.parametrize("pool", ["oldlab", "gb10"])
 def test_native_oci_bundles_separate_authority_and_preserve_rootless_buildkit(pool):
     module, context, policy = inputs(pool)
     result = module.render_native_oci_bundles(context, policy)
