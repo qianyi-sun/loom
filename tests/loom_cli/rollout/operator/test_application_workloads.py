@@ -125,10 +125,11 @@ def test_workload_patch_contains_uid_version_and_full_spec_preconditions():
 def _inventory():
     from loom_cli.rollout.operator.protected_application_workloads import ApplicationWorkload
 
-    return tuple(ApplicationWorkload.capture(_workload(name=name)) for name in (
+    deployments = tuple(ApplicationWorkload.capture(_workload(name=name)) for name in (
         "loom-capacity-agent", "loom-control-plane", "loom-family-orchestrator",
         "loom-llm-gateway", "loom-pgbouncer", "loom-pipeline-orchestrator", "loom-service",
-    )) + (ApplicationWorkload.capture(_workload("CronJob", "loom-staging-data-lifecycle", False)),)
+    ))
+    return (*deployments, ApplicationWorkload.capture(_workload("CronJob", "loom-staging-data-lifecycle", False)))
 
 
 def test_workload_inventory_is_durable_before_any_pause_and_cannot_be_replaced(tmp_path):

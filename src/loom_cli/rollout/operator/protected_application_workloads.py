@@ -154,3 +154,18 @@ class ApplicationWorkload:
             {"op": "test", "path": "/spec", "value": copy.deepcopy(spec)},
             change,
         ]
+
+
+def validate_workload_inventory(workloads: tuple[ApplicationWorkload, ...]) -> tuple[ApplicationWorkload, ...]:
+    """Require the complete fixed writer set and unique names and UIDs."""
+    if (not 8 <= len(workloads) <= 128
+            or any(type(item) is not ApplicationWorkload for item in workloads)):
+        raise ValueError("application workload inventory is incomplete or unbounded")
+    for item in workloads:
+        ApplicationWorkload.from_dict(item.to_dict())
+    names = {(item.kind, item.name) for item in workloads}
+    required = {("Deployment", name) for name in APPLICATION_DEPLOYMENTS} | {("CronJob", APPLICATION_CRONJOB)}
+    if (not required <= names or len(names) != len(workloads)
+            or len({item.uid for item in workloads}) != len(workloads)):
+        raise ValueError("application workload inventory is incomplete or repeats identities")
+    return tuple(sorted(workloads, key=lambda item: (item.kind, item.name)))
