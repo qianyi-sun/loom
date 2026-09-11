@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -103,6 +104,11 @@ def _assert_native_docker_stdin_is_not_retained(image: str) -> None:
 
     native = native_profile_fixture().native_execution
     assert native is not None
+    now = datetime.now(UTC).replace(microsecond=0)
+    native = native.model_copy(update={
+        "root_activated_at": (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "root_expires_at": (now + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    })
     credential = "test-native-bootstrap-" + uuid4().hex
     wire = encode_native_bootstrap(NativeWorkerBootstrap(
         native_execution=native, worker_credential=credential,
@@ -112,12 +118,17 @@ def _assert_native_docker_stdin_is_not_retained(image: str) -> None:
         text=True, timeout=15,
     ).strip()
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)
-    script = """from loom_capacity_executor.native_worker_bootstrap import read_native_bootstrap, NativeBootstrapError
+    script = """import ctypes, os, resource
+from loom_capacity_executor.native_worker_bootstrap import consume_native_worker_bootstrap, NativeBootstrapError
 try:
-    bootstrap = read_native_bootstrap(0, timeout_seconds=1)
+    bootstrap = consume_native_worker_bootstrap()
 except NativeBootstrapError:
     print('refused')
     raise SystemExit(65)
+assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
+assert ctypes.CDLL(None).prctl(3, 0, 0, 0, 0) == 0
+assert os.fstat(0).st_rdev == os.makedev(1, 3)
+assert os.read(0, 1) == b''
 print('accepted')
 """
     container = subprocess.check_output(

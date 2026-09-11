@@ -164,9 +164,16 @@ def test_preload_rejects_insufficient_capacity_before_writing_and_closes_pipe(
 
 _STARTUP_PROBE = """
 import ctypes, json, os, resource, stat, subprocess, sys
+import loom_capacity_executor.native_worker_bootstrap as module
 from loom_capacity_executor.native_worker_bootstrap import (
     consume_native_worker_bootstrap, NativeBootstrapError,
 )
+original_read = module.read_native_bootstrap
+def checked_read(descriptor):
+    assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
+    assert ctypes.CDLL(None).prctl(3, 0, 0, 0, 0) == 0
+    return original_read(descriptor)
+module.read_native_bootstrap = checked_read
 try:
     bootstrap = consume_native_worker_bootstrap()
 except NativeBootstrapError as exc:
@@ -189,12 +196,12 @@ print(json.dumps({
 """
 
 
-def _startup_wire(*, expired: bool = False) -> bytes:
+def _startup_wire(*, expired: bool = False, future: bool = False) -> bytes:
     bootstrap = _bootstrap()
     now = datetime.now(UTC).replace(microsecond=0)
     native = bootstrap.native_execution.model_copy(update={
-        "root_activated_at": (now - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "root_expires_at": (now + timedelta(days=-1 if expired else 1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "root_activated_at": (now + timedelta(days=1 if future else -2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "root_expires_at": (now + timedelta(days=-1 if expired else 2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
     })
     return encode_native_bootstrap(NativeWorkerBootstrap(
         native_execution=native, worker_credential=bootstrap.worker_credential,
@@ -216,12 +223,86 @@ def test_native_startup_hardens_before_handoff_and_detaches_stdin() -> None:
     assert _bootstrap().worker_credential.encode() not in completed.stdout + completed.stderr
 
 
-@pytest.mark.parametrize("kind", ["missing", "expired", "malformed"])
+@pytest.mark.parametrize("kind", ["missing", "expired", "future", "malformed"])
 def test_native_startup_refuses_without_recoverable_stdin(kind: str) -> None:
-    wire = _startup_wire(expired=True) if kind == "expired" else (b"" if kind == "missing" else b"invalid")
+    wire = (
+        _startup_wire(expired=kind == "expired", future=kind == "future")
+        if kind in {"expired", "future"} else (b"" if kind == "missing" else b"invalid")
+    )
     completed = subprocess.run(
         [sys.executable, "-I", "-c", _STARTUP_PROBE],
         input=wire, capture_output=True, check=False, timeout=15,
+    )
+    assert completed.returncode == 65, completed.stderr.decode()
+    assert completed.stdout.strip() == b"native worker bootstrap unavailable or malformed"
+    assert completed.stderr == b""
+
+
+def test_failed_dump_protection_never_reads_credential_and_diagnostic_is_safe() -> None:
+    script = """
+import os, stat
+import loom_capacity_executor.native_worker_bootstrap as module
+def refuse_hardening():
+    raise OSError('private-error-detail-must-not-escape')
+def forbidden_read(*args, **kwargs):
+    raise AssertionError('credential read before successful hardening')
+module._disable_bootstrap_dumps = refuse_hardening
+module.read_native_bootstrap = forbidden_read
+try:
+    module.consume_native_worker_bootstrap()
+except module.NativeBootstrapError as exc:
+    assert stat.S_ISCHR(os.fstat(0).st_mode)
+    assert os.read(0, 1) == b''
+    print(str(exc))
+    raise SystemExit(65)
+raise AssertionError('failed protection yielded authority')
+"""
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", script],
+        input=_startup_wire(), capture_output=True, check=False, timeout=15,
+    )
+    assert completed.returncode == 65, completed.stderr.decode()
+    assert completed.stdout.strip() == b"native worker bootstrap unavailable or malformed"
+    assert completed.stderr == b""
+
+
+@pytest.mark.parametrize("fault", ["open", "dup2", "device", "device-at-stdin"])
+def test_failed_stdin_replacement_closes_unread_credential_pipe(fault: str) -> None:
+    script = """
+import errno, os, sys
+import loom_capacity_executor.native_worker_bootstrap as module
+fault = sys.argv[1]
+real_open = os.open
+def refuse_hardening():
+    raise OSError('private-hardening-error')
+def replace_open(path, flags):
+    if fault == 'open':
+        raise OSError('private-open-error')
+    return real_open('/dev/zero' if fault.startswith('device') else path, flags)
+def refuse_dup2(*args, **kwargs):
+    raise OSError('private-duplication-error')
+module._disable_bootstrap_dumps = refuse_hardening
+module.os.open = replace_open
+if fault == 'dup2':
+    module.os.dup2 = refuse_dup2
+if fault == 'device-at-stdin':
+    os.close(0)
+try:
+    module.consume_native_worker_bootstrap()
+except module.NativeBootstrapError as exc:
+    try:
+        os.fstat(0)
+    except OSError as fd_error:
+        assert fd_error.errno == errno.EBADF
+    else:
+        raise AssertionError('failed startup retained stdin')
+    print(str(exc))
+    raise SystemExit(65)
+raise AssertionError('failed protection yielded authority')
+"""
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", script, fault],
+        input=_startup_wire(), capture_output=True, check=False, timeout=15,
     )
     assert completed.returncode == 65, completed.stderr.decode()
     assert completed.stdout.strip() == b"native worker bootstrap unavailable or malformed"

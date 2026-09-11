@@ -9,15 +9,19 @@ dumps and dotenv loading, and close stdin before starting child processes.
 
 from __future__ import annotations
 
+import ctypes
 import fcntl
 import json
 import math
 import os
 import re
+import resource
 import select
 import stat
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from loom_capacity_executor.launch_renderer import NativeTaskImageExecutionV2
 from loom_task_image_authority.publication_contracts import _unique_object
@@ -27,6 +31,8 @@ _HEADER_BYTES = 4
 _SCHEMA = "loom.native-worker-bootstrap/v1"
 _CREDENTIAL = re.compile(r"[A-Za-z0-9._~-]{43,512}", re.ASCII)
 _FAILURE = "native worker bootstrap unavailable or malformed"
+_PR_SET_DUMPABLE = 4
+_PR_GET_DUMPABLE = 3
 
 
 class NativeBootstrapError(ValueError):
@@ -147,4 +153,70 @@ def read_native_bootstrap(descriptor: int, *, timeout_seconds: float = 5) -> Nat
             raise ValueError
         return bootstrap
     except (OSError, ValueError, TypeError, OverflowError, RecursionError):
+        raise NativeBootstrapError(_FAILURE) from None
+
+
+def _disable_bootstrap_dumps() -> None:
+    # Core size alone does not prevent a pipe-based system core handler or
+    # same-UID ptrace access. Set and read back both Linux process protections
+    # before any credential bytes enter this process's Python heap.
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    libc = ctypes.CDLL(None, use_errno=True)
+    prctl = libc.prctl
+    prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    prctl.restype = ctypes.c_int
+    if (
+        resource.getrlimit(resource.RLIMIT_CORE) != (0, 0)
+        or prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0) != 0
+        or prctl(_PR_GET_DUMPABLE, 0, 0, 0, 0) != 0
+    ):
+        raise NativeBootstrapError(_FAILURE)
+
+
+def _detach_bootstrap_stdin() -> None:
+    descriptor: int | None = None
+    try:
+        descriptor = os.open("/dev/null", os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        status = os.fstat(descriptor)
+        if not stat.S_ISCHR(status.st_mode) or status.st_rdev != os.makedev(1, 3):
+            raise NativeBootstrapError(_FAILURE)
+        if descriptor == 0:
+            os.set_inheritable(0, True)
+        else:
+            os.dup2(descriptor, 0, inheritable=True)
+    except BaseException:
+        # Replacement itself can fail before consuming the pipe (including
+        # before the credential was read). Never return an error with that
+        # authority still recoverable through fd 0.
+        with suppress(OSError):
+            os.close(0)
+        raise
+    finally:
+        if descriptor is not None and descriptor != 0:
+            os.close(descriptor)
+
+
+def consume_native_worker_bootstrap() -> NativeWorkerBootstrap:
+    """Harden and detach the native entrypoint's one-use stdin before handoff.
+
+    This intentionally changes process-wide dumpability and core limits. Invoke
+    only in the dedicated immutable worker entrypoint, before threads, worker
+    settings or child processes. It is not registration or start authorization;
+    the caller still has to pass the credential directly into trusted settings
+    with no dotenv/environment fallback and retain the root only in memory.
+    """
+
+    try:
+        try:
+            _disable_bootstrap_dumps()
+            bootstrap = read_native_bootstrap(0)
+            root = bootstrap.native_execution.trust_root()
+            if not root.activated_at <= datetime.now(UTC) < root.expires_at:
+                raise NativeBootstrapError(_FAILURE)
+        finally:
+            # Also detach rejected, partial or expired input before reporting a
+            # safe error. Restart cannot recover it from container configuration.
+            _detach_bootstrap_stdin()
+        return bootstrap
+    except (OSError, ValueError, TypeError, OverflowError, AttributeError):
         raise NativeBootstrapError(_FAILURE) from None

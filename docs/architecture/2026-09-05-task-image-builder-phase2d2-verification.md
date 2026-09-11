@@ -1393,6 +1393,15 @@ decoder through Docker stdin and a manual restart, and check that container
 inspection/logs do not retain the credential. These prove transport semantics,
 not actual worker registration or native execution authority.
 
+The dedicated-process consumption function additionally sets and reads back
+`RLIMIT_CORE=(0,0)` and Linux `PR_SET_DUMPABLE=0` before reading the secret. It
+checks root validity against its own startup clock and replaces stdin with the
+verified `/dev/null` device before returning. If replacement fails, fd 0 is
+closed, including when hardening failed before any credential read. Subprocess
+tests inject open, duplication and device-validation failures; installed-image
+tests exercise dumpability, stdin detachment and restart refusal. These are
+startup primitives, not yet the fixed launcher or worker settings composition.
+
 The complete native adapter remains unimplemented. It must connect one fixed,
 immutable-image launch to owner-projected profile eligibility and authenticated
 registration; disable dotenv/core dumps and ambient execution overrides; pass
