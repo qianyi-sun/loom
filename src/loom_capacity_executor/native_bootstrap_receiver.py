@@ -17,6 +17,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Literal
 
 from loom_capacity_executor.native_bootstrap_delivery import (
     _MAX_DELIVERY_BYTES,
@@ -103,7 +104,8 @@ def _write_receipt_stdout(raw: bytes) -> None:
         offset += count
 
 
-def run_native_bootstrap_receiver_process(factory: Callable[[], NativeBootstrapReceiver]) -> int:
+def run_native_bootstrap_receiver_process(factory: Callable[[], NativeBootstrapReceiver],
+    *, operation: Literal["deliver", "status"] = "deliver") -> int:
     """Harden before configuration/secret access, detach input before admission.
 
     Only the configured transport supervisor may choose the factory. It must
@@ -113,14 +115,19 @@ def run_native_bootstrap_receiver_process(factory: Callable[[], NativeBootstrapR
     try:
         try:
             _disable_bootstrap_dumps()
+            if operation not in {"deliver", "status"}:
+                raise BootstrapDeliveryError("native receiver operation is invalid")
             receiver = factory()
             with _protected_destination(receiver.directory):
                 try:
                     raw = _read_delivery_stdin()
                 finally:
                     _detach_bootstrap_stdin()
-                receipt = asyncio.run(receiver.receive(raw))
-            _write_receipt_stdout(_canonical(receipt) + b"\n")
+                receipt = (asyncio.run(receiver.observe_receipt(raw)) if operation == "status"
+                    else asyncio.run(receiver.receive(raw)))
+            if receipt is None and operation != "status":
+                raise BootstrapDeliveryError("native receiver did not confirm delivery")
+            _write_receipt_stdout(_canonical(receipt) + b"\n" if receipt is not None else b"null\n")
         finally:
             _detach_bootstrap_stdin()
         return 0
