@@ -1556,6 +1556,30 @@ their exact serialized request and scheduler arguments. This prevents scheduler
 restart from reusing a consumed native bootstrap, but does not implement durable
 descendant cleanup or root delegation. No lease is issued by this readback.
 
+The native scheduler primitives now live in one stdlib-only protocol module,
+shared with the executor's strict model adapter. The future node verifier can
+install these same bytes and run with `python -I -S -B`, without importing the
+repository, site configuration, or an independent copy of the scheduler parser.
+Matched malformed-input fixtures exercise both imported and isolated execution.
+
+The module's Ed25519 verification primitive uses standard OpenSSL, not custom
+cryptography. It opens a root-owned, non-writable executable through protected
+directory descriptors, checks its configured digest and ELF format, then runs a
+sealed snapshot. Message, signature and public key use bounded, sealed, seekable
+descriptors; no temporary paths or streamed Ed25519 input are assumed. Arguments,
+environment and provider selection are fixed, diagnostics discarded, and verifier
+time bounded. Interrupted cleanup signals only a still-unreaped owned process;
+a PID already reaped by `Popen.wait` is no longer safe to signal. The interpreter,
+dynamic libraries and default provider remain root-managed OS dependencies, not
+dependencies authenticated by the executable hash alone.
+
+These primitives do not yet implement the signed preparation envelope, issuer,
+root key/purpose policy, atomic versioned installation, retained cgroup admission,
+or cleanup. The issuer must fetch current manager/bootstrap observations itself;
+signing caller-supplied unsigned observations would not establish root authority.
+The existing root guard remains the sole lifecycle owner. Expired preparation
+authority must block new preparation without removing existing resource limits.
+
 Installed-image diagnostic tests cover transport, loader-environment clearing and
 Docker client-loss cleanup, not actual protected worker registration acceptance.
 The worker container and all descendants require verified allocation containment.
