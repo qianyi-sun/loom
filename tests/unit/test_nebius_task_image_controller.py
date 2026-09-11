@@ -14,6 +14,8 @@ from loom_execution_actuator.task_image_controller import (
     build_observation,
     publication_receipt,
 )
+from loom_execution_actuator.task_image_renderer import render_task_image_job
+from tests.unit.test_nebius_task_image_renderer import inputs  # noqa: F401
 
 
 def receipt_job(*, message=None):
@@ -71,6 +73,61 @@ def test_expected_job_accepts_api_defaults_and_equivalent_quantities_but_not_sec
     assert _matches(observed, desired)
     observed["spec"]["securityContext"]["privileged"] = True
     assert not _matches(observed, desired)
+
+
+def canonical_api_job(job, *, null_defaults=False):
+    """Captured API transformations from the first real native build."""
+    observed = copy.deepcopy(job)
+    pod = observed["spec"]["template"]["spec"]
+    for key in ("hostIPC", "hostPID", "hostNetwork"):
+        if null_defaults:
+            pod[key] = None
+        else:
+            pod.pop(key)
+    for container in pod["initContainers"] + pod["containers"]:
+        for mount in container["volumeMounts"]:
+            if mount.get("readOnly") is False:
+                if null_defaults:
+                    mount["readOnly"] = None
+                else:
+                    mount.pop("readOnly")
+    for volume in pod["volumes"]:
+        if "emptyDir" in volume:
+            size = volume["emptyDir"]["sizeLimit"]
+            volume["emptyDir"]["sizeLimit"] = {"7168Mi": "7Gi", "4096Mi": "4Gi"}.get(size, size)
+    return observed
+
+
+@pytest.mark.parametrize("null_defaults", [False, True])
+def test_full_native_job_accepts_kubernetes_omitted_defaults_and_emptydir_units(request, null_defaults):
+    _, job = render_task_image_job(**request.getfixturevalue("inputs"))
+    observed = canonical_api_job(job, null_defaults=null_defaults)
+    assert observed != job
+    assert _matches(observed, job)
+
+
+@pytest.mark.parametrize("field", ["hostIPC", "hostPID", "hostNetwork", "volume_readonly", "storage", "publisher_readonly", "automount"])
+def test_normalized_native_job_still_rejects_non_equivalent_security_and_resources(request, field):
+    _, job = render_task_image_job(**request.getfixturevalue("inputs"))
+    observed = canonical_api_job(job)
+    pod = observed["spec"]["template"]["spec"]
+    if field in {"hostIPC", "hostPID", "hostNetwork"}:
+        pod[field] = True
+    elif field == "volume_readonly":
+        pod["initContainers"][0]["volumeMounts"][1]["readOnly"] = True
+    elif field == "publisher_readonly":
+        pod["containers"][0]["volumeMounts"][1].pop("readOnly")
+    elif field == "automount":
+        pod.pop("automountServiceAccountToken")  # Unlike host*, this defaults true.
+    else:
+        pod["volumes"][1]["emptyDir"]["sizeLimit"] = "8Gi"
+    assert not _matches(observed, job)
+
+
+def test_boolean_and_quantity_defaults_are_scoped_to_kubernetes_fields():
+    assert not _matches({}, {"readOnly": False})
+    assert not _matches({"other": {}}, {"other": {"hostIPC": False}})
+    assert not _matches({"data": {"sizeLimit": "7Gi"}}, {"data": {"sizeLimit": "7168Mi"}})
 
 
 class FakeClients:
@@ -157,4 +214,16 @@ async def test_create_conflict_recovers_same_objects_but_rejects_changed_configu
     assert (await api.ensure(cm, job))["metadata"]["uid"] == "job-uid"
     clients.cm["data"]["claim.json"] = "changed"
     with pytest.raises(ValueError, match="configuration"):
+        await api.ensure(cm, job)
+
+
+async def test_create_conflict_recovers_api_normalized_native_job(request):
+    api, clients = fake_api()
+    cm, job = render_task_image_job(**request.getfixturevalue("inputs"))
+    clients.cm = {**copy.deepcopy(cm), "metadata": {**cm["metadata"], "uid": "cm-uid"}}
+    clients.job = canonical_api_job(job)
+    clients.job["metadata"]["uid"] = "job-uid"
+    assert (await api.ensure(cm, job))["metadata"]["uid"] == "job-uid"
+    clients.job["spec"]["template"]["spec"]["volumes"][1]["emptyDir"]["sizeLimit"] = "8Gi"
+    with pytest.raises(ValueError, match="differs"):
         await api.ensure(cm, job)
