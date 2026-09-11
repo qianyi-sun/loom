@@ -2190,6 +2190,13 @@ failed deletions or leftover state return cleanup uncertainty. The supervised
 fixture consumes this production result before artifact verification; it does
 not retry partial runtime deletion on failure. Its outer container is disposed
 separately as test-resource cleanup.
+Artifact verification accepts an immutable `PersonalDevBuildArtifactBinding`
+derived from authenticated native source context. The existing application
+registration entrypoint checks the candidate/attempt relationship and adapts to
+the same verifier; native workers need not fabricate database records. Both paths
+check the exact candidate, source/archive/build-contract digests, attempt, lease
+epoch and platform before extracting the complete OCI image set. This binding is
+expected content identity, never runtime, publication or physical-release authority.
 These fixtures remain rootful and offline (`--network=none`); restricted external
 dependency fetching, protected material/rootless installation, Slurm containment,
 ARM64 supervision, authenticated IO-helper composition and native artifact GC
