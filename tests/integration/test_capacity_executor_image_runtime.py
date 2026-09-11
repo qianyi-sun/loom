@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import subprocess
 import sys
 import unittest
@@ -80,10 +81,71 @@ def test_capacity_executor_image_build() -> None:
             capture_output=True, text=True, check=False, timeout=900,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+        _assert_native_docker_stdin_is_not_retained(image)
     finally:
         subprocess.run(
             ["docker", "image", "rm", image],
             capture_output=True, check=False, timeout=30,
+        )
+
+
+def _assert_native_docker_stdin_is_not_retained(image: str) -> None:
+    """Exercise the installed production decoder through actual Docker restart.
+
+    This certifies transport semantics only: it is not worker registration,
+    Slurm containment, root attestation or execution-start acceptance.
+    """
+    from loom_capacity_executor.native_worker_bootstrap import (
+        NativeWorkerBootstrap,
+        encode_native_bootstrap,
+    )
+    from tests.unit.test_capacity_executor_native_launch_profile import native_profile_fixture
+
+    native = native_profile_fixture().native_execution
+    assert native is not None
+    credential = "test-native-bootstrap-" + uuid4().hex
+    wire = encode_native_bootstrap(NativeWorkerBootstrap(
+        native_execution=native, worker_credential=credential,
+    ))
+    image_id = subprocess.check_output(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+        text=True, timeout=15,
+    ).strip()
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)
+    script = """from loom_capacity_executor.native_worker_bootstrap import read_native_bootstrap, NativeBootstrapError
+try:
+    bootstrap = read_native_bootstrap(0, timeout_seconds=1)
+except NativeBootstrapError:
+    print('refused')
+    raise SystemExit(65)
+print('accepted')
+"""
+    container = subprocess.check_output(
+        ["docker", "create", "--interactive", "--restart=no", "--read-only",
+         "--network=none", "--cpus=0.25", "--memory=256m", "--pids-limit=32",
+         "--entrypoint=/usr/local/bin/python", image_id, "-I", "-c", script],
+        text=True, timeout=15,
+    ).strip()
+    assert re.fullmatch(r"[0-9a-f]{64}", container)
+    try:
+        first = subprocess.run(
+            ["docker", "start", "--attach", "--interactive", container],
+            input=wire, capture_output=True, check=False, timeout=30,
+        )
+        assert first.returncode == 0, first.stderr.decode()
+        assert first.stdout.strip() == b"accepted"
+        restarted = subprocess.run(
+            ["docker", "start", "--attach", "--interactive", container],
+            input=b"", capture_output=True, check=False, timeout=30,
+        )
+        assert restarted.returncode == 65, restarted.stderr.decode()
+        assert restarted.stdout.strip() == b"refused"
+        for command in (["docker", "inspect", container], ["docker", "logs", container]):
+            retained = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
+            assert credential.encode() not in retained
+    finally:
+        subprocess.run(
+            ["docker", "rm", "--force", container], capture_output=True, check=True, timeout=30,
         )
 
 
