@@ -320,6 +320,35 @@ database migration, claim/worker adapter, catalog fallback or runtime default is
 added. Those boundaries must remain fail-closed before any sidecar, task or
 verifier container starts; Phase 1 behavior is unchanged.
 
+## Legacy-reader exclusion
+
+The ordinary trial and unified-work selectors, and the locked unsigned V1 image
+snapshot reader, require `ready_publication_operation_id IS NULL`. The protected
+claim function applies the same predicate at both candidate selection and locked
+V1 snapshot return. Native-ready images remain ineligible until an explicit
+signed-grant and one-use-start adapter exists. The predicate is per materialization
+and compatible architecture, not a task-wide veto: eligible Phase 1 work must not
+be starved by an earlier native trial or a different native architecture.
+Strong source manifests alone do not imply native readiness; Phase 1 may retain
+and use those sources. Missing compatible legacy readiness cannot trigger an
+unsigned native snapshot or a mutable-catalog fallback.
+
+Guard migration `guard_0031` patches the effective existing claim function,
+including its retry amendments, without changing its owner, signature, ACL,
+security settings, claim identity or lock order. Application-owned bootstrap
+convergence adds only SELECT on the native-publication discriminator to the
+guard owner's existing column grant. Migration preflight checks that effective
+permission before installing the function; it does not grant itself application
+table authority. This is software support for protected convergence, not a live
+grant or deployment.
+
+The security predicate is retained on schema-label downgrade, and re-upgrade is
+idempotent. Rollback must retain its narrow column permission as well; removing
+it closes protected claims with a permission error rather than restoring unsafe
+V1 admission. Earlier owning migrations still control eventual function removal.
+Prerequisite inventory remains complete: it records readiness facts and is not
+filtered as though inventory were execution permission.
+
 ## Evidence and remaining activation gates
 
 Tests use independently generated execution/publication keys and directly check

@@ -781,7 +781,7 @@ class PsycopgPersonalDevCapacityDatabase:
                         sql.SQL(
                             "GRANT SELECT (id, materialization_key, task_id, task_checksum, "
                             "cpu_arch, task_config, task_source, task_source_provenance, "
-                            "state, registry_images) "
+                            "state, registry_images, ready_publication_operation_id) "
                             "ON TABLE public.task_image_materializations TO {}"
                         ).format(sql.Identifier(owner))
                     )
