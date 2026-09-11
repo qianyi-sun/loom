@@ -10,18 +10,29 @@ import tempfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import ParamSpec, TypeVar
+from typing import ParamSpec, Protocol, TypeVar
 
 from loom.personal_dev_build_demand import personal_build_work_identity
 from loom.personal_dev_build_platform_requests import canonical_build_source
 from loom.personal_dev_builder import verify_personal_dev_build_source
 from loom.personal_dev_candidate import CandidateRegistration, PersonalDevPlatform
-from loom_capacity_agent.build_admission import BuildClaimExchangeV1, BuildClaimRequestV1
-from loom_capacity_executor.build_admission_client import BuildAdmissionClient
+from loom_capacity_agent.build_admission import (
+    BuildClaimExchangeV1,
+    BuildClaimRequestV1,
+    BuildSourceReadReceiptV1,
+)
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
 _CHUNK_BYTES = 1024 * 1024
+
+
+class NativeBuildSourceClient(Protocol):
+    """Implemented by both the pinned pool client and purpose-aware router."""
+
+    async def read_source(self, claim: BuildClaimRequestV1, *, worker_credential: str,
+        offset: int, length: int,
+    ) -> BuildSourceReadReceiptV1: ...
 
 
 async def _settled_io(function: Callable[_P, _T], *args: _P.args, **kwargs: _P.kwargs) -> _T:
@@ -55,7 +66,7 @@ class NativeClaimBuildSource:
     the host or treat successful staging as a fresh execution/lease permit.
     """
 
-    def __init__(self, *, client: BuildAdmissionClient, workspace: Path, max_archive_bytes: int) -> None:
+    def __init__(self, *, client: NativeBuildSourceClient, workspace: Path, max_archive_bytes: int) -> None:
         if type(max_archive_bytes) is not int or max_archive_bytes <= 0:
             raise ValueError("native source archive limit must be positive")
         if not workspace.is_absolute():

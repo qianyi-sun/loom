@@ -24,7 +24,11 @@ from loom_capacity_agent.admission import (
     ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
 )
-from loom_capacity_agent.build_admission import BuildClaimRequestV1, BuildOutcomeRequestV1
+from loom_capacity_agent.build_admission import (
+    BuildClaimRequestV1,
+    BuildOutcomeRequestV1,
+    BuildSourceReadReceiptV1,
+)
 from loom_capacity_agent.claim_guard import ExecutableClaimProposalV2
 from loom_capacity_agent.client import read_owner_only_bytes
 from loom_capacity_executor.admission_client import DatabaseExecutableAdmissionClient
@@ -93,6 +97,7 @@ class TypedAdmissionDirectoryV3(_StrictLaunchV3):
 _BUILD_CONSUMERS = frozenset({
     "prepare_worker", "bind_slurm_job", "observe_intent", "revoke_prepared_bootstrap",
     "withdraw_unregistered_worker", "register_worker", "claim_platform", "begin_drain", "record_outcome", "acknowledge_release",
+    "read_source",
 })
 
 
@@ -211,3 +216,14 @@ class TypedAdmissionRouter:
         if self.purpose(request.claim.binding) != "personal-build-worker":
             raise ValueError("native outcome requires a build-purpose route")
         return await self._call(request.claim.binding, "record_outcome", request, worker_credential=worker_credential)
+
+    async def read_source(self, claim: BuildClaimRequestV1, *, worker_credential: str,
+        offset: int, length: int,
+    ) -> BuildSourceReadReceiptV1:
+        if self.purpose(claim.binding) != "personal-build-worker":
+            raise ValueError("native source requires a build-purpose route")
+        receipt = await self._call(claim.binding, "read_source", claim,
+            worker_credential=worker_credential, offset=offset, length=length)
+        if not isinstance(receipt, BuildSourceReadReceiptV1):
+            raise ValueError("native source route returned an invalid receipt")
+        return receipt
