@@ -34,6 +34,7 @@ from loom_control_plane.service_execution_output import (
     ServiceExecutionOutputRouteService,
     ServiceExecutionPeerV1,
 )
+from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 from tests.integration.test_service_execution_leases import (
     _complete_output_contract,
     _reserve,
@@ -46,8 +47,8 @@ from tests.integration.test_service_execution_leases import (
 def independent_minio_endpoints() -> Iterator[tuple[MinioContainer, MinioContainer]]:
     label = {"loom.test": "service-execution-spool-materialization"}
     with (
-        MinioContainer().with_kwargs(labels=label) as spool,
-        MinioContainer().with_kwargs(labels=label) as canonical,
+        MinioContainer(image=MINIO_TEST_IMAGE).with_kwargs(labels=label) as spool,
+        MinioContainer(image=MINIO_TEST_IMAGE).with_kwargs(labels=label) as canonical,
     ):
         assert spool.get_config()["endpoint"] != canonical.get_config()["endpoint"]
         spool.get_client().make_bucket("artifacts")

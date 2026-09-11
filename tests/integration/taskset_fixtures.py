@@ -28,6 +28,7 @@ from loom.db.schema import (
 )
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 
 _MANIFEST_YAML = """
 apiVersion: loom.taskset/v1
@@ -73,7 +74,7 @@ def _manifest_bytes(*, intents: str = "", verifier: str = "", display_name: str 
 
 @pytest.fixture(scope="module")
 def tasksets_minio() -> MinioContainer:
-    with MinioContainer() as m:
+    with MinioContainer(image=MINIO_TEST_IMAGE) as m:
         yield m
 
 
