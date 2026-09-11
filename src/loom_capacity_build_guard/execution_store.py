@@ -1,8 +1,10 @@
-"""Protected native build preparation/physical retention, never worker exchange."""
+"""Protected native build preparation, physical binding and scoped registration."""
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from hashlib import sha256
 from uuid import UUID
 
 from sqlalchemy import text
@@ -11,10 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
     ExecutablePreparedBootstrapRevocationV2,
+    ExecutableWorkerRegistrationV2,
     ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
     PreparedExecutableAdmissionV2,
     ProtectedIntentObservationV2,
+    RegisteredExecutableWorkerV2,
     RevokedExecutableBootstrapV2,
     WithdrawnExecutableWorkerV2,
 )
@@ -107,6 +111,34 @@ class BuildGuardExecutionStore:
             receipt = ProtectedIntentObservationV2.model_validate_json(returned)
             if canonical_executable_bytes(receipt).decode("ascii") != returned or receipt.binding != binding:
                 raise ValueError("build observation receipt changed")
+            return receipt
+
+    async def register_worker(self, request: ExecutableWorkerRegistrationV2, *,
+        bootstrap_capability: str,
+    ) -> RegisteredExecutableWorkerV2:
+        """Retain only a native credential hash; no app worker or source grant."""
+        if not self._session.in_transaction():
+            raise ValueError("build registration requires an outer transaction")
+        request = ExecutableWorkerRegistrationV2.model_validate_json(request.model_dump_json())
+        if (not isinstance(bootstrap_capability, str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{43,512}", bootstrap_capability) is None):
+            raise ValueError("build registration bootstrap capability is invalid")
+        if request.predecessor_worker_incarnation is not None or request.protected_registration_epoch != 2 or request.bootstrap_registration_epoch != 1:
+            raise ValueError("build registration requires initial native epochs")
+        bootstrap_hash = sha256(bootstrap_capability.encode("ascii")).hexdigest()
+        wire, digest = canonical_executable_bytes(request), canonical_executable_digest(request)
+        async with self._session.begin_nested():
+            returned = await self._session.scalar(text("""SELECT loom_capacity_build_guard.register_worker(
+                :installation,CAST(:payload AS jsonb),:wire,:digest,:bootstrap)"""),
+                {"installation": self._installation.id, "payload": wire.decode("ascii"), "wire": wire,
+                    "digest": digest, "bootstrap": bootstrap_hash})
+            receipt = RegisteredExecutableWorkerV2.model_validate_json(returned)
+            if (canonical_executable_bytes(receipt).decode("ascii") != returned
+                or receipt.subject_id != self._installation.subject_id or receipt.subject_incarnation != self._installation.subject_incarnation
+                or receipt.intent_id != request.binding.intent_id or receipt.worker_id != request.worker_id
+                or receipt.worker_incarnation != request.worker_incarnation or receipt.predecessor_worker_incarnation is not None
+                or receipt.protected_registration_epoch != 2 or receipt.request_digest != digest or receipt.registration_digest != digest):
+                raise ValueError("build registration receipt changed")
             return receipt
 
     async def revoke_prepared_bootstrap(self, request: ExecutablePreparedBootstrapRevocationV2) -> RevokedExecutableBootstrapV2:

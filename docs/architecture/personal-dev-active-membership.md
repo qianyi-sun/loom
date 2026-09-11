@@ -459,7 +459,7 @@ requeue. This deliberately does not implement retirement for registered workers:
 that requires durable per-platform outcomes which distinguish successful work,
 retryable failure and cancellation, suppress both pending demand and fresh
 admission when finished, and do not infer an outcome from physical termination.
-Native exchange/claims, outcome handling and runtime orchestration remain incomplete.
+Native claim execution, outcome handling and runtime orchestration remain incomplete.
 
 The management-only `BuildRecoveryCoordinator` connects acknowledged unregistered
 revocations to authenticated manager final-release and native terminal evidence.
@@ -479,6 +479,24 @@ while item failures return fixed diagnostic categories without exposing response
 contents. Discovery/authority errors do not produce invented success. This adapter
 still needs connection to the management runtime and live concurrent-owner
 acceptance; it issues no source grants or application worker credentials.
+
+Build-guard revision `build_guard_0016` adds the private native registration
+consumer for the existing sealed handoff. Only initial bootstrap epoch 1 to
+registration epoch 2 is admitted; predecessor rotation is unsupported. The
+procedure requires exact committed physical Slurm binding, the presented
+bootstrap hash, current bootstrap/source/plan authority, and no retained terminal
+or revocation evidence. It stores only the worker credential hash, in the build
+guard rather than any application worker table. Exact replay preserves original
+identity and survives source expiry as evidence recovery; handoff expiry still
+prevents a late launch. Registration does not itself claim a platform request or
+issue a source capability.
+
+Observation exposes only committed registration. Registration and unregistered
+withdrawal take the same installation/bootstrap/physical locks, so the withdrawal
+path cannot revoke a registered worker. Holds remain charged and retained native
+registration prevents lossy downgrade. Registered-worker claims, drain/release,
+per-platform outcomes, purpose-specific transport and allocation containment must
+be connected before public typed execution can be enabled.
 
 `ActivationRuntimeArtifactV3` and its explicit pinned loader compose the exact
 typed admission file, complete purpose/profile policy, approved profile digest,
