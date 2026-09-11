@@ -50,7 +50,7 @@ def test_build_guard_is_private_owner_only_and_empty_rollback_is_reversible(buil
     config, engine, owner, agent, agent_url = build_guard_database
     command.upgrade(config, "head")
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0002"
+        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0003"
         assert connection.scalar(text("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='loom_capacity_build_guard'")) == owner
         assert connection.scalar(text("SELECT has_schema_privilege(:agent,'loom_capacity_build_guard','USAGE')"), {"agent": agent})
     runtime = create_engine(agent_url)
@@ -90,7 +90,7 @@ def test_build_guard_rejects_foreign_default_privileges(build_guard_database, su
             connection.exec_driver_sql(f"DROP ROLE {quote(foreign)}")
 
 
-@pytest.mark.parametrize("surface", ["schema", "table", "column", "function"])
+@pytest.mark.parametrize("surface", ["schema", "table", "column", "function", "prepare-grant-option", "prepare-search-path"])
 def test_build_guard_at_head_rejects_privilege_drift(build_guard_database, surface):
     config, engine, _owner, agent, _url = build_guard_database
     command.upgrade(config, "head")
@@ -99,9 +99,15 @@ def test_build_guard_at_head_rejects_privilege_drift(build_guard_database, surfa
         "table": "INSERT ON loom_capacity_build_guard.installations",
         "column": "INSERT (id) ON loom_capacity_build_guard.installations",
         "function": "EXECUTE ON FUNCTION loom_capacity_build_guard.reject_evidence_mutation()",
-    }[surface]
+    }.get(surface)
     with engine.begin() as connection:
-        connection.exec_driver_sql(f"GRANT {target} TO {engine.dialect.identifier_preparer.quote(agent)}")
+        if surface == "prepare-search-path":
+            connection.exec_driver_sql("ALTER FUNCTION loom_capacity_build_guard.prepare_plan(uuid,jsonb,bytea,text,jsonb) SET search_path=public")
+        elif surface == "prepare-grant-option":
+            connection.exec_driver_sql("GRANT EXECUTE ON FUNCTION loom_capacity_build_guard.prepare_plan(uuid,jsonb,bytea,text,jsonb) "
+                f"TO {engine.dialect.identifier_preparer.quote(agent)} WITH GRANT OPTION")
+        else:
+            connection.exec_driver_sql(f"GRANT {target} TO {engine.dialect.identifier_preparer.quote(agent)}")
     with pytest.raises(RuntimeError, match="privilege"):
         command.upgrade(config, "head")
 
@@ -113,6 +119,23 @@ def test_build_guard_rejects_preexisting_schema_create_grant(build_guard_databas
         connection.exec_driver_sql(f"CREATE SCHEMA loom_capacity_build_guard AUTHORIZATION {quote(owner)}")
         connection.exec_driver_sql(f"GRANT CREATE ON SCHEMA loom_capacity_build_guard TO {quote(agent)}")
     with pytest.raises(RuntimeError, match="privilege"):
+        command.upgrade(config, "head")
+
+
+@pytest.mark.parametrize("boundary", ["function", "execute", "usage"])
+def test_build_guard_requires_revision_callable_surface(build_guard_database, boundary):
+    config, engine, _owner, agent, _url = build_guard_database
+    command.upgrade(config, "head")
+    quote = engine.dialect.identifier_preparer.quote
+    function = "loom_capacity_build_guard.prepare_plan(uuid,jsonb,bytea,text,jsonb)"
+    with engine.begin() as connection:
+        if boundary == "function":
+            connection.exec_driver_sql(f"DROP FUNCTION {function}")
+        elif boundary == "execute":
+            connection.exec_driver_sql(f"REVOKE EXECUTE ON FUNCTION {function} FROM {quote(agent)}")
+        else:
+            connection.exec_driver_sql(f"REVOKE USAGE ON SCHEMA loom_capacity_build_guard FROM {quote(agent)}")
+    with pytest.raises(RuntimeError, match=r"privilege|surface"):
         command.upgrade(config, "head")
 
 
@@ -137,7 +160,7 @@ def test_retained_installation_is_immutable_and_blocks_downgrade(build_guard_dat
     with pytest.raises(DBAPIError, match="retained evidence"):
         command.downgrade(config, "base")
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0002"
+        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0003"
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.installations")) == 1
 
 

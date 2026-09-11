@@ -29,15 +29,16 @@ from tests.integration.test_personal_dev_native_builder_store import sessions as
 from tests.unit.test_personal_dev_build_admission import admission_input
 
 
-@pytest.fixture
-async def prepared_input(build_guard_database, owner_sessions, sessions, tmp_path):
+@pytest.fixture(params=["gb10", "oldlab"])
+async def prepared_input(build_guard_database, owner_sessions, sessions, tmp_path, request):
     _config, engine, owner, _agent, agent_url = build_guard_database
     now = datetime.now(UTC)
     registration = await _seed_running_attempt(sessions, now=now)
     member, runtime = build_service(tmp_path, registration)
     async with sessions.begin() as session:
         requests = await stage_platform_requests(session, registration,
-            member=member, runtime=runtime, platforms=("linux/arm64",), now=now)
+            member=member, runtime=runtime,
+            platforms=("linux/arm64" if request.param == "gb10" else "linux/amd64",), now=now)
     owner_factory, _ = owner_sessions
     with engine.begin() as connection:
         quote = engine.dialect.identifier_preparer.quote
@@ -46,7 +47,7 @@ async def prepared_input(build_guard_database, owner_sessions, sessions, tmp_pat
     async with owner_factory.begin() as session:
         await session.execute(text(f"SET LOCAL ROLE {owner}"))
         retained = await BuildGuardInstallationStore(session, expected_owner_role=owner).retain(member=member, runtime=runtime)
-    values = admission_input(tmp_path)
+    values = admission_input(tmp_path, pool=request.param)
     proposal = values["proposal"]
     shape = proposal.shapes[0]
     shape = shape.model_copy(update={"binding": shape.binding.model_copy(update={"account_id": member.configuration.account_id})})
@@ -112,3 +113,75 @@ async def test_preparation_rolls_back_with_outer_transaction(prepared_input):
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.plans")) == 0
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 0
+
+
+@pytest.mark.parametrize("boundary", ["node", "account", "reporter", "expired", "source"])
+async def test_preparation_rejects_authority_drift_without_partial_writes(prepared_input, boundary):
+    from uuid import uuid4
+
+    from sqlalchemy.exc import DBAPIError
+
+    sessions, engine, retained, proposal, registration, request = prepared_input
+    if boundary in {"node", "account"}:
+        shape = proposal.shapes[0]
+        changes = {"node_ids": ("controller-forbidden",)} if boundary == "node" else {"account_id": "foreign-owner"}
+        proposal = proposal.model_copy(update={"shapes": (shape.model_copy(update={
+            "binding": shape.binding.model_copy(update=changes)}),)})
+    elif boundary == "reporter":
+        proposal = proposal.model_copy(update={"reporter_incarnation": uuid4()})
+    elif boundary == "expired":
+        proposal = proposal.model_copy(update={"lease_not_after": datetime.now(UTC) - timedelta(seconds=1)})
+    else:
+        with engine.begin() as connection:
+            connection.execute(text("UPDATE personal_dev_candidates SET archive_size_bytes=archive_size_bytes+1 WHERE id=:id"), {"id": registration.candidate.id})
+    async with sessions.begin() as session:
+        with pytest.raises(DBAPIError, match=r"binding|installation|lease|source"):
+            await prepare(session, retained, proposal, registration, request)
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.plans")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 0
+
+
+@pytest.mark.parametrize("boundary", ["cancelled", "shortened"])
+async def test_current_replay_rejects_cancellation_or_shortened_lease_without_freeing_hold(prepared_input, boundary):
+    from sqlalchemy.exc import DBAPIError
+
+    sessions, engine, retained, proposal, registration, request = prepared_input
+    async with sessions.begin() as session:
+        await prepare(session, retained, proposal, registration, request)
+    with engine.begin() as connection:
+        if boundary == "cancelled":
+            connection.execute(text("UPDATE personal_dev_build_platform_requests SET cancelled_at=now() WHERE id=:id"), {"id": request.id})
+        else:
+            connection.execute(text("UPDATE personal_dev_candidate_build_attempts SET lease_expires_at=now()+interval '10 seconds' WHERE id=:id"), {"id": registration.build_attempt.id})
+    async with sessions.begin() as session:
+        with pytest.raises(DBAPIError, match=r"lease|assignment"):
+            await prepare(session, retained, proposal, registration, request)
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
+
+
+@pytest.mark.parametrize("boundary", ["proposal_id", "admission_incarnation", "manager_input_digest", "noncanonical", "execution_epoch"])
+async def test_sql_boundary_rejects_non_contract_proposals(prepared_input, boundary):
+    from hashlib import sha256
+
+    from sqlalchemy.exc import DBAPIError
+
+    sessions, engine, retained, proposal, registration, request = prepared_input
+    payload = json.loads(canonical_executable_bytes(proposal))
+    if boundary == "execution_epoch":
+        del payload["shapes"][0]["binding"]["execution"]["execution_epoch"]
+    elif boundary != "noncanonical":
+        del payload[boundary]
+    wire = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii")
+    if boundary == "noncanonical":
+        wire = b" " + wire
+    async with sessions.begin() as session:
+        with pytest.raises(DBAPIError, match=r"contract|canonical|field"):
+            await session.execute(text("""SELECT loom_capacity_build_guard.prepare_plan(
+                :installation, CAST(:payload AS jsonb), :wire, :digest, CAST(:sources AS jsonb))
+            """), {"installation": retained.id, "payload": wire.decode("ascii"), "wire": wire,
+                "digest": sha256(wire).hexdigest(),
+                "sources": json.dumps({str(request.id): canonical_build_source(registration).decode("ascii")})})
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.plans")) == 0
