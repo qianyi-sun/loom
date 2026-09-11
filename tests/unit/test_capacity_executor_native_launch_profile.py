@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -11,11 +12,17 @@ from pydantic import ValidationError
 
 from loom_capacity_executor.launch_renderer import (
     OperatorLaunchProfileV2,
+    TrustedLaunchContextV2,
+    TrustedLaunchRenderError,
     canonical_launch_policy_digest,
+    render_launch_request,
 )
 from loom_capacity_executor.runtime import canonical_approved_profiles_digest
 from loom_capacity_manager.executable_contracts import canonical_executable_bytes
-from tests.unit.test_capacity_executor_launch_renderer import operator_profile_fixture
+from tests.unit.test_capacity_executor_launch_renderer import (
+    launch_context_fixture,
+    operator_profile_fixture,
+)
 
 
 def native_contract_fixture() -> dict[str, object]:
@@ -115,3 +122,43 @@ def test_invalid_or_ambiguous_native_release_contract_is_rejected(
     raw["native_execution"] = native_contract_fixture() | {field: value}
     with pytest.raises(ValidationError):
         OperatorLaunchProfileV2.model_validate(raw)
+
+
+def _native_context() -> TrustedLaunchContextV2:
+    context = launch_context_fixture()
+    profile = native_profile_fixture()
+    digest = canonical_launch_policy_digest(profile)
+    return replace(
+        context,
+        profile=profile.model_copy(update={"controller_authority_sha256": digest}),
+        controller_authority=context.controller_authority.model_copy(
+            update={"controller_authority_sha256": digest}
+        ),
+        submitted_at=datetime(2026, 9, 11, tzinfo=UTC),
+    )
+
+
+def test_native_launch_retains_exact_approved_worker_image_and_config() -> None:
+    context = _native_context()
+    request = render_launch_request(context)
+    assert request.image_digest == context.profile.image_digest
+    assert request.trusted_launcher_config == context.profile.trusted_launcher_config
+
+
+def test_native_root_substitution_after_approval_rejects_scheduler_launch() -> None:
+    context = _native_context()
+    assert context.profile.native_execution is not None
+    changed = context.profile.native_execution.model_copy(update={"root_key_id": "other-root"})
+    context = replace(context, profile=context.profile.model_copy(update={"native_execution": changed}))
+    with pytest.raises(TrustedLaunchRenderError, match="policy digest"):
+        render_launch_request(context)
+
+
+@pytest.mark.parametrize(
+    "submitted_at",
+    [datetime(2026, 8, 31, tzinfo=UTC), datetime(2026, 10, 1, tzinfo=UTC)],
+)
+def test_native_launch_rejects_root_outside_its_validity(submitted_at: datetime) -> None:
+    context = replace(_native_context(), submitted_at=submitted_at)
+    with pytest.raises(TrustedLaunchRenderError, match="native execution root"):
+        render_launch_request(context)
