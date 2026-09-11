@@ -16,6 +16,9 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
     revision = connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) if version_table else None
     callables = []
     additional_helpers = []
+    if revision == "build_guard_0031":
+        callables.append(f"{SCHEMA}.authorize_execution(uuid,jsonb,bytea,text,text)")
+        revision = "build_guard_0030"
     if revision == "build_guard_0030":
         callables.append(f"{SCHEMA}.read_platform_outcome(uuid,uuid,jsonb,bytea,text)")
         revision = "build_guard_0029"

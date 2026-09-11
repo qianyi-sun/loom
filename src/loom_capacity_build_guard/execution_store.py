@@ -30,6 +30,8 @@ from loom_capacity_agent.build_admission import (
     BuildAllocatedClaimRequestV1,
     BuildClaimReceiptV1,
     BuildClaimRequestV1,
+    BuildExecutionPermitV1,
+    BuildExecutionRequestV1,
     BuildOutcomeReceiptV1,
     BuildOutcomeRequestV1,
     BuildSourceContextV1,
@@ -292,6 +294,24 @@ class BuildGuardExecutionStore:
             if (canonical_bytes(receipt).decode("ascii") != returned or receipt.claim != request
                 or receipt.claim_digest != digest):
                 raise ValueError("native source receipt changed")
+            return receipt
+
+    async def authorize_execution(self, request: BuildExecutionRequestV1, *, worker_credential: str) -> BuildExecutionPermitV1:
+        """Issue fresh bounded permission; caller must commit before replying."""
+        if not self._session.in_transaction():
+            raise ValueError("native execution permission requires an outer transaction")
+        request = BuildExecutionRequestV1.model_validate_json(request.model_dump_json())
+        if not isinstance(worker_credential, str) or re.fullmatch(r"[A-Za-z0-9_-]{43,512}", worker_credential) is None:
+            raise ValueError("native execution credential is invalid")
+        wire = canonical_bytes(request)
+        async with self._session.begin_nested():
+            returned = await self._session.scalar(text("""SELECT loom_capacity_build_guard.authorize_execution(
+                :installation,CAST(:payload AS jsonb),:wire,:digest,:credential)"""),
+                {"installation": self._installation.id, "payload": wire.decode("ascii"), "wire": wire,
+                    "digest": sha256(wire).hexdigest(), "credential": sha256(worker_credential.encode("ascii")).hexdigest()})
+            receipt = BuildExecutionPermitV1.model_validate_json(returned)
+            if canonical_bytes(receipt).decode("ascii") != returned or receipt.request != request:
+                raise ValueError("native execution permission response changed")
             return receipt
 
     async def read_source_context(self, request: BuildClaimRequestV1, *, worker_credential: str) -> BuildSourceContextV1:

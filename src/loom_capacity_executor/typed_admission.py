@@ -29,6 +29,8 @@ from loom_capacity_agent.build_admission import (
     BuildArtifactV1,
     BuildClaimReceiptV1,
     BuildClaimRequestV1,
+    BuildExecutionPermitV1,
+    BuildExecutionRequestV1,
     BuildOutcomeRequestV1,
     BuildSourceContextV1,
     BuildSourceReadReceiptV1,
@@ -102,7 +104,7 @@ class TypedAdmissionDirectoryV3(_StrictLaunchV3):
 _BUILD_CONSUMERS = frozenset({
     "prepare_worker", "bind_slurm_job", "observe_intent", "revoke_prepared_bootstrap",
     "withdraw_unregistered_worker", "register_worker", "claim_platform", "begin_drain", "record_outcome", "acknowledge_release",
-    "read_source", "read_source_context", "claim_assigned_platform", "upload_artifact",
+    "read_source", "read_source_context", "claim_assigned_platform", "upload_artifact", "authorize_execution",
 })
 
 
@@ -231,6 +233,18 @@ class TypedAdmissionRouter:
             worker_credential=worker_credential, offset=offset, length=length)
         if not isinstance(receipt, BuildSourceReadReceiptV1):
             raise ValueError("native source route returned an invalid receipt")
+        return receipt
+
+    async def authorize_execution(self, request: BuildExecutionRequestV1, *, worker_credential: str) -> BuildExecutionPermitV1:
+        request = BuildExecutionRequestV1.model_validate_json(request.model_dump_json())
+        if self.purpose(request.claim.binding) != "personal-build-worker":
+            raise ValueError("native execution requires a build-purpose route")
+        receipt = await self._call(request.claim.binding, "authorize_execution", request, worker_credential=worker_credential)
+        if not isinstance(receipt, BuildExecutionPermitV1):
+            raise ValueError("native execution route returned an invalid receipt")
+        receipt = BuildExecutionPermitV1.model_validate_json(receipt.model_dump_json())
+        if receipt.request != request:
+            raise ValueError("native execution route returned a different permission")
         return receipt
 
     async def read_source_context(self, claim: BuildClaimRequestV1, *, worker_credential: str) -> BuildSourceContextV1:

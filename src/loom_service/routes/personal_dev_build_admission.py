@@ -23,6 +23,7 @@ from loom_capacity_agent.admission import (
 from loom_capacity_agent.build_admission import (
     BuildAllocatedClaimExchangeV1,
     BuildClaimExchangeV1,
+    BuildExecutionExchangeV1,
     BuildOutcomeExchangeV1,
     BuildPreparationRequestV1,
     BuildRegistrationRequestV1,
@@ -54,7 +55,7 @@ async def _admit(
     *,
     pool_id: str,
     intent_id: UUID,
-    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap", "withdraw", "register", "claim", "drain", "outcome", "release", "source", "context", "claim-assigned"],
+    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap", "withdraw", "register", "claim", "drain", "outcome", "release", "source", "context", "claim-assigned", "execution"],
 ) -> Response:
     sessions = getattr(request.app.state, "personal_dev_build_admission_sessions", None)
     verifier = getattr(request.app.state, "personal_dev_build_admission_verifier", None)
@@ -62,6 +63,10 @@ async def _admit(
         verifier, CapacityPrincipalVerifier
     ):
         raise HTTPException(503, "build admission unavailable")
+    # Production configuration deliberately cannot select this mode until an
+    # installed runtime composition can validate all execution prerequisites.
+    if operation_name == "execution" and getattr(request.app.state, "personal_dev_build_admission_mode", None) != "native-execution":
+        raise HTTPException(503, "native execution unavailable")
     if operation_name in {"register", "drain", "release"} and getattr(
         request.app.state, "personal_dev_build_admission_mode", None
     ) not in {"native-registration", "native-claims", "native-source", "native-artifacts"}:
@@ -96,6 +101,10 @@ async def _admit(
                     raise HTTPException(413, "build admission request exceeds byte bound")
                 body.extend(chunk)
             try:
+                execution_request = (
+                    BuildExecutionExchangeV1.model_validate_json(bytes(body))
+                    if operation_name == "execution" else None
+                )
                 assigned_claim = (
                     BuildAllocatedClaimExchangeV1.model_validate_json(bytes(body))
                     if operation_name == "claim-assigned" else None
@@ -126,7 +135,9 @@ async def _admit(
                     else None
                 )
                 operation = (
-                    assigned_claim.claim
+                    execution_request.request.claim
+                    if execution_request is not None
+                    else assigned_claim.claim
                     if assigned_claim is not None
                     else source_read.claim
                     if source_read is not None
@@ -180,7 +191,10 @@ async def _admit(
                 await session.execute(text("SET LOCAL statement_timeout='10000ms'"))
                 await session.execute(text("SET LOCAL lock_timeout='5000ms'"))
                 store = BuildGuardExecutionStore(session, binding=binding)
-                if assigned_claim is not None:
+                if execution_request is not None:
+                    wire = canonical_bytes(await store.authorize_execution(
+                        execution_request.request, worker_credential=execution_request.worker_credential))
+                elif assigned_claim is not None:
                     wire = canonical_bytes(await store.claim_assigned_platform(
                         assigned_claim.claim, worker_credential=assigned_claim.worker_credential))
                 elif release is not None:
@@ -221,7 +235,7 @@ async def _admit(
             # Context exit commits. Never send a preparation receipt from an
             # uncommitted transaction that could be followed by scheduler submit.
             return Response(wire, media_type="application/json",
-                headers={"Cache-Control": "no-store"} if operation_name in {"context", "claim-assigned"} else None)
+                headers={"Cache-Control": "no-store"} if operation_name in {"context", "claim-assigned", "execution"} else None)
     except (DBAPIError, ValueError):
         raise HTTPException(409, "build admission evidence unavailable or changed") from None
     except (TimeoutError, PoolTimeoutError, BotoCoreError, ClientError):
@@ -315,6 +329,11 @@ async def claim_build_platform(request: Request, pool_id: str, intent_id: UUID) 
 @router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/claim-assigned")
 async def claim_assigned_build_platform(request: Request, pool_id: str, intent_id: UUID) -> Response:
     return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="claim-assigned")
+
+
+@router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/execution")
+async def authorize_build_execution(request: Request, pool_id: str, intent_id: UUID) -> Response:
+    return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="execution")
 
 
 @router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/drain")
