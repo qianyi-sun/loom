@@ -2283,6 +2283,15 @@ source-only staging entrypoint remains a compatibility view. The IO object and
 its descriptor-scoped source path must never be sent into the mapped runtime;
 full composition must still copy sealed input and settle the launcher while
 retaining the received-artifact scope through upload/outcome.
+`prepare_native_runtime_input` now supplies the fixed input-copy primitive. It
+reads the authenticated staged archive in its original descriptor scope, checks
+exact length and SHA-256 while copying without extraction, and writes the existing
+authority-free contract. Only complete `0444` files in a fresh `0555` input
+directory become ready. Final directory/file identity readback rejects replacement;
+failed or cancelled writes settle before exact owned-file cleanup, preserving
+foreign replacements. The real outer-IO fixture consumes these portable copies.
+Connecting this input primitive and scoped authenticated IO to a single installed
+launcher/upload/outcome orchestration remains separate work.
 These fixtures remain offline (`--network=none`); restricted external
 dependency fetching, protected material/rootless installation, Slurm containment,
 ARM64 supervision, authenticated IO-helper composition and native artifact GC
