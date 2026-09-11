@@ -1,5 +1,6 @@
 """Disposable Docker fixture only. Not an installer or an execution authority."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -63,6 +64,30 @@ def main():
     if prepare_only:
         assert workspace.stat().st_mode & 0o777 == 0o700
         assert not (workspace / "input").exists(), "outer IO owns source input preparation"
+        from loom_capacity_agent.build_admission import BuildSourceContextV1
+        from loom_capacity_executor.native_oci_bundles import NativeOciBundlePolicy
+        from loom_capacity_executor.native_oci_material import prepare_native_oci_material
+
+        seccomp = (fixtures / "client-seccomp.json").read_bytes()
+        context = BuildSourceContextV1.model_validate_json((fixtures / "context.json").read_bytes())
+        bundle_root = rootfs.parent / "bundles"
+        prepare_native_oci_material(context, bundle_root=bundle_root,
+            policy=NativeOciBundlePolicy(rootfs=rootfs, workspace=workspace,
+                client_seccomp=seccomp, client_seccomp_sha256=hashlib.sha256(seccomp).hexdigest(),
+                tmp_bytes=64 * 1024**2, buildkit_state_bytes=1024**3))
+        assert (workspace / "output").stat().st_uid == 1000
+        assert (workspace / "output").stat().st_gid == 1000
+        if identity["root_stop"].endswith("expiry"):
+            # V1 fixture-only lifetime probe, never an option of the production
+            # assembler. One-launch V2 acceptance must use a feature Dockerfile.
+            config = bundle_root / "client/config.json"
+            document = json.loads(config.read_bytes())
+            document["process"]["args"] = ["/usr/bin/python3", "/opt/lifecycle_probe.py"]
+            config.chmod(0o600)
+            config.write_text(json.dumps(document))
+            config.chmod(0o444)
+        print("native-production-oci-material-ready", flush=True)
+        return
     else:
         workspace.mkdir(mode=0o755)
         shutil.copytree(fixtures / "input", workspace / "input")
@@ -70,9 +95,6 @@ def main():
     output.mkdir(mode=0o700)
     os.chown(output, 1000, 1000)
     (workspace / "buildkit-run").mkdir(mode=0o1777)
-    if prepare_only:
-        workspace.chmod(0o700)
-        return
     sandbox_id = identity["sandbox_id"]
     buildkit_id = identity["buildkit_id"]
     client_id = identity["client_id"]

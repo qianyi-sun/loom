@@ -2106,6 +2106,19 @@ host mapping helpers or grants an arbitrary capability request. A partial failur
 does not make the material ready. Trusted current-source overlays remain fixture
 steps; neither helper is an installed runtime-readiness certificate.
 
+`prepare_native_oci_material` completes mapped local assembly using the fixed
+renderer: fresh `0555` bundle directories with exact `0444` configs, a private
+`0700` output directory owned by mapped UID/GID 1000, and the `1777` BuildKit
+socket mountpoint. It refuses existing destinations and symlinked parents,
+checks creation identity before ownership changes, and rechecks directory/file
+identities, metadata and config bytes before returning. Failure cleanup removes
+only tracked inodes and preserves staged input and foreign replacements. The
+outer KVM fixture uses this production assembly for actual build execution;
+its V1 expiry case still explicitly substitutes a fixture-only lifetime probe.
+Assembly does not authenticate the installed release, launch a feature, or
+provide a one-launch installed worker entrypoint. SIGKILL scratch recovery and
+unmodified-client expiry acceptance remain separate obligations.
+
 The versioned client policy is
 `deploy/personal-dev-builder/client-seccomp-v1.json`. It permits ordinary
 Python/buildctl file IO, read-only extended-attribute inspection, constrained

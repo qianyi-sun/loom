@@ -248,6 +248,7 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
     (fixtures / "claim.json").write_text(claim.model_dump_json())
     (fixtures / "context.json").write_text(context.model_dump_json())
     wire = (ROOT / "deploy/personal-dev-builder/client-seccomp-v1.json").read_bytes()
+    (fixtures / "client-seccomp.json").write_bytes(wire)
     policy = NativeOciBundlePolicy(rootfs=Path("/tmp/native-material/rootfs" if root_stop.startswith("monitored-rootless-outer")
         else "/tmp/native-rootfs"), workspace=Path("/tmp/native-work"),
         client_seccomp=wire, client_seccomp_sha256=hashlib.sha256(wire).hexdigest(),
@@ -310,6 +311,7 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
     assert "native-allocated-runtime-cleanup-ok" in output.stdout
     if "-outer" in root_stop:
+        assert "native-production-oci-material-ready" in output.stdout
         assert "native-outer-io-session-settled" in output.stdout
     if root_stop.endswith("expiry"):
         assert "native-supervised-expiry-stopped-live-client" in output.stdout

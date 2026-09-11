@@ -76,8 +76,12 @@ only local assembly, never permission to execute or physical capacity release.
 
         def directory(ancestor: int, name: str, mode: int, uid: int = 0) -> int:
             os.mkdir(name, 0o700, dir_fd=ancestor)
+            created_identity = _identity(os.stat(name, dir_fd=ancestor, follow_symlinks=False))
             descriptor = os.open(name, _DIRECTORY, dir_fd=ancestor)
             stack.callback(os.close, descriptor)
+            if _identity(os.fstat(descriptor)) != created_identity:
+                raise ValueError("native OCI directory changed before open")
+            _metadata(descriptor, 0o700)
             directories.append((ancestor, name, descriptor, mode, uid))
             return descriptor
 
@@ -89,7 +93,7 @@ only local assembly, never permission to execute or physical capacity release.
                 os.fchmod(descriptor, mode)
                 os.fsync(descriptor)
             root = directory(parent, bundle_root.name, 0o555)
-            created = {(): _identity(os.fstat(root))}
+            created: dict[tuple[str, ...], tuple[int, int]] = {(): _identity(os.fstat(root))}
             roots.append((root, parent, bundle_root.name, created))
             files: list[tuple[int, int, bytes]] = []
             for role in ("pause", "buildkit", "client"):
@@ -117,8 +121,8 @@ only local assembly, never permission to execute or physical capacity release.
             os.fsync(root)
             for role_fd, descriptor, wire in files:
                 observed = os.fstat(descriptor)
-                path = os.stat("config.json", dir_fd=role_fd, follow_symlinks=False)
-                if (_identity(path) != _identity(observed) or not stat.S_ISREG(observed.st_mode)
+                path_metadata = os.stat("config.json", dir_fd=role_fd, follow_symlinks=False)
+                if (_identity(path_metadata) != _identity(observed) or not stat.S_ISREG(observed.st_mode)
                     or stat.S_IMODE(observed.st_mode) != 0o444 or observed.st_nlink != 1
                     or (observed.st_uid, observed.st_gid) != (0, 0) or observed.st_size != len(wire)
                     or os.pread(descriptor, len(wire) + 1, 0) != wire):
@@ -129,9 +133,9 @@ only local assembly, never permission to execute or physical capacity release.
                     raise ValueError("native OCI directory changed during preparation")
             for path, descriptor, mode in ((policy.workspace, workspace, 0o700),
                 (bundle_root.parent, parent, 0o700), (policy.rootfs, rootfs, 0o755)):
-                observed = _open_directory(path, stack)
+                reopened = _open_directory(path, stack)
                 _metadata(descriptor, mode)
-                if _identity(os.fstat(observed)) != _identity(os.fstat(descriptor)):
+                if _identity(os.fstat(reopened)) != _identity(os.fstat(descriptor)):
                     raise ValueError("native OCI parent changed during preparation")
             os.fsync(workspace)
             os.fsync(parent)

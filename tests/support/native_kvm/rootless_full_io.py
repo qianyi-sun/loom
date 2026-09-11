@@ -37,7 +37,8 @@ def verify_runtime():
     """Independent mapped readback; never repeat production runtime deletions."""
     context = BuildSourceContextV1.model_validate_json(Path("/fixtures/context.json").read_bytes())
     expiry = json.loads(Path("/fixtures/identity.json").read_bytes())["root_stop"].endswith("expiry")
-    layout = NativeRunscLayout(Path("/runtime/runsc"), Path("/tmp/runsc-state"), Path("/fixtures"), context.claim_digest)
+    layout = NativeRunscLayout(Path("/runtime/runsc"), Path("/tmp/runsc-state"),
+        Path("/tmp/native-material/bundles"), context.claim_digest)
     output = Path("/tmp/native-work/output")
     if expiry:
         pulse = output / "lifecycle-pulse"
@@ -72,7 +73,7 @@ async def main():
         check=True, timeout=60)
     claim = BuildClaimRequestV1.model_validate_json(Path("/fixtures/claim.json").read_bytes())
     spec = NativeRootlessSpecV1(claim=claim, context=context, runsc="/runtime/runsc",
-        state_root="/tmp/runsc-state", bundle_root="/fixtures", workspace="/tmp/native-work",
+        state_root="/tmp/runsc-state", bundle_root="/tmp/native-material/bundles", workspace="/tmp/native-work",
         max_artifact_bytes=32 * 1024**2, max_image_archive_bytes=3 * 1024**2)
     wire = canonical_bytes(spec)
     spec_path = Path("/tmp/native-work/runtime-spec.json")
