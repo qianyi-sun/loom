@@ -110,6 +110,7 @@ _AUTHORITY_REBIND_ACTIVITY_TABLES = (
     "protected_runtime_trial_submissions",
     "trial_attempts",
     "trial_requirements",
+    "trial_writer_mutations",
 )
 _AUTHORITY_REBIND_ACTIVITY_UNION = " UNION ALL ".join(
     f"SELECT 1 AS present FROM loom_capacity_guard.{table_name}"
@@ -124,6 +125,7 @@ _AUTHORITY_REBIND_LOCK_TABLES = tuple(
             "agent_runtime_authority",
             "audit_events",
             "authority_state",
+            "trial_writer_fence",
             "capacity_guard_alembic_version",
             "claim_guard_activation",
             "executable_admission_authority",
@@ -134,6 +136,9 @@ _AUTHORITY_REBIND_LOCK_TABLES = tuple(
 )
 _AUTHORITY_REBIND_LOCK_SQL = ", ".join(
     f"loom_capacity_guard.{table_name}" for table_name in _AUTHORITY_REBIND_LOCK_TABLES
+)
+_AUTHORITY_REBIND_LOCK_STATEMENT = (
+    f"LOCK TABLE {_AUTHORITY_REBIND_LOCK_SQL} IN ACCESS EXCLUSIVE MODE NOWAIT;"
 )
 _AUTHORITY_REBIND_TRIGGER_PREDICATE = """
     (
@@ -217,8 +222,16 @@ _AUTHORITY_BINDING_AUDIT_MODEL_TYPES: dict[str, type[GuardFenceV1] | type[AgentR
 }
 _AUTHORITY_REBIND_FOUNDATION_PREDICATE = f"""
     (SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version)
-      = 'guard_0032'
+      = 'guard_0033'
     AND NOT EXISTS ({_AUTHORITY_REBIND_ACTIVITY_UNION})
+    AND (SELECT count(*) FROM loom_capacity_guard.trial_writer_fence) = 1
+    AND EXISTS (
+      SELECT 1 FROM loom_capacity_guard.trial_writer_fence
+      WHERE singleton_id = 1 AND writer_incarnation IS NULL
+        AND writer_epoch = 1 AND subject_id IS NULL
+        AND registration IS NULL AND authority_binding IS NULL
+        AND high_water = 0 AND frozen IS FALSE AND freeze_operation_id IS NULL
+    )
     AND (SELECT count(*) FROM loom_capacity_guard.agent_reporter_state) = 1
     AND EXISTS (
       SELECT 1
@@ -2376,7 +2389,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         repaired_authority = sql.Literal(str(target_authority)).as_string()
         payload = f"""\
 BEGIN;
-LOCK TABLE {_AUTHORITY_REBIND_LOCK_SQL} IN ACCESS EXCLUSIVE MODE;
+{_AUTHORITY_REBIND_LOCK_STATEMENT}
 DO $loom$
 BEGIN
     IF current_user <> 'postgres'
@@ -2485,7 +2498,7 @@ COMMIT;
         payload = f"""\
 BEGIN;
 -- protected staging capacity authority runtime restore
-LOCK TABLE {_AUTHORITY_REBIND_LOCK_SQL} IN ACCESS EXCLUSIVE MODE;
+{_AUTHORITY_REBIND_LOCK_STATEMENT}
 DO $loom$
 BEGIN
     IF current_user <> 'postgres'

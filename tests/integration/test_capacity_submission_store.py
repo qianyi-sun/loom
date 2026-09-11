@@ -603,7 +603,7 @@ async def test_atomic_submission_blocks_guard_downgrade_without_data_loss(
     finally:
         admin.dispose()
     assert dict(row) == {
-        "version_num": "guard_0032",
+        "version_num": "guard_0033",
         "state": "protected-pending",
         "lifecycle_authority_id": receipt.lifecycle_authority_id,
         "protected_attempt_id": submission.protected_attempt_id,
@@ -612,7 +612,7 @@ async def test_atomic_submission_blocks_guard_downgrade_without_data_loss(
 
 
 @pytest.mark.asyncio
-async def test_concurrent_guard_downgrade_observes_committing_atomic_submission(
+async def test_concurrent_guard_downgrade_refuses_then_observes_committed_atomic_submission(
     capacity_guard_database: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -676,39 +676,17 @@ async def test_concurrent_guard_downgrade_observes_committing_atomic_submission(
                 asyncio.to_thread(command.downgrade, config, "guard_0010")
             )
 
-            admin = create_engine(_value(capacity_guard_database, "admin_url"))
-            try:
-                async with asyncio.timeout(10):
-                    while True:
-                        with admin.connect() as connection:
-                            waiting_on_guard_relation = connection.execute(
-                                text(
-                                    "SELECT EXISTS ("
-                                    "SELECT 1 FROM pg_locks AS lock "
-                                    "JOIN pg_stat_activity AS activity ON activity.pid = lock.pid "
-                                    "JOIN pg_class AS relation ON relation.oid = lock.relation "
-                                    "JOIN pg_namespace AS namespace "
-                                    "ON namespace.oid = relation.relnamespace "
-                                    "WHERE activity.application_name = :application_name "
-                                    "AND namespace.nspname = 'loom_capacity_guard' "
-                                    "AND lock.granted IS FALSE)"
-                                ),
-                                {"application_name": application_name},
-                            ).scalar_one()
-                        if waiting_on_guard_relation:
-                            break
-                        if downgrade_task.done():
-                            pytest.fail(
-                                "guard downgrade completed before overlapping the open "
-                                f"atomic submission: {downgrade_task.exception()!r}"
-                            )
-                        await asyncio.sleep(0.01)
-            finally:
-                admin.dispose()
+            # guard0031 refuses public-table lock contention immediately. A
+            # waiting downgrade could retain other authority needed by the
+            # writer; retry only after the failed migration transaction ends.
+            async with asyncio.timeout(10):
+                with pytest.raises(DBAPIError, match="could not obtain lock") as busy:
+                    await downgrade_task
+            assert busy.value.orig.sqlstate == "55P03"
 
             await transaction.commit()
             with pytest.raises(DBAPIError, match="atomic trial submissions exist"):
-                await downgrade_task
+                await asyncio.to_thread(command.downgrade, config, "guard_0010")
 
         admin = create_engine(_value(capacity_guard_database, "admin_url"))
         try:
@@ -741,7 +719,7 @@ async def test_concurrent_guard_downgrade_observes_committing_atomic_submission(
         await agent_engine.dispose()
 
     assert dict(row) == {
-        "version_num": "guard_0032",
+        "version_num": "guard_0033",
         "state": "protected-pending",
         "lifecycle_authority_id": receipt.lifecycle_authority_id,
         "protected_attempt_id": submission.protected_attempt_id,
@@ -922,7 +900,7 @@ async def test_guard_0022_refuses_downgrade_with_protected_staging_submission(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0032"
+                == "guard_0033"
             )
             assert (
                 connection.execute(

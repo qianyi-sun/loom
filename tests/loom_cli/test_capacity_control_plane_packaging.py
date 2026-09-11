@@ -87,6 +87,7 @@ _GUARD_MIGRATION_RESOURCES = {
     "capacity_guard_migrations/versions/guard_0030_application_trigger_schema_usage.py",
     "capacity_guard_migrations/versions/guard_0031_native_reader_fence.py",
     "capacity_guard_migrations/versions/guard_0032_typed_terminal_inventory.py",
+    "capacity_guard_migrations/versions/guard_0033_trial_writer_interception.py",
 }
 _PROFILE = _REPO_ROOT / "deploy/dev-fleet/capacity-control-plane.toml"
 _MANAGER_IMAGE = "ghcr.io/qianyi-sun/loom-capacity-manager@sha256:" + "a" * 64
@@ -256,13 +257,39 @@ def test_installed_wheel_renders_capacity_manifests_outside_checkout(
             "-c",
             (
                 "import json, capacity_guard_migrations, capacity_migrations, loom_cli; "
+                "import loom.application_schema_inventory as schema_inventory; "
+                "import loom.application_schema_reference as schema_reference; "
+                "import loom.application_runtime_grants as runtime_grants; "
+                "import loom.application_ownership_transfer as ownership_transfer; "
+                "import loom.application_database_connection as database_connection; "
+                "import loom.application_login_sealing as login_sealing; "
+                "import loom.application_runtime_login as runtime_login; "
+                "import loom.application_database_admission as database_admission; "
+                "import loom_cli.rollout.operator.protected_peer_database_connection as peer_connection; "
+                "import loom_cli.rollout.operator.protected_application_admission_recovery as admission_recovery; "
+                "import loom_cli.rollout.operator.protected_application_credential_recovery as credential_recovery; "
                 "from loom_capacity_guard.schema_startup import capacity_guard_schema_head; "
+                "from loom.trial_writer_trigger_authority import application_trigger_owner_handoff_ddl; "
                 "from loom_capacity_manager.migration_resources import "
                 "resolve_capacity_migration_resources; "
                 "print(json.dumps({"
                 "'capacity_package': capacity_migrations.__file__, "
                 "'guard_package': capacity_guard_migrations.__file__, "
+                "'schema_inventory_package': schema_inventory.__file__, "
+                "'schema_reference_package': schema_reference.__file__, "
+                "'runtime_grants_package': runtime_grants.__file__, "
+                "'ownership_transfer_package': ownership_transfer.__file__, "
+                "'database_connection_package': database_connection.__file__, "
+                "'login_sealing_package': login_sealing.__file__, "
+                "'runtime_login_package': runtime_login.__file__, "
+                "'database_admission_package': database_admission.__file__, "
+                "'peer_connection_package': peer_connection.__file__, "
+                "'admission_recovery_package': admission_recovery.__file__, "
+                "'credential_recovery_package': credential_recovery.__file__, "
                 "'guard_head': capacity_guard_schema_head()[0], "
+                "'handoff_rendered': bool(application_trigger_owner_handoff_ddl("
+                "previous_owner='loom_previous', application_owner='loom_application_owner', "
+                "guard_owner='loom_guard_owner').as_string()), "
                 "'loom_cli': loom_cli.__file__, "
                 "'migration_config': str("
                 "resolve_capacity_migration_resources().config)}))"
@@ -276,7 +303,8 @@ def test_installed_wheel_renders_capacity_manifests_outside_checkout(
     )
     assert probe.returncode == 0, probe.stderr
     probe_result = json.loads(probe.stdout)
-    assert probe_result.pop("guard_head") == "guard_0032"
+    assert probe_result.pop("guard_head") == "guard_0033"
+    assert probe_result.pop("handoff_rendered") is True
     loaded_paths = [Path(value).resolve() for value in probe_result.values()]
     assert all(path.is_relative_to(installed_purelib) for path in loaded_paths)
     assert not any(path.is_relative_to(_REPO_ROOT) for path in loaded_paths)

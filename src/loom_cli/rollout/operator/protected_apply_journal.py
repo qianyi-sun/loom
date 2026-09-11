@@ -18,16 +18,38 @@ import json
 import os
 import re
 import stat
+import threading
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
 from uuid import UUID, uuid4
 
+from loom.application_database_admission import (
+    ApplicationDatabaseAdmissionTarget,
+    ApplicationDatabaseCoordinationGuard,
+    ApplicationDatabaseHandoffBackend,
+)
+
 from .failure_diagnostics import unclassified_failure_diagnostic
 from .final_gate_plan import FinalGatePlan
 from .model import validate_safe_identifier
+from .protected_application_admission_recovery import (
+    MAX_HANDOFF_RECOVERIES,
+    ApplicationAdmissionRecoveryRecord,
+    ApplicationHandoffRecoveryIntent,
+    ApplicationHandoffReplacementReceipt,
+    admission_record_digest,
+    require_replacement_identity,
+)
+from .protected_application_credential_recovery import ApplicationCredentialRecoveryBinding
+from .protected_cnpg_fence_recovery import (
+    CNPGFenceCreateIntent,
+    CNPGFenceObjectReceipt,
+    CNPGFenceRequest,
+)
+from .protected_cnpg_writer_configuration import CNPGWriterConfigurationBinding
 from .protected_external_supervisor_transport import (
     COMPENSATION_RECONCILIATION_FAILURE_CODES,
     EXTERNAL_SUPERVISOR_APPLY_FAILURE_CODES,
@@ -873,6 +895,338 @@ class ProtectedApplyJournal:
         )
         self.root = self.attempt_root / "protected-apply"
         self.lock_path = self.root / "execution.lock"
+        self._active_apply: tuple[Path, ComponentIntent] | None = None
+        self._active_apply_owner: tuple[int, int] | None = None
+
+    def _application_admission_context(self) -> tuple[Path, ComponentIntent]:
+        if self._active_apply is None or self._active_apply_owner != (
+            os.getpid(),
+            threading.get_ident(),
+        ):
+            raise ProtectedApplyJournalError(
+                "application admission requires active component apply"
+            )
+        root, intent = self._active_apply
+        _require_directory(root, uid=self.service_uid)
+        if ComponentIntent.from_dict(self._read(root / "intent.json")) != intent:
+            raise ProtectedApplyJournalError("application admission component intent changed")
+        return root, intent
+
+    def read_application_admission_recovery(self) -> ApplicationAdmissionRecoveryRecord | None:
+        """Read saved identity inside active apply; never recapture closed state on retry."""
+        root, intent = self._application_admission_context()
+        try:
+            payload = self._read(root / "application-admission.json")
+        except FileNotFoundError:
+            return None
+        try:
+            record = ApplicationAdmissionRecoveryRecord.from_dict(payload)
+        except ValueError:
+            raise ProtectedApplyJournalError(
+                "application admission recovery record is invalid"
+            ) from None
+        if record.intent_digest != intent.intent_digest:
+            raise ProtectedApplyJournalError("application admission recovery intent changed")
+        self._sync_application_recovery(root, "application-admission.json")
+        return record
+
+    def _sync_application_recovery(self, root: Path, filename: str) -> None:
+        # A prior publisher can exit after making its link visible but BEFORE
+        # fsync. A matching file is not proof of durable publication on retry.
+        for path in (root / "intent.json", root / filename):
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                _require_regular(fd, uid=self.service_uid)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        # Persist both file entries and newly-created component/journal directories.
+        # The admitted attempt directory itself belongs to the outer plan store.
+        for path in (root, self.root, self.attempt_root):
+            _require_directory(path, uid=self.service_uid)
+            fd = _open_directory(path)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+
+    def read_application_handoff_recoveries(
+        self,
+    ) -> tuple[tuple[ApplicationHandoffRecoveryIntent, ApplicationHandoffReplacementReceipt | None], ...]:
+        """Validate and flush the entire append-only chain before recovery decisions."""
+        root, _active = self._application_admission_context()
+        original = self.read_application_admission_recovery()
+        if original is None:
+            raise ProtectedApplyJournalError("application handoff recovery requires original admission")
+        names = {path.name for path in root.iterdir() if path.name.startswith("application-handoff-")}
+        allowed = {
+            f"application-handoff-{ordinal:02d}-{kind}.json"
+            for ordinal in range(1, MAX_HANDOFF_RECOVERIES + 1) for kind in ("intent", "peer")
+        }
+        if not names <= allowed:
+            raise ProtectedApplyJournalError("application handoff recovery layout changed")
+        previous_digest = admission_record_digest(original.to_dict())
+        prior_backends = [original.handoff_backend]
+        records: list[tuple[ApplicationHandoffRecoveryIntent, ApplicationHandoffReplacementReceipt | None]] = []
+        consumed: set[str] = set()
+        try:
+            for ordinal in range(1, MAX_HANDOFF_RECOVERIES + 1):
+                intent_name = f"application-handoff-{ordinal:02d}-intent.json"
+                peer_name = f"application-handoff-{ordinal:02d}-peer.json"
+                if intent_name not in names:
+                    break
+                intent = ApplicationHandoffRecoveryIntent.from_dict(self._read(root / intent_name))
+                if intent != ApplicationHandoffRecoveryIntent(ordinal, previous_digest):
+                    raise ValueError("chain binding changed")
+                self._sync_application_recovery(root, intent_name)
+                consumed.add(intent_name)
+                receipt = None
+                if peer_name in names:
+                    receipt = ApplicationHandoffReplacementReceipt.from_dict(self._read(root / peer_name))
+                    if receipt.recovery_intent_digest != intent.digest:
+                        raise ValueError("receipt binding changed")
+                    require_replacement_identity(original, prior_backends, receipt.handoff_backend)
+                    self._sync_application_recovery(root, peer_name)
+                    consumed.add(peer_name)
+                    previous_digest = receipt.digest
+                    prior_backends.append(receipt.handoff_backend)
+                records.append((intent, receipt))
+                if receipt is None:
+                    break
+        except ValueError:
+            raise ProtectedApplyJournalError("application handoff recovery chain identity is invalid") from None
+        if names != consumed:
+            raise ProtectedApplyJournalError("application handoff recovery chain has gaps or pending successor")
+        return tuple(records)
+
+    def prepare_application_handoff_recovery(self, *, ordinal: int) -> ApplicationHandoffRecoveryIntent:
+        """Persist intent BEFORE reopening; retry an explicit ordinal, never silently advance."""
+        records = self.read_application_handoff_recoveries()
+        if type(ordinal) is not int or not 1 <= ordinal <= MAX_HANDOFF_RECOVERIES or ordinal > len(records) + 1:
+            raise ProtectedApplyJournalError("application handoff recovery ordinal is invalid")
+        if ordinal <= len(records):
+            return records[ordinal - 1][0]
+        if records and records[-1][1] is None:
+            raise ProtectedApplyJournalError("application handoff recovery is pending")
+        root, _active = self._application_admission_context()
+        original = self.read_application_admission_recovery()
+        assert original is not None
+        previous = records[-1][1] if records else None
+        intent = ApplicationHandoffRecoveryIntent(
+            ordinal, previous.digest if previous is not None else admission_record_digest(original.to_dict()),
+        )
+        self._publish_or_match(root / f"application-handoff-{ordinal:02d}-intent.json", intent.to_dict())
+        if self.read_application_handoff_recoveries()[-1] != (intent, None):
+            raise ProtectedApplyJournalError("application handoff recovery intent readback changed")
+        return intent
+
+    def record_application_handoff_replacement(
+        self, *, ordinal: int, handoff_backend: ApplicationDatabaseHandoffBackend,
+    ) -> ApplicationHandoffReplacementReceipt:
+        """Save an independently admitted peer; caller must still reclose and exact-peer drain."""
+        records = self.read_application_handoff_recoveries()
+        if type(ordinal) is not int or not 1 <= ordinal <= len(records):
+            raise ProtectedApplyJournalError("application handoff recovery intent must precede peer receipt")
+        root, _active = self._application_admission_context()
+        original = self.read_application_admission_recovery()
+        assert original is not None
+        intent, existing = records[ordinal - 1]
+        receipt = ApplicationHandoffReplacementReceipt(intent.digest, handoff_backend)
+        if existing is not None and existing != receipt:
+            raise ProtectedApplyJournalError("application handoff recovery peer cannot be replaced")
+        prior = [original.handoff_backend] + [
+            peer.handoff_backend for _, peer in records[:ordinal - 1] if peer is not None
+        ]
+        try:
+            require_replacement_identity(original, prior, handoff_backend)
+        except ValueError:
+            raise ProtectedApplyJournalError("application handoff replacement identity is invalid") from None
+        self._publish_or_match(root / f"application-handoff-{ordinal:02d}-peer.json", receipt.to_dict())
+        if self.read_application_handoff_recoveries()[ordinal - 1][1] != receipt:
+            raise ProtectedApplyJournalError("application handoff recovery peer readback changed")
+        return receipt
+
+    def require_application_credential_context(self, plan: FinalGatePlan) -> None:
+        """Require the current apply intent before any sensitive backup/live read."""
+        _root, intent = self._application_admission_context()
+        if (
+            FinalGatePlan.from_dict(plan.to_dict()) != plan
+            or plan.plan_digest != intent.plan_digest
+            or plan.namespace != "loom-staging"
+            or plan.checkpoint_schema_version != 3
+            or plan.checkpoint_component_sha256 is None
+        ):
+            raise ProtectedApplyJournalError("application credential plan binding changed")
+
+    def record_application_cnpg_configuration(
+        self, plan: FinalGatePlan, *, binding: CNPGWriterConfigurationBinding
+    ) -> None:
+        """Persist declared-writer inputs, not controller quiescence authority."""
+        self.require_application_credential_context(plan)
+        root, intent = self._application_admission_context()
+        if type(binding) is not CNPGWriterConfigurationBinding:
+            raise ProtectedApplyJournalError("CNPG writer configuration binding is invalid")
+        record = {"schema_version": 1, "intent_digest": intent.intent_digest, "binding": asdict(binding)}
+        path = root / "application-cnpg-configuration.json"
+        self._publish_or_match(path, record)
+        observed = self._read(path)
+        if json.dumps(observed, sort_keys=True) != json.dumps(record, sort_keys=True):
+            raise ProtectedApplyJournalError("CNPG writer configuration readback changed")
+        self._sync_application_recovery(root, path.name)
+
+    def prepare_application_cnpg_fence(
+        self, plan: FinalGatePlan, *,
+        target_pooler_names: tuple[str, ...],
+    ) -> CNPGFenceRequest:
+        """Bind renderer inputs durably before any attempted policy installation."""
+        self.require_application_credential_context(plan)
+        root, intent = self._application_admission_context()
+        request = CNPGFenceRequest(intent.intent_digest, target_pooler_names)
+        self._publish_or_match(root / "application-cnpg-fence-request.json", request.to_dict())
+        observed = self.read_application_cnpg_fence(plan)
+        if observed != request:
+            raise ProtectedApplyJournalError("CNPG fence request readback changed")
+        return request
+
+    def read_application_cnpg_fence(self, plan: FinalGatePlan) -> CNPGFenceRequest | None:
+        """Recover the exact guarded request, never adopt legacy restart authority."""
+        self.require_application_credential_context(plan)
+        root, intent = self._application_admission_context()
+        path = root / "application-cnpg-fence-request.json"
+        try:
+            value = self._read(path)
+        except FileNotFoundError:
+            return None
+        request = CNPGFenceRequest.from_dict(value)
+        if request.intent_digest != intent.intent_digest:
+            raise ProtectedApplyJournalError("CNPG fence request intent changed")
+        self._sync_application_recovery(root, path.name)
+        return request
+
+    def record_application_cnpg_fence_object(
+        self, plan: FinalGatePlan, *, ordinal: int, uid: str,
+    ) -> CNPGFenceObjectReceipt:
+        """Persist caller-verified API identity; never infer ownership from a name."""
+        request = self.read_application_cnpg_fence(plan)
+        if request is None:
+            raise ProtectedApplyJournalError("CNPG fence request must precede object identity")
+        receipt = CNPGFenceObjectReceipt(request.intent_digest, ordinal, uid,
+                                         request.document_sha256(ordinal))
+        root, _intent = self._application_admission_context()
+        path = root / f"application-cnpg-fence-{ordinal:02d}-object.json"
+        self._publish_or_match(path, receipt.to_dict())
+        observed = self.read_application_cnpg_fence_object(plan, ordinal=ordinal)
+        if observed != receipt:
+            raise ProtectedApplyJournalError("CNPG fence object readback changed")
+        return receipt
+
+    def prepare_application_cnpg_fence_create(
+        self, plan: FinalGatePlan, *, ordinal: int,
+    ) -> CNPGFenceCreateIntent:
+        """Write ahead only after the caller observes authoritative absence.
+
+        This records the caller's observation; it does not itself query the API
+        or establish exclusive policy authority. Reuse the original nonce on retry.
+        """
+        request = self.read_application_cnpg_fence(plan)
+        if request is None:
+            raise ProtectedApplyJournalError("CNPG fence request must precede create intent")
+        existing = self.read_application_cnpg_fence_create(plan, ordinal=ordinal)
+        if existing is not None:
+            return existing
+        if self.read_application_cnpg_fence_object(plan, ordinal=ordinal) is not None:
+            raise ProtectedApplyJournalError("CNPG fence known object cannot be recreated")
+        intent = CNPGFenceCreateIntent.prepare(request, ordinal=ordinal, nonce=uuid4().hex)
+        root, _active = self._application_admission_context()
+        self._publish_or_match(root / f"application-cnpg-fence-{ordinal:02d}-create.json", intent.to_dict())
+        observed = self.read_application_cnpg_fence_create(plan, ordinal=ordinal)
+        if observed != intent:
+            raise ProtectedApplyJournalError("CNPG fence create intent readback changed")
+        return intent
+
+    def read_application_cnpg_fence_create(
+        self, plan: FinalGatePlan, *, ordinal: int,
+    ) -> CNPGFenceCreateIntent | None:
+        request = self.read_application_cnpg_fence(plan)
+        if request is None:
+            raise ProtectedApplyJournalError("CNPG fence request must precede create intent")
+        request.document_sha256(ordinal)
+        root, _active = self._application_admission_context()
+        path = root / f"application-cnpg-fence-{ordinal:02d}-create.json"
+        try:
+            value = self._read(path)
+        except FileNotFoundError:
+            return None
+        intent = CNPGFenceCreateIntent.from_dict(value)
+        if intent.ordinal != ordinal:
+            raise ProtectedApplyJournalError("CNPG fence create ordinal changed")
+        intent.document(request)
+        self._sync_application_recovery(root, path.name)
+        return intent
+
+    def read_application_cnpg_fence_object(
+        self, plan: FinalGatePlan, *, ordinal: int,
+    ) -> CNPGFenceObjectReceipt | None:
+        request = self.read_application_cnpg_fence(plan)
+        if request is None:
+            raise ProtectedApplyJournalError("CNPG fence request must precede object identity")
+        digest = request.document_sha256(ordinal)
+        root, _intent = self._application_admission_context()
+        path = root / f"application-cnpg-fence-{ordinal:02d}-object.json"
+        try:
+            value = self._read(path)
+        except FileNotFoundError:
+            return None
+        receipt = CNPGFenceObjectReceipt.from_dict(value)
+        if (receipt.intent_digest != request.intent_digest or receipt.ordinal != ordinal
+                or receipt.document_sha256 != digest):
+            raise ProtectedApplyJournalError("CNPG fence object identity binding changed")
+        self._sync_application_recovery(root, path.name)
+        return receipt
+
+    def record_application_credential_recovery(
+        self, plan: FinalGatePlan, *, binding: ApplicationCredentialRecoveryBinding
+    ) -> None:
+        """Bind original sources and live identity without persisting passwords."""
+        self.require_application_credential_context(plan)
+        root, intent = self._application_admission_context()
+        assert plan.checkpoint_component_sha256 is not None
+        if (
+            type(binding) is not ApplicationCredentialRecoveryBinding
+            or binding.manifest_sha256 != plan.backup_manifest_sha256
+            or binding.component_sha256 != plan.checkpoint_component_sha256["k8s_secrets"]
+        ):
+            raise ProtectedApplyJournalError("application credential backup binding changed")
+        record = {
+            "schema_version": 1,
+            "intent_digest": intent.intent_digest,
+            "binding": asdict(binding),
+        }
+        path = root / "application-credentials.json"
+        self._publish_or_match(path, record)
+        observed = self._read(path)
+        if type(observed.get("schema_version")) is not int or observed != record:
+            raise ProtectedApplyJournalError("application credential recovery readback changed")
+        self._sync_application_recovery(root, path.name)
+
+    def record_application_admission_recovery(
+        self,
+        *,
+        target: ApplicationDatabaseAdmissionTarget,
+        handoff_backend: ApplicationDatabaseHandoffBackend,
+        coordination_guard: ApplicationDatabaseCoordinationGuard | None = None,
+    ) -> ApplicationAdmissionRecoveryRecord:
+        """Durably bind the full target BEFORE closure, without passwords or new authority.
+
+        Caller must independently admit maintenance and credential/workload recovery.
+        Publication is immutable and reuses this journal's private file contract.
+        """
+        root, intent = self._application_admission_context()
+        record = ApplicationAdmissionRecoveryRecord(intent.intent_digest, target, handoff_backend, coordination_guard)
+        self._publish_or_match(root / "application-admission.json", record.to_dict())
+        if self.read_application_admission_recovery() != record:
+            raise ProtectedApplyJournalError("application admission recovery readback changed")
+        return record
 
     def execute(
         self,
@@ -1295,8 +1649,16 @@ class ProtectedApplyJournal:
         ordinal: int,
         plan: FinalGatePlan,
     ) -> None:
+        if self._active_apply is not None:
+            raise ProtectedApplyJournalError("protected component apply is already active")
+        self._active_apply = (component_root, ComponentIntent.build(plan, component, ordinal))
+        self._active_apply_owner = (os.getpid(), threading.get_ident())
         try:
-            component.apply(plan)
+            try:
+                component.apply(plan)
+            finally:
+                self._active_apply = None
+                self._active_apply_owner = None
         except BaseException as exc:
             from .protected_gb10_transport import GB10FleetApplyError
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Iterator
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
@@ -20,8 +21,11 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
 import loom.personal_dev_capacity_runtime as capacity_runtime_module
+import loom.trial_writer_trigger_authority as trigger_authority_module
 import loom_cli.rollout.operator.protected_staging_capacity_database_component as capacity_database_component_module
 from loom.dev_instance import derive_identity
+from loom.dev_instance_provision import render_create_database_sql, render_role_convergence_sql
+from loom.dev_instance_runtime import PsycopgSharedFixtureSqlExecutor, instance_database_url
 from loom.personal_dev_capacity import (
     PersonalDevCapacityAvailability,
     PersonalDevCapacityManagerCheckpoint,
@@ -45,6 +49,31 @@ from loom_cli.rollout.operator.protected_staging_capacity_database_component imp
     KubernetesProtectedStagingCapacityDatabaseComponent,
     build_staging_reporter_configuration_for_candidate,
 )
+
+
+@pytest.fixture
+def capacity_postgres_url(postgres_url: str) -> Iterator[str]:
+    """Give each independent environment identity its own public database.
+
+    Production role convergence binds one guard authority to one environment
+    database. Sharing the session database among unrelated identities would
+    leave another authority's function grants in the next test's environment.
+    """
+    source = make_url(postgres_url)
+    assert source.database is not None
+    database_name = f"loom_capacity_runtime_{uuid4().hex}"
+    engine = create_engine(source.set(database="postgres"), isolation_level="AUTOCOMMIT")
+    quote = engine.dialect.identifier_preparer.quote
+    try:
+        with engine.connect() as admin:
+            admin.exec_driver_sql(
+                f"CREATE DATABASE {quote(database_name)} TEMPLATE {quote(source.database)}"
+            )
+        yield source.set(database=database_name).render_as_string(hide_password=False)
+    finally:
+        with engine.connect() as admin:
+            admin.exec_driver_sql(f"DROP DATABASE IF EXISTS {quote(database_name)} WITH (FORCE)")
+        engine.dispose()
 
 
 def _active_binding(subject_id: UUID, subject_incarnation: UUID) -> ExecutableIntentBindingV2:
@@ -128,7 +157,7 @@ def test_capacity_guard_passfile_handles_short_writes(
 
 @pytest.mark.asyncio
 async def test_compensation_shutdown_observation_rejects_null_role_validity(
-    postgres_url: str,
+    capacity_postgres_url: str,
 ) -> None:
     """Break caught: SQL three-valued logic accepting an unset role validity."""
 
@@ -136,7 +165,7 @@ async def test_compensation_shutdown_observation_rejects_null_role_validity(
     owner, migrator, agent, executor, observer, runtime = _role_names(identity)
     protected = (owner, migrator, agent, executor, observer, runtime)
     connection_url = (
-        make_url(postgres_url)
+        make_url(capacity_postgres_url)
         .render_as_string(hide_password=False)
         .replace("postgresql+psycopg://", "postgresql://", 1)
     )
@@ -184,7 +213,7 @@ async def test_compensation_shutdown_observation_rejects_null_role_validity(
     ["loom_cap_staging_owner", "loom_cap_staging_executor"],
 )
 async def test_full_compensation_covers_every_protected_role_session(
-    postgres_url: str,
+    capacity_postgres_url: str,
     active_role: str,
 ) -> None:
     """Break caught: full compensation accepting a live owner or executor session."""
@@ -195,12 +224,12 @@ async def test_full_compensation_covers_every_protected_role_session(
     assert active_role in protected
     password = f"protected-session-{uuid4().hex}"
     connection_url = (
-        make_url(postgres_url)
+        make_url(capacity_postgres_url)
         .render_as_string(hide_password=False)
         .replace("postgresql+psycopg://", "postgresql://", 1)
     )
     active_url = (
-        make_url(postgres_url)
+        make_url(capacity_postgres_url)
         .set(username=active_role, password=password)
         .render_as_string(hide_password=False)
         .replace("postgresql+psycopg://", "postgresql://", 1)
@@ -335,7 +364,7 @@ async def test_full_compensation_covers_every_protected_role_session(
 
 @pytest.mark.asyncio
 async def test_staging_peer_arm_composes_with_converge_seal_retry_and_replacement(
-    postgres_url: str,
+    capacity_postgres_url: str,
 ) -> None:
     """Catch retries sending application-role ACL mutations to the protected schema."""
 
@@ -344,7 +373,7 @@ async def test_staging_peer_arm_composes_with_converge_seal_retry_and_replacemen
     identity = staging_capacity_identity()
     owner, migrator, agent, executor, observer, runtime = _role_names(identity)
     protected = (owner, migrator, agent, executor, observer, runtime)
-    parsed = make_url(postgres_url)
+    parsed = make_url(capacity_postgres_url)
     application_password = f"loom-app-{uuid4().hex}"
     cluster_url = (
         parsed.set(database="template1")
@@ -774,6 +803,20 @@ async def test_staging_peer_arm_composes_with_converge_seal_retry_and_replacemen
             original_digest = (await digest.fetchone())[0]
 
             await connection.execute(
+                "SELECT loom_capacity_guard.initialize_trial_writer_fence("
+                "(SELECT agent_incarnation FROM loom_capacity_guard.agent_registrations), %s)",
+                (uuid4(),),
+            )
+            assert not repair._authority_rebind_foundation_exact()
+            # Restore only this disposable fixture for the remaining independent
+            # corruption probes. There is deliberately no runtime unbind API.
+            await connection.execute(
+                "UPDATE loom_capacity_guard.trial_writer_fence SET writer_incarnation=NULL, "
+                "subject_id=NULL, registration=NULL, authority_binding=NULL"
+            )
+            assert repair._authority_rebind_foundation_exact()
+
+            await connection.execute(
                 "ALTER TABLE loom_capacity_guard.agent_reporter_state "
                 "DISABLE TRIGGER agent_reporter_state_monotonic_row"
             )
@@ -960,14 +1003,493 @@ async def test_capacity_guard_migration_uses_password_free_url_and_private_passf
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("handoff", [False, True])
+async def test_personal_role_convergence_after_actual_application_owned_migrations(
+    capacity_postgres_url: str,
+    handoff: bool,
+) -> None:
+    """Use the real personal SQL bootstrap, not administrator-owned test tables."""
+    identity = derive_identity(f"appowner-{uuid4().hex[:8]}")
+    password = uuid4().hex
+    database = PsycopgPersonalDevCapacityDatabase(capacity_postgres_url)
+    bootstrap = PsycopgSharedFixtureSqlExecutor(capacity_postgres_url)
+    await bootstrap.apply_role_and_database(
+        identity,
+        role_sql=render_role_convergence_sql(identity, password),
+        create_database_sql=render_create_database_sql(identity),
+    )
+    root = Path(__file__).resolve().parents[2]
+    cfg = AlembicConfig(str(root / "migrations/alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "migrations"))
+    cfg.set_main_option(
+        "sqlalchemy.url", instance_database_url(capacity_postgres_url, identity, password)
+    )
+    new_owner = f"sealed_app_{uuid4().hex}"
+    admin_url = (
+        make_url(capacity_postgres_url)
+        .set(database=identity.database)
+        .render_as_string(hide_password=False)
+    )
+    admin_url = admin_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    try:
+        command.upgrade(cfg, "head")
+        roles = await database._converge_roles(identity, _new_credentials())
+        owner, _migrator, agent, executor, observer, runtime, migrator_url, _agent_url = roles
+        await database._migrate(
+            migrator_url=migrator_url,
+            owner=owner,
+            agent=agent,
+            executor=executor,
+            observer=observer,
+            runtime=runtime,
+        )
+        application_url = instance_database_url(capacity_postgres_url, identity, password)
+        async with await psycopg.AsyncConnection.connect(
+            application_url.replace("postgresql+psycopg://", "postgresql://", 1)
+        ) as application:
+            result = await application.execute(
+                "SELECT pg_get_userbyid(proowner), prosecdef, proconfig "
+                "FROM pg_proc WHERE oid = 'public.loom_drop_trial_writer_triggers()'::regprocedure"
+            )
+            assert await result.fetchone() == (identity.db_role, True, ["search_path=pg_catalog"])
+            result = await application.execute(
+                "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'public.trials'::regclass"
+            )
+            assert await result.fetchone() == (identity.db_role,)
+        # Re-convergence must retain the same function owner, body and ACL.
+        await database._converge_roles(identity, _new_credentials())
+        await database._seal_migrator(identity, owner=owner, migrator=_migrator)
+        if handoff:
+            # Sealing is committed before the ownership transaction, so another
+            # connection cannot authenticate against an old visible LOGIN flag.
+            async with await psycopg.AsyncConnection.connect(admin_url) as admin:
+                await admin.execute(
+                    psycopg.sql.SQL("ALTER ROLE {} NOLOGIN PASSWORD NULL").format(
+                        psycopg.sql.Identifier(identity.db_role)
+                    )
+                )
+            async with await psycopg.AsyncConnection.connect(admin_url) as admin:
+                async with admin.transaction():
+                    await admin.execute(
+                        psycopg.sql.SQL(
+                            "CREATE ROLE {} NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB "
+                            "NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+                        ).format(psycopg.sql.Identifier(new_owner))
+                    )
+                    # This test exercises the trigger substep of a larger
+                    # ownership transaction, not complete application sealing.
+                    await admin.execute(
+                        psycopg.sql.SQL("ALTER TABLE public.trials OWNER TO {}").format(
+                            psycopg.sql.Identifier(new_owner)
+                        )
+                    )
+                    await admin.execute(
+                        trigger_authority_module.application_trigger_owner_handoff_ddl(
+                            previous_owner=identity.db_role,
+                            application_owner=new_owner,
+                            guard_owner=owner,
+                        )
+                    )
+                    await admin.execute(
+                        psycopg.sql.SQL("GRANT SELECT, UPDATE ON public.trials TO {}").format(
+                            psycopg.sql.Identifier(identity.db_role)
+                        )
+                    )
+            async with await psycopg.AsyncConnection.connect(
+                admin_url,
+                autocommit=True,
+            ) as application:
+                # Check the old role's effective privileges without reopening
+                # its sealed login or claiming the rest of its owner scope is safe.
+                await application.execute(
+                    psycopg.sql.SQL("SET ROLE {}").format(psycopg.sql.Identifier(identity.db_role))
+                )
+                for statement in (
+                    "ALTER TABLE public.trials DISABLE TRIGGER capacity_guard_lock_trial_writer",
+                    "SELECT public.loom_drop_trial_writer_triggers()",
+                    "SELECT loom_capacity_guard.close_protected_runtime_trial_claim(NULL,NULL,NULL,NULL,NULL)",
+                ):
+                    with pytest.raises(InsufficientPrivilege):
+                        await application.execute(statement)
+            async with await psycopg.AsyncConnection.connect(admin_url) as admin:
+                observed = await admin.execute(
+                    "SELECT pg_get_userbyid(proowner) FROM pg_proc "
+                    "WHERE oid IN ('public.loom_drop_trial_writer_triggers()'::regprocedure, "
+                    "'public.loom_close_protected_runtime_trial_claim()'::regprocedure, "
+                    "'public.loom_transform_protected_runtime_trial_requeue()'::regprocedure)"
+                )
+                assert await observed.fetchall() == [(new_owner,)] * 3
+                # The retained private bridge grant must follow the new
+                # definer, not disappear or remain callable by the old login.
+                observed = await admin.execute(
+                    "SELECT has_schema_privilege(%s, 'loom_capacity_guard', 'USAGE'), "
+                    "has_function_privilege(%s, 'loom_capacity_guard.close_protected_runtime_trial_claim(uuid,text,text,uuid,integer)', 'EXECUTE')",
+                    (new_owner, new_owner),
+                )
+                assert await observed.fetchone() == (True, True)
+            # A subsequent guard provisioning run must use an explicit trusted
+            # owner binding, never infer a new owner from the live catalog.
+            async with await psycopg.AsyncConnection.connect(admin_url) as admin:
+                await admin.execute(
+                    psycopg.sql.SQL("ALTER DATABASE {} OWNER TO {}").format(
+                        psycopg.sql.Identifier(identity.database),
+                        psycopg.sql.Identifier(new_owner),
+                    )
+                )
+                await admin.execute(
+                    psycopg.sql.SQL("GRANT CREATE ON SCHEMA public TO {}").format(
+                        psycopg.sql.Identifier(new_owner)
+                    )
+                )
+            binding = capacity_runtime_module.ApplicationOwnerBinding(
+                database=identity.database,
+                runtime_role=identity.db_role,
+                owner_role=new_owner,
+            )
+            bound_database = PsycopgPersonalDevCapacityDatabase(
+                capacity_postgres_url, application_owner_binding=binding
+            )
+            for _ in range(2):
+                rebound = await bound_database._converge_roles(identity, _new_credentials())
+                await bound_database._migrate(
+                    migrator_url=rebound[-2],
+                    owner=owner,
+                    agent=agent,
+                    executor=executor,
+                    observer=observer,
+                    runtime=runtime,
+                )
+                await bound_database._seal_migrator(identity, owner=owner, migrator=_migrator)
+            async with await psycopg.AsyncConnection.connect(admin_url) as admin:
+                observed = await admin.execute(
+                    "SELECT pg_get_userbyid(proowner), "
+                    "has_function_privilege(%s, oid, 'EXECUTE') FROM pg_proc "
+                    "WHERE oid IN ('public.loom_drop_trial_writer_triggers()'::regprocedure, "
+                    "'public.loom_close_protected_runtime_trial_claim()'::regprocedure, "
+                    "'public.loom_transform_protected_runtime_trial_requeue()'::regprocedure)",
+                    (identity.db_role,),
+                )
+                assert await observed.fetchall() == [(new_owner, False)] * 3
+                for signature in (
+                    "loom_capacity_guard.close_protected_runtime_trial_claim(uuid,text,text,uuid,integer)",
+                    "loom_capacity_guard.transform_protected_runtime_trial_requeue"
+                    "(uuid,text,uuid,integer,uuid,integer,text,text,timestamp with time zone)",
+                ):
+                    observed = await admin.execute(
+                        "SELECT has_function_privilege(%s, %s, 'EXECUTE'), "
+                        "has_function_privilege(%s, %s, 'EXECUTE'), "
+                        "has_schema_privilege(%s, 'loom_capacity_guard', 'USAGE')",
+                        (identity.db_role, signature, new_owner, signature, new_owner),
+                    )
+                    assert await observed.fetchone() == (False, True, True)
+            # Destroy must include this explicitly bound owner, without
+            # discovering and adopting arbitrary other roles.
+            await bound_database.destroy(identity)
+            async with await psycopg.AsyncConnection.connect(
+                capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
+            ) as admin:
+                observed = await admin.execute(
+                    "SELECT count(*) FROM pg_roles WHERE rolname = %s", (new_owner,)
+                )
+                assert await observed.fetchone() == (0,)
+    finally:
+        await database.destroy(identity)
+        async with await psycopg.AsyncConnection.connect(
+            capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
+            autocommit=True,
+        ) as cleanup:
+            await cleanup.execute(
+                psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(new_owner))
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "database_owner",
+        "table_owner",
+        "login",
+        "superuser",
+        "membership",
+        "database_binding",
+        "runtime_binding",
+        "guard_collision",
+    ],
+)
+async def test_bound_application_owner_refuses_drift_before_provisioning(
+    capacity_postgres_url: str, drift: str
+) -> None:
+    parsed = make_url(capacity_postgres_url)
+    assert parsed.database is not None
+    identity = replace(derive_identity(f"binding-{uuid4().hex[:8]}"), database=parsed.database)
+    target = f"bound_app_{uuid4().hex}"
+    peer = f"bound_peer_{uuid4().hex}"
+    guard_owner, guard_migrator, *_ = _role_names(identity)
+    connect_url = capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    async with await psycopg.AsyncConnection.connect(connect_url) as admin:
+        observed = await admin.execute(
+            "SELECT pg_get_userbyid(d.datdba), pg_get_userbyid(c.relowner) "
+            "FROM pg_database AS d, pg_class AS c WHERE d.datname = current_database() "
+            "AND c.oid = 'public.trials'::regclass"
+        )
+        original = await observed.fetchone()
+        assert original is not None
+        for role in (target, peer):
+            await admin.execute(
+                psycopg.sql.SQL("CREATE ROLE {} NOLOGIN NOINHERIT").format(
+                    psycopg.sql.Identifier(role)
+                )
+            )
+        await admin.execute(
+            psycopg.sql.SQL("CREATE ROLE {} NOLOGIN NOINHERIT").format(
+                psycopg.sql.Identifier(guard_owner)
+            )
+        )
+        await admin.execute(
+            psycopg.sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                psycopg.sql.Identifier(guard_migrator), psycopg.sql.Literal(uuid4().hex)
+            )
+        )
+        await admin.execute(
+            psycopg.sql.SQL("GRANT {} TO {}").format(
+                psycopg.sql.Identifier(guard_owner), psycopg.sql.Identifier(guard_migrator)
+            )
+        )
+        for privilege, role in (("CREATE", guard_owner), ("CONNECT", guard_migrator)):
+            await admin.execute(
+                psycopg.sql.SQL("GRANT {} ON DATABASE {} TO {}").format(
+                    psycopg.sql.SQL(privilege),
+                    psycopg.sql.Identifier(identity.database),
+                    psycopg.sql.Identifier(role),
+                )
+            )
+        await admin.execute(
+            psycopg.sql.SQL("ALTER DATABASE {} OWNER TO {}").format(
+                psycopg.sql.Identifier(identity.database), psycopg.sql.Identifier(target)
+            )
+        )
+        await admin.execute(
+            psycopg.sql.SQL("ALTER TABLE public.trials OWNER TO {}").format(
+                psycopg.sql.Identifier(target)
+            )
+        )
+    binding = capacity_runtime_module.ApplicationOwnerBinding(
+        database=identity.database,
+        runtime_role=identity.db_role,
+        owner_role=target,
+    )
+    try:
+        async with await psycopg.AsyncConnection.connect(connect_url) as admin:
+            if drift == "database_owner":
+                await admin.execute(
+                    psycopg.sql.SQL("ALTER DATABASE {} OWNER TO {}").format(
+                        psycopg.sql.Identifier(identity.database), psycopg.sql.Identifier(peer)
+                    )
+                )
+            elif drift == "table_owner":
+                await admin.execute(
+                    psycopg.sql.SQL("ALTER TABLE public.trials OWNER TO {}").format(
+                        psycopg.sql.Identifier(peer)
+                    )
+                )
+            elif drift in {"login", "superuser"}:
+                await admin.execute(
+                    psycopg.sql.SQL("ALTER ROLE {} {}").format(
+                        psycopg.sql.Identifier(target), psycopg.sql.SQL(drift.upper())
+                    )
+                )
+            elif drift == "membership":
+                await admin.execute(
+                    psycopg.sql.SQL("GRANT {} TO {}").format(
+                        psycopg.sql.Identifier(target), psycopg.sql.Identifier(peer)
+                    )
+                )
+            elif drift == "database_binding":
+                binding = replace(binding, database="wrong_database")
+            elif drift == "runtime_binding":
+                binding = replace(binding, runtime_role=peer)
+            else:
+                binding = replace(binding, owner_role=_role_names(identity)[0])
+        database = PsycopgPersonalDevCapacityDatabase(
+            capacity_postgres_url, application_owner_binding=binding
+        )
+        with pytest.raises(PersonalDevCapacityInstallationError, match="application owner binding"):
+            await database._converge_roles(identity, _new_credentials())
+        with pytest.raises(PersonalDevCapacityInstallationError, match="application owner binding"):
+            await database.seal(identity)
+        async with await psycopg.AsyncConnection.connect(connect_url) as admin:
+            observed = await admin.execute(
+                "SELECT count(*) FROM pg_roles WHERE rolname = ANY(%s)",
+                (list(_role_names(identity)),),
+            )
+            assert await observed.fetchone() == (2,)
+            observed = await admin.execute(
+                "SELECT rolcanlogin, rolpassword IS NOT NULL, "
+                "pg_has_role(rolname, %s, 'MEMBER') FROM pg_authid WHERE rolname = %s",
+                (guard_owner, guard_migrator),
+            )
+            assert await observed.fetchone() == (True, True, True)
+            observed = await admin.execute(
+                "SELECT count(*) FROM pg_database AS d, aclexplode(d.datacl) AS a "
+                "WHERE d.datname = current_database() AND "
+                "(a.grantee = %s::regrole AND a.privilege_type = 'CREATE' OR "
+                "a.grantee = %s::regrole AND a.privilege_type = 'CONNECT')",
+                (guard_owner, guard_migrator),
+            )
+            assert await observed.fetchone() == (2,)
+            observed = await admin.execute(
+                "SELECT rolcanlogin, rolsuper FROM pg_roles WHERE rolname = %s", (target,)
+            )
+            assert await observed.fetchone() == (drift == "login", drift == "superuser")
+    finally:
+        async with await psycopg.AsyncConnection.connect(connect_url) as admin:
+            await admin.execute(
+                psycopg.sql.SQL("ALTER DATABASE {} OWNER TO {}").format(
+                    psycopg.sql.Identifier(identity.database), psycopg.sql.Identifier(original[0])
+                )
+            )
+            await admin.execute(
+                psycopg.sql.SQL("ALTER TABLE public.trials OWNER TO {}").format(
+                    psycopg.sql.Identifier(original[1])
+                )
+            )
+            for role in (guard_migrator, guard_owner, peer, target):
+                await admin.execute(
+                    psycopg.sql.SQL("REVOKE ALL ON DATABASE {} FROM {}").format(
+                        psycopg.sql.Identifier(identity.database), psycopg.sql.Identifier(role)
+                    )
+                )
+                await admin.execute(
+                    psycopg.sql.SQL("REVOKE ALL ON public.trials FROM {}").format(
+                        psycopg.sql.Identifier(role)
+                    )
+                )
+                await admin.execute(
+                    psycopg.sql.SQL("DROP ROLE {}").format(psycopg.sql.Identifier(role))
+                )
+
+
+@pytest.mark.asyncio
+async def test_bound_owner_cleanup_refuses_foreign_grants_after_database_is_gone(
+    capacity_postgres_url: str,
+) -> None:
+    identity = derive_identity(f"gone-{uuid4().hex[:8]}")
+    target = f"gone_owner_{uuid4().hex}"
+    connect_url = capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    async with await psycopg.AsyncConnection.connect(connect_url) as admin:
+        await admin.execute(
+            psycopg.sql.SQL("CREATE ROLE {} NOLOGIN NOINHERIT").format(
+                psycopg.sql.Identifier(target)
+            )
+        )
+        await admin.execute(
+            psycopg.sql.SQL("GRANT CONNECT ON DATABASE template1 TO {}").format(
+                psycopg.sql.Identifier(target)
+            )
+        )
+    database = PsycopgPersonalDevCapacityDatabase(
+        capacity_postgres_url,
+        application_owner_binding=capacity_runtime_module.ApplicationOwnerBinding(
+            database=identity.database, runtime_role=identity.db_role, owner_role=target
+        ),
+    )
+    try:
+        with pytest.raises(
+            PersonalDevCapacityInstallationError, match="application owner binding scope"
+        ):
+            await database.destroy(identity)
+        async with await psycopg.AsyncConnection.connect(connect_url) as admin:
+            observed = await admin.execute(
+                "SELECT count(*) FROM pg_database AS d, aclexplode(d.datacl) AS a "
+                "WHERE d.datname = 'template1' AND a.grantee = %s::regrole "
+                "AND a.privilege_type = 'CONNECT'",
+                (target,),
+            )
+            assert await observed.fetchone() == (1,)
+            await admin.execute(
+                psycopg.sql.SQL("REVOKE ALL ON DATABASE template1 FROM {}").format(
+                    psycopg.sql.Identifier(target)
+                )
+            )
+        await database.destroy(identity)
+        await database.destroy(identity)
+    finally:
+        async with await psycopg.AsyncConnection.connect(connect_url) as admin:
+            observed = await admin.execute("SELECT to_regrole(%s)", (target,))
+            if await observed.fetchone() != (None,):
+                await admin.execute(
+                    psycopg.sql.SQL("REVOKE ALL ON DATABASE template1 FROM {}").format(
+                        psycopg.sql.Identifier(target)
+                    )
+                )
+                await admin.execute(
+                    psycopg.sql.SQL("DROP ROLE {}").format(psycopg.sql.Identifier(target))
+                )
+
+
+@pytest.mark.asyncio
+async def test_personal_helper_convergence_rejects_unexpected_table_owner(
+    capacity_postgres_url: str,
+) -> None:
+    parsed = make_url(capacity_postgres_url)
+    assert parsed.database is not None
+    identity = replace(derive_identity(f"ownerdrift-{uuid4().hex[:8]}"), database=parsed.database)
+    foreign_owner = f"foreign_trial_owner_{uuid4().hex}"
+    database = PsycopgPersonalDevCapacityDatabase(capacity_postgres_url)
+    owner, migrator, *_ = _role_names(identity)
+    url = capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    async with await psycopg.AsyncConnection.connect(url, autocommit=True) as admin:
+        original = await admin.execute(
+            "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'public.trials'::regclass"
+        )
+        original_row = await original.fetchone()
+        assert original_row is not None
+        await admin.execute(
+            psycopg.sql.SQL("CREATE ROLE {} NOLOGIN").format(psycopg.sql.Identifier(foreign_owner))
+        )
+        await admin.execute(
+            psycopg.sql.SQL("ALTER TABLE public.trials OWNER TO {}").format(
+                psycopg.sql.Identifier(foreign_owner)
+            )
+        )
+        try:
+            with pytest.raises(
+                PersonalDevCapacityInstallationError, match="application owner is unexpected"
+            ):
+                await database._converge_roles(identity, _new_credentials())
+            observed = await admin.execute(
+                "SELECT pg_get_userbyid(relowner), "
+                "to_regprocedure('public.loom_drop_trial_writer_triggers()'), "
+                "has_table_privilege(%s, 'public.trials', 'TRIGGER') "
+                "FROM pg_class WHERE oid = 'public.trials'::regclass",
+                (owner,),
+            )
+            assert await observed.fetchone() == (foreign_owner, None, False)
+            sealed = await admin.execute(
+                "SELECT rolcanlogin FROM pg_roles WHERE rolname=%s", (migrator,)
+            )
+            assert await sealed.fetchone() == (False,)
+        finally:
+            await admin.execute(
+                psycopg.sql.SQL("ALTER TABLE public.trials OWNER TO {}").format(
+                    psycopg.sql.Identifier(original_row[0])
+                )
+            )
+            await admin.execute(
+                psycopg.sql.SQL("DROP ROLE {}").format(psycopg.sql.Identifier(foreign_owner))
+            )
+
+
+@pytest.mark.asyncio
 async def test_capacity_role_convergence_provisions_isolated_runtime_role(
-    postgres_url: str,
+    capacity_postgres_url: str,
 ) -> None:
     name = f"runtime-{uuid4().hex[:8]}"
-    database_name = make_url(postgres_url).database
+    database_name = make_url(capacity_postgres_url).database
     assert database_name is not None
     identity = replace(derive_identity(name), database=database_name)
-    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+    database = PsycopgPersonalDevCapacityDatabase(capacity_postgres_url)
     credentials = _new_credentials()
 
     (
@@ -982,7 +1504,7 @@ async def test_capacity_role_convergence_provisions_isolated_runtime_role(
     ) = await database._converge_roles(identity, credentials)
 
     async with await psycopg.AsyncConnection.connect(
-        postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
+        capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
     ) as connection:
         role = await connection.execute(
             "SELECT rolcanlogin, rolinherit, rolpassword IS NULL, "
@@ -995,7 +1517,7 @@ async def test_capacity_role_convergence_provisions_isolated_runtime_role(
         assert runtime not in {owner, migrator, agent, executor, observer}
 
     runtime_url = (
-        make_url(postgres_url)
+        make_url(capacity_postgres_url)
         .set(
             database=database_name,
             username=runtime,
@@ -1011,18 +1533,18 @@ async def test_capacity_role_convergence_provisions_isolated_runtime_role(
 
 @pytest.mark.asyncio
 async def test_capacity_role_convergence_removes_owner_password(
-    postgres_url: str,
+    capacity_postgres_url: str,
 ) -> None:
     name = f"ownpw-{uuid4().hex[:8]}"
-    database_name = make_url(postgres_url).database
+    database_name = make_url(capacity_postgres_url).database
     assert database_name is not None
     identity = replace(derive_identity(name), database=database_name)
-    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+    database = PsycopgPersonalDevCapacityDatabase(capacity_postgres_url)
     credentials = _new_credentials()
 
     owner, *_rest = await database._converge_roles(identity, credentials)
     async with await psycopg.AsyncConnection.connect(
-        postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
+        capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
         autocommit=True,
     ) as connection:
         await connection.execute(
@@ -1035,7 +1557,7 @@ async def test_capacity_role_convergence_removes_owner_password(
     await database._converge_roles(identity, credentials)
 
     async with await psycopg.AsyncConnection.connect(
-        postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
+        capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
     ) as connection:
         role = await connection.execute(
             "SELECT rolcanlogin, rolpassword IS NULL FROM pg_authid WHERE rolname = %s",
@@ -1251,11 +1773,11 @@ async def test_runtime_registration_rejects_function_privilege_drift(
 
 @pytest.mark.asyncio
 async def test_capacity_role_convergence_seals_migrator_when_cancelled(
-    postgres_url: str,
+    capacity_postgres_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     identity = derive_identity(f"cancel-{uuid4().hex[:8]}")
-    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+    database = PsycopgPersonalDevCapacityDatabase(capacity_postgres_url)
     seal = AsyncMock()
     monkeypatch.setattr(database, "_seal_migrator", seal)
 
@@ -1272,14 +1794,14 @@ async def test_capacity_role_convergence_seals_migrator_when_cancelled(
 
 @pytest.mark.asyncio
 async def test_capacity_role_convergence_rejects_external_owner_membership(
-    postgres_url: str,
+    capacity_postgres_url: str,
 ) -> None:
     name = f"role-{uuid4().hex[:8]}"
-    database_name = make_url(postgres_url).database
+    database_name = make_url(capacity_postgres_url).database
     assert database_name is not None
     identity = replace(derive_identity(name), database=database_name)
     credentials = _new_credentials()
-    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+    database = PsycopgPersonalDevCapacityDatabase(capacity_postgres_url)
 
     (
         owner,
@@ -1293,14 +1815,14 @@ async def test_capacity_role_convergence_rejects_external_owner_membership(
     ) = await database._converge_roles(identity, credentials)
     outsider = f"loom_cap_outsider_{uuid4().hex[:8]}"
     async with await psycopg.AsyncConnection.connect(
-        postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
+        capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
         autocommit=True,
     ) as connection:
         await connection.execute(f'GRANT SELECT ON TABLE public.trials TO "{agent}"')
 
     await database._converge_roles(identity, credentials)
     async with await psycopg.AsyncConnection.connect(
-        postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
+        capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
         autocommit=True,
     ) as connection:
         privilege = await connection.execute(
@@ -1322,7 +1844,7 @@ async def test_capacity_role_convergence_rejects_external_owner_membership(
     ):
         await database._converge_roles(identity, credentials)
     async with await psycopg.AsyncConnection.connect(
-        postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
+        capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
     ) as connection:
         sealed = await connection.execute(
             "SELECT rolcanlogin, rolpassword IS NULL FROM pg_authid WHERE rolname = %s",
@@ -1338,13 +1860,13 @@ async def test_capacity_role_convergence_rejects_external_owner_membership(
 
 @pytest.mark.asyncio
 async def test_capacity_role_convergence_grants_only_required_reference_columns(
-    postgres_url: str,
+    capacity_postgres_url: str,
 ) -> None:
     name = f"references-{uuid4().hex[:8]}"
-    database_name = make_url(postgres_url).database
+    database_name = make_url(capacity_postgres_url).database
     assert database_name is not None
     identity = replace(derive_identity(name), database=database_name)
-    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+    database = PsycopgPersonalDevCapacityDatabase(capacity_postgres_url)
 
     (
         owner,
@@ -1358,7 +1880,7 @@ async def test_capacity_role_convergence_grants_only_required_reference_columns(
     ) = await database._converge_roles(identity, _new_credentials())
 
     async with await psycopg.AsyncConnection.connect(
-        postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
+        capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
     ) as connection:
         privileges = await connection.execute(
             "SELECT "
@@ -1379,15 +1901,15 @@ async def test_capacity_role_convergence_grants_only_required_reference_columns(
 
 @pytest.mark.asyncio
 async def test_capacity_role_convergence_grants_bounded_protected_claim_surface(
-    postgres_url: str,
+    capacity_postgres_url: str,
 ) -> None:
     """A protected claim can mutate only its exact public scheduler surface."""
 
     name = f"claimsurf-{uuid4().hex[:8]}"
-    database_name = make_url(postgres_url).database
+    database_name = make_url(capacity_postgres_url).database
     assert database_name is not None
     identity = replace(derive_identity(name), database=database_name)
-    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+    database = PsycopgPersonalDevCapacityDatabase(capacity_postgres_url)
 
     (
         owner,
@@ -1436,7 +1958,7 @@ async def test_capacity_role_convergence_grants_bounded_protected_claim_surface(
         ("execution_admission_reservations", "execution_role", "SELECT"),
         ("execution_admission_reservations", "trial_id", "INSERT"),
     }
-    connect_url = postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    connect_url = capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
     async with await psycopg.AsyncConnection.connect(connect_url) as connection:
         missing: set[tuple[str, str, str]] = set()
         for table, column, privilege in expected_columns:
@@ -1457,13 +1979,13 @@ async def test_capacity_role_convergence_grants_bounded_protected_claim_surface(
 
 @pytest.mark.asyncio
 async def test_capacity_role_convergence_removes_contaminated_executor_privileges(
-    postgres_url: str,
+    capacity_postgres_url: str,
 ) -> None:
     name = f"execcont-{uuid4().hex[:8]}"
-    database_name = make_url(postgres_url).database
+    database_name = make_url(capacity_postgres_url).database
     assert database_name is not None
     identity = replace(derive_identity(name), database=database_name)
-    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+    database = PsycopgPersonalDevCapacityDatabase(capacity_postgres_url)
     credentials = _new_credentials()
     (
         _owner,
@@ -1476,7 +1998,7 @@ async def test_capacity_role_convergence_removes_contaminated_executor_privilege
         _agent_url,
     ) = await database._converge_roles(identity, credentials)
     schema_name = f"executor_contamination_{uuid4().hex[:8]}"
-    connect_url = postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    connect_url = capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
     async with await psycopg.AsyncConnection.connect(connect_url, autocommit=True) as connection:
         await connection.execute(f'CREATE ROLE "{identity.db_role}" LOGIN')
         await connection.execute(f'CREATE SCHEMA "{schema_name}"')
@@ -1553,17 +2075,17 @@ async def test_capacity_role_convergence_removes_contaminated_executor_privilege
 
 @pytest.mark.asyncio
 async def test_capacity_role_convergence_isolates_executor_from_public_functions(
-    postgres_url: str,
+    capacity_postgres_url: str,
 ) -> None:
     """Catch PUBLIC schema usage bypassing direct executor function revocation."""
 
     name = f"execpublic-{uuid4().hex[:8]}"
-    database_name = make_url(postgres_url).database
+    database_name = make_url(capacity_postgres_url).database
     assert database_name is not None
     identity = replace(derive_identity(name), database=database_name)
-    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+    database = PsycopgPersonalDevCapacityDatabase(capacity_postgres_url)
     function_name = f"executor_public_evidence_{uuid4().hex[:8]}"
-    connect_url = postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    connect_url = capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
     async with await psycopg.AsyncConnection.connect(connect_url, autocommit=True) as connection:
         await connection.execute(f'CREATE ROLE "{identity.db_role}" LOGIN')
         await connection.execute("GRANT USAGE ON SCHEMA public TO PUBLIC")
@@ -1632,13 +2154,13 @@ async def test_capacity_role_convergence_isolates_executor_from_public_functions
 
 @pytest.mark.asyncio
 async def test_capacity_migrator_authority_is_sealed_between_reconciliations(
-    postgres_url: str,
+    capacity_postgres_url: str,
 ) -> None:
     name = f"seal-{uuid4().hex[:8]}"
-    database_name = make_url(postgres_url).database
+    database_name = make_url(capacity_postgres_url).database
     assert database_name is not None
     identity = replace(derive_identity(name), database=database_name)
-    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+    database = PsycopgPersonalDevCapacityDatabase(capacity_postgres_url)
     (
         owner,
         migrator,
@@ -1653,7 +2175,7 @@ async def test_capacity_migrator_authority_is_sealed_between_reconciliations(
     await database._seal_migrator(identity, owner=owner, migrator=migrator)
 
     async with await psycopg.AsyncConnection.connect(
-        postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
+        capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
     ) as connection:
         role = await connection.execute(
             "SELECT rolcanlogin, rolpassword IS NULL FROM pg_authid WHERE rolname = %s",
@@ -1674,19 +2196,19 @@ async def test_capacity_migrator_authority_is_sealed_between_reconciliations(
 
 @pytest.mark.asyncio
 async def test_capacity_migrator_seal_is_idempotent_before_roles_exist(
-    postgres_url: str,
+    capacity_postgres_url: str,
 ) -> None:
     name = f"seal-absent-{uuid4().hex[:8]}"
-    database_name = make_url(postgres_url).database
+    database_name = make_url(capacity_postgres_url).database
     assert database_name is not None
     identity = replace(derive_identity(name), database=database_name)
     owner, migrator, *_rest = _role_names(identity)
-    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+    database = PsycopgPersonalDevCapacityDatabase(capacity_postgres_url)
 
     await database._seal_migrator(identity, owner=owner, migrator=migrator)
 
     async with await psycopg.AsyncConnection.connect(
-        postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
+        capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
     ) as connection:
         roles = await connection.execute(
             "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
@@ -1696,10 +2218,12 @@ async def test_capacity_migrator_seal_is_idempotent_before_roles_exist(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("separate_owner", [False, True])
 async def test_transient_migrator_admin_converges_roles_without_altering_itself(
-    postgres_url: str,
+    capacity_postgres_url: str,
+    separate_owner: bool,
 ) -> None:
-    parsed = make_url(postgres_url)
+    parsed = make_url(capacity_postgres_url)
     suffix = uuid4().hex[:8]
     database_name = f"transient_roles_{suffix}"
     application_role = f"transient_app_{suffix}"
@@ -1707,7 +2231,7 @@ async def test_transient_migrator_admin_converges_roles_without_altering_itself(
     identity = replace(
         derive_identity(f"transient-{uuid4().hex[:8]}"),
         database=database_name,
-        db_role=application_role,
+        db_role=f"transient_runtime_{suffix}" if separate_owner else application_role,
     )
     credentials = _new_credentials()
     owner, migrator, agent, executor, observer, runtime = _role_names(identity)
@@ -1759,6 +2283,17 @@ async def test_transient_migrator_admin_converges_roles_without_altering_itself(
             connect_url,
             autocommit=True,
         ) as connection:
+            if separate_owner:
+                await connection.execute(
+                    psycopg.sql.SQL("ALTER ROLE {} NOLOGIN PASSWORD NULL").format(
+                        psycopg.sql.Identifier(application_role)
+                    )
+                )
+                await connection.execute(
+                    psycopg.sql.SQL("CREATE ROLE {} NOLOGIN NOINHERIT").format(
+                        psycopg.sql.Identifier(identity.db_role)
+                    )
+                )
             for role in (owner, executor):
                 await connection.execute(
                     psycopg.sql.SQL(
@@ -1808,11 +2343,29 @@ async def test_transient_migrator_admin_converges_roles_without_altering_itself(
         database = PsycopgPersonalDevCapacityDatabase(
             migrator_url,
             transient_role_admin=True,
+            application_owner_binding=(
+                capacity_runtime_module.ApplicationOwnerBinding(
+                    database=database_name,
+                    runtime_role=identity.db_role,
+                    owner_role=application_role,
+                )
+                if separate_owner
+                else None
+            ),
         )
 
         observed = await database._converge_roles(identity, credentials)
 
         assert observed[:6] == protected
+        await database._migrate(
+            migrator_url=observed[-2],
+            owner=owner,
+            agent=agent,
+            executor=executor,
+            observer=observer,
+            runtime=runtime,
+        )
+        await database._converge_roles(identity, credentials)
         async with await psycopg.AsyncConnection.connect(connect_url) as connection:
             role = await connection.execute(
                 "SELECT rolcanlogin, rolcreaterole, rolpassword IS NULL "
@@ -1846,7 +2399,7 @@ async def test_transient_migrator_admin_converges_roles_without_altering_itself(
                     psycopg.sql.Identifier(database_name)
                 )
             )
-            for role in (*reversed(protected), application_role):
+            for role in (*reversed(protected), application_role, identity.db_role):
                 await connection.execute(
                     psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(role))
                 )
@@ -1854,7 +2407,7 @@ async def test_transient_migrator_admin_converges_roles_without_altering_itself(
 
 @pytest.mark.asyncio
 async def test_peer_sql_arms_and_seals_exact_staging_migrator_authority(
-    postgres_url: str,
+    capacity_postgres_url: str,
 ) -> None:
     credentials = _new_credentials()
 
@@ -1886,7 +2439,7 @@ async def test_peer_sql_arms_and_seals_exact_staging_migrator_authority(
     component._seal_transient_migrator()
     arm_payload, *seal_payloads = runner.payloads
     assert len(seal_payloads) == 6
-    parsed = make_url(postgres_url)
+    parsed = make_url(capacity_postgres_url)
     identity = staging_capacity_identity()
     owner, migrator, agent, executor, observer, runtime = _role_names(identity)
     protected = (owner, migrator, agent, executor, observer, runtime)
@@ -2032,14 +2585,14 @@ async def test_peer_sql_arms_and_seals_exact_staging_migrator_authority(
 
 @pytest.mark.asyncio
 async def test_destroy_seal_disables_primary_and_capacity_database_logins(
-    postgres_url: str,
+    capacity_postgres_url: str,
 ) -> None:
     name = f"retain-{uuid4().hex[:8]}"
-    database_name = make_url(postgres_url).database
+    database_name = make_url(capacity_postgres_url).database
     assert database_name is not None
     identity = replace(derive_identity(name), database=database_name)
-    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
-    connect_url = postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    database = PsycopgPersonalDevCapacityDatabase(capacity_postgres_url)
+    connect_url = capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
     async with await psycopg.AsyncConnection.connect(
         connect_url,
         autocommit=True,
@@ -2074,14 +2627,14 @@ async def test_destroy_seal_disables_primary_and_capacity_database_logins(
 
 @pytest.mark.asyncio
 async def test_destroy_seal_terminates_live_sessions_and_blocks_reconnects(
-    postgres_url: str,
+    capacity_postgres_url: str,
 ) -> None:
     name = f"sealrace-{uuid4().hex[:8]}"
-    database_name = make_url(postgres_url).database
+    database_name = make_url(capacity_postgres_url).database
     assert database_name is not None
     identity = replace(derive_identity(name), database=database_name)
-    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
-    connect_url = postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    database = PsycopgPersonalDevCapacityDatabase(capacity_postgres_url)
+    connect_url = capacity_postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
     application_password = f"app-password-{uuid4().hex}"
     async with await psycopg.AsyncConnection.connect(connect_url, autocommit=True) as connection:
         await connection.execute(
@@ -2100,19 +2653,19 @@ async def test_destroy_seal_terminates_live_sessions_and_blocks_reconnects(
     ) = await database._converge_roles(identity, credentials)
 
     role_urls = {
-        migrator: make_url(postgres_url)
+        migrator: make_url(capacity_postgres_url)
         .set(database=database_name, username=migrator, password=credentials.migrator_password)
         .render_as_string(hide_password=False)
         .replace("postgresql+psycopg://", "postgresql://", 1),
-        agent: make_url(postgres_url)
+        agent: make_url(capacity_postgres_url)
         .set(database=database_name, username=agent, password=credentials.agent_password)
         .render_as_string(hide_password=False)
         .replace("postgresql+psycopg://", "postgresql://", 1),
-        observer: make_url(postgres_url)
+        observer: make_url(capacity_postgres_url)
         .set(database=database_name, username=observer, password=credentials.observer_password)
         .render_as_string(hide_password=False)
         .replace("postgresql+psycopg://", "postgresql://", 1),
-        identity.db_role: make_url(postgres_url)
+        identity.db_role: make_url(capacity_postgres_url)
         .set(database=database_name, username=identity.db_role, password=application_password)
         .render_as_string(hide_password=False)
         .replace("postgresql+psycopg://", "postgresql://", 1),
@@ -2232,11 +2785,13 @@ async def test_destroy_seal_terminates_live_sessions_and_blocks_reconnects(
 
 @pytest.mark.asyncio
 async def test_personal_capacity_status_reader_accepts_jsonb_uuid_dict_observation(
-    postgres_url: str,
+    capacity_postgres_url: str,
 ) -> None:
     database_name = f"loom_capacity_status_{uuid4().hex[:8]}"
     admin_url = (
-        make_url(postgres_url).set(database="postgres").render_as_string(hide_password=False)
+        make_url(capacity_postgres_url)
+        .set(database="postgres")
+        .render_as_string(hide_password=False)
     )
     admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
     quoted_database = admin_engine.dialect.identifier_preparer.quote(database_name)
@@ -2248,14 +2803,14 @@ async def test_personal_capacity_status_reader_accepts_jsonb_uuid_dict_observati
         cfg.set_main_option("script_location", str(repo_root / "migrations"))
         cfg.set_main_option(
             "sqlalchemy.url",
-            make_url(postgres_url)
+            make_url(capacity_postgres_url)
             .set(database=database_name)
             .render_as_string(hide_password=False),
         )
         command.upgrade(cfg, "head")
 
         identity = replace(derive_identity(f"status-{uuid4().hex[:8]}"), database=database_name)
-        database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+        database = PsycopgPersonalDevCapacityDatabase(capacity_postgres_url)
         credentials = _new_credentials()
         (
             owner,
@@ -2290,7 +2845,7 @@ async def test_personal_capacity_status_reader_accepts_jsonb_uuid_dict_observati
         worker_id = uuid4()
         worker_incarnation = uuid4()
         engine = create_engine(
-            make_url(postgres_url)
+            make_url(capacity_postgres_url)
             .set(database=database_name)
             .render_as_string(hide_password=False),
             isolation_level="SERIALIZABLE",
@@ -2447,7 +3002,7 @@ async def test_personal_capacity_status_reader_accepts_jsonb_uuid_dict_observati
 
         reader = PersonalDevCapacityStatusReader(
             kubectl=_Kubectl(),  # type: ignore[arg-type]
-            database_admin_url=postgres_url,
+            database_admin_url=capacity_postgres_url,
             projector=_Projector(),  # type: ignore[arg-type]
         )
 

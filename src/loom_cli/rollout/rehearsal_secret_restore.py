@@ -66,6 +66,7 @@ _DATABASE_FIELDS_BY_SECRET = {
     ),
     "loom-capacity-agent": frozenset({"database-url"}),
     "loom-protected-worker-runtime": frozenset({"database-url"}),
+    "loom-postgres-cnpg-credentials": frozenset({"username", "password"}),
 }
 
 
@@ -260,6 +261,16 @@ def _read_secret(
         raise ValueError("rehearsal checkpoint Secret data encoding is invalid") from exc
     cloned_data = dict(data)
     _validate_database_fields(name, cloned_data)
+    if name == "loom-postgres-cnpg-credentials":
+        if secret_type != "kubernetes.io/basic-auth" or set(cloned_data) != {
+            "username",
+            "password",
+        }:
+            raise ValueError("rehearsal CNPG credential contract is invalid")
+        cloned_data = {
+            "username": base64.b64encode(b"loom_rehearsal").decode("ascii"),
+            "password": base64.b64encode(b"rehearsal-trust-only").decode("ascii"),
+        }
     if name == "loom-admin-secret":
         source_toml = cloned_data.get("secrets.toml")
         if source_toml is None:

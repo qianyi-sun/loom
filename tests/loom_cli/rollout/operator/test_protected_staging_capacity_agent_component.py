@@ -1239,19 +1239,30 @@ def test_agent_runtime_configuration_seals_the_exact_database_admission_digest(
         configuration_map["data"]["reporter-configuration.json"]
     )
 
-    assert capacity_guard_schema_head() == ("guard_0032", 32)
+    assert capacity_guard_schema_head() == ("guard_0033", 33)
     assert configuration.protected_admission_sha256 == (
-        "572588101f8d8caccfd5c40819690ded6e07c7e867627c827a94a786d5c705ca"
+        "096fda0fa37268a3642a60f42d25a0fa484f2aaa010060188ef7bff528d288d4"
     )
 
 
+@pytest.mark.parametrize(
+    ("revision", "generation", "expected_digest"),
+    [
+        ("guard_0029", 29, "51b50234edf19102baf749776995846d5bc73ce0a9e3b1b4fe0d93bcced98fc9"),
+        ("guard_0030", 30, "acc2da81b2a58f9d006622a3c83c9c2c4d327f9343fdb7cf1d31338fcc7338eb"),
+    ],
+)
 def test_agent_admission_digest_does_not_reuse_the_previous_guard_generation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    revision: str,
+    generation: int,
+    expected_digest: str,
 ) -> None:
     """The sealed digest includes the schema generation, not only reporter identity."""
     monkeypatch.setattr(
         "loom.personal_dev_capacity_runtime.capacity_guard_schema_head",
-        lambda: ("guard_0029", 29),
+        lambda: (revision, generation),
     )
     manifest = _component(_Cluster())._sources(_plan(tmp_path)).manifest
     configuration_map = next(
@@ -1261,9 +1272,8 @@ def test_agent_admission_digest_does_not_reuse_the_previous_guard_generation(
         configuration_map["data"]["reporter-configuration.json"]
     )
 
-    assert configuration.protected_admission_sha256 == (
-        "51b50234edf19102baf749776995846d5bc73ce0a9e3b1b4fe0d93bcced98fc9"
-    )
+    assert configuration.protected_admission_sha256 == expected_digest
+    assert expected_digest != "8197619e92fde22cc2c2b99d65db3136f84b8bc149b0a33942d352a883debd6b"
 
 
 def test_classify_and_final_readback_bracket_source_authority(tmp_path: Path) -> None:

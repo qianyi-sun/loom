@@ -12,11 +12,18 @@ import json
 import os
 import subprocess
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from loom.application_database_admission import (
+    ApplicationDatabaseHandoffBackend,
+    reclose_application_database_for_handoff_recovery,
+    reopen_application_database_for_handoff_recovery,
+    require_application_database_drained,
+)
 from loom_cli.rollout.external_supervisor_controller import (
     parse_external_supervisor_controller_bindings,
 )
@@ -67,6 +74,10 @@ from .protected_gb10_component import (
 )
 from .protected_manifest_component import KubernetesProtectedManifestComponent
 from .protected_migration_component import KubernetesProtectedMigrationComponent
+from .protected_peer_database_connection import (
+    PeerDatabaseConnection,
+    PeerDatabaseTransportError,
+)
 from .protected_production_defaults_component import (
     HttpxProductionDefaultsTransport,
     KubernetesProtectedProductionDefaultsComponent,
@@ -75,6 +86,24 @@ from .protected_production_defaults_component import (
 
 PROTECTED_KUBECONFIG_PATH = Path("/var/lib/loom-staging-rollout/kubeconfig")
 _MAX_OUTPUT_BYTES = 1024 * 1024
+_STAGING_PEER_DATABASE_COMMAND = (
+    "kubectl",
+    "--namespace",
+    "loom-staging",
+    "exec",
+    "-i",
+    "service/loom-postgres-rw",
+    "--",
+    "sh",
+    "-ceu",
+    # Staging is PG17. Prevent LOGIN callbacks before the first peer query;
+    # the peer refuses any existing event policy, then restores DDL handling.
+    "PGOPTIONS='-c event_triggers=off' exec psql -U postgres -d loom -qAtX -v ON_ERROR_STOP=1",
+)
+_STAGING_PEER_MAINTENANCE_COMMAND = (
+    *_STAGING_PEER_DATABASE_COMMAND[:-1],
+    "PGOPTIONS='-c event_triggers=off' exec psql -U postgres -d postgres -qAtX -v ON_ERROR_STOP=1",
+)
 _EXTERNAL_SUPERVISOR_CONTROLLER_ORDER = (
     "gx10-01c7",
     "TRT-EAI-OLDLAB-1",
@@ -185,12 +214,130 @@ class SubprocessProtectedApplyCommandRunner:
         return {
             "HOME": "/var/lib/loom-staging-rollout",
             "KUBECONFIG": str(self.kubeconfig),
+            # CLI preferences must not rewrite protected commands or add output.
+            "KUBECTL_KUBERC": "false",
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "PYTHONDONTWRITEBYTECODE": "1",
             "XDG_RUNTIME_DIR": f"/run/user/{uid}",
         }
+
+    def open_staging_peer_database(self) -> PeerDatabaseConnection:
+        """Open the fixed bounded peer channel for admitted installed code only.
+
+        This does not admit a release or authorize a handoff. The protected
+        caller supplies its existing service identity, durable operation and
+        preconditions; no candidate-selected target or credentials are accepted.
+        The returned context manager owns cleanup, and exposes exact backend
+        identity for recovery. Local process retirement never proves rollback.
+        """
+        return self._open_staging_peer(maintenance=False)
+
+    def open_staging_peer_maintenance_database(self) -> PeerDatabaseConnection:
+        """Keep fixed maintenance access available while application admission is closed.
+
+        Same installed authority, environment and transport bounds as the handoff
+        peer. No caller-selected database, credential or command is accepted.
+        The protected operation must supply its exact journaled application target.
+        """
+        return self._open_staging_peer(maintenance=True)
+
+    def _open_staging_peer(self, *, maintenance: bool) -> PeerDatabaseConnection:
+        environment = dict(self.environment)
+        command = self._validate_invocation(
+            _STAGING_PEER_MAINTENANCE_COMMAND if maintenance else _STAGING_PEER_DATABASE_COMMAND,
+            env=environment,
+            input_payload=None,
+            timeout_seconds=30,
+        )
+        try:
+            process = subprocess.Popen(
+                command,
+                env=environment,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+        except OSError:
+            raise PeerDatabaseTransportError("protected peer process failed safely") from None
+        connection = PeerDatabaseConnection(process)
+        identity = connection.backend_identity
+        if (
+            connection.info.server_version // 10000 != 17
+            or identity.database != ("postgres" if maintenance else "loom")
+            or identity.session_user != "postgres"
+        ):
+            connection.close()
+            raise PeerDatabaseTransportError("protected peer identity does not match staging")
+        return connection
+
+    @contextmanager
+    def recover_staging_peer_database(
+        self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal, ordinal: int,
+        runtime_password: str | None = None,
+    ) -> Iterator[PeerDatabaseConnection]:
+        """Compose same-guard lost-peer recovery for an active protected component.
+
+        This is not a deployed component or release admission. The enclosing
+        operation must independently retain workload/DDL/process exclusion and
+        continuously supervise the ORIGINAL guard. Only sealed, closed-database
+        work is allowed in the yielded scope; LOGIN restoration/release belongs
+        to the later complete safe-outcome composer. No discovered peer is adopted.
+        """
+        journal.require_application_credential_context(plan)
+        original = journal.read_application_admission_recovery()
+        if original is None or original.target.database != "loom" or original.coordination_guard is None:
+            raise PeerDatabaseTransportError("protected peer recovery requires original staging admission and guard")
+        records = journal.read_application_handoff_recoveries()
+        if (type(ordinal) is not int or ordinal < len(records)
+                or (records and ordinal == len(records) and records[-1][1] is not None)):
+            raise PeerDatabaseTransportError("protected peer recovery requires pending or successor ordinal")
+        journal.prepare_application_handoff_recovery(ordinal=ordinal)
+        prior = records[ordinal - 2][1] if ordinal > 1 else None
+        lost = prior.handoff_backend if prior is not None else original.handoff_backend
+        with self.open_staging_peer_maintenance_database() as maintenance:
+            def reclose() -> None:
+                reclose_application_database_for_handoff_recovery(
+                    maintenance, target=original.target, provisioner_role="postgres", handoff_backend=lost,
+                    coordination_guard=original.coordination_guard, runtime_password=runtime_password,
+                )
+
+            # Reconcile both sides of a lost reopen ACK before admitting a process.
+            # This commits closure but never signals or adopts surviving sessions.
+            try:
+                reclose()
+                reopen_application_database_for_handoff_recovery(
+                    maintenance, target=original.target, provisioner_role="postgres", handoff_backend=lost,
+                    coordination_guard=original.coordination_guard, runtime_password=runtime_password,
+                )
+                with self.open_staging_peer_database() as peer:
+                    identity = peer.backend_identity
+                    if identity.database != original.target.database or identity.session_user != "postgres":
+                        raise PeerDatabaseTransportError("protected recovery peer identity changed")
+                    backend = ApplicationDatabaseHandoffBackend(
+                        identity.backend_pid, identity.backend_started_at, identity.system_identifier,
+                        identity.server_started_at, identity.database_oid,
+                    )
+                    journal.record_application_handoff_replacement(ordinal=ordinal, handoff_backend=backend)
+                    reclose()
+                    require_application_database_drained(
+                        maintenance, target=original.target, provisioner_role="postgres", handoff_backend=backend,
+                        coordination_guard=original.coordination_guard, runtime_password=runtime_password,
+                    )
+                    yield peer
+            finally:
+                # Even failed startup/publication or a lost reopen ACK must attempt
+                # guarded closure. The prior maintenance transport may be poisoned;
+                # fresh maintenance serializes with an in-flight ALTER, even when
+                # its committed snapshot still says closed. Lock timeout is refusal,
+                # not evidence of remote retirement or successful cleanup.
+                with self.open_staging_peer_maintenance_database() as cleanup:
+                    reclose_application_database_for_handoff_recovery(
+                        cleanup, target=original.target, provisioner_role="postgres", handoff_backend=lost,
+                        coordination_guard=original.coordination_guard, runtime_password=runtime_password,
+                    )
 
     def capture_stdout(
         self,
@@ -205,6 +352,40 @@ class SubprocessProtectedApplyCommandRunner:
             input_payload=None,
             timeout_seconds=timeout_seconds,
         )
+
+    def probe_cnpg_input_fence(
+        self, *, intent_digest: str, target_pooler_names: tuple[str, ...],
+    ) -> bool:
+        """Require exact fence/binding denial, not generic subprocess failure.
+
+        Only fixed server-dry-run requests are executed. A False result means a
+        request was accepted; other failures are sanitized and raised. The caller
+        still owns the protected journal, policy identities and writer exclusion.
+        """
+        from .protected_cnpg_input_fence import cnpg_input_fence_probe_commands
+
+        for policy_name, argv, payload in cnpg_input_fence_probe_commands(
+            intent_digest=intent_digest, target_pooler_names=target_pooler_names,
+        ):
+            command = self._validate_invocation(
+                argv, env=self.environment, input_payload=payload, timeout_seconds=30,
+            )
+            try:
+                result = subprocess.run(command, check=False, capture_output=True,
+                                        input=payload, timeout=30, env=dict(self.environment))
+            except (OSError, subprocess.SubprocessError):
+                raise RuntimeError("CNPG input fence probe transport failed safely") from None
+            if len(result.stdout) > self.max_output_bytes or len(result.stderr) > self.max_output_bytes:
+                raise RuntimeError("CNPG input fence probe response exceeded its bound")
+            if result.returncode == 0:
+                return False
+            expected = (f"ValidatingAdmissionPolicy '{policy_name}' with binding '{policy_name}' "
+                        "denied request: loom-cnpg-fence: protected handoff input is frozen").encode()
+            if (result.returncode != 1 or result.stdout
+                    or not result.stderr.startswith(b"Error from server (Forbidden):")
+                    or expected not in result.stderr):
+                raise RuntimeError("CNPG input fence probe did not prove expected denial")
+        return True
 
     def capture_stdout_with_input(
         self,
