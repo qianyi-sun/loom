@@ -17,8 +17,9 @@ from tests.integration.test_application_ownership_transfer import (
 pytestmark = pytest.mark.parametrize("transfer_postgres", [16, 17], indirect=True)
 
 
+@pytest.mark.parametrize("revoke_membership", [False, True])
 def test_migrator_retirement_requires_closed_admission_and_retires_set_role_sessions(
-    transfer_database,  # noqa: F811
+    revoke_membership, transfer_database,  # noqa: F811
 ):
     from loom.application_migrator_retirement import retire_application_migrator
 
@@ -31,16 +32,17 @@ def test_migrator_retirement_requires_closed_admission_and_retires_set_role_sess
         peer.execute(sql.SQL("GRANT {} TO {} WITH ADMIN FALSE, INHERIT FALSE, SET TRUE").format(sql.Identifier(target.successor_role), sql.Identifier(migrator)))
         peer.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(sql.Identifier(target.database), sql.Identifier(migrator)))
         oid = peer.execute("SELECT oid::bigint FROM pg_roles WHERE rolname=%s", (migrator,)).fetchone()[0]
-        options = dict(target=target, coordination_guard=arguments["coordination_guard"], migrator_role=migrator, migrator_oid=oid)
+        options = dict(target=target, coordination_guard=arguments["coordination_guard"], migrator_role=migrator, migrator_oid=oid, provisioner_role=next(role for role, alias in arguments["role_bindings"].items() if alias == "provisioner"))
         try:
             with psycopg.connect(transfer_database[0], user=migrator, password=password, autocommit=True) as active:
                 active.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(target.successor_role)))
                 active.execute("CREATE TABLE public.migrator_probe (id integer)")
                 # NOLOGIN + a revoked grant does not revoke an existing SET ROLE.
                 peer.execute(sql.SQL("ALTER ROLE {} NOLOGIN PASSWORD NULL").format(sql.Identifier(migrator)))
-                peer.execute(sql.SQL("REVOKE {} FROM {}").format(sql.Identifier(target.successor_role), sql.Identifier(migrator)))
+                if revoke_membership:
+                    peer.execute(sql.SQL("REVOKE {} FROM {}").format(sql.Identifier(target.successor_role), sql.Identifier(migrator)))
                 assert active.execute("SELECT current_user").fetchone() == (target.successor_role,)
-                with pytest.raises(RuntimeError, match="admission.*closed"):
+                with pytest.raises(RuntimeError, match=r"closed admission"):
                     retire_application_migrator(maintenance, **options)
                 assert active.execute("SELECT current_user").fetchone() == (target.successor_role,)
                 maintenance.execute(sql.SQL("ALTER DATABASE {} ALLOW_CONNECTIONS false").format(sql.Identifier(target.database)))
@@ -69,7 +71,7 @@ def test_migrator_retirement_refuses_unsafe_authority(transfer_database, drift):
         migrator = "app_migrate_" + uuid4().hex
         peer.execute(sql.SQL("CREATE ROLE {} NOLOGIN NOINHERIT").format(sql.Identifier(migrator)))
         oid = peer.execute("SELECT oid::bigint FROM pg_roles WHERE rolname=%s", (migrator,)).fetchone()[0]
-        options = dict(target=target, coordination_guard=arguments["coordination_guard"], migrator_role=migrator, migrator_oid=oid)
+        options = dict(target=target, coordination_guard=arguments["coordination_guard"], migrator_role=migrator, migrator_oid=oid, provisioner_role=next(role for role, alias in arguments["role_bindings"].items() if alias == "provisioner"))
         foreign = None
         try:
             if drift == "foreign":
