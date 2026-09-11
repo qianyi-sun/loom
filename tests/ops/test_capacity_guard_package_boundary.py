@@ -132,6 +132,9 @@ def test_capacity_agent_has_no_pool_mutation_or_candidate_runtime_wiring() -> No
         Path("src/loom/personal_dev_membership_client.py"): {
             "loom_capacity_agent.client",
         },
+        Path("src/loom/personal_dev_builder_exporter.py"): {
+            "loom_capacity_agent.build_admission",
+        },
         Path("src/loom/personal_dev_membership_runtime.py"): {
             "loom_capacity_agent.client",
             "loom_capacity_agent.contracts",
@@ -169,6 +172,10 @@ def test_capacity_agent_has_no_pool_mutation_or_candidate_runtime_wiring() -> No
         },
         Path("src/loom_service/personal_dev_build_admission.py"): {
             "loom_capacity_agent.client",
+        },
+        Path("src/loom_service/personal_dev_build_management.py"): {
+            "loom_capacity_agent.client",
+            "loom_capacity_agent.contracts",
         },
         Path("src/loom_service/routes/personal_dev_build_admission.py"): {
             "loom_capacity_agent.admission",
