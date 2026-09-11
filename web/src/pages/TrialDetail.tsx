@@ -23,6 +23,7 @@ import { StatCard } from "../components/StatCard";
 import { StatusPill } from "../components/StatusPill";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import { useTrialEventStream } from "../hooks/useTrialEventStream";
+import { agentLabel } from "../lib/agentLabel";
 import { formatLocalDateTime } from "../lib/dateTime";
 import { humanizeFailureReason } from "../lib/humanizeFailureReason";
 import { modelLabel } from "../lib/modelLabel";
@@ -315,7 +316,7 @@ function TrialHeader({
             label="Visibility"
             value={`${trial.visibility ?? "team"} / ${trial.share_status ?? "pending_scan"}`}
           />
-          <StatCard label="Agent" value={trial.agent_name ?? "—"} />
+          <StatCard label="Agent" value={agentLabel(trial.agent_name, trial.agent_version)} />
           <StatCard label="Model" value={modelLabel(trial.model)} />
           {"model_switch_plan" in trial && trial.model_switch_plan != null ? (
             <StatCard

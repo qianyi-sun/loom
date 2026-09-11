@@ -511,12 +511,19 @@ export interface Backend {
   cold_start_pools: string[];
 }
 
+export interface AgentVersionEntry {
+  agent_version: string;
+  harbor_version: string;
+  loom_bridge_revision: string;
+}
+
 /** Plan 28 PR-3: one (agent, model, n_per_task) tuple within a Batch.
  * The submit form always sends a list of these (even single-combo
  * batches send a 1-element list) so the back-end uses one code path. */
 export interface Combination {
   label?: string | null;
   agent_name: string;
+  agent_version?: string | null;
   agent_model: {
     provider: string;
     name: string;
@@ -531,6 +538,7 @@ export interface CombinationSummary {
   combination_idx: number;
   label: string;
   agent_name: string;
+  agent_version?: string | null;
   agent_model?: { provider: string; name: string } | null;
   provider_connection_id?: string | null;
   provider_model_id?: string | null;
@@ -1414,6 +1422,7 @@ export const api = {
       items: {
         name: string;
         aliases?: string[];
+        versions?: AgentVersionEntry[];
         needs_model: boolean;
         kind: "builtin" | "adapter";
         description: string;

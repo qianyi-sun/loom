@@ -45,3 +45,9 @@ describe("humanizeTrialConfig", () => {
     expect(out.diagnostics).toEqual([]);
   });
 });
+
+it("shows the selected agent version as part of the agent identity", () => {
+  const out = humanizeTrialConfig({ agent_name: "terminus-2", agent_version: "harbor-v2" });
+  expect(out.items).toContain("Agent: terminus-2@harbor-v2");
+  expect(out.diagnostics).toEqual([]);
+});

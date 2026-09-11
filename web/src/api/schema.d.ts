@@ -955,6 +955,7 @@ export interface components {
       llm_evidence_status?: string;
       no_call?: boolean;
       agent_name: string | null;
+      agent_version?: string | null;
       model: components["schemas"]["ModelSpec"] | null;
     };
     ModelSpec: {
@@ -1270,6 +1271,7 @@ export interface components {
     Combination: {
       label?: string;
       agent_name: string;
+      agent_version?: string | null;
       agent_model: { provider: string; name: string } | null;
       n_per_task: number;
       provider_connection_id?: string | null;
@@ -1279,6 +1281,7 @@ export interface components {
       combination_idx: number;
       label: string;
       agent_name: string;
+      agent_version?: string | null;
       agent_model?: { provider: string; name: string } | null;
       provider_connection_id?: string | null;
       provider_model_id?: string | null;
