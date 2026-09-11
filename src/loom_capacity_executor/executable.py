@@ -1414,6 +1414,13 @@ class ExecutablePoolExecutor:
         self, checkpoint: ExecutableCheckpointReceiptV2
     ) -> ExecutorTickResult | None:
         for record in self.journal.latest_records("prepared-revocation"):
+            if record.event_kind == "prepared-handoff-deleted":
+                payload = record.durable_payload()
+                if payload is None:
+                    raise JournalRegressionError("prepared revocation payload is absent")
+                revocation = self._prepared_revocation_from_record(record, payload)
+                if self._supersede_preparation(revocation):
+                    return ExecutorTickResult("draining", revocation.binding.intent_id)
             if record.event_kind != "protected-prepared-revocation-confirmed":
                 continue
             payload = record.durable_payload()
@@ -1438,6 +1445,18 @@ class ExecutablePoolExecutor:
         )
         if not records:
             return None
+        if len(records) == 2 and {record.event_kind for record in records} == {
+            "protected-bootstrap-requested", "protected-prepared-revocation-requested",
+        }:
+            revocation_record = next(record for record in records
+                if record.event_kind == "protected-prepared-revocation-requested")
+            revocation_payload = revocation_record.durable_payload()
+            if revocation_payload is None:
+                raise JournalRegressionError("prepared revocation payload is absent")
+            revocation = self._prepared_revocation_from_record(revocation_record, revocation_payload)
+            preparation = self._pending_preparation_for_revocation(revocation)
+            if preparation is not None and preparation in records:
+                records = (revocation_record,)
         if len(records) != 1:
             raise JournalRegressionError("multiple local executable requests remain unresolved")
         record = records[0]
@@ -1511,6 +1530,8 @@ class ExecutablePoolExecutor:
             return ExecutorTickResult("quarantined", withdrawal.binding.intent_id)
         if record.event_kind == "protected-prepared-revocation-requested":
             revocation = self._prepared_revocation_from_record(record, payload)
+            if self._native_admission(revocation.binding):
+                self._assert_native_unsubmitted(revocation.binding, revocation.bootstrap_registration_epoch)
             await self.admission.revoke_prepared_bootstrap(revocation)
             self.journal.append(
                 "protected-prepared-revocation-confirmed",
@@ -1836,6 +1857,15 @@ class ExecutablePoolExecutor:
         bootstrap_epoch = observation.bootstrap_registration_epoch
         if bootstrap_epoch <= 0 or observation.claim_high_water != 0:
             raise JournalRegressionError("prepared bootstrap revocation evidence is incomplete")
+        await self._request_bootstrap_revocation(close=close, bootstrap_epoch=bootstrap_epoch)
+
+    async def _request_bootstrap_revocation(
+        self,
+        *,
+        close: ExecutableIntentCloseV2,
+        bootstrap_epoch: int,
+    ) -> None:
+        """Journal/replay protected revocation without inventing an observation."""
         revocation = ExecutablePreparedBootstrapRevocationV2(
             operation_id=uuid5(
                 _OPERATION_NAMESPACE,
@@ -1845,6 +1875,7 @@ class ExecutablePoolExecutor:
             bootstrap_registration_epoch=bootstrap_epoch,
             protected_registration_epoch=bootstrap_epoch + 1,
         )
+        self._pending_preparation_for_revocation(revocation)
         payload = canonical_executable_bytes(revocation)
         digest = canonical_executable_digest(revocation)
         latest = self.journal.latest("prepared-revocation", str(close.binding.intent_id))
@@ -1920,6 +1951,46 @@ class ExecutablePoolExecutor:
             object_id=record.object_id,
             payload=payload,
         )
+        self._supersede_preparation(revocation)
+        return True
+
+    def _pending_preparation_for_revocation(
+        self, revocation: ExecutablePreparedBootstrapRevocationV2,
+    ) -> JournalRecord | None:
+        latest = self.journal.latest("bootstrap", str(revocation.binding.intent_id))
+        if latest is None or latest.event_kind != "protected-bootstrap-requested":
+            return None
+        # Only native revocation supports a bootstrap that was never prepared.
+        purpose = getattr(self.admission, "purpose", None)
+        if (self.typed_policy is None or not callable(purpose)
+            or purpose(revocation.binding) != "personal-build-worker"):
+            raise JournalRegressionError("unprepared revocation requires exact native authority")
+        payload = latest.durable_payload()
+        if payload is None:
+            raise JournalRegressionError("pending bootstrap payload is absent")
+        registration = ExecutableBootstrapRegistrationV2.model_validate_json(payload)
+        proposal = self._retained_bootstrap_proposal(revocation.binding)
+        if (registration.binding != revocation.binding
+            or registration.bootstrap_registration_epoch != revocation.bootstrap_registration_epoch
+            or proposal is None or registration.command_sequence != proposal.command_sequence
+            or canonical_executable_bytes(registration) != payload
+            or canonical_executable_digest(registration) != latest.payload_digest):
+            raise JournalRegressionError("pending bootstrap differs from native revocation")
+        return latest
+
+    def _supersede_preparation(self, revocation: ExecutablePreparedBootstrapRevocationV2) -> bool:
+        """Retire only an exact preparation after protected revocation and deletion."""
+        latest = self._pending_preparation_for_revocation(revocation)
+        if latest is None:
+            return False
+        retained = self.journal.latest("prepared-revocation", str(revocation.binding.intent_id))
+        if (retained is None or retained.event_kind != "prepared-handoff-deleted"
+            or retained.payload_digest != canonical_executable_digest(revocation)
+            or retained.durable_payload() != canonical_executable_bytes(revocation)):
+            raise JournalRegressionError("preparation supersession lacks committed revocation")
+        self.journal.append("protected-bootstrap-revoked", latest.payload_digest,
+            object_kind=latest.object_kind, object_id=latest.object_id,
+            payload=latest.durable_payload())
         return True
 
     def _confirmed_terminal_inventory_record(
@@ -1963,6 +2034,13 @@ class ExecutablePoolExecutor:
                 command_sequence=close.command_sequence,
             )
         assert close.bootstrap_evidence_sha256 is not None
+        native_unsubmitted = self._native_admission(close.binding) and envelope is None
+        if native_unsubmitted:
+            self.journal.assert_covers(checkpoint.journal_sequence, checkpoint.journal_digest)
+            self._assert_native_unsubmitted(close.binding, close.bootstrap_registration_epoch)
+            await self._request_bootstrap_revocation(
+                close=close, bootstrap_epoch=close.bootstrap_registration_epoch,
+            )
         prepared_revocation = self.journal.latest(
             "prepared-revocation",
             str(close.binding.intent_id),
@@ -1989,6 +2067,16 @@ class ExecutablePoolExecutor:
                 bootstrap_evidence_sha256=close.bootstrap_evidence_sha256,
             )
         observation = await self.admission.observe_intent(close.binding)
+        if native_unsubmitted and (
+            observation.binding != close.binding
+            or observation.prepared_revocation is None
+            or observation.prepared_revocation.binding != close.binding
+            or observation.prepared_revocation.bootstrap_registration_epoch != close.bootstrap_registration_epoch
+            or observation.worker_id is not None
+            or observation.worker_incarnation is not None
+            or observation.claim_high_water != 0
+        ):
+            raise JournalRegressionError("native unsubmitted cleanup lacks committed revocation")
         if observation.bootstrap_registration_epoch < close.bootstrap_registration_epoch:
             raise JournalRegressionError("protected bootstrap observation differs from close")
         jobs = await self.slurm.inventory()
@@ -2159,6 +2247,31 @@ class ExecutablePoolExecutor:
             operation=lambda: self.client.close_executable_intent(close),
         )
         return ExecutorTickResult("draining", close.binding.intent_id)
+
+    def _native_admission(self, binding: ExecutableIntentBindingV2) -> bool:
+        if self.typed_policy is None:
+            return False
+        purpose = getattr(self.admission, "purpose", None)
+        if not callable(purpose):
+            raise JournalRegressionError("typed cleanup admission purpose is unavailable")
+        resolved_purpose = purpose(binding)
+        if resolved_purpose not in {"application-worker", "personal-build-worker"}:
+            raise JournalRegressionError("typed cleanup admission purpose is invalid")
+        return bool(resolved_purpose == "personal-build-worker")
+
+    def _assert_native_unsubmitted(self, binding: ExecutableIntentBindingV2, bootstrap_epoch: int) -> None:
+        # Absence of the latest envelope alone is not proof of no submission.
+        # Unknown/orphan history cannot turn physical work into an unused close.
+        if (self.journal.records("job", str(binding.intent_id))
+            or self.journal.records("executor", _physical_binding_object_id(binding.intent_id))
+            or any(record.event_kind.startswith("physical-bind-")
+                for record in self.journal.records("intent", str(binding.intent_id)))):
+            raise JournalRegressionError("native unsubmitted cleanup has physical journal evidence")
+        if self._retained_bootstrap_proposal(binding) is None:
+            raise JournalRegressionError("native cleanup bootstrap proposal is absent")
+        if self._bootstrap_handoff_store is None:
+            raise JournalRegressionError("native cleanup bootstrap handoff store is absent")
+        self._bootstrap_handoff_store.assert_unconsumed(binding, bootstrap_registration_epoch=bootstrap_epoch)
 
     async def _release(self, release: ExecutablePartialReleaseV2) -> ExecutorTickResult:
         if not release.releases:

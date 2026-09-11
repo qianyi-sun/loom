@@ -42,7 +42,7 @@ _CENTRAL_EVENTS = {
 _LIFECYCLE_EVENTS = _CENTRAL_EVENTS | {
     "slurm-submit-requested", "slurm-submit-unknown", "slurm-submit-confirmed",
     "physical-bind-requested", "physical-bind-confirmed", "launch-facts-retained",
-    "protected-bootstrap-requested", "protected-bootstrap-confirmed",
+    "protected-bootstrap-requested", "protected-bootstrap-confirmed", "protected-bootstrap-revoked",
     "protected-drain-requested", "protected-drain-confirmed",
     "protected-withdraw-requested", "protected-withdraw-confirmed",
     "protected-prepared-revocation-requested", "protected-prepared-revocation-confirmed",

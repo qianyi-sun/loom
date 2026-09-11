@@ -345,6 +345,18 @@ credentials; they never fall back to application admission. This router is not
 yet wired into an activation artifact: V2 remains unchanged and typed execution
 stays disabled until all lifecycle and allocation-contained consumers are complete.
 
+The native unsubmitted close consumer can revoke before first preparation. It
+requires a retained exact bootstrap proposal, checkpoint-covered journal, no job
+or physical-binding history, and no consumed/physical handoff sidecars. It never
+uses a failed preparation or local expiry as cancellation authority. Revocation
+is journaled before sending, committed before handoff deletion, and observed
+before logical close. A pending preparation is explicitly marked revoked, never
+falsely confirmed; restart recognizes only its exact matching pending revocation
+and resumes deletion/supersession after crashes. Physical or ambiguous submissions
+still require separate terminal cleanup. Discovery of the exact manager-authored
+close during pending-preparation replay remains to be connected; the public typed
+execution interlock stays closed.
+
 Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
 preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release
 verification bind the exact historical configuration, acknowledgement and member
