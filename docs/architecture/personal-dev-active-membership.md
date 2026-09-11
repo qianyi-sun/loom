@@ -509,6 +509,20 @@ configuration nor loop health changes builder availability or native readiness.
 Owner onboarding still needs the protected installer to retain and materialize
 these scopes; this is not automatic personal-namespace provisioning.
 
+Protected onboarding uses `/v2/personal-memberships/checkpoint` and the typed
+`PUT /v2/personal-memberships/{subject_id}` transport. Both require the unbound
+management delegate and exact active V4 operator policy. The mutation shares
+the policy check's authority lock and the existing typed membership transaction;
+build subjects are derived from namespace identity plus owner, not a supplied
+personal namespace string. The checkpoint retains its purpose-neutral V1 wire;
+mutations/results use explicit typed V2 wire. The typed client retains the
+original request, checkpoint and idempotency key, and verifies the exact returned
+event hash against independently pinned preparation/fleet inputs. A lost reply
+can replay unchanged after another owner's revision advances. If its execution
+retires, the result remains unconfirmed; this transport never silently changes
+authority or invents a new retry key. Legacy application routes are unchanged.
+This is membership transport, not scope installation or native build readiness.
+
 `BuildManagementRuntime` composes installation-scoped terminal recovery, protected
 release publication, final retirement, demand reporting, bootstrap registration
 and plan convergence. Each pass performs cleanup before new admission. Expected

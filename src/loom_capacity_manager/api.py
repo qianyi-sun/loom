@@ -179,6 +179,12 @@ from loom_capacity_manager.typed_inventory_contracts import (
     TerminalInventoryEvidence,
     parse_executor_inventory,
 )
+from loom_capacity_manager.typed_membership_commands import (
+    PersonalMembershipMutationV2,
+    parse_typed_membership_mutation,
+    typed_membership_subject_id,
+)
+from loom_capacity_manager.typed_membership_store import CapacityTypedMembershipStore
 
 _ContractT = TypeVar("_ContractT", bound=BaseModel)
 
@@ -613,6 +619,12 @@ def create_app(
     development_projection_body = contract_body(DynamicDevelopmentSubjectProjectionV1)
     membership_mutation_body = contract_body(PersonalApplicationMembershipMutationV1)
 
+    async def typed_membership_mutation_body(request: Request) -> PersonalMembershipMutationV2:
+        try:
+            return parse_typed_membership_mutation(await request.body())
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="invalid capacity contract") from exc
+
     async def membership_subject_query_body(request: Request) -> PersonalMembershipSubjectQueryV1:
         try:
             return parse_membership_subject_query(await request.body())
@@ -947,6 +959,39 @@ def create_app(
                     head_sha256=result.head_sha256,
                 ),
             )
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.get("/v2/personal-memberships/checkpoint")
+    async def typed_personal_membership_checkpoint(
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:membership:manage")),
+    ) -> Response:
+        assert_unbound_execution_actor(actor)
+        session_factory, store, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await CapacityTypedMembershipStore().checkpoint(session, actor=actor.principal_id, management=store)
+            return Response(content=canonical_bytes(result), media_type="application/json")
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.put("/v2/personal-memberships/{subject_id}")
+    async def mutate_typed_personal_membership(
+        subject_id: UUID, request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:membership:manage")),
+        value: PersonalMembershipMutationV2 = Depends(typed_membership_mutation_body),
+        idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    ) -> Response:
+        assert_unbound_execution_actor(actor)
+        if typed_membership_subject_id(value) != subject_id:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, store, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await CapacityTypedMembershipStore().apply_authenticated(session, value,
+                    actor=actor.principal_id, idempotency_key=idempotency_key, management=store)
+            return Response(content=canonical_bytes(result), media_type="application/json")
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
 

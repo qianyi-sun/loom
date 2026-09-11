@@ -7,11 +7,17 @@ from uuid import UUID
 import httpx
 import pytest
 
-from loom.personal_dev_membership_client import PersonalDevMembershipError, PersonalDevMembershipRevisionConflictError
-from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
+from loom.personal_dev_membership_client import (
+    PersonalDevMembershipError,
+    PersonalDevMembershipRevisionConflictError,
+)
+from loom_capacity_manager.contracts import MAX_CONTRACT_BYTES, canonical_bytes, canonical_digest
 from loom_capacity_manager.membership_contracts import PersonalMembershipCheckpointV1
 from loom_capacity_manager.membership_digest import canonical_membership_event_head
-from loom_capacity_manager.typed_membership_commands import PersonalMembershipResultV2, derive_build_member
+from loom_capacity_manager.typed_membership_commands import (
+    PersonalMembershipResultV2,
+    derive_build_member,
+)
 from tests.unit.test_capacity_typed_membership_commands import typed_build_mutation
 
 
@@ -74,7 +80,7 @@ async def test_typed_client_rejects_unconfirmed_or_wrong_result(boundary):
     if boundary == "duplicate":
         wire = b'{"schema_version":2,' + wire[1:]
     elif boundary == "oversize":
-        wire += b" " * (4 * 1024 * 1024)
+        wire += b" " * MAX_CONTRACT_BYTES
     headers = {"Content-Type": "application/json"}
     if boundary == "compressed":
         headers["Content-Encoding"] = "unexpected"

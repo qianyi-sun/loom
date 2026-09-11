@@ -12,9 +12,16 @@ from loom_capacity_manager.api import create_app
 from loom_capacity_manager.auth import CapacityPrincipalVerifier
 from loom_capacity_manager.config import CapacityManagerSettings
 from loom_capacity_manager.contracts import canonical_bytes
-from loom_capacity_manager.models import CapacityDeploymentGeneration, CapacityPersonalMembershipEvent
+from loom_capacity_manager.models import (
+    CapacityDeploymentGeneration,
+    CapacityPersonalMembershipEvent,
+)
 from loom_capacity_manager.store import WriterFence
-from tests.capacity_build_membership_fixtures import application_request, build_request, typed_sql_execution
+from tests.capacity_build_membership_fixtures import (
+    application_request,
+    build_request,
+    typed_sql_execution,
+)
 from tests.integration.test_capacity_manager_api import _owner_file, _principal
 from tests.integration.test_capacity_typed_membership_execution import typed_management
 
@@ -104,3 +111,43 @@ async def test_typed_http_rejects_invalid_authority_without_membership_write(typ
         assert checkpoint.status_code == expected, checkpoint.text
     async with sessions() as session:
         assert await session.scalar(select(func.count()).select_from(CapacityPersonalMembershipEvent)) == 0
+
+
+async def test_typed_client_recovers_committed_lost_reply_after_other_owner_advances(typed_api):
+    from loom.personal_dev_membership_client import PersonalDevMembershipError
+    from loom.personal_dev_typed_membership_client import (
+        CapacityManagerPersonalDevTypedMembershipClient,
+        PersonalDevTypedMembershipEnvelopeV1,
+    )
+
+    http, preparation, fleet, execution, sessions, _app = typed_api
+    sent = []
+
+    async def transport(request):
+        response = await http.send(request)
+        if request.method == "PUT":
+            sent.append((request.content, request.headers["Idempotency-Key"]))
+            if len(sent) == 1:
+                assert response.status_code == 200, response.text
+                await response.aclose()
+                raise httpx.ReadTimeout("test reply lost after manager commit")
+        return response
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as wire:
+        client = CapacityManagerPersonalDevTypedMembershipClient(manager_origin="https://capacity.test", bearer_token=TOKEN, http_client=wire)
+        original = PersonalDevTypedMembershipEnvelopeV1(request=build_request(preparation, execution),
+            expected_checkpoint=await client.membership_checkpoint(), idempotency_key=UUID(int=900001))
+        with pytest.raises(PersonalDevMembershipError, match="unconfirmed"):
+            await client.mutate_membership(original, preparation=preparation, fleet=fleet)
+        checkpoint = await client.membership_checkpoint()
+        assert checkpoint.revision == 1
+        other = PersonalDevTypedMembershipEnvelopeV1(request=build_request(preparation, execution, owner=88011, revision=1),
+            expected_checkpoint=checkpoint, idempotency_key=UUID(int=900002))
+        assert (await client.mutate_membership(other, preparation=preparation, fleet=fleet)).revision == 2
+        recovered = await client.mutate_membership(original, preparation=preparation, fleet=fleet)
+        assert recovered.replayed and recovered.revision == 1
+        assert recovered.head_sha256 == checkpoint.head_sha256
+        assert (await client.membership_checkpoint()).revision == 2
+    assert sent[0] == sent[2] and sent[0] != sent[1]
+    async with sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(CapacityPersonalMembershipEvent)) == 2
