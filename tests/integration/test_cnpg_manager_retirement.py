@@ -364,3 +364,66 @@ def test_cnpg_exec_reconciles_credentials_without_reopening_application_login(cn
             with pytest.raises(AssertionError, match="peer connection lost"):
                 _query(guard, "SELECT 1 / 0; SELECT 'masked-sql-error'")
             assert guard.wait(timeout=10) != 0
+
+
+@pytest.mark.timeout(900)
+def test_replaced_cnpg_reaches_client_retirement_with_original_readonly_guard(cnpg_probe):
+    """Real manager pools drain between safe probes; no permanent SQL silence required."""
+    from loom.application_database_admission import (
+        ApplicationDatabaseAdmissionTarget,
+        _read_coordination_guard,
+    )
+    from loom.application_handoff_completion import _require_retired_client_work
+    from loom.staging_mutation_coordination import rollout_guard_application_name
+    from loom_cli.rollout.operator.protected_peer_database_connection import PeerDatabaseConnection
+    from tests.integration.test_application_database_admission import _handoff
+
+    argv, kube, pod, expected_manager = cnpg_probe
+
+    def peer(database):
+        return PeerDatabaseConnection(subprocess.Popen(
+            argv("exec", "-i", pod, "-c", "postgres", "--", "env", "PGOPTIONS=-c event_triggers=off",
+                 "psql", "-XAtq", "-v", "ON_ERROR_STOP=0", "-U", "postgres", "-d", database),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
+        ), query_timeout_seconds=10)
+
+    with peer("loom") as handoff, peer("postgres") as maintenance:
+        with handoff.transaction():
+            handoff.execute("CREATE ROLE loom_rollout_readonly LOGIN NOINHERIT PASSWORD 'disposable-guard'")
+            handoff.execute("CREATE ROLE sealed_probe NOLOGIN NOINHERIT")
+        backend = _handoff(handoff)
+        row = handoff.execute("SELECT d.datdba::bigint,r.oid::bigint FROM pg_database d "
+                              "CROSS JOIN pg_roles r WHERE d.datname='loom' AND r.rolname='sealed_probe'").fetchone()
+        target = ApplicationDatabaseAdmissionTarget(backend.system_identifier, "loom", backend.database_oid,
+                                                     "loom", row[0], "sealed_probe", row[1])
+        name = rollout_guard_application_name(request_id="req-cnpg-retire", candidate_sha="a" * 40,
+                                              candidate_tree="b" * 40, generation="c" * 32)
+        with _child(argv("exec", "-i", pod, "-c", "postgres", "--", "env", "PGPASSWORD=disposable-guard",
+                         "psql", "-h", "127.0.0.1", "-XAtq", "-v", "ON_ERROR_STOP=1",
+                         "-U", "loom_rollout_readonly", "-d", "loom")) as guard:
+            before = _query(guard, "SET application_name='" + name + "'; SELECT pg_backend_pid() || '|' || pg_try_advisory_lock(5498691230183247727)")
+            assert before.endswith("|true")
+            saved = _read_coordination_guard(maintenance, target=target, backend_pid=int(before.split("|")[0]),
+                                             application_name=name)
+            with handoff.transaction():
+                handoff.execute("ALTER ROLE loom NOLOGIN PASSWORD NULL")
+            with maintenance.transaction():
+                maintenance.execute("ALTER DATABASE loom ALLOW_CONNECTIONS false")
+            _replace_manager(argv, kube, pod, expected_manager=expected_manager)
+            def retired():
+                try:
+                    _require_retired_client_work(maintenance, target=target, handoff_backend=backend,
+                                                 coordination_guard=saved, provisioner="postgres")
+                except RuntimeError as exc:
+                    if "client work" not in str(exc):
+                        raise
+                    return False
+                return True
+            _eventually(retired, bool, "replacement manager client work did not retire", seconds=30)
+            # Reconciliation is allowed to refresh the same configured password.
+            _eventually(lambda: handoff.execute("SELECT NOT rolcanlogin AND rolpassword IS NOT NULL "
+                                                "FROM pg_authid WHERE rolname='loom'").fetchone(),
+                        lambda row: row == (True,), "supported credential refresh did not finish")
+            _eventually(retired, bool, "safe reconciliation retained an unknown client", seconds=30)
+            assert _read_coordination_guard(maintenance, target=target, backend_pid=saved.backend.pid,
+                                            application_name=name) == saved
