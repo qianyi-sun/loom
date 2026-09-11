@@ -123,6 +123,8 @@ class TrustedLauncherConfigV2(StrictV2Model):
     @model_serializer(mode="wrap")
     def _preserve_legacy_wire(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         payload = cast(dict[str, Any], handler(self))
+        if self.native_worker is None:
+            payload.pop("native_worker", None)
         if self.typed_application_executor is None:
             payload.pop("typed_application_executor", None)
         return payload
@@ -156,6 +158,12 @@ class NativeTrustedLauncherConfigV3(TrustedLauncherConfigV2):
 
     schema_version: Literal[3] = 3  # type: ignore[assignment]
     executor: BuildAdmissionExecutorV1
+
+    @model_validator(mode="after")
+    def _build_only(self) -> NativeTrustedLauncherConfigV3:
+        if self.native_worker is not None or self.typed_application_executor is not None:
+            raise ValueError("personal-build launcher refuses application native policy")
+        return self
 
     @field_validator("schema_version", mode="before")
     @classmethod
