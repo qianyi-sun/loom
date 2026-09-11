@@ -53,7 +53,7 @@ async def test_application_claim_passes_routing_binding_into_atomic_admission(tm
 
 
 @pytest.mark.parametrize("pool", ["gb10", "oldlab"])
-@pytest.mark.parametrize("operation", ["claim", "outcome"])
+@pytest.mark.parametrize("operation", ["claim", "outcome", "source"])
 async def test_native_claim_cannot_fall_back_to_application_authority(tmp_path, pool, operation):
     from loom_capacity_agent.build_admission import BuildClaimRequestV1, BuildOutcomeRequestV1
 
@@ -67,10 +67,56 @@ async def test_native_claim_cannot_fall_back_to_application_authority(tmp_path, 
     claim = BuildClaimRequestV1(binding=request.binding, operation_id=uuid4(), request_id=uuid4(),
         worker_id=uuid4(), worker_incarnation=uuid4())
     with pytest.raises(ValueError, match="build-purpose"):
-        if operation == "outcome":
+        if operation == "source":
+            await router.read_source(claim, worker_credential="w" * 43, offset=0, length=10)
+        elif operation == "outcome":
             await router.record_outcome(BuildOutcomeRequestV1(claim=claim, operation_id=uuid4(), result="failed"), worker_credential="w" * 43)
         else:
             await router.claim_platform(claim, worker_credential="w" * 43)
+
+
+@pytest.mark.parametrize("pool", ["oldlab", "gb10"])
+@pytest.mark.parametrize("boundary", ["exact", "failure", "invalid", "changed-root"])
+async def test_native_source_uses_pinned_route_and_closes_per_read(tmp_path, pool, boundary):
+    import base64
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from loom_capacity_agent.build_admission import BuildClaimRequestV1, BuildSourceReadReceiptV1
+    from loom_capacity_manager.contracts import canonical_digest
+
+    module, request, document, path, digest = configured(tmp_path, pool, "personal-build-worker")
+    claim = BuildClaimRequestV1(binding=request.binding, operation_id=uuid4(), request_id=uuid4(),
+        worker_id=uuid4(), worker_incarnation=uuid4())
+    receipt = BuildSourceReadReceiptV1(claim_digest=canonical_digest(claim), source_binding_sha256="a" * 64,
+        archive_sha256="b" * 64, archive_size_bytes=20, offset=4, data_base64=base64.b64encode(b"source").decode("ascii"))
+    read = AsyncMock(return_value=object() if boundary == "invalid" else receipt,
+        side_effect=RuntimeError("lost read") if boundary == "failure" else None)
+    close = AsyncMock()
+    opened = []
+
+    def build(identity, connection):
+        assert identity == document.executor and connection == document.entries[0].build
+        opened.append(connection)
+        return SimpleNamespace(read_source=read, aclose=close)
+
+    def application(*args, **kwargs):
+        pytest.fail("source read must never use application authority")
+
+    router = module.TypedAdmissionRouter(path, expected_sha256=digest, executor=document.executor,
+        application_client_factory=application, build_client_factory=build)
+    if boundary == "changed-root":
+        path.write_bytes(path.read_bytes() + b" ")
+    if boundary == "exact":
+        assert await router.read_source(claim, worker_credential="w" * 43, offset=4, length=6) == receipt
+    else:
+        with pytest.raises((ValueError, RuntimeError)):
+            await router.read_source(claim, worker_credential="w" * 43, offset=4, length=6)
+    if boundary == "changed-root":
+        assert opened == []
+    else:
+        read.assert_awaited_once_with(claim, worker_credential="w" * 43, offset=4, length=6)
+        close.assert_awaited_once()
 
 
 @pytest.mark.parametrize("pool", ["gb10","oldlab"])
