@@ -611,8 +611,8 @@ every archived file, source commit and dirty marker before yielding context and
 archive together. It does not fabricate application records or require worker
 database access. Legacy registration-based staging retains its full manifest
 equality check. Context/source reads do not extend leases; neither is permission
-to start a build or publish an artifact. Claim discovery/launcher handoff and
-allocation-contained execution still need their actual runtime connection.
+to start a build or publish an artifact. Allocation-contained execution still
+needs its actual runtime connection.
 
 Revision `build_guard_0029` adds `/claim-assigned` under the same intent/pool
 route and explicit `native-source` mode. A registered worker supplies its exact
@@ -627,6 +627,20 @@ explicit request ID on this allocated-claim interface instead of silently
 discarding it, and verify all supplied fields plus the returned full claim digest.
 Application-purpose routes cannot use this operation. Startup checks its exact
 private ACL; this operation alone does not launch a worker or enable readiness.
+
+The native trusted launcher explicitly selects configuration V3 and the pinned
+purpose-aware admission router; application V2 remains compatible. After the
+existing one-time launch claim, it transfers the registered worker, physical
+allocation, admission pins, executor identity and scoped worker credential to
+the verified executable through a bounded, write-sealed Linux memfd. The native
+environment contains only fixed PATH/LANG, the exact Slurm job ID and descriptor
+number; it does not inherit controller credentials or feature-controlled values.
+The consumer validates canonical bytes, identity, owner, mode, size and seals,
+then closes the descriptor before any sandbox subprocess. Failed exec closes the
+descriptor without making the one-time launch replayable. A real subprocess test
+verifies descriptor inheritance and consumption, not Slurm/KVM containment.
+The runtime claim/source/build/artifact consumer and installed containment remain
+required before native readiness can be enabled.
 
 `BuildManagementRuntime` composes installation-scoped terminal recovery, protected
 release publication, final retirement, demand reporting, bootstrap registration

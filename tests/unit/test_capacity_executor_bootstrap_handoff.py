@@ -514,6 +514,8 @@ async def test_trusted_launcher_process_entry_derives_physical_binding_from_slur
 ) -> None:
     from dataclasses import replace
 
+    from loom_capacity_executor import trusted_launcher as launcher_module
+    from loom_capacity_executor.build_admission_client import BuildAdmissionExecutorV1
     from loom_capacity_executor.launch_renderer import (
         canonical_launch_policy_digest,
         render_signed_launch,
@@ -527,8 +529,6 @@ async def test_trusted_launcher_process_entry_derives_physical_binding_from_slur
         TrustedLauncherConfigV2,
         run_trusted_launcher_process,
     )
-    from loom_capacity_executor import trusted_launcher as launcher_module
-    from loom_capacity_executor.build_admission_client import BuildAdmissionExecutorV1
 
     directory = tmp_path / "handoff"
     directory.mkdir(mode=0o700)
@@ -628,7 +628,10 @@ async def test_trusted_launcher_process_entry_derives_physical_binding_from_slur
     def fake_execvpe(file: str, argv: tuple[str, ...], env: dict[str, str]) -> None:
         exec_calls.append((file, argv, env))
         if native:
-            from loom_capacity_executor.native_worker_handoff import NATIVE_WORKER_HANDOFF_ENV, consume_native_worker_handoff
+            from loom_capacity_executor.native_worker_handoff import (
+                NATIVE_WORKER_HANDOFF_ENV,
+                consume_native_worker_handoff,
+            )
 
             assert "LOOM_DB_PASSWORD" not in env and "PYTHONPATH" not in env
             assert WORKER_CREDENTIAL_ENV not in env
