@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -15,6 +16,7 @@ from loom_capacity_agent.build_admission import BuildPreparationRequestV1
 from loom_capacity_build_guard.execution_store import BuildGuardExecutionStore
 from loom_capacity_manager.auth import AuthorizationError, CapacityPrincipalVerifier
 from loom_capacity_manager.executable_contracts import (
+    ExecutableIntentBindingV2,
     canonical_executable_bytes,
 )
 
@@ -22,7 +24,7 @@ router = APIRouter(include_in_schema=False)
 _MAX_REQUEST_BYTES = 1024 * 1024
 
 
-async def _admit(request: Request, *, pool_id: str, intent_id: UUID, prepare: bool) -> Response:
+async def _admit(request: Request, *, pool_id: str, intent_id: UUID, operation_name: Literal["prepare", "bind", "observe"]) -> Response:
     sessions = getattr(request.app.state,"personal_dev_build_admission_sessions",None)
     verifier = getattr(request.app.state,"personal_dev_build_admission_verifier",None)
     if not isinstance(sessions,async_sessionmaker) or not isinstance(verifier,CapacityPrincipalVerifier):
@@ -45,11 +47,15 @@ async def _admit(request: Request, *, pool_id: str, intent_id: UUID, prepare: bo
                     raise HTTPException(413,"build admission request exceeds byte bound")
                 body.extend(chunk)
             try:
-                preparation = BuildPreparationRequestV1.model_validate_json(bytes(body)) if prepare else None
-                operation = preparation.registration if preparation is not None else PhysicalJobBindingV2.model_validate_json(bytes(body))
+                preparation = BuildPreparationRequestV1.model_validate_json(bytes(body)) if operation_name == "prepare" else None
+                operation = (
+                    preparation.registration if preparation is not None else
+                    ExecutableIntentBindingV2.model_validate_json(bytes(body)) if operation_name == "observe" else
+                    PhysicalJobBindingV2.model_validate_json(bytes(body))
+                )
             except ValueError:
                 raise HTTPException(400,"invalid build admission request") from None
-            binding = operation.binding
+            binding = operation if isinstance(operation,ExecutableIntentBindingV2) else operation.binding
             if binding.intent_id != intent_id or binding.pool_id != pool_id or not principal.matches_executor(
                 pool_id=binding.pool_id,executor_id=binding.executor_id,
                 executor_incarnation=binding.executor_incarnation,pool_generation=binding.pool_generation):
@@ -61,6 +67,8 @@ async def _admit(request: Request, *, pool_id: str, intent_id: UUID, prepare: bo
                 if preparation is not None:
                     wire = canonical_executable_bytes(await store.prepare_worker(
                         preparation.registration,bootstrap_sha256=preparation.bootstrap_sha256))
+                elif isinstance(operation,ExecutableIntentBindingV2):
+                    wire = canonical_executable_bytes(await store.observe_intent(operation))
                 else:
                     assert isinstance(operation,PhysicalJobBindingV2)
                     wire = canonical_executable_bytes(await store.bind_slurm_job(operation))
@@ -75,9 +83,14 @@ async def _admit(request: Request, *, pool_id: str, intent_id: UUID, prepare: bo
 
 @router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/prepare")
 async def prepare_build(request: Request,pool_id: str,intent_id: UUID) -> Response:
-    return await _admit(request,pool_id=pool_id,intent_id=intent_id,prepare=True)
+    return await _admit(request,pool_id=pool_id,intent_id=intent_id,operation_name="prepare")
 
 
 @router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/bind")
 async def bind_build(request: Request,pool_id: str,intent_id: UUID) -> Response:
-    return await _admit(request,pool_id=pool_id,intent_id=intent_id,prepare=False)
+    return await _admit(request,pool_id=pool_id,intent_id=intent_id,operation_name="bind")
+
+
+@router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/observe")
+async def observe_build(request: Request,pool_id: str,intent_id: UUID) -> Response:
+    return await _admit(request,pool_id=pool_id,intent_id=intent_id,operation_name="observe")

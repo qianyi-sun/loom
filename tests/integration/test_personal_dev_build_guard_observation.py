@@ -9,8 +9,12 @@ from sqlalchemy.exc import DBAPIError
 from loom_capacity_agent.admission import ProtectedIntentObservationV2
 from loom_capacity_manager.executable_contracts import ExecutableAdmissionPlanClosureV2
 from tests.integration.test_personal_dev_build_guard_execution import admitted, physical, store
-from tests.integration.test_personal_dev_build_guard_installations import owner_sessions as owner_sessions
-from tests.integration.test_personal_dev_build_guard_migrations import build_guard_database as build_guard_database
+from tests.integration.test_personal_dev_build_guard_installations import (
+    owner_sessions as owner_sessions,
+)
+from tests.integration.test_personal_dev_build_guard_migrations import (
+    build_guard_database as build_guard_database,
+)
 from tests.integration.test_personal_dev_build_guard_prepare import prepared_input as prepared_input
 from tests.integration.test_personal_dev_native_builder_store import sessions as sessions
 

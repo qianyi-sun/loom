@@ -6,8 +6,10 @@ from importlib import import_module
 import httpx
 import pytest
 
-from loom_capacity_agent.admission import PreparedExecutableAdmissionV2
-from loom_capacity_agent.admission import ProtectedIntentObservationV2
+from loom_capacity_agent.admission import (
+    PreparedExecutableAdmissionV2,
+    ProtectedIntentObservationV2,
+)
 from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
     canonical_executable_bytes,

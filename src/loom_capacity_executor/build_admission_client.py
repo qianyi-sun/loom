@@ -12,6 +12,7 @@ from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
     PhysicalJobBindingV2,
     PreparedExecutableAdmissionV2,
+    ProtectedIntentObservationV2,
 )
 from loom_capacity_agent.build_admission import BuildPreparationRequestV1
 from loom_capacity_agent.client import (
@@ -150,4 +151,11 @@ class BuildAdmissionClient:
             or receipt.slurm_job_id != request.slurm_job_id or receipt.ownership_evidence_sha256 != request.ownership_evidence_sha256
             or receipt.request_digest != digest or receipt.binding_digest != digest):
             raise BuildAdmissionTransportError("build admission physical receipt binding changed")
+        return receipt
+
+    async def observe_intent(self, binding: ExecutableIntentBindingV2) -> ProtectedIntentObservationV2:
+        binding = ExecutableIntentBindingV2.model_validate_json(binding.model_dump_json())
+        receipt = await self._post(binding,"observe",canonical_executable_bytes(binding),ProtectedIntentObservationV2)
+        if receipt.binding != binding:
+            raise BuildAdmissionTransportError("build admission observation binding changed")
         return receipt

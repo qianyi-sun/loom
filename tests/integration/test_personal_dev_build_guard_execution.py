@@ -221,7 +221,7 @@ async def test_execution_direct_sql_rejects_non_contract_requests(prepared_input
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == int(operation=="bind")
 
 
-@pytest.mark.parametrize("signature", ["prepare_worker(uuid,jsonb,bytea,text,text)", "bind_slurm_job(uuid,jsonb,bytea,text)"])
+@pytest.mark.parametrize("signature", ["prepare_worker(uuid,jsonb,bytea,text,text)", "bind_slurm_job(uuid,jsonb,bytea,text)", "observe_intent(uuid,jsonb,bytea,text)"])
 @pytest.mark.parametrize("boundary", ["execute", "search-path", "grant-option"])
 def test_execution_required_privileges_are_pinned(build_guard_database, signature, boundary):
     from alembic import command
@@ -258,6 +258,11 @@ async def test_committed_preparation_recovery_survives_actual_bootstrap_expiry(p
             await BuildGuardBootstrapStore(session, installation=installation).authorize_publication(registration.binding.intent_id)
         assert await store(session, installation).prepare_worker(registration, bootstrap_sha256=digest) == prepared
         assert (await store(session, installation).bind_slurm_job(physical(registration))).intent_id == registration.binding.intent_id
+        observed = await store(session, installation).observe_intent(registration.binding)
+        assert observed.binding == registration.binding
+        assert observed.bootstrap_registration_epoch == 1
+        assert observed.prepared_revocation is None
+        assert observed.release is None
 
 
 @pytest.mark.parametrize("collision", ["job", "operation"])

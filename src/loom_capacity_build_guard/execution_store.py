@@ -12,6 +12,7 @@ from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
     PhysicalJobBindingV2,
     PreparedExecutableAdmissionV2,
+    ProtectedIntentObservationV2,
 )
 from loom_capacity_build_guard.installation_store import (
     BuildGuardInstallationV1,
@@ -83,6 +84,25 @@ class BuildGuardExecutionStore:
                 or receipt.bootstrap_sha256 != bootstrap_sha256
                 or receipt.request_digest != digest or receipt.admission_digest != digest):
                 raise ValueError("build worker preparation receipt changed")
+            return receipt
+
+    async def observe_intent(self, binding: ExecutableIntentBindingV2) -> ProtectedIntentObservationV2:
+        """Recover exact retained preparation, never a claim or release permit."""
+        if not self._session.in_transaction():
+            raise ValueError("build observation requires an outer transaction")
+        binding = ExecutableIntentBindingV2.model_validate_json(binding.model_dump_json())
+        if (binding.subject_id != self._installation.subject_id
+            or binding.subject_incarnation != self._installation.subject_incarnation):
+            raise ValueError("build observation subject binding changed")
+        wire = canonical_executable_bytes(binding)
+        async with self._session.begin_nested():
+            returned = await self._session.scalar(text("""SELECT loom_capacity_build_guard.observe_intent(
+                :installation,CAST(:payload AS jsonb),:wire,:digest)"""),
+                {"installation":self._installation.id,"payload":wire.decode("ascii"),"wire":wire,
+                    "digest":canonical_executable_digest(binding)})
+            receipt = ProtectedIntentObservationV2.model_validate_json(returned)
+            if canonical_executable_bytes(receipt).decode("ascii") != returned or receipt.binding != binding:
+                raise ValueError("build observation receipt changed")
             return receipt
 
     async def bind_slurm_job(self, request: PhysicalJobBindingV2) -> BoundExecutableWorkerV2:

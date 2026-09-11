@@ -15,21 +15,23 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
     version_table = connection.scalar(text("SELECT to_regclass('loom_capacity_build_guard.alembic_version')"))
     revision = connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) if version_table else None
     callables = []
-    if revision in {"build_guard_0003", "build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009"}:
+    if revision in {"build_guard_0003", "build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010"}:
         callables.append(f"{SCHEMA}.prepare_plan(uuid,jsonb,bytea,text,jsonb)")
-    if revision in {"build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009"}:
+    if revision in {"build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010"}:
         callables.append(f"{SCHEMA}.authorize_publication(uuid,uuid)")
-    if revision in {"build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009"}:
+    if revision in {"build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010"}:
         callables.extend((f"{SCHEMA}.close_plan(uuid,jsonb,bytea,text)",
             f"{SCHEMA}.authorize_closure_publication(uuid,uuid)"))
-    if revision in {"build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009"}:
+    if revision in {"build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010"}:
         callables.extend((f"{SCHEMA}.capture_demand(uuid,bigint,jsonb)", f"{SCHEMA}.read_demand(uuid)"))
-    if revision in {"build_guard_0007", "build_guard_0008", "build_guard_0009"}:
+    if revision in {"build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010"}:
         callables.append(f"{SCHEMA}.read_pending_sources(uuid)")
-    if revision in {"build_guard_0008", "build_guard_0009"}:
+    if revision in {"build_guard_0008", "build_guard_0009", "build_guard_0010"}:
         callables.extend((f"{SCHEMA}.register_bootstrap(uuid,jsonb,bytea,text)", f"{SCHEMA}.authorize_bootstrap_publication(uuid,uuid)"))
-    if revision == "build_guard_0009":
+    if revision in {"build_guard_0009", "build_guard_0010"}:
         callables.extend((f"{SCHEMA}.prepare_worker(uuid,jsonb,bytea,text,text)", f"{SCHEMA}.bind_slurm_job(uuid,jsonb,bytea,text)"))
+    if revision == "build_guard_0010":
+        callables.append(f"{SCHEMA}.observe_intent(uuid,jsonb,bytea,text)")
     parameters = {"schema": SCHEMA, "owner": owner, "agent": agent, "callables": callables}
     defaults = connection.scalar(text("""
         SELECT EXISTS (
@@ -89,18 +91,18 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
         if usage is not True:
             raise RuntimeError("build guard required schema privilege is absent")
         helpers = ["reject_evidence_mutation()"]
-        if revision in {"build_guard_0002", "build_guard_0003", "build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009"}:
+        if revision in {"build_guard_0002", "build_guard_0003", "build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010"}:
             helpers.append("assert_current_source(uuid,uuid,jsonb,bytea,text)")
-        if revision in {"build_guard_0003", "build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009"}:
+        if revision in {"build_guard_0003", "build_guard_0004", "build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010"}:
             helpers.extend(("canonical_plan_json(jsonb)",
                 "assert_plan_fields(jsonb,text[],text[],text[],text[],text[])", "assert_plan_contract(jsonb,bytea)"))
-        if revision in {"build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009"}:
+        if revision in {"build_guard_0005", "build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010"}:
             helpers.append("assert_native_closure_plan(jsonb,jsonb)")
-        if revision in {"build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009"}:
+        if revision in {"build_guard_0006", "build_guard_0007", "build_guard_0008", "build_guard_0009", "build_guard_0010"}:
             helpers.append("demand_timestamp(timestamptz)")
-        if revision in {"build_guard_0008", "build_guard_0009"}:
+        if revision in {"build_guard_0008", "build_guard_0009", "build_guard_0010"}:
             helpers.append("assert_bootstrap(jsonb,bytea,text,jsonb)")
-        if revision == "build_guard_0009":
+        if revision in {"build_guard_0009", "build_guard_0010"}:
             helpers.append(f"execution_receipt({SCHEMA}.execution_events)")
         for signature in helpers:
             present = connection.scalar(text("""

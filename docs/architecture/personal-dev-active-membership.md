@@ -294,6 +294,14 @@ The service owns this independent connection pool through normal shutdown and
 partial startup failure; it removes admission access before disposing the pool.
 This configuration never sets builder availability or enables source intake.
 
+Private guard revision `build_guard_0010` adds read-only exact-intent observation
+at the same path with the `observe` suffix. It requires committed preparation,
+authenticates the complete binding, and remains readable after expiry, cancellation
+or logical closure so recovery does not lose its evidence. It neither removes a
+request hold nor manufactures a terminal release receipt. This revision has no
+worker exchange or claims; observation must be extended atomically when those
+consumers are installed. The typed executor activation interlock remains closed.
+
 The pool-side build-admission client uses a separate controller-only bearer token
 and verified mTLS files. It pins pool generation and executor identity, bounds
 request deadlines and response sizes, rejects redirects, and validates canonical
