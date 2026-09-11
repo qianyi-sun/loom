@@ -421,6 +421,27 @@ replay the same event. Neither publication nor acknowledgement removes holds or
 asserts physical termination. Unbound revocation needs no fabricated terminal
 inventory; the manager's separate physical-release checks remain authoritative.
 
+Manager migration `capacity_0023` retains a per-intent final-release witness
+atomically with `release_shapes`, the physical release transition and its command
+receipt. Restrictive references preserve the exact original protected publication
+and command, even if later protected receipts arrive. The witness includes the
+released shape, protected acknowledgement digest, command sequence/request digest
+and release time. The command digest is opaque provenance for a potentially
+multi-shape command; the subject-scoped read does not disclose other shapes.
+Insertion validates the closing intent's exact physical/protected evidence;
+deferred guards require both sides of the release transition at commit. Pristine
+unaccepted proposal discard remains witness-free. Legacy releases are never
+backfilled from current receipts, including on command replay. Witnesses are
+immutable and prevent downgrade while retained.
+
+`GET /v2/subjects/{subject_id}/intents/{intent_id}/final-release-witness` uses
+the original allocation's authenticated reporter. The bounded reporter client
+checks intent, subject/incarnation, deployment, candidate and reporter pins.
+This manager proof is not by itself native hold-retirement permission: the build
+guard must still join its installation, assignment, bootstrap, acknowledged
+protected-release publication and (for bound work) imported native terminal
+inventory. Native hold retirement and runtime orchestration remain incomplete.
+
 `ActivationRuntimeArtifactV3` and its explicit pinned loader compose the exact
 typed admission file, complete purpose/profile policy, approved profile digest,
 execution fence and controller-local manifest. Assembly verifies route executor,

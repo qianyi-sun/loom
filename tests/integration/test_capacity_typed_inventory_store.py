@@ -110,7 +110,7 @@ async def test_typed_inventory_downgrade_retains_evidence_and_fences_new_writes(
             async with capacity_session.begin_nested():
                 connection = await capacity_session.connection()
                 await connection.run_sync(lambda sync: command.downgrade(_config(sync), "capacity_0018"))
-        assert await capacity_session.scalar(text("SELECT version_num FROM alembic_version")) == "capacity_0022"
+        assert await capacity_session.scalar(text("SELECT version_num FROM alembic_version")) == "capacity_0023"
         assert (await store.executor_checkpoint(capacity_session, binding)).inventory_sequence == 1
     else:
         connection = await capacity_session.connection()

@@ -88,7 +88,7 @@ async def test_chunked_inventory_rollback_preserves_evidence_and_fences_late_wri
             async with capacity_session.begin_nested():
                 connection = await capacity_session.connection()
                 await connection.run_sync(lambda sync: command.downgrade(_config(sync), "capacity_0021"))
-        assert await capacity_session.scalar(text("SELECT version_num FROM alembic_version")) == "capacity_0022"
+        assert await capacity_session.scalar(text("SELECT version_num FROM alembic_version")) == "capacity_0023"
     else:
         connection = await capacity_session.connection()
         await connection.run_sync(lambda sync: command.downgrade(_config(sync), "capacity_0021"))

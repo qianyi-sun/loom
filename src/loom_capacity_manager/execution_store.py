@@ -44,6 +44,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
     ExecutableExecutorHeartbeatV2,
     ExecutableExecutorInventoryV2,
+    ExecutableFinalReleaseWitnessV2,
     ExecutableIntentBindingV2,
     ExecutableIntentCloseV2,
     ExecutableLaunchPermitV2,
@@ -91,6 +92,7 @@ from loom_capacity_manager.models import (
     CapacityExecutableBootstrapProposal,
     CapacityExecutableCommandReceipt,
     CapacityExecutableExecutorState,
+    CapacityExecutableFinalReleaseWitness,
     CapacityExecutableIntent,
     CapacityExecutableLaunchRateBucket,
     CapacityExecutableProtectedReleaseReceipt,
@@ -1067,6 +1069,75 @@ class CapacityExecutionStore:
             ):
                 raise ExecutionConflictError("stored terminal inventory evidence binding changed")
             return evidence
+
+    async def subject_final_release_witness(
+        self,
+        session: AsyncSession,
+        *,
+        subject_id: UUID,
+        subject_incarnation: UUID,
+        reporter_incarnation: UUID,
+        intent_id: UUID,
+    ) -> ExecutableFinalReleaseWitnessV2 | None:
+        """Read retained authority using the original allocation's reporter.
+
+        Missing historical witnesses stay unavailable, including after legacy
+        command replay. Never reconstruct them using the latest protected receipt.
+        """
+        async with _write_transaction(session):
+            result = (await session.execute(
+                select(CapacityExecutableFinalReleaseWitness, CapacityExecutableIntent,
+                       CapacityExecutableProtectedReleaseReceipt, CapacityExecutableCommandReceipt)
+                .join(CapacityExecutableIntent,
+                      CapacityExecutableIntent.intent_id == CapacityExecutableFinalReleaseWitness.intent_id)
+                .join(CapacityExecutableProtectedReleaseReceipt,
+                      CapacityExecutableProtectedReleaseReceipt.id == CapacityExecutableFinalReleaseWitness.protected_receipt_id)
+                .join(CapacityExecutableCommandReceipt,
+                      CapacityExecutableCommandReceipt.id == CapacityExecutableFinalReleaseWitness.command_receipt_id)
+                .where(CapacityExecutableIntent.intent_id == intent_id,
+                       CapacityExecutableIntent.subject_id == subject_id,
+                       CapacityExecutableIntent.subject_incarnation == subject_incarnation,
+                       CapacityExecutableIntent.state == "released")
+            )).one_or_none()
+            if result is None:
+                return None
+            row, intent, protected, command = result
+            try:
+                witness = ExecutableFinalReleaseWitnessV2(
+                    release=ExecutableReleasedShapeV2.model_validate_json(json.dumps(row.release_payload)),
+                    protected_release=ExecutableProtectedReleaseV2.model_validate_json(json.dumps(protected.release_payload)),
+                    protected_acknowledgement_sha256=protected.acknowledgement_digest,
+                    command_sequence=command.command_sequence,
+                    command_request_sha256=command.request_digest,
+                    released_at=row.released_at,
+                )
+                canonical_executable_bytes(witness)
+            except ValueError as exc:
+                raise ExecutionConflictError("stored final release witness is invalid") from exc
+            binding = witness.release.binding
+            await self._exact_subject_reporter(
+                session, subject_id=subject_id, subject_incarnation=subject_incarnation,
+                reporter_incarnation=reporter_incarnation, operation="final release witness",
+                historical_binding=binding,
+            )
+            if (
+                binding.model_dump(mode="json") != intent.binding_payload
+                or protected.intent_id != intent_id
+                or protected.reporter_incarnation != reporter_incarnation
+                or command.execution_epoch != binding.execution.execution_epoch
+                or command.executor_incarnation != binding.executor_incarnation
+                or command.operation_kind != "release"
+                or command.result_payload.get("tranche_id") != str(binding.tranche_id)
+                or binding.shape_instance_id not in command.result_payload.get("released_shape_ids", [])
+                or command.result_digest != _payload_digest(command.result_payload)
+                or row.released_at != intent.released_at
+                or witness.release.inventory_sequence != intent.inventory_sequence
+                or witness.release.terminal_kind != intent.terminal_kind
+                or witness.release.terminal_identity != intent.terminal_identity
+                or witness.release.terminal_evidence_sha256 != intent.terminal_evidence_sha256
+            ):
+                raise ExecutionConflictError("stored final release witness binding changed")
+            return witness
 
     async def launch_subject(
         self,
@@ -2958,10 +3029,7 @@ class CapacityExecutionStore:
                             "release requires exact protected and physical terminal evidence"
                         )
                 now = await _database_now(session)
-                for row, _item in rows:
-                    row.state = "released"
-                    row.released_at = now
-                await self._record_command(
+                command_receipt = await self._record_command(
                     session,
                     first,
                     sequence=release.command_sequence,
@@ -2969,6 +3037,22 @@ class CapacityExecutionStore:
                     request_digest=digest,
                     result_payload=payload,
                 )
+                await session.flush()
+                for row, item in rows:
+                    session.add(CapacityExecutableFinalReleaseWitness(
+                        intent_id=row.intent_id,
+                        protected_receipt_id=protected_releases[row.intent_id].id,
+                        command_receipt_id=command_receipt.id,
+                        release_payload=item.model_dump(mode="json"),
+                        released_at=now,
+                    ))
+                # Insert while intents are closing; SQL validates exact retained
+                # references, then deferred guards require the paired transition.
+                await session.flush()
+                for row, _item in rows:
+                    row.state = "released"
+                    row.released_at = now
+                await session.flush()
             return ReleasedExecutableShapes(
                 first.tranche_id,
                 released_ids,
@@ -5033,19 +5117,18 @@ class CapacityExecutionStore:
         operation_kind: str,
         request_digest: str,
         result_payload: dict[str, Any],
-    ) -> None:
+    ) -> CapacityExecutableCommandReceipt:
         result_digest = _payload_digest(result_payload)
-        session.add(
-            CapacityExecutableCommandReceipt(
-                execution_epoch=row.execution_epoch,
-                executor_incarnation=row.executor_incarnation,
-                command_sequence=sequence,
-                operation_kind=operation_kind,
-                request_digest=request_digest,
-                result_digest=result_digest,
-                result_payload=result_payload,
-            )
+        receipt = CapacityExecutableCommandReceipt(
+            execution_epoch=row.execution_epoch,
+            executor_incarnation=row.executor_incarnation,
+            command_sequence=sequence,
+            operation_kind=operation_kind,
+            request_digest=request_digest,
+            result_digest=result_digest,
+            result_payload=result_payload,
         )
+        session.add(receipt)
         state = (
             await session.execute(
                 select(CapacityExecutableExecutorState)
@@ -5057,6 +5140,7 @@ class CapacityExecutionStore:
         ).scalar_one()
         state.command_high_water = sequence
         state.last_command_digest = request_digest
+        return receipt
 
 
 __all__ = [

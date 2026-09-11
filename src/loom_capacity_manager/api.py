@@ -58,6 +58,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableExecutorHeartbeatV2,
     ExecutableExecutorInventoryV2,
     ExecutableExecutorRegistrationV2,
+    ExecutableFinalReleaseWitnessV2,
     ExecutableIntentBindingV2,
     ExecutableIntentCloseV2,
     ExecutablePartialReleaseV2,
@@ -1843,6 +1844,36 @@ def create_app(
         result = await read_subject_terminal_inventory_evidence(subject_id, intent_id, request, actor)
         payload = b"null" if result is None else canonical_executable_bytes(result)
         return Response(content=payload, media_type="application/json")
+
+    @app.get(
+        "/v2/subjects/{subject_id}/intents/{intent_id}/final-release-witness",
+        response_model=ExecutableFinalReleaseWitnessV2 | None,
+    )
+    async def get_subject_final_release_witness(
+        subject_id: UUID,
+        intent_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(subject_agent_principal),
+    ) -> Response:
+        if (
+            actor.subject_id != subject_id
+            or actor.subject_incarnation is None
+            or actor.demand_reporter_incarnation is None
+        ):
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.subject_final_release_witness(
+                    session, subject_id=subject_id,
+                    subject_incarnation=actor.subject_incarnation,
+                    reporter_incarnation=actor.demand_reporter_incarnation,
+                    intent_id=intent_id,
+                )
+            payload = b"null" if result is None else canonical_executable_bytes(result)
+            return Response(content=payload, media_type="application/json")
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
 
     async def read_subject_terminal_inventory_evidence(
         subject_id: UUID,

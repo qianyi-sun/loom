@@ -37,7 +37,10 @@ async def test_final_release_client_fails_closed(change):
     # Keep the publication digest valid for binding tamper so those cases test
     # client pins, independently of the model's protected-release join.
     if change in (*fields, "deployment", "candidate", "reporter"):
-        from loom_capacity_manager.executable_contracts import ExecutableProtectedReleaseV2, canonical_executable_digest
+        from loom_capacity_manager.executable_contracts import (
+            ExecutableProtectedReleaseV2,
+            canonical_executable_digest,
+        )
         payload["protected_acknowledgement_sha256"] = canonical_executable_digest(
             ExecutableProtectedReleaseV2.model_validate_json(json.dumps(payload["protected_release"])))
     seen = []

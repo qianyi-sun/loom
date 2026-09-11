@@ -1444,6 +1444,10 @@ def _assert_exact_approved_routes(app: FastAPI) -> None:
             ("GET",),
         ),
         (
+            "/v2/subjects/{subject_id}/intents/{intent_id}/final-release-witness",
+            ("GET",),
+        ),
+        (
             "/v3/subjects/{subject_id}/intents/{intent_id}/terminal-inventory-evidence",
             ("GET",),
         ),

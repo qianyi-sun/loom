@@ -155,6 +155,21 @@ async def test_final_release_transition_requires_witness_at_commit_boundary(capa
             await capacity_session.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
 
 
+async def test_final_release_witness_without_transition_cannot_commit(capacity_session):
+    store, _member, _protected, release = await ready_release(capacity_session)
+    command = await stage_command(capacity_session, store, release)
+    protected = await capacity_session.scalar(select(CapacityExecutableProtectedReleaseReceipt))
+    with pytest.raises(DBAPIError, match="atomic retained witness"):
+        async with capacity_session.begin_nested():
+            await capacity_session.execute(text("""
+                INSERT INTO capacity_executable_final_release_witnesses
+                (intent_id,protected_receipt_id,command_receipt_id,release_payload,released_at)
+                VALUES (:intent,:protected,:command,CAST(:payload AS jsonb),clock_timestamp())
+            """), dict(intent=release.releases[0].binding.intent_id,
+                protected=protected.id, command=command.id, payload=release.releases[0].model_dump_json()))
+            await capacity_session.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+
+
 async def test_legacy_release_replay_does_not_fabricate_witness(capacity_session):
     from alembic import command
 
@@ -175,8 +190,60 @@ async def test_legacy_release_replay_does_not_fabricate_witness(capacity_session
 
 
 async def test_pristine_proposal_discard_commits_without_fabricated_witness(capacity_session):
-    from tests.integration.test_capacity_manager_execution_store import test_newer_sealed_epoch_supersedes_a_stale_proposal
+    from tests.integration.test_capacity_manager_execution_store import (
+        test_newer_sealed_epoch_supersedes_a_stale_proposal,
+    )
 
     await test_newer_sealed_epoch_supersedes_a_stale_proposal(capacity_session)
     await capacity_session.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
     assert await capacity_session.scalar(text("SELECT count(*) FROM capacity_executable_final_release_witnesses")) == 0
+
+
+async def test_multi_shape_release_retains_one_command_and_exact_per_intent_proofs(capacity_session):
+    from datetime import UTC, datetime, timedelta
+
+    from loom_capacity_manager.executable_contracts import (
+        ExecutableBootstrapAcknowledgementV2,
+        ExecutableBootstrapProposalV2,
+    )
+    from loom_capacity_manager.execution_store import CapacityExecutionStore
+    from tests.capacity_fixtures import demand_snapshot
+    from tests.integration.test_capacity_manager_execution_store import _batched_admission_proposal
+
+    store = CapacityExecutionStore()
+    executor, bindings, _plan = await _batched_admission_proposal(store, capacity_session)
+    reporter = demand_snapshot().reporter_incarnation
+    await store.begin_intent_close(capacity_session, ExecutableIntentCloseV2(binding=bindings[0], command_sequence=3))
+    bootstrap = ExecutableBootstrapProposalV2(binding=bindings[1], command_sequence=4,
+        proposal_epoch=1, bootstrap_sha256="7" * 64, expires_at=datetime.now(UTC) + timedelta(minutes=1))
+    await store.propose_bootstrap(capacity_session, bootstrap)
+    await store.acknowledge_bootstrap(capacity_session, ExecutableBootstrapAcknowledgementV2(
+        binding=bindings[1], proposal_epoch=1, proposal_digest=canonical_executable_digest(bootstrap),
+        reporter_incarnation=reporter, bootstrap_registration_epoch=1,
+        bootstrap_evidence_sha256="8" * 64, protected_admission_sha256="3" * 64),
+        actor="development", idempotency_key=UUID(int=124201))
+    await store.begin_intent_close(capacity_session, ExecutableIntentCloseV2(binding=bindings[1], command_sequence=5))
+    for index, binding in enumerate(bindings):
+        await store.acknowledge_protected_release(capacity_session, ExecutableProtectedReleaseV2(
+            binding=binding, reporter_incarnation=reporter, bootstrap_registration_epoch=1,
+            protected_registration_epoch=2, bootstrap_revoked=True, protected_release_sha256=str(index + 1) * 64),
+            actor="development", idempotency_key=UUID(int=124202 + index))
+    pieces = [await store.next_pool_work(capacity_session, executor, cleanup_only=True,
+        cleanup_intent_id=binding.intent_id) for binding in bindings]
+    assert all(isinstance(piece, ExecutablePartialReleaseV2) for piece in pieces)
+    release = pieces[0].model_copy(update={"releases": tuple(piece.releases[0] for piece in pieces)})
+    wrong = release.model_copy(update={"releases": (release.releases[0],
+        release.releases[1].model_copy(update={"terminal_evidence_sha256": "f" * 64}))})
+    with pytest.raises(ExecutionConflictError, match="exact protected and physical"):
+        await store.release_shapes(capacity_session, wrong)
+    assert await capacity_session.scalar(text("SELECT count(*) FROM capacity_executable_final_release_witnesses")) == 0
+    await store.release_shapes(capacity_session, release)
+    await capacity_session.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+    assert await capacity_session.scalar(text("SELECT count(DISTINCT command_receipt_id) FROM capacity_executable_final_release_witnesses")) == 1
+    for item in release.releases:
+        witness = await store.subject_final_release_witness(capacity_session,
+            subject_id=item.binding.subject_id, subject_incarnation=item.binding.subject_incarnation,
+            reporter_incarnation=reporter, intent_id=item.binding.intent_id)
+        assert witness.release == item and witness.release.terminal_kind == "unused"
+        assert witness.command_request_sha256 == canonical_executable_digest(release)
+    assert (await store.release_shapes(capacity_session, release)).replayed

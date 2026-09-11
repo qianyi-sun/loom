@@ -2767,6 +2767,34 @@ class CapacityExecutableCommandReceipt(Base):
     )
 
 
+class CapacityExecutableFinalReleaseWitness(Base):
+    """Immutable exact authority retained atomically with physical release."""
+
+    __tablename__ = "capacity_executable_final_release_witnesses"
+    __table_args__ = (
+        CheckConstraint(
+            "jsonb_typeof(release_payload) = 'object' "
+            "AND octet_length(release_payload::text) <= 8388608",
+            name="capacity_final_release_payload_check",
+        ),
+    )
+
+    intent_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("capacity_executable_intents.intent_id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    protected_receipt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("capacity_executable_protected_release_receipts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    command_receipt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("capacity_executable_command_receipts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    release_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    released_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
 class CapacityExecutableLaunchRateBucket(Base):
     """Executable-v2 token bucket, isolated from the permanent dry-run ledger."""
 

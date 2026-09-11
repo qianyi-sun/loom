@@ -1208,6 +1208,40 @@ class ExecutableReleasedShapeV2(StrictV2Model):
     protected_release_sha256: Digest
 
 
+class ExecutableFinalReleaseWitnessV2(StrictV2Model):
+    """Manager-retained per-intent release authority, not an executor assertion.
+
+    The request digest identifies the original (possibly multi-shape) command;
+    it cannot be recomputed from this one subject's evidence.
+    """
+
+    release: ExecutableReleasedShapeV2
+    protected_release: ExecutableProtectedReleaseV2
+    protected_acknowledgement_sha256: Digest
+    command_sequence: PositiveQuantity
+    command_request_sha256: Digest
+    released_at: datetime
+
+    @field_validator("released_at")
+    @classmethod
+    def _released_utc(cls, value: datetime) -> datetime:
+        return _utc_time(value)
+
+    @model_validator(mode="after")
+    def _exact_release(self) -> ExecutableFinalReleaseWitnessV2:
+        if (
+            self.release.binding != self.protected_release.binding
+            or self.release.protected_registration_epoch
+            != self.protected_release.protected_registration_epoch
+            or self.release.protected_release_sha256
+            != self.protected_release.protected_release_sha256
+            or self.protected_acknowledgement_sha256
+            != canonical_executable_digest(self.protected_release)
+        ):
+            raise ValueError("final release witness protected binding changed")
+        return self
+
+
 class ExecutablePartialReleaseV2(StrictV2Model):
     """Monotonic physical terminal evidence for exact reservation shapes."""
 

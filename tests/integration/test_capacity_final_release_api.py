@@ -10,6 +10,8 @@ from tests.integration.test_capacity_manager_api import (
     DEMAND_TOKEN,
     OLDLAB_V2_EXECUTOR_TOKEN,
     _v2_intent_binding,
+)
+from tests.integration.test_capacity_manager_api import (
     api_context_v2_executor_generation as api_context_v2_executor_generation,
 )
 

@@ -154,7 +154,7 @@ async def test_typed_terminal_downgrade_preserves_evidence_and_fences_late_write
             async with capacity_session.begin_nested():
                 connection = await capacity_session.connection()
                 await connection.run_sync(lambda sync: command.downgrade(_config(sync), "capacity_0020"))
-        assert await capacity_session.scalar(text("SELECT version_num FROM alembic_version")) == "capacity_0022"
+        assert await capacity_session.scalar(text("SELECT version_num FROM alembic_version")) == "capacity_0023"
     else:
         connection = await capacity_session.connection()
         await connection.run_sync(lambda sync: command.downgrade(_config(sync), "capacity_0020"))

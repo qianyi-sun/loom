@@ -25,6 +25,7 @@ from loom_capacity_agent.terminal_inventory import application_terminal_evidence
 from loom_capacity_guard.contracts import canonical_digest as guard_canonical_digest
 from loom_capacity_manager.auth import MAX_BEARER_TOKEN_BYTES
 from loom_capacity_manager.contracts import (
+    MAX_CONTRACT_BYTES,
     CapacityContractError,
     DemandSnapshotV1,
     Digest,
@@ -40,6 +41,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableAdmissionPlanProposalV2,
     ExecutableBootstrapAcknowledgementV2,
     ExecutableBootstrapProposalV2,
+    ExecutableFinalReleaseWitnessV2,
     ExecutableProtectedReleaseV2,
     canonical_executable_bytes,
     canonical_executable_digest,
@@ -430,6 +432,56 @@ class DemandReporterClient:
         ):
             raise DemandPublishError("capacity manager bootstrap work binding changed")
         return proposal
+
+    async def get_final_release_witness(
+        self, intent_id: UUID,
+    ) -> ExecutableFinalReleaseWitnessV2 | None:
+        """Fetch manager release authority, not permission to retire local holds.
+
+        The guard must still match this witness to its exact local assignment,
+        protected publication acknowledgement and native terminal evidence.
+        """
+        if not isinstance(intent_id, UUID):
+            raise DemandPublishError("final release intent id must be a UUID")
+        endpoint = (
+            f"{self._manager_origin}/v2/subjects/{self._configuration.subject_id}/"
+            f"intents/{intent_id}/final-release-witness"
+        )
+        try:
+            async with self._http.stream("GET", endpoint,
+                headers={"Authorization": f"Bearer {self._bearer_token}"},
+                follow_redirects=False,
+            ) as response:
+                if response.status_code != 200:
+                    raise DemandPublishError(
+                        f"capacity manager rejected final release witness with status {response.status_code}")
+                content = bytearray()
+                async for chunk in response.aiter_bytes():
+                    content.extend(chunk[:MAX_CONTRACT_BYTES + 1 - len(content)])
+                    if len(content) > MAX_CONTRACT_BYTES:
+                        raise DemandPublishError("capacity manager final release witness exceeds its byte bound")
+        except httpx.HTTPError:
+            raise DemandPublishError("capacity manager final release witness transport failed") from None
+        if content == b"null":
+            return None
+        try:
+            witness = ExecutableFinalReleaseWitnessV2.model_validate_json(bytes(content))
+            canonical_executable_bytes(witness)
+        except ValueError as exc:
+            raise DemandPublishError("capacity manager returned invalid final release witness") from exc
+        binding = witness.release.binding
+        if (
+            binding.intent_id != intent_id
+            or binding.subject_id != self._configuration.subject_id
+            or binding.subject_incarnation != self._configuration.subject_incarnation
+            or binding.deployment_generation != self._configuration.deployment_generation
+            or binding.candidate.algorithm != self._configuration.candidate_identity_algorithm
+            or binding.candidate.identity != self._configuration.candidate_identity
+            or binding.candidate.publication_sha256 != self._configuration.candidate_publication_sha256
+            or witness.protected_release.reporter_incarnation != self._configuration.reporter_incarnation
+        ):
+            raise DemandPublishError("capacity manager final release witness binding changed")
+        return witness
 
     async def get_executable_terminal_inventory_evidence(
         self,
