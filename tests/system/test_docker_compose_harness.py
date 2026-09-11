@@ -11,8 +11,8 @@ import httpx
 import pytest
 import yaml
 
-from tests.system import docker_compose
 from tests.support.minio_images import MINIO_TLS_IMAGE
+from tests.system import docker_compose
 
 
 def test_compose_uses_available_pinned_minio_fixture() -> None:
