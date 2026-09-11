@@ -31,6 +31,7 @@ def main():
     for path in (fixtures / "client-modules").iterdir():
         shutil.copyfile(path, rootfs / "opt/loom-personal-dev-builder/loom" / path.name)
     shutil.copyfile("/test-support/client_probe.py", rootfs / "opt/client_probe.py")
+    shutil.copyfile("/test-support/lifecycle_probe.py", rootfs / "opt/lifecycle_probe.py")
     workspace = Path("/tmp/native-work")
     workspace.mkdir(mode=0o755)
     shutil.copytree(fixtures / "input", workspace / "input")
@@ -79,6 +80,41 @@ def main():
         os.chmod("/result/artifacts.tar", 0o644)
         assert list((output / "build/images").iterdir()) == []
         print("native-allocated-client-artifact-ok", flush=True)
+        # Establish the lifetime primitive for the future watchdog: stopping
+        # the trusted pause root must stop all children, including live clients,
+        # and must not admit a late in-flight child into the same sandbox.
+        lifecycle = json.loads((fixtures / "client/config.json").read_bytes())
+        lifecycle["process"]["args"] = ["/usr/bin/python3", "/opt/lifecycle_probe.py"]
+        Path("/tmp/lifecycle-bundle").mkdir()
+        Path("/tmp/lifecycle-bundle/config.json").write_text(json.dumps(lifecycle))
+        started.append(sandbox_id + "-lifecycle")
+        subprocess.run([*runtime, "run", "--detach", "--bundle=/tmp/lifecycle-bundle", sandbox_id + "-lifecycle"],
+            check=True, timeout=15)
+        pulse = output / "lifecycle-pulse"
+        deadline = time.monotonic() + 10
+        while not pulse.exists() or pulse.stat().st_size == 0:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("lifecycle child did not start")
+            time.sleep(0.05)
+        subprocess.run([*runtime, "kill", "--all", sandbox_id, "SIGKILL"], check=True, timeout=5)
+        deadline = time.monotonic() + 10
+        while True:
+            states = [json.loads(subprocess.run([*runtime, "state", name], check=True,
+                capture_output=True, text=True, timeout=5).stdout)["status"]
+                for name in (sandbox_id, sandbox_id + "-buildkit", sandbox_id + "-lifecycle")]
+            if states == ["stopped"] * 3:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"sandbox root stop left live children: {states}")
+            time.sleep(0.05)
+        stopped_pulse = pulse.read_bytes()
+        late_name = sandbox_id + "-late"
+        started.append(late_name)
+        late = subprocess.run([*runtime, "run", "--detach", "--bundle=/tmp/lifecycle-bundle", late_name],
+            capture_output=True, timeout=5)
+        assert late.returncode != 0, "stopped sandbox accepted a late child"
+        assert pulse.read_bytes() == stopped_pulse
+        print("native-root-stop-children-and-late-start-ok", flush=True)
     finally:
         cleanup_failures = []
         for name in reversed(started):
