@@ -812,12 +812,15 @@ compares those defined defaults and quantities by meaning when recovering an
 existing Job. Actual resource or permission changes still fail identity checks;
 do not edit the persisted attempt to match an API serialization difference.
 
-The execution node-group template must advertise `kubernetes.io/os=linux` and
-`kubernetes.io/arch=amd64` as well as the integration pool labels. Native builds
-retain these selectors so their declared architecture is enforced. With zero
-execution nodes, the autoscaler evaluates the template before any kubelet can
-add labels; missing template labels can prevent scale-up even when capacity is
-available. Keep the labels in Terraform and preserve the node group's limits.
+The execution node-group template must advertise `loom.nebius/node-os=linux`
+and `loom.nebius/node-arch=amd64` as well as the integration pool labels. Nebius
+ignores custom template labels containing `kubernetes.io` or `k8s.io`, so the
+native renderer uses these provider-supported labels to enforce architecture.
+It translates equivalent standard OS/architecture constraints and rejects
+conflicting values. With zero execution nodes, the autoscaler evaluates the
+template before any kubelet can add labels; missing template labels prevent
+scale-up even when capacity is available. Keep these labels aligned with the
+actual node type in Terraform and preserve the node group's limits.
 
 Default limits are one build, 1 CPU, 2 GiB RAM, 16 GiB ephemeral storage, 512
 processes and 30 minutes. Sources are bounded to 2,000 files/512 MiB; one attempt
