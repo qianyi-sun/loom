@@ -16,15 +16,14 @@ from tests.unit.test_worker_native_entrypoint import _configured_bootstrap
 
 
 @pytest.fixture(autouse=True)
-def native_cgroup(tmp_path, monkeypatch):
+def native_cgroup(tmp_path_factory, monkeypatch):
     import os
 
     from loom_capacity_executor import native_worker_launch as launch
     from loom_capacity_executor.native_worker_cgroup import open_native_cgroup
     from tests.unit.test_native_worker_cgroup import _job
 
-    root = tmp_path / "cgroups"
-    root.mkdir(mode=0o700)
+    root = tmp_path_factory.mktemp("native-cgroups")
     directory = _job(root)
     # Real production directory/control checks against a disposable filesystem.
     # No production bypass flag is exposed by the launcher.
@@ -416,7 +415,10 @@ async def test_stop_during_registration_does_not_burn_launch_marker(tmp_path, mo
 @pytest.mark.parametrize("phase", ["before-handoff", "during-registration", "during-marker", "after-create"])
 async def test_cgroup_drift_never_starts_native_worker(tmp_path, monkeypatch, native_cgroup, phase):
     from loom_capacity_executor import native_worker_launch as launch
-    from loom_capacity_executor.native_worker_container import NativeContainerError, NativeWorkerContainerPolicyV2
+    from loom_capacity_executor.native_worker_container import (
+        NativeContainerError,
+        NativeWorkerContainerPolicyV2,
+    )
 
     directory, reference, physical, bootstrap = _handoff(tmp_path)
     policy = NativeWorkerContainerPolicyV2(native_execution=bootstrap.native_execution,

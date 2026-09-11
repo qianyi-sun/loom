@@ -1443,6 +1443,17 @@ node/deployment evidence without disrupting the existing service. Actual process
 ancestry, cancellation and positive descendant cleanup still require live proof;
 daemon/pull overhead is not made allocation-contained by container placement.
 
+Before bootstrap exchange, the launcher opens the exact job ancestor through
+descriptor-relative, no-follow traversal and retains its directory descriptor.
+Bounded control-file reads require protected root ownership, finite positive
+aggregate memory within the allocation, the exact PID ceiling, an effective CPU
+set within the allocation, and zero swap allowance. Parent directory identities
+and permissions are rechecked along with these controls after registration,
+after consuming the launch marker, and after container creation before attachment.
+Drift prevents startup; a known created container still receives exact-ID cleanup.
+These checks establish launch-time readback, not cgroup preparation authority,
+continuous enforcement, post-start process ancestry, or positive descendant cleanup.
+
 The fixed container invocation uses an absolute isolated Python entrypoint, a
 read-only root, a non-root user, explicit Docker parent/resource limits, no
 restart or healthcheck, and only the Docker socket and per-launch scratch bind.

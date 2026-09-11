@@ -25,6 +25,7 @@ from loom_capacity_executor.native_worker_bootstrap import (
     encode_native_bootstrap,
     native_bootstrap_pipe,
 )
+from loom_capacity_executor.native_worker_cgroup import open_native_cgroup
 from loom_capacity_executor.native_worker_container import (
     _CONTAINER_ID,
     FixedDockerCLI,
@@ -137,36 +138,40 @@ async def launch_native_worker_once(
         ownership=physical.ownership_evidence_sha256)
     if cli.stop_requested is not None and cli.stop_requested():
         raise NativeContainerError("native worker launch interrupted before handoff")
-    _disable_bootstrap_dumps()
-    await consume_bootstrap_handoff(directory, reference, physical, admission, now=now)
-    if cli.stop_requested is not None and cli.stop_requested():
-        raise NativeContainerError("native worker launch interrupted before consumption")
-    if not root.activated_at <= now() < root.expires_at:
-        raise NativeContainerError("native execution root expired during handoff")
-    credential = claim_bootstrap_handoff_launch(directory, reference, physical, admission, now=now)
-    bootstrap = bind_native_settings(NativeWorkerBootstrap(native_execution=policy.native_execution,
-        worker_credential=credential, canonical_worker_settings=policy.canonical_worker_settings), allocation)
-    if scratch is not None:
-        scratch.creation_possible = True
-    raw_id = cli.call(*create_argv)
-    try:
-        container_id = raw_id.decode("ascii").strip()
-    except UnicodeError:
-        raise NativeContainerError("native worker create identity is uncertain") from None
-    if _CONTAINER_ID.fullmatch(container_id) is None:
-        raise NativeContainerError("native worker create identity is uncertain")
-    try:
-        created = cli.json("container", "inspect", container_id)
-        if (not isinstance(created, list) or len(created) != 1
-            or created[0].get("Id") != container_id or created[0].get("Image") != image.image_id):
-            raise NativeContainerError("native worker actual image readback changed")
+    with open_native_cgroup(allocation) as containment:
+        _disable_bootstrap_dumps()
+        await consume_bootstrap_handoff(directory, reference, physical, admission, now=now)
+        if cli.stop_requested is not None and cli.stop_requested():
+            raise NativeContainerError("native worker launch interrupted before consumption")
         if not root.activated_at <= now() < root.expires_at:
-            raise NativeContainerError("native execution root expired before worker startup")
-        status = await run_attached_native_worker(cli, container_id, bootstrap)
-        if status != 0:
-            raise NativeContainerError("native worker exited unsuccessfully")
-    finally:
-        remove_native_container(cli, container_id)
+            raise NativeContainerError("native execution root expired during handoff")
+        containment.assert_current()
+        credential = claim_bootstrap_handoff_launch(directory, reference, physical, admission, now=now)
+        bootstrap = bind_native_settings(NativeWorkerBootstrap(native_execution=policy.native_execution,
+            worker_credential=credential, canonical_worker_settings=policy.canonical_worker_settings), allocation)
+        containment.assert_current()
+        if scratch is not None:
+            scratch.creation_possible = True
+        raw_id = cli.call(*create_argv)
+        try:
+            container_id = raw_id.decode("ascii").strip()
+        except UnicodeError:
+            raise NativeContainerError("native worker create identity is uncertain") from None
+        if _CONTAINER_ID.fullmatch(container_id) is None:
+            raise NativeContainerError("native worker create identity is uncertain")
+        try:
+            created = cli.json("container", "inspect", container_id)
+            if (not isinstance(created, list) or len(created) != 1
+                or created[0].get("Id") != container_id or created[0].get("Image") != image.image_id):
+                raise NativeContainerError("native worker actual image readback changed")
+            if not root.activated_at <= now() < root.expires_at:
+                raise NativeContainerError("native execution root expired before worker startup")
+            containment.assert_current()
+            status = await run_attached_native_worker(cli, container_id, bootstrap)
+            if status != 0:
+                raise NativeContainerError("native worker exited unsuccessfully")
+        finally:
+            remove_native_container(cli, container_id)
 
 
 def _verify_native_docker_config(directory: Path) -> None:
