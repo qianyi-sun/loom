@@ -67,15 +67,29 @@ class BuildPlanCoordinator:
         self._timeout = operation_timeout_seconds
 
     async def prepare(self, proposal: ExecutableAdmissionPlanProposalV2, *,
-        sources: Mapping[UUID, CandidateRegistration],
+        sources: Mapping[UUID, CandidateRegistration] | None = None,
     ) -> PreparedBuildPlan:
         async with asyncio.timeout(self._timeout), self._sessions.begin() as session:
             prepared = await BuildGuardPlanStore(session, installation=self._installation).prepare(proposal, sources=sources)
         return prepared
 
-    async def publish(self, plan_id: UUID) -> ExecutableAdmissionAcknowledgementReceiptV2:
+    async def converge(self, proposal: ExecutableAdmissionPlanProposalV2) -> ExecutableAdmissionAcknowledgementReceiptV2:
+        """Replay committed authority first; load pending sources only for a new plan."""
+        proposal = ExecutableAdmissionPlanProposalV2.model_validate_json(proposal.model_dump_json())
+        digest = canonical_executable_digest(proposal)
+        try:
+            return await self.publish(proposal.plan_id, expected_proposal_digest=digest)
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) != "P0002":
+                raise
+        await self.prepare(proposal)
+        return await self.publish(proposal.plan_id, expected_proposal_digest=digest)
+
+    async def publish(self, plan_id: UUID, *, expected_proposal_digest: str | None = None) -> ExecutableAdmissionAcknowledgementReceiptV2:
         async with asyncio.timeout(self._timeout), self._sessions.begin() as session:
             work = await BuildGuardPlanStore(session, installation=self._installation).authorize_publication(plan_id)
+            if expected_proposal_digest is not None and work.acknowledgement.proposal_digest != expected_proposal_digest:
+                raise ValueError("build publication retained proposal differs from manager work")
             result = await self._publisher.publish_executable_admission_acknowledgement(
                 work.acknowledgement, idempotency_key=work.idempotency_key)
             if not isinstance(result, ExecutableAdmissionAcknowledgementReceiptV2):

@@ -497,6 +497,15 @@ contents. Discovery/authority errors do not produce invented success. This adapt
 still needs connection to the management runtime and live concurrent-owner
 acceptance; it issues no source grants or application worker credentials.
 
+Build-guard revision `build_guard_0023` gives absent plan publication a dedicated
+SQLSTATE. `BuildPlanCoordinator.converge` first republishes an existing exact
+proposal, recovering reservations after process restart or lost replies. Only
+explicit plan absence permits new preparation, which loads the requested source
+subset through the private source reader and rechecks it under preparation locks.
+Changed proposal, expired/cancelled source, generic database failure and rejected
+publication cannot create replacement reservations. No application database
+credential or caller-provided source map is required for this convergence path.
+
 Build-guard revision `build_guard_0022` adds bounded management-only discovery of
 held registered workers independently of final release. It returns exact worker
 and optional claim identities, never credentials or source contents. The
