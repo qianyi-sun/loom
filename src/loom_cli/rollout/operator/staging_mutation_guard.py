@@ -40,6 +40,7 @@ from .config import OperatorConfig, candidate_sha_from_runner_repo
 from .envelope import fixed_operator_config_path
 from .model import validate_safe_identifier
 from .policy import sanitized_child_environment
+from .protected_application_guard_retention import application_guard_is_retained
 from .readonly_database_client import (
     READONLY_DATABASE_STATEMENT_TIMEOUT_SECONDS,
     READONLY_DATABASE_TUNNEL_TEARDOWN_BOUND_SECONDS,
@@ -1027,6 +1028,10 @@ class MutationGuardManager:
         candidate_config: OperatorConfig | None = None,
     ) -> MutationGuardEvidence:
         selected_config = self.config if candidate_config is None else candidate_config
+        if application_guard_is_retained(
+            self.config.state_root, request_id=request_id, service_uid=self.service_uid,
+        ):
+            raise MutationGuardError("application handoff still retains the original mutation guard")
         candidate_sha, candidate_tree = self.resolve_candidate(selected_config)
         evidence = self.systemd.stop_mutation_guard(
             request_id,
@@ -1217,6 +1222,11 @@ def reconcile_orphaned_guard(
         raise MutationGuardError("orphaned mutation guard released evidence contradicts suspension")
     if final_evidence != initial_evidence:
         raise MutationGuardError("orphaned mutation guard evidence changed during recovery")
+    if application_guard_is_retained(
+        config.state_root, request_id=request_id, service_uid=service_uid,
+        guard=final_evidence,
+    ):
+        raise MutationGuardError("application handoff retains the orphaned mutation guard freeze")
     _restore_cronjob(
         config,
         run,
@@ -1296,6 +1306,7 @@ def hold_request_guard(
     acquired = False
     unsafe_loss = False
     ready_published = False
+    application_retention_seen = False
     ready: MutationGuardEvidence | None = None
     try:
         _require_before_readiness_deadline(
@@ -1449,6 +1460,19 @@ def hold_request_guard(
                         if not math.isfinite(now):
                             unsafe_loss = True
                             raise MutationGuardError("mutation guard clock authority was lost")
+                        if application_guard_is_retained(
+                            config.state_root, request_id=request_id, service_uid=service_uid,
+                            guard=ready, acknowledge=True,
+                            require_record=application_retention_seen,
+                        ):
+                            application_retention_seen = True
+                            if now >= deadline_monotonic:
+                                unsafe_loss = True
+                                raise MutationGuardError(
+                                    "mutation guard deadline expired during retained application handoff"
+                                )
+                            sleep(1.0)
+                            continue
                         if stop_requested():
                             break
                         if now >= deadline_monotonic:

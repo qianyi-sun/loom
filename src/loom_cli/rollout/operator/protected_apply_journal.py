@@ -24,7 +24,11 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from .staging_mutation_guard import MutationGuardEvidence
 
 from loom.application_database_admission import (
     ApplicationDatabaseAdmissionTarget,
@@ -1150,6 +1154,53 @@ class ProtectedApplyJournal:
             or plan.checkpoint_component_sha256 is None
         ):
             raise ProtectedApplyJournalError("application credential plan binding changed")
+
+    def retain_application_guard(self, plan: FinalGatePlan, *, guard: MutationGuardEvidence) -> None:
+        """Publish retention before sealing; acknowledgement is separately required."""
+        from .protected_application_guard_retention import _REQUEST, _journal_context, _sync
+        from .staging_mutation_guard import MutationGuardEvidence
+
+        self.require_application_credential_context(plan)
+        _, intent = self._application_admission_context()
+        if (type(guard) is not MutationGuardEvidence or guard.candidate_sha != plan.candidate_sha
+                or guard.candidate_tree != plan.candidate_tree):
+            raise ProtectedApplyJournalError("application guard candidate binding changed")
+        root, record = _journal_context(self, intent=intent, guard=guard,
+                                        starting_epoch=plan.starting_mutation_epoch)
+        _require_directory(root, uid=self.service_uid)
+        self._publish_or_match(root / _REQUEST, record)
+        _sync(root / _REQUEST)
+
+    def require_application_guard_retained(self, plan: FinalGatePlan, *, guard: MutationGuardEvidence) -> None:
+        """Refuse SQL mutation until the same supervised guard durably promises retention."""
+        from .protected_application_guard_retention import (
+            _ACK,
+            _journal_context,
+            _sync,
+            application_guard_is_retained,
+        )
+        from .staging_mutation_guard import MutationGuardEvidence
+
+        self.require_application_credential_context(plan)
+        _, intent = self._application_admission_context()
+        if (type(guard) is not MutationGuardEvidence or guard.candidate_sha != plan.candidate_sha
+                or guard.candidate_tree != plan.candidate_tree):
+            raise ProtectedApplyJournalError("application guard candidate binding changed")
+        root, _ = _journal_context(self, intent=intent, guard=guard,
+                                   starting_epoch=plan.starting_mutation_epoch)
+        state_root = self.attempt_root.parents[3]
+        if not application_guard_is_retained(state_root, request_id=self.request_id,
+                                             service_uid=self.service_uid, guard=guard):
+            raise ProtectedApplyJournalError("application guard retention is not pending")
+        expected = {"schema_version": 1, "intent_digest": intent.intent_digest,
+                    "guard_evidence_digest": guard.evidence_digest}
+        try:
+            ack = self._read(root / _ACK)
+        except FileNotFoundError:
+            raise ProtectedApplyJournalError("application guard acknowledgement is absent") from None
+        if ack != expected:
+            raise ProtectedApplyJournalError("application guard acknowledgement changed")
+        _sync(root / _ACK)
 
     def record_application_cnpg_configuration(
         self, plan: FinalGatePlan, *, binding: CNPGWriterConfigurationBinding

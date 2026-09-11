@@ -689,6 +689,25 @@ the enclosing operation must admit effective role privileges, the installed guar
 process and its supervision. Its existing post-readiness loop never reacquires a
 lost lock and uses catalog-only health queries compatible with handoff table locks.
 
+The application handoff journal also supports an explicit guard-retention
+handshake. Before any login seal, the active `application-ownership-handoff`
+component publishes its intent and exact original guard identity under the
+existing request. The supervised guard durably acknowledges that request before
+the component may proceed. Publication alone cannot win a race with guard
+shutdown. Once acknowledged, rollout-owner exit or an ordinary stop request does
+not release the lock while the handoff remains pending. Only the same component's
+validated terminal at the expected mutation epoch restores ordinary release
+semantics. The terminal must represent the complete database, credential,
+workload and input-fence outcome; retention itself supplies none of that evidence.
+
+The manager and systemd stop transport both refuse pending retention, including
+cleanup of a failed launch. Orphan reconciliation retains the lifecycle CronJob
+freeze even if the guard has died. Lost locks, deadline expiry and missing or
+changed acknowledged records fail closed without restoring the CronJob or
+reacquiring a guard. This preserves containment, not continued recovery authority
+after the original guard is lost. No deployed handoff component selects the
+handshake yet; complete handoff composition and admission remain required.
+
 With this immutable optional binding, drain requires exactly the handoff backend
 and that guard; it still refuses extra readonly/admin sessions, startup activity,
 prepared work, missing/replaced guards and lost locks. Ownership transfer accepts

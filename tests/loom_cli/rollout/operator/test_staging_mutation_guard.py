@@ -56,7 +56,7 @@ _TREE_ANNOTATION = "loom.carin.dev/staging-mutation-guard-candidate-tree"
 def _config(tmp_path: Path):
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir(mode=0o700, exist_ok=True)
-    return replace(make_config(), runtime_root=runtime_root)
+    return replace(make_config(), runtime_root=runtime_root, state_root=tmp_path / "state")
 
 
 def test_candidate_resolution_accepts_root_owned_installer_repo(
