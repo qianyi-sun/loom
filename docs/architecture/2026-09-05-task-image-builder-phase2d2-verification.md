@@ -1409,6 +1409,18 @@ reconstructed physical reference before invoking the native runtime. Legacy
 launch retains its existing path. Two-filesystem and concurrent-receiver tests
 exercise this storage composition, not live host transport authentication.
 
+The dedicated one-shot receiver process applies and reads back dump protections
+before constructing its fixed configuration/admission factory or reading secret
+input. A descriptor-relative walk requires root/receiver-owned, non-group/world-
+writable, nonsymlink destination ancestry; sticky temporary directories are not
+an installation namespace. It reads a bounded EOF-terminated pipe, replaces stdin
+with `/dev/null` before admission, and emits only a bounded historical receipt.
+Invalid input, cancellation and adapter exceptions produce one generic error,
+never exception details. Lost output does not roll back published delivery: an
+exact retry returns the existing receipt. This process API requires a fixed
+authenticated supervisor and protected local factory; it is not a network listener
+or permission to choose a receiver from request bytes.
+
 The fixed confidential controller-to-node transport, protected receiver installation,
 controller delivery journaling, remote revocation/cleanup convergence and crash-orphan
 retirement still need integration. Do not infer them from local delivery success
