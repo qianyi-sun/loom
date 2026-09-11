@@ -32,6 +32,9 @@ from loom_capacity_agent.build_admission import (
     BuildClaimExchangeV1,
     BuildClaimReceiptV1,
     BuildClaimRequestV1,
+    BuildExecutionExchangeV1,
+    BuildExecutionPermitV1,
+    BuildExecutionRequestV1,
     BuildOutcomeExchangeV1,
     BuildOutcomeReceiptV1,
     BuildOutcomeRequestV1,
@@ -201,6 +204,14 @@ class BuildAdmissionClient:
         if (receipt.claim_digest != canonical_digest(request.claim) or receipt.offset != request.offset
             or len(receipt.data) != min(request.length, receipt.archive_size_bytes - request.offset)):
             raise BuildAdmissionTransportError("native source response binding changed")
+        return receipt
+
+    async def authorize_execution(self, request: BuildExecutionRequestV1, *, worker_credential: str) -> BuildExecutionPermitV1:
+        envelope = BuildExecutionExchangeV1.model_validate_json(BuildExecutionExchangeV1(
+            request=request, worker_credential=worker_credential).model_dump_json())
+        receipt = await self._post(envelope.request.claim.binding, "execution", canonical_bytes(envelope), BuildExecutionPermitV1)
+        if receipt.request != envelope.request:
+            raise BuildAdmissionTransportError("native execution permission response binding changed")
         return receipt
 
     async def read_source_context(self, claim: BuildClaimRequestV1, *, worker_credential: str) -> BuildSourceContextV1:

@@ -11,7 +11,13 @@ import httpx
 import pytest
 import yaml
 
+from tests.support.minio_images import MINIO_TLS_IMAGE
 from tests.system import docker_compose
+
+
+def test_compose_uses_available_pinned_minio_fixture() -> None:
+    compose = yaml.safe_load(docker_compose.COMPOSE_FILE.read_text(encoding="utf-8"))
+    assert compose["services"]["minio"]["image"] == MINIO_TLS_IMAGE
 
 
 def test_compose_uses_one_test_only_step_jwt_signing_key() -> None:

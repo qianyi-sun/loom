@@ -5,13 +5,13 @@ import json
 import os
 import subprocess
 import time
+from contextlib import ExitStack
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from threading import Thread
 from types import MethodType
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
@@ -53,12 +53,20 @@ from tests.integration.test_task_image_authority_api import (
     _settings,
 )
 from tests.integration.test_task_image_projection_store import GRANT_ID, SUPERVISOR_SHA256, _policy
+from tests.support.guard_fixture import running_guard
 from tests.unit.test_task_image_builder_guard_service import (
     PROOF,
     REQUEST,
     RESPONSE,
     _service,
 )
+
+pytestmark = [pytest.mark.docker, pytest.mark.timeout(240)]
+
+
+def _remove_fixture_container(name: str) -> None:
+    result = subprocess.run(["docker", "rm", "-f", name], timeout=10, capture_output=True, text=True, check=False)
+    assert result.returncode == 0 or "No such container" in result.stderr, "fixture container cleanup failed"
 
 
 def _sha256(value: object) -> str:
@@ -293,11 +301,12 @@ async def test_real_authority_guard_socket_and_go_orchestrator_flow(
         bundle_capability_provider=provider,
     )
 
-    with TestClient(app) as client:
+    with TestClient(app) as client, ExitStack() as cleanup:
         service, ledger, _peer, _slurm, guard_events = _service(
             tmp_path,
             now_factory=flow_now,
         )
+        cleanup.callback(ledger.close)
         service._uuid = _phase2c_uuid_factory().__next__  # type: ignore[method-assign]
         _peer.executable_sha256 = SUPERVISOR_SHA256
         service.config = replace(
@@ -339,27 +348,22 @@ async def test_real_authority_guard_socket_and_go_orchestrator_flow(
         )
         service.authority = _FastAPIAuthorityAdapter(client, authority_events)  # type: ignore[assignment]
 
-        failure: list[BaseException] = []
-
-        def run_service() -> None:
-            try:
-                service.start()
-            except BaseException as exc:  # pragma: no cover - reported below
-                failure.append(exc)
-
-        thread = Thread(target=run_service)
-        thread.start()
+        failure = cleanup.enter_context(running_guard(service))
         deadline = time.monotonic() + 5
         while not service.config.protocol.socket_path.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
         assert service.config.protocol.socket_path.exists()
 
         repo = Path(__file__).resolve().parents[2]
+        container_name = "loom-phase2c-test-" + uuid4().hex
+        cleanup.callback(_remove_fixture_container, container_name)
         result = subprocess.run(
             [
                 "docker",
                 "run",
                 "--rm",
+                "--name",
+                container_name,
                 "--pid=host",
                 "--user",
                 f"{os.getuid()}:{os.getgid()}",
@@ -403,14 +407,12 @@ async def test_real_authority_guard_socket_and_go_orchestrator_flow(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             check=False,
+            timeout=180,  # Includes cold image pull and Go compilation; Go itself remains bounded to30s.
         )
 
         service.stop()
-        thread.join(timeout=5)
-        service.close()
         ledger_entry = ledger.get(GRANT_ID)
         ledger_document = None if ledger_entry is None else ledger_entry.document()
-        ledger.close()
 
     assert failure == []
     assert result.returncode == 0, (

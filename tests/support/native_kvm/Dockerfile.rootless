@@ -1,0 +1,15 @@
+# Disposable mechanism fixture, not a deployable worker or installer.
+FROM ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:23099633b78bce84207e7a2418df1b941a360163a7d13b3f514f180bc29a89f9 AS mapping
+FROM ghcr.io/qianyi-sun/loom-capacity-executor@sha256:26d6a31e82838187398889cc958236f5f7e309353caca8c82dc3160828332604
+USER 0:0
+RUN apt-get update && apt-get install -y --no-install-recommends uidmap iproute2 libcap2-bin \
+    && useradd --uid 1000 --create-home native-fixture \
+    && test -s /etc/subuid && test -s /etc/subgid \
+    && chmod 0755 /usr/bin/newuidmap /usr/bin/newgidmap \
+    && setcap cap_setuid=ep /usr/bin/newuidmap \
+    && setcap cap_setgid=ep /usr/bin/newgidmap
+COPY --from=mapping /usr/bin/rootlesskit /usr/bin/rootlesskit
+# Explicit source-only build context: exercise installed -I modules without a
+# production PYTHONPATH override or copying the repository's owner-local files.
+COPY --from=trusted-src / /usr/local/lib/python3.12/site-packages/
+USER 1000:1000

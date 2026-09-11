@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any
+from uuid import UUID
 
 from loom.personal_dev_candidate import (
     PERSONAL_DEV_COMPONENTS,
@@ -47,6 +48,30 @@ class VerifiedPersonalDevBuildArtifact:
     platform: PersonalDevPlatform
     manifest_sha256: str
     images: Mapping[str, VerifiedPersonalDevImageArtifact]
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevBuildArtifactBinding:
+    """Expected immutable content identity, not publication or execution authority.
+
+    Native workers derive this from authenticated source context; application
+    callers derive it from their registration. Never derive it from an artifact.
+    """
+
+    candidate_sha: str
+    source_sha256: str
+    archive_sha256: str
+    build_contract_sha256: str
+    attempt_id: UUID
+    lease_epoch: int
+    platform: PersonalDevPlatform
+
+    def __post_init__(self) -> None:
+        for field in ("candidate_sha", "source_sha256", "archive_sha256", "build_contract_sha256"):
+            _digest(getattr(self, field), label=field, prefixed=False)
+        if not isinstance(self.attempt_id, UUID) or self.platform not in PERSONAL_DEV_PLATFORMS:
+            raise ValueError("personal-dev artifact binding identity is invalid")
+        _exact_positive_int(self.lease_epoch, label="lease epoch")
 
 
 def _safe_member_name(name: str) -> PurePosixPath:
@@ -402,7 +427,30 @@ def verify_personal_dev_build_artifact(
     max_artifact_bytes: int,
     max_image_archive_bytes: int,
 ) -> VerifiedPersonalDevBuildArtifact:
-    """Verify and safely materialize one complete native OCI image bundle."""
+    """Adapt an application registration to the shared strict artifact verifier."""
+    attempt = registration.build_attempt
+    candidate = registration.candidate
+    if attempt is None or attempt.candidate_id != candidate.id or attempt.lease_epoch <= 0:
+        raise ValueError("personal-dev build artifact registration is unavailable")
+    binding = PersonalDevBuildArtifactBinding(candidate_sha=candidate.candidate_sha,
+        source_sha256=candidate.source_sha256, archive_sha256=candidate.archive_sha256,
+        build_contract_sha256=candidate.build_contract_sha256, attempt_id=attempt.id,
+        lease_epoch=attempt.lease_epoch, platform=platform)
+    return verify_bound_personal_dev_build_artifact(path, binding, output_directory=output_directory,
+        max_artifact_bytes=max_artifact_bytes, max_image_archive_bytes=max_image_archive_bytes)
+
+
+def verify_bound_personal_dev_build_artifact(
+    path: Path,
+    binding: PersonalDevBuildArtifactBinding,
+    *,
+    output_directory: Path,
+    max_artifact_bytes: int,
+    max_image_archive_bytes: int,
+) -> VerifiedPersonalDevBuildArtifact:
+    """Verify one native OCI bundle without fabricating application records."""
+    binding.__post_init__()
+    platform = binding.platform
     if platform not in PERSONAL_DEV_PLATFORMS:
         raise ValueError("personal-dev build artifact platform is unsupported")
     if (
@@ -412,10 +460,6 @@ def verify_personal_dev_build_artifact(
         or not 0 < max_image_archive_bytes <= max_artifact_bytes
     ):
         raise ValueError("personal-dev build artifact limits are invalid")
-    attempt = registration.build_attempt
-    candidate = registration.candidate
-    if attempt is None or attempt.candidate_id != candidate.id or attempt.lease_epoch <= 0:
-        raise ValueError("personal-dev build artifact registration is unavailable")
     output_metadata = os.lstat(output_directory)
     if not stat.S_ISDIR(output_metadata.st_mode) or stat.S_ISLNK(output_metadata.st_mode):
         raise ValueError("personal-dev artifact output directory is invalid")
@@ -482,15 +526,16 @@ def verify_personal_dev_build_artifact(
                 bindings = {
                     "schema_version": 1,
                     "attestation_scope": "personal-dev-only",
-                    "candidate_sha": candidate.candidate_sha,
-                    "source_sha256": candidate.source_sha256,
-                    "archive_sha256": candidate.archive_sha256,
-                    "build_contract_sha256": candidate.build_contract_sha256,
-                    "attempt_id": str(attempt.id),
-                    "lease_epoch": attempt.lease_epoch,
+                    "candidate_sha": binding.candidate_sha,
+                    "source_sha256": binding.source_sha256,
+                    "archive_sha256": binding.archive_sha256,
+                    "build_contract_sha256": binding.build_contract_sha256,
+                    "attempt_id": str(binding.attempt_id),
+                    "lease_epoch": binding.lease_epoch,
                     "platform": platform,
                 }
-                if any(manifest[key] != value for key, value in bindings.items()):
+                if any(type(manifest[key]) is not type(value) or manifest[key] != value
+                    for key, value in bindings.items()):
                     raise PersonalDevBuildArtifactError(
                         "personal-dev build artifact platform or attempt binding is invalid"
                     )
@@ -609,9 +654,11 @@ def verify_personal_dev_build_artifact(
 
 
 __all__ = [
+    "PersonalDevBuildArtifactBinding",
     "PersonalDevBuildArtifactError",
     "VerifiedPersonalDevBuildArtifact",
     "VerifiedPersonalDevImageArtifact",
+    "verify_bound_personal_dev_build_artifact",
     "verify_personal_dev_build_artifact",
     "verify_personal_dev_oci_image_archive",
 ]

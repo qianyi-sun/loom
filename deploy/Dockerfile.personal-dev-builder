@@ -104,6 +104,11 @@ COPY src/loom/personal_dev_source.py ./loom/personal_dev_source.py
 RUN python3 -m compileall -q /opt/loom-personal-dev-builder \
     && chown -R 1000:1000 /opt/loom-personal-dev-builder
 
+# Direct OCI consumers keep rootfs read-only from the first instruction.
+# Install empty root-owned mountpoints; do not grant source write access here.
+RUN mkdir -p /input /output /var/run/loom-buildkit /var/lib/loom-buildkit \
+    && chmod 0755 /input /output /var/run/loom-buildkit /var/lib/loom-buildkit
+
 USER 1000:1000
 ENV HOME=/workspace/home \
     PYTHONPATH=/opt/loom-personal-dev-builder \

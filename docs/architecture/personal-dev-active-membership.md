@@ -2061,6 +2061,245 @@ This adapter does not enable membership intake. Allocation-contained KVM runtime
 native artifact garbage collection and installed service composition still gate
 operational readiness.
 
+`NativeOciBundles` renders the fixed native pause, BuildKit and client OCI
+documents as immutable bytes. The trusted pause owns pod lifetime independently
+of feature-controlled completion. BuildKit uses the existing UID-1000 RootlessKit
+launcher, only SETUID/SETGID in its bounding set, private bounded tmpfs state,
+and gVisor's read-only virtual cgroup mount for nested build execution. This is
+not a host cgroup bind. The client has no capabilities, no-new-privileges, a
+digest-bound deny-default seccomp profile, read-only source/contract and shared
+socket mounts, and one writable output directory. The fixed `build-allocated`
+command creates a fresh child workspace within that output directory.
+
+Direct OCI supplies the explicit mount-source annotation normally supplied by
+containerd for pod-shared tmpfs. It creates separate PID and mount namespaces;
+no host namespace paths, hooks, devices, credentials or cgroup-placement paths
+are rendered. The client policy rejects privileged namespace/mount syscalls,
+unrestricted `clone`, and `clone3` allowance. Architecture-specific profiles
+must cover the exact native platform. Policy parsing and absolute/disjoint path
+checks do not establish trusted filesystem ownership or installation validity.
+The installed wrapper still must verify immutable runtime/rootfs material,
+source/contract binding, private directories, client seccomp conformance, fresh
+start/liveness authority, Slurm containment, cleanup and physical release.
+Docker rootfs export alone is insufficient: it drops the capability xattrs on
+`newuidmap` and `newgidmap` required by the pinned RootlessKit launcher. Protected
+rootfs provisioning must preserve and verify the exact published capabilities.
+This renderer does not enable intake, execute commands or certify a worker.
+
+The versioned client policy is
+`deploy/personal-dev-builder/client-seccomp-v1.json`. It permits ordinary
+Python/buildctl file IO, read-only extended-attribute inspection, constrained
+thread creation and AF_UNIX sockets. Other network socket families, namespace
+creation, mount operations and kernel-control syscalls remain denied. `clone3`
+returns ENOSYS so libc can fall back to the namespace-filtered `clone` call.
+The builder image provisions root-owned empty mountpoints before switching to
+UID 1000; the runtime never makes its root filesystem writable to add them.
+
+`tests/integration/test_native_oci_kvm.py` belongs to the Docker integration lane.
+On a native KVM host it verifies pinned gVisor bytes, exports a digest-pinned
+builder filesystem and overlays current trusted Python for a disposable test.
+It consumes the real rendered bundles and client profile, runs all component
+Dockerfiles with an offline `RUN`, and verifies the complete returned artifact
+and modified-source contents. Missing KVM is a reported skip, not acceptance.
+This fixture is not proof of the newly published builder image, protected rootfs
+installation, rootless host policy, Slurm containment or fleet readiness.
+The renderer returns distinct role-prefixed root, BuildKit and client IDs.
+No ID prefixes another: runsc's lifecycle lookup otherwise treats the root ID
+as ambiguous while its children exist, preventing a reliable root-stop command.
+The real KVM fixture also observes root-stop termination of both BuildKit and a
+live restricted client, rejects a late child joining that stopped sandbox, and
+verifies empty runtime state after cleanup. Its init process reaps detached
+runtime helpers; installed process supervision still needs equivalent proof.
+Both explicit root kill and abrupt death of the attached runsc root launcher
+are exercised. The latter tests gVisor's kernel parent-death binding, not the
+installed supervisor-to-launcher death chain or Slurm cleanup.
+`bind_native_parent_death` supplies a dependency-free Linux helper primitive:
+it checks the expected parent before and after setting `PDEATHSIG=SIGKILL`, then
+checks the configured signal. Each fork link must bind separately; privilege
+changes can clear the setting. The disposable KVM test now also exercises a
+supervisor → broker → root wrapper → attached runsc chain using this primitive:
+abrupt supervisor death stops the live pod and rejects a subsequent child.
+This demonstrates the chain in the rootful fixture, not the installed rootless
+worker, a blocked-spawn race, or actual Slurm release. The real supervisor and
+broker remain to be integrated; a successful primitive test does not open intake.
+
+Revision `build_guard_0031` adds a separate native execution-freshness operation.
+The trusted worker submits its exact claim, a new challenge and the verified
+source-binding digest. The private guard rechecks the committed registration,
+assignment, installation, held request and live whole-attempt source under the
+existing locks; drain, cancellation, outcome, terminal and release states reject
+permission. Its receipt echoes the exact request and grants at most ten seconds,
+capped by the current source lease. The HTTPS reply follows transaction commit,
+is not cacheable, and contains no storage or worker credentials.
+
+This is a stateless freshness check, not another capacity grant or proof of
+single execution. A future installed one-shot worker must prove exclusion across
+crash/requeue/restart, retain a terminal stop latch, and use mandatory Linux
+`CLOCK_BOOTTIME` captured before the request to subtract all transport time.
+Permission arrival cannot start a fresh lifetime; late renewals cannot revive
+cleanup. Revocation is bounded by the remaining permission window, not
+instantaneous. An independent deadline monitor and exact runtime cleanup remain
+required, with physical capacity charged until manager terminal/release proof.
+`NativeExecutionDeadline` provides the local serialized state: one pending
+challenge, request-start BOOTTIME plus the server lifetime, and an irreversible
+stop on expiry, clock failure, protocol error, cancellation or cleanup. It
+subtracts transport and validation delay, refuses renewals across an expired
+older permission, and never falls back to a suspend-blind clock. This helper
+does not schedule its own timer, start/kill children, persist one-shot exclusion,
+or prove physical release; the independent runtime watchdog must consume it.
+`supervise_native_execution` now consumes it in a bounded local monitor, separate
+from blocking authority IO and runtime spawning. Its precreated helpers exchange
+canonical, size-limited UNIX sequenced packets; descriptor transfer, EOF,
+backpressure and malformed or unsolicited replies fail closed. Each fixed
+pause → BuildKit → client start carries an absolute BOOTTIME deadline for the
+broker to recheck before spawning. The monitor polls at most 50 ms apart and
+checks expiry after waking, before starts, and before accepting client completion.
+It reads a queued cancellation behind a permit before progressing; the single
+outstanding-request contract bounds that drain to two frames without starving
+expiry. It always kills and reaps its exact broker child on return. Its result
+reports only observed client success and broker reaping, not artifact acceptance,
+complete runtime cleanup or physical release. The caller retains the authority
+channel and must settle any pending reply before a subsequent artifact phase.
+Real helper-process tests prove deadline behavior under
+blocked IO, silence, protocol failures and queued cancellation, while simulated
+BOOTTIME jumps cover queued starts and completion after suspend-like expiry.
+They do not establish installed rootless or Slurm containment.
+
+`run_native_runtime_broker` now connects that monitor to fixed attached runsc
+starts. Its readiness acknowledgment binds the inherited channel to its PID,
+expected parent and claim digest; the caller must verify it before requesting
+execution permission. `exec_native_runsc` binds each command wrapper to its
+broker parent, checks start expiry immediately before exec, and clears inherited
+environment. Commands and role IDs are fixed; control messages cannot carry a
+shell command, runtime flag, mount or path. Pause and BuildKit readiness require
+living attached launchers and exact runtime state; BuildKit additionally needs
+its fixed private socket. Control stdout is bounded during capture, not afterward.
+Repeated starts, dead parent launchers and control EOF stop progression.
+
+The disposable AMD64 KVM fixture runs all ten modified-source builds through the
+actual monitor/broker/launcher chain and verifies their artifacts. A second run
+blocks authority renewal while a restricted client is live; expiry stops that
+client and rejects a late start. Cleanup waits for successful stopped/absent
+runtime readback before exact deletion, then checks empty state. Broker reaping
+alone is insufficient, and neither result proves physical capacity release.
+`reconcile_native_runtime_cleanup` implements that ordering outside the live
+monitor: it requires a terminated/reaped broker, rejects unknown or duplicate
+runtime identities, waits for terminal state, performs each exact deletion once,
+then requires a successful empty inventory. Failed reads are not absence, and
+failed deletions or leftover state return cleanup uncertainty. The supervised
+fixture consumes this production result before artifact verification; it does
+not retry partial runtime deletion on failure. Its outer container is disposed
+separately as test-resource cleanup.
+Artifact verification accepts an immutable `PersonalDevBuildArtifactBinding`
+derived from authenticated native source context. The existing application
+registration entrypoint checks the candidate/attempt relationship and adapts to
+the same verifier; native workers need not fabricate database records. Both paths
+check the exact candidate, source/archive/build-contract digests, attempt, lease
+epoch and platform before extracting the complete OCI image set. This binding is
+expected content identity, never runtime, publication or physical-release authority.
+Manifest identity fields require exact JSON types as well as values; boolean or
+floating-point equivalents of integer schema versions and epochs are rejected.
+`serve_native_execution_authority` adapts the existing pinned admission client
+to the monitor's bounded sequenced-packet protocol in a separate IO helper. It
+forwards only the consumed claim and source binding, validates the exact returned
+permit, and never sends worker credentials to the monitor. Failure sends a bounded
+stop message without retries; silence or a stuck helper still expires independently
+in the monitor. The disposable supervised KVM fixture uses this adapter with a
+fixture-only authority client, including a blocked renewal. This is not installed
+helper composition or an authenticated live-service acceptance result.
+The rootless prerequisite fixture now starts the pinned RootlessKit as container
+UID/GID 1000, with only the packaged UID/GID mapping-helper capabilities in its
+bounding set. A caller-created user/mount/network namespace then runs the same
+fixed KVM runtime command successfully. It changes no host policy and does not
+certify Docker's host UID mapping, installed AppArmor/subordinate-ID policy, or
+the complete BuildKit/death chain. A separate real mapping probe confirms that
+the mapped namespace's trusted reader can read private mode-0700 builder output
+while the original outer UID cannot. The IO composition must keep verification
+in the mapped ownership context or explicitly transfer the artifact; it must not
+assume the outer helper can traverse private subordinate-UID directories.
+The activation-channel fixture passes one sequenced-packet authority channel and
+one artifact stream through RootlessKit without exposing either to its feature
+child. It verifies private artifact transfer and active parent death at both
+the RootlessKit-to-mapped-child and outer-IO-to-RootlessKit boundaries. Deliberately
+unbound negative controls must survive: child timeouts cannot masquerade as
+working kernel lifetime binding. These are active-process tests, not proof of
+the mapping-time startup window or installed Slurm containment.
+The complete AMD64 supervised-build fixture now also runs inside RootlessKit
+started as UID 1000 with only the two mapping-helper capabilities available.
+It builds all ten images from modified local source, verifies their OCI payloads,
+and confirms exact runtime cleanup. A blocked-renewal case expires a live client,
+confirms cleanup, rejects a late child, and emits no artifact. The disposable
+fixture assembles the trusted root filesystem on explicitly executable tmpfs;
+an inherited locked `noexec` mount cannot be relaxed by a rootless gofer. Its
+mapping helpers use exact UID/GID file capabilities instead of set-ID bits.
+`execute_native_build_session` now composes the mapped production lifecycle:
+validate claim/context/layout, byte limits and private workspace; own the fixed
+broker and validate its readiness; supervise execution; settle the broker and
+confirm runtime cleanup; only then verify the bound artifact. Failed execution,
+unreaped supervision or uncertain cleanup returns no artifact. The complete
+rootless success/expiry fixtures exercise this session, with fixture-only authority
+replies. It neither uploads nor records outcomes or releases capacity; trusted
+material, one-shot launch fencing and the outer IO lifecycle remain caller duties.
+The full IO-split fixture additionally keeps its synthetic authority client
+outside RootlessKit. The mapped monitor receives only the private execution
+socket; after successful cleanup and verification, it exports artifact bytes
+through a separate inherited stream. The original outer UID cannot traverse
+the mapped private output. `native_artifact_transfer` validates a bounded canonical
+claim/source/size/hash header, exact bytes and EOF, rejecting ancillary descriptors.
+The outer receiver stages a scoped private spool using descriptor-anchored paths
+and settled cancellation-safe writes. These are transport facts, not OCI
+publication authority. Upload must retain that scope and open directory descriptor;
+the `/proc/self/fd/...` path is not portable to another process. The expiry fixture
+still proves a live client stopped, exact cleanup and no exported artifact.
+`native_rootless_runtime` provides the fixed credential-free launch/mapped
+entrypoint. A bounded canonical owner-only specification binds claim, source,
+preverified layout and limits. It rejects reused state, creates only a fresh
+private `workspace/rootlesskit` directory (RootlessKit removes that directory),
+checks two connected UNIX socket types, remaps them collision-safely to activation
+FDs 3/4 and closes all other non-stdio descriptors. It clears environment and
+working directory before executing the pinned packaged RootlessKit with fixed
+offline/static-mapping flags and isolated installed Python. The mapped target
+checks activation PID/count and the documented keeper PID against the original
+RootlessKit grandparent, then binds parent death before starting any broker.
+The keeper marker may be missing or metadata-valid but empty during RootlessKit's
+create-before-write window; only those states get a bounded five-second wait.
+Malformed identities and adoption fail closed. Its canonical stdout result
+contains local execution/cleanup and artifact transport observations only; outer
+IO must bound capture and match them to the received stream and existing upload
+protocol. No local result substitutes for publication or physical release.
+The full IO-split fixture exercises that entrypoint from installed source with
+isolated imports. Separate trusted same-mapping preparation and readback passes
+restore fixture rootfs capabilities and independently verify cleanup/late-start
+rejection; these are not a protected worker installer. Actual subreaper adoption
+and mapping-time parent death still require kernel/Slurm acceptance coverage.
+`allocated_worker_io` retains the consumed handoff's authenticated client and
+credential in a scoped outer IO object while the assigned source stays staged.
+It serves only that claim/source's authority channel, uploads through the existing
+claim-bound stream and validates exact historical-outcome receipts. It adds no
+write retry, launcher or release authority. Scope exit closes admission to new
+operations, cancels and settles in-flight operations even during repeated caller
+cancellation, then lets the surrounding source context clean up. The older
+source-only staging entrypoint remains a compatibility view. The IO object and
+its descriptor-scoped source path must never be sent into the mapped runtime;
+full composition must still copy sealed input and settle the launcher while
+retaining the received-artifact scope through upload/outcome.
+`prepare_native_runtime_input` now supplies the fixed input-copy primitive. It
+reads the authenticated staged archive in its original descriptor scope, checks
+exact length and SHA-256 while copying without extraction, and writes the existing
+authority-free contract. Only complete `0444` files in a fresh `0555` input
+directory become ready. Final directory/file identity readback rejects replacement;
+failed or cancelled writes settle before exact owned-file cleanup, preserving
+foreign replacements. The real outer-IO fixture consumes these portable copies.
+Connecting this input primitive and scoped authenticated IO to a single installed
+launcher/upload/outcome orchestration remains separate work.
+These fixtures remain offline (`--network=none`); restricted external
+dependency fetching, protected material/rootless installation, Slurm containment,
+ARM64 supervision, authenticated IO-helper composition and native artifact GC
+remain acceptance gaps before installed intake can be enabled.
+The route requires `native-execution`, which production service configuration
+currently rejects. Isolated route tests exercise it without opening installed
+execution; source/claim receipts remain inert and no runtime launcher is enabled.
+
 1. Deliver executable delegated **application** membership: versioned policy,
    durable log/projection, authenticated lifecycle endpoint, common allocation
    and executor integration. Existing V2 active-mutation rejection remains.
