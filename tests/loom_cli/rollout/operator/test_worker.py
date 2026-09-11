@@ -1765,3 +1765,35 @@ def test_attempt_uses_original_retained_guard_at_live_advanced_epoch(tmp_path, m
             run_attempt(envelope, dependencies)
         assert "driver-run" not in bundle.order and "driver-lock-acquire" not in bundle.order
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("driver_rc", [0, 1])
+def test_pending_handoff_records_resumable_failure_without_claiming_guard_release(driver_rc):
+    from loom_cli.rollout.operator.staging_mutation_guard import MutationGuardRetainedError
+
+    bundle = worker_fakes(driver_rc=driver_rc)
+    guard = FakeMutationGuard(bundle.order, release_error=MutationGuardRetainedError("handoff pending"))
+    dependencies = replace(bundle.deps, mutation_guard=guard)
+    assert run_attempt(valid_envelope(), dependencies) == 1
+    assert bundle.store.active is None
+    assert bundle.store.events[-1].event == "attempt_failed"
+    assert bundle.store.events[-1].reason == ("application_handoff_pending" if driver_rc == 0 else "driver_failed")
+    assert not any(event.event == "attempt_done" for event in bundle.store.events)
+    assert guard.released == [REQUEST_ID]  # one refused release request; no retry
+
+
+def test_pending_handoff_still_records_failed_final_admission():
+    from loom_cli.rollout.operator.staging_mutation_guard import MutationGuardRetainedError
+
+    bundle = worker_fakes()
+    guard = FakeMutationGuard(bundle.order, release_error=MutationGuardRetainedError("handoff pending"))
+
+    def refuse(_):
+        raise ValueError("admission unavailable")
+
+    dependencies = replace(bundle.deps, mutation_guard=guard, final_admission=refuse)
+    assert run_attempt(valid_envelope(), dependencies) == 1
+    assert bundle.store.active is None
+    assert bundle.store.events[-1].event == "attempt_failed"
+    assert "final-admission" in bundle.store.events[-1].reason
+    assert "driver-run" not in bundle.order
