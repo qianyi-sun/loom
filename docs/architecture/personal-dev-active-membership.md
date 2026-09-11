@@ -2290,11 +2290,22 @@ authority-free contract. Only complete `0444` files in a fresh `0555` input
 directory become ready. Final directory/file identity readback rejects replacement;
 failed or cancelled writes settle before exact owned-file cleanup, preserving
 foreign replacements. The real outer-IO fixture consumes these portable copies.
-Connecting this input primitive and scoped authenticated IO to a single installed
-launcher/upload/outcome orchestration remains separate work.
+`run_native_outer_build` composes these primitives in the original trusted IO
+process: verified input copy, fixed isolated-Python launcher, concurrent bounded
+result/private artifact reception, launcher and authority settlement, exact upload,
+then historical outcome. Upload retains the receiver's descriptor-scoped spool,
+checks its bytes, and requires the consumer to exhaust the complete body before
+recording success. The outcome operation ID is deterministic for the claim;
+ambiguous writes are not retried and no outcome grants release authority.
+Cancellation settles each owned operation once, including async client cleanup,
+before removing its spool. Rejected excessive stdout is drained in bounded chunks
+after killing the launcher so pipe backpressure cannot prevent process reaping.
+Caller-supplied protected mapped material and the existing one-shot launch fence
+remain prerequisites. The real KVM fixture now exercises this production
+orchestrator with synthetic authority/upload/outcome, not installed service IO.
 These fixtures remain offline (`--network=none`); restricted external
 dependency fetching, protected material/rootless installation, Slurm containment,
-ARM64 supervision, authenticated IO-helper composition and native artifact GC
+ARM64 supervision, installed authenticated IO composition and native artifact GC
 remain acceptance gaps before installed intake can be enabled.
 The route requires `native-execution`, which production service configuration
 currently rejects. Isolated route tests exercise it without opening installed

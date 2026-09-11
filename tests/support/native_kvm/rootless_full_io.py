@@ -4,23 +4,27 @@ import asyncio
 import hashlib
 import json
 import os
-import shutil
-import socket
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from loom_capacity_agent.build_admission import BuildClaimRequestV1, BuildSourceContextV1
-from loom_capacity_executor.native_artifact_transfer import receive_native_artifact
+from loom_capacity_agent.build_admission import (
+    BuildClaimRequestV1,
+    BuildExecutionPermitV1,
+    BuildOutcomeReceiptV1,
+    BuildSourceContextV1,
+)
+from loom_capacity_agent.build_artifact_stream import BuildArtifactUploadReceiptV1
+from loom_capacity_executor.native_allocated_io import scoped_native_allocated_io
 from loom_capacity_executor.native_build_source import NativeStagedBuildSource
+from loom_capacity_executor.native_outer_build import run_native_outer_build
 from loom_capacity_executor.native_rootless_runtime import (
-    NativeRootlessResultV1,
     NativeRootlessSpecV1,
     exec_native_rootless_runtime,
 )
 from loom_capacity_executor.native_runsc import NativeRunscLayout
-from loom_capacity_executor.native_runtime_input import prepare_native_runtime_input
-from loom_capacity_manager.contracts import canonical_bytes
+from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 
 
 def launch():
@@ -63,8 +67,6 @@ async def main():
     # to restore rootfs capabilities. It starts no feature/runtime process.
     runtime_workspace = Path("/tmp/native-work")
     runtime_workspace.mkdir(mode=0o700)
-    await prepare_native_runtime_input(NativeStagedBuildSource(context, Path("/fixtures/input/source.tar")),
-        workspace=runtime_workspace, max_artifact_bytes=32 * 1024**2, max_image_archive_bytes=3 * 1024**2)
     subprocess.run(["/usr/bin/rootlesskit", "--net=none", "--subid-source=static",
         "--state-dir=/tmp/rootless-preparation", sys.executable, "/test-support/execute.py", "prepare"],
         check=True, timeout=60)
@@ -76,64 +78,57 @@ async def main():
     spec_path = Path("/tmp/native-work/runtime-spec.json")
     spec_path.write_bytes(wire)
     spec_path.chmod(0o400)
-    authority, mapped_authority = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-    artifact, mapped_artifact = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     workspace = Path("/tmp/native-outer-io")
     workspace.mkdir(mode=0o700)
-    children = []
-    try:
-        helper = subprocess.Popen([sys.executable, "/test-support/supervised.py", str(authority.fileno()),
-            str(os.getpid()), str(int(expiry))], pass_fds=(authority.fileno(),))
-        children.append(helper)
-        authority.close()
-        child = subprocess.Popen([sys.executable, __file__, "launch", str(os.getpid()),
-            str(mapped_authority.fileno()), str(mapped_artifact.fileno()), hashlib.sha256(wire).hexdigest()],
-            pass_fds=(mapped_authority.fileno(), mapped_artifact.fileno()), stdout=subprocess.PIPE)
-        children.append(child)
-        mapped_authority.close()
-        mapped_artifact.close()
-        if expiry:
-            artifact.setblocking(False)
-            async with asyncio.timeout(120):
-                # A partial header is not evidence of zero export. Even one
-                # byte is a failure; the expired session must close untouched.
-                assert await asyncio.get_running_loop().sock_recv(artifact, 1) == b"", "expired runtime exported bytes"
-        else:
-            async with receive_native_artifact(artifact, workspace=workspace,
-                claim_digest=context.claim_digest, source_binding_sha256=context.source_binding_sha256,
-                max_artifact_bytes=32 * 1024**2, timeout_seconds=120) as received:
-                # Receiver path stays in this process and context; no FD path RPC.
-                shutil.copyfile(received.archive, "/result/artifacts.tar")
-                try:
-                    Path("/tmp/native-work/output/build/artifacts.tar").read_bytes()
-                except PermissionError:
-                    pass
-                else:
-                    raise AssertionError("outer IO directly read private mapped output")
-                print("native-outer-io-received-private-artifact", flush=True)
-        stdout, _stderr = child.communicate(timeout=10)
-        assert child.returncode == 0 and 1 <= len(stdout) <= 4096
-        result = NativeRootlessResultV1.model_validate_json(stdout)
-        assert canonical_bytes(result) + b"\n" == stdout
-        assert result.claim_digest == context.claim_digest and result.source_binding_sha256 == context.source_binding_sha256
-        assert result.broker_reaped and result.cleanup_confirmed
-        assert result.client_succeeded is not expiry
-        assert (result.artifact is None) is expiry
-        if not expiry:
-            assert result.artifact == received.artifact
-            print("native-supervised-build-completed", flush=True)
-        print("native-supervised-cleanup-confirmed", flush=True)
-        subprocess.run(["/usr/bin/rootlesskit", "--net=none", "--subid-source=static",
-            "--state-dir=/tmp/rootless-verification", sys.executable, __file__, "verify"], check=True, timeout=30)
-        assert list(workspace.iterdir()) == []
-        print("native-outer-io-session-settled", flush=True)
-    finally:
-        for process in reversed(children):
-            if process.poll() is None:
-                process.kill()
-            process.wait(timeout=5)
-        for channel in (authority, mapped_authority, artifact, mapped_artifact):
-            channel.close()
+
+    class FixtureClient:
+        calls = 0
+
+        async def authorize_execution(self, request, *, worker_credential):
+            assert worker_credential == "x" * 43
+            self.calls += 1
+            if expiry and self.calls > 1:
+                await asyncio.Future()  # Independent mapped monitor must expire.
+            now = datetime.now(UTC)
+            return BuildExecutionPermitV1(request=request, request_digest=canonical_digest(request),
+                issued_at=now, not_after=now + timedelta(seconds=10))
+
+        async def upload_artifact(self, observed_claim, *, worker_credential, artifact, chunks):
+            assert not expiry and observed_claim == claim and worker_credential == "x" * 43
+            observed_size, digest = 0, hashlib.sha256()
+            with open("/result/artifacts.tar", "wb") as output:
+                async for chunk in chunks:
+                    output.write(chunk)
+                    digest.update(chunk)
+                    observed_size += len(chunk)
+            assert observed_size == artifact.archive_size_bytes and digest.hexdigest() == artifact.archive_sha256
+            try:
+                Path("/tmp/native-work/output/build/artifacts.tar").read_bytes()
+            except PermissionError:
+                pass
+            else:
+                raise AssertionError("outer IO directly read private mapped output")
+            print("native-outer-io-received-private-artifact", flush=True)
+            return BuildArtifactUploadReceiptV1(claim_digest=context.claim_digest, artifact=artifact)
+
+        async def record_outcome(self, request, *, worker_credential):
+            assert request.claim == claim and worker_credential == "x" * 43
+            assert request.result == ("failed" if expiry else "artifact-ready")
+            return BuildOutcomeReceiptV1(request=request, request_digest=canonical_digest(request))
+
+    async with scoped_native_allocated_io(claim=claim,
+        source=NativeStagedBuildSource(context, Path("/fixtures/input/source.tar")),
+        client=FixtureClient(), worker_credential="x" * 43) as owner:
+        outcome = await run_native_outer_build(owner, spec_path=spec_path, expected_sha256=hashlib.sha256(wire).hexdigest(),
+            artifact_workspace=workspace, timeout_seconds=120)
+    assert (outcome.request.artifact is None) is expiry
+    if not expiry:
+        print("native-supervised-build-completed", flush=True)
+    print("native-supervised-cleanup-confirmed", flush=True)
+    subprocess.run(["/usr/bin/rootlesskit", "--net=none", "--subid-source=static",
+        "--state-dir=/tmp/rootless-verification", sys.executable, __file__, "verify"], check=True, timeout=30)
+    assert list(workspace.iterdir()) == []
+    print("native-outer-io-session-settled", flush=True)
 
 
 if __name__ == "__main__":

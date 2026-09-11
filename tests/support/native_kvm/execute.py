@@ -46,7 +46,7 @@ def main():
     workspace = Path("/tmp/native-work")
     if prepare_only:
         assert workspace.stat().st_mode & 0o777 == 0o700
-        assert (workspace / "input").stat().st_mode & 0o777 == 0o555
+        assert not (workspace / "input").exists(), "outer IO owns source input preparation"
     else:
         workspace.mkdir(mode=0o755)
         shutil.copytree(fixtures / "input", workspace / "input")
