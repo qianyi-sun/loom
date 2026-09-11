@@ -89,7 +89,8 @@ async def test_coordinator_commits_closure_before_cleanup_publication(prepared_i
     assert calls[0] == calls[1]
 
 
-async def test_restart_replays_retained_closure_before_new_manager_reason(prepared_input):
+@pytest.mark.parametrize("already_closed", [False, True])
+async def test_restart_replays_retained_closure_before_new_manager_reason(prepared_input, already_closed):
     coordinator_type = import_module("loom_capacity_build_guard.coordinator").BuildPlanCoordinator
     sessions, _engine, retained, proposal, _, _ = prepared_input
     calls = []
@@ -102,9 +103,31 @@ async def test_restart_replays_retained_closure_before_new_manager_reason(prepar
                 receipt_digest=canonical_executable_digest(ack), replayed=False, executable=False)
 
     first = ExecutableAdmissionPlanClosureV2(closure_id=uuid4(), proposal=proposal, close_reason="manager-closed")
-    await coordinator_type(sessions, installation=retained, publisher=Publisher()).close(first)
+    if already_closed:
+        await coordinator_type(sessions, installation=retained, publisher=Publisher()).close(first)
     changed = first.model_copy(update={"closure_id": uuid4(), "close_reason": "expired"})
     restarted = coordinator_type(sessions, installation=retained, publisher=Publisher())
     receipt = await restarted.reconcile_closure(changed)
-    assert receipt.closure_id == first.closure_id
-    assert calls[0][0].close_reason == "manager-closed"
+    assert receipt.closure_id == (first.closure_id if already_closed else changed.closure_id)
+    assert calls[0][0].close_reason == ("manager-closed" if already_closed else "expired")
+
+
+async def test_timeout_releases_publication_locks_without_losing_preparation(prepared_input):
+    import asyncio
+
+    coordinator_type = import_module("loom_capacity_build_guard.coordinator").BuildPlanCoordinator
+    sessions, engine, retained, proposal, registration, request = prepared_input
+
+    class Publisher:
+        async def publish_executable_admission_acknowledgement(self, ack, *, idempotency_key):
+            await asyncio.Event().wait()
+
+    await coordinator_type(sessions, installation=retained, publisher=Publisher()).prepare(proposal, sources={request.id: registration})
+    coordinator = coordinator_type(sessions, installation=retained, publisher=Publisher(), operation_timeout_seconds=0.2)
+    with pytest.raises(TimeoutError):
+        await coordinator.publish(proposal.plan_id)
+    with engine.begin() as connection:
+        connection.execute(text("SET LOCAL lock_timeout='100ms'"))
+        connection.execute(text("UPDATE personal_dev_build_platform_requests SET cancelled_at=now() WHERE id=:id"), {"id": request.id})
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.dispositions")) == 0

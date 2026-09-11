@@ -179,6 +179,33 @@ publication nor cancellation removes request holds. Closure/release, native
 bootstrap/execution and functioning readiness integration remain required before
 build intake can open.
 
+Revision `build_guard_0005` retains authenticated manager closures even when the
+source lease expired or cancellation arrived. A never-received plan gets terminal
+identity evidence with no assignments; a prepared plan retains its immutable
+assignment identities as abandoned. Exact closure replay is allowed after a lost
+publication reply, while a different closure or proposal cannot rebind the plan.
+The SQL boundary validates the complete cold native-plan shape/allowance mapping
+against the retained installation before inserting even a never-received plan.
+The agent first commits the closure and then authorizes its cleanup acknowledgement
+from that durable record. A top-level transaction fence also covers nested
+savepoints. Cleanup uses the existing protected idempotency namespace and remains
+replayable after source expiry; it grants no executable authority.
+
+Closure retention and cleanup acknowledgement never remove request holds or emit
+physical-release evidence. Protected release and native runtime integration still
+must account for actual executor state before any request is reusable or capacity
+is reported as free.
+
+The management build-plan coordinator owns separate preparation/closure commits
+and bounded publication transactions. It keeps source locks through the existing
+authenticated manager client's exact receipt checks. A lost or invalid response
+leaves prepared assignments durable and retryable; it never invents delivery
+success. Closure recovery first replays any retained acknowledgement for the same
+proposal, since the manager's current close reason and closure ID can change as
+time passes. Only an explicit protected missing-record result permits retaining
+a new closure. This coordinator is not yet a complete demand/native-runtime loop
+and does not advertise readiness.
+
 Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
 preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release
 verification bind the exact historical configuration, acknowledgement and member
