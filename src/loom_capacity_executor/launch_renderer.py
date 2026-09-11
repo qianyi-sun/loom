@@ -360,6 +360,10 @@ def _assert_profile_binding(context: TrustedLaunchContextV2) -> OperatorResource
 
     # Revalidate after the digest check so model_copy cannot bypass profile invariants.
     OperatorLaunchProfileV2.model_validate(profile.model_dump(mode="python"))
+    if profile.native_execution is not None:
+        root = profile.native_execution.trust_root()
+        if not root.activated_at <= context.submitted_at < root.expires_at:
+            raise TrustedLaunchRenderError("native execution root is not valid at submission")
     if (
         binding.pool_id != profile.pool_id
         or binding.pool_generation != profile.pool_generation
