@@ -884,6 +884,7 @@ exclude_paths = [
   "tests/integration/test_behavior_pipeline_inputs.py",
   "tests/integration/test_capacity_executor_image_runtime.py",
   "tests/integration/test_oldlab_controller_stdin.py",
+  "tests/integration/test_task_image_builder_phase2c_flow.py",
   "tests/integration/test_docker_driver_exec.py",
   "tests/integration/test_docker_driver_exec_streaming.py",
   "tests/integration/test_docker_driver_healthcheck.py",
@@ -935,6 +936,7 @@ lane = "integration-docker"
 include_paths = [
   "tests/integration/test_capacity_executor_image_runtime.py",
   "tests/integration/test_oldlab_controller_stdin.py",
+  "tests/integration/test_task_image_builder_phase2c_flow.py",
   "tests/integration/test_docker_driver_exec.py",
   "tests/integration/test_docker_driver_exec_streaming.py",
   "tests/integration/test_docker_driver_healthcheck.py",

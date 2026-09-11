@@ -11,7 +11,7 @@ from pathlib import Path
 from threading import Thread
 from types import MethodType
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
@@ -254,10 +254,49 @@ class _FastAPIAuthorityAdapter:
         self._put(f"/v1/projections/{grant_id}/revocation", dict(request), status=204)
 
 
+def _run_probe_container(arguments: list[str], *, timeout: int, env=None):
+    """Bound the client and retire exactly our container even on interruption."""
+    name = f"loom-phase2c-{uuid4().hex}"
+    try:
+        return subprocess.run(
+            ["docker", "run", "--rm", "--name", name, *arguments],
+            env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            check=False, timeout=timeout,
+        )
+    finally:
+        subprocess.run(
+            ["docker", "rm", "--force", name],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            check=False, timeout=10,
+        )
+
+
+@pytest.fixture(scope="module")
+def phase2c_go_probe(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Compile before starting a live guard; the protocol keeps its 30s limit."""
+    directory = tmp_path_factory.mktemp("phase2c-go-probe")
+    repo = Path(__file__).resolve().parents[2]
+    result = _run_probe_container([
+        "--user", f"{os.getuid()}:{os.getgid()}",
+        "-v", f"{repo}:/src:ro", "-v", f"{directory}:/probe",
+        "-e", "GOCACHE=/tmp/loom-go-cache",
+        "-e", "GOMODCACHE=/tmp/loom-go-mod-cache", "-w", "/src",
+        "golang:1.23.4-bookworm", "go", "test", "-c",
+        "-o", "/probe/supervisor.test", "./cmd/loom-task-image-builder-supervisor",
+    ], timeout=120)
+    assert result.returncode == 0, result.stdout
+    binary = directory / "supervisor.test"
+    assert binary.is_file()
+    return binary
+
+
+@pytest.mark.docker
+@pytest.mark.timeout(180)  # Bounded cold compilation plus the separate 30s protocol probe.
 @pytest.mark.asyncio
 async def test_real_authority_guard_socket_and_go_orchestrator_flow(
     tmp_path: Path,
     isolated_migration_postgres_url: str,
+    phase2c_go_probe: Path,
 ) -> None:
     await _seed_released_grant(isolated_migration_postgres_url)
     materialization_id = await _seed_materialization(isolated_migration_postgres_url)
@@ -349,68 +388,44 @@ async def test_real_authority_guard_socket_and_go_orchestrator_flow(
 
         thread = Thread(target=run_service)
         thread.start()
-        deadline = time.monotonic() + 5
-        while not service.config.protocol.socket_path.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert service.config.protocol.socket_path.exists()
+        try:
+            deadline = time.monotonic() + 5
+            while not service.config.protocol.socket_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert service.config.protocol.socket_path.exists()
 
-        repo = Path(__file__).resolve().parents[2]
-        result = subprocess.run(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "--pid=host",
-                "--user",
-                f"{os.getuid()}:{os.getgid()}",
-                "-v",
-                f"{repo}:/src:ro",
-                "-v",
-                f"{tmp_path}:{tmp_path}",
-                "-e",
-                "GOCACHE=/tmp/loom-go-cache",
-                "-e",
-                "GOMODCACHE=/tmp/loom-go-mod-cache",
-                "-e",
-                "LOOM_PHASE2C_SOCKET",
-                "-e",
-                "LOOM_PHASE2C_GRANT_ID",
-                "-e",
-                "LOOM_PHASE2C_MATERIALIZATION_ID",
-                "-e",
-                "LOOM_PHASE2C_GOARCH_OVERRIDE",
-                "-w",
-                "/src",
-                "golang:1.23.4-bookworm",
-                "go",
-                "test",
-                "./cmd/loom-task-image-builder-supervisor",
-                "-run",
-                "^TestSupervisorExternalGuardFlow$",
-                "-count=1",
-                "-timeout=30s",
-                "-v",
-            ],
-            cwd=repo,
-            env={
-                **os.environ,
-                "LOOM_PHASE2C_SOCKET": str(service.config.protocol.socket_path),
-                "LOOM_PHASE2C_GRANT_ID": str(GRANT_ID),
-                "LOOM_PHASE2C_MATERIALIZATION_ID": str(materialization_id),
-                "LOOM_PHASE2C_GOARCH_OVERRIDE": "arm64",
-            },
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-
-        service.stop()
-        thread.join(timeout=5)
-        service.close()
-        ledger_entry = ledger.get(GRANT_ID)
-        ledger_document = None if ledger_entry is None else ledger_entry.document()
-        ledger.close()
+            result = _run_probe_container(
+                [
+                    "--pid=host", "--user", f"{os.getuid()}:{os.getgid()}",
+                    "-v", f"{phase2c_go_probe.parent}:/probe:ro",
+                    "-v", f"{tmp_path}:{tmp_path}",
+                    "-e", "LOOM_PHASE2C_SOCKET",
+                    "-e", "LOOM_PHASE2C_GRANT_ID",
+                    "-e", "LOOM_PHASE2C_MATERIALIZATION_ID",
+                    "-e", "LOOM_PHASE2C_GOARCH_OVERRIDE",
+                    "golang:1.23.4-bookworm", "/probe/supervisor.test",
+                    "-test.run=^TestSupervisorExternalGuardFlow$",
+                    "-test.count=1", "-test.timeout=30s", "-test.v",
+                ],
+                timeout=45,
+                env={
+                    **os.environ,
+                    "LOOM_PHASE2C_SOCKET": str(service.config.protocol.socket_path),
+                    "LOOM_PHASE2C_GRANT_ID": str(GRANT_ID),
+                    "LOOM_PHASE2C_MATERIALIZATION_ID": str(materialization_id),
+                    "LOOM_PHASE2C_GOARCH_OVERRIDE": "arm64",
+                },
+            )
+        finally:
+            service.stop()
+            thread.join(timeout=5)
+            try:
+                assert not thread.is_alive(), "external-flow guard did not stop"
+                service.close()
+                ledger_entry = ledger.get(GRANT_ID)
+                ledger_document = None if ledger_entry is None else ledger_entry.document()
+            finally:
+                ledger.close()
 
     assert failure == []
     assert result.returncode == 0, (

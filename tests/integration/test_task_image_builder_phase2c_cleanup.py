@@ -26,6 +26,7 @@ async def test_external_probe_interruption_retires_guard(
     resources = []
     threads = []
     closed = []
+    containers = []
     original_service = flow._service
 
     def capture_service(*args, **kwargs):
@@ -46,7 +47,10 @@ async def test_external_probe_interruption_retires_guard(
         threads.append(thread)
         return thread
 
-    def interrupted_probe(*args, **kwargs):
+    def interrupted_probe(argv, **kwargs):
+        containers.append(argv)
+        if argv[1] == "rm":
+            return subprocess.CompletedProcess(argv, 0, "", "")
         raise interruption
 
     monkeypatch.setattr(flow, "_service", capture_service)
@@ -55,10 +59,13 @@ async def test_external_probe_interruption_retires_guard(
     try:
         with pytest.raises(type(interruption)):
             await flow.test_real_authority_guard_socket_and_go_orchestrator_flow(
-                tmp_path, isolated_migration_postgres_url,
+                tmp_path, isolated_migration_postgres_url, tmp_path / "supervisor.test",
             )
         assert threads and all(not thread.is_alive() for thread in threads)
         assert closed == ["ledger"]
+        assert len(containers) == 2
+        name = containers[0][containers[0].index("--name") + 1]
+        assert containers[1] == ["docker", "rm", "--force", name]
     finally:
         # Keep the RED regression safe: the original test leaks these resources.
         for service, ledger in resources:
