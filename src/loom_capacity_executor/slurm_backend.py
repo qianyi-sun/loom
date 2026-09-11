@@ -885,6 +885,8 @@ class AsyncSlurmBackend:
             )
         if request.features:
             arguments.append(f"--constraint={'&'.join(request.features)}")
+        if request.native_lifetime == "single-use-no-requeue/v1":
+            arguments.append("--no-requeue")
         arguments.extend(
             (
                 f"--time={_time_argument(request.time_limit_seconds)}",

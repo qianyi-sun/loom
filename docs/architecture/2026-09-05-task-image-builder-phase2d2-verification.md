@@ -1517,6 +1517,19 @@ incarnation evidence, and the node guard must independently authenticate the
 result. Direct SQL callers likewise own snapshot freshness. Containment renewal,
 root delegation, and positive cleanup are not implemented by this observation.
 
+Native scheduler readback is a separate versioned contract, not an extension of
+retained V2 inventory records. The existing digest-pinned command runner requests
+one exact job using `scontrol --json=v0.0.40`; the parser rejects partial/error
+responses, duplicate JSON/TRES keys, arrays, heterogeneous or requeued jobs,
+non-running state, unset/infinite timestamps and any allocation/ownership mismatch.
+It records scheduler submission/start times and UID as well as exact resources;
+the caller timestamps before the query so a slow response cannot renew freshness.
+Approved native profiles now render an optional single-use scheduler lifetime and
+submit with `--no-requeue`. Legacy profiles omit the new field entirely, preserving
+their exact serialized request and scheduler arguments. This prevents scheduler
+restart from reusing a consumed native bootstrap, but does not implement durable
+descendant cleanup or root delegation. No lease is issued by this readback.
+
 Installed-image diagnostic tests cover transport, loader-environment clearing and
 Docker client-loss cleanup, not actual protected worker registration acceptance.
 The worker container and all descendants require verified allocation containment.
