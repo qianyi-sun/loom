@@ -18,7 +18,11 @@ import psycopg
 from psycopg import sql
 from psycopg.pq import TransactionStatus
 
-from loom.application_database_admission import ApplicationDatabaseAdmissionTarget
+from loom.application_database_admission import (
+    ApplicationDatabaseAdmissionTarget,
+    ApplicationDatabaseCoordinationGuard,
+    _require_coordination_guard,
+)
 from loom.application_database_connection import ApplicationDatabaseConnection, application_sql
 from loom.application_ownership_transfer import require_application_role_scope
 from loom.application_password import application_scram_verifier, matches_application_scram
@@ -49,6 +53,7 @@ def observe_application_runtime_login(
     password: str,
     target: ApplicationDatabaseAdmissionTarget,
     schema_acl_profile: ApplicationSchemaAclProfile = "application-only",
+    coordination_guard: ApplicationDatabaseCoordinationGuard | None = None,
 ) -> ApplicationRuntimeLoginState:
     """Classify a saved restoration without changing login, password or grants.
 
@@ -60,7 +65,7 @@ def observe_application_runtime_login(
     return _application_runtime_login(
         connection, owner_role=owner_role, role_bindings=role_bindings,
         password=password, target=target, schema_acl_profile=schema_acl_profile,
-        restore=False,
+        restore=False, coordination_guard=coordination_guard,
     )
 
 
@@ -72,6 +77,7 @@ def restore_application_runtime_login(
     password: str,
     target: ApplicationDatabaseAdmissionTarget,
     schema_acl_profile: ApplicationSchemaAclProfile = "application-only",
+    coordination_guard: ApplicationDatabaseCoordinationGuard | None = None,
 ) -> None:
     """Commit login for the former owner only after exact sealed-profile admission.
 
@@ -87,7 +93,7 @@ def restore_application_runtime_login(
     _application_runtime_login(
         connection, owner_role=owner_role, role_bindings=role_bindings,
         password=password, target=target, schema_acl_profile=schema_acl_profile,
-        restore=True,
+        restore=True, coordination_guard=coordination_guard,
     )
 
 
@@ -100,6 +106,7 @@ def _application_runtime_login(
     target: ApplicationDatabaseAdmissionTarget,
     schema_acl_profile: ApplicationSchemaAclProfile,
     restore: bool,
+    coordination_guard: ApplicationDatabaseCoordinationGuard | None,
 ) -> ApplicationRuntimeLoginState:
     profile = application_schema_profile(ownership="sealed-owner", acl_profile=schema_acl_profile)
     aliases = {
@@ -212,6 +219,8 @@ def _application_runtime_login(
             ),
             profile=profile,
         )
+        if coordination_guard is not None:
+            _require_coordination_guard(connection, target, coordination_guard)
         state = connection.execute(
             application_sql(
                 "SELECT rolcanlogin,rolpassword,rolvaliduntil IS NULL OR rolvaliduntil='infinity'::pg_catalog.timestamptz FROM pg_catalog.pg_authid WHERE rolname={}",
@@ -224,6 +233,8 @@ def _application_runtime_login(
             and state[2] is True
             and matches_application_scram(password, state[1])
         ):
+            if coordination_guard is not None:
+                _require_coordination_guard(connection, target, coordination_guard)
             return ApplicationRuntimeLoginState.RESTORED
         if state is None or state[0] is not False or (
             state[1] is not None and not matches_application_scram(password, state[1])
@@ -259,4 +270,6 @@ def _application_runtime_login(
             raise ApplicationRuntimeLoginError(
                 "application runtime login credential update was not exact"
             )
+        if coordination_guard is not None:
+            _require_coordination_guard(connection, target, coordination_guard)
         return ApplicationRuntimeLoginState.RESTORED
