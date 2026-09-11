@@ -28,7 +28,10 @@ def _prepared():
 
 @pytest.mark.parametrize("tamper", ["digest", "id", "platform", "volume", "onbuild", "env", "duplicate"])
 def test_native_image_preflight_refuses_unverified_image_composition(tamper):
-    from loom_capacity_executor.native_worker_container import NativeContainerError, prepare_native_image
+    from loom_capacity_executor.native_worker_container import (
+        NativeContainerError,
+        prepare_native_image,
+    )
 
     image = _image()
     if tamper == "digest":
@@ -55,7 +58,8 @@ def _allocation():
     return NativeWorkerAllocation(intent_id="11111111-1111-4111-8111-111111111111", job_id="101",
         cgroup_parent="loom-job-101.slice", cpu_millicores=1000, memory_bytes=1024**3,
         pids_max=128, concurrency_slots=1, scratch_directory="/var/lib/loom/native-workers/test",
-        docker_socket_gid=998, runtime_uid=65532, runtime_gid=65532)
+        docker_socket_gid=998, runtime_uid=65532, runtime_gid=65532, pool_id="oldlab",
+        hostname="oldlab-5", candidate_sha="a" * 40)
 
 
 def test_fixed_create_removes_loader_environment_and_has_no_secret_or_command_override():
@@ -76,7 +80,10 @@ def test_fixed_create_removes_loader_environment_and_has_no_secret_or_command_ov
 
 
 def test_runtime_settings_bind_allocation_and_refuse_ungated_runtime_modes():
-    from loom_capacity_executor.native_worker_container import NativeContainerError, bind_native_settings
+    from loom_capacity_executor.native_worker_container import (
+        NativeContainerError,
+        bind_native_settings,
+    )
 
     original = _configured_bootstrap()
     result = bind_native_settings(original, _allocation())
@@ -86,8 +93,11 @@ def test_runtime_settings_bind_allocation_and_refuse_ungated_runtime_modes():
     assert settings["slurm_job_id"] == "101"
     assert settings["slurm_allocated_gpus"] == 0
     assert settings["max_concurrent"] == 1
+    assert settings["pool_name"] == "oldlab"
+    assert settings["hostname"] == "oldlab-5"
+    assert settings["candidate_sha"] == "a" * 40
     assert result.worker_credential == original.worker_credential
-    for overrides in ({"enable_worker_vllm": True}, {"pool_name": "task-image-builder"},
+    for overrides in ({"enable_worker_vllm": True}, {"sandbox_isolation": True}, {"pool_name": "task-image-builder"},
                       {"cgroup_parent": "/foreign"}, {"docker_socket": "/foreign.sock"}):
         changed = replace(original, canonical_worker_settings=json.dumps(
             original.worker_settings() | overrides, sort_keys=True, separators=(",", ":")))
@@ -103,14 +113,15 @@ def test_cli_never_inherits_host_configuration_or_tokens(monkeypatch, tmp_path):
     observed = []
 
     def run(argv, **kwargs):
-        from subprocess import CompletedProcess
-
         observed.append((argv, kwargs))
-        return CompletedProcess(argv, 0, b"[]", b"")
+        raise OSError("test boundary")
 
-    monkeypatch.setattr("loom_capacity_executor.native_worker_container.subprocess.run", run)
+    monkeypatch.setattr("loom_capacity_executor.native_worker_container.subprocess.Popen", run)
     cli = FixedDockerCLI(executable="/proc/self/fd/9", descriptor=9, config_directory="/etc/loom/empty-docker")
-    assert cli.json("image", "inspect", "sha256:" + "a" * 64) == []
+    from loom_capacity_executor.native_worker_container import NativeContainerError
+
+    with pytest.raises(NativeContainerError):
+        cli.json("image", "inspect", "sha256:" + "a" * 64)
     argv, kwargs = observed[0]
     assert argv[:3] == ("/proc/self/fd/9", "--config=/etc/loom/empty-docker", "--host=unix:///var/run/docker.sock")
     assert kwargs["env"] == {}
@@ -118,7 +129,10 @@ def test_cli_never_inherits_host_configuration_or_tokens(monkeypatch, tmp_path):
 
 
 def test_cleanup_requires_successful_remove_and_positive_daemon_readback(monkeypatch):
-    from loom_capacity_executor.native_worker_container import NativeContainerError, remove_native_container
+    from loom_capacity_executor.native_worker_container import (
+        NativeContainerError,
+        remove_native_container,
+    )
 
     class CLI:
         def __init__(self):
@@ -139,3 +153,78 @@ def test_cleanup_requires_successful_remove_and_positive_daemon_readback(monkeyp
         remove_native_container(cli, "a" * 64)
     cli.remove_failed = False
     remove_native_container(cli, "a" * 64)
+
+
+@pytest.mark.parametrize("override", [
+    {"candidate_argv": ("/usr/bin/docker", "run", "foreign")},
+    {"candidate_argv": ("/usr/bin/docker", "--config=/foreign")},
+])
+def test_native_trusted_config_forbids_candidate_suffix(override):
+    from loom_capacity_executor.trusted_launcher import TrustedLauncherConfigV2
+
+    value = {
+        "handoff_directory": "/var/lib/loom/handoff", "admission_directory": "/etc/loom/admission",
+        "admission_directory_sha256": "a" * 64,
+        "candidate_executable": {"path": "/usr/bin/docker", "sha256": "b" * 64, "owner_uid": 0, "mode": 493},
+        "candidate_image_digest": _image()["RepoDigests"][0], "candidate_argv": ("/usr/bin/docker",),
+        "native_worker": {
+            "native_execution": _configured_bootstrap().native_execution.model_dump(mode="json"),
+            "canonical_worker_settings": _configured_bootstrap().canonical_worker_settings,
+            "docker_config_directory": "/etc/loom/empty-docker", "pids_max": 128,
+        },
+    }
+    assert TrustedLauncherConfigV2.model_validate(value).native_worker is not None
+    with pytest.raises(ValueError, match=r"native.*suffix"):
+        TrustedLauncherConfigV2.model_validate(value | override)
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_control_command_output_flood_is_bounded(stream):
+    import subprocess
+    import sys
+
+    from loom_capacity_executor.native_worker_container import (
+        NativeContainerError,
+        capture_native_control_output,
+    )
+
+    script = f"import sys; sys.{stream}.buffer.write(b'x' * (2 * 1024 * 1024)); sys.{stream}.flush()"
+    with subprocess.Popen([sys.executable, "-I", "-c", script], stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+        with pytest.raises(NativeContainerError, match="output"):
+            capture_native_control_output(process, timeout=10)
+        assert process.poll() is not None
+
+
+def test_control_command_timeout_reaps_cli_without_claiming_container_cleanup():
+    import subprocess
+    import sys
+
+    from loom_capacity_executor.native_worker_container import (
+        NativeContainerError,
+        capture_native_control_output,
+    )
+
+    with subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(60)"],
+                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+        with pytest.raises(NativeContainerError, match="uncertain"):
+            capture_native_control_output(process, timeout=0.05)
+        assert process.poll() is not None
+
+
+def test_image_prefetch_does_not_consume_handoff_on_platform_failure(monkeypatch, tmp_path):
+    from loom_capacity_executor.native_worker_container import (
+        NativeContainerError,
+        prefetch_native_image,
+    )
+
+    class CLI:
+        def call(self, *args, **kwargs):
+            assert args[:2] == ("image", "pull")
+            return b""
+
+        def json(self, *args, **kwargs):
+            return [_image() | {"Architecture": "arm64"}]
+
+    with pytest.raises(NativeContainerError):
+        prefetch_native_image(CLI(), image_digest=_image()["RepoDigests"][0], platform="linux/amd64")
