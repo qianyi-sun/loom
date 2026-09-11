@@ -160,6 +160,22 @@ async def test_current_bootstrap_refuses_read_committed(capacity_guard_database)
 
 
 @pytest.mark.asyncio
+async def test_current_bootstrap_refuses_an_external_serializable_snapshot(capacity_guard_database):
+    _, registration, _, physical, _ = await _prepared(capacity_guard_database)
+    engine = create_async_engine(_value(capacity_guard_database, "executor_url"), isolation_level="SERIALIZABLE")
+    try:
+        async with engine.connect() as connection, connection.begin():
+            await connection.execute(text("SELECT 1"))
+            async with AsyncSession(bind=connection, join_transaction_mode="create_savepoint") as session:
+                assert not session.in_transaction()
+                with pytest.raises(ExecutableAdmissionError, match="fresh owned transaction"):
+                    await ExecutableAdmissionStore(session, registration=registration).observe_current_bootstrap(physical)
+            assert connection.in_transaction()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_current_bootstrap_rejects_expiry_without_refreshing_historical_bind(capacity_guard_database):
     _, registration, _, physical, bound = await _prepared(capacity_guard_database, short_lived=True)
     observed = await _observe(capacity_guard_database, registration, physical)
