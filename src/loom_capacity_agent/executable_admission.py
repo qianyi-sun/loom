@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
+    CurrentExecutableBootstrapV2,
     DrainedExecutableWorkerV2,
     ExecutableDrainRequestV2,
     ExecutablePreparedBootstrapRevocationV2,
@@ -233,6 +234,32 @@ class ExecutableAdmissionStore:
             or receipt.binding_digest != receipt.request_digest
         ):
             raise ExecutableAdmissionError("protected physical binding receipt changed")
+        return receipt
+
+    async def observe_current_bootstrap(
+        self,
+        request: PhysicalJobBindingV2,
+    ) -> CurrentExecutableBootstrapV2:
+        """Read unused pre-registration evidence in a fresh owned transaction.
+
+        The response is not durable admission and cannot replace fresh manager or
+        scheduler evidence. Repeated calls recheck current state, unlike bind replay.
+        Never invoke inside an existing transaction: SERIALIZABLE can legally
+        retain a snapshot from before revocation. Return only after owned commit.
+        """
+        if not isinstance(request, PhysicalJobBindingV2):
+            raise TypeError("current bootstrap observation requires its physical binding")
+        if self._session.in_transaction():
+            raise ExecutableAdmissionError("current bootstrap observation requires a fresh owned transaction")
+        async with self._session.begin():
+            receipt = await self._invoke(
+                "observe_current_executable_bootstrap", request, CurrentExecutableBootstrapV2,
+            )
+            if receipt.physical_binding != request or (
+                self._registration is not None
+                and receipt.agent_incarnation != self._registration.agent_incarnation
+            ):
+                raise ExecutableAdmissionError("current bootstrap observation binding changed")
         return receipt
 
     async def register_worker(

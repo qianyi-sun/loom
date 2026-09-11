@@ -1499,6 +1499,22 @@ must cover this post-bind authority; it grants containment preparation, never a
 second worker registration or trial start. This adapter is still required before
 host launch acceptance; neither the signed ownership
 comment nor the legacy guard's opt-in format may be silently replaced.
+
+`guard_0033` adds an executor-only unused-bootstrap observation. It matches the
+entire persisted physical request, current local agent/candidate binding, prepared
+bootstrap and latest protected bootstrap epoch, checks the database clock against
+the original expiry, and refuses every later registration or terminal admission
+event. It records no start or new admission event. The Python adapter requires an
+idle SERIALIZABLE session and owns its short transaction through commit: reusing
+an existing transaction could label a pre-withdrawal snapshot as current. Contended
+admission locking fails immediately for caller-level retry. Historical binding
+replay and historical intent observation retain their separate existing contracts.
+This response is unsigned local snapshot evidence, not a containment lease; a
+trusted issuer must still combine it with fresh manager/execution and scheduler
+incarnation evidence, and the node guard must independently authenticate the
+result. Direct SQL callers likewise own snapshot freshness. Containment renewal,
+root delegation, and positive cleanup are not implemented by this observation.
+
 Installed-image diagnostic tests cover transport, loader-environment clearing and
 Docker client-loss cleanup, not actual protected worker registration acceptance.
 The worker container and all descendants require verified allocation containment.
