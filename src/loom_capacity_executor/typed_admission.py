@@ -194,6 +194,11 @@ class TypedAdmissionRouter:
     async def observe_intent(self, binding: ExecutableIntentBindingV2) -> Any:
         return await self._call(binding, "observe_intent", binding)
 
+    async def observe_current_bootstrap(self, request: PhysicalJobBindingV2) -> Any:
+        # Deliberately absent from _BUILD_CONSUMERS: application containment
+        # observation must never borrow a builder credential or permission.
+        return await self._call(request.binding, "observe_current_bootstrap", request)
+
     async def revoke_prepared_bootstrap(self, request: ExecutablePreparedBootstrapRevocationV2) -> Any:
         return await self._call(request.binding, "revoke_prepared_bootstrap", request)
 
