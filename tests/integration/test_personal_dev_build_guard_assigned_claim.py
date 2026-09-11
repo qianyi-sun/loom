@@ -55,3 +55,51 @@ async def test_assigned_claim_resolves_only_authenticated_worker_allocation(prep
             execution = store(session, installation)
             assert await execution.claim_assigned_platform(request, worker_credential=CREDENTIAL) == receipt
             assert (await execution.read_source_context(receipt.request, worker_credential=CREDENTIAL)).request_id == platform.id
+
+
+@pytest.mark.parametrize("boundary", ["exact", "lost-reply", "cancelled", "replay-after-cancel", "operation-reuse"])
+async def test_assigned_claim_http_commit_and_replay_do_not_renew_authority(prepared_input, tmp_path, monkeypatch, boundary):
+    import httpx
+
+    from loom_capacity_agent.build_admission import BuildAllocatedClaimRequestV1
+    from tests.integration.test_personal_dev_build_guard_http import application
+    from tests.unit.test_capacity_build_admission_client import client_for
+
+    factory, engine, _installation, _plan, _source, platform = prepared_input
+    claim = await claim_input(prepared_input, monkeypatch)
+    request = BuildAllocatedClaimRequestV1.model_validate_json(claim.model_dump_json(exclude={"request_id"}))
+    app = application(prepared_input, tmp_path)
+    app.state.personal_dev_build_admission_mode = "native-source"
+    received = []
+    async def receive(response):
+        received.append(response.status_code)
+        if boundary == "lost-reply" and len(received) == 1:
+            raise httpx.ReadTimeout("reply lost after commit", request=response.request)
+    def cancel():
+        with engine.begin() as connection:
+            connection.execute(text("UPDATE personal_dev_build_platform_requests SET cancelled_at=now() WHERE id=:id"), {"id": platform.id})
+    if boundary == "cancelled":
+        cancel()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), event_hooks={"response": [receive]}) as http:
+        client = client_for(http, request)
+        client._token = "executor-secret"
+        if boundary in {"cancelled", "lost-reply"}:
+            with pytest.raises(RuntimeError):
+                await client.claim_assigned_platform(request, worker_credential=CREDENTIAL)
+        if boundary == "cancelled":
+            assert received == [409]
+        else:
+            receipt = await client.claim_assigned_platform(request, worker_credential=CREDENTIAL)
+            assert receipt.request == claim
+            if boundary == "replay-after-cancel":
+                cancel()
+            if boundary == "operation-reuse":
+                with pytest.raises(RuntimeError):
+                    await client.claim_assigned_platform(request.model_copy(update={"operation_id": uuid4()}), worker_credential=CREDENTIAL)
+            else:
+                assert await client.claim_assigned_platform(request, worker_credential=CREDENTIAL) == receipt
+            if boundary == "replay-after-cancel":
+                with pytest.raises(RuntimeError):
+                    await client.read_source_context(receipt.request, worker_credential=CREDENTIAL)
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_claims")) == int(boundary != "cancelled")

@@ -56,12 +56,19 @@ async def test_native_context_client_validates_current_claim_and_bounded_reply(p
 
 @pytest.mark.parametrize("purpose", ["application-worker", "personal-build-worker"])
 @pytest.mark.parametrize("boundary", ["exact", "error", "invalid", "directory"])
-async def test_native_context_router_never_uses_application_authority(tmp_path, purpose, boundary):
+@pytest.mark.parametrize("method", ["read_source_context", "claim_assigned_platform"])
+async def test_native_context_router_never_uses_application_authority(tmp_path, purpose, boundary, method):
+    from loom_capacity_agent.build_admission import BuildAllocatedClaimRequestV1, BuildClaimReceiptV1
+
     module, request, document, path, digest = configured(tmp_path, "gb10", purpose)
     claim = claim_for(request.binding)
     context, events = context_for(claim), []
+    argument = claim
+    if method == "claim_assigned_platform":
+        argument = BuildAllocatedClaimRequestV1.model_validate_json(claim.model_dump_json(exclude={"request_id"}))
+        context = BuildClaimReceiptV1(request=claim, request_digest=canonical_digest(claim))
     async def read(incoming, **options):
-        assert incoming == claim
+        assert incoming == argument
         assert options == {"worker_credential": "x" * 43}
         if boundary == "error":
             raise ValueError("unavailable")
@@ -70,7 +77,7 @@ async def test_native_context_router_never_uses_application_authority(tmp_path, 
         events.append("close")
     def factory(*args):
         events.append("open")
-        return SimpleNamespace(read_source_context=read, aclose=close)
+        return SimpleNamespace(**{method: read}, aclose=close)
     def forbidden(*args, **kwargs):
         pytest.fail("native context reached application credentials")
     router = module.TypedAdmissionRouter(path, expected_sha256=digest, executor=document.executor,
@@ -78,10 +85,10 @@ async def test_native_context_router_never_uses_application_authority(tmp_path, 
     if boundary == "directory":
         path.write_bytes(path.read_bytes() + b" ")
     if purpose == "personal-build-worker" and boundary == "exact":
-        assert await router.read_source_context(claim, worker_credential="x" * 43) == context
+        assert await getattr(router, method)(argument, worker_credential="x" * 43) == context
     else:
         with pytest.raises((ValueError, RuntimeError)):
-            await router.read_source_context(claim, worker_credential="x" * 43)
+            await getattr(router, method)(argument, worker_credential="x" * 43)
     assert events == ([] if purpose == "application-worker" or boundary == "directory" else ["open", "close"])
 
 
@@ -149,3 +156,26 @@ async def test_claim_context_stages_real_sealed_source_without_application_recor
     assert not list(workspace.iterdir())
     if boundary in {"context-claim", "contract", "limit"}:
         assert len(calls) == 1
+
+
+@pytest.mark.parametrize("boundary", ["exact", "worker", "operation", "digest", "noncanonical"])
+async def test_allocated_claim_client_pins_every_supplied_field(boundary):
+    from loom_capacity_agent.build_admission import BuildAllocatedClaimRequestV1, BuildClaimReceiptV1
+
+    claim = claim_for(native_registration().binding)
+    request = BuildAllocatedClaimRequestV1.model_validate_json(claim.model_dump_json(exclude={"request_id"}))
+    async def handle(outgoing):
+        assert outgoing.url.path.endswith("/claim-assigned")
+        assert b'"request_id"' not in outgoing.content
+        returned = claim.model_copy(update={"worker": {"worker_id": uuid4()},
+            "operation": {"operation_id": uuid4()}}.get(boundary, {}))
+        receipt = BuildClaimReceiptV1(request=returned,
+            request_digest="f" * 64 if boundary == "digest" else canonical_digest(returned))
+        return httpx.Response(200, content=canonical_bytes(receipt) + (b" " if boundary == "noncanonical" else b""))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = client_for(http, request)
+        if boundary == "exact":
+            assert (await client.claim_assigned_platform(request, worker_credential="x" * 43)).request == claim
+        else:
+            with pytest.raises((RuntimeError, ValueError)):
+                await client.claim_assigned_platform(request, worker_credential="x" * 43)
