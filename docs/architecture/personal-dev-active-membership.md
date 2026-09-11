@@ -238,6 +238,20 @@ manufacture work, or turn held work back into pending work. Explicit source maps
 remain supported for callers already holding exact source evidence. Native claim
 projection and the runtime loop remain to be connected.
 
+Revision `build_guard_0008` retains purpose-specific, hash-only native bootstrap
+proposals before build-plan creation: the manager requires bootstrap acknowledgement
+to produce that plan. The private procedure checks the complete approved native
+installation, owner account, candidate, pool/executor/node, execution manifest,
+one-slot resources and zero surge. It grants no source URL, credential, assignment
+or readiness. A separate publication procedure requires an earlier committed
+registration and derives the existing authenticated manager acknowledgement.
+Both proposal and registration epochs remain one, matching the current pool
+executor/manager contract. Exact replies replay; expiry preserves evidence but
+blocks new authorization, and same-intent secret rotation is forbidden. Recovery
+must use manager-owned cleanup and a new intent. Later native binding and claims
+must match this exact hash/evidence plus admitted work and physical scheduler
+ownership; none of those capabilities is enabled by bootstrap retention alone.
+
 Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
 preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release
 verification bind the exact historical configuration, acknowledgement and member
