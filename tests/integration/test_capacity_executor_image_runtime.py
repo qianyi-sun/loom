@@ -111,6 +111,7 @@ def test_capacity_executor_image_build() -> None:
             capture_output=True, text=True, check=False, timeout=900,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+        _assert_fixed_native_receiver_process_adapter(image)
         _assert_native_docker_stdin_is_not_retained(image)
         _assert_native_image_environment_is_removed(image)
         asyncio.run(_assert_native_attachment_loss_needs_container_cleanup(image))
@@ -119,6 +120,82 @@ def test_capacity_executor_image_build() -> None:
             ["docker", "image", "rm", image],
             capture_output=True, check=False, timeout=30,
         )
+
+
+def _assert_fixed_native_receiver_process_adapter(image: str) -> None:
+    """Actual pinned interpreter, installed module and fixed config; no DB authority.
+
+    A historical status lookup needs no live admission credential. Its unknown
+    response proves this process composition, not delivery or native activation.
+    """
+    from uuid import UUID, uuid5
+
+    from loom_capacity_executor.native_bootstrap_delivery import (
+        NativeBootstrapDeliveryReceiptV1,
+        encode_native_delivery_query,
+    )
+    from loom_capacity_manager.executable_contracts import canonical_executable_digest
+    from tests.unit.test_capacity_executor_bootstrap_handoff import _physical
+    from tests.unit.test_capacity_executor_launch_renderer import launch_context_fixture
+
+    binding = launch_context_fixture().binding
+    physical = _physical(binding).model_copy(update={"operation_id": uuid5(
+        UUID("cb359b0c-a844-4bc5-9592-a4c35e344f3d"), f"physical-bind:{binding.intent_id}")})
+    digest = canonical_executable_digest(binding)
+    expected = NativeBootstrapDeliveryReceiptV1(target_node=binding.node_ids[0],
+        reference=digest + ".json", binding_sha256=digest,
+        physical_binding_sha256=canonical_executable_digest(physical),
+        bootstrap_sha256="a" * 64, source_payload_sha256="b" * 64,
+        expires_at=datetime(2026, 8, 13, tzinfo=UTC))
+    query = encode_native_delivery_query(physical, expected)
+    script = """
+import asyncio, hashlib, os, stat, sys
+from pathlib import Path
+from loom_capacity_executor.native_bootstrap_delivery import parse_native_delivery_query, _canonical
+from loom_capacity_executor.native_bootstrap_process_adapter import NativeBootstrapProcessAdapter, NativeBootstrapReceiverProcessPolicy
+from loom_capacity_executor.native_bootstrap_receiver import NativeBootstrapReceiverConfigV1
+from loom_capacity_executor.native_worker_bootstrap import _disable_bootstrap_dumps
+from loom_capacity_executor.runtime import canonical_admission_directory_digest
+from loom_capacity_executor.slurm_contracts import SlurmFileIdentityV2
+from loom_capacity_executor.trusted_launcher import TrustedCandidateExecutableV2
+_disable_bootstrap_dumps()
+raw = sys.stdin.buffer.read(65537)
+query = parse_native_delivery_query(raw)
+binding = query.physical.binding
+base = Path('/run/loom-receiver')
+admission = base / 'admission'
+admission.mkdir(mode=0o700)
+config = NativeBootstrapReceiverConfigV1(directory=str(base), target_node=binding.node_ids[0],
+    pool_id=binding.pool_id, trusted_release_sha256=binding.execution.trusted_fleet_release_sha256,
+    admission_directory=str(admission), admission_directory_sha256=canonical_admission_directory_digest(admission))
+wire = _canonical(config)
+path = base / 'receiver.json'
+path.write_bytes(wire)
+path.chmod(0o600)
+interpreter = Path(sys.executable).resolve(strict=True)
+info = interpreter.stat()
+policy = NativeBootstrapReceiverProcessPolicy(
+    interpreter=TrustedCandidateExecutableV2(path=str(interpreter), sha256=hashlib.sha256(interpreter.read_bytes()).hexdigest(),
+        owner_uid=info.st_uid, mode=stat.S_IMODE(info.st_mode)),
+    configuration=SlurmFileIdentityV2(path=str(path), sha256=hashlib.sha256(wire).hexdigest(), owner_uid=os.geteuid()))
+async def exercise():
+    adapter = NativeBootstrapProcessAdapter(policy)
+    try:
+        assert await adapter.observe_receipt(raw) is None
+        assert adapter.active_operations == 0
+    finally:
+        await adapter.aclose()
+    assert adapter.active_operations == 0
+asyncio.run(exercise())
+print('fixed-receiver-status-unknown')
+"""
+    result = subprocess.run(["docker", "run", "--rm", "--interactive", "--read-only", "--network=none",
+        "--cpus=1", "--memory=512m", "--pids-limit=32", "--user=65532:65532",
+        "--tmpfs=/run/loom-receiver:rw,nosuid,nodev,noexec,mode=0700,uid=65532,gid=65532",
+        "--entrypoint=/usr/local/bin/python", image, "-I", "-B", "-c", script],
+        input=query, capture_output=True, check=False, timeout=45)
+    assert result.returncode == 0, result.stderr.decode()
+    assert result.stdout == b"fixed-receiver-status-unknown\n" and result.stderr == b""
 
 
 def _assert_native_image_environment_is_removed(image: str) -> None:
