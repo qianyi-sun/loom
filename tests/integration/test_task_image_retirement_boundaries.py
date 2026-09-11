@@ -43,6 +43,60 @@ from tests.integration.test_task_image_retirement_snapshot import ORIGIN, _setup
 from tests.integration.test_task_image_retirement_store import observe, store
 
 
+async def test_positive_observation_retries_one_real_idle_abort(
+    registry_authority_session, registry_issuer, monkeypatch,
+):
+    """A retry restarts preparation; the protected timeout remains unchanged."""
+    factory = registry_authority_session
+    _, attempt, _ = await _setup(factory, registry_issuer)
+    module = store()
+    original = module.revalidate_retirement_inventory
+    calls = []
+
+    async def expire_once(session, *, prepared):
+        calls.append(prepared.inventory.attempt_id)
+        if len(calls) == 1:
+            backend = await session.scalar(text("SELECT pg_backend_pid()"))
+            assert await session.scalar(text("SHOW idle_in_transaction_session_timeout")) == "1s"
+            async with factory.kw["bind"].connect() as probe:
+                await probe.execution_options(isolation_level="AUTOCOMMIT")
+                async with asyncio.timeout(3):
+                    while await probe.scalar(text("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid=:pid)"), {"pid": backend}):
+                        await asyncio.sleep(0.02)
+        await original(session, prepared=prepared)
+
+    monkeypatch.setattr(module, "revalidate_retirement_inventory", expire_once)
+    # Resolve dynamically so the missing positive-only adapter is the regression.
+    import tests.integration.test_task_image_retirement_boundaries as boundaries
+
+    result = await boundaries._observe_positive_semantics(factory, attempt.id, NOW + timedelta(seconds=12))
+    assert result.status == "pinned" and result.pins == ("build_lease",)
+    assert calls == [attempt.id, attempt.id]
+    assert result.unreferenced_since is None and result.retired_at is None
+
+
+@pytest.mark.parametrize("idle_abort", [True, False])
+async def test_positive_observation_retry_is_bounded_and_sqlstate_specific(monkeypatch, idle_abort):
+    from psycopg.errors import IdleInTransactionSessionTimeout, QueryCanceled
+
+    import tests.integration.test_task_image_retirement_boundaries as boundaries
+
+    original = IdleInTransactionSessionTimeout("injected idle abort") if idle_abort else QueryCanceled("not retryable here")
+    error = DBAPIError("probe", {}, original)
+    calls = []
+    factory, attempt, instant = object(), UUID(int=1), NOW
+
+    async def unavailable(*args):
+        calls.append(args)
+        raise error
+
+    monkeypatch.setattr(boundaries, "observe", unavailable)
+    with pytest.raises(DBAPIError) as caught:
+        await boundaries._observe_positive_semantics(factory, attempt, instant)
+    assert caught.value is error
+    assert calls == [(factory, attempt, instant)] * (3 if idle_abort else 1)
+
+
 @pytest.mark.parametrize("complete", [False, True])
 async def test_nonterminal_and_terminal_execution_pins_require_positive_cleanup(
     registry_authority_session,
