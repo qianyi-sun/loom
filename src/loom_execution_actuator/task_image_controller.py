@@ -59,18 +59,38 @@ class NativeBuildApi(Protocol):
     async def delete(self, namespace: str, name: str, uid: str | None, *, configmap: dict[str, Any]) -> bool: ...
 
 
-def _matches(actual: Any, expected: Any, *, quantities: bool = False) -> bool:
-    """Compare owned fields, allowing API defaults and equivalent quantities."""
+# Kubernetes omits these explicit false defaults when serializing a Job.
+# Other booleans (notably automountServiceAccountToken) have different defaults.
+_POD_SPEC_PATH = ("spec", "template", "spec")
+_FALSE_DEFAULT_PATHS = {
+    *((*_POD_SPEC_PATH, field) for field in ("hostIPC", "hostPID", "hostNetwork")),
+    *((*_POD_SPEC_PATH, containers, "*", "volumeMounts", "*", "readOnly")
+      for containers in ("initContainers", "containers")),
+}
+_EMPTYDIR_SIZE_PATH = (*_POD_SPEC_PATH, "volumes", "*", "emptyDir", "sizeLimit")
+
+
+def _matches(
+    actual: Any, expected: Any, *, quantities: bool = False, _path: tuple[str, ...] = (),
+) -> bool:
+    """Compare owned fields, allowing only known API defaults and quantities."""
+    if actual is None and expected is False and _path in _FALSE_DEFAULT_PATHS:
+        return True
     if isinstance(expected, dict):
         return isinstance(actual, dict) and all(
-            _matches(actual.get(key), value, quantities=key in {"limits", "requests"} or quantities)
+            _matches(
+                actual.get(key), value,
+                quantities=key in {"limits", "requests"} or quantities,
+                _path=(*_path, key),
+            )
             for key, value in expected.items()
         )
     if isinstance(expected, list):
         return isinstance(actual, list) and len(actual) == len(expected) and all(
-            _matches(a, e, quantities=quantities) for a, e in zip(actual, expected, strict=True)
+            _matches(a, e, quantities=quantities, _path=(*_path, "*"))
+            for a, e in zip(actual, expected, strict=True)
         )
-    if quantities and isinstance(actual, str) and isinstance(expected, str):
+    if (quantities or _path == _EMPTYDIR_SIZE_PATH) and isinstance(actual, str) and isinstance(expected, str):
         from kubernetes.utils.quantity import parse_quantity
         try:
             return bool(parse_quantity(actual) == parse_quantity(expected))

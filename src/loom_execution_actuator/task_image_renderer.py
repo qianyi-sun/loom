@@ -357,12 +357,20 @@ def render_task_image_job(
                 }
             )
     node_selector = dict(target.node_selector or {})
-    for key, expected in (
-        ("kubernetes.io/os", "linux"),
-        ("kubernetes.io/arch", "amd64" if architecture == "x86_64" else "arm64"),
+    # Nebius ignores reserved Kubernetes labels in zero-node templates. Translate
+    # these two constraints to the provider-supported labels owned by our IaC.
+    for standard_key, key, expected in (
+        ("kubernetes.io/os", "loom.nebius/node-os", "linux"),
+        (
+            "kubernetes.io/arch",
+            "loom.nebius/node-arch",
+            "amd64" if architecture == "x86_64" else "arm64",
+        ),
     ):
-        if key in node_selector and node_selector[key] != expected:
-            raise ValueError("native task-image architecture conflicts with execution target")
+        for constraint in (standard_key, key):
+            if constraint in node_selector and node_selector[constraint] != expected:
+                raise ValueError("native task-image architecture conflicts with execution target")
+        node_selector.pop(standard_key, None)
         node_selector[key] = expected
     pod: dict[str, Any] = {
         "restartPolicy": "Never",

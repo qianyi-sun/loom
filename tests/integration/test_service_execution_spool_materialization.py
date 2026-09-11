@@ -52,16 +52,17 @@ from tests.integration.test_service_execution_leases import (
     _runtime_result_payload,
     _seed_ready_trial,
 )
+from tests.support.minio import MINIO_TEST_IMAGE
 
 
 @pytest.fixture
 def independent_minio_endpoints() -> Iterator[tuple[MinioContainer, MinioContainer]]:
     label = {"loom.test": "service-execution-spool-materialization"}
     with (
-        MinioContainer()
+        MinioContainer(MINIO_TEST_IMAGE)
         .waiting_for(HttpWaitStrategy(9000, "/minio/health/cluster"))
         .with_kwargs(labels=label) as spool,
-        MinioContainer()
+        MinioContainer(MINIO_TEST_IMAGE)
         .waiting_for(HttpWaitStrategy(9000, "/minio/health/cluster"))
         .with_kwargs(labels=label) as canonical,
     ):

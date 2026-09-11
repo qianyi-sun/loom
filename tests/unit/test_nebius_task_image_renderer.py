@@ -202,8 +202,8 @@ def test_job_bounds_resources_and_only_builder_has_rootless_exceptions(inputs) -
     assert private_tmp == {"prepare-tmp", "builder-tmp", "publish-tmp"}
     assert pod["nodeSelector"] == {
         **inputs["target"].node_selector,
-        "kubernetes.io/os": "linux",
-        "kubernetes.io/arch": "amd64",
+        "loom.nebius/node-os": "linux",
+        "loom.nebius/node-arch": "amd64",
     }
     assert pod["tolerations"] == list(inputs["target"].tolerations)
 
@@ -378,3 +378,41 @@ def test_native_registry_key_is_mounted_only_in_publisher(inputs) -> None:
         not any(mount["name"] == "registry" for mount in phase["volumeMounts"])
         for phase in pod["initContainers"]
     )
+
+
+@pytest.mark.parametrize("architecture,label", [("x86_64", "amd64"), ("arm64", "arm64")])
+def test_native_selectors_match_zero_node_template(inputs, architecture, label) -> None:
+    inputs["claim"]["cpu_arch"] = architecture
+    inputs["target"] = replace(
+        inputs["target"],
+        node_selector={
+            "loom.pool": "native",
+            "kubernetes.io/os": "linux",
+            "kubernetes.io/arch": label,
+        },
+    )
+    _, job = render_task_image_job(**inputs)
+    selector = job["spec"]["template"]["spec"]["nodeSelector"]
+    template_labels = {
+        "loom.pool": "native",
+        "loom.nebius/node-os": "linux",
+        "loom.nebius/node-arch": label,
+    }
+    assert selector.items() <= template_labels.items()
+    assert selector["loom.nebius/node-arch"] == label
+    assert inputs["target"].node_selector["kubernetes.io/arch"] == label
+
+
+@pytest.mark.parametrize(
+    "constraint,value",
+    [
+        ("kubernetes.io/os", "windows"),
+        ("kubernetes.io/arch", "arm64"),
+        ("loom.nebius/node-os", "windows"),
+        ("loom.nebius/node-arch", "arm64"),
+    ],
+)
+def test_native_selector_rejects_conflicting_target_constraints(inputs, constraint, value) -> None:
+    inputs["target"] = replace(inputs["target"], node_selector={constraint: value})
+    with pytest.raises(ValueError, match="architecture conflicts"):
+        render_task_image_job(**inputs)

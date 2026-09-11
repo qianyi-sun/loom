@@ -29,6 +29,7 @@ from loom_execution_actuator.task_image_controller import (
 )
 from tests.integration.test_nebius_task_image_claims import _seed, claim_setup  # noqa: F401
 from tests.integration.test_service_execution_leases import NEBIUS_CPU_EXECUTION_CLASS_V1, _target
+from tests.unit.test_nebius_task_image_controller import canonical_api_job
 from tests.unit.test_service_execution_materialization import _task
 
 MODULE = "loom_execution_actuator.task_image_controller"
@@ -143,7 +144,8 @@ async def test_claim_reserve_transaction_rolls_back_without_job_or_attempt(contr
     assert not attempts and not kube.ensure_calls
 
 
-async def test_restart_recovers_ambiguous_create_once_and_persists_success_before_release(controller_setup):
+@pytest.mark.parametrize("normalized_api", [False, True])
+async def test_restart_recovers_ambiguous_create_once_and_persists_success_before_release(controller_setup, normalized_api):
     controller, sessions, team_id, kube = controller_setup
     image_id, _ = await seed_image(sessions, team_id)
     kube.lose_create_response = True
@@ -151,9 +153,12 @@ async def test_restart_recovers_ambiguous_create_once_and_persists_success_befor
         await controller.run_once()
     row, attempts = await rows(sessions, image_id)
     assert row.state == "claimed" and attempts[0].native_build["job_uid"] is None
+    if normalized_api:
+        kube.jobs = {name: canonical_api_job(job) for name, job in kube.jobs.items()}
+    expected_uid = next(iter(kube.jobs.values()))["metadata"]["uid"]
     await controller.run_once()
     row, attempts = await rows(sessions, image_id)
-    assert row.state == "running" and attempts[0].native_build["job_uid"]
+    assert row.state == "running" and attempts[0].native_build["job_uid"] == expected_uid
     assert kube.ensure_calls == 1
     kube.finish()
     kube.allow_delete = False
@@ -168,6 +173,31 @@ async def test_restart_recovers_ambiguous_create_once_and_persists_success_befor
     kube.allow_delete = True
     await controller.run_once()
     assert (await rows(sessions, image_id))[1][0].native_build["capacity_released_at"]
+    assert kube.delete_calls[-1][1] == expected_uid
+
+
+async def test_cancel_recovers_normalized_unacknowledged_job_uid_and_releases_only_after_delete(controller_setup):
+    controller, sessions, team_id, kube = controller_setup
+    image_id, trial_id = await seed_image(sessions, team_id)
+    kube.lose_create_response = True
+    with pytest.raises(TimeoutError):
+        await controller.run_once()
+    kube.jobs = {name: canonical_api_job(job) for name, job in kube.jobs.items()}
+    expected_uid = next(iter(kube.jobs.values()))["metadata"]["uid"]
+    assert (await rows(sessions, image_id))[1][0].native_build["job_uid"] is None
+    async with sessions() as session, session.begin():
+        (await session.get(Trial, trial_id)).state = "cancelled"
+    kube.allow_delete = False
+    await controller.run_once()
+    row, attempts = await rows(sessions, image_id)
+    assert row.failure_reason == "build_cancelled"
+    assert attempts[0].native_build["job_uid"] == expected_uid
+    assert not attempts[0].native_build.get("capacity_released_at")
+    assert kube.delete_calls[-1][1] == expected_uid
+    kube.allow_delete = True
+    await controller.run_once()
+    assert (await rows(sessions, image_id))[1][0].native_build["capacity_released_at"]
+    assert not kube.jobs and kube.ensure_calls == 1
 
 
 async def test_db_scan_recovers_missing_acknowledged_job_without_recreating_same_epoch(controller_setup):

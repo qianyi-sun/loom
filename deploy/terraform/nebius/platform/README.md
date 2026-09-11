@@ -1,5 +1,24 @@
 # Independent integration platform state
 
+The integration execution node group's `template.metadata.labels` explicitly
+declares `loom.nebius/node-os=linux` and `loom.nebius/node-arch=amd64`, in addition to
+the existing Loom isolation labels. These describe the configured Linux/x86_64
+`cpu-e2` nodes. Nebius ignores custom template labels containing `kubernetes.io`
+or `k8s.io`, so native builds use these provider-supported custom keys. They
+must be available to the autoscaler's zero-node template before kubelet starts,
+otherwise the pending build can report `NotTriggerScaleUp` with a node-selector
+mismatch. This does not change the node group's CPU/disk shape or autoscaling
+minimum/maximum, and does not label or change the system node group. Keep the
+build Pod's OS/architecture selectors intact. Apply this change to the existing
+`module.platform.nebius_mk8s_v1_node_group.integration["execution"]` resource;
+do not create another node group or raise its minimum to work around scale-up.
+
+For an operator-applied recovery, merge the two labels into the current
+NodeGroup **template** labels using the native API, preserving all existing
+labels and matching this Terraform change. A `kubectl label node` update does
+not repair a group scaled to zero. Verify ordinary build demand subsequently
+triggers scale-up; a successful metadata update alone does not prove recovery.
+
 This root adds dedicated system and execution node groups, four
 native storage buckets with three scoped identities, and one fixed public IPv4
 allocation to the existing Nebius cluster. Existing cluster/network/registry IDs
