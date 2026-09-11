@@ -1,12 +1,63 @@
 """Pinned routing and authenticated manager purpose agree before positive work."""
 
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 
 from loom_capacity_executor.journal import JournalRegressionError
 from tests.unit.test_capacity_executor_executable import close_fixture
 from tests.unit.test_capacity_executor_typed_journal import facts, typed_executor
+
+
+@pytest.mark.parametrize("purpose", ["application-worker", "personal-build-worker"])
+async def test_confirmed_preparation_replay_needs_no_current_permit(tmp_path, purpose):
+    runtime, journal, context = typed_executor(tmp_path, purpose=purpose)
+    try:
+        binding = context.binding
+        await runtime._propose_bootstrap(binding, command_sequence=1)
+        evidence = close_fixture(binding, command_sequence=2).bootstrap_evidence_sha256
+        registration = await runtime._prepare_protected_bootstrap(binding,
+            bootstrap_registration_epoch=1, bootstrap_evidence_sha256=evidence)
+        runtime.client.launch_subject = AsyncMock(side_effect=AssertionError("permit no longer live"))
+        runtime.admission.prepare_worker = AsyncMock(side_effect=AssertionError("already prepared"))
+        head = journal.head
+        assert await runtime._prepare_protected_bootstrap(binding,
+            bootstrap_registration_epoch=1, bootstrap_evidence_sha256=evidence) == registration
+        with pytest.raises(JournalRegressionError, match="changed"):
+            await runtime._prepare_protected_bootstrap(binding,
+                bootstrap_registration_epoch=2, bootstrap_evidence_sha256=evidence)
+        assert journal.head == head
+        runtime.client.launch_subject.assert_not_awaited()
+        runtime.admission.prepare_worker.assert_not_awaited()
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize("boundary", ["missing-route", "invalid-facts", "foreign-binding", "expired-permit"])
+async def test_preparation_requires_current_exact_facts_before_journaling(tmp_path, boundary):
+    runtime, journal, context = typed_executor(tmp_path)
+    try:
+        await runtime._propose_bootstrap(context.binding, command_sequence=1)
+        subject = facts(context)
+        if boundary == "missing-route":
+            runtime.admission.purpose = None
+        elif boundary == "invalid-facts":
+            runtime.client.launch_subject.return_value = subject.model_copy(update={"schema_version": 3.0})
+        elif boundary == "foreign-binding":
+            runtime.client.launch_subject.return_value = subject.model_copy(update={
+                "binding": subject.binding.model_copy(update={"intent_id": uuid4()})})
+        else:
+            runtime.client.launch_subject.side_effect = ValueError("expired permit")
+        runtime.admission.prepare_worker = AsyncMock(side_effect=AssertionError("must not prepare"))
+        head = journal.head
+        with pytest.raises(ValueError):
+            await runtime._prepare_protected_bootstrap(context.binding, bootstrap_registration_epoch=1,
+                bootstrap_evidence_sha256="a" * 64)
+        assert journal.head == head
+        runtime.admission.prepare_worker.assert_not_awaited()
+    finally:
+        journal.close()
 
 
 @pytest.mark.parametrize("pool", ["oldlab", "gb10"])

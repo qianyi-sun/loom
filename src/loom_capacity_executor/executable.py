@@ -104,7 +104,10 @@ from loom_capacity_manager.executable_contracts import (
     canonical_executable_digest,
     retained_prepared_activation_matches,
 )
-from loom_capacity_manager.launch_subject_contracts import ExecutableLaunchSubjectV3
+from loom_capacity_manager.launch_subject_contracts import (
+    ExecutableLaunchSubjectV3,
+    canonical_launch_subject_bytes,
+)
 from loom_capacity_manager.membership_launch_authority import ResolvedAllocationLaunchSubject
 from loom_capacity_manager.ownership import OwnershipKeyring, verify_executable_ownership
 from loom_capacity_manager.typed_inventory_contracts import (
@@ -523,6 +526,23 @@ class ExecutablePoolExecutor:
         )
         return result
 
+    def _assert_admission_purpose(
+        self, binding: ExecutableIntentBindingV2, subject: ExecutableLaunchSubjectV3,
+    ) -> None:
+        canonical_launch_subject_bytes(subject)
+        if canonical_executable_bytes(subject.binding) != canonical_executable_bytes(binding):
+            raise ValueError("admission purpose launch binding changed")
+        purpose = getattr(self.admission, "purpose", None)
+        if not callable(purpose) or purpose(binding) != subject.authority.purpose:
+            raise ValueError("admission purpose differs from authenticated launch subject")
+
+    async def _verify_preparation_purpose(self, binding: ExecutableIntentBindingV2) -> None:
+        if self.typed_policy is not None:
+            # Only positive preparation needs a current permit. Native cleanup
+            # is checked first and can revoke after that permit has expired.
+            subject = await self.client.launch_subject(binding)
+            self._assert_admission_purpose(binding, subject)
+
     def render_launch(
         self,
         binding: ExecutableIntentBindingV2,
@@ -533,6 +553,7 @@ class ExecutablePoolExecutor:
         if self.typed_policy is not None:
             if launch_subject is None or launch_subject.binding != binding:
                 raise ValueError("typed runtime requires exact authenticated launch subject")
+            self._assert_admission_purpose(binding, launch_subject)
             rendered_typed = render_typed_signed_launch(
                 TrustedLaunchContextV3(
                     binding=binding,
@@ -794,6 +815,7 @@ class ExecutablePoolExecutor:
             raise JournalRegressionError("stored typed ownership proof is not authentic")
         try:
             self._assert_binding(proof.metadata.binding)
+            self._assert_admission_purpose(subject.binding, subject)
             expected = render_typed_signed_launch(
                 TrustedLaunchContextV3(
                     binding=subject.binding,
@@ -960,7 +982,11 @@ class ExecutablePoolExecutor:
                 or canonical_executable_digest(registration) != latest.payload_digest
             ):
                 raise JournalRegressionError("protected bootstrap preparation changed")
+            # Exact confirmed replay is read-only, including during cleanup
+            # after submission/expiry. Any later launch revalidates purpose
+            # against its authenticated or retained launch facts separately.
             return registration
+        await self._verify_preparation_purpose(binding)
         registration, proposal = self._protected_bootstrap_registration(
             binding,
             bootstrap_registration_epoch=bootstrap_registration_epoch,
@@ -1488,6 +1514,7 @@ class ExecutablePoolExecutor:
                         or cleanup.command_sequence != checkpoint.command_sequence + 1):
                         raise JournalRegressionError("native preparation cleanup authority changed")
                     return await self._close(cleanup, checkpoint)
+            await self._verify_preparation_purpose(registration.binding)
             prepared = await self.admission.prepare_worker(
                 registration,
                 bootstrap_sha256=proposal.bootstrap_sha256,

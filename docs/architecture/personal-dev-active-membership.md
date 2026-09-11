@@ -346,6 +346,14 @@ used by legacy V2 activation. The distinct V3 artifact below composes it with
 typed policy, but execution stays disabled until all lifecycle and
 allocation-contained consumers are complete.
 
+Before fresh protected preparation or rendering, the executor checks the pinned
+admission purpose against exact manager-authenticated launch facts. Pending
+preparation replay performs that check only after checking for native cleanup;
+confirmed preparation replay is read-only and does not require a live permit.
+Retained launch replay checks the pinned purpose against its journaled facts,
+never a fresh manager lookup. Mismatches cannot prepare, render or launch, while
+exact confirmed replay and native unsubmitted revocation survive permit expiry.
+
 The native unsubmitted close consumer can revoke before first preparation. It
 requires a retained exact bootstrap proposal, checkpoint-covered journal, no job
 or physical-binding history, and no consumed/physical handoff sidecars. It never
