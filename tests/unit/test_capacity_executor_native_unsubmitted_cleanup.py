@@ -209,3 +209,45 @@ async def test_native_close_rejects_malformed_pending_pair_before_revocation(tmp
         assert (store.directory/store.reference_for(binding)).exists()
     finally:
         journal.close()
+
+
+@pytest.mark.parametrize("reply", ["exact", "foreign", "wrong-epoch", "wrong-evidence", "wrong-sequence", "absent"])
+async def test_native_pending_preparation_polls_only_exact_authorized_close(tmp_path,reply):
+    from uuid import uuid4
+
+    runtime,journal,context = typed_executor(tmp_path)
+    try:
+        binding = context.binding
+        runtime.admission.purpose = lambda supplied: "personal-build-worker"
+        await runtime._propose_bootstrap(binding,command_sequence=1)
+        close = close_fixture(binding,command_sequence=2)
+        runtime.admission.prepare_worker = AsyncMock(side_effect=RuntimeError("cancelled"))
+        with pytest.raises(RuntimeError,match="cancelled"):
+            await runtime._prepare_protected_bootstrap(binding,bootstrap_registration_epoch=1,
+                bootstrap_evidence_sha256=close.bootstrap_evidence_sha256)
+        runtime.admission.prepare_worker.reset_mock()
+        response = close
+        if reply == "foreign":
+            response = close.model_copy(update={"binding":binding.model_copy(update={"intent_id":uuid4()})})
+        elif reply == "wrong-epoch":
+            response = close.model_copy(update={"bootstrap_registration_epoch":99})
+        elif reply == "wrong-evidence":
+            response = close.model_copy(update={"bootstrap_evidence_sha256":"f"*64})
+        elif reply == "wrong-sequence":
+            response = close.model_copy(update={"command_sequence":99})
+        elif reply == "absent":
+            response = None
+        runtime.client.work = close
+        runtime.client.next_executable_work = AsyncMock(return_value=response)
+        if reply == "exact":
+            assert (await runtime._replay_local_request(await runtime._checkpoint())).status == "draining"
+            assert runtime.client.work is None
+            runtime.admission.prepare_worker.assert_not_awaited()
+        else:
+            with pytest.raises(RuntimeError):
+                await runtime._replay_local_request(await runtime._checkpoint())
+            assert runtime.admission.prepared_revocation_requests == []
+            assert runtime.client.work == close
+        runtime.client.next_executable_work.assert_awaited_once_with(1,cleanup_only=True,cleanup_intent_id=binding.intent_id)
+    finally:
+        journal.close()
