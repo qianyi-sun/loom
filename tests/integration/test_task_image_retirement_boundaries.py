@@ -43,6 +43,19 @@ from tests.integration.test_task_image_retirement_snapshot import ORIGIN, _setup
 from tests.integration.test_task_image_retirement_store import observe, store
 
 
+async def _observe_positive_semantics(factory, attempt_id, instant):
+    # An idle-aborted transaction has not observed or retired anything. This
+    # positive pin-semantics test may restart the entire supported operation;
+    # timeout/rollback/cancellation tests below continue to call observe directly.
+    for attempt in range(3):
+        try:
+            return await observe(factory, attempt_id, instant)
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) != "25P03" or attempt == 2:
+                raise
+    raise AssertionError("positive observation retry loop exhausted without outcome")
+
+
 async def test_positive_observation_retries_one_real_idle_abort(
     registry_authority_session, registry_issuer, monkeypatch,
 ):
@@ -117,14 +130,14 @@ async def test_nonterminal_and_terminal_execution_pins_require_positive_cleanup(
         await session.commit()
     attempt_id = UUID(receipt.attempt_id)
     instant = NOW + timedelta(days=1)
-    assert (await observe(factory, attempt_id, instant)).pins == ("nonterminal_trial",)
+    assert (await _observe_positive_semantics(factory, attempt_id, instant)).pins == ("nonterminal_trial",)
     async with factory() as session:
         lease = await _reserve(session, trial_id=trial_id, target=target, now=NOW)
         trial = await session.get(Trial, trial_id)
         trial.state = "succeeded"
         trial.result = {"reward": 1.0}
         await session.commit()
-    assert (await observe(factory, attempt_id, instant)).pins == ("execution_lease",)
+    assert (await _observe_positive_semantics(factory, attempt_id, instant)).pins == ("execution_lease",)
     async with factory() as session:
         # Desired deletion and elapsed runtime deadline are not positive cleanup.
         await enqueue_execution_transition(
@@ -135,7 +148,7 @@ async def test_nonterminal_and_terminal_execution_pins_require_positive_cleanup(
             now=NOW + timedelta(seconds=1),
         )
         await session.commit()
-    assert (await observe(factory, attempt_id, instant)).pins == ("execution_lease",)
+    assert (await _observe_positive_semantics(factory, attempt_id, instant)).pins == ("execution_lease",)
     async with factory() as session:
         if complete:
             await record_execution_event(
@@ -154,7 +167,7 @@ async def test_nonterminal_and_terminal_execution_pins_require_positive_cleanup(
             current.desired_state = "deleted"
             current.deleted_at = NOW + timedelta(seconds=2)
         await session.commit()
-    result = await observe(factory, attempt_id, instant)
+    result = await _observe_positive_semantics(factory, attempt_id, instant)
     if complete:
         assert result.status == "observing" and result.unreferenced_since == instant
     else:
