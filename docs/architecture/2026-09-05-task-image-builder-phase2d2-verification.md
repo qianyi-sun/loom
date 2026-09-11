@@ -1584,10 +1584,19 @@ seconds, within the policy interval. Own-clock expiry and scheduler observation
 age are checked before crypto and again before returning; clock rollback fails
 closed. Tests exercise real signatures and complete isolated stdlib execution.
 
-This does not implement the issuer, protected policy loading, atomic versioned
-installation, durable replay admission, retained cgroup preparation, or cleanup.
-The issuer must fetch current manager/bootstrap observations itself;
-signing caller-supplied unsigned observations would not establish root authority.
+The controller-only preparation issuer fetches current manager, application
+bootstrap and pinned scheduler observations itself. Its input is the physical
+reference, existing signed ownership proof and caller-owned durable grant identity,
+not caller-supplied unsigned observation JSON. It verifies ownership against the
+configured key, revalidates the complete current binding/purpose and approved
+native profile set, and bounds the signature by all observation ages, bootstrap,
+policy and native execution-root deadlines. The complete read sequence is bounded;
+failed or cancelled reads cannot yield a packet, and signing does not hold database
+locks. Consumed permit expiry is not reapplied to an already allocated job.
+
+This issuer is not yet wired into the executor lifecycle or exposed as a signing
+endpoint. Protected policy loading, atomic versioned installation, durable grant
+identity/replay admission, retained cgroup preparation and cleanup remain missing.
 The existing root guard remains the sole lifecycle owner. Expired preparation
 authority must block new preparation without removing existing resource limits.
 

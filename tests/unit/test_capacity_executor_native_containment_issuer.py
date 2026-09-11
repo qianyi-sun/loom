@@ -1,5 +1,6 @@
 """Preparation signing fetches authority, never promotes caller observation JSON."""
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -15,8 +16,14 @@ import pytest
 from loom_capacity_agent.admission import CurrentExecutableBootstrapV2, PhysicalJobBindingV2
 from loom_capacity_executor.native_slurm_allocation import parse_native_allocation
 from loom_capacity_executor.typed_launch_renderer import render_typed_signed_launch
-from loom_capacity_manager.executable_contracts import ExecutableLaunchPermitV2, canonical_executable_digest
-from loom_capacity_manager.launch_subject_contracts import CurrentApplicationAllocationV3, ExecutableLaunchSubjectV3
+from loom_capacity_manager.executable_contracts import (
+    ExecutableLaunchPermitV2,
+    canonical_executable_digest,
+)
+from loom_capacity_manager.launch_subject_contracts import (
+    CurrentApplicationAllocationV3,
+    ExecutableLaunchSubjectV3,
+)
 from loom_capacity_manager.typed_ownership_contracts import canonical_typed_ownership_bytes
 from tests.unit.test_capacity_executor_native_containment_authority import canonical
 from tests.unit.test_capacity_executor_native_launch_profile import _native_typed_context
@@ -167,7 +174,72 @@ async def test_issuer_does_not_refresh_expired_authority_after_slow_scheduler(so
     original = issuer(source)
     module = import_module("loom_capacity_executor.native_containment_issuer")
     later = source.bootstrap.bootstrap_expires_at + timedelta(seconds=1)
-    monkeypatch.setattr(module.time, "time_ns", lambda: int(later.timestamp() * 1_000_000_000))
+    observe = original._slurm.observe_native_allocation
+
+    async def delayed(*args, **kwargs):
+        result = await observe(*args, **kwargs)
+        monkeypatch.setattr(module.time, "time_ns", lambda: int(later.timestamp() * 1_000_000_000))
+        return result
+
+    monkeypatch.setattr(original._slurm, "observe_native_allocation", delayed)
     with pytest.raises(ValueError):
         await original.issue(physical_binding=source.physical, ownership_proof=source.rendered.ownership_proof,
+            grant_id=UUID(int=814), grant_generation=1)
+    assert source.calls == ["manager", "bootstrap", "scheduler"]
+
+
+@pytest.mark.parametrize("adapter,method,earlier", (
+    ("_manager", "current_application_allocation", []),
+    ("_admission", "observe_current_bootstrap", ["manager"]),
+    ("_slurm", "observe_native_allocation", ["manager", "bootstrap"]),
+))
+@pytest.mark.parametrize("failure", (TimeoutError, asyncio.CancelledError))
+async def test_issuer_preserves_failed_or_cancelled_reads_without_signing(source, monkeypatch, adapter, method, earlier, failure):
+    instance = issuer(source)
+
+    async def unavailable(*args, **kwargs):
+        raise failure()
+
+    monkeypatch.setattr(getattr(instance, adapter), method, unavailable)
+    with pytest.raises(failure):
+        await instance.issue(physical_binding=source.physical, ownership_proof=source.rendered.ownership_proof,
+            grant_id=UUID(int=814), grant_generation=1)
+    assert source.calls == earlier
+
+
+async def test_issuer_bounds_entire_read_sequence_and_cancels_pending_read(source, monkeypatch):
+    instance = issuer(source)
+    module = import_module("loom_capacity_executor.native_containment_issuer")
+    timeout = asyncio.timeout
+    cancelled = []
+    monkeypatch.setattr(module.asyncio, "timeout", lambda value: timeout(0.01))
+
+    async def stalled(*args, **kwargs):
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.append(True)
+
+    monkeypatch.setattr(instance._manager, "current_application_allocation", stalled)
+    with pytest.raises(TimeoutError):
+        await instance.issue(physical_binding=source.physical, ownership_proof=source.rendered.ownership_proof,
+            grant_id=UUID(int=814), grant_generation=1)
+    assert cancelled == [True]
+    assert source.calls == []
+
+
+async def test_issuer_never_returns_a_packet_that_expires_during_signing(source, monkeypatch):
+    instance = issuer(source)
+    module = import_module("loom_capacity_executor.native_containment_issuer")
+    encode = module._canonical_native
+
+    def late(value):
+        result = encode(value)
+        if "signature_hex" in value:
+            monkeypatch.setattr(module.time, "time_ns", lambda: value["payload"]["expires_at_ms"] * 1_000_000)
+        return result
+
+    monkeypatch.setattr(module, "_canonical_native", late)
+    with pytest.raises(ValueError, match="during signing"):
+        await instance.issue(physical_binding=source.physical, ownership_proof=source.rendered.ownership_proof,
             grant_id=UUID(int=814), grant_generation=1)
