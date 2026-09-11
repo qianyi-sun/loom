@@ -35,6 +35,11 @@ and reuse the original release JSON when registering or retrying registration.
 The same version label cannot be rebound to a different image or re-signed
 record. To publish a changed runtime, use a new version label.
 
+The split Harbor image retains the worker's existing Debian `perl-base` policy
+mapping. It must match exactly the same three reviewed findings; no CVE, package
+scope, severity allowance or expiration is added. The existing policy expiry
+still blocks publication unless its owning review renews or removes the finding.
+
 For local tooling tests, `nebius_candidate.py create-runtime-release` accepts
 the single-image build record plus the existing signing-key/keyring arguments.
 `build --mode harness-only --agent-version <label>` retains the protected

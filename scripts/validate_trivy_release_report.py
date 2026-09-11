@@ -46,6 +46,7 @@ _POSTGRES_PERL_PACKAGES = (
     "perl-modules-5.36",
 )
 _PERL_BASE_COMPONENTS = (
+    "harbor-runtime",
     "capacity-executor",
     "capacity-manager",
     "control-plane",
@@ -60,7 +61,6 @@ _PERL_BASE_COMPONENTS = (
     "worker",
 )
 _EMPTY_COMPONENTS = (
-    "harbor-runtime",
     "execution-runtime",
     "nebius-terminal-bench",
     "llm-gateway-sandbox",
