@@ -2103,6 +2103,13 @@ Dockerfiles with an offline `RUN`, and verifies the complete returned artifact
 and modified-source contents. Missing KVM is a reported skip, not acceptance.
 This fixture is not proof of the newly published builder image, protected rootfs
 installation, rootless host policy, Slurm containment or fleet readiness.
+The renderer returns distinct role-prefixed root, BuildKit and client IDs.
+No ID prefixes another: runsc's lifecycle lookup otherwise treats the root ID
+as ambiguous while its children exist, preventing a reliable root-stop command.
+The real KVM fixture also observes root-stop termination of both BuildKit and a
+live restricted client, rejects a late child joining that stopped sandbox, and
+verifies empty runtime state after cleanup. Its init process reaps detached
+runtime helpers; installed process supervision still needs equivalent proof.
 
 Revision `build_guard_0031` adds a separate native execution-freshness operation.
 The trusted worker submits its exact claim, a new challenge and the verified

@@ -109,6 +109,8 @@ class NativeOciBundlePolicy:
 @dataclass(frozen=True, slots=True)
 class NativeOciBundles:
     sandbox_id: str
+    buildkit_id: str
+    client_id: str
     pause: bytes
     buildkit: bytes
     client: bytes
@@ -120,7 +122,12 @@ def render_native_oci_bundles(context: BuildSourceContextV1, policy: NativeOciBu
     policy.__post_init__()
     if context.build_contract_sha256 != PERSONAL_DEV_BUILD_CONTRACT_SHA256:
         raise ValueError("native OCI build contract changed")
-    sandbox_id = "loom-native-" + context.claim_digest
+    # runsc lifecycle commands resolve IDs by prefix, including exact-looking
+    # IDs. Never make a child ID start with its root ID: root kill/state would
+    # become ambiguous precisely while its children are alive.
+    sandbox_id = "loom-native-pause-" + context.claim_digest
+    buildkit_id = "loom-native-buildkit-" + context.claim_digest
+    client_id = "loom-native-client-" + context.claim_digest
     shared = str(policy.workspace / "buildkit-run")
 
     def spec() -> dict[str, Any]:
@@ -164,4 +171,4 @@ def render_native_oci_bundles(context: BuildSourceContextV1, policy: NativeOciBu
 
     def wire(value: dict[str, Any]) -> bytes:
         return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
-    return NativeOciBundles(sandbox_id, wire(pause), wire(sidecar), wire(client))
+    return NativeOciBundles(sandbox_id, buildkit_id, client_id, wire(pause), wire(sidecar), wire(client))

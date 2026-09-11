@@ -117,7 +117,8 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path)
         client_seccomp=wire, client_seccomp_sha256=hashlib.sha256(wire).hexdigest(),
         tmp_bytes=64 * 1024**2, buildkit_state_bytes=1024**3)
     bundles = render_native_oci_bundles(context, policy)
-    (fixtures / "identity.json").write_text(json.dumps({"sandbox_id": bundles.sandbox_id}))
+    (fixtures / "identity.json").write_text(json.dumps({"sandbox_id": bundles.sandbox_id,
+        "buildkit_id": bundles.buildkit_id, "client_id": bundles.client_id}))
     for component in ("pause", "buildkit", "client"):
         (fixtures / component).mkdir()
         (fixtures / component / "config.json").write_bytes(getattr(bundles, component))
@@ -129,7 +130,9 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path)
         "personal_dev_sandbox_builder", "personal_dev_source"):
         shutil.copyfile(ROOT / "src/loom" / (module + ".py"), modules / (module + ".py"))
     try:
-        output = checked("docker", "run", "--name", name, "--network=none", "--cpus=2", "--memory=4g",
+        # Detached runsc helpers need an orphan reaper. Python as container PID1
+        # leaves zombies that runsc's kill(pid, 0) liveness test sees as running.
+        output = checked("docker", "run", "--init", "--name", name, "--network=none", "--cpus=2", "--memory=4g",
             "--pids-limit=512", "--device=/dev/kvm", "--cap-add=SYS_ADMIN", "--cap-add=SYS_PTRACE",
             "--security-opt=apparmor=unconfined", "--security-opt=seccomp=unconfined", "--read-only",
             "--tmpfs=/tmp:rw,nodev,size=2g",
