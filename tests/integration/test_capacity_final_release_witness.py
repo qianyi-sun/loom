@@ -1,9 +1,10 @@
 """Final release evidence is retained with the exact command, not reconstructed."""
 
+import json
 from uuid import UUID
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 
 from loom_capacity_manager.executable_contracts import (
@@ -11,6 +12,10 @@ from loom_capacity_manager.executable_contracts import (
     ExecutablePartialReleaseV2,
     ExecutableProtectedReleaseV2,
     canonical_executable_digest,
+)
+from loom_capacity_manager.models import (
+    CapacityExecutableIntent,
+    CapacityExecutableProtectedReleaseReceipt,
 )
 from loom_capacity_manager.store import ExecutionConflictError
 from tests.capacity_execution_fixtures import executor_binding
@@ -82,14 +87,16 @@ async def test_final_release_witness_rolls_back_with_command(capacity_session):
 async def test_final_release_witness_is_immutable(capacity_session, mutation):
     store, member, _protected, release = await ready_release(capacity_session)
     await store.release_shapes(capacity_session, release)
-    async with capacity_session.begin_nested():
-        with pytest.raises(DBAPIError, match="append-only"):
+    await capacity_session.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+    with pytest.raises(DBAPIError, match="append-only"):
+        async with capacity_session.begin_nested():
             await capacity_session.execute(text(mutation))
-        await capacity_session.rollback()
+    assert await read_witness(capacity_session, store, member, release) is not None
 
 
 async def test_final_release_witness_downgrade_retains_authority(capacity_session):
     from alembic import command
+
     from tests.integration.test_capacity_build_membership_sql import _config
 
     store, _member, _protected, release = await ready_release(capacity_session)
@@ -99,3 +106,77 @@ async def test_final_release_witness_downgrade_retains_authority(capacity_sessio
         async with capacity_session.begin_nested():
             connection = await capacity_session.connection()
             await connection.run_sync(lambda sync: command.downgrade(_config(sync), "capacity_0022"))
+
+
+async def stage_command(session, store, release):
+    intent = await session.scalar(select(CapacityExecutableIntent).where(
+        CapacityExecutableIntent.intent_id == release.releases[0].binding.intent_id))
+    assert intent is not None
+    receipt = await store._record_command(session, intent, sequence=release.command_sequence,
+        operation_kind="release", request_digest=canonical_executable_digest(release),
+        result_payload={"tranche_id": str(release.tranche_id),
+            "released_shape_ids": [item.binding.shape_instance_id for item in release.releases], "executable": True})
+    await session.flush()
+    return receipt
+
+
+@pytest.mark.parametrize("tamper", ("schema", "physical", "protected", "command", "binding"))
+async def test_final_release_witness_rejects_direct_sql_substitution(capacity_session, tamper):
+    store, _member, _protected, release = await ready_release(capacity_session)
+    command = await stage_command(capacity_session, store, release)
+    protected = await capacity_session.scalar(select(CapacityExecutableProtectedReleaseReceipt))
+    payload = release.releases[0].model_dump(mode="json")
+    if tamper == "schema":
+        payload["schema_version"] = "2"
+    elif tamper == "physical":
+        payload["terminal_evidence_sha256"] = "f" * 64
+    elif tamper == "binding":
+        payload["binding"]["subject_id"] = str(UUID(int=124099))
+    params = dict(intent=release.releases[0].binding.intent_id,
+        protected=UUID(int=124099) if tamper == "protected" else protected.id,
+        command=UUID(int=124099) if tamper == "command" else command.id, payload=json.dumps(payload))
+    with pytest.raises(DBAPIError, match="final release"):
+        async with capacity_session.begin_nested():
+            await capacity_session.execute(text("""
+                INSERT INTO capacity_executable_final_release_witnesses
+                (intent_id,protected_receipt_id,command_receipt_id,release_payload,released_at)
+                VALUES (:intent,:protected,:command,CAST(:payload AS jsonb),clock_timestamp())
+            """), params)
+
+
+async def test_final_release_transition_requires_witness_at_commit_boundary(capacity_session):
+    _store, _member, _protected, release = await ready_release(capacity_session)
+    with pytest.raises(DBAPIError, match="atomic retained witness"):
+        async with capacity_session.begin_nested():
+            await capacity_session.execute(text("""
+                UPDATE capacity_executable_intents SET state='released',released_at=clock_timestamp()
+                WHERE intent_id=:intent
+            """), {"intent": release.releases[0].binding.intent_id})
+            await capacity_session.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+
+
+async def test_legacy_release_replay_does_not_fabricate_witness(capacity_session):
+    from alembic import command
+
+    from tests.integration.test_capacity_build_membership_sql import _config
+
+    store, member, _protected, release = await ready_release(capacity_session)
+    connection = await capacity_session.connection()
+    await connection.run_sync(lambda sync: command.downgrade(_config(sync), "capacity_0022"))
+    await stage_command(capacity_session, store, release)
+    await capacity_session.execute(text("""
+        UPDATE capacity_executable_intents SET state='released',released_at=clock_timestamp()
+        WHERE intent_id=:intent
+    """), {"intent": release.releases[0].binding.intent_id})
+    await connection.run_sync(lambda sync: command.upgrade(_config(sync), "capacity_0023"))
+    capacity_session.expire_all()
+    assert (await store.release_shapes(capacity_session, release)).replayed
+    assert await read_witness(capacity_session, store, member, release) is None
+
+
+async def test_pristine_proposal_discard_commits_without_fabricated_witness(capacity_session):
+    from tests.integration.test_capacity_manager_execution_store import test_newer_sealed_epoch_supersedes_a_stale_proposal
+
+    await test_newer_sealed_epoch_supersedes_a_stale_proposal(capacity_session)
+    await capacity_session.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+    assert await capacity_session.scalar(text("SELECT count(*) FROM capacity_executable_final_release_witnesses")) == 0
