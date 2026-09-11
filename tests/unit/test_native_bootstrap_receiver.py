@@ -250,6 +250,7 @@ def admission_factory(directory, *, expected_directory_sha256):
     assert expected_directory_sha256 == 'a' * 64
     return factory().admission
 receiver_process.RoutedExecutableAdmissionClient = admission_factory
+receiver_process.datetime = type('Clock', (), {{'now': staticmethod(lambda tz: datetime.fromisoformat(config['now']))}})
 result = receiver_process.main({argv!r})
 """)
     process = await asyncio.create_subprocess_exec(sys.executable, "-B", "-c", probe,

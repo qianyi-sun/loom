@@ -1453,7 +1453,26 @@ requires the isolated receiver-process adapter; elapsed-time rejection alone is
 not proof of interruption. Socket ownership survives cancellation, and listener
 failure closes the socket and is exposed through `wait()` for the fixed supervisor.
 
-Protected transport/receiver installation and fixed process-adapter composition,
+The fixed process adapter opens a verified sealed interpreter snapshot before
+serving requests and runs only the isolated receiver module with pinned local
+configuration flags, an empty environment and private bounded pipes. The receiver
+loads a canonical, owner-only configuration and a digest-pinned admission directory
+after dump protection. Neither a packet nor an environment variable selects a
+factory, executable or configuration. The installed interpreter prefix, shared
+libraries and module tree must also be immutable; sealing the ELF alone does not
+authenticate those dependencies.
+
+The adapter retains spawn handoffs and cleanup owners across cancellation. A
+timeout is an unknown operation outcome, not evidence of rollback or reaping.
+Unreaped children continue to count against capacity. Kill, reap or pipe-cleanup
+failure blocks further admission and keeps the interpreter descriptor open;
+explicit shutdown can retry the same owned handles and reports failure until
+cleanup succeeds. Responses are checked against the original deadline after
+cleanup and synchronous parsing. No successful shutdown is inferred from a
+cancelled request or an attempted kill. Abrupt supervisor loss still needs its
+protected service-level process containment and crash-recovery integration.
+
+Protected transport/receiver installation and fixed TLS-supervisor composition,
 controller delivery journaling, remote revocation/cleanup convergence and crash-orphan
 retirement still need integration. Do not infer them from local delivery/TLS success
 or mount the whole controller handoff directory to fill the gap. Delivery receipts

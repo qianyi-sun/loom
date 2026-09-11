@@ -13,11 +13,15 @@ import math
 import os
 import select
 import stat
+import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from loom_capacity_executor.native_bootstrap_delivery import (
     _MAX_DELIVERY_BYTES,
@@ -29,6 +33,47 @@ from loom_capacity_executor.native_worker_bootstrap import (
     _detach_bootstrap_stdin,
     _disable_bootstrap_dumps,
 )
+from loom_capacity_executor.runtime import RoutedExecutableAdmissionClient
+from loom_capacity_executor.slurm_contracts import SlurmFileIdentityV2
+from loom_capacity_executor.trusted_launcher import _read_verified_file
+from loom_capacity_manager.contracts import Digest, Identifier
+
+
+class NativeBootstrapReceiverConfigV1(BaseModel):
+    """Immutable local operator configuration, never a transport request."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_name: Literal["loom.native-bootstrap-receiver-config/v1"] = Field(default="loom.native-bootstrap-receiver-config/v1", alias="schema")
+    directory: Annotated[str, Field(max_length=4096)]
+    target_node: Identifier
+    pool_id: Identifier
+    trusted_release_sha256: Digest
+    admission_directory: Annotated[str, Field(max_length=4096)]
+    admission_directory_sha256: Digest
+
+    @field_validator("directory", "admission_directory")
+    @classmethod
+    def _canonical_directory(cls, value: str) -> str:
+        path = Path(value)
+        if (not path.is_absolute() or path == Path("/") or str(path) != value
+            or ".." in path.parts or "\0" in value or value.startswith("//")):
+            raise ValueError("native receiver configuration directory is invalid")
+        return value
+
+
+def _load_fixed_receiver(identity: SlurmFileIdentityV2) -> NativeBootstrapReceiver:
+    with _protected_destination(Path(identity.path).parent):
+        raw = _read_verified_file(identity, label="receiver configuration", executable=False)
+    config = NativeBootstrapReceiverConfigV1.model_validate_json(raw)
+    if raw != _canonical(config):
+        raise BootstrapDeliveryError("native receiver configuration is not canonical")
+    with _protected_destination(Path(config.admission_directory)):
+        admission = RoutedExecutableAdmissionClient(Path(config.admission_directory),
+            expected_directory_sha256=config.admission_directory_sha256)
+    return NativeBootstrapReceiver(directory=Path(config.directory), target_node=config.target_node,
+        pool_id=config.pool_id, trusted_release_sha256=config.trusted_release_sha256,
+        admission=admission, now=lambda: datetime.now(UTC))
 
 
 @contextmanager
@@ -143,3 +188,30 @@ def run_native_bootstrap_receiver_process(factory: Callable[[], NativeBootstrapR
         except OSError:
             pass
         return 2
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Fixed module entrypoint for the verified local process adapter.
+
+    Flags identify an operator-pinned configuration and one of two operations.
+    No executable, factory import, environment override or command suffix is
+    accepted. Validation occurs inside the hardened process error boundary.
+    """
+    arguments = tuple(sys.argv[1:] if argv is None else argv)
+
+    def factory() -> NativeBootstrapReceiver:
+        if (len(arguments) != 8 or arguments[::2] != ("--configuration",
+            "--configuration-sha256", "--configuration-owner-uid", "--operation")
+            or arguments[7] not in {"deliver", "status"}):
+            raise BootstrapDeliveryError("native receiver arguments are invalid")
+        owner = int(arguments[5])
+        if str(owner) != arguments[5]:
+            raise BootstrapDeliveryError("native receiver configuration owner is invalid")
+        return _load_fixed_receiver(SlurmFileIdentityV2(path=arguments[1], sha256=arguments[3], owner_uid=owner))
+
+    operation: Literal["deliver", "status"] = "status" if len(arguments) == 8 and arguments[7] == "status" else "deliver"
+    return run_native_bootstrap_receiver_process(factory, operation=operation)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
