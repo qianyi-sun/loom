@@ -350,3 +350,48 @@ async def test_receiver_rejects_destination_replacement_during_authority_read(de
             await receiver.receive(payload)
         assert list(delivery.node.iterdir()) == []
         assert list((Path(holder) / "original").iterdir()) == []
+
+
+async def test_historical_status_survives_consumption_and_source_expiry_without_capability(delivery):
+    module, payload, receiver = objects(delivery)
+    expected = module.expected_native_delivery_receipt(payload)
+    query = module.encode_native_delivery_query(delivery.physical, expected)
+    secret = json.loads(payload)["record"]["capability"].encode()
+    assert secret not in query
+    assert await receiver.observe_receipt(query) is None
+    assert list(delivery.node.iterdir()) == []
+    assert delivery.admission.reads == 0
+    assert await receiver.receive(payload) == expected
+    directory = module.native_delivery_directory(delivery.node, delivery.lease.reference)
+    await consume_bootstrap_handoff(directory, delivery.lease.reference, delivery.physical, delivery.admission, now=lambda: delivery.now)
+    claim_bootstrap_handoff_launch(directory, delivery.lease.reference, delivery.physical, delivery.admission, now=lambda: delivery.now)
+    delivery.now += timedelta(days=1)
+    delivery.admission.current = None
+    with pytest.raises(ValueError):
+        module.export_native_bootstrap(delivery.store, delivery.physical, now=lambda: delivery.now)
+    before = {path.name: (path.stat().st_ino, path.read_bytes()) for path in directory.iterdir()}
+    assert await receiver.observe_receipt(query) == expected
+    assert before == {path.name: (path.stat().st_ino, path.read_bytes()) for path in directory.iterdir()}
+    assert delivery.admission.reads == 1
+    assert expected.executable is False
+
+
+@pytest.mark.parametrize("change", ("physical", "reference", "source", "node", "pool", "release", "missing-receipt", "extra"))
+async def test_historical_status_never_aliases_foreign_or_corrupt_delivery(delivery, change):
+    module, payload, receiver = objects(delivery)
+    expected = await receiver.receive(payload)
+    query = json.loads(module.encode_native_delivery_query(delivery.physical, expected))
+    if change == "physical":
+        query["physical"]["slurm_job_id"] = "999999"
+    elif change in {"reference", "source"}:
+        query["expected"][{"reference": "reference", "source": "source_payload_sha256"}[change]] = "f" * 64
+    elif change in {"node", "pool", "release"}:
+        setattr(receiver, {"node": "target_node", "pool": "pool_id", "release": "trusted_release_sha256"}[change], "foreign")
+    elif change == "extra":
+        query["capability"] = "must-not-be-accepted"
+    else:
+        directory = module.native_delivery_directory(delivery.node, delivery.lease.reference)
+        (directory / "delivery-receipt.json").unlink()
+    encoded = json.dumps(query, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    with pytest.raises(ValueError):
+        await receiver.observe_receipt(encoded)
