@@ -1373,6 +1373,36 @@ shadow campaign must separately isolate queue membership, output authority and
 readiness effects. This composition does not activate production to simulate a
 shadow campaign or replace execution trust, capacity-fairness and rollback gates.
 
+### Native protected-worker launch composition (inactive)
+
+`OperatorLaunchProfileV2.native_execution` optionally binds the native protocol,
+platform, environment and execution-root public bytes/lifetime into both the
+launch-policy and approved-profile-set digests. The enclosing profile already
+pins the worker image, launcher, launcher configuration and release. Legacy
+profiles omit the new field from canonical serialization, preserving their
+existing authority hashes; they do not acquire native eligibility. Rendering
+refuses roots outside their validity at submission. Actual launch must recheck
+validity after any Slurm queue delay.
+
+The native bootstrap codec transfers the bounded credential/root document through
+a memory-only, EOF-terminated pipe, not container environment or retained files.
+Preloading checks the pipe's actual capacity and atomic-write limit. Reading
+requires canonical framing, a byte bound and a deadline; missing, delayed,
+trailing or replayed input fails closed. Image tests exercise the installed
+decoder through Docker stdin and a manual restart, and check that container
+inspection/logs do not retain the credential. These prove transport semantics,
+not actual worker registration or native execution authority.
+
+The complete native adapter remains unimplemented. It must connect one fixed,
+immutable-image launch to owner-projected profile eligibility and authenticated
+registration; disable dotenv/core dumps and ambient execution overrides; pass
+credentials directly into worker settings; and close stdin before child work.
+The worker container and all descendants require verified allocation containment.
+Docker client loss is not container termination. Unique in-memory execution
+ownership, durable grant finalization/start consumption and positive owned
+cleanup remain necessary before native readiness can reach any worker. No
+profile parsing, successful bootstrap or signature alone enables execution.
+
 ## Completion and subsequent activation
 
 D2 acceptance requires real streamed-registry fixtures, PostgreSQL concurrency
