@@ -19,7 +19,7 @@ from uuid import UUID
 import httpx
 
 from loom.driver.service_sandbox import ServiceSandboxDriver
-from loom.errors import DriverError
+from loom.errors import AgentError, DriverError
 from loom.models.capabilities import Capabilities
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
@@ -29,7 +29,7 @@ from loom.service_execution_task import (
     _safe_workspace_path,
     _write_json_atomic,
 )
-from loom.service_execution_terminus2 import run_terminus2
+from loom.service_execution_terminus2 import TASK_IMAGE_TOOLS_REQUIRED, run_terminus2
 from loom.service_execution_terminus_trace import parse_terminus_events, terminus_usage
 from loom.trial.workspace import WorkspaceStagingPolicy, materialize_workspace
 from loom.trial.workspace_snapshot import (
@@ -185,5 +185,8 @@ if __name__ == "__main__":
         main()
     except Exception as exc:
         # HTTP exceptions can embed response/request details; never persist them.
-        print(f"isolated execution failed ({type(exc).__name__})", file=sys.stderr)
+        message = f"isolated execution failed ({type(exc).__name__})"
+        if isinstance(exc, AgentError) and exc.args == (TASK_IMAGE_TOOLS_REQUIRED,):
+            message += f": {TASK_IMAGE_TOOLS_REQUIRED}"
+        print(message, file=sys.stderr)
         raise SystemExit(1) from None

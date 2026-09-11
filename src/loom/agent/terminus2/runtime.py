@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
@@ -44,7 +44,9 @@ from loom.models.trial import MultiModelSwitchSpec
 from loom.models.types import OS, ModelSpec
 from loom.request_params import sanitize_request_extras
 from loom.trajectory.attempt_guard import AttemptTrajectoryFencedError
-from loom.trajectory.writer import TrajectoryWriter
+
+if TYPE_CHECKING:
+    from loom.trajectory.writer import TrajectoryWriter
 
 
 def _require_attempt_mutation_active(

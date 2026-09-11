@@ -7,7 +7,7 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID, uuid4
 
 from loom.agent.terminus2.agent_message import parse_agent_message
@@ -32,7 +32,9 @@ from loom.models.trajectory import (
 from loom.models.types import ModelSpec
 from loom.security.redaction import redact_text
 from loom.trajectory.llm_call_events import llm_call_row_to_event
-from loom.trajectory.writer import TrajectoryWriter
+
+if TYPE_CHECKING:
+    from loom.trajectory.writer import TrajectoryWriter
 
 
 class _CpClient(Protocol):

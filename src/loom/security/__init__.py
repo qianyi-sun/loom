@@ -8,13 +8,16 @@ path of ``loom cluster``) or in a k8s Secret (used for bootstrap
 infra credentials in cluster mode).
 """
 
-from loom.security.secret_store import (
-    LocalEncryptedSecretStore,
-    SecretNotFoundError,
-    SecretStore,
-    SecretStoreError,
-    parse_ref,
-)
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from loom.security.secret_store import (
+        LocalEncryptedSecretStore,
+        SecretNotFoundError,
+        SecretStore,
+        SecretStoreError,
+        parse_ref,
+    )
 
 __all__ = [
     "LocalEncryptedSecretStore",
@@ -23,3 +26,13 @@ __all__ = [
     "SecretStoreError",
     "parse_ref",
 ]
+
+
+def __getattr__(name: str) -> object:
+    if name in __all__:
+        from loom.security import secret_store
+
+        value = getattr(secret_store, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

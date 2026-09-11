@@ -1,0 +1,22 @@
+FROM python:3.12-slim
+ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
+# Keep the existing Harbor compatibility version and current-user tool probes.
+ARG HARBOR_COMPAT_SHA=527d50deb63a5d279e8c20593c18a2cbc7f61f9e
+WORKDIR /app
+COPY deploy/harbor-runtime-requirements.txt /tmp/harbor-runtime-requirements.txt
+COPY deploy/patches/harbor-current-user-tool-probes.patch /tmp/harbor-current-user-tool-probes.patch
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends git patch && \
+    pip install --no-cache-dir --requirement /tmp/harbor-runtime-requirements.txt \
+      "harbor @ git+https://github.com/harbor-framework/harbor.git@${HARBOR_COMPAT_SHA}" && \
+    patch --batch --forward -p1 -d "$(python -I -c 'import harbor; print(next(iter(harbor.__path__)))')" < /tmp/harbor-current-user-tool-probes.patch && \
+    rm /tmp/harbor-runtime-requirements.txt /tmp/harbor-current-user-tool-probes.patch && \
+    apt-get purge -y --auto-remove git patch && \
+    rm -rf /var/lib/apt/lists/* && \
+    pip check
+# Install the whole Loom library at a trusted Python location. Isolated Python
+# ignores PYTHONPATH; no editable install, worker package or per-file copy list.
+COPY src/loom /usr/local/lib/python3.12/site-packages/loom
+USER 65532:65532
+RUN python -I -B -c "import loom.service_execution_sandbox_task; from loom.agent.terminus2.runtime import _import_terminus2; _import_terminus2(); from harbor.agents.terminus_2.tmux_session import TmuxSession"
+CMD ["python", "-I", "-B", "-m", "loom.service_execution_sandbox_task", "--help"]

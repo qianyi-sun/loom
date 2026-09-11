@@ -12,7 +12,6 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from loom.agent.litellm import _render_artifact_body
 from loom.request_params import sanitize_request_extras
 
 
@@ -143,6 +142,8 @@ def _write_json_atomic(path: Path, document: dict[str, Any]) -> None:
 
 
 def run_direct_completion(*, workspace: Path = Path("/workspace")) -> None:
+    from loom.agent.litellm import _render_artifact_body
+
     instruction_path = _safe_workspace_path(
         workspace,
         _required_environment("LOOM_TASK_INSTRUCTION_FILE"),
