@@ -252,3 +252,22 @@ async def test_concurrent_terminal_import_retains_one_exact_receipt(prepared_inp
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.terminal_inventory")) == 1
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
+
+
+@pytest.mark.parametrize("boundary", ["function", "execute", "helper", "search-path", "grant-option"])
+def test_terminal_migration_requires_exact_private_surface(build_guard_database, boundary):
+    from alembic import command
+
+    config, engine, _owner, agent, _url = build_guard_database
+    command.upgrade(config, "head")
+    function = "loom_capacity_build_guard.import_terminal_inventory(uuid,jsonb,bytea,text)"
+    quoted_agent = engine.dialect.identifier_preparer.quote(agent)
+    statements = {"function": f"DROP FUNCTION {function}",
+        "execute": f"REVOKE EXECUTE ON FUNCTION {function} FROM {quoted_agent}",
+        "helper": "DROP FUNCTION loom_capacity_build_guard.terminal_inventory_receipt(loom_capacity_build_guard.terminal_inventory)",
+        "search-path": f"ALTER FUNCTION {function} SET search_path=public",
+        "grant-option": f"GRANT EXECUTE ON FUNCTION {function} TO {quoted_agent} WITH GRANT OPTION"}
+    with engine.begin() as connection:
+        connection.exec_driver_sql(statements[boundary])
+    with pytest.raises(RuntimeError, match=r"privilege|surface"):
+        command.upgrade(config, "head")

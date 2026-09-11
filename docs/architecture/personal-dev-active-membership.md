@@ -397,6 +397,19 @@ application recovery still rejects build evidence. Both paths retain bounded
 authenticated transport and exact subject/intent/candidate checks. Fetching is
 not protected import, local signature verification or capacity-release authority.
 
+Build-guard revision `build_guard_0013` adds a separate immutable native terminal
+inventory ledger. The management reporter's `BuildGuardTerminalStore` imports
+manager-authenticated build-purpose V3 Slurm evidence only, joining the exact
+committed bootstrap, physical job and complete signed-proof digest to the retained
+installation and assignment. Owner, native launch profile, controller policy and
+trusted release pins must agree. Serializable locks and savepoint-checked receipts
+make exact retries safe; changed evidence is rejected. Cleanup survives source
+expiry, cancellation and withdrawal without consulting new membership revisions.
+The importer is not exposed on executor admission HTTP routes. This is structural
+validation and a protected local join, not independent signature verification.
+It neither revokes a worker nor removes a capacity hold; protected release
+publication and authoritative hold release remain separate prerequisites.
+
 `ActivationRuntimeArtifactV3` and its explicit pinned loader compose the exact
 typed admission file, complete purpose/profile policy, approved profile digest,
 execution fence and controller-local manifest. Assembly verifies route executor,
