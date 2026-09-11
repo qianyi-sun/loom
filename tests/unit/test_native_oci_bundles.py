@@ -54,6 +54,9 @@ def test_native_oci_bundles_separate_authority_and_preserve_rootless_buildkit(po
     pause, sidecar, client = [json.loads(wire) for wire in (result.pause, result.buildkit, result.client)]
     assert result == module.render_native_oci_bundles(context, policy)
     assert result.sandbox_id.endswith(context.claim_digest)
+    ids = (result.sandbox_id, result.buildkit_id, result.client_id)
+    assert len(set(ids)) == 3
+    assert all(not right.startswith(left) for left in ids for right in ids if right != left)
     for spec in (pause, sidecar, client):
         assert spec["root"] == {"path": str(policy.rootfs), "readonly": True}
         assert spec["process"]["user"] == {"uid": 1000, "gid": 1000}

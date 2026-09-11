@@ -144,6 +144,7 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path)
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
     assert "native-allocated-client-artifact-ok" in output.stdout
     assert "native-client-isolation-probes-ok" in output.stdout
+    assert "native-root-stop-children-and-late-start-ok" in output.stdout
     assert "native-allocated-runtime-cleanup-ok" in output.stdout
     verified_dir = tmp_path / "verified"
     verified_dir.mkdir()
