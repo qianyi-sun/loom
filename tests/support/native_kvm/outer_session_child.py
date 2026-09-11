@@ -14,8 +14,8 @@ from loom_capacity_executor.native_rootless_runtime import (
     NativeRootlessResultV1,
     read_native_rootless_spec,
 )
-from loom_capacity_manager.contracts import canonical_bytes
 from loom_capacity_executor.native_supervisor import NativeAuthorityRequest
+from loom_capacity_manager.contracts import canonical_bytes
 
 
 async def main():

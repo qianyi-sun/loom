@@ -163,3 +163,48 @@ async def test_outer_io_matches_stream_and_result_before_upload_or_outcome(tmp_p
                 while await process.stdout.read(65536):
                     pass
             await process.wait()
+
+
+@pytest.mark.parametrize("creation_fails", [False, True])
+async def test_cancelled_spawn_settles_late_creation_with_repeated_cancellation(monkeypatch, creation_fails):
+    module = import_module("loom_capacity_executor.native_outer_build")
+    original = asyncio.create_subprocess_exec
+    created, allow_return = asyncio.Event(), asyncio.Event()
+    processes = []
+
+    async def delayed_spawn(*args, **kwargs):
+        if not creation_fails:
+            process = await original(sys.executable, "-c",
+                "import os,time; os.write(1, b'x'*1024**2); time.sleep(60)",
+                stdout=asyncio.subprocess.PIPE, limit=4097)
+            processes.append(process)
+        created.set()
+        await allow_return.wait()
+        if creation_fails:
+            raise OSError("creation failed")
+        return process
+
+    monkeypatch.setattr(module.asyncio, "create_subprocess_exec", delayed_spawn)
+    task = asyncio.create_task(module._spawn(Path("/unused"), "a" * 64, 3, 4))
+    try:
+        await asyncio.wait_for(created.wait(), 3)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        allow_return.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 3)
+        for process in processes:
+            assert process.returncode is not None
+            assert process.stdout.at_eof()
+    finally:
+        allow_return.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        for process in processes:
+            if process.returncode is None:
+                process.kill()
+            while await process.stdout.read(65536):
+                pass
+            await process.wait()
