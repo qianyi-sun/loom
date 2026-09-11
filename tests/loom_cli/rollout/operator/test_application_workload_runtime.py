@@ -207,7 +207,7 @@ def test_late_cronjob_child_is_journaled_and_paused_before_drain_succeeds(tmp_pa
         journal.execute(plan, [_component(apply)])
 
 
-@pytest.mark.parametrize("blocker", ["hpa", "foreign-pod", "projected-secret", "guard", "cron-uid"])
+@pytest.mark.parametrize("blocker", ["hpa", "foreign-pod", "projected-secret", "orphan-writer", "guard", "cron-uid"])
 def test_workload_runtime_refuses_unknown_writers_before_any_patch(tmp_path, blocker):
     from loom_cli.rollout.operator.protected_application_workload_runtime import (
         pause_application_workloads,
@@ -228,6 +228,9 @@ def test_workload_runtime_refuses_unknown_writers_before_any_patch(tmp_path, blo
         if blocker == "projected-secret":
             runner.objects[-1]["spec"] = {"containers": [{"name": "foreign"}], "volumes": [
                 {"name": "credentials", "projected": {"sources": [{"secret": {"name": "loom-secrets"}}]}}]}
+        elif blocker == "orphan-writer":
+            runner.objects[-1]["metadata"]["labels"] = {"app": "loom-control-plane"}
+            runner.objects[-1]["spec"] = {"containers": [{"name": "writer"}]}
     def apply(_):
         admit()
         with pytest.raises((ValueError, RuntimeError)):
