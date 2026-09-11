@@ -52,6 +52,15 @@ class NativeSlurmAllocationV1(BaseModel):
     requeue: Literal[False] = False
     restart_count: Literal[0] = 0
 
+    @model_validator(mode="before")
+    @classmethod
+    def _literal_types(cls, value: object) -> object:
+        if isinstance(value, dict):
+            for field, expected_type in (("schema_version", int), ("restart_count", int), ("requeue", bool)):
+                if field in value and type(value[field]) is not expected_type:
+                    raise ValueError("native scheduler literals require exact JSON types")
+        return value
+
     @model_validator(mode="after")
     def _ordered_times(self) -> NativeSlurmAllocationV1:
         for value in (self.submitted_at, self.started_at, self.observed_at):
@@ -139,6 +148,7 @@ def parse_native_allocation(
             or task["set"] is not False or task["infinite"] is not False
             or _integer(task["number"]) != 0
             or job["array_task_string"] != "" or job["het_job_id_set"] != ""
+            or job["batch_flag"] is not True
             or job["requeue"] is not False or _integer(job["restart_cnt"]) != 0
             or job["job_state"] != ["RUNNING"] or _number(job["node_count"]) != 1):
             raise NativeSlurmObservationError("native allocation is not one running non-requeue batch job")
