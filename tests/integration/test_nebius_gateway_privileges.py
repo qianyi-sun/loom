@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -15,19 +16,37 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom import nebius_platform_bootstrap as bootstrap
-from loom.db.schema import RateCard, Task, Team, Token, Trial
+from loom.db.schema import (
+    RateCard,
+    Task,
+    TaskImageMaterialization,
+    Team,
+    Token,
+    Trial,
+    TrialTaskImageMaterialization,
+)
+from loom.execution_runtime_contract import RuntimeTaskInputV1
+from loom.pipeline.keys import canonical_digest, digest_bytes
+from loom.service_execution_materialization import (
+    ServiceExecutionInputFileV1,
+    ServiceExecutionInputManifestV1,
+)
+from loom.trajectory.storage import FakeObjectStore
+from loom_control_plane.service_execution_output import resolve_service_execution_input
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.rate_card import RateCardCache
 from tests.integration.test_nebius_platform_bootstrap import platform_database  # noqa: F401
+from tests.integration.test_service_execution_leases import _runtime_contract
 
 pytestmark = pytest.mark.docker
 
 
-async def test_gateway_completion_records_usage_with_restricted_tls_role(
+@pytest.fixture
+def gateway_database(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+) -> tuple[str, str]:
     database_url = request.getfixturevalue("platform_database")
     monkeypatch.setattr(bootstrap, "database_url", lambda _value, _namespace: database_url)
     monkeypatch.setenv("LOOM_DB_URL", database_url)
@@ -41,6 +60,14 @@ async def test_gateway_completion_records_usage_with_restricted_tls_role(
     bootstrap.bootstrap_database({"namespace": "loom-nebius-platform"})
     # A repeated migration/bootstrap must preserve these restricted grants.
     bootstrap.bootstrap_database({"namespace": "loom-nebius-platform"})
+    return database_url, password
+
+
+async def test_gateway_completion_records_usage_with_restricted_tls_role(
+    gateway_database: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url, password = gateway_database
 
     team_id, trial_id = uuid4(), uuid4()
     task_id = "gateway-grants-" + uuid4().hex
@@ -189,3 +216,93 @@ async def test_gateway_completion_records_usage_with_restricted_tls_role(
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 db.execute(statement)
             db.rollback()
+
+
+async def test_gateway_reads_frozen_task_input_without_materialization_write_privileges(
+    gateway_database: tuple[str, str],
+) -> None:
+    database_url, password = gateway_database
+    team_id, trial_id, snapshot_id = uuid4(), uuid4(), uuid4()
+    task_id = "gateway-snapshot-" + uuid4().hex
+    body = b"frozen instruction\n"
+    plan = _runtime_contract(now=datetime.now(UTC))
+    manifest = ServiceExecutionInputManifestV1(
+        task_revision_sha256=plan.task_revision_sha256,
+        files=(ServiceExecutionInputFileV1(
+            relative_path="instruction.md", size_bytes=len(body), sha256=digest_bytes(body), mode="0644",
+        ),),
+    )
+    manifest_body = manifest.canonical_bytes()
+    manifest_digest = digest_bytes(manifest_body)
+    plan = plan.model_copy(update={
+        "task_image_materialization_id": snapshot_id,
+        "agent_image_ref": plan.task_image_ref,
+        "task_input": RuntimeTaskInputV1(manifest_sha256=manifest_digest, file_count=1, total_bytes=len(body)),
+    })
+    contract = plan.canonical_payload()
+    lease = SimpleNamespace(
+        trial_id=trial_id, team_id=team_id,
+        runtime_contract_json=contract, runtime_contract_sha256=canonical_digest(contract),
+    )
+    admin_engine = create_engine(make_url(database_url).set(drivername="postgresql+psycopg"))
+    try:
+        with admin_engine.begin() as db:
+            db.execute(insert(Team).values(id=team_id, name="gateway-snapshot"))
+            # The current Task no longer describes the source authorized by the lease.
+            db.execute(insert(Task).values(
+                id=task_id, checksum="9" * 64, config={"new_revision": True},
+                source="s3://artifacts/new/task/", source_provenance={},
+            ))
+            db.execute(insert(Trial).values(
+                id=trial_id, team_id=team_id, task_id=task_id, config={}, requires_caps={},
+                state="running", submitted_at=datetime.now(UTC),
+            ))
+            db.execute(insert(TaskImageMaterialization).values(
+                id=snapshot_id, materialization_key=uuid4().hex * 2, task_id=task_id,
+                task_checksum=plan.task_revision_sha256.removeprefix("sha256:"), cpu_arch="x86_64",
+                task_config={"original_revision": True}, task_source="s3://artifacts/original/task/",
+                task_source_provenance={"service_execution_input": {
+                    "schema_version": "loom.service-execution-input.v1",
+                    "manifest_uri": "s3://artifacts/original/manifest.json",
+                    "manifest_sha256": manifest_digest, "file_count": 1, "total_bytes": len(body),
+                }},
+                state="retiring", registry_images={},
+            ))
+            db.execute(insert(TrialTaskImageMaterialization).values(trial_id=trial_id, materialization_id=snapshot_id))
+    finally:
+        admin_engine.dispose()
+
+    gateway_url = make_url(database_url).set(username="loom_gateway", password=password)
+    engine = create_async_engine(gateway_url.set(drivername="postgresql+psycopg"))
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    store = FakeObjectStore()
+    store.objects[("artifacts", "original/manifest.json")] = manifest_body
+    try:
+        async with sessions() as session:
+            resolved = await resolve_service_execution_input(
+                session, lease=lease, store=store, artifacts_bucket="artifacts",
+            )
+            assert resolved.prefix == "original/task/"
+            assert resolved.manifest_body == manifest_body
+    finally:
+        await engine.dispose()
+
+    with psycopg.connect(gateway_url.render_as_string(hide_password=False)) as db:
+        assert db.execute(
+            "SELECT current_user, ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()"
+        ).fetchone() == ("loom_gateway", True)
+        for table, update in (
+            ("task_image_materializations", "state='failed'"),
+            ("trial_task_image_materializations", "materialization_id=materialization_id"),
+        ):
+            assert db.execute(
+                "SELECT has_table_privilege(current_user, %s, 'SELECT'), "
+                "has_table_privilege(current_user, %s, 'INSERT'), "
+                "has_table_privilege(current_user, %s, 'UPDATE'), "
+                "has_table_privilege(current_user, %s, 'DELETE')",
+                (table, table, table, table),
+            ).fetchone() == (True, False, False, False)
+            for statement in (f"UPDATE {table} SET {update}", f"DELETE FROM {table}"):
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    db.execute(statement)
+                db.rollback()
