@@ -271,6 +271,7 @@ async def issue_session_registry_credential(
         session,
         authorization=authorization,
         now=now,
+        source_admission=True,
     )
     row, attempt = await lock_session_materialization_lease(
         session,
@@ -658,6 +659,7 @@ async def _record_session_publication_candidate(
         session,
         authorization=authorization,
         now=now,
+        source_admission=True,
     )
     materialization, attempt = await lock_session_materialization_lease(
         session,

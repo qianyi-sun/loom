@@ -1289,10 +1289,47 @@ real producer against PostgreSQL and TLS MinIO, including authored/catalog IDs,
 two-architecture enqueue, reuse, upload failure and publication rollback.
 
 The local CLI and Python default remain legacy. Adapter and taskset producer
-integration, builder/trial admission and reference release, both taskset GC paths,
-scheduled reconciliation, and V2 claim switching remain required. Taskset quota
+integration, trial admission and reference release, both taskset GC paths,
+and scheduled reconciliation remain required. Taskset quota
 accounting must include retained historical source objects outside generation
 roots before that producer switches. These APIs do not activate native builders.
+
+### Native registered-source composition
+
+Native claims derive V2 plans only from an admitted registered source, checking
+its manifest, full config/provenance, location, checksum and materialization key
+together. The registered-source manifest column cannot silently fall back to a
+V1 plan when provenance is missing. Historical V1 wire bytes and canonical hashes
+remain unchanged; the synchronous V1 bundle provider still refuses V2 input.
+
+Fresh/replayed claims, start/heartbeat operations including replay, live-plan
+reads, and shared registry credential/candidate admission retain the source under
+image → attempt → source locking. A retained READ COMMITTED transaction is checked
+before authority reads can autoflush caller-owned state. Locked image and session
+parent reads refresh cached ownership and reject pending edits before refresh.
+Cleanup-only release and containment failure do not
+require available input and retain their non-admitting SERIALIZABLE route.
+
+Every continuing attempt compares its retained canonical claim against the
+freshly admitted derivation. A self-consistent receipt hash alone cannot replace
+the manifest, component paths or plan schema. Only live session identity and
+authorization expiry may differ on renewal; a claim replay returns its original
+receipt without extending that receipt's expiry or changing its session binding.
+
+The configured asynchronous bundle path checks source authority both before
+storage I/O and after reacquiring the transaction locks, including encrypted
+capability replay. PostgreSQL and disposable TLS MinIO tests compose the real
+registered publisher, HTTP projection/session/claim and configured bundle backend,
+then download and hash returned signed objects. They exercise source loss before
+I/O, during unlocked I/O and before replay, plus session renewal without rewriting
+the claim. Projection/guard observations in those fixtures are synthetic: these
+tests are not native Slurm, containment or activation acceptance.
+
+Production providers remain disabled and source collection remains unscheduled.
+Native session and registry authority still require production purpose; a genuine
+shadow campaign must separately isolate queue membership, output authority and
+readiness effects. This composition does not activate production to simulate a
+shadow campaign or replace execution trust, capacity-fairness and rollback gates.
 
 ## Completion and subsequent activation
 
