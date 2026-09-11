@@ -41,6 +41,64 @@ def receipt(request):
         admission_digest=digest,protected_high_water=1)
 
 
+def native_registration(pool="gb10"):
+    from uuid import uuid4
+
+    from loom_capacity_agent.admission import ExecutableWorkerRegistrationV2
+
+    return ExecutableWorkerRegistrationV2(operation_id=uuid4(), binding=registration(pool).binding,
+        bootstrap_registration_epoch=1, protected_registration_epoch=2, slurm_job_id="1234",
+        worker_id=uuid4(), worker_incarnation=uuid4(), worker_credential_sha256="e" * 64)
+
+
+@pytest.mark.parametrize("pool", ["gb10", "oldlab"])
+@pytest.mark.parametrize("boundary", ["exact", "subject_id", "subject_incarnation", "intent_id",
+    "worker_id", "worker_incarnation", "predecessor_worker_incarnation",
+    "protected_registration_epoch", "request_digest", "registration_digest"])
+async def test_client_validates_native_registration_receipt(pool, boundary):
+    from uuid import uuid4
+
+    from loom_capacity_agent.admission import RegisteredExecutableWorkerV2
+
+    request = native_registration(pool)
+    digest = canonical_executable_digest(request)
+    expected = RegisteredExecutableWorkerV2(subject_id=request.binding.subject_id,
+        subject_incarnation=request.binding.subject_incarnation, intent_id=request.binding.intent_id,
+        worker_id=request.worker_id, worker_incarnation=request.worker_incarnation,
+        protected_registration_epoch=2, request_digest=digest, registration_digest=digest,
+        protected_high_water=3)
+
+    async def handle(outgoing):
+        assert outgoing.url.path.endswith("/register")
+        assert outgoing.headers["Authorization"] == "Bearer admission-only-secret"
+        assert json.loads(outgoing.content) == {"schema_version": 1,
+            "registration": request.model_dump(mode="json"), "bootstrap_capability": "b" * 43}
+        changed = expected
+        if boundary != "exact":
+            value = 3 if boundary.endswith("epoch") else "f" * 64 if boundary.endswith("digest") else uuid4()
+            changed = expected.model_copy(update={boundary: value})
+        return httpx.Response(200, content=canonical_executable_bytes(changed))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = client_for(http, request)
+        if boundary == "exact":
+            assert await client.register_worker(request, bootstrap_capability="b" * 43) == expected
+        else:
+            with pytest.raises(RuntimeError, match="binding"):
+                await client.register_worker(request, bootstrap_capability="b" * 43)
+
+
+@pytest.mark.parametrize("capability", ["short", "b" * 513, " " * 43, "é" * 43])
+async def test_client_rejects_invalid_registration_secret_before_transport(capability):
+    async def unexpected(outgoing):
+        pytest.fail("invalid secret must not reach transport")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected)) as http:
+        request = native_registration()
+        with pytest.raises(ValueError):
+            await client_for(http, request).register_worker(request, bootstrap_capability=capability)
+
+
 @pytest.mark.parametrize("boundary", ["exact", "subject_id", "subject_incarnation", "intent_id",
     "slurm_job_id", "ownership_evidence_sha256", "bootstrap_registration_epoch",
     "protected_registration_epoch", "request_digest", "withdrawal_digest"])

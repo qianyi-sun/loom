@@ -49,6 +49,41 @@ def preparation(registration, digest):
     return {"schema_version":1,"registration":registration.model_dump(mode="json"),"bootstrap_sha256":digest}
 
 
+@pytest.mark.parametrize("boundary", ["exact", "disabled", "secret", "credential", "pool", "http"])
+async def test_http_native_registration_commits_and_replays(prepared_input, tmp_path, monkeypatch, boundary):
+    from tests.integration.test_personal_dev_build_guard_registration import (
+        BOOTSTRAP,
+        registration_input,
+    )
+
+    _factory, engine, *_ = prepared_input
+    request, _physical = await registration_input(prepared_input, monkeypatch)
+    app = application(prepared_input, tmp_path)
+    app.state.personal_dev_build_admission_mode = "prepare-bind-only" if boundary == "disabled" else "native-registration"
+    base = "http://management.test" if boundary == "http" else "https://management.test"
+    token = "wrong" if boundary == "credential" else "executor-secret"
+    url = route(request, "register")
+    if boundary == "pool":
+        url = url.replace(f"/pools/{request.binding.pool_id}/", "/pools/foreign/")
+    envelope = {"schema_version": 1, "registration": request.model_dump(mode="json"),
+        "bootstrap_capability": "x" * 43 if boundary == "secret" else BOOTSTRAP}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=base,
+        headers={"Authorization": f"Bearer {token}"}) as client:
+        reply = await client.post(url, json=envelope)
+        if boundary == "exact":
+            assert reply.status_code == 200, reply.text
+            assert reply.json()["worker_id"] == str(request.worker_id)
+            replay = await client.post(url, json=envelope)
+            assert replay.content == reply.content
+        else:
+            assert reply.status_code in {401, 403, 409, 503}, reply.text
+        assert BOOTSTRAP not in reply.text
+        assert "executor-secret" not in reply.text
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_registrations")) == (1 if boundary == "exact" else 0)
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
+
+
 async def test_http_prepare_bind_and_lost_reply_replay_are_committed(prepared_input, tmp_path):
     _factory, engine, _installation, _plan, _source, _request = prepared_input
     registration, digest = await admitted(prepared_input)
