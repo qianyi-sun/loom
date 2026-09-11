@@ -2,10 +2,12 @@
 
 import asyncio
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -14,7 +16,7 @@ from loom_capacity_agent.executable_admission import (
     ExecutableAdmissionError,
     ExecutableAdmissionStore,
 )
-from loom_capacity_manager.executable_contracts import canonical_executable_digest
+from loom_capacity_manager.executable_contracts import canonical_executable_bytes, canonical_executable_digest
 from tests.integration.test_capacity_agent_executable_admission import (
     _initialize_and_register,
     _physical,
@@ -68,6 +70,8 @@ async def test_current_bootstrap_is_fresh_exact_and_does_not_consume_or_record_s
     assert observed.bootstrap_sha256 == _DIGEST
     assert before <= observed.observed_at < observed.bootstrap_expires_at
     assert observed.observation_state == "current-unused-bootstrap"
+    with pytest.raises(ValidationError):
+        type(observed).model_validate_json(json.dumps(observed.model_dump(mode="json") | {"executable": 0}))
     again = await _observe(capacity_guard_database, registration, physical)
     assert again.observed_at >= observed.observed_at
     async with _serializable_executor_session(capacity_guard_database) as session:
@@ -202,3 +206,26 @@ async def test_executor_client_uses_fresh_bounded_application_observation(capaci
         await client.withdraw_unregistered_worker(_withdrawal(request))
         with pytest.raises(DBAPIError, match="current unused bootstrap"):
             await client.observe_current_bootstrap(physical)
+
+
+@pytest.mark.asyncio
+async def test_sql_observation_never_refreshes_transaction_snapshot_age(capacity_guard_database):
+    """Even a direct SQL caller gets the conservative age of its retained snapshot."""
+    _, registration, request, physical, _ = await _prepared(capacity_guard_database)
+    async with _serializable_executor_session(capacity_guard_database) as session:
+        snapshot_time = (await session.execute(text("SELECT transaction_timestamp()"))).scalar_one()
+        # A concurrent agent can publish a replacement while this SERIALIZABLE
+        # transaction still legitimately sees the old bootstrap. That observation
+        # must not be relabeled with a newer timestamp after replacement.
+        await _protect_bootstrap(capacity_guard_database, registration, request=request,
+            bootstrap_sha256="b" * 64, proposal_epoch=2)
+        wire = canonical_executable_bytes(physical)
+        observed = (await session.execute(text(
+            "SELECT loom_capacity_guard.observe_current_executable_bootstrap("
+            ":subject, :incarnation, CAST(:payload AS jsonb), CAST(:wire AS bytea), :digest)"
+        ), {"subject": registration.subject_id, "incarnation": registration.subject_incarnation,
+            "payload": wire.decode(), "wire": wire, "digest": canonical_executable_digest(physical)})).scalar_one()
+        assert datetime.fromisoformat(observed["observed_at"]) == snapshot_time
+    # The supported API owns a fresh snapshot and must see that replacement.
+    with pytest.raises(DBAPIError, match="current unused bootstrap"):
+        await _observe(capacity_guard_database, registration, physical)
