@@ -42,13 +42,14 @@ def receipt(request):
 
 
 def native_registration(pool="gb10"):
+    from hashlib import sha256
     from uuid import uuid4
 
     from loom_capacity_agent.admission import ExecutableWorkerRegistrationV2
 
     return ExecutableWorkerRegistrationV2(operation_id=uuid4(), binding=registration(pool).binding,
         bootstrap_registration_epoch=1, protected_registration_epoch=2, slurm_job_id="1234",
-        worker_id=uuid4(), worker_incarnation=uuid4(), worker_credential_sha256="e" * 64)
+        worker_id=uuid4(), worker_incarnation=uuid4(), worker_credential_sha256=sha256(b"w" * 43).hexdigest())
 
 
 @pytest.mark.parametrize("pool", ["gb10", "oldlab"])
@@ -97,6 +98,42 @@ async def test_client_rejects_invalid_registration_secret_before_transport(capab
         request = native_registration()
         with pytest.raises(ValueError):
             await client_for(http, request).register_worker(request, bootstrap_capability=capability)
+
+
+@pytest.mark.parametrize("pool", ["gb10", "oldlab"])
+@pytest.mark.parametrize("boundary", ["exact", "request", "digest", "noncanonical", "rejected"])
+async def test_client_authenticates_exact_native_platform_claim(pool, boundary):
+    from uuid import uuid4
+
+    from loom_capacity_agent.build_admission import BuildClaimReceiptV1, BuildClaimRequestV1
+    from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
+
+    worker = native_registration(pool)
+    request = BuildClaimRequestV1(binding=worker.binding, operation_id=uuid4(), request_id=uuid4(),
+        worker_id=worker.worker_id, worker_incarnation=worker.worker_incarnation)
+    expected = BuildClaimReceiptV1(request=request, request_digest=canonical_digest(request))
+
+    async def handle(outgoing):
+        assert outgoing.url.path.endswith("/claim")
+        assert json.loads(outgoing.content) == {"schema_version": 1,
+            "claim": request.model_dump(mode="json"), "worker_credential": "w" * 43}
+        response = expected
+        if boundary == "request":
+            response = response.model_copy(update={"request": request.model_copy(update={"request_id": uuid4()})})
+        elif boundary == "digest":
+            response = response.model_copy(update={"request_digest": "f" * 64})
+        if boundary == "rejected":
+            return httpx.Response(409, content=b"private credential and database diagnostics")
+        return httpx.Response(200, content=canonical_bytes(response) + (b" " if boundary == "noncanonical" else b""))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = client_for(http, worker)
+        if boundary == "exact":
+            assert await client.claim_platform(request, worker_credential="w" * 43) == expected
+        else:
+            with pytest.raises(RuntimeError) as failure:
+                await client.claim_platform(request, worker_credential="w" * 43)
+            assert "private credential" not in str(failure.value)
 
 
 @pytest.mark.parametrize("boundary", ["exact", "subject_id", "subject_incarnation", "intent_id",

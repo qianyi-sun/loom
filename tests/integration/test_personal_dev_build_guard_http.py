@@ -263,7 +263,7 @@ async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_inpu
 
 
 @pytest.mark.parametrize("pinned", [False,True,"typed"])
-@pytest.mark.parametrize("register", [False, True])
+@pytest.mark.parametrize("register", [False, True, "claim"])
 async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepared_input,tmp_path,pinned,register,monkeypatch):
     import asyncio
     import socket
@@ -293,7 +293,8 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
     _factory,engine,_installation,_plan,_source,_request = prepared_input
     registration,digest = await admitted(prepared_input)
     app = application(prepared_input,tmp_path)
-    app.state.personal_dev_build_admission_mode = "native-registration" if register else "prepare-bind-only"
+    app.state.personal_dev_build_admission_mode = ("native-claims" if register == "claim"
+        else "native-registration" if register else "prepare-bind-only")
     ca_key,ca = _new_ca("build-admission-ca")
     server_key,server_cert = _signed_certificate("localhost",ca_key,ca,server=True)
     client_key,client_cert = _signed_certificate("build-executor",ca_key,ca,server=False)
@@ -375,6 +376,17 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
             registered = await client.register_worker(worker, bootstrap_capability=BOOTSTRAP)
             assert await client.register_worker(worker, bootstrap_capability=BOOTSTRAP) == registered
             assert (await client.observe_intent(binding)).worker_id == worker.worker_id
+            if register == "claim":
+                from loom_capacity_agent.build_admission import BuildClaimRequestV1
+
+                claim = BuildClaimRequestV1(binding=binding, operation_id=uuid4(), request_id=_request.id,
+                    worker_id=worker.worker_id, worker_incarnation=worker.worker_incarnation)
+                # Install the same opaque credential hash in the registered worker.
+                # This fixture's native_registration uses a deterministic hash.
+                claimed = await client.claim_platform(claim, worker_credential="w" * 43)
+                assert claimed.request == claim
+                assert await client.claim_platform(claim, worker_credential="w" * 43) == claimed
+                assert (await client.observe_intent(binding)).claim_high_water == 1
         else:
             withdraw = withdrawal(physical_request)
             withdrawn = await client.withdraw_unregistered_worker(withdraw)
