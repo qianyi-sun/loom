@@ -19,10 +19,12 @@ from urllib.parse import urlsplit
 import h11
 
 from loom_task_image_authority.config import _validate_https_origin
+from loom_task_image_authority.keyset_signing_request import decode_keyset_signing_request
 from loom_task_image_authority.publication_contracts import (
     MAX_SIGNER_REPLY_BYTES,
     decode_unsigned_input,
 )
+from loom_task_image_authority.publication_keyset import MAX_KEYSET_ENVELOPE_BYTES
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +77,7 @@ def _check_raw_framing(raw_head: bytes) -> None:
         raise ValueError("ambiguous response framing")
 
 
-class HTTPSPublicationSigner:
+class _HTTPSFixedSigner:
     """One bounded POST per call; never retries, redirects or uses proxy settings.
 
     Queue time counts toward the total deadline. Each operation owns one socket,
@@ -135,18 +137,13 @@ class HTTPSPublicationSigner:
             request.cancel()
         await asyncio.gather(*requests, return_exceptions=True)
 
-    async def sign_publication(
-        self, canonical_unsigned_input: bytes, *, maximum_reply_bytes: int,
+    async def _request(
+        self, canonical_input: bytes, *, maximum_reply_bytes: int, target: bytes,
     ) -> bytes:
-        if (
-            self._close_task is not None
-            or type(maximum_reply_bytes) is not int
-            or not 0 < maximum_reply_bytes <= MAX_SIGNER_REPLY_BYTES
-        ):
-            raise ValueError("publication signer request is unavailable or invalid")
-        decode_unsigned_input(canonical_unsigned_input)
+        if self._close_task is not None:
+            raise ValueError("signer request is unavailable")
         deadline = asyncio.get_running_loop().time() + self._limits.total_timeout_seconds
-        request = asyncio.create_task(self._sign(canonical_unsigned_input, maximum_reply_bytes, deadline))
+        request = asyncio.create_task(self._sign(canonical_input, maximum_reply_bytes, deadline, target))
         self._requests.add(request)
         request.add_done_callback(self._requests.discard)
         return await request
@@ -196,13 +193,13 @@ class HTTPSPublicationSigner:
             if name == b"content-length" and int(values[0]) > maximum_reply_bytes:
                 raise ValueError("response body ceiling")
 
-    async def _sign(self, unsigned: bytes, maximum_reply_bytes: int, deadline: float) -> bytes:
+    async def _sign(self, unsigned: bytes, maximum_reply_bytes: int, deadline: float, target: bytes) -> bytes:
         writer: asyncio.StreamWriter | None = None
         try:
             async with asyncio.timeout_at(deadline), self._semaphore:
                 stream, writer = await self._connect()
                 protocol = h11.Connection(h11.CLIENT, max_incomplete_event_size=self._limits.maximum_header_bytes)
-                request = h11.Request(method=b"POST", target=b"/v1/publications/sign", headers=[
+                request = h11.Request(method=b"POST", target=target, headers=[
                     (b"Host", self._host), (b"Content-Type", b"application/json"),
                     (b"Accept", b"application/json"), (b"Accept-Encoding", b"identity"),
                     (b"Content-Length", str(len(unsigned)).encode("ascii")),
@@ -261,3 +258,29 @@ class HTTPSPublicationSigner:
         finally:
             if writer is not None:
                 writer.transport.abort()
+
+
+class HTTPSPublicationSigner(_HTTPSFixedSigner):
+    """Fixed publication operation; signature verification remains caller-owned."""
+
+    async def sign_publication(
+        self, canonical_unsigned_input: bytes, *, maximum_reply_bytes: int,
+    ) -> bytes:
+        if type(maximum_reply_bytes) is not int or not 0 < maximum_reply_bytes <= MAX_SIGNER_REPLY_BYTES:
+            raise ValueError("invalid publication signer reply limit")
+        decode_unsigned_input(canonical_unsigned_input)
+        return await self._request(
+            canonical_unsigned_input, maximum_reply_bytes=maximum_reply_bytes, target=b"/v1/publications/sign",
+        )
+
+
+class HTTPSKeysetSigner(_HTTPSFixedSigner):
+    """Fixed bootstrap/refresh operation; retention/finalization remain separate."""
+
+    async def sign_keyset(self, canonical_request: bytes, *, maximum_reply_bytes: int) -> bytes:
+        if type(maximum_reply_bytes) is not int or not 0 < maximum_reply_bytes <= MAX_KEYSET_ENVELOPE_BYTES:
+            raise ValueError("invalid keyset signer reply limit")
+        decode_keyset_signing_request(canonical_request)
+        return await self._request(
+            canonical_request, maximum_reply_bytes=maximum_reply_bytes, target=b"/v1/keysets/sign",
+        )

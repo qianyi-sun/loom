@@ -1,9 +1,11 @@
 # Task-image execution trust
 
-Status: signed-keyset verification and durable distribution adapter implemented;
-runtime distribution, complete execution grants and online start remain uncomposed.
+Status: signed-keyset verification, durable distribution adapter and dedicated
+signer service/client implemented; host signing service provisioning, runtime
+distribution, complete execution grants and online start remain uncomposed.
 
-This increment implements the keyset wire described by the
+This document covers the keyset wire, durable distribution and dedicated signer
+implementation of the
 [Phase 2 production design](2026-09-02-task-image-builder-phase2-production.md).
 It does not activate builders or authorize a trial runtime. The
 [publication boundary](2026-09-05-task-image-builder-phase2d2-verification.md)
@@ -127,7 +129,113 @@ The adapter is **not runtime-composed**. Database authentication and the executi
 root remain operator-configured. Retention is not proof of fleet readiness: the
 authenticated claim path must deliver these exact envelopes to root-pinned capable
 workers, and the serialized online one-use start gate must exist before activation.
-No private signing key, signer service or worker capability is installed here.
+No private signing key, live signer service or worker capability is installed here.
+
+## Dedicated signer policy and fixed clients
+
+`loom_task_image_signer.policy` is a separate process-owned policy package, not an
+in-process authority private-key provider. It has two fixed operations. Keyset
+signing accepts a closed canonical preparation request containing environment,
+previous/proposed version, revocation epoch and the complete ordered public-key
+snapshot. It independently reads the durable authority, stamps its own clock,
+signs with the configured execution root, rechecks the authority and verifies
+the provider's returned signature. Version zero needs no previous artifact;
+retaining the returned artifact remains a separately fenced transaction.
+
+Publication signing requires a current committed authenticated keyset. It selects
+the operator-configured publication key and checks stable environment, registry,
+pool/architecture, cluster, build policy, release, supervisor and purpose/campaign
+configuration. Per-allocation attestation, grant/job and image facts are supplied
+by the authenticated publication verifier and remain signed and checked by the
+existing publication completion authority. A per-allocation attestation digest
+is deliberately not a static release setting: new legitimate allocations must
+not require signer reconfiguration. The signer does not claim to re-fetch OCI
+graphs or grant readiness from a signature alone.
+
+Both operations use separate bounded READ COMMITTED transactions before and
+after provider I/O, with no database locks retained while signing. Server-side
+statement/idle limits complement an outer checkout/provider/cleanup-inclusive
+deadline. The original signed issue/expiry and exact retained artifact are
+rechecked before return. Publication and execution key bytes must differ;
+providers and handles come only from trusted service composition, not requests.
+
+The service database role needs SELECT on publication state, keys, keysets and
+members, plus UPDATE on only `state.singleton_id` and `keys.key_id` to obtain
+the required locks. Existing immutable-identity triggers and column grants
+prevent authority mutation. This is not SQL read-only: same-value identity
+updates can take locks and create row versions. A real disposable restricted
+login test exercises both signing operations and rejects changes to counters,
+key bytes/lifecycle, audit rows, trigger state, schema ownership and roles.
+Production provisioning must verify effective privileges, no broad inherited
+grants/ownership and the required immutable/state-lock triggers.
+
+`HTTPSKeysetSigner` and `HTTPSPublicationSigner` reuse one bounded mTLS transport
+but expose separate fixed operation paths. TLS identities remain operator-owned;
+neither client accepts an arbitrary signing domain, key or endpoint path. The
+keyset response is still untrusted until the existing cryptographic verifier and
+durable finalizer accept it.
+
+`SignerServer` explicitly binds TLS 1.3 with required client certificates and
+maps the actual socket peer's DER-certificate SHA-256 to permitted operations.
+CA membership alone is insufficient. Its raw socket accept loop reserves a
+connection slot before accepting and allocating a TLS handshake; excess
+connections remain in the finite OS backlog. Each accepted socket has a single
+deadline for handshake, bounded headers/body, operation queue, policy and reply.
+It executes at most one operation and closes the connection. Raw CRLF framing
+is checked before h11 normalization, including rejection of bare CR/LF, duplicate
+headers, ambiguous lengths, transfer encodings, folding, upgrades and forwarded
+identity. Shutdown cancels and joins both handshake and policy tasks; a retained
+completion callback owns socket/slot cleanup even if a task never starts.
+
+`load_signing_key` loads an explicitly provisioned 32-byte Ed25519 seed from an
+owner-only directory and regular single-link file. Descriptor-relative no-follow
+traversal rejects symlink components and writable ancestors. File ownership,
+mode, size and before/after metadata are checked; the derived public key must
+match the configured pin. There is no missing-file generation fallback, exported
+private-key API or detached signing thread. Key bytes live only in the dedicated
+signer process; service-account isolation and protected key installation remain
+operator prerequisites. The module does not provision them.
+
+### Explicit startup and privilege admission
+
+The inert `loom-task-image-signer --config /absolute/owner-only/settings.json`
+entrypoint requires schema `loom.task-image-signer/v1`. Configuration supplies
+the bind address/port, owner-only database URL file, TLS certificate/private key
+and client CA files, distinct execution/publication public pins and seed paths,
+the execution root's environment/validity interval, stable publication selections,
+and exact peer certificate digests mapped to `keyset`/`publication` operations.
+No credential, root, permission, bind listener or selection is discovered from
+worker state. Limits default to sixteen admitted connections, two operations,
+16 KiB headers, three-second handshake/read budgets and a ten-second total
+connection deadline. Policy I/O has a five-second ceiling and new keysets a
+five-minute lifetime, bounded by the configured root and fifteen-minute maximum.
+
+Startup first authenticates with the dedicated database role and verifies its
+effective privileges. Administrative/inherited roles, database or schema CREATE,
+unrelated relation/sequence access, function ownership, callable non-trigger
+SECURITY DEFINER routines, parameter permission to change
+`session_replication_role`, extra column writes and missing required read/lock
+privileges are rejected. The exact enabled trigger set, trigger properties and
+function bodies are pinned to migrations `0135`/`0138`. Row-security filtering
+and disabled, substituted or extra authority triggers close admission. Ordinary
+trigger-returning routines cannot be called directly and are verified through
+their attached authority triggers. These checks perform no grants or schema
+changes. A trusted administrator changing privileges after startup remains
+outside this service-account boundary.
+
+Only then are signing keys loaded and the TLS listener opened. Database URLs
+accept only explicit `postgresql+psycopg` credentials/destination and the closed
+`sslmode`/`sslrootcert` option set. A nonnumeric-loopback destination requires
+`verify-full` with an absolute CA path. All ambient `PG*` settings are rejected,
+preventing libpq host/service/TLS overrides. Authority transactions explicitly
+put `pg_temp` last in their search path. A listener failure reaches the service
+supervisor; SIGINT/SIGTERM close/join connection and policy work before disposing
+the database pool. Interrupted context cleanup retains that ordering.
+
+Disposable tests exercise this complete startup-to-signature path with an actual
+restricted login, owner-only key files and mTLS. This is not a production key
+ceremony or native activation. There is still no installed service account, live
+listener, worker delivery, complete execution grant or one-use start evidence.
 
 ## Evidence and remaining activation gates
 
@@ -145,9 +253,10 @@ signing, exact replay, key-insert serialization, unsupported isolation, cached o
 pending state, unchanged expiry and rollback on expiration during persistence.
 These are local contract tests, not live distribution or native acceptance.
 
-The dedicated signing service policy, versioned complete grant, source binding,
-worker reader and serialized one-use start/revocation must still be implemented
-and integrated with this distributor. Production remains
+The dedicated signing service policy and distributor are implemented but not
+provisioned or runtime-composed. The versioned complete grant, source binding,
+worker reader and serialized one-use start/revocation still require implementation
+and integration. Production remains
 disabled pending those gates, genuine shadow isolation, both native containment
 and scheduling campaigns, Phase 1 continuity, incident acceptance, rollback and
 soak. No private signing keys, live state changes or runtime defaults are supplied
