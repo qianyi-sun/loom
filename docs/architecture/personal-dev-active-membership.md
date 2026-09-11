@@ -497,6 +497,27 @@ contents. Discovery/authority errors do not produce invented success. This adapt
 still needs connection to the management runtime and live concurrent-owner
 acceptance; it issues no source grants or application worker credentials.
 
+`BuildManagementRuntime` composes installation-scoped terminal recovery, protected
+release publication, final retirement, demand reporting, bootstrap registration
+and plan convergence. Each pass performs cleanup before new admission. Expected
+stage failures do not prevent later cleanup or manager closure processing;
+cancellation and unexpected programming errors propagate. Disabled intake still
+reports accounting and converges closures, but cannot register a bootstrap or
+prepare/publish new admission work. Diagnostics contain fixed stage names, never
+database messages or response contents. The service must still supply the pinned
+installation, exact reporter connection and live intake interlock; loop health
+is not membership readiness, a source grant, or candidate publication authority.
+
+Build-guard revision `build_guard_0024` privately rediscovers committed plans
+without a publication or terminal disposition. This recovers lost acknowledgement
+replies even after the manager removes accepted proposals from its work queue.
+A bounded finite sweep replays each exact proposal digest through existing
+publication authorization; it cannot bypass current source, lease or hold checks.
+Failed items remain retryable and cannot starve later admissions. Completely
+retired assignments are omitted only using committed exact retirement evidence,
+not elapsed time or absent holds. Restart begins the scan again; its cursor is
+not delivery evidence. Disabled intake never republishes admission.
+
 Build-guard revision `build_guard_0023` gives absent plan publication a dedicated
 SQLSTATE. `BuildPlanCoordinator.converge` first republishes an existing exact
 proposal, recovering reservations after process restart or lost replies. Only

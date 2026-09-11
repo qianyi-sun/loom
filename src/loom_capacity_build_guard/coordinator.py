@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.personal_dev_candidate import CandidateRegistration
 from loom_capacity_agent.client import (
+    DemandPublishError,
     ExecutableAdmissionAcknowledgementReceiptV2,
     ExecutableAdmissionPlanClosureAcknowledgementReceiptV2,
 )
@@ -26,6 +27,7 @@ from loom_capacity_build_guard.plan_store import (
     PreparedBuildPlan,
     RetainedBuildClosureV1,
 )
+from loom_capacity_build_guard.publication_discovery import BuildGuardPublicationDiscovery
 from loom_capacity_manager.executable_contracts import (
     ExecutableAdmissionAcknowledgementV2,
     ExecutableAdmissionPlanClosureAcknowledgementV2,
@@ -65,6 +67,33 @@ class BuildPlanCoordinator:
         self._installation = installation
         self._publisher = publisher
         self._timeout = operation_timeout_seconds
+        self._publication_after = UUID(int=0)
+        self._publication_through: UUID | None = None
+        self._publication_lock = asyncio.Lock()
+
+    async def publish_pending(self) -> bool:
+        """Sweep durable preparations, including ones the manager no longer offers.
+
+        The bounded cursor is scan progress, never delivery evidence. A failed
+        item does not starve later items; every finite sweep starts again at zero.
+        All replay still goes through current-source publication authorization.
+        """
+        async with self._publication_lock:
+            async with asyncio.timeout(self._timeout), self._sessions.begin() as session:
+                page = await BuildGuardPublicationDiscovery(session, installation=self._installation).read_pending(
+                    after_plan_id=self._publication_after, through_plan_id=self._publication_through)
+            self._publication_through = page.through_plan_id
+            success = True
+            for pending in page.plans:
+                try:
+                    await self.publish(pending.plan_id, expected_proposal_digest=pending.proposal_digest)
+                except (DemandPublishError, DBAPIError, ValueError, TimeoutError):
+                    success = False
+                # Cancellation propagates without claiming this item progressed.
+                self._publication_after = pending.plan_id
+            if not page.plans or self._publication_after == self._publication_through:
+                self._publication_after, self._publication_through = UUID(int=0), None
+            return success
 
     async def prepare(self, proposal: ExecutableAdmissionPlanProposalV2, *,
         sources: Mapping[UUID, CandidateRegistration] | None = None,

@@ -15,6 +15,9 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
     version_table = connection.scalar(text("SELECT to_regclass('loom_capacity_build_guard.alembic_version')"))
     revision = connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) if version_table else None
     callables = []
+    if revision == "build_guard_0024":
+        callables.append(f"{SCHEMA}.read_pending_publications(uuid,uuid,uuid,integer)")
+        revision = "build_guard_0023"
     if revision == "build_guard_0023":
         # Only the missing-plan SQLSTATE changes; callable authority is unchanged.
         revision = "build_guard_0022"

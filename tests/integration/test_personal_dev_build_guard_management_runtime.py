@@ -230,6 +230,8 @@ async def test_restart_recovers_accepted_plan_missing_from_manager_queue(prepare
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.dispositions WHERE kind='publication'")) == 0
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
+        disabled = await runtime(factory, installation, manager).run_once(admission_enabled=False)
+        assert disabled.failed_stages == () and len(accepted) == 1
         # New runtime instance: no in-memory proposal survives the failed pass.
         second = await runtime(factory, installation, manager).run_once(admission_enabled=True)
         assert second.failed_stages == ()
@@ -240,3 +242,43 @@ async def test_restart_recovers_accepted_plan_missing_from_manager_queue(prepare
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.dispositions WHERE kind='publication'")) == 1
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.assignments")) == 1
+
+
+async def test_stale_pending_publication_does_not_starve_other_pool_admission(prepared_input, sessions, tmp_path):
+    from loom_capacity_build_guard.plan_store import BuildGuardPlanStore
+    from tests.integration.test_personal_dev_build_guard_recovery import other_pool_input
+
+    factory, engine, installation, old_plan, _source, old_request = prepared_input
+    new_plan = (await other_pool_input(prepared_input, sessions, tmp_path))[3]
+    async with factory.begin() as session:
+        await BuildGuardPlanStore(session, installation=installation).prepare(old_plan)
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE personal_dev_build_platform_requests SET cancelled_at=now() WHERE id=:id"), {"id": old_request.id})
+    accepted = []
+
+    async def handle(outgoing):
+        path = outgoing.url.path
+        if "/reports/demand/" in path:
+            snapshot = DemandSnapshotV1.model_validate_json(outgoing.content)
+            return httpx.Response(200, json={"snapshot_id": str(uuid4()), "digest": canonical_digest(snapshot),
+                "sequence": snapshot.sequence, "replayed": False})
+        if path.endswith("/bootstrap-work"):
+            return httpx.Response(200, content=b"null")
+        if path.endswith("/admission-work"):
+            return httpx.Response(200, content=canonical_executable_bytes(new_plan))
+        assert "/admission-acknowledgements/" in path
+        ack = ExecutableAdmissionAcknowledgementV2.model_validate_json(outgoing.content)
+        assert ack.plan_id == new_plan.plan_id
+        accepted.append(ack)
+        return httpx.Response(200, json={"proposal_id": str(ack.proposal_id), "prepared_plan_digest": ack.prepared_plan_digest,
+            "receipt_digest": canonical_executable_digest(ack), "replayed": False, "executable": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        manager = DemandReporterClient(configuration_for(installation), manager_origin="https://manager.example",
+            bearer_token="test-only-token", http_client=http)
+        result = await runtime(factory, installation, manager).run_once(admission_enabled=True)
+        assert result.failed_stages == ("admission",)
+    assert len(accepted) == 1
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.dispositions WHERE kind='publication'")) == 1
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 2
