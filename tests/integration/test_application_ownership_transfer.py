@@ -48,7 +48,9 @@ async def transfer_database(
 ) -> AsyncIterator[tuple[str, str, dict[str, str]]]:
     identity = derive_identity(f"transfer-{uuid4().hex[:8]}")
     password = uuid4().hex
-    if getattr(request, "param", None) == "staging-credential":
+    if getattr(request, "param", None) == "protected-staging":
+        identity = derive_identity("staging")
+    if getattr(request, "param", None) in {"staging-credential", "protected-staging"}:
         # Fixed staging DB/role names only inside this disposable PostgreSQL.
         identity = replace(identity, database="loom", db_role="loom")
         password = "ab" * 16

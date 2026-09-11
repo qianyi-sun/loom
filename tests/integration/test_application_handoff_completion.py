@@ -29,11 +29,11 @@ pytestmark = pytest.mark.parametrize("transfer_postgres", [16, 17], indirect=Tru
 
 
 @contextmanager
-def _closed(database_fixture):
+def _closed(database_fixture, *, request=None):
     url, owner, bindings = database_fixture
     runtime = next(role for role, alias in bindings.items() if alias == "application-owner")
     provisioner = next(role for role, alias in bindings.items() if alias == "provisioner")
-    request = dict(request_id="req-complete-handoff", candidate_sha="a" * 40,
+    request = request or dict(request_id="req-complete-handoff", candidate_sha="a" * 40,
                    candidate_tree="b" * 40, generation="c" * 32)
     with psycopg.connect(url, autocommit=True) as peer, _maintenance(peer) as maintenance:
         database = peer.execute("SELECT current_database()").fetchone()[0]
@@ -64,8 +64,9 @@ def _closed(database_fixture):
                     # Disposable fixture cleanup, including intentionally lost guard cases.
                     maintenance.execute(sql.SQL("ALTER DATABASE {} ALLOW_CONNECTIONS true").format(sql.Identifier(database)))
         finally:
-            peer.execute("DROP OWNED BY loom_rollout_readonly")
-            peer.execute("DROP ROLE loom_rollout_readonly")
+            with psycopg.connect(url, autocommit=True) as cleanup:
+                cleanup.execute("DROP OWNED BY loom_rollout_readonly")
+                cleanup.execute("DROP ROLE loom_rollout_readonly")
 
 
 class LostAcknowledgementError(RuntimeError):
