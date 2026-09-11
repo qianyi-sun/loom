@@ -55,3 +55,54 @@ def test_artifact_identity_is_claim_specific_and_receipt_is_not_executable():
     receipt = BuildOutcomeReceiptV1(request=request, request_digest=canonical_digest(request))
     assert not receipt.executable and receipt.live_claim_count == 0 and receipt.claim_high_water == 1
     assert BuildOutcomeReceiptV1.model_validate_json(canonical_bytes(receipt)) == receipt
+
+
+@pytest.mark.parametrize("boundary", ["exact", "claim", "digest", "noncanonical", "rejected"])
+async def test_outcome_client_transmits_credentials_without_retaining_them(boundary):
+    import json
+
+    import httpx
+
+    from tests.unit.test_capacity_build_admission_client import client_for
+
+    claim = claim_request()
+    request = BuildOutcomeRequestV1(claim=claim, operation_id=uuid4(), result="failed")
+    expected = BuildOutcomeReceiptV1(request=request, request_digest=canonical_digest(request))
+
+    async def handle(outgoing):
+        assert outgoing.url.path.endswith("/outcome")
+        assert json.loads(outgoing.content) == {"schema_version": 1,
+            "outcome": request.model_dump(mode="json"), "worker_credential": "w" * 43}
+        response = expected
+        if boundary == "claim":
+            response = response.model_copy(update={"request": request.model_copy(update={"claim": claim.model_copy(update={"operation_id": uuid4()})})})
+        elif boundary == "digest":
+            response = response.model_copy(update={"request_digest": "f" * 64})
+        elif boundary == "rejected":
+            return httpx.Response(409, content=b"private database credential diagnostics")
+        return httpx.Response(200, content=canonical_bytes(response) + (b" " if boundary == "noncanonical" else b""))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = client_for(http, claim)
+        if boundary == "exact":
+            assert await client.record_outcome(request, worker_credential="w" * 43) == expected
+        else:
+            with pytest.raises(RuntimeError) as failure:
+                await client.record_outcome(request, worker_credential="w" * 43)
+            assert "private database" not in str(failure.value)
+
+
+@pytest.mark.parametrize("credential", ["short", "w" * 513, "é" * 43, " " * 43])
+async def test_outcome_client_rejects_invalid_credentials_before_transport(credential):
+    import httpx
+
+    from tests.unit.test_capacity_build_admission_client import client_for
+
+    request = BuildOutcomeRequestV1(claim=claim_request(), operation_id=uuid4(), result="failed")
+
+    async def unexpected(outgoing):
+        pytest.fail("invalid outcome credential reached the network")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected)) as http:
+        with pytest.raises(ValueError):
+            await client_for(http, request.claim).record_outcome(request, worker_credential=credential)
