@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 
+from loom_cli.rollout.operator.protected_apply_journal import ProtectedApplyJournal
 from tests.loom_cli.rollout.operator.test_application_admission_recovery import (
     _component,
     _guard,
@@ -41,7 +42,7 @@ def test_manager_replacement_requires_active_original_guard_and_durable_single_d
         journal.prepare_application_manager_replacement(identity=_manager())
 
     def apply(_):
-        with pytest.raises(RuntimeError, match="original.*guard"):
+        with pytest.raises(RuntimeError, match=r"original.*guard"):
             journal.prepare_application_manager_replacement(identity=_manager())
         _admit(journal)
         intent = journal.prepare_application_manager_replacement(identity=_manager())
@@ -62,7 +63,9 @@ def test_manager_replacement_requires_active_original_guard_and_durable_single_d
     saved = intent_path.read_bytes()
     assert intent_path.stat().st_mode & 0o777 == 0o600
 
-    journal = _journal(tmp_path)
+    journal = ProtectedApplyJournal(
+        tmp_path / "state", request_id=plan.request_id, attempt_number=plan.attempt_number,
+    )
 
     def recover(_):
         assert journal.begin_application_manager_replacement() is False
