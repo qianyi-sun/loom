@@ -2,10 +2,13 @@
 
 import os
 from contextlib import contextmanager
+from uuid import uuid4
 
 import pytest
 from psycopg import sql
+from testcontainers.postgres import PostgresContainer
 
+from loom.application_schema_reference import application_schema_reference
 from loom_cli.rollout.operator.protected_application_guard_retention import (
     application_guard_is_retained,
 )
@@ -13,17 +16,24 @@ from loom_cli.rollout.operator.staging_mutation_guard import MutationGuardEviden
 from tests.integration.test_application_handoff_completion import _closed
 from tests.integration.test_application_ownership_transfer import (
     transfer_database,  # noqa: F401
-    transfer_postgres,  # noqa: F401
     transfer_postgres_url,  # noqa: F401
 )
 from tests.loom_cli.rollout.operator.test_application_admission_recovery import _component
 from tests.loom_cli.rollout.operator.test_application_guard_retention import _guard, _setup
 
 
+@pytest.fixture(scope="module")
+def transfer_postgres(request):
+    with PostgresContainer(application_schema_reference(postgres_major=request.param).postgres_image,
+                           driver="psycopg", username="postgres", password=uuid4().hex).with_bind_ports(
+                               5432, ("127.0.0.1", None)) as postgres:
+        yield postgres
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transfer_postgres", [17], indirect=True)
 @pytest.mark.parametrize("transfer_database", ["protected-staging"], indirect=True)
-@pytest.mark.parametrize("interruption", [None, "receipt", "commit", "foreign-role"])
+@pytest.mark.parametrize("interruption", [None, "receipt", "commit", "foreign-role", "guard-after-receipt"])
 async def test_staging_owner_creation_recovers_only_its_saved_oid(
     transfer_database, tmp_path, monkeypatch, interruption,  # noqa: F811
 ):
@@ -49,6 +59,8 @@ async def test_staging_owner_creation_recovers_only_its_saved_oid(
         def record(*args, **kwargs):
             original(*args, **kwargs)
             seen.append(kwargs["role_oid"])
+            if interruption == "guard-after-receipt":
+                assert db_guard.execute("SELECT pg_advisory_unlock(5498691230183247727)").fetchone() == (True,)
             if interruption == "receipt" and armed[0]:
                 armed[0] = False
                 raise RuntimeError("receipt persisted before rollback")
@@ -81,6 +93,11 @@ async def test_staging_owner_creation_recovers_only_its_saved_oid(
                 with pytest.raises(RuntimeError, match="unrecorded"):
                     journal.execute(plan, [_component(apply)])
                 assert seen == [] and outcome == []
+                return
+            if interruption == "guard-after-receipt":
+                with pytest.raises(RuntimeError, match="coordination guard"):
+                    journal.execute(plan, [_component(apply)])
+                assert peer.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (APPLICATION_OWNER_ROLE,)).fetchone() is None
                 return
             if interruption:
                 with pytest.raises(RuntimeError, match=r"rollback|acknowledgement"):
