@@ -1403,6 +1403,15 @@ ownership, durable grant finalization/start consumption and positive owned
 cleanup remain necessary before native readiness can reach any worker. No
 profile parsing, successful bootstrap or signature alone enables execution.
 
+The shared Docker-parent discovery also rejects a systemd slice whose memory
+ceiling exceeds the live Slurm job ceiling. Both values must be finite positive
+byte counts; an unverifiable job ceiling fails closed, and a stale slice may
+converge only within the existing bounded wait. The job ceiling is reread on
+every attempt. This is a trial-worker launch check, not proof that the sibling
+systemd slice is a Slurm descendant or that its lifetime cleanup is correct.
+The native rootless builder still requires its separate exact allocation-
+descendant containment and positive cleanup proofs.
+
 ## Completion and subsequent activation
 
 D2 acceptance requires real streamed-registry fixtures, PostgreSQL concurrency
