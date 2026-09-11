@@ -1,0 +1,100 @@
+"""Disposable Docker fixture only. Not an installer or an execution authority."""
+
+import json
+import os
+import shutil
+import subprocess
+import tarfile
+import time
+from pathlib import Path
+
+
+def main():
+    fixtures = Path("/fixtures")
+    rootfs = Path("/tmp/native-rootfs")
+    rootfs.mkdir()
+    # The outer test exported this immutable, digest-selected trusted image.
+    # Extraction and capability restoration occur only in this disposable,
+    # network-disabled, bounded fixture -- never on a worker's filesystem.
+    with tarfile.open(fixtures / "rootfs.tar") as archive:
+        archive.extractall(rootfs, filter="fully_trusted")
+    for name in ("input", "output", "var/run/loom-buildkit", "var/lib/loom-buildkit"):
+        (rootfs / name).mkdir(parents=True, exist_ok=True)
+    for name, value in {
+        "newuidmap": "0100000280000000000000000000000000000000",
+        "newgidmap": "0100000240000000000000000000000000000000",
+    }.items():
+        target = rootfs / "usr/bin" / name
+        os.setxattr(target, "security.capability", bytes.fromhex(value))
+        assert os.getxattr(target, "security.capability").hex() == value
+    # Exercise current production Python, not the older published wrapper.
+    for path in (fixtures / "client-modules").iterdir():
+        shutil.copyfile(path, rootfs / "opt/loom-personal-dev-builder/loom" / path.name)
+    shutil.copyfile("/test-support/client_probe.py", rootfs / "opt/client_probe.py")
+    workspace = Path("/tmp/native-work")
+    workspace.mkdir(mode=0o755)
+    shutil.copytree(fixtures / "input", workspace / "input")
+    output = workspace / "output"
+    output.mkdir(mode=0o700)
+    os.chown(output, 1000, 1000)
+    (workspace / "buildkit-run").mkdir(mode=0o1777)
+    sandbox_id = json.loads((fixtures / "identity.json").read_text())["sandbox_id"]
+    runtime = ["/runtime/runsc", "--root=/tmp/runsc-state", "--platform=kvm",
+        "--network=none", "--ignore-cgroups=true", "--gvisor-marker-file=true",
+        "--host-settings=check", "--sidecar-release-enforcement-policy=ALWAYS",
+        "--host-uds=none", "--host-fifo=none", "--directfs=false",
+        "--allow-suid=false", "--oci-seccomp=true"]
+    started = []
+    logs = []
+    try:
+        for component, suffix in (("pause", ""), ("buildkit", "-buildkit")):
+            name = sandbox_id + suffix
+            started.append(name)
+            log = open("/tmp/" + component + ".log", "w+")
+            logs.append(log)
+            subprocess.run([*runtime, "run", "--detach", "--bundle=/fixtures/" + component, name],
+                stdout=log, stderr=subprocess.STDOUT, check=True, timeout=20)
+        deadline = time.monotonic() + 20
+        while True:
+            ready = subprocess.run([*runtime, "exec", sandbox_id + "-buildkit", "/usr/bin/test", "-S",
+                "/var/run/loom-buildkit/buildkitd.sock"], capture_output=True, timeout=5)
+            if ready.returncode == 0:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"BuildKit socket did not become ready: {ready.stdout!r} {ready.stderr!r}")
+            time.sleep(0.1)
+        subprocess.run([*runtime, "exec", sandbox_id + "-buildkit", "/bin/touch",
+            "/tmp/sidecar-private"], check=True, timeout=5)
+        probe = json.loads((fixtures / "client/config.json").read_bytes())
+        probe["process"]["args"] = ["/usr/bin/python3", "/opt/client_probe.py"]
+        Path("/tmp/probe-bundle").mkdir()
+        Path("/tmp/probe-bundle/config.json").write_text(json.dumps(probe))
+        started.append(sandbox_id + "-probe")
+        subprocess.run([*runtime, "run", "--bundle=/tmp/probe-bundle", sandbox_id + "-probe"],
+            check=True, timeout=15)
+        started.append(sandbox_id + "-client")
+        subprocess.run([*runtime, "run", "--bundle=/fixtures/client", sandbox_id + "-client"],
+            check=True, timeout=120)
+        shutil.copyfile(output / "build/artifacts.tar", "/result/artifacts.tar")
+        os.chmod("/result/artifacts.tar", 0o644)
+        assert list((output / "build/images").iterdir()) == []
+        print("native-allocated-client-artifact-ok", flush=True)
+    finally:
+        cleanup_failures = []
+        for name in reversed(started):
+            result = subprocess.run([*runtime, "delete", "--force", name], timeout=15)
+            if result.returncode:
+                cleanup_failures.append(name)
+        for log in logs:
+            log.seek(0)
+            print(log.read()[-16000:], flush=True)
+            log.close()
+        assert not cleanup_failures, cleanup_failures
+        remaining = subprocess.run([*runtime, "list", "--format=json"], check=True,
+            capture_output=True, text=True, timeout=10)
+        assert json.loads(remaining.stdout) in (None, []), remaining.stdout
+        print("native-allocated-runtime-cleanup-ok", flush=True)
+
+
+if __name__ == "__main__":
+    main()
