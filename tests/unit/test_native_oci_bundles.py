@@ -7,13 +7,15 @@ from pathlib import Path
 
 import pytest
 
+from loom.personal_dev_candidate import PERSONAL_DEV_BUILD_CONTRACT_SHA256
 from tests.unit.test_capacity_build_admission_client import native_registration
 from tests.unit.test_native_build_context import claim_for, context_for
 
 
 def inputs(pool="oldlab"):
     module = import_module("loom_capacity_executor.native_oci_bundles")
-    context = context_for(claim_for(native_registration(pool).binding))
+    context = context_for(claim_for(native_registration(pool).binding)).model_copy(
+        update={"build_contract_sha256": PERSONAL_DEV_BUILD_CONTRACT_SHA256})
     seccomp = json.dumps({"defaultAction": "SCMP_ACT_ERRNO", "syscalls": [
         {"names": ["read", "write", "exit_group"], "action": "SCMP_ACT_ALLOW"}]}, sort_keys=True).encode()
     policy = module.NativeOciBundlePolicy(rootfs=Path("/opt/loom/native-builder/rootfs"),
@@ -85,6 +87,10 @@ def test_native_oci_policy_rejects_unbound_or_unbounded_material(field, value):
     {"defaultAction": "SCMP_ACT_ALLOW"},
     {"defaultAction": "SCMP_ACT_ERRNO", "syscalls": []},
     {"defaultAction": "SCMP_ACT_ERRNO", "syscalls": [{"action": "SCMP_ACT_ALLOW", "names": ["mount"]}]},
+    {"defaultAction": "SCMP_ACT_ERRNO", "syscalls": [{"action": "SCMP_ACT_ALLOW", "names": ["clone"]}]},
+    {"defaultAction": "SCMP_ACT_ERRNO", "syscalls": [{"action": "SCMP_ACT_ALLOW", "names": ["clone3"]}]},
+    {"defaultAction": "SCMP_ACT_ERRNO", "syscalls": [{"action": [], "names": ["read"]}]},
+    {"defaultAction": "SCMP_ACT_ERRNO", "architectures": [{}], "syscalls": [{"action": "SCMP_ACT_ALLOW", "names": ["read"]}]},
 ])
 def test_native_oci_policy_rejects_unconfined_client_even_with_matching_digest(profile):
     from dataclasses import replace
@@ -92,3 +98,32 @@ def test_native_oci_policy_rejects_unconfined_client_even_with_matching_digest(p
     wire = json.dumps(profile).encode()
     with pytest.raises(ValueError):
         replace(policy, client_seccomp=wire, client_seccomp_sha256=hashlib.sha256(wire).hexdigest())
+
+
+@pytest.mark.parametrize("boundary", ["safe-thread", "namespace", "wrong-argument", "wrong-arch", "duplicate-key", "wrong-contract"])
+def test_native_oci_policy_binds_architecture_and_excludes_namespace_clone(boundary):
+    from dataclasses import replace
+    module, context, policy = inputs()
+    argument = {"index": 0, "op": "SCMP_CMP_MASKED_EQ", "value": 0x7E020000, "valueTwo": 0}
+    if boundary == "namespace":
+        argument["value"] &= ~0x10000000
+    elif boundary == "wrong-argument":
+        argument["index"] = 1
+    profile = {"defaultAction": "SCMP_ACT_ERRNO", "architectures": [
+        "SCMP_ARCH_AARCH64" if boundary == "wrong-arch" else "SCMP_ARCH_X86_64"],
+        "syscalls": [{"names": ["clone"], "action": "SCMP_ACT_ALLOW", "args": [argument]}]}
+    wire = json.dumps(profile).encode()
+    if boundary == "duplicate-key":
+        wire = wire.replace(b'{"defaultAction":', b'{"defaultAction":"SCMP_ACT_ALLOW","defaultAction":', 1)
+    if boundary == "wrong-contract":
+        context = context.model_copy(update={"build_contract_sha256": "f" * 64})
+
+    def render():
+        bound = replace(policy, client_seccomp=wire, client_seccomp_sha256=hashlib.sha256(wire).hexdigest())
+        return module.render_native_oci_bundles(context, bound)
+
+    if boundary == "safe-thread":
+        assert json.loads(render().client)["linux"]["seccomp"] == profile
+    else:
+        with pytest.raises(ValueError):
+            render()

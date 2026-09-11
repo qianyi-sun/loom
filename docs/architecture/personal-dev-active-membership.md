@@ -2061,6 +2061,31 @@ This adapter does not enable membership intake. Allocation-contained KVM runtime
 native artifact garbage collection and installed service composition still gate
 operational readiness.
 
+`NativeOciBundles` renders the fixed native pause, BuildKit and client OCI
+documents as immutable bytes. The trusted pause owns pod lifetime independently
+of feature-controlled completion. BuildKit uses the existing UID-1000 RootlessKit
+launcher, only SETUID/SETGID in its bounding set, private bounded tmpfs state,
+and gVisor's read-only virtual cgroup mount for nested build execution. This is
+not a host cgroup bind. The client has no capabilities, no-new-privileges, a
+digest-bound deny-default seccomp profile, read-only source/contract and shared
+socket mounts, and one writable output directory. The fixed `build-allocated`
+command creates a fresh child workspace within that output directory.
+
+Direct OCI supplies the explicit mount-source annotation normally supplied by
+containerd for pod-shared tmpfs. It creates separate PID and mount namespaces;
+no host namespace paths, hooks, devices, credentials or cgroup-placement paths
+are rendered. The client policy rejects privileged namespace/mount syscalls,
+unrestricted `clone`, and `clone3` allowance. Architecture-specific profiles
+must cover the exact native platform. Policy parsing and absolute/disjoint path
+checks do not establish trusted filesystem ownership or installation validity.
+The installed wrapper still must verify immutable runtime/rootfs material,
+source/contract binding, private directories, client seccomp conformance, fresh
+start/liveness authority, Slurm containment, cleanup and physical release.
+Docker rootfs export alone is insufficient: it drops the capability xattrs on
+`newuidmap` and `newgidmap` required by the pinned RootlessKit launcher. Protected
+rootfs provisioning must preserve and verify the exact published capabilities.
+This renderer does not enable intake, execute commands or certify a worker.
+
 1. Deliver executable delegated **application** membership: versioned policy,
    durable log/projection, authenticated lifecycle endpoint, common allocation
    and executor integration. Existing V2 active-mutation rejection remains.
