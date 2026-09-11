@@ -16,16 +16,17 @@ import (
 )
 
 var (
-	digestImage   = regexp.MustCompile(`^.+@sha256:[0-9a-f]{64}$`)
-	sha256Value   = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	candidate     = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	execClass     = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,79}$`)
-	roleName      = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
-	keyID         = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-	envName       = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
-	secretEnv     = regexp.MustCompile(`(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|KUBECONFIG)`)
-	workspacePath = regexp.MustCompile(`^/workspace(?:/[-A-Za-z0-9._]+)*$`)
-	probePath     = regexp.MustCompile(`^/[ -~]*$`)
+	digestImage       = regexp.MustCompile(`^.+@sha256:[0-9a-f]{64}$`)
+	sha256Value       = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	candidate         = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	execClass         = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,79}$`)
+	roleName          = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+	keyID             = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+	envName           = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
+	secretEnv         = regexp.MustCompile(`(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|KUBECONFIG)`)
+	workspacePath     = regexp.MustCompile(`^/workspace(?:/[-A-Za-z0-9._]+)*$`)
+	probePath         = regexp.MustCompile(`^/[ -~]*$`)
+	materializationID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 )
 
 type resources struct {
@@ -103,35 +104,36 @@ type executionImageAdmission struct {
 }
 
 type plan struct {
-	SchemaVersion         string                  `json:"schema_version"`
-	CandidateSHA          string                  `json:"candidate_sha"`
-	TaskRevisionSHA256    string                  `json:"task_revision_sha256"`
-	CommandIdentitySHA256 string                  `json:"command_identity_sha256"`
-	ExecutionRole         string                  `json:"execution_role"`
-	ExecutionClassID      string                  `json:"execution_class_id"`
-	Composition           string                  `json:"composition"`
-	TaskImageRef          string                  `json:"task_image_ref"`
-	AgentImageRef         *string                 `json:"agent_image_ref,omitempty"`
-	RuntimeImageRef       string                  `json:"runtime_image_ref"`
-	RuntimeBinarySHA256   string                  `json:"runtime_binary_sha256"`
-	ImageAdmission        executionImageAdmission `json:"image_admission"`
-	RunAsUser             int64                   `json:"run_as_user"`
-	RunAsGroup            int64                   `json:"run_as_group"`
-	FSGroup               int64                   `json:"fs_group"`
-	TaskResources         resources               `json:"task_resources"`
-	WorkspaceMiB          int64                   `json:"workspace_mib"`
-	RuntimeVolumeMiB      int64                   `json:"runtime_volume_mib"`
-	TerminationGraceSec   int64                   `json:"termination_grace_seconds"`
-	Setup                 []phase                 `json:"setup"`
-	Main                  phase                   `json:"main"`
-	VerifierExecution     string                  `json:"verifier_execution"`
-	Verifier              *phase                  `json:"verifier"`
-	Sidecars              []sidecar               `json:"sidecars"`
-	MaxLogBytesPerStream  int64                   `json:"max_log_bytes_per_stream"`
-	MaxArtifactBytes      int64                   `json:"max_artifact_bytes"`
-	TaskInput             *taskInput              `json:"task_input"`
-	OutputDeclarations    []outputDeclaration     `json:"output_declarations"`
-	RuntimeContractSHA256 string                  `json:"-"`
+	SchemaVersion              string                  `json:"schema_version"`
+	CandidateSHA               string                  `json:"candidate_sha"`
+	TaskRevisionSHA256         string                  `json:"task_revision_sha256"`
+	CommandIdentitySHA256      string                  `json:"command_identity_sha256"`
+	ExecutionRole              string                  `json:"execution_role"`
+	ExecutionClassID           string                  `json:"execution_class_id"`
+	Composition                string                  `json:"composition"`
+	TaskImageRef               string                  `json:"task_image_ref"`
+	TaskImageMaterializationID *string                 `json:"task_image_materialization_id,omitempty"`
+	AgentImageRef              *string                 `json:"agent_image_ref,omitempty"`
+	RuntimeImageRef            string                  `json:"runtime_image_ref"`
+	RuntimeBinarySHA256        string                  `json:"runtime_binary_sha256"`
+	ImageAdmission             executionImageAdmission `json:"image_admission"`
+	RunAsUser                  int64                   `json:"run_as_user"`
+	RunAsGroup                 int64                   `json:"run_as_group"`
+	FSGroup                    int64                   `json:"fs_group"`
+	TaskResources              resources               `json:"task_resources"`
+	WorkspaceMiB               int64                   `json:"workspace_mib"`
+	RuntimeVolumeMiB           int64                   `json:"runtime_volume_mib"`
+	TerminationGraceSec        int64                   `json:"termination_grace_seconds"`
+	Setup                      []phase                 `json:"setup"`
+	Main                       phase                   `json:"main"`
+	VerifierExecution          string                  `json:"verifier_execution"`
+	Verifier                   *phase                  `json:"verifier"`
+	Sidecars                   []sidecar               `json:"sidecars"`
+	MaxLogBytesPerStream       int64                   `json:"max_log_bytes_per_stream"`
+	MaxArtifactBytes           int64                   `json:"max_artifact_bytes"`
+	TaskInput                  *taskInput              `json:"task_input"`
+	OutputDeclarations         []outputDeclaration     `json:"output_declarations"`
+	RuntimeContractSHA256      string                  `json:"-"`
 }
 
 func loadPlan(path string) (plan, error) {
@@ -181,6 +183,12 @@ func (p plan) validate() error {
 	}
 	if p.AgentImageRef != nil && !digestImage.MatchString(*p.AgentImageRef) {
 		return fmt.Errorf("agent image must be digest-pinned")
+	}
+	if p.TaskImageMaterializationID != nil &&
+		(!materializationID.MatchString(*p.TaskImageMaterializationID) ||
+			*p.TaskImageMaterializationID == "00000000-0000-0000-0000-000000000000" ||
+			p.AgentImageRef == nil || p.ExecutionRole != "attempt" || p.Composition != "init_payload") {
+		return fmt.Errorf("prepared task images require a nonzero materialization UUID and separate trusted attempt controller")
 	}
 	if p.RunAsUser <= 0 || p.RunAsUser > 2_147_483_647 ||
 		p.RunAsGroup <= 0 || p.RunAsGroup > 2_147_483_647 ||
@@ -265,11 +273,20 @@ func (p plan) validate() error {
 		}
 		known[item.RoleName] = true
 	}
-	requiredImages := []string{p.TaskImageRef, p.RuntimeImageRef}
+	// The authenticated lease carries the Control Plane's task-image authorization.
+	// Only that prepared task image and matching private sandboxes are exempt from
+	// platform publication; runtime, controller and other sidecars remain covered.
+	requiredImages := []string{p.RuntimeImageRef}
+	if p.TaskImageMaterializationID == nil {
+		requiredImages = append(requiredImages, p.TaskImageRef)
+	}
 	if p.AgentImageRef != nil {
 		requiredImages = append(requiredImages, *p.AgentImageRef)
 	}
 	for _, item := range p.Sidecars {
+		if p.TaskImageMaterializationID != nil && item.PrivateSandbox && item.ImageRef == p.TaskImageRef {
+			continue
+		}
 		requiredImages = append(requiredImages, item.ImageRef)
 	}
 	if err := p.ImageAdmission.validate(requiredImages, time.Now().UTC()); err != nil {

@@ -54,6 +54,33 @@ node template can fit this Trial. This is an initial allocation, not a promise
 for all 90 tasks; placement must account for all containers and live regional
 quota. Agent and verifier each retain the original 900-second timeout.
 
+## Dockerfile task prerequisites
+
+Ordinary Nebius Batches can also queue a compatible Terminus-2 TaskSet whose
+primary environment specifies a Dockerfile. Import readiness means the task
+files and input manifest have been published; it does not mean the image has
+been built. The Trial waits for its linked x86_64 task-image materialization
+before reserving execution, consuming an attempt, or calling a model. An
+architecture-independent task may also have an arm64 prerequisite; that row
+does not block the x86_64 Nebius execution path. A failed x86_64 prerequisite
+finishes the waiting Trial with `task_image_build_failed` and no consumed attempt.
+
+This connection consumes existing ready-image records. It does not enable a
+new builder or permit arbitrary prebuilt images. The trusted controller and
+runtime still come from the published platform profile; only the task and its
+private verifier sandbox use the image associated with the frozen task revision.
+Direct-completion cannot use this Dockerfile path. The other existing CPU,
+workspace, networking, verifier and single-step restrictions still apply.
+
+Resubmitting an existing Trial preserves its original task-image links even
+when the TaskSet has since been rebuilt. Submit a new Trial to use the new
+revision. Cancelling a waiting Trial does not cancel a shared image build needed
+by other Trials. Generated inputs remain retained while a current task revision,
+a live Trial, an unexpired build lease, or a ready image cache references them.
+A retired cache with no remaining consumer does not retain historical inputs.
+Preparing the same content again after cache retirement uses the current upload
+location; ready cache reuse preserves its existing frozen source.
+
 ## What changes from old staging
 
 The original instruction and `tests/test_outputs.py` are copied byte for byte.

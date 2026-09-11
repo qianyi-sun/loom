@@ -9,6 +9,7 @@ import re
 import stat
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -25,6 +26,7 @@ from loom.execution_runtime_contract import (
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.pipeline.keys import canonical_digest
+from loom.task_image_materialization import TaskImageExecutionGrantV1
 
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -173,6 +175,7 @@ def automatic_service_execution_rejections(
     trial: TrialConfig,
     *,
     source_provenance: dict[str, Any],
+    allow_task_image_preparation: bool = False,
 ) -> tuple[str, ...]:
     """Return stable reasons why the v1 ordinary-TaskSet compiler cannot run a task."""
 
@@ -186,7 +189,7 @@ def automatic_service_execution_rejections(
         reasons.append("linux_x86_64_required")
     if env.gpu_vendor != "none" or env.gpus:
         reasons.append("gpu_unsupported")
-    if (
+    if not (allow_task_image_preparation and terminus and env.dockerfile is not None) and (
         env.dockerfile is not None
         or env.docker_image is None
         or _DIGEST_REF.fullmatch(env.docker_image) is None
@@ -274,6 +277,17 @@ def automatic_service_execution_rejections(
     return tuple(dict.fromkeys(reasons))
 
 
+def resolve_prepared_task(task: TaskConfig, grant: TaskImageExecutionGrantV1) -> TaskConfig:
+    """Use the ready image for resource admission without changing its frozen source."""
+    payload = task.model_dump(mode="json")
+    payload["environment"].update(
+        dockerfile=None, docker_build_context=None, docker_build_args={},
+        docker_build_target=None, docker_image=grant.registry_images["task"],
+        cpu_arch=grant.cpu_arch,
+    )
+    return TaskConfig.model_validate(payload)
+
+
 def compile_service_execution_plan(
     *,
     task: TaskConfig,
@@ -281,7 +295,16 @@ def compile_service_execution_plan(
     task_revision_sha256: str,
     source_provenance: dict[str, Any],
     profile: ServiceExecutionRuntimeProfileV1,
+    task_image_grant: TaskImageExecutionGrantV1 | None = None,
 ) -> ExecutionRuntimePlanV1:
+    if task_image_grant is not None:
+        if (trial.agent_name != "terminus-2"
+            or task.environment.dockerfile is None
+            or task_revision_sha256 != "sha256:" + task_image_grant.task_checksum
+            or task != TaskConfig.model_validate(task_image_grant.task_config)
+            or source_provenance != task_image_grant.task_source_provenance):
+            raise ValueError("prepared task image does not match the frozen task")
+        task = resolve_prepared_task(task, task_image_grant)
     task = normalize_steps(task)
     reasons = automatic_service_execution_rejections(
         task,
@@ -292,6 +315,10 @@ def compile_service_execution_plan(
         raise ValueError("automatic service execution is incompatible: " + ",".join(reasons))
     terminus = trial.agent_name == "terminus-2"
     profile_reasons = runtime_profile_rejections(task, trial, profile)
+    if task_image_grant is not None and profile.agent_image_ref is not None:
+        admitted = {item.statement.image_ref for item in profile.image_admission.admissions}
+        profile_reasons = (() if profile.agent_image_ref in admitted
+                           else ("task_image_not_in_runtime_profile",))
     if "terminus_controller_unavailable" in profile_reasons:
         raise ValueError("active runtime profile has no Terminus controller image")
     if profile_reasons:
@@ -353,6 +380,9 @@ def compile_service_execution_plan(
             task=task, trial=trial, task_revision_sha256=task_revision_sha256,
             profile=profile, binding=binding, command_identity=command_identity,
             output_paths=output_paths,
+            task_image_materialization_id=(
+                task_image_grant.materialization_id if task_image_grant else None
+            ),
         )
     output_declarations = (
         *(
@@ -429,6 +459,7 @@ def compile_service_execution_plan(
 
 def runtime_profile_rejections(
     task: TaskConfig, trial: TrialConfig, profile: ServiceExecutionRuntimeProfileV1,
+    *, allow_task_image_preparation: bool = False,
 ) -> tuple[str, ...]:
     """Submission and scheduling share the profile's image/agent compatibility."""
     if trial.agent_name != "terminus-2":
@@ -437,7 +468,8 @@ def runtime_profile_rejections(
     if profile.agent_image_ref is None:
         return ("terminus_controller_unavailable",)
     admitted = {item.statement.image_ref for item in profile.image_admission.admissions}
-    if task.environment.docker_image not in admitted or profile.agent_image_ref not in admitted:
+    preparing = allow_task_image_preparation and task.environment.dockerfile is not None
+    if (not preparing and task.environment.docker_image not in admitted) or profile.agent_image_ref not in admitted:
         return ("task_image_not_in_runtime_profile",)
     return ()
 
@@ -455,6 +487,7 @@ def _compile_terminus_plan(
     *, task: TaskConfig, trial: TrialConfig, task_revision_sha256: str,
     profile: ServiceExecutionRuntimeProfileV1, binding: ServiceExecutionInputBindingV1,
     command_identity: str, output_paths: list[str],
+    task_image_materialization_id: UUID | None = None,
 ) -> ExecutionRuntimePlanV1:
     """Reuse Harbor in a trusted controller with private native task/verifier sandboxes."""
     env = task.environment
@@ -510,10 +543,12 @@ def _compile_terminus_plan(
         candidate_sha=profile.candidate_sha, task_revision_sha256=task_revision_sha256,
         command_identity_sha256=command_identity, execution_class_id=profile.execution_class_id,
         composition="init_payload", task_image_ref=env.docker_image,
+        task_image_materialization_id=task_image_materialization_id,
         agent_image_ref=profile.agent_image_ref, runtime_image_ref=profile.runtime_image_ref,
         runtime_binary_sha256=profile.runtime_binary_sha256,
         image_admission=_plan_admissions(
-            profile, {env.docker_image, profile.agent_image_ref, profile.runtime_image_ref},
+            profile, {profile.agent_image_ref, profile.runtime_image_ref}
+            | ({env.docker_image} if task_image_materialization_id is None else set()),
         ),
         run_as_user=profile.run_as_user, run_as_group=profile.run_as_group, fs_group=profile.fs_group,
         task_resources=resources, workspace_mib=env.storage_mb,

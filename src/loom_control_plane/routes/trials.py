@@ -108,6 +108,18 @@ async def _ensure_trial_task_image_links(
     trial_id: UUID,
     task_row: TaskRow,
 ) -> None:
+    # The prerequisite set is the submitted revision. Serialize first publication
+    # and replays on the Trial so a later TaskSet rebuild cannot append a newer
+    # revision to an existing Trial's frozen image links.
+    await session.execute(
+        select(TrialRow.id).where(TrialRow.id == trial_id).with_for_update()
+    )
+    if await session.scalar(
+        select(TrialTaskImageMaterialization.materialization_id)
+        .where(TrialTaskImageMaterialization.trial_id == trial_id)
+        .limit(1)
+    ) is not None:
+        return
     materializations = await ensure_task_image_materializations(
         session,
         task_row=task_row,
@@ -375,11 +387,14 @@ async def submit_trial(
         )
         automatic_compatible = (
             profile is not None
-            and not runtime_profile_rejections(task_config, trial_config, profile)
+            and not runtime_profile_rejections(
+                task_config, trial_config, profile, allow_task_image_preparation=True,
+            )
             and not automatic_service_execution_rejections(
                 task_config,
                 trial_config,
                 source_provenance=dict(task_row.source_provenance or {}),
+                allow_task_image_preparation=True,
             )
         )
     required_worker_pool = _resolve_required_worker_pool_for_backend(

@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loom.db.schema import (
     Task,
     TaskImageMaterialization,
+    Trial,
     TrialTaskImageMaterialization,
 )
 from loom.models.task import TaskConfig
@@ -201,10 +202,16 @@ async def ensure_task_image_materializations(
         raise RuntimeError("task image materialization identity conflict")
     now = datetime.now(UTC)
     for row in rows:
+        if row.task_config != task_row.config:
+            raise RuntimeError("task image materialization snapshot conflicts with task checksum")
         row.last_referenced_at = now
         row.unreferenced_at = None
         row.updated_at = now
         if row.state == "retired":
+            # A retired cache may have lost its old generated input objects.
+            # The same checksum/config can be rebuilt from the current upload.
+            row.task_source = task_row.source
+            row.task_source_provenance = task_row.source_provenance or {}
             row.state = "queued"
             row.attempt_count = 0
             row.next_attempt_at = None
@@ -234,8 +241,10 @@ async def get_trial_task_image_execution_grant(
             TrialTaskImageMaterialization,
             TrialTaskImageMaterialization.materialization_id == TaskImageMaterialization.id,
         )
+        .join(Trial, Trial.id == TrialTaskImageMaterialization.trial_id)
         .where(
-            TrialTaskImageMaterialization.trial_id == trial_id,
+            Trial.id == trial_id,
+            TaskImageMaterialization.task_id == Trial.task_id,
             TaskImageMaterialization.cpu_arch.in_(cpu_arches),
             TaskImageMaterialization.state == "ready",
         )

@@ -482,6 +482,7 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
                                 task_config,
                                 parsed_trial,
                                 source_provenance=provenance,
+                                allow_task_image_preparation=True,
                             )
                         )
                     )
@@ -490,7 +491,10 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
                 elif parsed_trials:
                     reasons = (*reasons, *(
                         reason for parsed_trial in parsed_trials
-                        for reason in runtime_profile_rejections(task_config, parsed_trial, profile)
+                        for reason in runtime_profile_rejections(
+                            task_config, parsed_trial, profile,
+                            allow_task_image_preparation=True,
+                        )
                     ))
             if (
                 task_config is None

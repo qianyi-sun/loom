@@ -18,7 +18,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.data_lifecycle_registry import register_lifecycle_object
-from loom.db.schema import Artifact, ServiceExecutionLease, Task, Trial, TrialEvent
+from loom.db.schema import Artifact, ServiceExecutionLease, Trial, TrialEvent
 from loom.execution_runtime_contract import ExecutionRuntimeResultV1
 from loom.llm_call_ledger import read_service_execution_llm_calls
 from loom.models.task import TaskConfig
@@ -29,6 +29,9 @@ from loom_control_plane.config import ControlPlaneSettings
 from loom_control_plane.service_execution_materializer import (
     build_canonical_atif,
     build_canonical_events,
+)
+from loom_control_plane.service_execution_task_snapshot import (
+    resolve_service_execution_task_snapshot,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -95,9 +98,7 @@ async def repair_accounting(
         metadata = copy.deepcopy(artifact.artifact_metadata or {})
         if metadata.get("accounting_source") == _SOURCE:
             return {"status": "already_corrected", "trial_id": str(trial.id)}
-        task = await session.get(Task, trial.task_id)
-        if task is None:
-            raise ValueError("task missing")
+        task = await resolve_service_execution_task_snapshot(session, lease=lease, trial=trial)
         trial_config = TrialConfig.model_validate(trial.config)
         if trial_config.agent_name != "terminus-2":
             raise ValueError("accounting repair only supports Terminus-2")

@@ -23,7 +23,6 @@ from loom.db.schema import (
     ArtifactUploadSession,
     ServiceExecutionLease,
     ServiceExecutionTarget,
-    Task,
     Trial,
 )
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1, ExecutionRuntimeResultV1
@@ -43,6 +42,10 @@ from loom.service_execution_materialization import (
 )
 from loom.trajectory.storage import ObjectStore
 from loom_control_plane.service_execution import record_committed_runtime_result
+from loom_control_plane.service_execution_task_snapshot import (
+    ServiceExecutionTaskSnapshotError,
+    resolve_service_execution_task_snapshot,
+)
 
 _MAX_FILES = 10_133
 _MAX_TOKEN_TTL_SECONDS = 600
@@ -139,12 +142,11 @@ async def resolve_service_execution_input(
     plan = _runtime_plan(lease)
     if plan.task_input is None:
         raise ServiceExecutionBrokerError("task_input_unavailable")
-    row = (
-        await session.execute(
-            select(Task).join(Trial, Trial.task_id == Task.id).where(Trial.id == lease.trial_id)
-        )
-    ).scalar_one_or_none()
-    if row is None or row.source is None:
+    try:
+        row = await resolve_service_execution_task_snapshot(session, lease=lease)
+    except ServiceExecutionTaskSnapshotError as exc:
+        raise ServiceExecutionBrokerError(str(exc)) from exc
+    if row.source is None:
         raise ServiceExecutionBrokerError("task_input_unavailable")
     try:
         binding = service_execution_input_binding(row.source_provenance)
