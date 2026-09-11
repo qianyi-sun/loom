@@ -215,6 +215,11 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
             checked("docker", "export", name, stdout=output)
     finally:
         subprocess.run(["docker", "rm", name], capture_output=True, timeout=20, check=False)
+    with (fixtures / "rootfs.tar").open("rb") as rootfs_archive:
+        (fixtures / "rootfs-binding.json").write_text(json.dumps({
+            "sha256": hashlib.file_digest(rootfs_archive, "sha256").hexdigest(),
+            "size_bytes": (fixtures / "rootfs.tar").stat().st_size,
+        }))
     repo = tmp_path / "source"
     repo.mkdir()
     (repo / "deploy").mkdir()
@@ -243,7 +248,8 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
     (fixtures / "claim.json").write_text(claim.model_dump_json())
     (fixtures / "context.json").write_text(context.model_dump_json())
     wire = (ROOT / "deploy/personal-dev-builder/client-seccomp-v1.json").read_bytes()
-    policy = NativeOciBundlePolicy(rootfs=Path("/tmp/native-rootfs"), workspace=Path("/tmp/native-work"),
+    policy = NativeOciBundlePolicy(rootfs=Path("/tmp/native-material/rootfs" if root_stop.startswith("monitored-rootless-outer")
+        else "/tmp/native-rootfs"), workspace=Path("/tmp/native-work"),
         client_seccomp=wire, client_seccomp_sha256=hashlib.sha256(wire).hexdigest(),
         tmp_bytes=64 * 1024**2, buildkit_state_bytes=1024**3)
     bundles = render_native_oci_bundles(context, policy)

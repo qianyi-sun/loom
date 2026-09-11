@@ -22,13 +22,22 @@ def main():
     fixtures = Path("/fixtures")
     identity = json.loads((fixtures / "identity.json").read_text())
     prepare_only = sys.argv[1:] == ["prepare"]
-    rootfs = Path("/tmp/native-rootfs")
-    rootfs.mkdir()
+    rootfs = Path("/tmp/native-material/rootfs" if prepare_only else "/tmp/native-rootfs")
     # The outer test exported this immutable, digest-selected trusted image.
     # Extraction and capability restoration occur only in this disposable,
     # network-disabled, bounded fixture -- never on a worker's filesystem.
-    with tarfile.open(fixtures / "rootfs.tar") as archive:
-        archive.extractall(rootfs, filter="fully_trusted")
+    if prepare_only:
+        from loom_capacity_executor.native_rootfs_archive import unpack_native_rootfs_archive
+
+        rootfs.parent.mkdir(mode=0o700)
+        binding = json.loads((fixtures / "rootfs-binding.json").read_bytes())
+        unpack_native_rootfs_archive(archive=fixtures / "rootfs.tar", destination=rootfs,
+            expected_sha256=binding["sha256"], expected_size_bytes=binding["size_bytes"],
+            max_unpacked_bytes=1024**3, max_entries=100000)
+    else:
+        rootfs.mkdir()
+        with tarfile.open(fixtures / "rootfs.tar") as archive:
+            archive.extractall(rootfs, filter="fully_trusted")
     for name in ("input", "output", "var/run/loom-buildkit", "var/lib/loom-buildkit"):
         (rootfs / name).mkdir(parents=True, exist_ok=True)
     for name, value in {

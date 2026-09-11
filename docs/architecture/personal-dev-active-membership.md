@@ -2086,6 +2086,20 @@ Docker rootfs export alone is insufficient: it drops the capability xattrs on
 rootfs provisioning must preserve and verify the exact published capabilities.
 This renderer does not enable intake, execute commands or certify a worker.
 
+`unpack_native_rootfs_archive` supplies bounded per-attempt unpacking of an
+already authenticated trusted-release archive, never personal source. It checks
+exact archive length/digest and metadata stability before extraction, bounds
+metadata reads, entry count and unpacked bytes, and rejects duplicate/traversing
+paths, sparse files, hard links, devices and writes through symlink ancestors.
+Guest absolute symlinks are preserved without following them in host writes.
+Fresh private-parent ownership, descriptor-anchored writes and final inode/type/
+owner/mode checks prevent accepting replaced material; failure cleanup touches
+only tracked inodes, including restoring writable modes on owned directories.
+Abrupt process death may retain partial attempt scratch and is not release proof.
+The KVM outer fixture uses this unpacker under the actual mapped UID/GID namespace,
+but capability restoration and trusted current-source overlays are still fixture
+steps. The unpack result is not an installed runtime-readiness certificate.
+
 The versioned client policy is
 `deploy/personal-dev-builder/client-seccomp-v1.json`. It permits ordinary
 Python/buildctl file IO, read-only extended-attribute inspection, constrained
