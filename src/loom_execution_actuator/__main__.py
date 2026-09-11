@@ -17,6 +17,10 @@ from loom_execution_actuator.config import ExecutionActuatorSettings
 from loom_execution_actuator.controller import ExecutionActuator
 from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
+from loom_execution_actuator.task_image_controller import (
+    NativeBuildKubernetesApi,
+    NativeTaskImageController,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -24,21 +28,28 @@ _LOG = logging.getLogger(__name__)
 @dataclass
 class ActuatorRuntimeHealth:
     stale_after_seconds: float
+    task_image_builder_enabled: bool = False
     started_at: float = field(default_factory=time.monotonic)
     last_command_success: float | None = None
     last_reconcile_success: float | None = None
+    last_build_success: float | None = None
 
     def mark_success(self, loop: str) -> None:
         if loop == "command":
             self.last_command_success = time.monotonic()
         elif loop == "reconcile":
             self.last_reconcile_success = time.monotonic()
+        elif loop == "build":
+            self.last_build_success = time.monotonic()
 
     def ready(self) -> bool:
         now = time.monotonic()
+        observations = [self.last_command_success, self.last_reconcile_success]
+        if self.task_image_builder_enabled:
+            observations.append(self.last_build_success)
         return all(
             observed is not None and now - observed <= self.stale_after_seconds
-            for observed in (self.last_command_success, self.last_reconcile_success)
+            for observed in observations
         )
 
 
@@ -110,32 +121,51 @@ async def _watch_loop(actuator: ExecutionActuator, timeout_seconds: int) -> None
         await asyncio.sleep(0.25)
 
 
+async def _build_loop(
+    builder: NativeTaskImageController,
+    poll_seconds: float,
+    runtime_health: ActuatorRuntimeHealth,
+) -> None:
+    while True:
+        try:
+            await builder.run_once()
+            runtime_health.mark_success("build")
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            # SDK errors may contain credential-bearing URLs or request bodies.
+            _LOG.error("native task image reconciliation failed (%s)", type(error).__name__)
+        await asyncio.sleep(poll_seconds)
+
+
 async def _run() -> None:
     settings = ExecutionActuatorSettings()
     engine = create_async_engine(settings.db_url, pool_pre_ping=True)
     await assert_schema_at_head(engine, db_url_env_var="LOOM_EXECUTION_ACTUATOR_DB_URL")
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     kubernetes = InClusterKubernetesJobApi(connection=settings.kubernetes_connection)
+    target = ExecutionTargetRuntime(
+        target_id=settings.target_id,
+        namespace=settings.namespace,
+        runtime_class_name=settings.runtime_class_name,
+        node_selector=settings.node_selector,
+        tolerations=settings.tolerations,
+        service_account_name=settings.service_account_name,
+        credential_broker_url=settings.credential_broker_url,
+        pod_identity_audience=settings.pod_identity_audience,
+    )
     actuator = ExecutionActuator(
         sessions=sessions,
         kubernetes=kubernetes,
-        target=ExecutionTargetRuntime(
-            target_id=settings.target_id,
-            namespace=settings.namespace,
-            runtime_class_name=settings.runtime_class_name,
-            node_selector=settings.node_selector,
-            tolerations=settings.tolerations,
-            service_account_name=settings.service_account_name,
-            credential_broker_url=settings.credential_broker_url,
-            pod_identity_audience=settings.pod_identity_audience,
-        ),
+        target=target,
         controller_id=settings.controller_id,
         command_limit=settings.command_limit,
         command_lease_seconds=settings.command_lease_seconds,
         delete_grace_seconds=settings.delete_grace_seconds,
     )
     runtime_health = ActuatorRuntimeHealth(
-        stale_after_seconds=max(15.0, settings.full_reconcile_seconds * 3)
+        stale_after_seconds=max(15.0, settings.full_reconcile_seconds * 3),
+        task_image_builder_enabled=settings.task_image_builder is not None,
     )
     server = uvicorn.Server(
         uvicorn.Config(
@@ -145,14 +175,26 @@ async def _run() -> None:
             log_level="info",
         )
     )
-    tasks = (
+    tasks = [
         asyncio.create_task(server.serve()),
         asyncio.create_task(_command_loop(actuator, settings.poll_seconds, runtime_health)),
         asyncio.create_task(
             _reconcile_loop(actuator, settings.full_reconcile_seconds, runtime_health)
         ),
         asyncio.create_task(_watch_loop(actuator, settings.watch_timeout_seconds)),
-    )
+    ]
+    build_kubernetes = None
+    if settings.task_image_builder is not None:
+        build_kubernetes = NativeBuildKubernetesApi(connection=settings.kubernetes_connection)
+        builder = NativeTaskImageController(
+            sessions=sessions,
+            kubernetes=build_kubernetes,
+            target=target,
+            settings=settings.task_image_builder,
+        )
+        tasks.append(
+            asyncio.create_task(_build_loop(builder, settings.poll_seconds, runtime_health))
+        )
     try:
         await asyncio.gather(*tasks)
     finally:
@@ -162,6 +204,8 @@ async def _run() -> None:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         await kubernetes.close()
+        if build_kubernetes is not None:
+            await build_kubernetes.close()
         await engine.dispose()
 
 

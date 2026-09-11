@@ -60,6 +60,8 @@ def load_render(
     config = json.loads(configs[0]["data"]["environment.json"])
     validate_environment(config)
     namespaces = {config["namespace"], config["execution_namespace"]}
+    if config.get("task_image_builder") is not None:
+        namespaces.add(config["execution_namespace"] + "-build")
     for filename, rows in files.items():
         for row in rows:
             metadata = row["metadata"]
@@ -119,6 +121,15 @@ def secret_requirements(
             namespace = doc["metadata"].get("namespace")
             if namespace:
                 walk(doc, namespace)
+    # Build Jobs are created on demand, so their mounted Secrets do not appear
+    # in the static Deployment. Check their names/keys before enabling the loop.
+    builder = config.get("task_image_builder")
+    if builder is not None:
+        namespace = config["execution_namespace"] + "-build"
+        result[namespace, "loom-task-build-source"] = {"access-key", "secret-key"}
+        result[namespace, "loom-task-build-registry"] = {"credentials.json"}
+        if builder.get("cache_bucket"):
+            result[namespace, "loom-task-build-cache"] = {"access-key", "secret-key"}
     return result
 
 

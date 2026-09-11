@@ -3021,6 +3021,9 @@ class TaskImageMaterializationAttempt(Base):
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
     lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
     builder_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Native Job identity, requested resources and observed lifecycle belong to
+    # this existing attempt; retries never overwrite an older attempt's record.
+    native_build: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     grant_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     session_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     session_generation: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

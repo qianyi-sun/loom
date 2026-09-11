@@ -16,10 +16,12 @@ COPY src ./src
 COPY packages ./packages
 COPY migrations ./migrations
 COPY capacity_guard_migrations ./capacity_guard_migrations
+# Native task-image publication uses the existing minimal IAM SDK extra.
 RUN chmod -R a+rX ./src ./packages ./migrations ./capacity_guard_migrations && \
     pip install --no-cache-dir -e ./packages/loom-bundle-checksum && \
-    pip install --no-cache-dir -e . && \
-    pip install --no-cache-dir -e ./packages/loom-launcher
+    pip install --no-cache-dir -e '.[nebius-gateway]' && \
+    pip install --no-cache-dir -e ./packages/loom-launcher && \
+    python -c 'from nebius.sdk import SDK; import loom_execution_actuator.task_image_runtime'
 ARG LOOM_BUILD_SHA=unknown
 LABEL org.opencontainers.image.revision="${LOOM_BUILD_SHA}"
 RUN install -d -m 0755 /opt/loom && \

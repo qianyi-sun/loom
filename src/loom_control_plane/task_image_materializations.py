@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from loom.db.schema import (
+    Batch,
     Task,
     TaskImageMaterialization,
     TaskImageMaterializationAttempt,
@@ -228,18 +229,85 @@ def _lease_deadline(*, now: datetime, lease_seconds: float) -> datetime:
     return now + timedelta(seconds=lease_seconds)
 
 
+def _nebius_demand_exists(row: Any, *, pool_id: str) -> ColumnElement[bool]:
+    # Mirror the durable service scheduler's consumer path. A build remains
+    # useful during scheduling backoff or transient target unavailability.
+    # Use the frozen task binding, never a later revision of the catalog Task.
+    binding = row.task_config["service_execution"]
+    return and_(
+        row.cpu_arch == "x86_64",
+        exists(
+            select(1)
+            .select_from(TrialTaskImageMaterialization)
+            .join(Trial, Trial.id == TrialTaskImageMaterialization.trial_id)
+            .join(Batch, Batch.id == Trial.batch_id)
+            .where(
+                TrialTaskImageMaterialization.materialization_id == row.id,
+                Trial.task_id == row.task_id,
+                Trial.team_id == Batch.team_id,
+                Trial.state.not_in(_TERMINAL_TRIAL_STATES),
+                Trial.cancellation_requested_at.is_(None),
+                Trial.family_key.is_(None),
+                Batch.backend == "nebius",
+                Batch.state.not_in(("finished", "cancelled")),
+                Trial.requires_caps["worker_pool"].astext == pool_id,
+                or_(
+                    Trial.execution_route_pool_name.is_(None),
+                    and_(
+                        Trial.execution_route_pool_name == pool_id,
+                        Trial.execution_route_json["selected_adapter_kind"].astext == "kubernetes_job",
+                    ),
+                ),
+                or_(
+                    binding["logical_pool_id"].astext == pool_id,
+                    and_(
+                        binding.astext.is_(None),
+                        Batch.service_execution_runtime_profile["logical_pool_id"].astext == pool_id,
+                    ),
+                ),
+            )
+        ),
+    )
+
+
+async def has_nebius_task_image_demand(
+    session: AsyncSession,
+    *,
+    materialization_id: UUID,
+    pool_id: str,
+) -> bool:
+    """Whether any live native consumer still needs this shared build.
+
+    This is a demand observation, not lease ownership. Callers retain the
+    existing builder/epoch fencing when heartbeating or stopping a build.
+    """
+    return bool(await session.scalar(
+        select(_nebius_demand_exists(TaskImageMaterialization, pool_id=pool_id))
+        .where(TaskImageMaterialization.id == materialization_id)
+    ))
+
+
 async def claim_task_image_materialization(
     session: AsyncSession,
     *,
     builder_id: str,
     cpu_arch: str,
     lease_seconds: float = DEFAULT_TASK_IMAGE_LEASE_SECONDS,
+    nebius_pool_id: str | None = None,
 ) -> TaskImageMaterialization | None:
-    """Atomically claim queued work or recover one expired lease."""
+    """Claim queued work or an expired lease, optionally for native demand only."""
+    scope: tuple[ColumnElement[bool], ...] = ()
+    if nebius_pool_id is not None:
+        if cpu_arch != "x86_64":
+            raise ValueError("Nebius task image preparation requires x86_64")
+        if not nebius_pool_id.strip():
+            raise ValueError("nebius_pool_id must not be empty")
+        scope = (_nebius_demand_exists(TaskImageMaterialization, pool_id=nebius_pool_id),)
     now = datetime.now(UTC)
     await session.execute(
         update(TaskImageMaterialization)
         .where(
+            *scope,
             TaskImageMaterialization.state.in_(("claimed", "running")),
             TaskImageMaterialization.lease_expires_at <= now,
             TaskImageMaterialization.attempt_count >= TaskImageMaterialization.max_attempts,
@@ -257,6 +325,7 @@ async def claim_task_image_materialization(
     row = await session.scalar(
         select(TaskImageMaterialization)
         .where(
+            *scope,
             TaskImageMaterialization.cpu_arch == cpu_arch,
             TaskImageMaterialization.attempt_count < TaskImageMaterialization.max_attempts,
             or_(
@@ -443,14 +512,15 @@ async def fail_task_image_materialization(
         allowed_states=("claimed", "running"),
         now=now,
     )
-    try:
-        registry_images = validate_task_image_registry_images(
-            registry_images,
-            expected_components=_expected_registry_image_components(row.task_config),
-            require_nonempty=False,
-        )
-    except ValueError as exc:
-        raise TaskImageCompletionError(str(exc)) from exc
+    if registry_images:
+        try:
+            registry_images = validate_task_image_registry_images(
+                registry_images,
+                expected_components=_expected_registry_image_components(row.task_config),
+                require_nonempty=False,
+            )
+        except ValueError as exc:
+            raise TaskImageCompletionError(str(exc)) from exc
     await _record_attempt_publication_evidence(
         session,
         row,

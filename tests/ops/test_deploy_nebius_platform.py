@@ -17,6 +17,25 @@ from tests.unit.test_nebius_platform_render import platform_inputs, regional_inp
 from loom.nebius_platform_render import build_platform, write_platform
 
 
+def test_on_demand_build_secret_preflight_and_namespace(
+    request: pytest.FixtureRequest, tmp_path: Path
+) -> None:
+    config, candidate, profile = request.getfixturevalue("platform_inputs")
+    config["task_image_builder"] = {
+        "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
+        "cache_bucket": config["buckets"]["artifacts"],
+    }
+    files = build_platform(config, candidate, profile, {}, repo_root=deploy.ROOT)
+    write_platform(files, config, candidate, tmp_path)
+    _, observed, _ = deploy.load_render(tmp_path)
+    assert observed["task_image_builder"] == config["task_image_builder"]
+    requirements = deploy.secret_requirements(files, config)
+    namespace = config["execution_namespace"] + "-build"
+    assert requirements[namespace, "loom-task-build-source"] == {"access-key", "secret-key"}
+    assert requirements[namespace, "loom-task-build-registry"] == {"credentials.json"}
+    assert requirements[namespace, "loom-task-build-cache"] == {"access-key", "secret-key"}
+
+
 @pytest.fixture
 def rendered(tmp_path: Path) -> tuple[argparse.Namespace, dict, dict, dict]:
     key = Ed25519PrivateKey.generate()

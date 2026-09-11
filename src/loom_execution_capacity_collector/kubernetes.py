@@ -168,10 +168,14 @@ def _scheduling(spec: Any) -> dict[str, Any]:
 
 def _managed_placement(pod: Any) -> ManagedPodPlacement:
     labels = dict(getattr(pod.metadata, "labels", None) or {})
+    native = labels.get("app.kubernetes.io/component") == "task-image-builder"
+    identity = ("task-image:" + _identity(labels.get("loom.materialization-id"), name="materialization ID")
+                if native else _identity(labels.get("loom.openai.com/lease-id"), name="Pod lease ID"))
     return ManagedPodPlacement(
         uid=_identity(getattr(pod.metadata, "uid", None), name="Pod UID"),
-        lease_id=_identity(labels.get("loom.openai.com/lease-id"), name="Pod lease ID"),
-        generation=_positive_int(labels.get("loom.openai.com/generation"), name="Pod generation"),
+        # This placement-only key does not create a service execution lease.
+        lease_id=identity,
+        generation=_positive_int(labels.get("loom.lease-epoch" if native else "loom.openai.com/generation"), name="Pod generation"),
         requests=_pod_request(pod),
     )
 
@@ -314,9 +318,11 @@ def _target_pod(pod: Any, *, namespace: str, target_id: str) -> bool:
     metadata = pod.metadata
     labels = dict(getattr(metadata, "labels", None) or {})
     annotations = dict(getattr(metadata, "annotations", None) or {})
+    native = labels.get("app.kubernetes.io/component") == "task-image-builder"
     return (
-        metadata.namespace == namespace
-        and labels.get("app.kubernetes.io/managed-by") == _MANAGED_BY
+        metadata.namespace == (namespace + "-build" if native else namespace)
+        and (labels.get("app.kubernetes.io/managed-by") == _MANAGED_BY
+             or labels.get("app.kubernetes.io/component") == "task-image-builder")
         and annotations.get(_TARGET_ANNOTATION) == target_id
     )
 
