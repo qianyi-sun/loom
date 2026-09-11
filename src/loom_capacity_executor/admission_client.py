@@ -293,6 +293,15 @@ class DatabaseExecutableAdmissionClient:
         assert isinstance(result, ExecutableReleaseReceiptV2)
         return result
 
+    async def admit_claim_for_intent(
+        self,
+        binding: ExecutableIntentBindingV2,
+        proposal: ExecutableClaimProposalV2,
+    ) -> ExecutableClaimReceiptV2 | None:
+        result = await self._store_call("admit_claim_for_intent", binding, proposal)
+        assert result is None or isinstance(result, ExecutableClaimReceiptV2)
+        return result
+
     async def admit_claim(
         self,
         proposal: ExecutableClaimProposalV2,

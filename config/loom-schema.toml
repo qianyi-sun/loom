@@ -470,6 +470,17 @@ python_type = "int"
 default     = 4200
 description = "Lease and scoped-capability duration for one bounded native multi-architecture personal candidate build."
 
+[service_config.personal_dev_build_admission_config_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+description = "Optional owner-only pinned private build-admission configuration. Absence leaves its internal API unavailable; this does not enable build intake."
+
+[service_config.personal_dev_build_admission_config_sha256]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Exact SHA-256 of the canonical private prepare/bind-only management admission configuration."
+
 [service_config.personal_dev_builder_enabled]
 used_by     = ["loom-service"]
 python_type = "bool"

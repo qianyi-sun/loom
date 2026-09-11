@@ -144,6 +144,7 @@ async def _active_v3(
     max_subjects: int = 2,
     owner_min_reservation_slots: int = 4,
     owner_submission_rate_per_minute: int = 0,
+    ceiling: int = 1,
 ):  # type: ignore[no-untyped-def]
     fleet = fleet_with_development_template(
         owner_min_reservation_slots=owner_min_reservation_slots,
@@ -159,6 +160,7 @@ async def _active_v3(
         managed_base_subject_ids=(),
     )
     policy = execution_policy(
+        ceiling=ceiling,
         subject_acknowledgements=(base_ack,),
         personal_membership=membership_policy,
     )
@@ -166,6 +168,7 @@ async def _active_v3(
     fixture = await setup_execution(
         capacity_session,
         execution_policy=policy,
+        ceiling=ceiling,
         fleet=fleet,
         subjects=(base,),
     )

@@ -8,12 +8,16 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom_capacity_manager.build_membership_contracts import PersonalMembershipSnapshotV2
 from loom_capacity_manager.contracts import SubjectConfigurationV1, canonical_digest
 from loom_capacity_manager.executable_contracts import (
     ExecutionPreparationV2,
     SubjectExecutionAcknowledgementV2,
 )
-from loom_capacity_manager.membership_contracts import ExecutionPreparationV3
+from loom_capacity_manager.membership_contracts import (
+    ExecutionPreparationV3,
+    PersonalMembershipSnapshotV1,
+)
 from loom_capacity_manager.membership_execution import (
     ExecutableEpochV3,
     ExecutableEpochV4,
@@ -201,13 +205,21 @@ async def allocation_subject_is_current(
 
     try:
         current = await resolve_current_subject(
-            session, epoch, subject_id=subject_id, allow_disabled=True
+            session, epoch, subject_id=subject_id, allow_disabled=True, allow_equivocal=True
         )
     except (ValueError, ConfigurationConflictError) as exc:
         raise ExecutionConflictError(
             "allocation current subject generation evidence changed"
         ) from exc
-    return current == pinned and current[0].lifecycle_state == "active"
+    reporter_state = await session.scalar(select(CapacityDemandReporter.state).where(
+        CapacityDemandReporter.subject_id == subject_id,
+        CapacityDemandReporter.subject_incarnation == current[0].subject_incarnation,
+        CapacityDemandReporter.reporter_incarnation == current[0].demand_reporter_incarnation,
+    ))
+    return (
+        current == pinned and current[0].lifecycle_state == "active"
+        and reporter_state == "current"
+    )
 
 
 async def resolve_allocation_reporter(
@@ -257,10 +269,16 @@ async def resolve_allocation_reporter(
             "allocation historical reporter generation is unavailable"
         ) from exc
     if reporter.state == "fenced":
-        preparation = CapacityManagementStore._execution_preparation_from_row(epoch)
-        if not isinstance(preparation, ExecutionPreparationV3):
-            raise ExecutionConflictError("allocation historical reporter is fenced")
-        snapshot = await CapacityMembershipStore(CapacityManagementStore()).snapshot(session, epoch)
+        snapshot: PersonalMembershipSnapshotV1 | PersonalMembershipSnapshotV2
+        if epoch.manifest_payload.get("schema_version") == 4:
+            from loom_capacity_manager.typed_membership_store import _load_typed_history
+
+            snapshot = (await _load_typed_history(session, epoch.execution_epoch)).snapshot()
+        else:
+            preparation = CapacityManagementStore._execution_preparation_from_row(epoch)
+            if not isinstance(preparation, ExecutionPreparationV3):
+                raise ExecutionConflictError("allocation historical reporter is fenced")
+            snapshot = await CapacityMembershipStore(CapacityManagementStore()).snapshot(session, epoch)
         successor = next(
             (item for item in snapshot.members if item.configuration.subject_id == subject_id),
             None,

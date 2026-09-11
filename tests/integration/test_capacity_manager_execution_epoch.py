@@ -500,6 +500,7 @@ async def _publish_final_safe_evidence(
     capacity_session: AsyncSession,
     drained: ExecutionContextV2,
     *, bindings: tuple[PreparedExecutorBindingV2, ...] | None = None,
+    typed_management: CapacityManagementStore | None = None,
 ) -> tuple[ExecutionRetirementExecutorCheckpointV2, ...]:
     execution_store = CapacityExecutionStore()
     checkpoints = []
@@ -524,7 +525,13 @@ async def _publish_final_safe_evidence(
         }
         checkpoint_sequence = runtime.journal_high_water
         checkpoint_digest = runtime.journal_digest
-        inventory = ExecutableExecutorInventoryV2(
+        from loom_capacity_manager.typed_inventory_contracts import (
+            ExecutableExecutorInventoryV3,
+            inventory_confirmation_journal_head,
+        )
+
+        inventory_type = ExecutableExecutorInventoryV3 if typed_management else ExecutableExecutorInventoryV2
+        inventory = inventory_type(
             **common,
             inventory_sequence=runtime.inventory_high_water + 1,
             journal_sequence=checkpoint_sequence,
@@ -533,8 +540,12 @@ async def _publish_final_safe_evidence(
             journal_checkpoint_digest=checkpoint_digest,
             records=(),
         )
-        await execution_store.ingest_executor_inventory(capacity_session, inventory)
-        confirmation_sequence, confirmation_digest = canonical_inventory_confirmation_journal_head(
+        if typed_management is not None:
+            await execution_store.ingest_typed_executor_inventory(
+                capacity_session, inventory, management=typed_management)
+        else:
+            await execution_store.ingest_executor_inventory(capacity_session, inventory)
+        confirmation_sequence, confirmation_digest = inventory_confirmation_journal_head(
             inventory
         )
         await execution_store.heartbeat_executor(

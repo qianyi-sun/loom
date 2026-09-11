@@ -377,6 +377,7 @@ def test_retirement_lifecycle_schema_matches_model_and_migration(
         "retirement_safe": ("BOOLEAN", False),
         "retirement_inventory_digest": ("TEXT", True),
         "inventory_confirmation_journal_digest": ("TEXT", True),
+        "chunked_inventory_seen": ("BOOLEAN", False),
     }
     expected_unique_constraints = {
         "capacity_execution_epoch_drain_idempotency_key": ("drain_idempotency_key",),
@@ -405,7 +406,7 @@ def test_retirement_lifecycle_schema_matches_model_and_migration(
             "AND jsonb_typeof(inventory_payload) = 'object' "
             "AND last_inventory_at IS NOT NULL "
             "AND last_heartbeat_at > last_inventory_at "
-            "AND inventory_payload -> 'schema_version' = '2'::jsonb "
+            "AND inventory_payload -> 'schema_version' IN ('2'::jsonb, '3'::jsonb) "
             "AND inventory_payload -> 'inventory_sequence' "
             "= to_jsonb(inventory_high_water) "
             "AND inventory_payload ->> 'executor_id' = executor_id "
@@ -416,7 +417,11 @@ def test_retirement_lifecycle_schema_matches_model_and_migration(
             "AND inventory_confirmation_journal_digest ~ '^[0-9a-f]{64}$' "
             "AND ((inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water) "
             "AND inventory_payload ->> 'journal_digest' = journal_digest) OR "
-            "(inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water - 2) "
+            "(inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water - "
+            "(2 + CASE WHEN (inventory_payload -> 'schema_version' = '3'::jsonb AND "
+            "octet_length(public.capacity_executable_canonical_jsonb_text(inventory_payload)) > 32768) "
+            "THEN (octet_length(public.capacity_executable_canonical_jsonb_text(inventory_payload)) "
+            "+ 32767) / 32768 ELSE 0 END)) "
             "AND inventory_confirmation_journal_digest = journal_digest)) "
             "AND inventory_payload -> 'execution' -> 'execution_epoch' "
             "= to_jsonb(execution_epoch) "
@@ -448,7 +453,7 @@ def test_retirement_lifecycle_schema_matches_model_and_migration(
             "jsonb_typeof(inventory_payload) = 'object'::text AND "
             "last_inventory_at IS NOT NULL AND "
             "last_heartbeat_at > last_inventory_at AND "
-            "(inventory_payload -> 'schema_version'::text) = '2'::jsonb AND "
+            "((inventory_payload -> 'schema_version'::text) = ANY (ARRAY['2'::jsonb, '3'::jsonb])) AND "
             "(inventory_payload -> 'inventory_sequence'::text) "
             "= to_jsonb(inventory_high_water) AND "
             "(inventory_payload ->> 'executor_id'::text) = executor_id AND "
@@ -462,7 +467,11 @@ def test_retirement_lifecycle_schema_matches_model_and_migration(
             "= to_jsonb(journal_high_water) AND "
             "(inventory_payload ->> 'journal_digest'::text) = journal_digest OR "
             "(inventory_payload -> 'journal_sequence'::text) "
-            "= to_jsonb(journal_high_water - 2) AND "
+            "= to_jsonb(journal_high_water - (2 +\nCASE\n"
+            "    WHEN (inventory_payload -> 'schema_version'::text) = '3'::jsonb AND "
+            "octet_length(capacity_executable_canonical_jsonb_text(inventory_payload)) > 32768 "
+            "THEN (octet_length(capacity_executable_canonical_jsonb_text(inventory_payload)) + 32767) / 32768\n"
+            "    ELSE 0\nEND)) AND "
             "inventory_confirmation_journal_digest = journal_digest) AND "
             "((inventory_payload -> 'execution'::text) -> "
             "'execution_epoch'::text) = to_jsonb(execution_epoch) AND "

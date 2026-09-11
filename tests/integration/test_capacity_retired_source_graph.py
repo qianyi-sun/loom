@@ -1,6 +1,7 @@
 """Read-only source graph preserves all owners through repeated empty epochs."""
 
 from importlib import import_module
+from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 import pytest
@@ -28,6 +29,7 @@ from tests.integration.test_capacity_manager_execution_epoch import (
     _retirement_request,
 )
 from tests.integration.test_capacity_successor_source_verification import successor, verify
+from tests.integration.test_capacity_typed_membership_execution import typed_management
 
 
 async def seed_active_successor(session, candidate, *, epoch):
@@ -71,7 +73,14 @@ async def seed_empty_successor(session, candidate, *, epoch):
             journal_sequence=0, journal_digest="0" * 64))
     drained = await management.begin_execution_drain(session, _drain_request(active),
         actor="test-retirement", idempotency_key=UUID(int=984000 + epoch * 10))
-    checkpoints = await _publish_final_safe_evidence(session, drained, bindings=candidate.executors)
+    # Like seed_typed_sql_execution above, this creates read-only historical test
+    # data behind the deliberately closed cross-epoch runtime boundary. Only that
+    # authority readback is supplied by the harness; real inventory, heartbeat,
+    # retirement and SQL guards still execute. It is not activation acceptance.
+    inventory_management = typed_management(candidate)
+    with patch.object(inventory_management, "execution_authority", AsyncMock(return_value=drained)):
+        checkpoints = await _publish_final_safe_evidence(session, drained, bindings=candidate.executors,
+            typed_management=inventory_management)
     await management.retire_execution_epoch(session, _retirement_request(drained, checkpoints),
         actor="test-retirement", idempotency_key=UUID(int=984001 + epoch * 10))
     return candidate, RetiredMembershipSnapshotReferenceV1(namespace_id=candidate.personal_membership.namespace_id,

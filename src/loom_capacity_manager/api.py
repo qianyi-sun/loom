@@ -58,6 +58,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableExecutorHeartbeatV2,
     ExecutableExecutorInventoryV2,
     ExecutableExecutorRegistrationV2,
+    ExecutableFinalReleaseWitnessV2,
     ExecutableIntentBindingV2,
     ExecutableIntentCloseV2,
     ExecutablePartialReleaseV2,
@@ -105,6 +106,7 @@ from loom_capacity_manager.grant_store import (
     StaleCommandError,
     StaleExecutorError,
 )
+from loom_capacity_manager.launch_subject_contracts import canonical_launch_subject_bytes
 from loom_capacity_manager.membership_auth import authenticate_personal_subject_agent
 from loom_capacity_manager.membership_contracts import (
     ExecutionPreparationV3,
@@ -170,6 +172,12 @@ from loom_capacity_manager.store import (
     StaleWriterError,
     UnknownReporterError,
     WriterFence,
+)
+from loom_capacity_manager.typed_inventory_contracts import (
+    ExecutableExecutorInventoryV3,
+    ExecutorInventory,
+    TerminalInventoryEvidence,
+    parse_executor_inventory,
 )
 
 _ContractT = TypeVar("_ContractT", bound=BaseModel)
@@ -336,15 +344,15 @@ def _manager_execution_blockers(authority: CapacityAuthorityState) -> list[str]:
 
 def _validated_executable_inventory(
     row: CapacityExecutableExecutorState,
-) -> ExecutableExecutorInventoryV2 | None:
+) -> ExecutorInventory | None:
     payload = row.inventory_payload
     if payload is None or row.last_inventory_digest is None:
         return None
     try:
         # JSONB returns UUID values as strings; validate through the wire form
         # so the strict executable contracts restore their exact UUID types.
-        inventory = ExecutableExecutorInventoryV2.model_validate_json(json.dumps(payload))
-    except ValidationError:
+        inventory = parse_executor_inventory(json.dumps(payload))
+    except ValueError:
         return None
     if (
         inventory.execution.execution_epoch != row.execution_epoch
@@ -365,7 +373,7 @@ def _executor_status_item(
     *,
     now: datetime,
     freshness_seconds: int,
-) -> tuple[dict[str, Any], ExecutableExecutorInventoryV2 | None]:
+) -> tuple[dict[str, Any], ExecutorInventory | None]:
     inventory = _validated_executable_inventory(row)
     blockers: list[str] = []
     if row.state != "current":
@@ -643,6 +651,16 @@ def create_app(
     protected_release_acknowledgement_body = contract_body(DryRunProtectedReleaseAcknowledgementV1)
     executable_heartbeat_body = contract_body(ExecutableExecutorHeartbeatV2)
     executable_inventory_body = contract_body(ExecutableExecutorInventoryV2)
+
+    async def typed_inventory_body(request: Request) -> ExecutableExecutorInventoryV3:
+        try:
+            value = parse_executor_inventory(await request.body())
+            if type(value) is not ExecutableExecutorInventoryV3:
+                raise ValueError("typed inventory requires schema 3")
+            return value
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="invalid capacity contract") from exc
+
     execution_preparation_body = contract_body(ExecutionPreparationV2)
     execution_registration_body = contract_body(ExecutableExecutorRegistrationV2)
     execution_abort_body = contract_body(ExecutionPreparationAbortV2)
@@ -1592,17 +1610,47 @@ def create_app(
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
 
+    @app.get("/v3/executors/{pool_id}/intents/{intent_id}/launch-subject")
+    async def executable_launch_subject(
+        pool_id: str,
+        intent_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+    ) -> Response:
+        executor = executor_binding(actor, pool_id=pool_id)
+        session_factory, executions = execution_runtime(request)
+        _sessions, management, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.launch_subject(
+                    session, executor, intent_id=intent_id, management=management
+                )
+            return Response(
+                content=canonical_launch_subject_bytes(result), media_type="application/json"
+            )
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
     @app.get("/v2/executors/{pool_id}/work")
     async def next_executable_pool_work(
         pool_id: str,
         request: Request,
+        cleanup_only: bool = False,
+        cleanup_intent_id: UUID | None = None,
         actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
     ) -> Any:
         binding = executor_binding(actor, pool_id=pool_id)
+        if cleanup_intent_id is not None and (not cleanup_only or cleanup_intent_id.int == 0):
+            raise HTTPException(status_code=422, detail="exact intent selection requires cleanup-only")
         session_factory, executions = execution_runtime(request)
         try:
             async with session_factory() as session:
-                result = await executions.next_pool_work(session, binding)
+                if cleanup_intent_id is not None:
+                    result = await executions.next_pool_work(session, binding,
+                        cleanup_only=True, cleanup_intent_id=cleanup_intent_id)
+                else:
+                    result = (await executions.next_pool_work(session, binding, cleanup_only=True)
+                        if cleanup_only else await executions.next_pool_work(session, binding))
             return jsonable_encoder(result)
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
@@ -1627,6 +1675,33 @@ def create_app(
         try:
             async with session_factory() as session:
                 result = await executions.ingest_executor_inventory(session, value)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.put("/v3/executors/{pool_id}/inventory")
+    async def ingest_typed_executable_inventory(
+        pool_id: str,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+        value: ExecutableExecutorInventoryV3 = Depends(typed_inventory_body),
+    ) -> Any:
+        assert_executor_actor(
+            actor,
+            pool_id=pool_id,
+            executor_id=value.executor_id,
+            executor_incarnation=value.executor_incarnation,
+            pool_generation=value.pool_generation,
+        )
+        if value.pool_id != pool_id:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, executions = execution_runtime(request)
+        _sessions, management, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.ingest_typed_executor_inventory(
+                    session, value, management=management
+                )
             return jsonable_encoder(result)
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
@@ -1750,6 +1825,62 @@ def create_app(
         request: Request,
         actor: CapacityPrincipal = Depends(subject_agent_principal),
     ) -> Response:
+        result = await read_subject_terminal_inventory_evidence(subject_id, intent_id, request, actor)
+        if result is not None and type(result) is not ExecutableTerminalInventoryEvidenceV2:
+            raise HTTPException(status_code=409, detail="typed terminal evidence requires v3")
+        payload = b"null" if result is None else canonical_executable_bytes(result)
+        return Response(content=payload, media_type="application/json")
+
+    @app.get(
+        "/v3/subjects/{subject_id}/intents/{intent_id}/terminal-inventory-evidence",
+        response_model=TerminalInventoryEvidence | None,
+    )
+    async def get_versioned_subject_terminal_inventory_evidence(
+        subject_id: UUID,
+        intent_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(subject_agent_principal),
+    ) -> Response:
+        result = await read_subject_terminal_inventory_evidence(subject_id, intent_id, request, actor)
+        payload = b"null" if result is None else canonical_executable_bytes(result)
+        return Response(content=payload, media_type="application/json")
+
+    @app.get(
+        "/v2/subjects/{subject_id}/intents/{intent_id}/final-release-witness",
+        response_model=ExecutableFinalReleaseWitnessV2 | None,
+    )
+    async def get_subject_final_release_witness(
+        subject_id: UUID,
+        intent_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(subject_agent_principal),
+    ) -> Response:
+        if (
+            actor.subject_id != subject_id
+            or actor.subject_incarnation is None
+            or actor.demand_reporter_incarnation is None
+        ):
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.subject_final_release_witness(
+                    session, subject_id=subject_id,
+                    subject_incarnation=actor.subject_incarnation,
+                    reporter_incarnation=actor.demand_reporter_incarnation,
+                    intent_id=intent_id,
+                )
+            payload = b"null" if result is None else canonical_executable_bytes(result)
+            return Response(content=payload, media_type="application/json")
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    async def read_subject_terminal_inventory_evidence(
+        subject_id: UUID,
+        intent_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal,
+    ) -> TerminalInventoryEvidence | None:
         if (
             actor.subject_id != subject_id
             or actor.subject_incarnation is None
@@ -1766,8 +1897,7 @@ def create_app(
                     reporter_incarnation=actor.demand_reporter_incarnation,
                     intent_id=intent_id,
                 )
-            payload = b"null" if result is None else canonical_executable_bytes(result)
-            return Response(content=payload, media_type="application/json")
+            return result
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
 

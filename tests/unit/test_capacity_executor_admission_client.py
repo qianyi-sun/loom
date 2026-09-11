@@ -292,6 +292,25 @@ async def test_database_client_sends_complete_claim_to_protected_transaction() -
     assert await client.admit_claim(proposal) is None
 
 
+@pytest.mark.asyncio
+async def test_database_client_preserves_intent_binding_inside_claim_transaction() -> None:
+    binding = launch_context_fixture().binding
+    proposal = ExecutableClaimProposalV2(
+        operation_id=UUID(int=10), protected_attempt_id=UUID(int=11),
+        execution_generation=7, requirements_digest="b" * 64,
+        worker_id=UUID(int=12), worker_incarnation=UUID(int=13), expected_claim_high_water=0)
+    client = object.__new__(DatabaseExecutableAdmissionClient)
+
+    async def store_call(method, supplied_binding, supplied_proposal):
+        assert method == "admit_claim_for_intent"
+        assert supplied_binding is binding
+        assert supplied_proposal is proposal
+        return None
+
+    client._store_call = store_call
+    assert await client.admit_claim_for_intent(binding, proposal) is None
+
+
 # Production break caught: the production database client could not obtain the
 # exact protected worker/drain high-water needed before conditional cancellation.
 @pytest.mark.asyncio

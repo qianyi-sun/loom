@@ -52,6 +52,15 @@ from loom_capacity_manager.grant_contracts import (
     DryRunReservationAcceptanceV1,
     canonical_grant_digest,
 )
+from loom_capacity_manager.launch_subject_contracts import (
+    MAX_LAUNCH_SUBJECT_BYTES,
+    ExecutableLaunchSubjectV3,
+    parse_launch_subject,
+)
+from loom_capacity_manager.typed_inventory_contracts import (
+    ExecutableExecutorInventoryV3,
+    ExecutorInventory,
+)
 
 _MAX_CREDENTIAL_BYTES = MAX_BEARER_TOKEN_BYTES
 _MAX_RECEIPT_BYTES = 64 * 1024
@@ -306,6 +315,7 @@ async def _stream_response_bounded(
     headers: dict[str, str],
     content: bytes | None = None,
     body_label: str,
+    max_bytes: int = _MAX_RECEIPT_BYTES,
 ) -> tuple[int, bytes]:
     try:
         async with http_client.stream(
@@ -320,7 +330,7 @@ async def _stream_response_bounded(
             observed = 0
             async for chunk in response.aiter_bytes():
                 observed += len(chunk)
-                if observed > _MAX_RECEIPT_BYTES:
+                if observed > max_bytes:
                     raise ExecutorTransportError(
                         f"capacity manager {body_label} exceeds its byte bound"
                     )
@@ -636,7 +646,11 @@ class ExecutableCapacityExecutorClient:
         execution = binding.execution if binding is not None else getattr(value, "execution", None)
         epoch_context = isinstance(
             value,
-            (ExecutableExecutorHeartbeatV2, ExecutableExecutorInventoryV2),
+            (
+                ExecutableExecutorHeartbeatV2,
+                ExecutableExecutorInventoryV2,
+                ExecutableExecutorInventoryV3,
+            ),
         )
         if epoch_context:
             if not isinstance(execution, ExecutionContextV2):
@@ -768,16 +782,54 @@ class ExecutableCapacityExecutorClient:
             raise ExecutorTransportError("capacity manager heartbeat receipt changed")
         return receipt
 
+    async def launch_subject(self, binding: ExecutableIntentBindingV2) -> ExecutableLaunchSubjectV3:
+        """Fetch exact current manager facts; this does not consume a permit."""
+        self._assert_contract_binding(binding)
+        status_code, content = await _stream_response_bounded(
+            self._http,
+            "GET",
+            f"{self._manager_origin}/v3/executors/{self.registration.pool_id}/intents/{binding.intent_id}/launch-subject",
+            headers={"Authorization": f"Bearer {self._bearer_token}"},
+            body_label="launch subject",
+            max_bytes=MAX_LAUNCH_SUBJECT_BYTES,
+        )
+        if 400 <= status_code < 500:
+            raise ExecutorRejectedError(
+                f"capacity manager rejected launch subject with status {status_code}"
+            )
+        if status_code != 200:
+            raise ExecutorTransportError(
+                f"capacity manager launch subject failed with status {status_code}"
+            )
+        try:
+            value = parse_launch_subject(content)
+        except ValueError as exc:
+            raise ExecutorTransportError("capacity manager launch subject is invalid") from exc
+        if value.binding != binding:
+            raise ExecutorTransportError("capacity manager launch subject intent changed")
+        return value
+
     async def next_executable_work(
         self,
         command_sequence: int,
+        *,
+        cleanup_only: bool = False,
+        cleanup_intent_id: UUID | None = None,
     ) -> ExecutablePoolWorkV2 | None:
         if type(command_sequence) is not int or command_sequence < 0:
             raise ValueError("executable command high-water is invalid")
+        if type(cleanup_only) is not bool:
+            raise ValueError("cleanup-only work selection must be boolean")
+        if cleanup_intent_id is not None and (
+            not cleanup_only or not isinstance(cleanup_intent_id, UUID) or cleanup_intent_id.int == 0
+        ):
+            raise ValueError("exact cleanup selection requires cleanup-only and a nonzero intent UUID")
         status_code, response_content = await _stream_response_bounded(
             self._http,
             "GET",
-            f"{self._manager_origin}/v2/executors/{self.registration.pool_id}/work",
+            f"{self._manager_origin}/v2/executors/{self.registration.pool_id}/work"
+            + ("?cleanup_only=true" if cleanup_only else "")
+            + (f"&cleanup_intent_id={cleanup_intent_id}" if cleanup_intent_id is not None else ""),
             headers={"Authorization": f"Bearer {self._bearer_token}"},
             body_label="work",
         )
@@ -795,6 +847,14 @@ class ExecutableCapacityExecutorClient:
             work = _EXECUTABLE_WORK.validate_json(response_content)
         except (ValidationError, ValueError) as exc:
             raise ExecutorTransportError("capacity manager work is invalid") from exc
+        if cleanup_only and not isinstance(work, (ExecutableIntentCloseV2, ExecutablePartialReleaseV2)):
+            raise ExecutorTransportError("capacity manager returned new work to cleanup-only executor")
+        if cleanup_intent_id is not None:
+            bindings = ((work.binding,) if isinstance(work, ExecutableIntentCloseV2)
+                else tuple(item.binding for item in work.releases) if isinstance(work, ExecutablePartialReleaseV2)
+                else ())
+            if not bindings or any(binding.intent_id != cleanup_intent_id for binding in bindings):
+                raise ExecutorTransportError("capacity manager ignored exact cleanup intent selection")
         self._assert_contract_binding(work)
         work_sequence = getattr(work, "command_sequence", None)
         if work_sequence is not None and work_sequence != command_sequence + 1:
@@ -888,11 +948,14 @@ class ExecutableCapacityExecutorClient:
 
     async def ingest_executable_inventory(
         self,
-        value: ExecutableExecutorInventoryV2,
+        value: ExecutorInventory,
     ) -> ExecutableInventoryReceiptV2:
+        if type(value) not in (ExecutableExecutorInventoryV2, ExecutableExecutorInventoryV3):
+            raise ExecutorTransportError("unsupported executable inventory contract")
+        version = "v3" if isinstance(value, ExecutableExecutorInventoryV3) else "v2"
         receipt = await self._request(
             "PUT",
-            f"/v2/executors/{self.registration.pool_id}/inventory",
+            f"/{version}/executors/{self.registration.pool_id}/inventory",
             ExecutableInventoryReceiptV2,
             contract=value,
         )

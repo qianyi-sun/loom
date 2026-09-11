@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import UUID, uuid5
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, true, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +44,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
     ExecutableExecutorHeartbeatV2,
     ExecutableExecutorInventoryV2,
+    ExecutableFinalReleaseWitnessV2,
     ExecutableIntentBindingV2,
     ExecutableIntentCloseV2,
     ExecutableLaunchPermitV2,
@@ -58,12 +59,17 @@ from loom_capacity_manager.executable_contracts import (
     ExecutionContextV2,
     ExecutionFenceV2,
     PreparedExecutorBindingV2,
+    SignedExecutableOwnershipProofV2,
     StrictV2Model,
     canonical_executable_admission_work_bytes,
+    canonical_executable_bytes,
     canonical_executable_digest,
-    canonical_inventory_confirmation_journal_head,
 )
 from loom_capacity_manager.grant_contracts import ReservationShapeV1
+from loom_capacity_manager.launch_subject_contracts import (
+    ExecutableLaunchSubjectV3,
+    canonical_launch_subject_bytes,
+)
 from loom_capacity_manager.membership_contracts import ExecutionPreparationV3
 from loom_capacity_manager.membership_execution import parse_executable_epoch
 from loom_capacity_manager.membership_execution_store import (
@@ -71,6 +77,7 @@ from loom_capacity_manager.membership_execution_store import (
     resolve_allocation_reporter,
     resolve_allocation_subject,
 )
+from loom_capacity_manager.membership_launch_authority import resolve_allocation_launch_subject
 from loom_capacity_manager.models import (
     CapacityAccountPolicy,
     CapacityAllocation,
@@ -85,6 +92,7 @@ from loom_capacity_manager.models import (
     CapacityExecutableBootstrapProposal,
     CapacityExecutableCommandReceipt,
     CapacityExecutableExecutorState,
+    CapacityExecutableFinalReleaseWitness,
     CapacityExecutableIntent,
     CapacityExecutableLaunchRateBucket,
     CapacityExecutableProtectedReleaseReceipt,
@@ -102,9 +110,20 @@ from loom_capacity_manager.ownership import OwnershipKeyring
 from loom_capacity_manager.store import (
     CapacityManagementStore,
     CapacityStoreError,
+    ConfigurationConflictError,
     ExecutionConflictError,
 )
 from loom_capacity_manager.topology import TopologyInfeasible, TopologySearchLimit, pack_topology
+from loom_capacity_manager.typed_inventory_contracts import (
+    ExecutableExecutorInventoryV3,
+    ExecutableTerminalInventoryEvidenceV3,
+    ExecutorInventory,
+    TerminalInventoryEvidence,
+    inventory_confirmation_journal_head,
+    parse_executor_inventory,
+    parse_terminal_inventory_evidence,
+)
+from loom_capacity_manager.typed_ownership_contracts import SignedExecutableOwnershipProofV3
 
 _EXECUTION_NAMESPACE = UUID("82e6e16b-6c44-4af2-894b-af8fbb3fead2")
 
@@ -455,9 +474,7 @@ class CapacityExecutionStore:
         if state.inventory_payload is None or state.last_inventory_digest is None:
             return False
         try:
-            inventory = ExecutableExecutorInventoryV2.model_validate_json(
-                json.dumps(state.inventory_payload)
-            )
+            inventory = parse_executor_inventory(json.dumps(state.inventory_payload))
         except ValueError:
             return False
         if (
@@ -523,10 +540,7 @@ class CapacityExecutionStore:
                 return False
             observed_intent_ids.add(binding.intent_id)
             if (
-                not self._ownership_keyring.verify_executable(
-                    proof,
-                    expected_public_key_sha256=registration.signing_key_sha256,
-                )
+                not self._inventory_signature_matches(proof, registration.signing_key_sha256)
                 or proof.signing_key_id != registration.signing_key_id
                 or proof.metadata.controller_authority_sha256
                 != registration.controller_authority_sha256
@@ -537,6 +551,9 @@ class CapacityExecutionStore:
                 or proof.metadata.submitter_identity != "loom"
                 or record.resources != binding.resources
                 or record.node_ids != binding.node_ids
+                or not await self._inventory_subject_authority_matches(
+                    session, epoch, binding, proof
+                )
                 or record.state != "terminal"
                 or intent.state != "released"
             ):
@@ -574,11 +591,9 @@ class CapacityExecutionStore:
         inventory_sequence = witnessed_journal_sequence
         inventory_digest = witnessed_journal_digest
         try:
-            witnessed_contract = ExecutableExecutorInventoryV2.model_validate_json(
-                json.dumps(witnessed_inventory)
-            )
-            confirmation_sequence, confirmation_digest = (
-                canonical_inventory_confirmation_journal_head(witnessed_contract)
+            witnessed_contract = parse_executor_inventory(json.dumps(witnessed_inventory))
+            confirmation_sequence, confirmation_digest = inventory_confirmation_journal_head(
+                witnessed_contract
             )
         except ValueError:
             return False
@@ -709,10 +724,92 @@ class CapacityExecutionStore:
                 False,
             )
 
+    def _inventory_signature_matches(
+        self,
+        proof: SignedExecutableOwnershipProofV2 | SignedExecutableOwnershipProofV3,
+        expected_public_key_sha256: str,
+    ) -> bool:
+        if isinstance(proof, SignedExecutableOwnershipProofV3):
+            return self._ownership_keyring.verify_typed_executable(
+                proof, expected_public_key_sha256=expected_public_key_sha256
+            )
+        return self._ownership_keyring.verify_executable(
+            proof, expected_public_key_sha256=expected_public_key_sha256
+        )
+
+    async def _inventory_subject_authority_matches(
+        self,
+        session: AsyncSession,
+        epoch: CapacityExecutionEpoch,
+        binding: ExecutableIntentBindingV2,
+        proof: SignedExecutableOwnershipProofV2 | SignedExecutableOwnershipProofV3,
+    ) -> bool:
+        """Authenticate retained subject facts in addition to signature checks.
+
+        The caller separately verifies the persisted intent/executor and signed
+        controller authority. Historical resolution is for accounting/cleanup,
+        never admission of new work. A superseded owner remains accountable.
+        """
+        if type(proof) is SignedExecutableOwnershipProofV2:
+            return epoch.manifest_payload.get("schema_version") in (2, 3)
+        if (
+            type(proof) is not SignedExecutableOwnershipProofV3
+            or epoch.manifest_payload.get("schema_version") != 4
+        ):
+            return False
+        if proof.metadata.binding != binding:
+            return False
+        try:
+            allocation = await self._allocation_for_binding(session, binding)
+            resolved = await resolve_allocation_launch_subject(
+                session, epoch, allocation, subject_id=binding.subject_id, require_current=False
+            )
+            if proof.metadata.subject_authority != resolved.authority:
+                return False
+            canonical_launch_subject_bytes(
+                ExecutableLaunchSubjectV3(
+                    binding=binding,
+                    configuration=resolved.configuration,
+                    acknowledgement=resolved.acknowledgement,
+                    authority=resolved.authority,
+                )
+            )
+        except (ValueError, CapacityStoreError):
+            return False
+        return True
+
     async def ingest_executor_inventory(
         self,
         session: AsyncSession,
         inventory: ExecutableExecutorInventoryV2,
+    ) -> IngestedExecutableInventory:
+        if type(inventory) is not ExecutableExecutorInventoryV2:
+            raise ExecutionConflictError("unsupported executable inventory contract")
+        return await self._ingest_executor_inventory(session, inventory)
+
+    async def ingest_typed_executor_inventory(
+        self,
+        session: AsyncSession,
+        inventory: ExecutableExecutorInventoryV3,
+        *,
+        management: CapacityManagementStore,
+    ) -> IngestedExecutableInventory:
+        if type(inventory) is not ExecutableExecutorInventoryV3:
+            raise ExecutionConflictError("unsupported typed executable inventory contract")
+        try:
+            checked = parse_executor_inventory(canonical_executable_bytes(inventory))
+        except ValueError as exc:
+            raise ExecutionConflictError("invalid typed executable inventory contract") from exc
+        if type(checked) is not ExecutableExecutorInventoryV3:
+            raise ExecutionConflictError("typed executable inventory contract changed")
+        return await self._ingest_executor_inventory(session, checked, management=management)
+
+    async def _ingest_executor_inventory(
+        self,
+        session: AsyncSession,
+        inventory: ExecutorInventory,
+        *,
+        management: CapacityManagementStore | None = None,
     ) -> IngestedExecutableInventory:
         digest = canonical_executable_digest(inventory)
         async with _write_transaction(session):
@@ -725,6 +822,15 @@ class CapacityExecutionStore:
                 pool_generation=inventory.pool_generation,
             )
             del authority
+            typed = isinstance(inventory, ExecutableExecutorInventoryV3)
+            if typed != (epoch.manifest_payload.get("schema_version") == 4):
+                raise ExecutionConflictError("inventory version differs from execution manifest")
+            if typed:
+                if management is None:
+                    raise ExecutionConflictError(
+                        "typed inventory requires operator policy readback"
+                    )
+                await management.execution_authority(session)
             state = await self._runtime_state(session, registration, epoch, create=False)
             if state is None or state.state != "current":
                 raise ExecutionConflictError("executor lease is unavailable")
@@ -770,8 +876,8 @@ class CapacityExecutionStore:
             state.inventory_high_water = inventory.inventory_sequence
             state.last_inventory_digest = digest
             state.inventory_payload = inventory.model_dump(mode="json", exclude_none=False)
-            _, state.inventory_confirmation_journal_digest = (
-                canonical_inventory_confirmation_journal_head(inventory)
+            _, state.inventory_confirmation_journal_digest = inventory_confirmation_journal_head(
+                inventory
             )
             state.last_inventory_at = now
             state.retirement_safe = False
@@ -816,10 +922,7 @@ class CapacityExecutionStore:
                 ):
                     continue
                 if (
-                    not self._ownership_keyring.verify_executable(
-                        proof,
-                        expected_public_key_sha256=registration.signing_key_sha256,
-                    )
+                    not self._inventory_signature_matches(proof, registration.signing_key_sha256)
                     or proof.signing_key_id != registration.signing_key_id
                     or proof.metadata.controller_authority_sha256
                     != registration.controller_authority_sha256
@@ -830,6 +933,9 @@ class CapacityExecutionStore:
                     or proof.metadata.submitter_identity != "loom"
                     or record.resources != binding.resources
                     or record.node_ids != binding.node_ids
+                    or not await self._inventory_subject_authority_matches(
+                        session, epoch, binding, proof
+                    )
                 ):
                     if intent.state == "released":
                         continue
@@ -846,15 +952,22 @@ class CapacityExecutionStore:
                         raise ExecutionConflictError(
                             "terminal inventory evidence digest is unavailable"
                         )
-                    evidence = ExecutableTerminalInventoryEvidenceV2(
-                        binding=binding,
-                        inventory_execution=inventory.execution,
-                        inventory_sequence=inventory.inventory_sequence,
-                        inventory_digest=digest,
-                        journal_sequence=inventory.journal_sequence,
-                        journal_digest=inventory.journal_digest,
-                        record=record,
-                        observed_at=now,
+                    evidence_model = (
+                        ExecutableTerminalInventoryEvidenceV3
+                        if typed
+                        else ExecutableTerminalInventoryEvidenceV2
+                    )
+                    evidence = evidence_model.model_validate(
+                        dict(
+                            binding=binding,
+                            inventory_execution=inventory.execution,
+                            inventory_sequence=inventory.inventory_sequence,
+                            inventory_digest=digest,
+                            journal_sequence=inventory.journal_sequence,
+                            journal_digest=inventory.journal_digest,
+                            record=record,
+                            observed_at=now,
+                        )
                     )
                     await session.flush()
                     session.add(
@@ -894,7 +1007,7 @@ class CapacityExecutionStore:
         subject_incarnation: UUID,
         reporter_incarnation: UUID,
         intent_id: UUID,
-    ) -> ExecutableTerminalInventoryEvidenceV2 | None:
+    ) -> TerminalInventoryEvidence | None:
         """Return one durable terminal witness only to its exact current reporter."""
 
         async with _write_transaction(session):
@@ -927,9 +1040,7 @@ class CapacityExecutionStore:
             if row is None:
                 return None
             try:
-                evidence = ExecutableTerminalInventoryEvidenceV2.model_validate_json(
-                    json.dumps(row.evidence_payload)
-                )
+                evidence = parse_terminal_inventory_evidence(json.dumps(row.evidence_payload))
             except ValueError as exc:
                 raise ExecutionConflictError(
                     "stored terminal inventory evidence is invalid"
@@ -959,10 +1070,141 @@ class CapacityExecutionStore:
                 raise ExecutionConflictError("stored terminal inventory evidence binding changed")
             return evidence
 
+    async def subject_final_release_witness(
+        self,
+        session: AsyncSession,
+        *,
+        subject_id: UUID,
+        subject_incarnation: UUID,
+        reporter_incarnation: UUID,
+        intent_id: UUID,
+    ) -> ExecutableFinalReleaseWitnessV2 | None:
+        """Read retained authority using the original allocation's reporter.
+
+        Missing historical witnesses stay unavailable, including after legacy
+        command replay. Never reconstruct them using the latest protected receipt.
+        """
+        async with _write_transaction(session):
+            result = (await session.execute(
+                select(CapacityExecutableFinalReleaseWitness, CapacityExecutableIntent,
+                       CapacityExecutableProtectedReleaseReceipt, CapacityExecutableCommandReceipt)
+                .join(CapacityExecutableIntent,
+                      CapacityExecutableIntent.intent_id == CapacityExecutableFinalReleaseWitness.intent_id)
+                .join(CapacityExecutableProtectedReleaseReceipt,
+                      CapacityExecutableProtectedReleaseReceipt.id == CapacityExecutableFinalReleaseWitness.protected_receipt_id)
+                .join(CapacityExecutableCommandReceipt,
+                      CapacityExecutableCommandReceipt.id == CapacityExecutableFinalReleaseWitness.command_receipt_id)
+                .where(CapacityExecutableIntent.intent_id == intent_id,
+                       CapacityExecutableIntent.subject_id == subject_id,
+                       CapacityExecutableIntent.subject_incarnation == subject_incarnation,
+                       CapacityExecutableIntent.state == "released")
+            )).one_or_none()
+            if result is None:
+                return None
+            row, intent, protected, command = result
+            try:
+                witness = ExecutableFinalReleaseWitnessV2(
+                    release=ExecutableReleasedShapeV2.model_validate_json(json.dumps(row.release_payload)),
+                    protected_release=ExecutableProtectedReleaseV2.model_validate_json(json.dumps(protected.release_payload)),
+                    protected_acknowledgement_sha256=protected.acknowledgement_digest,
+                    command_sequence=command.command_sequence,
+                    command_request_sha256=command.request_digest,
+                    released_at=row.released_at,
+                )
+                canonical_executable_bytes(witness)
+            except ValueError as exc:
+                raise ExecutionConflictError("stored final release witness is invalid") from exc
+            binding = witness.release.binding
+            await self._exact_subject_reporter(
+                session, subject_id=subject_id, subject_incarnation=subject_incarnation,
+                reporter_incarnation=reporter_incarnation, operation="final release witness",
+                historical_binding=binding,
+            )
+            if (
+                binding.model_dump(mode="json") != intent.binding_payload
+                or protected.intent_id != intent_id
+                or protected.reporter_incarnation != reporter_incarnation
+                or command.execution_epoch != binding.execution.execution_epoch
+                or command.executor_incarnation != binding.executor_incarnation
+                or command.operation_kind != "release"
+                or command.result_payload.get("tranche_id") != str(binding.tranche_id)
+                or binding.shape_instance_id not in command.result_payload.get("released_shape_ids", [])
+                or command.result_digest != _payload_digest(command.result_payload)
+                or row.released_at != intent.released_at
+                or witness.release.inventory_sequence != intent.inventory_sequence
+                or witness.release.terminal_kind != intent.terminal_kind
+                or witness.release.terminal_identity != intent.terminal_identity
+                or witness.release.terminal_evidence_sha256 != intent.terminal_evidence_sha256
+            ):
+                raise ExecutionConflictError("stored final release witness binding changed")
+            return witness
+
+    async def launch_subject(
+        self,
+        session: AsyncSession,
+        executor: PreparedExecutorBindingV2,
+        *,
+        intent_id: UUID,
+        management: CapacityManagementStore,
+    ) -> ExecutableLaunchSubjectV3:
+        """Read current facts only for the exact live permitted executor.
+
+        This neither consumes the permit nor changes command high-water. The
+        executor must still consume the exact permit before scheduler submission.
+        """
+        async with _write_transaction(session):
+            authority = await self._lock_authority(session)
+            epoch = await self._lock_current_epoch(session, authority)
+            row = await self._locked_intent(session, intent_id)
+            binding = ExecutableIntentBindingV2.model_validate_json(json.dumps(row.binding_payload))
+            if (
+                binding.intent_id != intent_id
+                or binding.pool_id != executor.pool_id
+                or binding.pool_generation != executor.pool_generation
+                or binding.executor_id != executor.executor_id
+                or binding.executor_incarnation != executor.executor_incarnation
+            ):
+                raise ExecutionConflictError("launch subject executor binding changed")
+            context = await self._locked_execution_context(session, binding.execution, executor)
+            await management.execution_authority(session)
+            now = await _database_now(session)
+            if (
+                row.state != "permitted"
+                or row.permit_payload is None
+                or row.permit_expires_at is None
+                or row.permit_expires_at <= now
+            ):
+                raise ExecutionConflictError("launch subject requires an unexpired permit")
+            permit = ExecutableLaunchPermitV2.model_validate_json(json.dumps(row.permit_payload))
+            if (
+                permit.binding != binding
+                or permit.permit_id != row.permit_id
+                or permit.permit_epoch != row.permit_epoch
+                or permit.expires_at != row.permit_expires_at
+                or canonical_executable_digest(permit) != row.permit_digest
+            ):
+                raise ExecutionConflictError("launch subject permit evidence changed")
+            await self._assert_increase_eligible(session, context, current=row)
+            allocation = await self._allocation_for_binding(session, binding)
+            resolved = await resolve_allocation_launch_subject(
+                session, epoch, allocation, subject_id=binding.subject_id, require_current=True
+            )
+            result = ExecutableLaunchSubjectV3(
+                binding=binding,
+                configuration=resolved.configuration,
+                acknowledgement=resolved.acknowledgement,
+                authority=resolved.authority,
+            )
+            canonical_launch_subject_bytes(result)
+            return result
+
     async def next_pool_work(
         self,
         session: AsyncSession,
         executor: PreparedExecutorBindingV2,
+        *,
+        cleanup_only: bool = False,
+        cleanup_intent_id: UUID | None = None,
     ) -> (
         ExecutableReservationProposalV2
         | ExecutableIntentBindingV2
@@ -971,6 +1213,12 @@ class CapacityExecutionStore:
         | ExecutablePartialReleaseV2
         | None
     ):
+        if type(cleanup_only) is not bool:
+            raise ValueError("cleanup-only work selection must be boolean")
+        if cleanup_intent_id is not None and (
+            not cleanup_only or not isinstance(cleanup_intent_id, UUID) or cleanup_intent_id.int == 0
+        ):
+            raise ValueError("exact cleanup selection requires cleanup-only and a nonzero intent UUID")
         async with _write_transaction(session):
             authority = await self._lock_authority(session)
             if authority.execution_state == "shadow":
@@ -1001,6 +1249,8 @@ class CapacityExecutionStore:
                                 == executor.executor_incarnation,
                                 CapacityExecutableIntent.pool_id == executor.pool_id,
                                 CapacityExecutableIntent.state != "released",
+                                CapacityExecutableIntent.intent_id == cleanup_intent_id
+                                if cleanup_intent_id is not None else true(),
                             )
                             .order_by(
                                 CapacityExecutableIntent.allocation_epoch,
@@ -1105,7 +1355,7 @@ class CapacityExecutionStore:
                                 current,
                                 command_sequence=context.executor.command_high_water + 1,
                             )
-                        if increase_allowed:
+                        if increase_allowed and not cleanup_only:
                             proposal = await self._create_next_proposal(session, context)
                             if proposal is not None:
                                 return proposal
@@ -1114,6 +1364,8 @@ class CapacityExecutionStore:
                             current.state = "released"
                             current.released_at = now
                             released_any = True
+                            continue
+                        if cleanup_only:
                             continue
                         return ExecutableReservationProposalV2.model_validate_json(
                             json.dumps(current.proposal_payload)
@@ -1125,6 +1377,8 @@ class CapacityExecutionStore:
                                 current,
                                 command_sequence=context.executor.command_high_water + 1,
                             )
+                        if cleanup_only:
+                            continue
                         bootstrap = await self._latest_bootstrap_proposal(
                             session, current.intent_id, lock=True
                         )
@@ -1148,6 +1402,8 @@ class CapacityExecutionStore:
                                 current,
                                 command_sequence=context.executor.command_high_water + 1,
                             )
+                        if cleanup_only:
+                            continue
                         await self._assert_increase_eligible(session, context, current=current)
                         if (
                             current.permit_payload is None
@@ -1221,7 +1477,8 @@ class CapacityExecutionStore:
                 if released_any:
                     continue
                 if (
-                    authority.execution_state == "active"
+                    not cleanup_only
+                    and authority.execution_state == "active"
                     and authority.executable_new_capacity_ceiling > 0
                     and not authority.increase_freeze
                     and latest_increase_allowed
@@ -1237,7 +1494,8 @@ class CapacityExecutionStore:
                         return proposal
                 return None
             if (
-                authority.execution_state != "active"
+                cleanup_only
+                or authority.execution_state != "active"
                 or authority.executable_new_capacity_ceiling <= 0
                 or not latest_increase_allowed
             ):
@@ -2502,9 +2760,7 @@ class CapacityExecutionStore:
                     or recovery.controller_query_completed_at > now + timedelta(seconds=1)
                 ):
                     raise ExecutionConflictError("submission recovery evidence is not fresh")
-                inventory = ExecutableExecutorInventoryV2.model_validate_json(
-                    json.dumps(runtime.inventory_payload)
-                )
+                inventory = parse_executor_inventory(json.dumps(runtime.inventory_payload))
                 if canonical_executable_digest(inventory) != recovery.inventory_digest:
                     raise ExecutionConflictError("submission recovery inventory digest changed")
                 if any(
@@ -2581,9 +2837,7 @@ class CapacityExecutionStore:
                     ).scalar_one()
                     if runtime.inventory_payload is None:
                         raise ExecutionConflictError("unused close requires complete inventory")
-                    inventory = ExecutableExecutorInventoryV2.model_validate_json(
-                        json.dumps(runtime.inventory_payload)
-                    )
+                    inventory = parse_executor_inventory(json.dumps(runtime.inventory_payload))
                     if any(
                         record.ownership_proof is not None
                         and record.ownership_proof.metadata.binding.intent_id == row.intent_id
@@ -2775,10 +3029,7 @@ class CapacityExecutionStore:
                             "release requires exact protected and physical terminal evidence"
                         )
                 now = await _database_now(session)
-                for row, _item in rows:
-                    row.state = "released"
-                    row.released_at = now
-                await self._record_command(
+                command_receipt = await self._record_command(
                     session,
                     first,
                     sequence=release.command_sequence,
@@ -2786,6 +3037,22 @@ class CapacityExecutionStore:
                     request_digest=digest,
                     result_payload=payload,
                 )
+                await session.flush()
+                for row, item in rows:
+                    session.add(CapacityExecutableFinalReleaseWitness(
+                        intent_id=row.intent_id,
+                        protected_receipt_id=protected_releases[row.intent_id].id,
+                        command_receipt_id=command_receipt.id,
+                        release_payload=item.model_dump(mode="json"),
+                        released_at=now,
+                    ))
+                # Insert while intents are closing; SQL validates exact retained
+                # references, then deferred guards require the paired transition.
+                await session.flush()
+                for row, _item in rows:
+                    row.state = "released"
+                    row.released_at = now
+                await session.flush()
             return ReleasedExecutableShapes(
                 first.tranche_id,
                 released_ids,
@@ -3283,9 +3550,7 @@ class CapacityExecutionStore:
         now = await _database_now(session)
         if context.executor.inventory_payload is None:
             raise ExecutionConflictError("fresh complete executor inventory is required")
-        inventory = ExecutableExecutorInventoryV2.model_validate_json(
-            json.dumps(context.executor.inventory_payload)
-        )
+        inventory = parse_executor_inventory(json.dumps(context.executor.inventory_payload))
         if context.executor.last_inventory_at is None:
             raise ExecutionConflictError("fresh complete executor inventory is required")
         executor_inventory_fresh_until = (
@@ -3963,10 +4228,7 @@ class CapacityExecutionStore:
         if (
             epoch is None
             or allocation is None
-            or not isinstance(
-                CapacityManagementStore._execution_preparation_from_row(epoch),
-                ExecutionPreparationV3,
-            )
+            or not await CapacityExecutionStore._has_authenticated_membership(session, epoch)
         ):
             raise ExecutionConflictError("an earlier global launch is unresolved")
         try:
@@ -3994,9 +4256,7 @@ class CapacityExecutionStore:
         epoch: CapacityExecutionEpoch,
         allocation: CapacityAllocation,
     ) -> CapacitySubject:
-        if isinstance(
-            CapacityManagementStore._execution_preparation_from_row(epoch), ExecutionPreparationV3
-        ):
+        if await CapacityExecutionStore._has_authenticated_membership(session, epoch):
             allocation_epoch = await session.get(
                 CapacityAllocationEpoch, allocation.allocation_epoch
             )
@@ -4046,6 +4306,22 @@ class CapacityExecutionStore:
         return allocation
 
     @staticmethod
+    async def _has_authenticated_membership(
+        session: AsyncSession, epoch: CapacityExecutionEpoch,
+    ) -> bool:
+        if epoch.manifest_payload.get("schema_version") == 4:
+            from loom_capacity_manager.typed_membership_store import _load_typed_immutable_history
+
+            try:
+                await _load_typed_immutable_history(session, epoch.execution_epoch)
+            except (ValueError, ConfigurationConflictError) as exc:
+                raise ExecutionConflictError("typed membership history is invalid") from exc
+            return True
+        return isinstance(
+            CapacityManagementStore._execution_preparation_from_row(epoch), ExecutionPreparationV3
+        )
+
+    @staticmethod
     async def _membership_target_current(
         session: AsyncSession,
         epoch: CapacityExecutionEpoch,
@@ -4053,9 +4329,7 @@ class CapacityExecutionStore:
         *,
         subject_id: UUID,
     ) -> bool:
-        if not isinstance(
-            CapacityManagementStore._execution_preparation_from_row(epoch), ExecutionPreparationV3
-        ):
+        if not await CapacityExecutionStore._has_authenticated_membership(session, epoch):
             return True
         if epoch.state != "active":
             return False
@@ -4128,10 +4402,7 @@ class CapacityExecutionStore:
             )
             if epoch is None:
                 raise ExecutionConflictError(f"{operation} historical execution is unavailable")
-            if isinstance(
-                CapacityManagementStore._execution_preparation_from_row(epoch),
-                ExecutionPreparationV3,
-            ):
+            if await CapacityExecutionStore._has_authenticated_membership(session, epoch):
                 allocation = await CapacityExecutionStore._allocation_for_binding(
                     session, historical_binding
                 )
@@ -4660,7 +4931,7 @@ class CapacityExecutionStore:
     @staticmethod
     async def _locked_inventory_intents(
         session: AsyncSession,
-        inventory: ExecutableExecutorInventoryV2,
+        inventory: ExecutorInventory,
     ) -> dict[UUID, CapacityExecutableIntent]:
         intent_ids = tuple(
             sorted(
@@ -4716,7 +4987,7 @@ class CapacityExecutionStore:
     @staticmethod
     def _apply_inventory_observation(
         intent: CapacityExecutableIntent,
-        inventory: ExecutableExecutorInventoryV2,
+        inventory: ExecutorInventory,
         record: Any,
     ) -> bool:
         if intent.state == "released":
@@ -4846,19 +5117,18 @@ class CapacityExecutionStore:
         operation_kind: str,
         request_digest: str,
         result_payload: dict[str, Any],
-    ) -> None:
+    ) -> CapacityExecutableCommandReceipt:
         result_digest = _payload_digest(result_payload)
-        session.add(
-            CapacityExecutableCommandReceipt(
-                execution_epoch=row.execution_epoch,
-                executor_incarnation=row.executor_incarnation,
-                command_sequence=sequence,
-                operation_kind=operation_kind,
-                request_digest=request_digest,
-                result_digest=result_digest,
-                result_payload=result_payload,
-            )
+        receipt = CapacityExecutableCommandReceipt(
+            execution_epoch=row.execution_epoch,
+            executor_incarnation=row.executor_incarnation,
+            command_sequence=sequence,
+            operation_kind=operation_kind,
+            request_digest=request_digest,
+            result_digest=result_digest,
+            result_payload=result_payload,
         )
+        session.add(receipt)
         state = (
             await session.execute(
                 select(CapacityExecutableExecutorState)
@@ -4870,6 +5140,7 @@ class CapacityExecutionStore:
         ).scalar_one()
         state.command_high_water = sequence
         state.last_command_digest = request_digest
+        return receipt
 
 
 __all__ = [

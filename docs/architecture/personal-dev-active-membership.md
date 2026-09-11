@@ -56,6 +56,433 @@ New subjects use the same protected personal-name and owner derivation rules.
 Changing the delegate, template, fleet or executor trust roots requires a new
 reviewed execution preparation, not a membership operation.
 
+Typed allocation execution readers authenticate the exact immutable membership
+history before testing current eligibility or resolving a retained cleanup
+reporter. A superseded generation cannot launch; its authenticated fenced reporter
+can still identify retained work. An equivocal current reporter is ineligible and
+does not block another owner's missing-predecessor launch rank. That comparison
+still validates candidate, profile, deployment and materialized membership
+evidence; corruption is an error, not permission to skip work. Normal launch and
+demand readers remain strict. This reader support does not enable typed runtime
+activation or native submission.
+
+Migration `capacity_0019` pairs executor inventory V3 only with a V4 execution
+manifest (V2 inventory remains paired with V2/V3 manifests). Typed retirement
+keeps the exact inventory digest, executor identity, journal confirmation and
+post-inventory heartbeat requirements. Downgrade refuses retained typed
+inventory and installs a persistent legacy-only fence before removing its
+version trigger. This does not yet complete typed terminal-evidence insertion,
+predecessor release or executable SQL admission.
+
+Migration `capacity_0020` dispatches allocation-pinned SQL readers explicitly
+between legacy V2/V3 and typed V4 histories. Typed application reservations,
+bootstrap and protected admission use the same authenticated member history as
+Python. Currentness checks the original installation (including managed bases),
+exact candidate attestation/profile set and reporter binding. Capacity-only
+supersession can close old admission without requiring a new allocation epoch.
+Build services remain ineligible until authenticated build readiness is connected;
+inherited source graphs remain interlocked. Rollback refuses retained typed
+intents and restores the prior functions and privilege boundaries. This is
+database lifecycle support, not proof of native submission or live acceptance.
+
+The build runtime installation resolver joins the independently approved native
+publication to the V4 build template and both complete purpose-tagged pool policy
+sets. Each set must match its prepared controller root; the selected build profile
+must match the template's generation, shape, resources and eligible domains, the
+trusted launcher release, and the publication's exact architecture-specific agent
+image. Its paired builder image is retained from that same publication. Partial
+sets, cross-architecture images and substituted profiles are rejected. These pure
+installation facts need no running worker and grant no readiness or capacity:
+management still must prove its allocation-contained admission adapter is actually
+installed before a cold build service can become ready.
+
+Build assignment evidence uses the independent `loom_capacity_build_guard`
+management schema, not the per-environment application trial guard. Revision
+`build_guard_0001` retains installations, canonical plans, immutable assignments
+and dispositions. A separate request-hold table permits only one current
+assignment per platform request while preserving assignment history. Logical
+cancellation does not release a hold or stop its global capacity charge.
+
+This initial revision installs no runtime mutation procedures. The agent has
+schema USAGE only; a distinct NOLOGIN owner controls evidence and a dedicated
+least-privileged migrator assumes that role. Migration requires an explicit
+database URL and role names, rejects foreign defaults and schema/object/column
+privilege drift on every run (including an at-head rerun), and refuses downgrade
+with retained evidence. It is packaged independently with the service image.
+Tables alone confer no admission acknowledgement, bootstrap capability or build
+readiness: protected prepare/publication/release and the native runtime adapter
+remain required before intake can open.
+
+The owner-only installation store retains authenticated installer inputs in a
+SERIALIZABLE outer transaction. A deployment's identity remains stable across
+capacity-only membership updates, while owner, reporter, candidate-generation or
+approved-runtime rebinding is rejected. Readback checks exact canonical bytes,
+scalar identity pins and the runtime digest shared with platform requests.
+Retention does not activate an installation; the runtime agent cannot call this
+owner interface, and caller rollback also rolls back the retained record.
+
+Revision `build_guard_0002` adds an owner-only source assertion for the eventual
+protected prepare/publication procedures. It hashes the exact retained source
+snapshot bytes against the immutable platform request, then compares their JSON
+fields to the current candidate and build-attempt rows. Installation, parent,
+candidate and request locks remain held by the caller's SERIALIZABLE transaction;
+changed source, replaced/expired lease, installation drift and cancellation fail
+closed. Multi-request callers must first acquire each class of source locks in
+sorted order. This helper has no agent EXECUTE grant and produces no assignment
+or acknowledgement. The protected owner's future invocation requires SELECT and
+row-lock permission on these three management tables; the agent receives neither.
+
+Revision `build_guard_0003` grants the management agent only the protected
+`prepare_plan` entrypoint. It validates the complete native proposal contract and
+its canonical ASCII wire representation, checks approved installation/profile/
+executor/node bindings, and rechecks source under sorted row locks. Plan and
+assignment insertion is atomic with the caller's transaction. SQL generates the
+assignment identity and retained request-history sequence; a competing plan cannot
+take a held request. Replay must match the original plan, assignments and current
+source/lease, and cancellation or expiry never removes an existing hold.
+
+The assignment JSON and its exact SQL-generated bytes/hash are internal retained
+evidence, not the external protocol's canonical encoding. Migration reruns verify
+required entrypoint/helper presence, owner and pinned security settings as well
+as exact non-grantable agent privileges. Preparation still sends no manager
+acknowledgement and issues no bootstrap or source capability. Publication,
+closure/release, receipt readback and the native management adapter must be wired
+before intake or readiness can be enabled.
+
+The management plan store decodes the actual SQL preparation response into a
+frozen receipt, checking the complete assignment set against the exact proposal,
+source snapshots and retained runtime installation. It gives the internal
+installation/proposal/assignment document a deterministic canonical digest;
+SQL assignment storage bytes remain distinct from this encoding. Preparation
+requires a caller-owned transaction, and response validation failure rolls back
+its savepoint so a caught error cannot commit unusable holds. This receipt alone
+is not an admission acknowledgement or an execution capability.
+
+Revision `build_guard_0004` authorizes publication for an existing plan only. It
+requires preparation to have committed in a prior transaction, using a protected
+full top-level transaction ID so nested savepoints cannot bypass durability. It
+locks the installation and plan, then sorted source rows and assignments, rechecks
+current source/lease and request holds, and derives the canonical manager
+acknowledgement from those durable records. Assignment IDs, source epochs and
+history sequences cannot be supplied by the caller. Its prepared-plan digest
+matches the typed receipt's canonical internal encoding. Publication replay
+requires the same current checks and exact retained acknowledgement; closure or
+release dispositions prohibit publication. Unlike publication authorization,
+`prepare_plan` still rejects a plan with any disposition.
+
+The publication disposition records authorization, not confirmation of network
+delivery. The caller must keep its outer SERIALIZABLE transaction open through
+the existing manager client's exact receipt validation. A lost response retries
+the same durable publication with the existing protected idempotency namespace,
+or proceeds through closure recovery if current authority has expired. Neither
+publication nor cancellation removes request holds. Closure/release, native
+bootstrap/execution and functioning readiness integration remain required before
+build intake can open.
+
+Revision `build_guard_0005` retains authenticated manager closures even when the
+source lease expired or cancellation arrived. A never-received plan gets terminal
+identity evidence with no assignments; a prepared plan retains its immutable
+assignment identities as abandoned. Exact closure replay is allowed after a lost
+publication reply, while a different closure or proposal cannot rebind the plan.
+The SQL boundary validates the complete cold native-plan shape/allowance mapping
+against the retained installation before inserting even a never-received plan.
+The agent first commits the closure and then authorizes its cleanup acknowledgement
+from that durable record. A top-level transaction fence also covers nested
+savepoints. Cleanup uses the existing protected idempotency namespace and remains
+replayable after source expiry; it grants no executable authority.
+
+Closure retention and cleanup acknowledgement never remove request holds or emit
+physical-release evidence. Protected release and native runtime integration still
+must account for actual executor state before any request is reusable or capacity
+is reported as free.
+
+The management build-plan coordinator owns separate preparation/closure commits
+and bounded publication transactions. It keeps source locks through the existing
+authenticated manager client's exact receipt checks. A lost or invalid response
+leaves prepared assignments durable and retryable; it never invents delivery
+success. Closure recovery first replays any retained acknowledgement for the same
+proposal, since the manager's current close reason and closure ID can change as
+time passes. Only an explicit protected missing-record result permits retaining
+a new closure. This coordinator is not yet a complete demand/native-runtime loop
+and does not advertise readiness.
+
+Revision `build_guard_0006` retains a bounded latest demand report and monotonic
+reporter high-water per installation. Capture independently checks the complete
+current source set, excludes held requests from pending buckets, and derives held
+assignments from immutable plans even after cancellation or source expiry. It
+locks only bounded live/held work, not completed unheld history. Reports use the
+immutable platform-request creation time as their submission timestamp. Older
+configuration generations and backward observation times cannot replace newer
+state. The agent has no direct reporter-table writes.
+
+The demand coordinator commits capture before returning a report and retries only
+whole local transactions rejected for serialization conflict or deadlock, with a
+bounded attempt count and time budget. It does not retry ambiguous connection
+outcomes or publish externally during those retries. This revision covers the
+pre-bootstrap pending/assigned lifecycle; native claims do not exist yet, so no
+worker identities or fixed claims are fabricated. `publish_latest` reads the last
+committed report, closes its database transaction, then sends the exact canonical
+bytes through the authenticated reporter client. Missing observations cause no
+publication; lost or invalid replies leave the same sequence available for replay
+after restart. Newer captures supersede older observations, with reordered delivery
+fenced by the manager's existing reporter high-water. Publication grants neither
+readiness nor execution.
+
+Revision `build_guard_0007` adds a bounded private current-source reader. Demand
+capture can load actual active requests through this procedure in the same
+serializable transaction, without direct source-table access for the runtime agent.
+The canonical source encoding matches management staging, including Unicode
+escaping. Capture still independently locks and checks the complete source set
+against the original staged hashes; observation cannot rebind changed source,
+manufacture work, or turn held work back into pending work. Explicit source maps
+remain supported for callers already holding exact source evidence. Native claim
+projection and the runtime loop remain to be connected.
+
+Revision `build_guard_0008` retains purpose-specific, hash-only native bootstrap
+proposals before build-plan creation: the manager requires bootstrap acknowledgement
+to produce that plan. The private procedure checks the complete approved native
+installation, owner account, candidate, pool/executor/node, execution manifest,
+one-slot resources and zero surge. It grants no source URL, credential, assignment
+or readiness. A separate publication procedure requires an earlier committed
+registration and derives the existing authenticated manager acknowledgement.
+Both proposal and registration epochs remain one, matching the current pool
+executor/manager contract. Exact replies replay; expiry preserves evidence but
+blocks new authorization, and same-intent secret rotation is forbidden. Recovery
+must use manager-owned cleanup and a new intent. Later native binding and claims
+must match this exact hash/evidence plus admitted work and physical scheduler
+ownership; none of those capabilities is enabled by bootstrap retention alone.
+
+Revision `build_guard_0009` adds protected native preparation and physical job
+retention. New preparation joins the committed bootstrap hash/evidence to the
+exact admitted shape and held assignment, requires committed publication, and
+rechecks current source and leases. Exact retained preparation replay survives
+cancellation and expiry so a lost reply cannot strand the executor's cleanup
+journal. Physical binding requires prior committed preparation and pins the
+exact pool/job and ownership digest; it remains recordable after cancellation
+because the scheduler job may already exist. Neither operation releases a hold
+or grants a worker/source credential. Append-only receipts use the existing
+executor protocol and a database-generated high-water sequence. Purpose-specific
+executor authentication, contained execution, claims and physical release remain
+unconnected; typed runtime activation and readiness stay interlocked.
+
+The build-admission credential loader accepts a separate executor-only registry:
+every entry must have the single pool-execution scope and complete pool generation,
+executor ID and incarnation. It reuses owner-only file and duplicate-identity
+checks, while the manager's original loader still requires its operator. This
+does not configure an endpoint or grant access by itself. Management database
+credentials and application-worker credentials must never reach build containers.
+
+The management service mounts internal HTTPS
+`/api/v1/internal/capacity-build/pools/{pool}/intents/{intent}/prepare` and `bind`
+endpoints, unavailable without separately installed
+private sessions and an executor verifier. They authenticate complete pool and
+executor identity, derive the installation lookup from subject/incarnation/
+deployment, and let protected SQL resolve the actual native installation. Requests
+and transactions are bounded; receipts leave only after the outer commit. Database
+diagnostics and credentials never form response bodies. The legacy native-builder
+V1 router is unchanged. The pool client's authenticated typed route and deployment
+activation remain to be connected; endpoint presence does not enable build intake.
+
+Service startup can install these private sessions with the optional
+`LOOM_SVC_PERSONAL_DEV_BUILD_ADMISSION_CONFIG_FILE` and its exact
+`LOOM_SVC_PERSONAL_DEV_BUILD_ADMISSION_CONFIG_SHA256`. The canonical V1 document
+has `mode="prepare-bind-only"`, owner-only `database_url_file` and
+`principals_file` paths, and their SHA-256 digests. The database URL requires
+verified PostgreSQL TLS. Startup checks the restricted agent and protected
+prepare/bind procedures, and rejects incomplete inputs or privilege drift.
+The service owns this independent connection pool through normal shutdown and
+partial startup failure; it removes admission access before disposing the pool.
+This configuration never sets builder availability or enables source intake.
+
+Private guard revision `build_guard_0010` adds read-only exact-intent observation
+at the same path with the `observe` suffix. It requires committed preparation,
+authenticates the complete binding, and remains readable after expiry, cancellation
+or logical closure so recovery does not lose its evidence. It neither removes a
+request hold nor manufactures a terminal release receipt. This revision has no
+worker exchange or claims; observation must be extended atomically when those
+consumers are installed. The typed executor activation interlock remains closed.
+
+Revision `build_guard_0011` adds unbound bootstrap revocation, including when
+cancellation or expiry prevented the first preparation. Its append-only receipt
+binds the committed bootstrap and server-selected reporter and shares the protected
+execution high-water. It rejects any existing physical binding and fences later
+new preparation, binding and bootstrap publication; exact committed preparation
+replay remains available for recovery. Observation requires committed revocation
+before returning its terminal receipt. The executor-authenticated
+`revoke-bootstrap` endpoint commits before replying and supports exact retry.
+Revocation never removes request holds or proves scheduler absence. The executor
+must separately prove that no submission was attempted, or follow physical-job
+cleanup, before manager release. Typed cleanup routing, manager release publication,
+worker exchange/claims and contained execution remain interlocked and unfinished.
+
+The pool-side build-admission client uses a separate controller-only bearer token
+and verified mTLS files. It pins pool generation and executor identity, bounds
+request deadlines and response sizes, rejects redirects, and validates canonical
+receipts against every request binding and digest. Restart retries reconstruct
+identical requests. Real loopback mTLS tests exercise this client through the
+management router and private SQL on both pool identities, including rejection
+without a client certificate. This is local transport evidence, not a deployed
+endpoint or a contained native build. The shared request envelope carries only
+bootstrap hashes, never a source capability or an application worker credential.
+The envelope resides in the shared agent package already shipped by the executor
+release; no management build-guard package or database adapter is added to that
+image. The installed-runtime probe imports the client when present, while preserving
+compatibility with older immutable releases that predate it.
+
+The pinned transport constructor consumes the exact hashed owner-only credential
+bytes and trusts only the configured CA. Certificate/key loading uses sealed
+memory snapshots, preventing a file replacement between hashing and TLS loading.
+The separate canonical V3 admission directory pins the executor, unique subject
+incarnation, configuration/deployment/candidate generations, full candidate digest,
+account, purpose and protected-admission digest. Application routes carry their
+private database-file pin; build routes carry separate HTTPS/mTLS/token pins.
+Every operation rereads the directory and checks its immutable root and exact
+binding before creating a client, which is disposed even after a lost reply.
+Purpose resolution does not require an unexpired manager launch permit, preserving
+cleanup access after cancellation/expiry. The backend still validates protected
+installation authority. Unsupported native lifecycle methods reject before loading
+credentials; they never fall back to application admission. This router is not
+used by legacy V2 activation. The distinct V3 artifact below composes it with
+typed policy, but execution stays disabled until all lifecycle and
+allocation-contained consumers are complete.
+
+Before fresh protected preparation or rendering, the executor checks the pinned
+admission purpose against exact manager-authenticated launch facts. Pending
+preparation replay performs that check only after checking for native cleanup;
+confirmed preparation replay is read-only and does not require a live permit.
+Retained launch replay checks the pinned purpose against its journaled facts,
+never a fresh manager lookup. Mismatches cannot prepare, render or launch, while
+exact confirmed replay and native unsubmitted revocation survive permit expiry.
+
+Typed application claims retain the caller's full intent binding through the
+database client. A single savepoint observes that exact protected binding, calls
+the existing claim procedure and checks the returned intent before committing.
+Wrong-intent mutations roll back even when the caller catches the error. The
+existing procedure still owns worker eligibility and immutable receipt replay,
+so replay after drain or worker replacement does not depend on current-worker
+equality. Native builds cannot use this application claim path.
+
+The native unsubmitted close consumer can revoke before first preparation. It
+requires a retained exact bootstrap proposal, checkpoint-covered journal, no job
+or physical-binding history, and no consumed/physical handoff sidecars. It never
+uses a failed preparation or local expiry as cancellation authority. Revocation
+is journaled before sending, committed before handoff deletion, and observed
+before logical close. A pending preparation is explicitly marked revoked, never
+falsely confirmed; restart recognizes only its exact matching pending revocation
+and resumes deletion/supersession after crashes. The revoked-preparation event
+and its dependencies survive checkpoint/compaction until protected release.
+Pending native preparation polls manager work with `cleanup_only=true` and an
+exact `cleanup_intent_id`. This selector filters within the authenticated pool,
+executor and execution epoch; it cannot request new capacity. The client rejects
+responses that ignore the selector. Replay requires a close with the exact
+binding, bootstrap epoch/evidence and next command sequence before revoking.
+An absent close or another owner's work does not authorize cancellation. Physical
+or ambiguous submissions still require separate terminal cleanup; the public
+typed execution interlock stays closed.
+
+Physically bound builds that never registered use the distinct protected
+`withdraw_unregistered_worker` operation. Build-guard revision `build_guard_0012`
+retains an immutable withdrawal with exact prior-committed bootstrap, Slurm job
+and ownership digest. Serializable installation/bootstrap/physical locks fence
+conflicting operations; exact replay survives cancellation and expiry. Observation
+exposes withdrawal only after commit, and the existing revocation fence blocks
+new bootstrap publication or physical binding. This authenticates bootstrap
+revocation, **not** scheduler termination: capacity holds remain, no source grant
+is issued, and no terminal/release receipt is fabricated. Future native worker
+exchange must check this fence under the same locks. The pool-authenticated HTTP
+route, pinned client and typed router preserve the exact request and receipt;
+runtime initialization verifies the installed procedure and narrow privileges.
+The reporter has an explicit build-only V3 terminal-evidence fetch method;
+application recovery still rejects build evidence. Both paths retain bounded
+authenticated transport and exact subject/intent/candidate checks. Fetching is
+not protected import, local signature verification or capacity-release authority.
+
+Build-guard revision `build_guard_0013` adds a separate immutable native terminal
+inventory ledger. The management reporter's `BuildGuardTerminalStore` imports
+manager-authenticated build-purpose V3 Slurm evidence only, joining the exact
+committed bootstrap, physical job and complete signed-proof digest to the retained
+installation and assignment. Owner, native launch profile, controller policy and
+trusted release pins must agree. Serializable locks and savepoint-checked receipts
+make exact retries safe; changed evidence is rejected. Cleanup survives source
+expiry, cancellation and withdrawal without consulting new membership revisions.
+The importer is not exposed on executor admission HTTP routes. This is structural
+validation and a protected local join, not independent signature verification.
+It neither revokes a worker nor removes a capacity hold; protected release
+publication and authoritative hold release remain separate prerequisites.
+
+Build-guard revision `build_guard_0014` supplies the native protected-release
+outbox. Publications derive only from committed immutable unbound revocations or
+bound withdrawals and retain the installation's original reporter identity.
+Each event is skipped only after its own immutable acknowledgement; sparse shared
+event IDs are not a global commit-order cursor. `BuildReleaseCoordinator` reads,
+publishes with a stable idempotency key, then records the exact validated manager
+receipt in a separate transaction. Lost responses and concurrent acknowledgements
+replay the same event. Neither publication nor acknowledgement removes holds or
+asserts physical termination. Unbound revocation needs no fabricated terminal
+inventory; the manager's separate physical-release checks remain authoritative.
+
+Manager migration `capacity_0023` retains a per-intent final-release witness
+atomically with `release_shapes`, the physical release transition and its command
+receipt. Restrictive references preserve the exact original protected publication
+and command, even if later protected receipts arrive. The witness includes the
+released shape, protected acknowledgement digest, command sequence/request digest
+and release time. The command digest is opaque provenance for a potentially
+multi-shape command; the subject-scoped read does not disclose other shapes.
+Insertion validates the closing intent's exact physical/protected evidence;
+deferred guards require both sides of the release transition at commit. Pristine
+unaccepted proposal discard remains witness-free. Legacy releases are never
+backfilled from current receipts, including on command replay. Witnesses are
+immutable and prevent downgrade while retained.
+
+`GET /v2/subjects/{subject_id}/intents/{intent_id}/final-release-witness` uses
+the original allocation's authenticated reporter. The bounded reporter client
+checks intent, subject/incarnation, deployment, candidate and reporter pins.
+This manager proof is not by itself native hold-retirement permission: the build
+guard must still join its installation, assignment, bootstrap, acknowledged
+protected-release publication and (for bound work) imported native terminal
+inventory.
+
+Build-guard revision `build_guard_0015` performs that exact join for unbound
+revocations and unregistered physical withdrawals. It requires committed local
+revocation, publication acknowledgement and any required native terminal import;
+it atomically retains an immutable retirement and deletes only the matching
+request/assignment hold. Cleanup does not require a current source lease. Exact
+replay resolves the retained retirement before inspecting current holds, so it
+cannot remove a successor assignment's charge. Prior plans cannot regain admission
+or publication. Direct agent table writes stay forbidden and retained retirement
+evidence prevents lossy downgrade. The caller must be the management reporter
+fetching authenticated manager evidence, not an executor-provided assertion.
+
+A still-live unregistered request can requeue after this cleanup; new admission
+rechecks current source and owner authority. Cancelled or expired requests do not
+requeue. This deliberately does not implement retirement for registered workers:
+that requires durable per-platform outcomes which distinguish successful work,
+retryable failure and cancellation, suppress both pending demand and fresh
+admission when finished, and do not infer an outcome from physical termination.
+Native exchange/claims, outcome handling and runtime orchestration remain incomplete.
+
+`ActivationRuntimeArtifactV3` and its explicit pinned loader compose the exact
+typed admission file, complete purpose/profile policy, approved profile digest,
+execution fence and controller-local manifest. Assembly verifies route executor,
+configuration epoch and allowed purpose before acquiring runtime resources, and
+checks pool/Slurm identity and trusted launcher release across profiles. Journal
+ownership is released on partial construction failure. V2 wire fields and its
+separate loader/assembly remain compatible and reject V3 input. The shared nested
+Slurm JSON boundary round-trips strict tuple data without accepting coerced CPU
+quantities. This assembly has no positive CLI activation path: public typed
+tick/recovery gates remain closed. Router purpose must additionally agree with
+manager-authenticated launch facts before launch is enabled; native physical
+cleanup, claims/exchange, protected release and contained execution remain required.
+
+Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
+preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release
+verification bind the exact historical configuration, acknowledgement and member
+event, including purpose and owner. The manager verifies the executor signature;
+SQL independently checks provenance plus the existing exact inventory, binding,
+digest and scalar joins. Later empty inventories and deployment supersession do
+not erase authenticated terminal proof. Downgrade refuses retained typed terminal
+evidence and leaves a persistent legacy-only table constraint for late writers.
+
 The log binds authority incarnation, writer/execution epoch, manifest digest,
 namespace, global membership revision, previous digest, actor, idempotency key,
 request digest, subject identity and complete resulting subject evidence.
@@ -1015,19 +1442,193 @@ pool policy root. The schema-3 proof commits the selected profile and member
 event; legacy rendering and proof verification do not accept this context.
 Both renderers share scheduler-field translation without sharing authorization
 rules. This renderer neither obtains manager authority nor enables submission:
-the caller still needs authenticated manager transport, current admission,
-purpose-aware journal/inventory handling and the held-submit/bind/release path.
+the caller still needs current admission, purpose-aware journal/inventory
+handling and the held-submit/bind/release path.
+
+The executor-authenticated `GET /v3/executors/{pool_id}/intents/{intent_id}/launch-subject`
+returns canonical full configuration, acknowledgement and provenance for the
+exact persisted intent. The manager locks current authority, validates the
+executor lease and management policy, and requires an unexpired, unconsumed
+permit and a currently eligible subject. Reading facts neither consumes that
+permit nor advances command high-water. The client checks its registration and
+the exact returned intent. Serialization, parsing and streaming share an 8 MiB
+launch-facts limit; other receipt limits remain unchanged. Runtime submission
+still requires the purpose-preserving journal and inventory consumers; this
+read endpoint does not open typed activation or authorize scheduler submission.
+
+The pool runtime accepts a typed policy only after validating the complete
+operator profile set against its registered controller root. Its typed journal
+envelopes retain the exact subject facts in digest-addressed 32 KiB chunks within
+the existing locked, hash-chained, fsync'd journal. The full missing-chunk write
+is capacity-checked before the first append, preserving a recovery allowance of
+16 MiB for a maximum framed inventory, plus a per-retained-job cleanup allowance.
+Exhausted capacity
+rejects the new retention without consuming its permit or filling that allowance;
+this is backpressure, not journal garbage collection or unlimited retention.
+Existing per-record and journal size limits remain unchanged.
+
+Launch preparation fetches, renders and retains facts before permit consumption.
+Replay reconstructs the original bounded facts, verifies their digest and signed
+references, and re-renders against the registered operator policy without querying
+the current manager subject. Every submission and physical-binding envelope keeps
+the same facts. Public typed operation remains explicitly closed until the
+database, protected cleanup and bootstrap consumers are connected.
+The interlock runs before public tick, drain and recovery entrypoints can replay
+any retained command. Separate schema-3 inventory records preserve the typed
+proof and immutable executor binding, with exact version parsing and journal
+confirmation hashes over their actual bytes. The authenticated
+`PUT /v3/executors/{pool_id}/inventory` route accepts only exact schema-3 inventory
+for an exact schema-4 execution manifest. Its durable ingestion checks the
+operator policy, executor registration and lease before updating telemetry.
+Ownership verification joins the signed proof to the historical allocation,
+configuration, whole acknowledgement, candidate and purpose-specific member
+event. Superseded owners remain accountable for cleanup; historical verification
+does not authorize new work. The legacy route and ingestion method remain exact
+schema 2.
+
+Prepared schema-4 authority readback authenticates immutable history without
+requiring activation, rejects active membership events, and retains a zero
+capacity ceiling. Active reporter currentness still requires activated history;
+this readback does not enable preparation or activation. Manager readback and
+internal executor inventory publication preserve versioned terminal evidence.
+Manager database terminal/release guards authenticate the exact historical
+typed purpose and membership evidence. Real manager lifecycle tests cover
+terminal persistence and protected release, but schema-3 telemetry alone is
+not proof of working native terminal cleanup.
+Typed inventories above 32 KiB are retained as deterministic 32 KiB chunks,
+followed by small requested/confirmed digest references. Smaller typed inventories
+and legacy V2 inventories keep their original inline confirmation hashes. The
+manager derives the exact chunk/request/confirmation chain from the inventory's
+pre-batch journal anchor. The whole batch, including its response, is capacity
+checked before the first write or RPC. An interrupted chunk-only batch has not
+published anything; a durable request must replay the original inventory without
+resampling. Terminal and delayed release readers resolve the same retained bytes.
+Migration `capacity_0022` extends exact retirement sequence checks to this framing;
+rollback refuses retained large typed inventory and fences late writers.
+Its SQL-owned monotonic history marker survives later small inventories, so a
+replacement cannot hide older chunked journal dependencies from rollback checks.
+The persistent rollback fence uses JSONB's conservatively larger serialized size,
+so older migrations can remove their canonical serializer without breaking it;
+near-threshold small inventories may therefore also require refusing rollback.
+
+Delayed physical release can use the exact confirmed historical terminal inventory
+after Slurm accounting expires. The manager-pinned inventory sequence, terminal
+identity/digest, complete binding/resources, authenticated original launch proof,
+and current protected release must agree. A later empty inventory is insufficient,
+and current physical conflicts still refuse release. Available accounting evidence
+must match; conflicting evidence is never replaced with the historical fallback.
+
+The journal remains bounded at 64 MiB. Its checkpoint primitive writes a private,
+content-addressed snapshot of exact retained records and sparse evidence anchors,
+then binds that snapshot into the journal hash chain. Authenticated heartbeat
+readback must cover the checkpoint before atomic replacement removes the old
+prefix. Interrupted publication reopens one complete generation; repeated readback
+failures do not grow an already acknowledged heartbeat tail. Historical evidence
+anchors cannot authorize a manager checkpoint below the compaction floor.
+
+The runtime dependency selector preserves unreleased launch/bootstrap/physical
+binding and cancellation history, referenced launch facts, complete current
+inventory batches, first terminal inventories and inventories pinned by unused
+close. Lifecycle reclamation requires exact durable release confirmation and
+manager command high-water. Release tombstones remain while retained inventories
+still reference them. Unknown dependencies, pending RPCs, unfinished handoff
+cleanup and stale selections refuse compaction. Atomic old/new generations and
+recovery reserve count toward the same bound; unreferenced protocol files are
+reclaimed under the stable journal lock.
+
+The controller runs maintenance before ordinary work when the append-only journal
+has grown to 16 MiB; retained snapshot bytes remain in the capacity budget but do
+not retrigger maintenance. Compaction is followed by a freshly confirmed inventory
+and heartbeat to preserve retirement ordering. Lost final-inventory replies replay
+even below the ordinary trigger. A preflight capacity refusal retains the original
+journal and restricts polling to authenticated cleanup-only work. The manager's
+`GET /v2/executors/{pool_id}/work?cleanup_only=true` preserves current proposals
+without issuing new reservations, bootstrap work or permits, while still selecting
+eligible closure and release work. An older manager's increase response is rejected
+by the client, not executed. Pending commands replay before a new heartbeat;
+ambiguous submissions recover without fetching unrelated new work.
+
+Recovery publication can spend reserved headroom, while new launch-fact retention
+must preserve it. These paths require protected integration/rollout and live
+acceptance before they are evidence of native multi-owner readiness.
+
+Terminal recovery has an explicit versioned read endpoint:
+`GET /v3/subjects/{subject_id}/intents/{intent_id}/terminal-inventory-evidence`
+returns legacy or typed evidence with the same exact reporter authorization.
+The old V2 endpoint remains legacy-only and returns a conflict for typed evidence,
+never a down-converted proof. The updated application agent uses the V3 endpoint;
+its client, recovery loop and store revalidate typed evidence and reject
+`personal-build-worker` purpose before importing anything. Canonical bytes and
+digests are preserved through the protected SQL call. The client streams up to
+the shared 8 MiB terminal-evidence contract bound and rejects error responses
+without reading their bodies; unrelated receipt bounds remain unchanged.
+
+Protected migration `guard_0032` extends the existing agent-only SQL importer
+without adding privileges or admission authority. Exact typed versions,
+application purpose, subject reference and delegated owner/manifest provenance
+remain joined to the existing local registration, live claim and physical worker.
+The manager still owns signature verification and historical allocation joins;
+the environment database cannot independently resolve the manager's event log.
+An empty-database downgrade restores the legacy function under an evidence-table
+lock and retains a V2-only table constraint. This also fences already-running
+typed imports that outlive function replacement. Retained typed evidence refuses
+downgrade. These are cleanup and migration guarantees, not build admission or
+proof of the still-incomplete end-to-end runtime.
 
 The initial management demand projector emits one cold slot per explicitly
 requested native platform from a current, owner-matching running build lease.
 Its deterministic work identity binds the source candidate, archive generation,
 owner/team, lifecycle operation, whole attempt/lease and platform. It rejects
 duplicates, conflicting records, missing/expired leases and unusable sources.
+The full SHA-256 identifies the demand bucket; a purpose-namespaced deterministic
+UUID identifies that same platform work in manager admission allowances. This
+uses the existing protected-attempt contract without creating a task trial.
 Build-specific capabilities keep these requests out of ordinary task shapes.
 This pure projector does not authenticate database records or publish demand:
 the durable caller must select unassigned platform requests under the current
 fence and include assignments and cleanup-unproven commitments in the same
 snapshot. Removing pending demand is not physical release. Intake stays disabled.
+
+Migration `0142` adds management-owned durable platform requests. Staging locks
+and re-reads the whole build lease and source candidate, binds the exact owner,
+build-service incarnation/deployment, approved runtime installation and native
+platform, and atomically retains both requested platforms. Concurrent retries
+reuse the same IDs. Unrelated membership revisions and capacity-only changes do
+not replace the installation; a new deployment cannot reuse an old request.
+The bounded reader revalidates source/installation facts and emits only current,
+uncancelled requests. It is not yet the complete assignment/commitment snapshot.
+Cancellation remains available after service disablement, closes only the exact
+lease's demand and cannot resurrect it. A parent-serialized tombstone closes even
+a platform not yet staged; cancellation therefore cannot race a late insertion
+back into pending demand. Expired-lease cleanup derives identity without inventing
+a live lease, and does not cancel a later lease. Cancellation rejects never-issued
+future epochs and requires the current claimant for the current epoch.
+SQL preserves identities and prevents
+deletion/truncation; downgrade refuses retained requests. This queue neither
+requires a native agent nor creates a grant. Assignment consumption, protected
+build admission, capability issuance and readiness remain interlocked until
+their integrated lifecycle exists. Retention reclamation must eventually require
+authoritative cleanup; cancelled rows are not proof of physical release.
+
+The build admission join consumes the manager's existing proposal without
+allocating again. It requires exactly one request per cold one-slot shape and
+matches the current execution fence, prepared executor incarnation, permitted
+nodes, native profile/protocol, runtime publication and owner service. Cancelled,
+expired, zero-capacity and source-rebound work cannot pass. Its output retains
+manager allowance/intent/slot identities and the tighter of the proposal and
+whole-attempt lease deadlines. This pure join is not a committed assignment or
+an acknowledgement: the protected store must lock and persist it, then recheck
+authority before publication. Capability issuance additionally requires actual
+launch/bootstrap authority. Application trial lifecycles are not synthesized.
+
+Subject-agent HTTP authentication accepts exact V4 typed reporter history as
+well as legacy V3 applications. Build services use their own reporter token,
+not the management delegation credential. Identity authentication leaves pending
+build deployments pending and does not grant pool, operator or cross-owner scope.
+Rotated reporters retain identity for store-fenced cleanup. A retired epoch's
+retained admission closure permits only archive cleanup and exact receipt replay;
+it cannot deliver a fresh admission proposal or authorize a new acknowledgement.
+Source-bearing successor epochs retain their existing graph-consumer interlock.
 
 Submit a Slurm job held, durably bind it, then release under the exact current
 fence. Reconcile ambiguous submissions before retrying. The allocation grant

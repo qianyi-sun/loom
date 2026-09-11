@@ -28,7 +28,7 @@ def test_empty_source_journal_roundtrip_and_orm_schema_parity(isolated_migration
         command.upgrade(config, "head")
         inspector = inspect(engine)
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0141"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0142"
             for table in TABLES:
                 assert connection.scalar(text(f"SELECT count(*) FROM {table}")) == 0
                 model = Base.metadata.tables[table]
@@ -61,7 +61,7 @@ async def test_populated_journal_cannot_lose_tombstones_or_immutable_facts(
         with pytest.raises(DBAPIError, match="recovery tombstones"):
             command.downgrade(_config(isolated_migration_postgres_url), "0136")
         async with factory() as session:
-            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0141"
+            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0142"
         for table in reversed(TABLES[:-1]):
             for sql in (f"DELETE FROM {table}", f"TRUNCATE {table} CASCADE"):
                 async with factory() as session:

@@ -1180,6 +1180,23 @@ async def resolve_subject_acknowledgement(
 ) -> SubjectExecutionAcknowledgementV2:
     """Resolve only the exact immutable base or delegated generation evidence."""
 
+    if epoch.manifest_payload.get("schema_version") == 4:
+        from loom_capacity_manager.typed_membership_store import _load_typed_immutable_history
+
+        history = await _load_typed_immutable_history(session, epoch.execution_epoch)
+        acknowledgements = (*history.preparation.subject_acknowledgements,
+                            *(result.member.acknowledgement for result in history.results))
+        for acknowledgement in reversed(acknowledgements):
+            if (
+                acknowledgement.subject_id == subject_id
+                and acknowledgement.subject_incarnation == subject_incarnation
+                and acknowledgement.configuration_generation == configuration_generation
+                and acknowledgement.deployment_generation == deployment_generation
+                and acknowledgement.reporter_incarnation == reporter_incarnation
+            ):
+                return acknowledgement
+        raise ConfigurationConflictError("typed subject execution acknowledgement is unavailable")
+
     preparation = parse_execution_preparation(json.dumps(epoch.manifest_payload))
     for acknowledgement in preparation.subject_acknowledgements:
         if (

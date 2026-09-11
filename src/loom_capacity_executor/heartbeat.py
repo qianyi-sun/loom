@@ -81,6 +81,37 @@ class ExecutableHeartbeatLoop:
     def _object_id(self) -> str:
         return str(self.registration.executor_incarnation)
 
+    async def finish_checkpoint(self) -> bool:
+        """Acknowledge and publish a previously prepared dependency snapshot.
+
+        The caller must serialize this with executor ticks. A transport failure
+        preserves the original generation and the exact pending heartbeat for
+        replay. Neither a receipt alone nor an unacknowledged local head permits
+        prefix deletion. This method does not select runtime dependencies.
+        """
+        prepared = self.journal.pending_checkpoint()
+        if prepared is None:
+            return False
+        checkpoint = await self.client.executable_checkpoint()
+        self.journal.assert_covers(checkpoint.journal_sequence, checkpoint.journal_digest)
+        latest = self.journal.latest("heartbeat", self._object_id)
+        unresolved = latest is not None and latest.event_kind in {
+            "heartbeat-requested", "heartbeat-received",
+        }
+        if checkpoint.journal_sequence >= prepared.sequence and not unresolved:
+            self.journal.commit_checkpoint(
+                central_sequence=checkpoint.journal_sequence,
+                central_digest=checkpoint.journal_digest,
+            )
+            return True
+        await self.heartbeat(checkpoint)
+        confirmed = await self.client.executable_checkpoint()
+        self.journal.commit_checkpoint(
+            central_sequence=confirmed.journal_sequence,
+            central_digest=confirmed.journal_digest,
+        )
+        return True
+
     async def heartbeat(self, checkpoint: Any | None = None) -> ExecutableExecutorHeartbeatV2:
         """Send or replay one journaled heartbeat request."""
 

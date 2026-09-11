@@ -91,10 +91,13 @@ async def _require_current_evidence(
     acknowledgement: SubjectExecutionAcknowledgementV2,
     *,
     require_deployment: bool,
+    allow_equivocal: bool = False,
 ) -> None:
     if not _acknowledgement_matches(acknowledgement, subject):
         raise ConfigurationConflictError("current subject acknowledgement changed")
-    await management._require_preserved_subject_bindings(session, subject)
+    await management._require_preserved_subject_bindings(
+        session, subject, allow_equivocal=allow_equivocal
+    )
     candidate = (
         await session.execute(
             select(CapacityCandidate).where(
@@ -117,7 +120,9 @@ async def _require_current_evidence(
                 CapacityDemandReporter.subject_id == subject.subject_id,
                 CapacityDemandReporter.subject_incarnation == subject.subject_incarnation,
                 CapacityDemandReporter.reporter_incarnation == subject.demand_reporter_incarnation,
-                CapacityDemandReporter.state == "current",
+                CapacityDemandReporter.state.in_(
+                    ("current", "equivocal") if allow_equivocal else ("current",)
+                ),
             )
         )
     ).scalar_one_or_none()
@@ -155,8 +160,13 @@ async def resolve_current_subject(
     *,
     subject_id: UUID,
     allow_disabled: bool = False,
+    allow_equivocal: bool = False,
 ) -> tuple[SubjectConfigurationV1, SubjectExecutionAcknowledgementV2]:
-    """Authenticate one active current subject without pinning another owner's head."""
+    """Authenticate a current subject without pinning another owner's head.
+
+    The allow flags are for authenticated ineligibility comparisons only, never
+    launch admission. All candidate, deployment and materialization checks remain.
+    """
 
     if epoch.state != "active":
         raise ConfigurationConflictError("current subject execution is not active")
@@ -164,6 +174,7 @@ async def resolve_current_subject(
         try:
             return await _resolve_current_typed_subject(
                 session, epoch, subject_id=subject_id, allow_disabled=allow_disabled,
+                allow_equivocal=allow_equivocal,
             )
         except ValueError as exc:
             raise ConfigurationConflictError("current typed subject evidence is invalid") from exc
@@ -237,6 +248,7 @@ async def resolve_current_subject(
         subject,
         acknowledgement,
         require_deployment=member is not None,
+        allow_equivocal=allow_equivocal,
     )
     if member is not None:
         event = await session.scalar(
@@ -262,6 +274,7 @@ async def _resolve_current_typed_subject(
     *,
     subject_id: UUID,
     allow_disabled: bool,
+    allow_equivocal: bool = False,
 ) -> tuple[SubjectConfigurationV1, SubjectExecutionAcknowledgementV2]:
     """Use authenticated typed history without widening legacy execution parsing.
 
@@ -299,6 +312,7 @@ async def _resolve_current_typed_subject(
     await _require_current_evidence(
         session, CapacityManagementStore(), subject, acknowledgement,
         require_deployment=result is not None,
+        allow_equivocal=allow_equivocal,
     )
     return subject, acknowledgement
 

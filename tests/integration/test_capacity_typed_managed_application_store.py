@@ -100,7 +100,10 @@ async def test_managed_application_cross_epoch_capacity_import_and_reporter_rota
             journal_sequence=0, journal_digest="0" * 64))
     drained = await management.begin_execution_drain(capacity_session, _drain_request(execution),
         actor="retirement-operator", idempotency_key=UUID(int=88988))
-    checkpoints = await _publish_final_safe_evidence(capacity_session, drained)
+    from tests.integration.test_capacity_typed_membership_execution import typed_management
+
+    checkpoints = await _publish_final_safe_evidence(capacity_session, drained,
+        typed_management=typed_management(preparation))
     await management.retire_execution_epoch(capacity_session, _retirement_request(drained, checkpoints),
         actor="retirement-operator", idempotency_key=UUID(int=88989))
 

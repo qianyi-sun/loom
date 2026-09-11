@@ -14,10 +14,15 @@ def _capacity_config_without_database() -> Config:
 
 def test_upstream_1412_union_has_one_exact_capacity_history() -> None:
     script = ScriptDirectory.from_config(_capacity_config_without_database())
-    assert tuple(script.get_heads()) == ("capacity_0018",)
+    assert tuple(script.get_heads()) == ("capacity_0023",)
     assert tuple(
-        revision.revision for revision in script.walk_revisions("capacity_0004", "capacity_0018")
+        revision.revision for revision in script.walk_revisions("capacity_0004", "capacity_0023")
     ) == (
+        "capacity_0023",
+        "capacity_0022",
+        "capacity_0021",
+        "capacity_0020",
+        "capacity_0019",
         "capacity_0018",
         "capacity_0017",
         "capacity_0016",

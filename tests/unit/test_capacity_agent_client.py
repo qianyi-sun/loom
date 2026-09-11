@@ -578,7 +578,7 @@ async def test_subject_client_fetches_exact_terminal_inventory_evidence() -> Non
 
     assert fetched == evidence
     assert [request.url.path for request in seen] == [
-        f"/v2/subjects/{configuration.subject_id}/intents/"
+        f"/v3/subjects/{configuration.subject_id}/intents/"
         f"{evidence.binding.intent_id}/terminal-inventory-evidence"
     ]
 
@@ -684,7 +684,7 @@ async def test_subject_client_rejects_changed_terminal_inventory_evidence_bindin
         (302, b"", "status 302"),
         (503, b"unavailable", "status 503"),
         (200, b"{}", "invalid terminal inventory evidence"),
-        (200, b"x" * (16 * 1024 + 1), "byte bound"),
+        (200, b"x" * (8 * 1024 * 1024 + 1), "byte bound"),
     ),
 )
 async def test_subject_client_rejects_untrusted_terminal_inventory_responses(

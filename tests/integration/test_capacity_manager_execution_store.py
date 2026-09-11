@@ -9074,11 +9074,11 @@ async def test_queue_receipts_are_append_only_under_direct_sql(
     for statement in (
         "UPDATE public.capacity_executable_command_receipts SET request_digest = repeat('f', 64)",
         "DELETE FROM public.capacity_executable_command_receipts",
-        "TRUNCATE public.capacity_executable_command_receipts",
+        "TRUNCATE public.capacity_executable_command_receipts CASCADE",
         "UPDATE public.capacity_executable_protected_release_receipts "
         "SET protected_release_sha256 = repeat('f', 64)",
         "DELETE FROM public.capacity_executable_protected_release_receipts",
-        "TRUNCATE public.capacity_executable_protected_release_receipts",
+        "TRUNCATE public.capacity_executable_protected_release_receipts CASCADE",
     ):
         with pytest.raises(DBAPIError, match="append-only"):
             async with capacity_session.begin_nested():

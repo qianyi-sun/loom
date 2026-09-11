@@ -2524,7 +2524,7 @@ async def test_guard_0020_downgrade_serializes_committing_executable_evidence(
             await downgrade_task
         await executor_engine.dispose()
 
-    assert version == "guard_0031"
+    assert version == "guard_0032"
     assert evidence == 1
 
 
@@ -3546,8 +3546,10 @@ async def test_terminal_first_serializes_claim_rejection_on_exact_attempt_head(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bound_claim", [False, True])
 async def test_claimability_is_independent_for_concurrent_intents(
     capacity_guard_database: dict[str, object],
+    bound_claim: bool,
 ) -> None:
     _fence, registration = await _initialize_and_register(capacity_guard_database)
     first_template = _bootstrap(registration.subject_id, registration.subject_incarnation)
@@ -3657,7 +3659,26 @@ async def test_claimability_is_independent_for_concurrent_intents(
                 )
             )
 
-        first_claim = await store.admit_claim(
+        async def admit(binding, proposal):
+            if bound_claim:
+                return await store.admit_claim_for_intent(binding, proposal)
+            return await store.admit_claim(proposal)
+
+        if bound_claim:
+            # Both intents/workers are legitimate. Only the caller's routing
+            # binding is wrong: the inner SQL claim must roll back completely.
+            with pytest.raises(ExecutableAdmissionError, match="intent"):
+                await store.admit_claim_for_intent(first_request.binding,
+                    ExecutableClaimProposalV2(
+                        operation_id=UUID(int=142), protected_attempt_id=second_attempt,
+                        execution_generation=12, requirements_digest="f" * 64,
+                        worker_id=second_worker.worker_id,
+                        worker_incarnation=second_worker.worker_incarnation,
+                        expected_claim_high_water=0))
+            observation = await store.observe_intent(second_request.binding)
+            assert observation.claim_high_water == 0
+
+        first_claim = await admit(first_request.binding,
             ExecutableClaimProposalV2(
                 operation_id=UUID(int=141),
                 protected_attempt_id=first_attempt,
@@ -3668,7 +3689,7 @@ async def test_claimability_is_independent_for_concurrent_intents(
                 expected_claim_high_water=0,
             )
         )
-        second_claim = await store.admit_claim(
+        second_claim = await admit(second_request.binding,
             ExecutableClaimProposalV2(
                 operation_id=UUID(int=142),
                 protected_attempt_id=second_attempt,
@@ -3683,6 +3704,39 @@ async def test_claimability_is_independent_for_concurrent_intents(
         assert first_claim.intent_id == first_request.binding.intent_id
         assert second_claim is not None
         assert second_claim.intent_id == second_request.binding.intent_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lifecycle", ["drain", "replacement"])
+async def test_intent_bound_claim_replays_after_lifecycle_and_rejects_binding_drift(
+    capacity_guard_database: dict[str, object],
+    lifecycle: str,
+) -> None:
+    registration, worker, claim, _terminal = await _prepare_claim_terminal_race(capacity_guard_database)
+    async with _serializable_executor_session(capacity_guard_database) as session:
+        store = ExecutableAdmissionStore(session, registration=registration)
+        admitted = await store.admit_claim_for_intent(worker.binding, claim)
+        assert admitted is not None
+        if lifecycle == "drain":
+            await store.begin_drain(ExecutableDrainRequestV2(
+                operation_id=UUID(int=501), binding=worker.binding,
+                worker_id=worker.worker_id, worker_incarnation=worker.worker_incarnation,
+                expected_claim_high_water=1, drain_epoch=1))
+        else:
+            replacement = worker.model_copy(update={
+                "operation_id": UUID(int=501), "worker_id": UUID(int=502),
+                "worker_incarnation": UUID(int=503),
+                "protected_registration_epoch": worker.protected_registration_epoch + 1,
+                "worker_credential_sha256": hashlib.sha256(b"replacement-credential").hexdigest(),
+                "predecessor_worker_incarnation": worker.worker_incarnation})
+            await store.register_worker(replacement,
+                predecessor_worker_credential="worker-credential-one")
+            observed = await store.observe_intent(worker.binding)
+            assert observed.worker_incarnation == replacement.worker_incarnation
+        assert await store.admit_claim_for_intent(worker.binding, claim) == admitted
+        with pytest.raises(ExecutableAdmissionError, match="binding"):
+            await store.admit_claim_for_intent(
+                worker.binding.model_copy(update={"deployment_generation":99}), claim)
 
 
 @pytest.mark.asyncio

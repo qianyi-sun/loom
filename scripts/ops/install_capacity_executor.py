@@ -1239,7 +1239,12 @@ class ControllerInstaller:
             (
                 "import loom, loom_capacity_agent, loom_capacity_executor, "
                 "loom_capacity_guard, loom_capacity_manager, "
-                "loom_capacity_pool_controller, loom_capacity_pool_executor"
+                "loom_capacity_pool_controller, loom_capacity_pool_executor\n"
+                "import importlib.util\n"
+                # Older immutable releases predate build admission. When its
+                # client is present, probe its real dependency graph as well.
+                "if importlib.util.find_spec('loom_capacity_executor.build_admission_client') is not None:\n"
+                "    import loom_capacity_executor.build_admission_client\n"
             ),
         )
         self._run(

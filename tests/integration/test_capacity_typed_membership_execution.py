@@ -5,6 +5,7 @@ from copy import deepcopy
 from importlib import import_module
 
 import pytest
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom_capacity_manager.allocator import allocate_shadow
@@ -13,6 +14,8 @@ from loom_capacity_manager.membership_launch_authority import resolve_allocation
 from loom_capacity_manager.models import (
     CapacityAllocationEpoch,
     CapacityAuthorityState,
+    CapacityCandidate,
+    CapacityExecutableIntent,
     CapacityExecutionEpoch,
 )
 from loom_capacity_manager.reconciler import _commit_reconciled_epoch
@@ -21,6 +24,7 @@ from loom_capacity_manager.store import (
     CapacityManagementStore,
     CapacityStoreError,
     ExecutionConflictError,
+    ReportEquivocationError,
     WriterFence,
 )
 from tests.capacity_build_membership_fixtures import (
@@ -132,6 +136,25 @@ async def test_typed_two_owner_demand_is_sealed_without_erasing_build_membership
                     proof = render_typed_signed_launch(context).ownership_proof
                     assert proof.metadata.subject_authority == resolved.authority
                     assert proof.metadata.binding.candidate == member.acknowledgement.candidate
+                    from loom_capacity_manager.execution_store import CapacityExecutionStore
+
+                    verifier = CapacityExecutionStore()
+                    assert await verifier._membership_target_current(
+                        reader, epoch, row, subject_id=member.configuration.subject_id)
+                    reporter = await verifier._exact_subject_reporter(
+                        reader, subject_id=context.binding.subject_id,
+                        subject_incarnation=context.binding.subject_incarnation,
+                        reporter_incarnation=member.acknowledgement.reporter_incarnation,
+                        operation="typed-cleanup", historical_binding=context.binding)
+                    assert reporter.reporter_incarnation == member.acknowledgement.reporter_incarnation
+                    assert await verifier._inventory_subject_authority_matches(
+                        reader, epoch, context.binding, proof)
+                    changed_authority = proof.metadata.subject_authority.model_copy(update={
+                        "membership": proof.metadata.subject_authority.membership.model_copy(update={"head_sha256": "f" * 64})})
+                    changed_proof = proof.model_copy(update={"metadata": proof.metadata.model_copy(update={
+                        "subject_authority": changed_authority})})
+                    assert not await verifier._inventory_subject_authority_matches(
+                        reader, epoch, context.binding, changed_proof)
                 if member.revision != sealed.membership.revision:
                     assert resolved.authority.membership.head_sha256 != sealed.membership.head_sha256
                 if member.purpose == "personal-build-worker":
@@ -139,6 +162,37 @@ async def test_typed_two_owner_demand_is_sealed_without_erasing_build_membership
                         await resolve_allocation_launch_subject(reader, epoch, row,
                             subject_id=member.configuration.subject_id, require_current=True)
             selected = sealed.membership.members[1]
+            # Missing work from an equivocal owner must not block another
+            # owner's global rank, but corrupt provenance must still fail shut.
+            first_subject = sealed.hypothetical_launch_rank[0].subject_id
+            next_owner_rank = next(rank for rank in sealed.hypothetical_launch_rank
+                if rank.subject_id != first_subject)
+            target = CapacityExecutableIntent(
+                execution_epoch=epoch.execution_epoch, allocation_epoch=row.allocation_epoch,
+                launch_rank=next_owner_rank.rank)
+            with pytest.raises(ExecutionConflictError, match="earlier global launch"):
+                await CapacityExecutionStore._assert_central_launch_order(reader, (), target)
+            savepoint = await reader.begin_nested()
+            first_member = next(member for member in sealed.membership.members
+                if member.configuration.subject_id == first_subject)
+            with pytest.raises(ReportEquivocationError):
+                await management.ingest_demand_snapshot(reader,
+                    report(first_member.configuration).model_copy(update={"pending_unassigned": ()}),
+                    actor="equivocal-owner")
+            assert not await CapacityExecutionStore._membership_target_current(
+                reader, epoch, row, subject_id=first_subject)
+            assert await CapacityExecutionStore._membership_target_current(
+                reader, epoch, row, subject_id=next_owner_rank.subject_id)
+            with pytest.raises(ExecutionConflictError):
+                await resolve_allocation_launch_subject(reader, epoch, row,
+                    subject_id=first_subject, require_current=True)
+            await CapacityExecutionStore._assert_central_launch_order(reader, (), target)
+            await reader.execute(update(CapacityCandidate).where(
+                CapacityCandidate.subject_id == first_subject).values(
+                    source_payload={"publication_sha256": "f" * 64}))
+            with pytest.raises(ExecutionConflictError):
+                await CapacityExecutionStore._assert_central_launch_order(reader, (), target)
+            await savepoint.rollback()
             for tamper in ("snapshot-head", "legacy-downgrade"):
                 changed = CapacityAllocationEpoch(**{column.key: getattr(row, column.key) for column in row.__table__.columns})
                 changed.complete_payload = deepcopy(row.complete_payload)
@@ -161,5 +215,19 @@ async def test_typed_two_owner_demand_is_sealed_without_erasing_build_membership
                 subject_id=selected.configuration.subject_id, require_current=False)
             assert historical.configuration == selected.configuration
             assert historical.authority.membership.revision == selected.revision
+            # Cleanup authenticates the retained event after another generation
+            # becomes current; it must not reinterpret it using today's member.
+            old_context = typed_context(purpose="application-worker", resolved=historical, execution=sealed.execution)
+            old_proof = render_typed_signed_launch(old_context).ownership_proof
+            assert await CapacityExecutionStore()._inventory_subject_authority_matches(
+                reader, epoch, old_context.binding, old_proof)
+            assert not await CapacityExecutionStore._membership_target_current(
+                reader, epoch, row, subject_id=selected.configuration.subject_id)
+            reporter = await CapacityExecutionStore._exact_subject_reporter(
+                reader, subject_id=old_context.binding.subject_id,
+                subject_incarnation=old_context.binding.subject_incarnation,
+                reporter_incarnation=historical.acknowledgement.reporter_incarnation,
+                operation="typed-cleanup", historical_binding=old_context.binding)
+            assert reporter.state == "fenced"
     finally:
         await engine.dispose()

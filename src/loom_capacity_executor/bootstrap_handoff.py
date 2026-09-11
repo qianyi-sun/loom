@@ -325,6 +325,21 @@ class BootstrapHandoffStore:
     ) -> bool:
         """Remove only an unconsumed handoff after protected revocation commits."""
 
+        self.assert_unconsumed(binding, bootstrap_registration_epoch=bootstrap_registration_epoch)
+        path = _record_path(self.directory, self.reference_for(binding))
+        removed = _unlink_private_if_present(path, label="handoff record")
+        if removed:
+            _fsync_directory(self.directory)
+        return removed
+
+    def assert_unconsumed(
+        self,
+        binding: ExecutableIntentBindingV2,
+        *,
+        bootstrap_registration_epoch: int,
+    ) -> None:
+        """Reject local physical evidence; this check alone authorizes no release."""
+
         reference = self.reference_for(binding)
         path = _record_path(self.directory, reference)
         for suffix in (".used", ".credential", ".ownership", ".launched"):
@@ -334,17 +349,13 @@ class BootstrapHandoffStore:
                     "prepared handoff has physical or consumed local evidence"
                 )
         if not path.exists() and not path.is_symlink():
-            return False
+            return
         record = self._load(path)
         if (
             record.binding != binding
             or record.bootstrap_registration_epoch != bootstrap_registration_epoch
         ):
             raise BootstrapHandoffError("prepared handoff revocation binding changed")
-        removed = _unlink_private_if_present(path, label="handoff record")
-        if removed:
-            _fsync_directory(self.directory)
-        return removed
 
     def _load(self, path: Path) -> BootstrapHandoffRecordV2:
         try:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import UUID, uuid5
@@ -37,12 +37,27 @@ from loom_capacity_executor.client import (
     ProposedExecutableBootstrapReceiptV2,
     ReleasedExecutableShapesReceiptV2,
 )
+from loom_capacity_executor.inventory_journal import (
+    complete_inventory_request,
+    load_journal_inventory,
+    retain_inventory_request,
+)
 from loom_capacity_executor.journal import (
     ExecutorJournal,
     JournalRecord,
     JournalRegressionError,
 )
 from loom_capacity_executor.keys import ExecutorOwnershipKey
+from loom_capacity_executor.launch_facts_journal import (
+    LaunchFactsReferenceV3,
+    load_launch_facts,
+    retain_launch_facts,
+)
+from loom_capacity_executor.launch_policy_set import (
+    PoolLaunchPolicyV3,
+    resolve_typed_runtime_profile,
+    validate_typed_runtime_profiles,
+)
 from loom_capacity_executor.launch_renderer import (
     OperatorLaunchProfileV2,
     RenderedTrustedLaunchV2,
@@ -60,6 +75,11 @@ from loom_capacity_executor.slurm_contracts import (
     SlurmLaunchRequestV2,
     SlurmSubmissionV2,
     SlurmTerminalEvidenceV2,
+)
+from loom_capacity_executor.typed_launch_renderer import (
+    RenderedTrustedLaunchV3,
+    TrustedLaunchContextV3,
+    render_typed_signed_launch,
 )
 from loom_capacity_manager.contracts import ResourceVectorV1
 from loom_capacity_manager.executable_contracts import (
@@ -84,7 +104,22 @@ from loom_capacity_manager.executable_contracts import (
     canonical_executable_digest,
     retained_prepared_activation_matches,
 )
+from loom_capacity_manager.launch_subject_contracts import (
+    ExecutableLaunchSubjectV3,
+    canonical_launch_subject_bytes,
+)
+from loom_capacity_manager.membership_launch_authority import ResolvedAllocationLaunchSubject
 from loom_capacity_manager.ownership import OwnershipKeyring, verify_executable_ownership
+from loom_capacity_manager.typed_inventory_contracts import (
+    ExecutableExecutorInventoryV3,
+    ExecutableInventoryRecordV3,
+    ExecutorInventory,
+    InventoryRecord,
+)
+from loom_capacity_manager.typed_ownership_contracts import (
+    SignedExecutableOwnershipProofV3,
+    parse_typed_executable_ownership,
+)
 
 _OPERATION_NAMESPACE = UUID("cb359b0c-a844-4bc5-9592-a4c35e344f3d")
 _RECOVERY_LOOKBACK = timedelta(days=8)
@@ -92,9 +127,16 @@ _BOOTSTRAP_PROPOSAL_TTL = timedelta(minutes=10)
 
 
 class _ManagerClient(Protocol):
+    async def launch_subject(
+        self, binding: ExecutableIntentBindingV2
+    ) -> ExecutableLaunchSubjectV3: ...
+
     async def executable_checkpoint(self) -> ExecutableCheckpointReceiptV2: ...
 
-    async def next_executable_work(self, command_sequence: int) -> ExecutablePoolWorkV2 | None: ...
+    async def next_executable_work(
+        self, command_sequence: int, *, cleanup_only: bool = False,
+        cleanup_intent_id: UUID | None = None,
+    ) -> ExecutablePoolWorkV2 | None: ...
 
     async def accept_executable_reservation(
         self, value: ExecutableReservationAcceptanceV2
@@ -117,7 +159,7 @@ class _ManagerClient(Protocol):
     ) -> ReleasedExecutableShapesReceiptV2: ...
 
     async def ingest_executable_inventory(
-        self, value: ExecutableExecutorInventoryV2
+        self, value: ExecutorInventory
     ) -> ExecutableInventoryReceiptV2: ...
 
 
@@ -196,8 +238,9 @@ class ExecutorTickResult:
 
 @dataclass(frozen=True, slots=True)
 class _LaunchEnvelope:
-    rendered: RenderedTrustedLaunchV2
+    rendered: RenderedTrustedLaunchV2 | RenderedTrustedLaunchV3
     bootstrap_registration_epoch: int
+    launch_subject: ExecutableLaunchSubjectV3 | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,6 +368,7 @@ class ExecutablePoolExecutor:
         controller_authority: PoolControllerAuthorityV2,
         ownership_key: ExecutorOwnershipKey,
         profiles: tuple[OperatorLaunchProfileV2, ...] | None = None,
+        typed_policy: PoolLaunchPolicyV3 | None = None,
         now: Callable[[], datetime] | None = None,
         bootstrap_handoff_store: BootstrapHandoffStore | None = None,
     ) -> None:
@@ -332,7 +376,7 @@ class ExecutablePoolExecutor:
             raise TypeError("executable executor requires its exact registration")
         if not isinstance(journal, ExecutorJournal):
             raise TypeError("executable executor requires its locked journal")
-        approved_profiles = profiles or (profile,)
+        approved_profiles = (profile,) if profiles is None else profiles
         if not approved_profiles:
             raise ValueError("executable runtime requires at least one launch profile")
         if profile not in approved_profiles:
@@ -342,14 +386,23 @@ class ExecutablePoolExecutor:
             != controller_authority.controller_authority_sha256
         ):
             raise ValueError("executor launch authority differs from registration")
+        if typed_policy is not None:
+            validate_typed_runtime_profiles(
+                approved_profiles,
+                policy=typed_policy,
+                controller_authority_sha256=registration.controller_authority_sha256,
+            )
         for approved_profile in approved_profiles:
             if (
                 registration.pool_id != approved_profile.pool_id
                 or registration.pool_generation != approved_profile.pool_generation
                 or approved_profile.controller_authority_sha256
                 != controller_authority.controller_authority_sha256
-                or canonical_launch_policy_digest(approved_profile)
-                != controller_authority.controller_authority_sha256
+                or (
+                    typed_policy is None
+                    and canonical_launch_policy_digest(approved_profile)
+                    != controller_authority.controller_authority_sha256
+                )
             ):
                 raise ValueError("executor launch authority differs from approved profiles")
         if (
@@ -368,6 +421,7 @@ class ExecutablePoolExecutor:
         )
         self.profile = profile
         self.profiles = tuple(approved_profiles)
+        self.typed_policy = typed_policy
         self.controller_authority = controller_authority
         self.ownership_key = ownership_key
         self._now = now or (lambda: datetime.now(UTC))
@@ -472,8 +526,62 @@ class ExecutablePoolExecutor:
         )
         return result
 
-    def render_launch(self, binding: ExecutableIntentBindingV2) -> RenderedTrustedLaunchV2:
+    def _assert_admission_purpose(
+        self, binding: ExecutableIntentBindingV2, subject: ExecutableLaunchSubjectV3,
+    ) -> None:
+        canonical_launch_subject_bytes(subject)
+        if canonical_executable_bytes(subject.binding) != canonical_executable_bytes(binding):
+            raise ValueError("admission purpose launch binding changed")
+        purpose = getattr(self.admission, "purpose", None)
+        if not callable(purpose) or purpose(binding) != subject.authority.purpose:
+            raise ValueError("admission purpose differs from authenticated launch subject")
+
+    async def _verify_preparation_purpose(self, binding: ExecutableIntentBindingV2) -> None:
+        if self.typed_policy is not None:
+            # Only positive preparation needs a current permit. Native cleanup
+            # is checked first and can revoke after that permit has expired.
+            subject = await self.client.launch_subject(binding)
+            self._assert_admission_purpose(binding, subject)
+
+    def render_launch(
+        self,
+        binding: ExecutableIntentBindingV2,
+        *,
+        launch_subject: ExecutableLaunchSubjectV3 | None = None,
+    ) -> RenderedTrustedLaunchV2 | RenderedTrustedLaunchV3:
         self._assert_binding(binding)
+        if self.typed_policy is not None:
+            if launch_subject is None or launch_subject.binding != binding:
+                raise ValueError("typed runtime requires exact authenticated launch subject")
+            self._assert_admission_purpose(binding, launch_subject)
+            rendered_typed = render_typed_signed_launch(
+                TrustedLaunchContextV3(
+                    binding=binding,
+                    subject=ResolvedAllocationLaunchSubject(
+                        configuration=launch_subject.configuration,
+                        acknowledgement=launch_subject.acknowledgement,
+                        authority=launch_subject.authority,
+                    ),
+                    profiles=self.profiles,
+                    policy=self.typed_policy,
+                    controller_authority=self.controller_authority,
+                    ownership_key=self.ownership_key,
+                    submitted_at=self._now(),
+                )
+            )
+            reference = self._handoff_reference(binding)
+            return (
+                replace(
+                    rendered_typed,
+                    request=rendered_typed.request.model_copy(
+                        update={"bootstrap_handoff_reference": reference}
+                    ),
+                )
+                if reference is not None
+                else rendered_typed
+            )
+        if launch_subject is not None:
+            raise ValueError("legacy runtime cannot consume typed launch subject")
         profile = self._profile_for(binding)
         rendered = render_signed_launch(
             TrustedLaunchContextV2(
@@ -497,15 +605,45 @@ class ExecutablePoolExecutor:
             return None
         return self._bootstrap_handoff_store.reference_for(binding)
 
+    async def _prepare_launch(
+        self,
+        binding: ExecutableIntentBindingV2,
+        *,
+        bootstrap_registration_epoch: int,
+    ) -> _LaunchEnvelope:
+        """Resolve/render/retain before permit consumption, never during replay."""
+        self._assert_binding(binding)
+        subject = (
+            await self.client.launch_subject(binding) if self.typed_policy is not None else None
+        )
+        rendered = self.render_launch(binding, launch_subject=subject)
+        if subject is not None:
+            retain_launch_facts(self.journal, subject)
+        return _LaunchEnvelope(rendered, bootstrap_registration_epoch, subject)
+
     def _remember_launch(
         self,
-        rendered: RenderedTrustedLaunchV2,
+        rendered: RenderedTrustedLaunchV2 | RenderedTrustedLaunchV3,
         *,
         bootstrap_registration_epoch: int,
         event: str,
+        launch_subject: ExecutableLaunchSubjectV3 | None = None,
     ) -> None:
+        extra: dict[str, object] = {}
+        if isinstance(rendered, RenderedTrustedLaunchV3):
+            if launch_subject is None:
+                raise ValueError("typed launch journal requires retained subject")
+            self._validate_stored_launch(
+                rendered.request.operation_id,
+                _LaunchEnvelope(rendered, bootstrap_registration_epoch, launch_subject),
+            )
+            reference = retain_launch_facts(self.journal, launch_subject)
+            extra = {"schema_version": 3, "launch_facts": reference.model_dump(mode="json")}
+        elif launch_subject is not None:
+            raise ValueError("legacy launch journal cannot retain typed subject")
         payload = json.dumps(
             {
+                **extra,
                 "bootstrap_registration_epoch": bootstrap_registration_epoch,
                 "ownership_proof": rendered.ownership_proof.model_dump(
                     mode="json", exclude_none=False
@@ -544,6 +682,40 @@ class ExecutablePoolExecutor:
         if payload is None:
             raise JournalRegressionError("signed launch envelope is absent from journal")
         value = json.loads(payload.decode("ascii"))
+        if "schema_version" in value:
+            if (
+                type(value["schema_version"]) is not int
+                or value["schema_version"] != 3
+                or set(value)
+                != {
+                    "schema_version",
+                    "launch_facts",
+                    "bootstrap_registration_epoch",
+                    "ownership_proof",
+                    "request",
+                }
+                or type(value["bootstrap_registration_epoch"]) is not int
+                or value["bootstrap_registration_epoch"] <= 0
+            ):
+                raise JournalRegressionError("typed launch envelope schema or fields changed")
+            subject = load_launch_facts(
+                self.journal,
+                LaunchFactsReferenceV3.model_validate_json(json.dumps(value["launch_facts"])),
+            )
+            envelope = _LaunchEnvelope(
+                rendered=RenderedTrustedLaunchV3(
+                    request=SlurmLaunchRequestV2.model_validate_json(json.dumps(value["request"])),
+                    ownership_proof=parse_typed_executable_ownership(
+                        json.dumps(
+                            value["ownership_proof"], sort_keys=True, separators=(",", ":")
+                        ).encode("ascii")
+                    ),
+                ),
+                bootstrap_registration_epoch=value["bootstrap_registration_epoch"],
+                launch_subject=subject,
+            )
+            self._validate_stored_launch(intent_id, envelope)
+            return envelope
         envelope = _LaunchEnvelope(
             rendered=RenderedTrustedLaunchV2(
                 request=SlurmLaunchRequestV2.model_validate_json(json.dumps(value["request"])),
@@ -571,6 +743,11 @@ class ExecutablePoolExecutor:
 
     def _validate_stored_launch(self, intent_id: UUID, envelope: _LaunchEnvelope) -> None:
         rendered = envelope.rendered
+        if isinstance(rendered, RenderedTrustedLaunchV3):
+            self._validate_typed_stored_launch(intent_id, envelope, rendered)
+            return
+        if self.typed_policy is not None or envelope.launch_subject is not None:
+            raise JournalRegressionError("legacy launch evidence cannot enter typed runtime")
         proof = rendered.ownership_proof
         request = rendered.request
         keyring = OwnershipKeyring(
@@ -615,6 +792,61 @@ class ExecutablePoolExecutor:
             or request != expected.request
         ):
             raise JournalRegressionError("stored ownership request and proof are not coherent")
+
+    def _validate_typed_stored_launch(
+        self,
+        intent_id: UUID,
+        envelope: _LaunchEnvelope,
+        rendered: RenderedTrustedLaunchV3,
+    ) -> None:
+        proof, subject = rendered.ownership_proof, envelope.launch_subject
+        if (
+            self.typed_policy is None
+            or subject is None
+            or subject.binding != proof.metadata.binding
+        ):
+            raise JournalRegressionError("typed launch subject or policy is absent or changed")
+        keyring = OwnershipKeyring(
+            {self.ownership_key.signing_key_id: self.ownership_key.private_key.public_key()}
+        )
+        if not keyring.verify_typed_executable(
+            proof, expected_public_key_sha256=self.registration.signing_key_sha256
+        ):
+            raise JournalRegressionError("stored typed ownership proof is not authentic")
+        try:
+            self._assert_binding(proof.metadata.binding)
+            self._assert_admission_purpose(subject.binding, subject)
+            expected = render_typed_signed_launch(
+                TrustedLaunchContextV3(
+                    binding=subject.binding,
+                    subject=ResolvedAllocationLaunchSubject(
+                        configuration=subject.configuration,
+                        acknowledgement=subject.acknowledgement,
+                        authority=subject.authority,
+                    ),
+                    profiles=self.profiles,
+                    policy=self.typed_policy,
+                    controller_authority=self.controller_authority,
+                    ownership_key=self.ownership_key,
+                    submitted_at=proof.metadata.submitted_at,
+                )
+            )
+            reference = self._handoff_reference(subject.binding)
+            if reference is not None:
+                expected = replace(
+                    expected,
+                    request=expected.request.model_copy(
+                        update={"bootstrap_handoff_reference": reference}
+                    ),
+                )
+        except (TypeError, ValueError, RuntimeAssemblyError) as exc:
+            raise JournalRegressionError("stored typed launch facts differ from authority") from exc
+        if (
+            rendered != expected
+            or rendered.request.operation_id != intent_id
+            or proof.signing_key_id != self.registration.signing_key_id
+        ):
+            raise JournalRegressionError("stored typed launch request and proof are not coherent")
 
     def _retained_bootstrap_proposal(
         self,
@@ -750,7 +982,11 @@ class ExecutablePoolExecutor:
                 or canonical_executable_digest(registration) != latest.payload_digest
             ):
                 raise JournalRegressionError("protected bootstrap preparation changed")
+            # Exact confirmed replay is read-only, including during cleanup
+            # after submission/expiry. Any later launch revalidates purpose
+            # against its authenticated or retained launch facts separately.
             return registration
+        await self._verify_preparation_purpose(binding)
         registration, proposal = self._protected_bootstrap_registration(
             binding,
             bootstrap_registration_epoch=bootstrap_registration_epoch,
@@ -806,7 +1042,34 @@ class ExecutablePoolExecutor:
             raise JournalRegressionError("bootstrap handoff admission route is invalid")
         return value
 
+    def _assert_operation_consumers_ready(self) -> None:
+        if self.typed_policy is not None:
+            raise RuntimeAssemblyError("typed runtime operation consumers are not ready")
+
+    async def replay_pending_only(self, *, drain_only: bool) -> ExecutorTickResult:
+        """Resolve durable work before a new heartbeat can enter the journal.
+
+        Never fetch fresh work here: replay and ambiguous-submit recovery retain
+        their original authority and exact payloads, including drain-only fences.
+        """
+        self._assert_operation_consumers_ready()
+        checkpoint = await self._checkpoint()
+        replayed = await self._replay_local_request(checkpoint)
+        if replayed is not None:
+            return replayed
+        replayed = (await self._replay_drain_only_central_request(checkpoint) if drain_only
+            else await self._replay_central_request(checkpoint))
+        if replayed is not None:
+            return replayed
+        replayed = await self._replay_inventory_request(checkpoint)
+        if replayed is not None:
+            return replayed
+        if self._has_recovering_launch():
+            return await self.recover()
+        raise JournalRegressionError("unrecognized pending runtime work")
+
     async def tick(self) -> ExecutorTickResult:
+        self._assert_operation_consumers_ready()
         checkpoint = await self._checkpoint()
         replayed_local = await self._replay_local_request(checkpoint)
         if replayed_local is not None:
@@ -838,20 +1101,7 @@ class ExecutablePoolExecutor:
         if len(records) != 1:
             raise JournalRegressionError("multiple inventory requests remain unresolved")
         record = records[0]
-        payload = record.durable_payload()
-        if payload is None:
-            raise JournalRegressionError("inventory request is absent from journal")
-        try:
-            inventory = ExecutableExecutorInventoryV2.model_validate_json(payload)
-        except ValueError as exc:
-            raise JournalRegressionError("inventory request is invalid") from exc
-        if (
-            record.object_kind != "inventory"
-            or record.object_id != str(inventory.executor_incarnation)
-            or record.payload_digest != canonical_executable_digest(inventory)
-            or payload != canonical_executable_bytes(inventory)
-        ):
-            raise JournalRegressionError("inventory request binding changed")
+        inventory = load_journal_inventory(self.journal, record)
         self._assert_inventory_binding(inventory)
         if checkpoint.inventory_sequence not in {
             inventory.inventory_sequence - 1,
@@ -863,6 +1113,7 @@ class ExecutablePoolExecutor:
     async def tick_drain_only(self) -> ExecutorTickResult:
         """Apply one structurally drain-only operation without new capacity work."""
 
+        self._assert_operation_consumers_ready()
         checkpoint = await self._checkpoint()
         replayed_local = await self._replay_local_request(checkpoint)
         if replayed_local is not None:
@@ -875,7 +1126,7 @@ class ExecutablePoolExecutor:
         replayed_inventory = await self._replay_inventory_request(checkpoint)
         if replayed_inventory is not None:
             return replayed_inventory
-        work = await self.client.next_executable_work(checkpoint.command_sequence)
+        work = await self.client.next_executable_work(checkpoint.command_sequence, cleanup_only=True)
         if work is None:
             return await self._publish_inventory(checkpoint)
         if isinstance(work, (ExecutableIntentCloseV2, ExecutablePartialReleaseV2)):
@@ -1190,6 +1441,13 @@ class ExecutablePoolExecutor:
         self, checkpoint: ExecutableCheckpointReceiptV2
     ) -> ExecutorTickResult | None:
         for record in self.journal.latest_records("prepared-revocation"):
+            if record.event_kind == "prepared-handoff-deleted":
+                payload = record.durable_payload()
+                if payload is None:
+                    raise JournalRegressionError("prepared revocation payload is absent")
+                revocation = self._prepared_revocation_from_record(record, payload)
+                if self._supersede_preparation(revocation):
+                    return ExecutorTickResult("draining", revocation.binding.intent_id)
             if record.event_kind != "protected-prepared-revocation-confirmed":
                 continue
             payload = record.durable_payload()
@@ -1214,6 +1472,18 @@ class ExecutablePoolExecutor:
         )
         if not records:
             return None
+        if len(records) == 2 and {record.event_kind for record in records} == {
+            "protected-bootstrap-requested", "protected-prepared-revocation-requested",
+        }:
+            revocation_record = next(record for record in records
+                if record.event_kind == "protected-prepared-revocation-requested")
+            revocation_payload = revocation_record.durable_payload()
+            if revocation_payload is None:
+                raise JournalRegressionError("prepared revocation payload is absent")
+            revocation = self._prepared_revocation_from_record(revocation_record, revocation_payload)
+            preparation = self._pending_preparation_for_revocation(revocation)
+            if preparation is not None and preparation in records:
+                records = (revocation_record,)
         if len(records) != 1:
             raise JournalRegressionError("multiple local executable requests remain unresolved")
         record = records[0]
@@ -1231,6 +1501,20 @@ class ExecutablePoolExecutor:
                 or canonical_executable_bytes(registration) != payload
             ):
                 raise JournalRegressionError("protected bootstrap replay changed")
+            if self._native_admission(registration.binding):
+                cleanup = await self.client.next_executable_work(
+                    checkpoint.command_sequence, cleanup_only=True,
+                    cleanup_intent_id=registration.binding.intent_id,
+                )
+                if cleanup is not None:
+                    if (not isinstance(cleanup, ExecutableIntentCloseV2)
+                        or cleanup.binding != registration.binding
+                        or cleanup.bootstrap_registration_epoch != registration.bootstrap_registration_epoch
+                        or cleanup.bootstrap_evidence_sha256 != registration.bootstrap_evidence_sha256
+                        or cleanup.command_sequence != checkpoint.command_sequence + 1):
+                        raise JournalRegressionError("native preparation cleanup authority changed")
+                    return await self._close(cleanup, checkpoint)
+            await self._verify_preparation_purpose(registration.binding)
             prepared = await self.admission.prepare_worker(
                 registration,
                 bootstrap_sha256=proposal.bootstrap_sha256,
@@ -1287,6 +1571,8 @@ class ExecutablePoolExecutor:
             return ExecutorTickResult("quarantined", withdrawal.binding.intent_id)
         if record.event_kind == "protected-prepared-revocation-requested":
             revocation = self._prepared_revocation_from_record(record, payload)
+            if self._native_admission(revocation.binding):
+                self._assert_native_unsubmitted(revocation.binding, revocation.bootstrap_registration_epoch)
             await self.admission.revoke_prepared_bootstrap(revocation)
             self.journal.append(
                 "protected-prepared-revocation-confirmed",
@@ -1308,6 +1594,8 @@ class ExecutablePoolExecutor:
         work: ExecutablePoolWorkV2,
         checkpoint: ExecutableCheckpointReceiptV2,
     ) -> ExecutorTickResult:
+        if self.typed_policy is not None:
+            raise RuntimeAssemblyError("typed runtime operation consumers are not ready")
         if isinstance(work, ExecutableReservationProposalV2):
             acceptance = ExecutableReservationAcceptanceV2(
                 execution=work.execution,
@@ -1345,6 +1633,9 @@ class ExecutablePoolExecutor:
             if observation.bootstrap_registration_epoch != work.bootstrap_registration_epoch:
                 raise JournalRegressionError("protected bootstrap observation differs from permit")
             bootstrap_epoch = work.bootstrap_registration_epoch
+            envelope = await self._prepare_launch(
+                work.binding, bootstrap_registration_epoch=bootstrap_epoch
+            )
             consumption = ExecutablePermitConsumptionV2(
                 permit_id=work.permit_id,
                 permit_digest=canonical_executable_digest(work),
@@ -1356,7 +1647,7 @@ class ExecutablePoolExecutor:
                 event="permit-consume",
                 operation=lambda: self.client.consume_executable_permit(consumption),
             )
-            rendered = self.render_launch(work.binding)
+            rendered = envelope.rendered
             if self._bootstrap_handoff_store is not None:
                 bind_bootstrap_handoff_ownership(
                     self._bootstrap_handoff_store.directory,
@@ -1373,6 +1664,7 @@ class ExecutablePoolExecutor:
                 rendered,
                 bootstrap_registration_epoch=bootstrap_epoch,
                 event="slurm-submit-requested",
+                launch_subject=envelope.launch_subject,
             )
             try:
                 submission = await self.slurm.submit(rendered.request)
@@ -1381,16 +1673,16 @@ class ExecutablePoolExecutor:
                     rendered,
                     bootstrap_registration_epoch=bootstrap_epoch,
                     event="slurm-submit-unknown",
+                    launch_subject=envelope.launch_subject,
                 )
                 raise
             self._remember_launch(
                 rendered,
                 bootstrap_registration_epoch=bootstrap_epoch,
                 event="slurm-submit-confirmed",
+                launch_subject=envelope.launch_subject,
             )
-            await self._bind_physical(
-                envelope=_LaunchEnvelope(rendered, bootstrap_epoch), job_id=submission.job_id
-            )
+            await self._bind_physical(envelope=envelope, job_id=submission.job_id)
             return ExecutorTickResult("submitted", work.binding.intent_id, submission.job_id)
         if isinstance(work, ExecutableIntentCloseV2):
             self._assert_binding(work.binding)
@@ -1435,6 +1727,7 @@ class ExecutablePoolExecutor:
                 envelope.rendered,
                 bootstrap_registration_epoch=envelope.bootstrap_registration_epoch,
                 event="physical-bind-confirmed",
+                launch_subject=envelope.launch_subject,
             )
             return
         latest = self.journal.latest("intent", str(request.binding.intent_id))
@@ -1460,6 +1753,7 @@ class ExecutablePoolExecutor:
                     envelope.rendered,
                     bootstrap_registration_epoch=envelope.bootstrap_registration_epoch,
                     event="physical-bind-confirmed",
+                    launch_subject=envelope.launch_subject,
                 )
                 return
         else:
@@ -1489,6 +1783,7 @@ class ExecutablePoolExecutor:
             envelope.rendered,
             bootstrap_registration_epoch=envelope.bootstrap_registration_epoch,
             event="physical-bind-confirmed",
+            launch_subject=envelope.launch_subject,
         )
 
     def _physical_binding(
@@ -1603,6 +1898,15 @@ class ExecutablePoolExecutor:
         bootstrap_epoch = observation.bootstrap_registration_epoch
         if bootstrap_epoch <= 0 or observation.claim_high_water != 0:
             raise JournalRegressionError("prepared bootstrap revocation evidence is incomplete")
+        await self._request_bootstrap_revocation(close=close, bootstrap_epoch=bootstrap_epoch)
+
+    async def _request_bootstrap_revocation(
+        self,
+        *,
+        close: ExecutableIntentCloseV2,
+        bootstrap_epoch: int,
+    ) -> None:
+        """Journal/replay protected revocation without inventing an observation."""
         revocation = ExecutablePreparedBootstrapRevocationV2(
             operation_id=uuid5(
                 _OPERATION_NAMESPACE,
@@ -1612,6 +1916,7 @@ class ExecutablePoolExecutor:
             bootstrap_registration_epoch=bootstrap_epoch,
             protected_registration_epoch=bootstrap_epoch + 1,
         )
+        self._pending_preparation_for_revocation(revocation)
         payload = canonical_executable_bytes(revocation)
         digest = canonical_executable_digest(revocation)
         latest = self.journal.latest("prepared-revocation", str(close.binding.intent_id))
@@ -1687,19 +1992,56 @@ class ExecutablePoolExecutor:
             object_id=record.object_id,
             payload=payload,
         )
+        self._supersede_preparation(revocation)
+        return True
+
+    def _pending_preparation_for_revocation(
+        self, revocation: ExecutablePreparedBootstrapRevocationV2,
+    ) -> JournalRecord | None:
+        latest = self.journal.latest("bootstrap", str(revocation.binding.intent_id))
+        if latest is None or latest.event_kind != "protected-bootstrap-requested":
+            return None
+        # Only native revocation supports a bootstrap that was never prepared.
+        purpose = getattr(self.admission, "purpose", None)
+        if (self.typed_policy is None or not callable(purpose)
+            or purpose(revocation.binding) != "personal-build-worker"):
+            raise JournalRegressionError("unprepared revocation requires exact native authority")
+        payload = latest.durable_payload()
+        if payload is None:
+            raise JournalRegressionError("pending bootstrap payload is absent")
+        registration = ExecutableBootstrapRegistrationV2.model_validate_json(payload)
+        proposal = self._retained_bootstrap_proposal(revocation.binding)
+        if (registration.binding != revocation.binding
+            or registration.bootstrap_registration_epoch != revocation.bootstrap_registration_epoch
+            or proposal is None or registration.command_sequence != proposal.command_sequence
+            or canonical_executable_bytes(registration) != payload
+            or canonical_executable_digest(registration) != latest.payload_digest):
+            raise JournalRegressionError("pending bootstrap differs from native revocation")
+        return latest
+
+    def _supersede_preparation(self, revocation: ExecutablePreparedBootstrapRevocationV2) -> bool:
+        """Retire only an exact preparation after protected revocation and deletion."""
+        latest = self._pending_preparation_for_revocation(revocation)
+        if latest is None:
+            return False
+        retained = self.journal.latest("prepared-revocation", str(revocation.binding.intent_id))
+        if (retained is None or retained.event_kind != "prepared-handoff-deleted"
+            or retained.payload_digest != canonical_executable_digest(revocation)
+            or retained.durable_payload() != canonical_executable_bytes(revocation)):
+            raise JournalRegressionError("preparation supersession lacks committed revocation")
+        self.journal.append("protected-bootstrap-revoked", latest.payload_digest,
+            object_kind=latest.object_kind, object_id=latest.object_id,
+            payload=latest.durable_payload())
         return True
 
     def _confirmed_terminal_inventory_record(
         self,
         binding: ExecutableIntentBindingV2,
-    ) -> ExecutableInventoryRecordV2 | None:
+    ) -> InventoryRecord | None:
         retained = self.journal.latest("inventory", str(self.registration.executor_incarnation))
         if retained is None or retained.event_kind != "inventory-publish-confirmed":
             return None
-        payload = retained.durable_payload()
-        if payload is None:
-            raise JournalRegressionError("confirmed inventory is absent from journal")
-        inventory = ExecutableExecutorInventoryV2.model_validate_json(payload)
+        inventory = load_journal_inventory(self.journal, retained)
         self._assert_inventory_binding(inventory)
         matches = tuple(
             record
@@ -1733,6 +2075,13 @@ class ExecutablePoolExecutor:
                 command_sequence=close.command_sequence,
             )
         assert close.bootstrap_evidence_sha256 is not None
+        native_unsubmitted = self._native_admission(close.binding) and envelope is None
+        if native_unsubmitted:
+            self.journal.assert_covers(checkpoint.journal_sequence, checkpoint.journal_digest)
+            self._assert_native_unsubmitted(close.binding, close.bootstrap_registration_epoch)
+            await self._request_bootstrap_revocation(
+                close=close, bootstrap_epoch=close.bootstrap_registration_epoch,
+            )
         prepared_revocation = self.journal.latest(
             "prepared-revocation",
             str(close.binding.intent_id),
@@ -1759,6 +2108,16 @@ class ExecutablePoolExecutor:
                 bootstrap_evidence_sha256=close.bootstrap_evidence_sha256,
             )
         observation = await self.admission.observe_intent(close.binding)
+        if native_unsubmitted and (
+            observation.binding != close.binding
+            or observation.prepared_revocation is None
+            or observation.prepared_revocation.binding != close.binding
+            or observation.prepared_revocation.bootstrap_registration_epoch != close.bootstrap_registration_epoch
+            or observation.worker_id is not None
+            or observation.worker_incarnation is not None
+            or observation.claim_high_water != 0
+        ):
+            raise JournalRegressionError("native unsubmitted cleanup lacks committed revocation")
         if observation.bootstrap_registration_epoch < close.bootstrap_registration_epoch:
             raise JournalRegressionError("protected bootstrap observation differs from close")
         jobs = await self.slurm.inventory()
@@ -1930,6 +2289,31 @@ class ExecutablePoolExecutor:
         )
         return ExecutorTickResult("draining", close.binding.intent_id)
 
+    def _native_admission(self, binding: ExecutableIntentBindingV2) -> bool:
+        if self.typed_policy is None:
+            return False
+        purpose = getattr(self.admission, "purpose", None)
+        if not callable(purpose):
+            raise JournalRegressionError("typed cleanup admission purpose is unavailable")
+        resolved_purpose = purpose(binding)
+        if resolved_purpose not in {"application-worker", "personal-build-worker"}:
+            raise JournalRegressionError("typed cleanup admission purpose is invalid")
+        return bool(resolved_purpose == "personal-build-worker")
+
+    def _assert_native_unsubmitted(self, binding: ExecutableIntentBindingV2, bootstrap_epoch: int) -> None:
+        # Absence of the latest envelope alone is not proof of no submission.
+        # Unknown/orphan history cannot turn physical work into an unused close.
+        if (self.journal.records("job", str(binding.intent_id))
+            or self.journal.records("executor", _physical_binding_object_id(binding.intent_id))
+            or any(record.event_kind.startswith("physical-bind-")
+                for record in self.journal.records("intent", str(binding.intent_id)))):
+            raise JournalRegressionError("native unsubmitted cleanup has physical journal evidence")
+        if self._retained_bootstrap_proposal(binding) is None:
+            raise JournalRegressionError("native cleanup bootstrap proposal is absent")
+        if self._bootstrap_handoff_store is None:
+            raise JournalRegressionError("native cleanup bootstrap handoff store is absent")
+        self._bootstrap_handoff_store.assert_unconsumed(binding, bootstrap_registration_epoch=bootstrap_epoch)
+
     async def _release(self, release: ExecutablePartialReleaseV2) -> ExecutorTickResult:
         if not release.releases:
             return ExecutorTickResult("quarantined", detail="release evidence is empty")
@@ -1980,8 +2364,9 @@ class ExecutablePoolExecutor:
                     )
                 terminal = await self._terminal_for(terminal_identity)
                 if (
-                    terminal is None
-                    or self._slurm_evidence_digest(terminal) != item.terminal_evidence_sha256
+                    (terminal is not None
+                     and self._slurm_evidence_digest(terminal) != item.terminal_evidence_sha256)
+                    or (terminal is None and not await self._historical_terminal_for_release(item))
                 ):
                     return ExecutorTickResult(
                         "quarantined",
@@ -1994,6 +2379,46 @@ class ExecutablePoolExecutor:
             operation=lambda: self.client.release_executable_shapes(release),
         )
         return ExecutorTickResult("released")
+
+    async def _historical_terminal_for_release(self, item: ExecutableReleasedShapeV2) -> bool:
+        """Use manager-pinned durable terminal proof when accounting has expired.
+
+        Protected release is independently checked by the caller. Neither a later
+        empty inventory nor accounting absence alone authorizes capacity release.
+        """
+        envelope = self._load_launch(item.binding.intent_id)
+        if envelope is None or envelope.rendered.ownership_proof.metadata.binding != item.binding:
+            return False
+        matches = []
+        for retained in self.journal.records("inventory", str(self.registration.executor_incarnation)):
+            if retained.event_kind != "inventory-publish-confirmed":
+                continue
+            inventory = load_journal_inventory(self.journal, retained)
+            self._assert_inventory_binding(inventory)
+            if inventory.inventory_sequence != item.inventory_sequence:
+                continue
+            records = tuple(record for record in inventory.records
+                if record.physical_identity == item.terminal_identity
+                or (record.ownership_proof is not None
+                    and record.ownership_proof.metadata.binding.intent_id == item.binding.intent_id))
+            if len(records) != 1:
+                return False
+            record = records[0]
+            if (record.state != "terminal" or record.physical_kind != item.terminal_kind
+                or record.physical_identity != item.terminal_identity
+                or record.terminal_evidence_sha256 != item.terminal_evidence_sha256
+                or record.authority_scope != "dedicated-loom-association"
+                or record.ownership_proof != envelope.rendered.ownership_proof
+                or record.resources != item.binding.resources
+                or record.node_ids != item.binding.node_ids):
+                return False
+            matches.append(canonical_executable_bytes(inventory))
+        if not matches or len(set(matches)) != 1:
+            return False
+        # A current physical conflict must not be hidden by older terminal proof.
+        return not any(job.job_id == item.terminal_identity
+            or job.ownership_token == envelope.rendered.request.ownership_token
+            for job in await self.slurm.inventory())
 
     async def _unused_terminal_detail(self, item: ExecutableReleasedShapeV2) -> str | None:
         inventory = self._confirmed_inventory_for_release(item)
@@ -2050,9 +2475,9 @@ class ExecutablePoolExecutor:
     def _confirmed_inventory_for_release(
         self,
         item: ExecutableReleasedShapeV2,
-    ) -> ExecutableExecutorInventoryV2 | None:
+    ) -> ExecutorInventory | None:
         sequence_records = 0
-        matches: list[ExecutableExecutorInventoryV2] = []
+        matches: list[ExecutorInventory] = []
         match_payloads: set[bytes] = set()
         for record in self.journal.records(
             "inventory",
@@ -2060,11 +2485,8 @@ class ExecutablePoolExecutor:
         ):
             if record.event_kind != "inventory-publish-confirmed":
                 continue
-            payload = record.durable_payload()
-            if payload is None:
-                continue
             try:
-                inventory = ExecutableExecutorInventoryV2.model_validate_json(payload)
+                inventory = load_journal_inventory(self.journal, record)
                 self._assert_inventory_binding(inventory)
             except (ValueError, JournalRegressionError):
                 continue
@@ -2072,8 +2494,7 @@ class ExecutablePoolExecutor:
                 continue
             sequence_records += 1
             if (
-                record.payload_digest == item.terminal_evidence_sha256
-                and canonical_executable_digest(inventory) == item.terminal_evidence_sha256
+                canonical_executable_digest(inventory) == item.terminal_evidence_sha256
             ):
                 matches.append(inventory)
                 match_payloads.add(canonical_executable_bytes(inventory))
@@ -2258,6 +2679,7 @@ class ExecutablePoolExecutor:
         ).hexdigest()
 
     async def recover(self) -> ExecutorTickResult:
+        self._assert_operation_consumers_ready()
         checkpoint = await self._checkpoint()
         replayed_local = await self._replay_local_request(checkpoint)
         if replayed_local is not None:
@@ -2339,10 +2761,11 @@ class ExecutablePoolExecutor:
         replayed = await self._replay_inventory_request(checkpoint)
         if replayed is not None:
             return replayed
-        inventory_object_id = str(self.registration.executor_incarnation)
         observed = await self.slurm.inventory() if jobs is None else jobs
-        proofs: dict[str, SignedExecutableOwnershipProofV2] = {}
-        terminal_proofs: dict[str, SignedExecutableOwnershipProofV2] = {}
+        proofs: dict[str, SignedExecutableOwnershipProofV2 | SignedExecutableOwnershipProofV3] = {}
+        terminal_proofs: dict[
+            str, SignedExecutableOwnershipProofV2 | SignedExecutableOwnershipProofV3
+        ] = {}
         terminals: tuple[SlurmTerminalEvidenceV2, ...] = ()
         if not quarantine_all:
             high_water = await self.slurm.accounting_high_water(
@@ -2354,23 +2777,49 @@ class ExecutablePoolExecutor:
                     envelope = self._load_launch(UUID(record.object_id))
                 except (ValueError, JournalRegressionError):
                     continue
+                retained_proof = None if envelope is None else envelope.rendered.ownership_proof
+                if retained_proof is not None and (
+                    isinstance(retained_proof, SignedExecutableOwnershipProofV3)
+                    != (self.typed_policy is not None)
+                ):
+                    raise JournalRegressionError("inventory ownership version differs from runtime")
                 matches = self._exact_matches(envelope, observed)
-                if envelope is not None and len(matches) == 1:
-                    proofs[matches[0].job_id] = envelope.rendered.ownership_proof
+                if retained_proof is not None and len(matches) == 1:
+                    proofs[matches[0].job_id] = retained_proof
                 else:
                     bound_matches = self._bound_live_matches(envelope, observed)
-                    if envelope is not None and len(bound_matches) == 1:
-                        proofs[bound_matches[0].job_id] = envelope.rendered.ownership_proof
+                    if retained_proof is not None and len(bound_matches) == 1:
+                        proofs[bound_matches[0].job_id] = retained_proof
                 terminal_matches = self._exact_terminal_matches(envelope, terminals)
-                if envelope is not None and len(terminal_matches) == 1:
-                    terminal_proofs[terminal_matches[0].job_id] = envelope.rendered.ownership_proof
+                if retained_proof is not None and len(terminal_matches) == 1:
+                    terminal_proofs[terminal_matches[0].job_id] = retained_proof
 
-        def live_record(item: SlurmJobObservationV2) -> ExecutableInventoryRecordV2:
+        record_model = (
+            ExecutableInventoryRecordV3
+            if self.typed_policy is not None
+            else ExecutableInventoryRecordV2
+        )
+
+        def inventory_record(**fields: Any) -> InventoryRecord:
+            return record_model.model_validate(fields)
+
+        def live_record(item: SlurmJobObservationV2) -> InventoryRecord:
             proof = proofs.get(item.job_id)
-            profile = (
-                self._profile_for(proof.metadata.binding) if proof is not None else self.profile
-            )
-            return ExecutableInventoryRecordV2(
+            if isinstance(proof, SignedExecutableOwnershipProofV3):
+                if self.typed_policy is None:
+                    raise JournalRegressionError("typed inventory lacks its policy")
+                profile = resolve_typed_runtime_profile(
+                    proof.metadata.binding,
+                    self.profiles,
+                    policy=self.typed_policy,
+                    purpose=proof.metadata.subject_authority.purpose,
+                    controller_authority_sha256=self.registration.controller_authority_sha256,
+                )
+            else:
+                profile = (
+                    self._profile_for(proof.metadata.binding) if proof is not None else self.profile
+                )
+            return inventory_record(
                 physical_identity=item.job_id,
                 physical_kind="slurm-job",
                 authority_scope="dedicated-loom-association",
@@ -2396,7 +2845,7 @@ class ExecutablePoolExecutor:
         live_records = tuple(live_record(item) for item in observed)
         live_identities = {item.physical_identity for item in live_records}
         terminal_records = tuple(
-            ExecutableInventoryRecordV2(
+            inventory_record(
                 physical_identity=item.job_id,
                 physical_kind="slurm-job",
                 authority_scope="dedicated-loom-association",
@@ -2410,38 +2859,42 @@ class ExecutablePoolExecutor:
             for item in terminals
             if item.job_id in terminal_proofs and item.job_id not in live_identities
         )
-        inventory = ExecutableExecutorInventoryV2(
-            execution=self.registration.execution,
-            executor_id=self.registration.executor_id,
-            executor_incarnation=self.registration.executor_incarnation,
-            pool_id=self.registration.pool_id,
-            pool_generation=self.registration.pool_generation,
-            inventory_sequence=checkpoint.inventory_sequence + 1,
-            journal_sequence=self.journal.head.sequence,
-            journal_digest=self.journal.head.digest,
-            journal_checkpoint_sequence=checkpoint.journal_sequence,
-            journal_checkpoint_digest=checkpoint.journal_digest,
-            records=live_records + terminal_records,
+        inventory_model = (
+            ExecutableExecutorInventoryV3
+            if self.typed_policy is not None
+            else ExecutableExecutorInventoryV2
         )
-        inventory_payload = canonical_executable_bytes(inventory)
-        self.journal.append(
-            "inventory-publish-requested",
-            canonical_executable_digest(inventory),
-            object_kind="inventory",
-            object_id=inventory_object_id,
-            payload=inventory_payload,
+        inventory = inventory_model.model_validate(
+            dict(
+                execution=self.registration.execution,
+                executor_id=self.registration.executor_id,
+                executor_incarnation=self.registration.executor_incarnation,
+                pool_id=self.registration.pool_id,
+                pool_generation=self.registration.pool_generation,
+                inventory_sequence=checkpoint.inventory_sequence + 1,
+                journal_sequence=self.journal.head.sequence,
+                journal_digest=self.journal.head.digest,
+                journal_checkpoint_sequence=checkpoint.journal_sequence,
+                journal_checkpoint_digest=checkpoint.journal_digest,
+                records=live_records + terminal_records,
+            )
         )
+        retain_inventory_request(self.journal, inventory)
         return await self._send_inventory(inventory)
 
-    def _assert_inventory_binding(self, inventory: ExecutableExecutorInventoryV2) -> None:
-        if not _inventory_execution_matches(
-            inventory.execution, self.registration.execution
-        ) and not retained_prepared_activation_matches(
-            inventory.execution,
-            self.registration.execution,
-        ) and not _retained_drain_execution_matches(
-            inventory.execution,
-            self.registration.execution,
+    def _assert_inventory_binding(self, inventory: ExecutorInventory) -> None:
+        if isinstance(inventory, ExecutableExecutorInventoryV3) != (self.typed_policy is not None):
+            raise JournalRegressionError("inventory version differs from runtime")
+        if (
+            not _inventory_execution_matches(inventory.execution, self.registration.execution)
+            and not retained_prepared_activation_matches(
+                inventory.execution,
+                self.registration.execution,
+            )
+            and not _retained_drain_execution_matches(
+                inventory.execution,
+                self.registration.execution,
+            )
         ):
             raise JournalRegressionError("inventory request execution changed")
         if (
@@ -2454,29 +2907,20 @@ class ExecutablePoolExecutor:
 
     async def _send_inventory(
         self,
-        inventory: ExecutableExecutorInventoryV2,
+        inventory: ExecutorInventory,
     ) -> ExecutorTickResult:
-        payload = canonical_executable_bytes(inventory)
-        digest = canonical_executable_digest(inventory)
-        object_id = str(self.registration.executor_incarnation)
+        requested = self.journal.latest("inventory", str(inventory.executor_incarnation))
+        if (requested is None or requested.event_kind != "inventory-publish-requested"
+            or requested.sequence != self.journal.head.sequence
+            or canonical_executable_bytes(load_journal_inventory(self.journal, requested))
+            != canonical_executable_bytes(inventory)):
+            raise JournalRegressionError("inventory publication differs from pending request")
         try:
             await self.client.ingest_executable_inventory(inventory)
         except ExecutorRejectedError:
-            self.journal.append(
-                "inventory-publish-rejected",
-                digest,
-                object_kind="inventory",
-                object_id=object_id,
-                payload=payload,
-            )
+            complete_inventory_request(self.journal, inventory, rejected=True)
             raise
-        self.journal.append(
-            "inventory-publish-confirmed",
-            digest,
-            object_kind="inventory",
-            object_id=object_id,
-            payload=payload,
-        )
+        complete_inventory_request(self.journal, inventory, rejected=False)
         return ExecutorTickResult("inventory-published")
 
 

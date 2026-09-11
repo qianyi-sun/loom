@@ -136,6 +136,8 @@ spec:
           value: personal-dev-agent-v1
         - name: LOOM_SVC_PERSONAL_DEV_ACTIVATION_PUBLIC_KEY_SHA256
           value: ''
+        - name: LOOM_SVC_PERSONAL_DEV_BUILD_ADMISSION_CONFIG_SHA256
+          value: ''
         - name: LOOM_SVC_PERSONAL_DEV_BUILDER_DOCKER_PATH
           value: /usr/bin/docker
         - name: LOOM_SVC_PERSONAL_DEV_BUILDER_ENABLED

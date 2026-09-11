@@ -344,11 +344,11 @@ async def test_sql_build_migration_refuses_downgrade_with_retained_v4_authority(
     from tests.capacity_build_membership_fixtures import typed_sql_execution
 
     await typed_sql_execution(capacity_session)
-    connection = await capacity_session.connection()
     with pytest.raises(RuntimeError, match="typed membership history exists"):
         async with capacity_session.begin_nested():
+            connection = await capacity_session.connection()
             await connection.run_sync(lambda sync: command.downgrade(_config(sync), "capacity_0017"))
-    assert await capacity_session.scalar(text("SELECT version_num FROM alembic_version")) == "capacity_0018"
+    assert await capacity_session.scalar(text("SELECT version_num FROM alembic_version")) == "capacity_0023"
     assert await capacity_session.scalar(text("SELECT to_regprocedure('public.capacity_personal_build_initial_insert_guard()')")) is not None
 
 

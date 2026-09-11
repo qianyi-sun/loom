@@ -21,9 +21,11 @@ from loom_capacity_agent.admission import (
     PublishableExecutableProtectedReleaseV2,
 )
 from loom_capacity_agent.contracts import ReporterConfigurationV1
+from loom_capacity_agent.terminal_inventory import application_terminal_evidence
 from loom_capacity_guard.contracts import canonical_digest as guard_canonical_digest
 from loom_capacity_manager.auth import MAX_BEARER_TOKEN_BYTES
 from loom_capacity_manager.contracts import (
+    MAX_CONTRACT_BYTES,
     CapacityContractError,
     DemandSnapshotV1,
     Digest,
@@ -39,8 +41,8 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableAdmissionPlanProposalV2,
     ExecutableBootstrapAcknowledgementV2,
     ExecutableBootstrapProposalV2,
+    ExecutableFinalReleaseWitnessV2,
     ExecutableProtectedReleaseV2,
-    ExecutableTerminalInventoryEvidenceV2,
     canonical_executable_bytes,
     canonical_executable_digest,
     validate_executable_admission_work_size,
@@ -48,6 +50,12 @@ from loom_capacity_manager.executable_contracts import (
 from loom_capacity_manager.grant_contracts import (
     DryRunProtectedReleaseAcknowledgementV1,
     canonical_grant_digest,
+)
+from loom_capacity_manager.typed_inventory_contracts import (
+    MAX_TERMINAL_INVENTORY_EVIDENCE_BYTES,
+    ExecutableTerminalInventoryEvidenceV3,
+    TerminalInventoryEvidence,
+    parse_terminal_inventory_evidence,
 )
 
 _MAX_CREDENTIAL_BYTES = MAX_BEARER_TOKEN_BYTES
@@ -425,43 +433,124 @@ class DemandReporterClient:
             raise DemandPublishError("capacity manager bootstrap work binding changed")
         return proposal
 
+    async def get_final_release_witness(
+        self, intent_id: UUID,
+    ) -> ExecutableFinalReleaseWitnessV2 | None:
+        """Fetch manager release authority, not permission to retire local holds.
+
+        The guard must still match this witness to its exact local assignment,
+        protected publication acknowledgement and native terminal evidence.
+        """
+        if not isinstance(intent_id, UUID):
+            raise DemandPublishError("final release intent id must be a UUID")
+        endpoint = (
+            f"{self._manager_origin}/v2/subjects/{self._configuration.subject_id}/"
+            f"intents/{intent_id}/final-release-witness"
+        )
+        try:
+            async with self._http.stream("GET", endpoint,
+                headers={"Authorization": f"Bearer {self._bearer_token}"},
+                follow_redirects=False,
+            ) as response:
+                if response.status_code != 200:
+                    raise DemandPublishError(
+                        f"capacity manager rejected final release witness with status {response.status_code}")
+                content = bytearray()
+                async for chunk in response.aiter_bytes():
+                    content.extend(chunk[:MAX_CONTRACT_BYTES + 1 - len(content)])
+                    if len(content) > MAX_CONTRACT_BYTES:
+                        raise DemandPublishError("capacity manager final release witness exceeds its byte bound")
+        except httpx.HTTPError:
+            raise DemandPublishError("capacity manager final release witness transport failed") from None
+        if content == b"null":
+            return None
+        try:
+            witness = ExecutableFinalReleaseWitnessV2.model_validate_json(bytes(content))
+            canonical_executable_bytes(witness)
+        except ValueError as exc:
+            raise DemandPublishError("capacity manager returned invalid final release witness") from exc
+        binding = witness.release.binding
+        if (
+            binding.intent_id != intent_id
+            or binding.subject_id != self._configuration.subject_id
+            or binding.subject_incarnation != self._configuration.subject_incarnation
+            or binding.deployment_generation != self._configuration.deployment_generation
+            or binding.candidate.algorithm != self._configuration.candidate_identity_algorithm
+            or binding.candidate.identity != self._configuration.candidate_identity
+            or binding.candidate.publication_sha256 != self._configuration.candidate_publication_sha256
+            or witness.protected_release.reporter_incarnation != self._configuration.reporter_incarnation
+        ):
+            raise DemandPublishError("capacity manager final release witness binding changed")
+        return witness
+
     async def get_executable_terminal_inventory_evidence(
         self,
         intent_id: UUID,
-    ) -> ExecutableTerminalInventoryEvidenceV2 | None:
-        """Fetch one manager-verified physical terminal witness for this subject."""
+    ) -> TerminalInventoryEvidence | None:
+        """Fetch an application witness; never import build-purpose authority."""
+        evidence = await self._get_terminal_inventory_evidence(intent_id)
+        if evidence is None:
+            return None
+        try:
+            return application_terminal_evidence(evidence)
+        except ValueError as exc:
+            raise DemandPublishError("application terminal inventory evidence is invalid") from exc
+
+    async def get_build_terminal_inventory_evidence(
+        self,
+        intent_id: UUID,
+    ) -> ExecutableTerminalInventoryEvidenceV3 | None:
+        """Fetch typed native evidence; the build guard must still join local pins."""
+        evidence = await self._get_terminal_inventory_evidence(intent_id)
+        if evidence is None:
+            return None
+        if (not isinstance(evidence, ExecutableTerminalInventoryEvidenceV3)
+            or evidence.record.ownership_proof is None
+            or evidence.record.ownership_proof.metadata.subject_authority.purpose != "personal-build-worker"):
+            raise DemandPublishError("build terminal inventory evidence is invalid")
+        return evidence
+
+    async def _get_terminal_inventory_evidence(
+        self,
+        intent_id: UUID,
+    ) -> TerminalInventoryEvidence | None:
+        """Shared bounded authenticated transport, never a purpose admission gate."""
 
         if not isinstance(intent_id, UUID):
             raise DemandPublishError("terminal inventory intent id must be a UUID")
         endpoint = (
-            f"{self._manager_origin}/v2/subjects/{self._configuration.subject_id}/"
+            f"{self._manager_origin}/v3/subjects/{self._configuration.subject_id}/"
             f"intents/{intent_id}/terminal-inventory-evidence"
         )
         try:
-            response = await self._http.get(
+            async with self._http.stream(
+                "GET",
                 endpoint,
                 headers={"Authorization": f"Bearer {self._bearer_token}"},
                 follow_redirects=False,
-            )
+            ) as response:
+                if response.status_code != 200:
+                    raise DemandPublishError(
+                        "capacity manager rejected terminal inventory evidence with status "
+                        f"{response.status_code}"
+                    )
+                bounded_content = bytearray()
+                async for chunk in response.aiter_bytes():
+                    remaining = MAX_TERMINAL_INVENTORY_EVIDENCE_BYTES + 1 - len(bounded_content)
+                    bounded_content.extend(chunk[:remaining])
+                    if len(bounded_content) > MAX_TERMINAL_INVENTORY_EVIDENCE_BYTES:
+                        raise DemandPublishError(
+                            "capacity manager terminal inventory evidence exceeds its byte bound"
+                        )
         except httpx.HTTPError:
             raise DemandPublishError(
                 "capacity manager terminal inventory evidence transport failed"
             ) from None
-        if response.status_code != 200:
-            raise DemandPublishError(
-                "capacity manager rejected terminal inventory evidence with status "
-                f"{response.status_code}"
-            )
-        if len(response.content) > _MAX_RECEIPT_BYTES:
-            raise DemandPublishError(
-                "capacity manager terminal inventory evidence exceeds its byte bound"
-            )
-        if response.content == b"null":
+        response_content = bytes(bounded_content)
+        if response_content == b"null":
             return None
         try:
-            evidence = ExecutableTerminalInventoryEvidenceV2.model_validate_json(
-                response.content
-            )
+            evidence = parse_terminal_inventory_evidence(response_content)
         except (ValidationError, ValueError) as exc:
             raise DemandPublishError(
                 "capacity manager returned invalid terminal inventory evidence"

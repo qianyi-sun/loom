@@ -16,14 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_capacity_manager.contracts import Digest, Identifier, PositiveQuantity, Quantity
 from loom_capacity_manager.executable_contracts import (
-    ExecutableExecutorInventoryV2,
     ExecutionContextV2,
     ExecutionPreparationPolicyV2,
     ExecutionPreparationV2,
     PreparedExecutorBindingV2,
     StrictV2Model,
     canonical_executable_digest,
-    canonical_inventory_confirmation_journal_head,
 )
 from loom_capacity_manager.membership_contracts import (
     ExecutionPreparationPolicyV3,
@@ -38,6 +36,11 @@ from loom_capacity_manager.models import (
     CapacityExecutionEpoch,
     CapacityExecutionExecutor,
     CapacitySubject,
+)
+from loom_capacity_manager.typed_inventory_contracts import (
+    ExecutorInventory,
+    inventory_confirmation_journal_head,
+    parse_executor_inventory,
 )
 
 PreparedReadinessBlocker = Literal[
@@ -268,18 +271,14 @@ def _runtime_matches(
 def _validated_inventory(
     runtime: CapacityExecutableExecutorState,
     execution: ExecutionContextV2,
-) -> tuple[ExecutableExecutorInventoryV2 | None, bool]:
+) -> tuple[ExecutorInventory | None, bool]:
     if runtime.inventory_payload is None or runtime.last_inventory_digest is None:
         return None, False
     try:
-        inventory = ExecutableExecutorInventoryV2.model_validate_json(
-            json.dumps(runtime.inventory_payload)
-        )
+        inventory = parse_executor_inventory(json.dumps(runtime.inventory_payload))
     except ValueError:
         return None, False
-    confirmation_sequence, confirmation_digest = canonical_inventory_confirmation_journal_head(
-        inventory
-    )
+    confirmation_sequence, confirmation_digest = inventory_confirmation_journal_head(inventory)
     if (
         inventory.execution != execution
         or inventory.executor_id != runtime.executor_id
@@ -308,9 +307,9 @@ async def _subject_readiness(
 ) -> tuple[int, int]:
     configuration = (
         await session.execute(
-            select(CapacityConfigurationEpoch).where(
-                CapacityConfigurationEpoch.configuration_epoch == epoch.configuration_epoch
-            ).with_for_update(read=not exclusive)
+            select(CapacityConfigurationEpoch)
+            .where(CapacityConfigurationEpoch.configuration_epoch == epoch.configuration_epoch)
+            .with_for_update(read=not exclusive)
         )
     ).scalar_one_or_none()
     subjects = (
@@ -354,11 +353,13 @@ async def _subject_readiness(
             continue
         candidate = (
             await session.execute(
-                select(CapacityCandidate).where(
+                select(CapacityCandidate)
+                .where(
                     CapacityCandidate.subject_id == subject.subject_id,
                     CapacityCandidate.subject_incarnation == subject.subject_incarnation,
                     CapacityCandidate.candidate_generation == subject.candidate_generation,
-                ).with_for_update(read=not exclusive)
+                )
+                .with_for_update(read=not exclusive)
             )
         ).scalar_one_or_none()
         if candidate is None or (
@@ -427,7 +428,7 @@ def _executor_readiness(
     if not lease_fresh:
         blockers.append("executor-lease-expired")
 
-    inventory: ExecutableExecutorInventoryV2 | None = None
+    inventory: ExecutorInventory | None = None
     if runtime is None or runtime.inventory_high_water == 0:
         blockers.append("executor-inventory-missing")
     else:

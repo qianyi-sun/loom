@@ -10,6 +10,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Column,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
@@ -1894,7 +1895,12 @@ class CapacityExecutableExecutorState(Base):
     """Mutable lease and journal checkpoint for immutable v2 executor evidence."""
 
     __tablename__ = "capacity_executable_executor_states"
+    # This monotonic audit marker is owned exclusively by its database trigger;
+    # ordinary inventory/heartbeat writes must neither hydrate nor overwrite it.
+    # DeclarativeBase defines this class configuration without a ClassVar type.
+    __mapper_args__ = {"exclude_properties": ("chunked_inventory_seen",)}  # noqa: RUF012
     __table_args__ = (
+        Column("chunked_inventory_seen", Boolean, nullable=False, server_default=text("false")),
         CheckConstraint(
             "execution_epoch > 0 AND pool_generation > 0 "
             "AND pool_id IN ('gb10','oldlab') AND heartbeat_high_water >= 0 "
@@ -1929,7 +1935,7 @@ class CapacityExecutableExecutorState(Base):
             "AND jsonb_typeof(inventory_payload) = 'object' "
             "AND last_inventory_at IS NOT NULL "
             "AND last_heartbeat_at > last_inventory_at "
-            "AND inventory_payload -> 'schema_version' = '2'::jsonb "
+            "AND inventory_payload -> 'schema_version' IN ('2'::jsonb, '3'::jsonb) "
             "AND inventory_payload -> 'inventory_sequence' "
             "= to_jsonb(inventory_high_water) "
             "AND inventory_payload ->> 'executor_id' = executor_id "
@@ -1940,7 +1946,11 @@ class CapacityExecutableExecutorState(Base):
             "AND inventory_confirmation_journal_digest ~ '^[0-9a-f]{64}$' "
             "AND ((inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water) "
             "AND inventory_payload ->> 'journal_digest' = journal_digest) OR "
-            "(inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water - 2) "
+            "(inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water - "
+            "(2 + CASE WHEN (inventory_payload -> 'schema_version' = '3'::jsonb AND "
+            "octet_length(public.capacity_executable_canonical_jsonb_text(inventory_payload)) > 32768) "
+            "THEN (octet_length(public.capacity_executable_canonical_jsonb_text(inventory_payload)) "
+            "+ 32767) / 32768 ELSE 0 END)) "
             "AND inventory_confirmation_journal_digest = journal_digest)) "
             "AND inventory_payload -> 'execution' -> 'execution_epoch' "
             "= to_jsonb(execution_epoch) "
@@ -2755,6 +2765,34 @@ class CapacityExecutableCommandReceipt(Base):
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class CapacityExecutableFinalReleaseWitness(Base):
+    """Immutable exact authority retained atomically with physical release."""
+
+    __tablename__ = "capacity_executable_final_release_witnesses"
+    __table_args__ = (
+        CheckConstraint(
+            "jsonb_typeof(release_payload) = 'object' "
+            "AND octet_length(release_payload::text) <= 8388608",
+            name="capacity_final_release_payload_check",
+        ),
+    )
+
+    intent_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("capacity_executable_intents.intent_id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    protected_receipt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("capacity_executable_protected_release_receipts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    command_receipt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("capacity_executable_command_receipts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    release_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    released_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
 
 
 class CapacityExecutableLaunchRateBucket(Base):
