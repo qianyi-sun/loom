@@ -2110,6 +2110,9 @@ The real KVM fixture also observes root-stop termination of both BuildKit and a
 live restricted client, rejects a late child joining that stopped sandbox, and
 verifies empty runtime state after cleanup. Its init process reaps detached
 runtime helpers; installed process supervision still needs equivalent proof.
+Both explicit root kill and abrupt death of the attached runsc root launcher
+are exercised. The latter tests gVisor's kernel parent-death binding, not the
+still-unimplemented supervisor-to-launcher death chain or Slurm cleanup.
 
 Revision `build_guard_0031` adds a separate native execution-freshness operation.
 The trusted worker submits its exact claim, a new challenge and the verified

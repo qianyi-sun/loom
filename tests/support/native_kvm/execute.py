@@ -51,13 +51,29 @@ def main():
         "--allow-suid=false", "--oci-seccomp=true"]
     started = []
     logs = []
+    root_launcher = None
     try:
         for component, name in (("pause", sandbox_id), ("buildkit", buildkit_id)):
             started.append(name)
             log = open("/tmp/" + component + ".log", "w+")
             logs.append(log)
-            subprocess.run([*runtime, "run", "--detach", "--bundle=/fixtures/" + component, name],
-                stdout=log, stderr=subprocess.STDOUT, check=True, timeout=20)
+            if component == "pause":
+                # Pinned runsc's attached root gives sentry/helper processes a
+                # kernel parent-death signal; detached mode has no such bound.
+                root_launcher = subprocess.Popen([*runtime, "run", "--bundle=/fixtures/pause", name],
+                    stdout=log, stderr=subprocess.STDOUT)
+                deadline = time.monotonic() + 20
+                while True:
+                    state = subprocess.run([*runtime, "state", name], capture_output=True,
+                        text=True, timeout=5)
+                    if state.returncode == 0 and json.loads(state.stdout)["status"] == "running":
+                        break
+                    if root_launcher.poll() is not None or time.monotonic() >= deadline:
+                        raise RuntimeError("attached sandbox root did not become ready")
+                    time.sleep(0.05)
+            else:
+                subprocess.run([*runtime, "run", "--detach", "--bundle=/fixtures/" + component, name],
+                    stdout=log, stderr=subprocess.STDOUT, check=True, timeout=20)
         deadline = time.monotonic() + 20
         while True:
             ready = subprocess.run([*runtime, "exec", buildkit_id, "/usr/bin/test", "-S",
@@ -99,13 +115,21 @@ def main():
             if time.monotonic() >= deadline:
                 raise RuntimeError("lifecycle child did not start")
             time.sleep(0.05)
-        subprocess.run([*runtime, "kill", "--all", sandbox_id, "SIGKILL"], check=True, timeout=5)
+        if identity["root_stop"] == "launcher-death":
+            assert root_launcher is not None
+            root_launcher.kill()
+            assert root_launcher.wait(timeout=5) == -9
+        else:
+            subprocess.run([*runtime, "kill", "--all", sandbox_id, "SIGKILL"], check=True, timeout=5)
         deadline = time.monotonic() + 10
         while True:
-            states = [json.loads(subprocess.run([*runtime, "state", name], check=True,
-                capture_output=True, text=True, timeout=5).stdout)["status"]
-                for name in (sandbox_id, buildkit_id, lifecycle_id)]
-            if states == ["stopped"] * 3:
+            # Foreground runsc may collect/remove its own root state on exit.
+            # A successful full list distinguishes absence from a failed read.
+            observed = json.loads(subprocess.run([*runtime, "list", "--format=json"],
+                check=True, capture_output=True, text=True, timeout=5).stdout) or []
+            by_id = {item["id"]: item["status"] for item in observed}
+            states = [by_id.get(name, "absent") for name in (sandbox_id, buildkit_id, lifecycle_id)]
+            if all(state in {"stopped", "absent"} for state in states):
                 break
             if time.monotonic() >= deadline:
                 raise RuntimeError(f"sandbox root stop left live children: {states}")
@@ -123,6 +147,10 @@ def main():
             result = subprocess.run([*runtime, "delete", "--force", name], timeout=15)
             if result.returncode:
                 cleanup_failures.append(name)
+        if root_launcher is not None:
+            if root_launcher.poll() is None:
+                root_launcher.kill()
+            root_launcher.wait(timeout=5)
         for log in logs:
             log.seek(0)
             print(log.read()[-16000:], flush=True)

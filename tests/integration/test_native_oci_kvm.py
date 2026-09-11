@@ -73,7 +73,8 @@ def prepare_runtime(tmp_path, arch):
     return runtime
 
 
-def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path):
+@pytest.mark.parametrize("root_stop", ["signal", "launcher-death"])
+def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path, root_stop):
     arch = platform.machine()
     if arch not in BUILDERS or not Path("/dev/kvm").exists():
         pytest.skip("native KVM acceptance requires x86_64/aarch64 with /dev/kvm")
@@ -118,7 +119,7 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path)
         tmp_bytes=64 * 1024**2, buildkit_state_bytes=1024**3)
     bundles = render_native_oci_bundles(context, policy)
     (fixtures / "identity.json").write_text(json.dumps({"sandbox_id": bundles.sandbox_id,
-        "buildkit_id": bundles.buildkit_id, "client_id": bundles.client_id}))
+        "buildkit_id": bundles.buildkit_id, "client_id": bundles.client_id, "root_stop": root_stop}))
     for component in ("pause", "buildkit", "client"):
         (fixtures / component).mkdir()
         (fixtures / component / "config.json").write_bytes(getattr(bundles, component))
