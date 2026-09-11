@@ -63,3 +63,14 @@ def test_executor_only_registry_retains_file_and_identity_safety(tmp_path, bound
         path = link
     with pytest.raises(PrincipalRegistryError):
         CapacityPrincipalVerifier.from_pool_executor_file(path)
+
+
+def test_executor_registry_pins_the_same_bytes_it_parses(tmp_path):
+    from hashlib import sha256
+
+    path = _write_registry(tmp_path/"pinned.json",[_pool_executor()])
+    digest = sha256(path.read_bytes()).hexdigest()
+    verifier = CapacityPrincipalVerifier.from_pool_executor_file(path,expected_sha256=digest)
+    assert verifier.verify_bearer("Bearer executor-secret").executor_incarnation == EXECUTOR_INCARNATION
+    with pytest.raises(PrincipalRegistryError,match="digest"):
+        CapacityPrincipalVerifier.from_pool_executor_file(path,expected_sha256="0"*64)
