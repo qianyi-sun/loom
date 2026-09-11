@@ -432,8 +432,9 @@ def test_caller_constructed_claim_cannot_bypass_validation():
 
 def test_legacy_claim_requires_nonrefundable_identity():
     # node_setup_health refunds attempt_count before requeue; the same worker
-    # can legitimately reclaim with every field below unchanged. None identifies
-    # that new claim. The scheduler must persist a separate ID atomically.
+    # intended retry may reuse every field below. None identifies that new
+    # claim. The scheduler must persist a separate ID atomically. This is wire
+    # coverage, not an end-to-end claim/refund/reclaim regression.
     ambiguous = dict(
         kind="legacy", trial_id=IDENTITY, team_id=IDENTITY, worker_id=IDENTITY,
         worker_lease_epoch=2, trial_attempt_count=3,
