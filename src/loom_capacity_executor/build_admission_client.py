@@ -13,6 +13,8 @@ from loom_capacity_agent.admission import (
     DrainedExecutableWorkerV2,
     ExecutableDrainRequestV2,
     ExecutablePreparedBootstrapRevocationV2,
+    ExecutableReleaseReceiptV2,
+    ExecutableReleaseRequestV2,
     ExecutableWorkerRegistrationV2,
     ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
@@ -31,6 +33,7 @@ from loom_capacity_agent.build_admission import (
     BuildOutcomeRequestV1,
     BuildPreparationRequestV1,
     BuildRegistrationRequestV1,
+    BuildReleaseExchangeV1,
 )
 from loom_capacity_agent.client import (
     DemandReporterConnection,
@@ -229,6 +232,23 @@ class BuildAdmissionClient:
         receipt = await self._post(request.claim.binding, "outcome", canonical_bytes(exchange), BuildOutcomeReceiptV1)
         if receipt.request != request or receipt.request_digest != canonical_digest(request):
             raise BuildAdmissionTransportError("native outcome receipt binding changed")
+        return receipt
+
+    async def acknowledge_release(self, request: ExecutableReleaseRequestV2, *, current_worker_credential: str) -> ExecutableReleaseReceiptV2:
+        try:
+            exchange = BuildReleaseExchangeV1.model_validate_json(BuildReleaseExchangeV1(
+                release=request, worker_credential=current_worker_credential).model_dump_json())
+        except ValueError:
+            raise ValueError("native release exchange is invalid") from None
+        request = exchange.release
+        receipt = await self._post(request.binding, "release", canonical_bytes(exchange), ExecutableReleaseReceiptV2)
+        digest = canonical_executable_digest(request)
+        if (receipt.binding != request.binding or receipt.reporter_incarnation != request.reporter_incarnation
+            or receipt.bootstrap_registration_epoch != request.bootstrap_registration_epoch
+            or receipt.protected_registration_epoch != request.protected_registration_epoch
+            or receipt.claim_high_water != request.expected_claim_high_water or receipt.release_epoch != request.release_epoch
+            or receipt.request_digest != digest or receipt.protected_release_sha256 != digest):
+            raise BuildAdmissionTransportError("native release receipt binding changed")
         return receipt
 
     async def bind_slurm_job(self, request: PhysicalJobBindingV2) -> BoundExecutableWorkerV2:

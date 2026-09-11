@@ -92,7 +92,7 @@ class TypedAdmissionDirectoryV3(_StrictLaunchV3):
 
 _BUILD_CONSUMERS = frozenset({
     "prepare_worker", "bind_slurm_job", "observe_intent", "revoke_prepared_bootstrap",
-    "withdraw_unregistered_worker", "register_worker", "claim_platform", "begin_drain", "record_outcome",
+    "withdraw_unregistered_worker", "register_worker", "claim_platform", "begin_drain", "record_outcome", "acknowledge_release",
 })
 
 

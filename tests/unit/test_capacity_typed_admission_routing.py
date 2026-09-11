@@ -187,8 +187,7 @@ async def test_typed_route_rechecks_inputs_after_construction(tmp_path, boundary
         await router.prepare_worker(request,bootstrap_sha256="b"*64)
 
 
-@pytest.mark.parametrize("method", ["acknowledge_release", "admit_claim"])
-async def test_all_unimplemented_native_consumers_reject_before_transport(tmp_path,method):
+async def test_application_claim_rejects_native_route_before_transport(tmp_path):
     from types import SimpleNamespace
 
     module,request,document,path,digest = configured(tmp_path,"gb10","personal-build-worker")
@@ -199,10 +198,8 @@ async def test_all_unimplemented_native_consumers_reject_before_transport(tmp_pa
     router = module.TypedAdmissionRouter(path,expected_sha256=digest,executor=document.executor,
         application_client_factory=unexpected,build_client_factory=unexpected)
     value = SimpleNamespace(binding=request.binding)
-    args = (request.binding,value) if method == "admit_claim" else (value,)
-    kwargs = {"current_worker_credential":"secret"} if method == "acknowledge_release" else {}
     with pytest.raises(RuntimeError,match="not implemented"):
-        await getattr(router,method)(*args,**kwargs)
+        await router.admit_claim(request.binding, value)
 
 
 @pytest.mark.parametrize("method", ["bind_slurm_job", "observe_intent", "revoke_prepared_bootstrap", "withdraw_unregistered_worker", "register_worker", "begin_drain"])

@@ -22,6 +22,7 @@ from loom_capacity_agent.build_admission import (
     BuildOutcomeExchangeV1,
     BuildPreparationRequestV1,
     BuildRegistrationRequestV1,
+    BuildReleaseExchangeV1,
 )
 from loom_capacity_build_guard.execution_store import BuildGuardExecutionStore
 from loom_capacity_manager.auth import AuthorizationError, CapacityPrincipalVerifier
@@ -40,7 +41,7 @@ async def _admit(
     *,
     pool_id: str,
     intent_id: UUID,
-    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap", "withdraw", "register", "claim", "drain", "outcome"],
+    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap", "withdraw", "register", "claim", "drain", "outcome", "release"],
 ) -> Response:
     sessions = getattr(request.app.state, "personal_dev_build_admission_sessions", None)
     verifier = getattr(request.app.state, "personal_dev_build_admission_verifier", None)
@@ -48,7 +49,7 @@ async def _admit(
         verifier, CapacityPrincipalVerifier
     ):
         raise HTTPException(503, "build admission unavailable")
-    if operation_name in {"register", "drain"} and getattr(
+    if operation_name in {"register", "drain", "release"} and getattr(
         request.app.state, "personal_dev_build_admission_mode", None
     ) not in {"native-registration", "native-claims"}:
         raise HTTPException(503, "build registration unavailable")
@@ -74,6 +75,10 @@ async def _admit(
                     raise HTTPException(413, "build admission request exceeds byte bound")
                 body.extend(chunk)
             try:
+                release = (
+                    BuildReleaseExchangeV1.model_validate_json(bytes(body))
+                    if operation_name == "release" else None
+                )
                 outcome = (
                     BuildOutcomeExchangeV1.model_validate_json(bytes(body))
                     if operation_name == "outcome" else None
@@ -92,7 +97,9 @@ async def _admit(
                     else None
                 )
                 operation = (
-                    outcome.outcome.claim
+                    release.release
+                    if release is not None
+                    else outcome.outcome.claim
                     if outcome is not None
                     else claim.claim
                     if claim is not None
@@ -130,7 +137,10 @@ async def _admit(
                 await session.execute(text("SET LOCAL statement_timeout='10000ms'"))
                 await session.execute(text("SET LOCAL lock_timeout='5000ms'"))
                 store = BuildGuardExecutionStore(session, binding=binding)
-                if outcome is not None:
+                if release is not None:
+                    wire = canonical_executable_bytes(await store.acknowledge_release(
+                        release.release, current_worker_credential=release.worker_credential))
+                elif outcome is not None:
                     wire = canonical_bytes(await store.record_outcome(
                         outcome.outcome, worker_credential=outcome.worker_credential))
                 elif claim is not None:
@@ -213,3 +223,8 @@ async def drain_build_worker(request: Request, pool_id: str, intent_id: UUID) ->
 @router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/outcome")
 async def record_build_outcome(request: Request, pool_id: str, intent_id: UUID) -> Response:
     return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="outcome")
+
+
+@router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/release")
+async def release_build_worker(request: Request, pool_id: str, intent_id: UUID) -> Response:
+    return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="release")

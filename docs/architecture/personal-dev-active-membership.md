@@ -478,8 +478,8 @@ retryable failure and cancellation, suppress both pending demand and fresh
 admission when finished, and do not infer an outcome from physical termination.
 Native claim execution, outcome handling and runtime orchestration remain incomplete.
 
-The management-only `BuildRecoveryCoordinator` connects acknowledged unregistered
-revocations to authenticated manager final-release and native terminal evidence.
+The management-only `BuildRecoveryCoordinator` connects acknowledged protected
+releases to authenticated manager final-release and native terminal evidence.
 Discovery returns only exact retained assignments/current holds, not unacknowledged
 events or already-retired history. It pages a fixed upper event bound per sweep;
 the process-local cursor is neither durable acknowledgement nor a skip watermark.
@@ -512,8 +512,12 @@ matching committed physical-terminal evidence. Recovery fetches native terminal
 proof for registered releases as well as unregistered withdrawals. Old retirement
 replay cannot remove a successor assignment's hold. Failed/interrupted requests
 may requeue only after retirement; artifact-ready/cancelled requests remain
-ineligible for fresh admission. Protected release transport, runtime recovery
-orchestration, source grants and verified artifact publication remain required
+ineligible for fresh admission. The pool-authenticated `/release` endpoint and
+pinned client require a transport-only worker credential and return only committed,
+canonical release evidence. Typed routing preserves application/build authority;
+only `native-registration` and `native-claims` modes expose native release.
+Terminal release without the credential remains management-only, with no pool
+route. Runtime recovery orchestration, source grants and verified artifact publication remain required
 before operational enablement.
 
 Build-guard revision `build_guard_0020` permits management-only lost-result
@@ -572,8 +576,8 @@ using their allocated resources and registered worker incarnation. Current
 assignments may overlap fixed claims, but neither overlaps pending demand.
 Cancellation marks a claim `cancel-pending`; expired or terminal execution remains
 charged as `unknown` until a durable outcome is recorded. Neither case releases
-holds or infers build success. Registered release and complete runtime outcome
-delivery remain required before live execution can be enabled. Retained claim
+holds or infers build success. Complete runtime outcome and release orchestration
+remain required before live execution can be enabled. Retained claim
 evidence prevents lossy downgrade.
 
 Build-guard revision `build_guard_0016` adds the private native registration
@@ -591,8 +595,8 @@ Observation exposes only committed registration. Registration and unregistered
 withdrawal take the same installation/bootstrap/physical locks, so the withdrawal
 path cannot revoke a registered worker. Holds remain charged and retained native
 registration prevents lossy downgrade. Claims are now retained privately, and
-registration, claims and drain have purpose-specific transports. Registered
-release, outcome delivery and allocation containment must still be connected
+registration, claims, drain, outcomes and release have purpose-specific transports.
+Runtime lifecycle orchestration and allocation containment must still be connected
 before public typed execution can be enabled.
 
 `ActivationRuntimeArtifactV3` and its explicit pinned loader compose the exact

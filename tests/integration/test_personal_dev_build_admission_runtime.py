@@ -62,7 +62,7 @@ async def test_runtime_accepts_only_private_agent_and_disposes_on_rejection(
         assert disposed == created
 
 
-@pytest.mark.parametrize("boundary", ["foreign-prepare", "foreign-bind", "foreign-register", "foreign-claim", "foreign-drain", "foreign-outcome", "owner-login", "owner-createdb", "owner-membership"])
+@pytest.mark.parametrize("boundary", ["foreign-prepare", "foreign-bind", "foreign-register", "foreign-claim", "foreign-drain", "foreign-outcome", "foreign-release", "owner-login", "owner-createdb", "owner-membership"])
 async def test_runtime_rejects_protected_authority_drift(
     build_guard_database, owner_sessions, tmp_path, monkeypatch, boundary
 ):
@@ -78,7 +78,8 @@ async def test_runtime_rejects_protected_authority_drift(
                 "foreign-register": "register_worker(uuid,jsonb,bytea,text,text)",
                 "foreign-claim": "claim_platform(uuid,jsonb,bytea,text,text)",
                 "foreign-drain": "begin_drain(uuid,jsonb,bytea,text)",
-                "foreign-outcome": "record_outcome(uuid,jsonb,bytea,text,text)"}[boundary]
+                "foreign-outcome": "record_outcome(uuid,jsonb,bytea,text,text)",
+                "foreign-release": "acknowledge_release(uuid,jsonb,bytea,text,text)"}[boundary]
             connection.exec_driver_sql(f"GRANT USAGE ON SCHEMA loom_capacity_build_guard TO {quote(foreign)}")
             connection.exec_driver_sql(f"GRANT EXECUTE ON FUNCTION loom_capacity_build_guard.{signature} TO {quote(foreign)}")
         elif boundary == "owner-login":

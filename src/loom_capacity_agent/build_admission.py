@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
-from loom_capacity_agent.admission import ExecutableWorkerRegistrationV2
+from loom_capacity_agent.admission import ExecutableReleaseRequestV2, ExecutableWorkerRegistrationV2
 from loom_capacity_manager.contracts import Digest, PositiveQuantity, StrictV1Model
 from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
@@ -95,6 +95,14 @@ class BuildOutcomeExchangeV1(StrictV1Model):
     """Transport-only wrapper authentication, never retained outcome evidence."""
 
     outcome: BuildOutcomeRequestV1
+    worker_credential: str = Field(min_length=43, max_length=512,
+        pattern=r"^[A-Za-z0-9_-]+$", repr=False)
+
+
+class BuildReleaseExchangeV1(StrictV1Model):
+    """Worker-authenticated release; terminal proof is management-only."""
+
+    release: ExecutableReleaseRequestV2
     worker_credential: str = Field(min_length=43, max_length=512,
         pattern=r"^[A-Za-z0-9_-]+$", repr=False)
 

@@ -111,7 +111,8 @@ async def _assert_private_agent(connection: AsyncConnection, *, registration_ena
         "withdraw_unregistered_worker(uuid,jsonb,bytea,text)",
     )
     if registration_enabled:
-        signatures += ("register_worker(uuid,jsonb,bytea,text,text)", "begin_drain(uuid,jsonb,bytea,text)")
+        signatures += ("register_worker(uuid,jsonb,bytea,text,text)", "begin_drain(uuid,jsonb,bytea,text)",
+            "acknowledge_release(uuid,jsonb,bytea,text,text)")
     if claims_enabled:
         signatures += ("claim_platform(uuid,jsonb,bytea,text,text)", "record_outcome(uuid,jsonb,bytea,text,text)")
     for signature in signatures:

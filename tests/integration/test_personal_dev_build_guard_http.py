@@ -310,10 +310,11 @@ async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_inpu
         assert "drain_digest" not in result.text
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == (0 if operation == "prepare" else 2)
-            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_registrations")) == (1 if operation in {"claim", "drain", "outcome"} else 0)
-            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_claims")) == (1 if operation in {"drain", "outcome"} else 0)
-            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_drains")) == 0
-            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_outcomes")) == 0
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_registrations")) == (1 if operation in {"claim", "drain", "outcome", "release"} else 0)
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_claims")) == (1 if operation in {"drain", "outcome", "release"} else 0)
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_drains")) == int(operation == "release")
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_outcomes")) == int(operation == "release")
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_releases")) == 0
     finally:
         event.remove(target,"before_commit",fail_commit)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="https://management.test",
