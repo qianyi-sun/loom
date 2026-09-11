@@ -1,0 +1,121 @@
+"""Typed admission chooses pinned purpose without consulting a live permit."""
+
+import json
+from hashlib import sha256
+from importlib import import_module
+from uuid import uuid4
+
+import pytest
+
+from loom_capacity_manager.executable_contracts import canonical_executable_bytes, canonical_executable_digest
+from tests.unit.test_capacity_agent_client import _owner_file
+from tests.unit.test_capacity_build_admission_client import registration
+from tests.unit.test_capacity_build_pinned_transport import pinned_inputs
+
+
+def configured(tmp_path,pool,purpose):
+    module = import_module("loom_capacity_executor.typed_admission")
+    request = registration(pool)
+    binding = request.binding
+    database = _owner_file(tmp_path/"database-url",b"postgresql+psycopg://executor:private@database.test/app?sslmode=verify-full")
+    entry = module.TypedAdmissionEntryV3(subject_id=binding.subject_id,subject_incarnation=binding.subject_incarnation,
+        configuration_epoch=binding.execution.configuration_epoch,deployment_generation=binding.deployment_generation,
+        candidate_generation=binding.candidate_generation,candidate_sha256=canonical_executable_digest(binding.candidate),
+        account_id=binding.account_id,purpose=purpose,protected_admission_sha256="a"*64,
+        database={"path":str(database),"sha256":sha256(database.read_bytes()).hexdigest()} if purpose=="application-worker" else None,
+        build={"origin":"https://management.test",**pinned_inputs(tmp_path)} if purpose=="personal-build-worker" else None)
+    document = module.TypedAdmissionDirectoryV3(executor={"pool_id":pool,"pool_generation":binding.pool_generation,
+        "executor_id":binding.executor_id,"executor_incarnation":binding.executor_incarnation},entries=(entry,))
+    wire = canonical_executable_bytes(document)
+    path = _owner_file(tmp_path/"routes.json",wire)
+    return module,request,document,path,sha256(wire).hexdigest()
+
+
+@pytest.mark.parametrize("pool", ["gb10","oldlab"])
+@pytest.mark.parametrize("purpose", ["application-worker","personal-build-worker"])
+@pytest.mark.parametrize("failure", [False,True])
+async def test_typed_route_uses_exact_purpose_and_always_closes_client(tmp_path,pool,purpose,failure):
+    module,request,document,path,digest = configured(tmp_path,pool,purpose)
+    events = []
+
+    class Client:
+        async def prepare_worker(self,value,**kwargs):
+            assert value == request
+            events.append("prepared")
+            if failure:
+                raise RuntimeError("lost reply")
+            return "receipt"
+
+        async def aclose(self):
+            events.append("closed")
+
+    def application(url,**kwargs):
+        assert purpose == "application-worker"
+        assert b"sslmode=verify-full" in url
+        assert kwargs == {"subject_id":request.binding.subject_id,"subject_incarnation":request.binding.subject_incarnation}
+        events.append("application")
+        return Client()
+
+    def build(identity,connection):
+        assert purpose == "personal-build-worker"
+        assert identity == document.executor
+        assert connection == document.entries[0].build
+        events.append("build")
+        return Client()
+
+    client = module.TypedAdmissionRouter(path,expected_sha256=digest,executor=document.executor,
+        application_client_factory=application,build_client_factory=build)
+    assert client.purpose(request.binding) == purpose
+    assert client.bootstrap_handoff_route_sha256(request.binding) == canonical_executable_digest(document.entries[0])
+    if failure:
+        with pytest.raises(RuntimeError,match="lost reply"):
+            await client.prepare_worker(request,bootstrap_sha256="b"*64)
+    else:
+        assert await client.prepare_worker(request,bootstrap_sha256="b"*64) == "receipt"
+    assert events == ["application" if purpose=="application-worker" else "build","prepared","closed"]
+
+
+@pytest.mark.parametrize("boundary", ["subject","incarnation","account","candidate-generation","deployment-generation",
+    "configuration","candidate","pool","executor","root","noncanonical","unsupported"])
+async def test_typed_route_rejects_drift_before_creating_clients(tmp_path,boundary):
+    module,request,document,path,digest = configured(tmp_path,"gb10","personal-build-worker")
+    changes = {"subject":{"subject_id":uuid4()},"incarnation":{"subject_incarnation":uuid4()},
+        "account":{"account_id":"foreign"},"candidate-generation":{"candidate_generation":99},
+        "deployment-generation":{"deployment_generation":99},"configuration":{"execution":request.binding.execution.model_copy(update={"configuration_epoch":99})},
+        "candidate":{"candidate":request.binding.candidate.model_copy(update={"publication_sha256":"f"*64})},
+        "pool":{"pool_id":"oldlab"},"executor":{"executor_incarnation":uuid4()}}
+
+    def unexpected(*args,**kwargs):
+        pytest.fail("invalid typed routing must not create a credential-bearing client")
+
+    if boundary in {"root","noncanonical"}:
+        wire = path.read_bytes() + b" "
+        path.write_bytes(wire)
+        if boundary == "noncanonical":
+            digest = sha256(wire).hexdigest()
+    with pytest.raises((ValueError,RuntimeError)):
+        client = module.TypedAdmissionRouter(path,expected_sha256=digest,executor=document.executor,
+            application_client_factory=unexpected,build_client_factory=unexpected)
+        if boundary == "unsupported":
+            await client.begin_drain(type("Drain",(),{"binding":request.binding})())
+        else:
+            changed = request.model_copy(update={"binding":request.binding.model_copy(update=changes.get(boundary,{}))})
+            await client.prepare_worker(changed,bootstrap_sha256="b"*64)
+
+
+@pytest.mark.parametrize("boundary", ["duplicate","mixed","purpose","foreign-executor"])
+def test_typed_directory_rejects_ambiguous_authority(tmp_path,boundary):
+    module,_request,document,path,digest = configured(tmp_path,"gb10","personal-build-worker")
+    payload = document.model_dump(mode="json")
+    if boundary == "duplicate":
+        payload["entries"].append(payload["entries"][0])
+    elif boundary == "mixed":
+        payload["entries"][0]["database"] = payload["entries"][0]["build"]["bearer_token"]
+    elif boundary == "purpose":
+        payload["entries"][0]["purpose"] = "application-worker"
+    else:
+        payload["executor"]["executor_id"] = "foreign"
+    wire = json.dumps(payload,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode("ascii")
+    path.write_bytes(wire)
+    with pytest.raises((ValueError,RuntimeError)):
+        module.TypedAdmissionRouter(path,expected_sha256=sha256(wire).hexdigest(),executor=document.executor)
