@@ -8,6 +8,7 @@ from importlib import import_module
 
 import pytest
 
+from loom.personal_dev_candidate import PERSONAL_DEV_BUILD_CONTRACT_SHA256
 from loom_capacity_executor.native_build_source import NativeStagedBuildSource
 from loom_capacity_executor.native_sandbox_contract import render_native_sandbox_contract
 from tests.unit.test_native_build_context import context_for
@@ -20,7 +21,8 @@ def prepared(tmp_path):
     archive = tmp_path / "source.tar"
     archive.write_bytes(b"source bytes")
     context = context_for(execution_request().claim).model_copy(update={
-        "archive_size_bytes": archive.stat().st_size, "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest()})
+        "archive_size_bytes": archive.stat().st_size, "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+        "build_contract_sha256": PERSONAL_DEV_BUILD_CONTRACT_SHA256})
     return workspace, NativeStagedBuildSource(context, archive)
 
 
@@ -61,7 +63,9 @@ async def test_fixed_input_copy_is_verified_readonly_and_never_reuses_input(tmp_
             assert (workspace / "input" / name).stat().st_mode & 0o777 == 0o444
         assert (workspace / "input/source.tar").stat().st_ino != source.archive.stat().st_ino
     else:
-        with pytest.raises((ValueError, OSError)):
+        expected = {"digest": "digest changed", "truncated": "size/type changed", "excess": "size/type changed",
+            "public": "private and owner-controlled", "reused": "File exists", "limit": "integer binding"}.get(boundary)
+        with pytest.raises((ValueError, OSError, RuntimeError), match=expected):
             await module.prepare_native_runtime_input(source, **arguments)
         if boundary == "reused":
             assert (workspace / "input/keep").read_text() == "keep"
@@ -107,3 +111,74 @@ async def test_input_copy_settles_writes_and_anchors_cleanup(tmp_path, monkeypat
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_input_replacement_before_open_is_never_chmodded(tmp_path, monkeypatch):
+    module = import_module("loom_capacity_executor.native_runtime_input")
+    workspace, source = prepared(tmp_path)
+    original = module.os.open
+
+    def replacing(path, flags, *args, **kwargs):
+        if path == "input":
+            (workspace / "input").rename(workspace / "displaced-input")
+            (workspace / "input").mkdir(mode=0o555)
+        return original(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", replacing)
+    with pytest.raises(ValueError, match="input directory changed"):
+        await module.prepare_native_runtime_input(source, workspace=workspace,
+            max_artifact_bytes=1024**2, max_image_archive_bytes=256 * 1024)
+    assert (workspace / "input").stat().st_mode & 0o777 == 0o555
+    assert list((workspace / "input").iterdir()) == []
+
+
+async def test_missing_partial_file_does_not_mask_copy_cancellation(tmp_path, monkeypatch):
+    module = import_module("loom_capacity_executor.native_runtime_input")
+    workspace, source = prepared(tmp_path)
+
+    def removed_write(descriptor, data):
+        (workspace / "input/source.tar").unlink()
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(module, "_write_all", removed_write)
+    with pytest.raises(asyncio.CancelledError):
+        await module.prepare_native_runtime_input(source, workspace=workspace,
+            max_artifact_bytes=1024**2, max_image_archive_bytes=256 * 1024)
+    assert list(workspace.iterdir()) == []
+
+
+async def test_replaced_source_never_becomes_verified_input(tmp_path, monkeypatch):
+    module = import_module("loom_capacity_executor.native_runtime_input")
+    workspace, source = prepared(tmp_path)
+    original = module._write_all
+
+    def replace(descriptor, data):
+        original(descriptor, data)
+        if data == b"source bytes":
+            (workspace / "input/source.tar").unlink()
+            (workspace / "input/source.tar").write_bytes(b"foreign replacement")
+
+    monkeypatch.setattr(module, "_write_all", replace)
+    with pytest.raises(ValueError, match="input file changed"):
+        await module.prepare_native_runtime_input(source, workspace=workspace,
+            max_artifact_bytes=1024**2, max_image_archive_bytes=256 * 1024)
+    assert (workspace / "input/source.tar").read_bytes() == b"foreign replacement"
+    assert not (workspace / "input/contract.json").exists()
+
+
+async def test_missing_earlier_file_does_not_prevent_later_cleanup(tmp_path, monkeypatch):
+    module = import_module("loom_capacity_executor.native_runtime_input")
+    workspace, source = prepared(tmp_path)
+    original = module._write_all
+
+    def failed_contract(descriptor, data):
+        if data != b"source bytes":
+            (workspace / "input/source.tar").unlink()
+            raise OSError("contract write failed")
+        original(descriptor, data)
+
+    monkeypatch.setattr(module, "_write_all", failed_contract)
+    with pytest.raises(OSError, match="contract write failed"):
+        await module.prepare_native_runtime_input(source, workspace=workspace,
+            max_artifact_bytes=1024**2, max_image_archive_bytes=256 * 1024)
+    assert list(workspace.iterdir()) == []
