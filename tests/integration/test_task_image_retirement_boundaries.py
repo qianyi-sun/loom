@@ -185,7 +185,7 @@ async def test_old_completed_retirement_preserves_newer_lease_and_legacy_history
         await session.commit()
     attempt_id, row_id = UUID(receipt.attempt_id), UUID(receipt.materialization_id)
     instant = NOW + timedelta(hours=1)
-    await observe(factory, attempt_id, instant)
+    await _observe_positive_semantics(factory, attempt_id, instant)
     async with factory() as session:
         row = await retry_task_image_materialization(session, materialization_id=row_id)
         row.state, row.claimed_by = "claimed", "later-builder"
@@ -200,7 +200,9 @@ async def test_old_completed_retirement_preserves_newer_lease_and_legacy_history
             row.lease_expires_at,
             row.registry_image_history,
         )
-    assert (await observe(factory, attempt_id, instant + timedelta(days=7))).status == "retired"
+    assert (
+        await _observe_positive_semantics(factory, attempt_id, instant + timedelta(days=7))
+    ).status == "retired"
     async with factory() as session:
         row = await session.get(TaskImageMaterialization, row_id)
         assert (
