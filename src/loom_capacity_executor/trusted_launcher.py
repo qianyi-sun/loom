@@ -41,7 +41,11 @@ from loom_capacity_executor.pinned_admission_transport import PinnedAdmissionFil
 from loom_capacity_executor.runtime import RoutedExecutableAdmissionClient
 from loom_capacity_executor.slurm_contracts import SlurmExecutableIdentityV2, SlurmFileIdentityV2
 from loom_capacity_executor.typed_admission import TypedAdmissionRouter
-from loom_capacity_manager.executable_contracts import StrictV2Model, canonical_executable_bytes
+from loom_capacity_manager.executable_contracts import (
+    StrictV2Model,
+    canonical_executable_bytes,
+    canonical_executable_digest,
+)
 
 WORKER_CREDENTIAL_ENV = "LOOM_EXECUTOR_WORKER_CREDENTIAL"
 _MAX_TRUSTED_CONFIG_BYTES = 64 * 1024
@@ -514,8 +518,15 @@ async def run_trusted_launcher_process(
                 Path(config.admission_directory),
                 expected_directory_sha256=config.admission_directory_sha256,
             )
+        handoff_directory = Path(config.handoff_directory)
+        if config.native_worker is not None:
+            from loom_capacity_executor.native_bootstrap_delivery import (
+                wait_native_bootstrap_delivery,
+            )
+
+            handoff_directory = await wait_native_bootstrap_delivery(handoff_directory, args.bootstrap_handoff, now=now)
         physical = resolve_bootstrap_handoff_physical_binding(
-            Path(config.handoff_directory),
+            handoff_directory,
             args.bootstrap_handoff,
             operation_id=operation_id,
             slurm_job_id=slurm_job_id,
@@ -524,11 +535,18 @@ async def run_trusted_launcher_process(
             now=now,
         )
         if config.native_worker is not None:
+            from loom_capacity_executor.native_bootstrap_delivery import (
+                read_native_delivery_receipt,
+            )
             from loom_capacity_executor.native_worker_container import FixedDockerCLI
             from loom_capacity_executor.native_worker_launch import run_native_worker_on_host
 
+            delivery = read_native_delivery_receipt(handoff_directory, args.bootstrap_handoff)
+            if (delivery.physical_binding_sha256 != canonical_executable_digest(physical)
+                or delivery.target_node not in physical.binding.node_ids):
+                raise BootstrapHandoffError("native bootstrap delivery physical scope differs")
             await run_native_worker_on_host(
-                directory=Path(config.handoff_directory), reference=args.bootstrap_handoff,
+                directory=handoff_directory, reference=args.bootstrap_handoff,
                 physical=physical, admission=admission, policy=config.native_worker,
                 cli=FixedDockerCLI(executable=f"/proc/self/fd/{candidate_descriptor}",
                     descriptor=candidate_descriptor,

@@ -3,8 +3,11 @@
 import asyncio
 import hashlib
 import json
+import sys
+import tempfile
 from datetime import timedelta
 from importlib import import_module
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid5
 
@@ -24,11 +27,15 @@ from tests.unit.test_capacity_executor_launch_renderer import launch_context_fix
 
 
 @pytest.fixture
-def delivery(tmp_path):
+def delivery(tmp_path, request):
     controller = tmp_path / "controller"
-    node = tmp_path / "node"
     controller.mkdir(mode=0o700)
-    node.mkdir(mode=0o700)
+    # A different mount, not merely another directory in the controller tree.
+    # All staging/atomic rename stays within the node's own filesystem.
+    node_tree = tempfile.TemporaryDirectory(prefix="loom-native-bootstrap-test-", dir="/dev/shm")
+    request.addfinalizer(node_tree.cleanup)
+    node = Path(node_tree.name)
+    assert controller.stat().st_dev != node.stat().st_dev
     binding = launch_context_fixture().binding
     physical = _physical(binding).model_copy(update={"operation_id": uuid5(
         UUID("cb359b0c-a844-4bc5-9592-a4c35e344f3d"), f"physical-bind:{binding.intent_id}")})
@@ -244,3 +251,102 @@ async def test_worker_never_accepts_partial_or_expired_delivery(delivery):
     with pytest.raises(ValueError):
         await module.wait_native_bootstrap_delivery(delivery.node, delivery.lease.reference,
             now=lambda: _NOW, timeout_seconds=0.01)
+
+
+async def test_two_receiver_processes_converge_after_independent_authority_reads(delivery):
+    _module, payload, _receiver = objects(delivery)
+    # Independent authority is a test adapter here; actual cross-process file
+    # publication and conflict resolution use the production implementation.
+    probe = """
+import asyncio, json, sys
+from datetime import datetime
+from pathlib import Path
+from loom_capacity_agent.admission import CurrentExecutableBootstrapV2
+from loom_capacity_executor.native_bootstrap_delivery import NativeBootstrapReceiver
+
+data = json.loads(sys.stdin.readline())
+observation = CurrentExecutableBootstrapV2.model_validate_json(data['observation'])
+class Admission:
+    def bootstrap_handoff_route_sha256(self, binding):
+        return data['route']
+    async def observe_current_bootstrap(self, physical):
+        assert physical == observation.physical_binding
+        print('ready', flush=True)
+        assert await asyncio.to_thread(sys.stdin.readline) == 'publish\\n'
+        return observation
+
+async def main():
+    binding = observation.physical_binding.binding
+    receiver = NativeBootstrapReceiver(directory=Path(data['directory']),
+        target_node=binding.node_ids[0], pool_id=binding.pool_id,
+        trusted_release_sha256=binding.execution.trusted_fleet_release_sha256,
+        admission=Admission(), now=lambda: datetime.fromisoformat(data['now']))
+    receipt = await receiver.receive(data['payload'].encode('ascii'))
+    print(receipt.model_dump_json(by_alias=True), flush=True)
+
+asyncio.run(main())
+"""
+    data = json.dumps({"observation": delivery.admission.current.model_dump_json(),
+        "directory": str(delivery.node), "payload": payload.decode("ascii"),
+        "route": delivery.admission.route_sha256, "now": delivery.now.isoformat()}).encode() + b"\n"
+    processes = []
+    try:
+        for _ in range(2):
+            process = await asyncio.create_subprocess_exec(sys.executable, "-B", "-c", probe,
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            processes.append(process)
+            process.stdin.write(data)
+            await process.stdin.drain()
+        for process in processes:
+            assert await asyncio.wait_for(process.stdout.readline(), 10) == b"ready\n"
+        for process in processes:
+            process.stdin.write(b"publish\n")
+            await process.stdin.drain()
+        results = await asyncio.wait_for(asyncio.gather(*(process.communicate() for process in processes)), 10)
+        receipts = []
+        for process, (stdout, stderr) in zip(processes, results, strict=True):
+            assert process.returncode == 0, stderr.decode()
+            receipts.append(json.loads(stdout))
+        assert receipts[0] == receipts[1]
+        assert receipts[0]["source_payload_sha256"] == hashlib.sha256(payload).hexdigest()
+    finally:
+        for process in processes:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+
+
+async def test_receiver_deadline_cancels_unfinished_authority_read(delivery, monkeypatch):
+    module, payload, receiver = objects(delivery)
+    timeout = asyncio.timeout
+    cancelled = []
+
+    async def stalled(request):
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.append(True)
+
+    monkeypatch.setattr(module.asyncio, "timeout", lambda value: timeout(0.01))
+    delivery.admission.observe_current_bootstrap = stalled
+    with pytest.raises(ValueError, match="delivery refused"):
+        await receiver.receive(payload)
+    assert cancelled == [True]
+    assert list(delivery.node.iterdir()) == []
+
+
+async def test_receiver_rejects_destination_replacement_during_authority_read(delivery):
+    _module, payload, receiver = objects(delivery)
+    observe = delivery.admission.observe_current_bootstrap
+    with tempfile.TemporaryDirectory(prefix="loom-native-replacement-test-", dir="/dev/shm") as holder:
+        async def replaced(request):
+            result = await observe(request)
+            delivery.node.rename(Path(holder) / "original")
+            delivery.node.mkdir(mode=0o700)
+            return result
+
+        delivery.admission.observe_current_bootstrap = replaced
+        with pytest.raises(ValueError):
+            await receiver.receive(payload)
+        assert list(delivery.node.iterdir()) == []
+        assert list((Path(holder) / "original").iterdir()) == []
