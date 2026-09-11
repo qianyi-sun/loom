@@ -223,3 +223,26 @@ def test_queue_failure_cannot_teardown_any_slice(tmp_path: Path, monkeypatch: py
     with pytest.raises(guard.GuardError, match="queue unavailable"):
         guard.run_once(_config(tmp_path))
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("state", ["COMPLETED", "CANCELLED", "FAILED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "BOOT_FAIL", "DEADLINE", "REVOKED"])
+def test_terminal_legacy_job_retained_in_queue_does_not_preserve_orphan_slice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str,
+) -> None:
+    """Slurm MinJobAge retains terminal rows after their allocation is released."""
+    calls: list[tuple[str, ...]] = []
+
+    def route(_config: guard.GuardConfig, args) -> str:
+        calls.append(tuple(args))
+        if args[0] == "squeue":
+            return "123|loom-cgroup-v1:pids=3072"
+        if args[0] == "scontrol":
+            return f"JobId=123 AllocTRES=cpu=4,mem=16000M,node=1 JobState={state}"
+        if args[1] == "list-units":
+            return "loom-job-123.slice loaded active active"
+        return ""
+
+    monkeypatch.setattr(guard, "_run", route)
+    assert guard.run_once(_config(tmp_path)) == 0
+    assert ("systemctl", "stop", "loom-job-123.slice") in calls
+    assert not any(args[:2] == ("systemctl", "set-property") for args in calls)
