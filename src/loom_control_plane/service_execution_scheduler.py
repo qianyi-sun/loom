@@ -11,7 +11,13 @@ from uuid import UUID
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom.db.schema import ServiceExecutionLease, ServiceExecutionTarget, Trial
+from loom.db.schema import (
+    ServiceExecutionLease,
+    ServiceExecutionTarget,
+    TaskImageMaterialization,
+    Trial,
+    TrialTaskImageMaterialization,
+)
 from loom.execution_contract import ExecutionRoutingReason, workload_requirements_from_task
 from loom.execution_image_admission import ImageAdmissionKeyring
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1
@@ -21,6 +27,10 @@ from loom.pipeline.keys import canonical_digest, canonical_uuid5
 from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
     compile_service_execution_plan,
+)
+from loom.task_image_materialization import (
+    get_trial_task_image_execution_grant,
+    resolve_prepared_task,
 )
 from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
 from loom_control_plane.service_execution import reserve_trial_execution
@@ -180,8 +190,42 @@ async def _reserve_service_candidate(
     maximum_deadline_seconds: int,
     current_time: datetime,
 ) -> ServiceExecutionLease | None:
-    task = TaskConfig.model_validate(row["task_config"])
-    task_revision = _task_revision(row["task_checksum"])
+    # Architecture records are alternatives. Nebius's current execution class
+    # uses x86_64; an unused arm64 build must not hold up admission.
+    prerequisites = list((await session.execute(
+        select(TaskImageMaterialization)
+        .join(TrialTaskImageMaterialization,
+              TrialTaskImageMaterialization.materialization_id == TaskImageMaterialization.id)
+        .join(Trial, Trial.id == TrialTaskImageMaterialization.trial_id)
+        .where(Trial.id == row["id"], TaskImageMaterialization.task_id == Trial.task_id,
+               TaskImageMaterialization.cpu_arch == "x86_64")
+        .with_for_update(of=TaskImageMaterialization)
+    )).scalars())
+    if prerequisites and not any(item.state == "ready" for item in prerequisites):
+        if all(item.state == "failed" for item in prerequisites):
+            # Nothing was admitted: no attempt, lease, quota or model accounting
+            # exists to release. Use the same queued terminal transition as the
+            # retry-exhaustion sweeper; batch status derives from Trial state.
+            await session.execute(update(Trial).where(
+                Trial.id == row["id"], Trial.state == "queued",
+                Trial.cancellation_requested_at.is_(None),
+            ).values(state="failed", failure_reason="task_image_build_failed",
+                     failure_message="Task image preparation failed; inspect the build result.",
+                     finished_at=current_time, next_attempt_at=None))
+            return None
+        raise ExecutionProvisioningBlockedError("task_image_preparation_pending", retry_after_seconds=15)
+    try:
+        grant = await get_trial_task_image_execution_grant(
+            session, trial_id=row["id"], cpu_arches=["x86_64"],
+        )
+    except RuntimeError as exc:
+        raise ExecutionProvisioningBlockedError(
+            "task_image_preparation_pending", retry_after_seconds=15,
+        ) from exc
+    task = TaskConfig.model_validate(grant.task_config if grant else row["task_config"])
+    task_revision = _task_revision(grant.task_checksum if grant else row["task_checksum"])
+    source_provenance = (grant.task_source_provenance if grant
+                         else dict(row["task_source_provenance"] or {}))
     binding = task.service_execution
     if binding is not None:
         if binding.logical_pool_id != pool_id:
@@ -201,7 +245,8 @@ async def _reserve_service_candidate(
             task=task,
             trial=TrialConfig.model_validate(row["trial_config"]),
             task_revision_sha256=task_revision,
-            source_provenance=dict(row["task_source_provenance"] or {}),
+            source_provenance=source_provenance,
+            task_image_grant=grant,
             profile=runtime_profile,
         )
     targets = await _ready_targets(
@@ -211,7 +256,7 @@ async def _reserve_service_candidate(
         execution_class_id=runtime_plan.execution_class_id,
         now=current_time,
     )
-    requirements = workload_requirements_from_task(task)
+    requirements = workload_requirements_from_task(resolve_prepared_task(task, grant) if grant else task)
     blocked: ExecutionProvisioningBlockedError | None = None
     for target in targets:
         if requirements.data_residency and target.data_residency != requirements.data_residency:

@@ -35,6 +35,7 @@ from loom.execution_contract import (
     ExecutionTargetV1,
     WorkloadRequirementsV1,
     evaluate_execution_admission,
+    workload_requirements_from_task,
 )
 from loom.execution_image_admission import (
     ImageAdmissionError,
@@ -47,7 +48,12 @@ from loom.execution_runtime_contract import (
     runtime_pod_resources,
     validate_runtime_plan_requirements,
 )
+from loom.models.task import TaskConfig
 from loom.pipeline.keys import canonical_digest, canonical_uuid5
+from loom.task_image_materialization import (
+    get_trial_task_image_execution_grant,
+    resolve_prepared_task,
+)
 from loom.terminal_result_semantics import aggregate_reward_scalar
 from loom_control_plane.execution_admission import (
     ExecutionAdmissionBlockedError,
@@ -559,25 +565,6 @@ async def reserve_trial_execution(
             raise ServiceExecutionConflict("reservation request_id changed immutable identity")
         return existing
 
-    try:
-        verify_execution_image_admission(
-            runtime_contract.image_admission,
-            required_image_refs=(
-                runtime_contract.task_image_ref,
-                runtime_contract.runtime_image_ref,
-                *(
-                    [runtime_contract.agent_image_ref]
-                    if runtime_contract.agent_image_ref is not None
-                    else []
-                ),
-                *(sidecar.image_ref for sidecar in runtime_contract.sidecars),
-            ),
-            keyring=image_admission_keyring,
-            now=current_time,
-        )
-    except ImageAdmissionError as exc:
-        raise ServiceExecutionConflict(str(exc)) from exc
-
     trial = (
         await session.execute(select(Trial).where(Trial.id == trial_id).with_for_update())
     ).scalar_one_or_none()
@@ -659,6 +646,35 @@ async def reserve_trial_execution(
     if runtime_contract.execution_class_id != execution_class_id:
         raise ServiceExecutionConflict("runtime plan binds a different execution class")
     class_contract = ExecutionClassV1.model_validate(execution_class.spec_json)
+    # The Trial association is the authority for user task images. Hold both
+    # rows through reservation so retirement cannot race a new execution.
+    try:
+        grant = await get_trial_task_image_execution_grant(
+            session, trial_id=trial_id, cpu_arches=[class_contract.cpu_architecture],
+        )
+    except RuntimeError as exc:
+        raise ServiceExecutionConflict("task image is not ready for this trial") from exc
+    if grant is not None:
+        if (
+            runtime_contract.task_image_materialization_id != grant.materialization_id
+            or runtime_contract.task_image_ref != grant.registry_images.get("task")
+            or runtime_contract.task_revision_sha256 != "sha256:" + grant.task_checksum
+        ):
+            raise ServiceExecutionConflict("runtime plan does not match the trial's prepared image")
+        prepared_task = resolve_prepared_task(TaskConfig.model_validate(grant.task_config), grant)
+        if requirements != workload_requirements_from_task(prepared_task):
+            raise ServiceExecutionConflict("requirements do not match the prepared task")
+    elif runtime_contract.task_image_materialization_id is not None:
+        raise ServiceExecutionConflict("prepared image is not associated with this trial")
+    try:
+        verify_execution_image_admission(
+            runtime_contract.image_admission,
+            required_image_refs=runtime_contract.published_image_refs(),
+            keyring=image_admission_keyring,
+            now=current_time,
+        )
+    except ImageAdmissionError as exc:
+        raise ServiceExecutionConflict(str(exc)) from exc
     pod_resources = runtime_pod_resources(runtime_contract)
     admission_requirements = requirements.model_copy(
         update={

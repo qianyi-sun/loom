@@ -33,7 +33,6 @@ from loom.db.schema import (
     ArtifactUploadFile,
     ArtifactUploadSession,
     ServiceExecutionLease,
-    Task,
     Trial,
     TrialEvent,
 )
@@ -81,6 +80,10 @@ from loom_control_plane.metrics import (
     SERVICE_EXECUTION_SOURCE_CLEANUP_RETRIES_TOTAL,
     SERVICE_EXECUTION_SOURCE_SPOOL_BYTES,
     SERVICE_EXECUTION_SOURCE_SPOOL_RETAINED,
+)
+from loom_control_plane.service_execution_task_snapshot import (
+    ServiceExecutionTaskSnapshotError,
+    resolve_service_execution_task_snapshot,
 )
 
 logger = logging.getLogger(__name__)
@@ -610,7 +613,6 @@ class ServiceExecutionMaterializer:
                 raise MaterializationIntegrityError("materialization_claim_lost")
             upload = await session.get(ArtifactUploadSession, lease.output_upload_session_id)
             trial = await session.get(Trial, lease.trial_id)
-            task = None if trial is None else await session.get(Task, trial.task_id)
             artifact = (
                 await session.execute(
                     select(Artifact).where(
@@ -628,8 +630,12 @@ class ServiceExecutionMaterializer:
                     )
                 ).scalars()
             )
-            if upload is None or trial is None or task is None or artifact is None:
+            if upload is None or trial is None or artifact is None:
                 raise MaterializationIntegrityError("source_identity_missing")
+            try:
+                task = await resolve_service_execution_task_snapshot(session, lease=lease, trial=trial)
+            except ServiceExecutionTaskSnapshotError as exc:
+                raise MaterializationIntegrityError(str(exc)) from exc
             upload_data = {
                 "id": upload.id,
                 "prefix": upload.prefix,
@@ -669,7 +675,7 @@ class ServiceExecutionMaterializer:
             trial_config = TrialConfig.model_validate(trial_config_raw)
         except ValidationError as exc:
             raise MaterializationIntegrityError("source_metadata_invalid", str(exc)) from exc
-        # The Task row was loaded through Trial.task_id above. Uploaded TaskSets
+        # The task snapshot was bound through Trial.task_id above. Uploaded TaskSets
         # namespace that catalog identity without rewriting the source config's
         # task.id. Canonical events and ATIF must use the catalog identity, while
         # the original config remains intact for task semantics and provenance.

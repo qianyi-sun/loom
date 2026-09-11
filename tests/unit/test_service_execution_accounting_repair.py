@@ -28,6 +28,7 @@ def case(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
                                               "atif_uri": "s3://trajectories/old/atif.json"},
                             finished_at=now, result={"reward": 1.0})
     lease = SimpleNamespace(id=lease_id, trial_id=trial_id, team_id=team_id, attempt=1,
+                            runtime_contract_json=None,
                             generation=1, output_generation=1, materialization_state="committed", output_commit_state="committed",
                             materialization_committed_at=now, source_retain_until=now,
                             canonical_trajectory_sha256="old", canonical_atif_sha256="old")
@@ -70,7 +71,8 @@ def case(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
         async def get(self, model, identity, **kwargs):
             return {ServiceExecutionLease: lease, Trial: trial,
-                    Task: SimpleNamespace(config=task_config.model_dump(mode="json"))}[model]
+                    Task: SimpleNamespace(config=task_config.model_dump(mode="json"), source=None,
+                                          source_provenance={})}[model]
 
         async def scalar(self, query):
             return artifact

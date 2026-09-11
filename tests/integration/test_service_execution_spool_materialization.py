@@ -19,7 +19,16 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from testcontainers.core.wait_strategies import HttpWaitStrategy
 from testcontainers.minio import MinioContainer
 
-from loom.db.schema import Artifact, LlmCall, ServiceExecutionLease, Task, Trial, TrialEvent
+from loom.db.schema import (
+    Artifact,
+    LlmCall,
+    ServiceExecutionLease,
+    Task,
+    TaskImageMaterialization,
+    Trial,
+    TrialEvent,
+    TrialTaskImageMaterialization,
+)
 from loom.pipeline.artifact_commit import ArtifactCommitService, PartReceiptV1
 from loom.pipeline.keys import canonical_document, digest_bytes
 from loom.service_execution_terminus_trace import terminus_usage
@@ -76,10 +85,14 @@ def _store(container: MinioContainer) -> MinioObjectStore:
     )
 
 
-@pytest.mark.parametrize("terminus,legacy_repair", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize(
+    "terminus,legacy_repair,prepared_snapshot",
+    [(False, False, False), (True, False, False), (True, True, False), (True, True, True)],
+)
 async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
     terminus: bool,
     legacy_repair: bool,
+    prepared_snapshot: bool,
     monkeypatch: pytest.MonkeyPatch,
     isolated_migration_postgres_url: str,
     independent_minio_endpoints: tuple[MinioContainer, MinioContainer],
@@ -133,13 +146,36 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 "agent_name": "direct-completion",
                 "agent_model": {"provider": "openai", "name": "gpt-5"},
             }
+            if prepared_snapshot:
+                task.config = {**task.config, "environment": {
+                    **task.config["environment"], "docker_image": None,
+                    "dockerfile": "environment/Dockerfile", "cpus": 1,
+                    "memory_mb": 1024, "storage_mb": 2048, "tmpfs": ["/tmp"],
+                }}
+                snapshot_id = uuid4()
+                snapshot = TaskImageMaterialization(
+                    id=snapshot_id, materialization_key=uuid4().hex * 2,
+                    task_id=task.id, task_checksum=plan.task_revision_sha256.removeprefix("sha256:"),
+                    cpu_arch="x86_64", task_config=task.config, task_source=task.source,
+                    task_source_provenance=task.source_provenance, state="ready",
+                    registry_images={"task": plan.task_image_ref},
+                )
+                session.add(snapshot)
+                await session.flush()
+                session.add(TrialTaskImageMaterialization(trial_id=trial_id, materialization_id=snapshot_id))
+                plan = plan.model_copy(update={
+                    "task_image_materialization_id": snapshot_id,
+                    "agent_image_ref": plan.task_image_ref,
+                })
             lease = await _reserve(
-                session,
-                trial_id=trial_id,
-                target=target,
-                now=now,
-                runtime_contract=plan,
+                session, trial_id=trial_id, target=target, now=now, runtime_contract=plan,
             )
+            if prepared_snapshot:
+                # A successful claim freezes the snapshot; subsequent readiness
+                # changes and Task revisions cannot change projection or repair.
+                snapshot.state = "retiring"
+                snapshot.registry_images = {}
+                task.config = {"changed_after_lease": True}
             await enqueue_execution_transition(
                 session,
                 lease_id=lease.id,

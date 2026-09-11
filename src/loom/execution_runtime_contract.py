@@ -8,6 +8,7 @@ from datetime import datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -214,6 +215,7 @@ class ExecutionRuntimePlanV1(_Strict):
     composition: RuntimeComposition
     task_image_ref: str
     agent_image_ref: str | None = None
+    task_image_materialization_id: UUID | None = None
     runtime_image_ref: str
     runtime_binary_sha256: str = Field(pattern=_SHA256.pattern)
     image_admission: ExecutionImageAdmissionBundleV1
@@ -253,6 +255,13 @@ class ExecutionRuntimePlanV1(_Strict):
 
     @model_validator(mode="after")
     def _roles_and_dependencies_are_closed(self) -> ExecutionRuntimePlanV1:
+        if self.task_image_materialization_id is not None and (
+            self.task_image_materialization_id.int == 0
+            or self.agent_image_ref is None
+            or self.execution_role != "attempt"
+            or self.composition != RuntimeComposition.INIT_PAYLOAD
+        ):
+            raise ValueError("prepared task images require a separate trusted attempt controller")
         if (
             any(sidecar.private_sandbox for sidecar in self.sidecars)
             and self.agent_image_ref is None
@@ -307,10 +316,32 @@ class ExecutionRuntimePlanV1(_Strict):
         # Keep existing published plans byte-compatible when new fields are unused.
         if self.agent_image_ref is None:
             payload.pop("agent_image_ref")
+        if self.task_image_materialization_id is None:
+            payload.pop("task_image_materialization_id")
         for sidecar in payload["sidecars"]:
             if not sidecar["private_sandbox"]:
                 sidecar.pop("private_sandbox")
         return payload
+
+    def published_image_refs(self) -> tuple[str, ...]:
+        """Images executed with platform trust, separate from prepared task sandboxes.
+
+        The Control Plane checks the materialization against the Trial before
+        saving a lease. The authenticated lease carries that decision to the
+        actuator; a caller-provided UUID alone never authorizes an image.
+        """
+        refs = {self.runtime_image_ref, self.agent_image_ref or self.task_image_ref}
+        if self.task_image_materialization_id is None:
+            refs.add(self.task_image_ref)
+        refs.update(
+            sidecar.image_ref for sidecar in self.sidecars
+            if not (
+                self.task_image_materialization_id is not None
+                and sidecar.private_sandbox
+                and sidecar.image_ref == self.task_image_ref
+            )
+        )
+        return tuple(sorted(refs))
 
 
 def runtime_pod_resources(plan: ExecutionRuntimePlanV1) -> ContainerResourcesV1:

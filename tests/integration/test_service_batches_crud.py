@@ -2449,11 +2449,13 @@ async def test_post_accepts_explicit_nebius_backend_without_legacy_worker(
 
 @pytest.mark.parametrize("use_combinations", [False, True])
 @pytest.mark.parametrize("agent_name", ["direct-completion", "terminus-2"])
+@pytest.mark.parametrize("dockerfile", [False, True], ids=["prebuilt", "dockerfile"])
 async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
     use_combinations: bool,
     agent_name: str,
+    dockerfile: bool,
 ) -> None:
     app, raw, _team_id = camp_setup
     suffix = "combinations" if use_combinations else "single"
@@ -2480,6 +2482,14 @@ async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
             )
         }
     )
+    task_config = _automatic_service_execution_task_config(task_id)
+    if dockerfile:
+        environment = task_config["environment"]
+        assert isinstance(environment, dict)
+        environment.pop("docker_image")
+        environment.update({
+            "dockerfile": "environment/Dockerfile", "cpu_arch": "any",
+        })
     execution_class_spec = NEBIUS_CPU_EXECUTION_CLASS_V1.model_dump(mode="json")
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -2517,7 +2527,7 @@ async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
             insert(Task).values(
                 id=task_id,
                 checksum="c" * 64,
-                config=_automatic_service_execution_task_config(task_id),
+                config=task_config,
                 source="s3://artifacts/task-inputs/task/",
                 source_provenance={
                     "service_execution_input": {
@@ -2570,6 +2580,10 @@ async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
                 json=payload,
             )
 
+        if dockerfile and agent_name != "terminus-2":
+            assert response.status_code == 400, response.text
+            assert response.json()["detail"]["reason"] == "nebius_task_incompatible"
+            return
         assert response.status_code == 201, response.text
         assert response.json()["backend"] == "nebius"
         assert response.json()["expected_trial_count"] == 1

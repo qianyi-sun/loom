@@ -171,12 +171,7 @@ def render_execution_job(
     try:
         validate_execution_image_admission_bundle(
             plan.image_admission,
-            required_image_refs=(
-                plan.task_image_ref,
-                plan.runtime_image_ref,
-                *([plan.agent_image_ref] if plan.agent_image_ref is not None else []),
-                *(sidecar.image_ref for sidecar in plan.sidecars),
-            ),
+            required_image_refs=plan.published_image_refs(),
             now=current_time,
         )
     except ImageAdmissionError as exc:
