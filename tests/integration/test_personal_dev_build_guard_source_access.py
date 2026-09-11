@@ -35,7 +35,7 @@ async def test_source_access_requires_exact_committed_live_claim(prepared_input,
             elif boundary == "expired":
                 connection.execute(text("UPDATE personal_dev_candidate_build_attempts SET lease_expires_at=now()-interval '1 second' WHERE id=:id"), {"id": source.build_attempt.id})
             else:
-                connection.execute(text("UPDATE personal_dev_candidates SET archive_sha256=:digest WHERE id=:id"), {"id": source.candidate.id, "digest": "f" * 64})
+                connection.execute(text("UPDATE personal_dev_candidates SET archive_size_bytes=archive_size_bytes+1 WHERE id=:id"), {"id": source.candidate.id})
     if boundary == "drain":
         from loom_capacity_agent.admission import ExecutableDrainRequestV2
 
