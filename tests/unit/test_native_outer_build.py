@@ -18,7 +18,8 @@ from tests.unit.test_native_rootless_runtime import spec_file
 
 
 @pytest.mark.parametrize("mode", ["success", "failed", "oversize", "stdout-flood", "wrong-claim", "malformed", "artifact-mismatch",
-    "uncertain", "upload-error", "early-upload-reply", "outcome-error", "cancel", "authority-cleanup-cancel"])
+    "uncertain", "upload-error", "early-upload-reply", "outcome-error", "cancel", "authority-cleanup-cancel",
+    "upload-cleanup-cancel", "outcome-cleanup-cancel"])
 async def test_outer_io_matches_stream_and_result_before_upload_or_outcome(tmp_path, monkeypatch, mode):
     module = import_module("loom_capacity_executor.native_outer_build")
     _runtime, spec, spec_path, _digest = spec_file(tmp_path)
@@ -39,8 +40,21 @@ async def test_outer_io_matches_stream_and_result_before_upload_or_outcome(tmp_p
     started = asyncio.Event()
     authority_cleanup, allow_authority_cleanup = asyncio.Event(), asyncio.Event()
     authority_settled = []
+    write_started, write_cleanup, allow_write_cleanup = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    write_settled = []
     original = asyncio.create_subprocess_exec
-    child_mode = mode if mode not in {"upload-error", "outcome-error", "early-upload-reply"} else "success"
+    child_mode = mode if mode not in {"upload-error", "outcome-error", "early-upload-reply",
+        "upload-cleanup-cancel", "outcome-cleanup-cancel"} else "success"
+
+    async def blocked_write():
+        try:
+            write_started.set()
+            await asyncio.Future()
+        finally:
+            write_cleanup.set()
+            await allow_write_cleanup.wait()
+            assert list(spool.iterdir()), "spool removed before client cleanup settled"
+            write_settled.append(True)
 
     async def spawn(*args, **kwargs):
         assert args[:4] == (sys.executable, "-I", "-m", "loom_capacity_executor.native_rootless_runtime")
@@ -79,6 +93,8 @@ async def test_outer_io_matches_stream_and_result_before_upload_or_outcome(tmp_p
                 assert received == archive.read_bytes()
             if mode == "upload-error":
                 raise OSError("upload reply lost")
+            if mode == "upload-cleanup-cancel":
+                await blocked_write()
             return BuildArtifactUploadReceiptV1(claim_digest=canonical_digest(claim), artifact=artifact)
 
         async def record_outcome(self, request, *, worker_credential):
@@ -87,6 +103,8 @@ async def test_outer_io_matches_stream_and_result_before_upload_or_outcome(tmp_p
             calls.append("outcome")
             if mode == "outcome-error":
                 raise OSError("outcome reply lost")
+            if mode == "outcome-cleanup-cancel":
+                await blocked_write()
             assert request.result == ("failed" if mode == "failed" else "artifact-ready")
             return BuildOutcomeReceiptV1(request=request, request_digest=canonical_digest(request))
 
@@ -96,7 +114,17 @@ async def test_outer_io_matches_stream_and_result_before_upload_or_outcome(tmp_p
             client=Client(), worker_credential="w" * 43) as owner:
             task = asyncio.create_task(module.run_native_outer_build(owner, spec_path=spec_path,
                 expected_sha256=hashlib.sha256(wire).hexdigest(), artifact_workspace=spool, timeout_seconds=5))
-            if mode == "authority-cleanup-cancel":
+            if mode in {"upload-cleanup-cancel", "outcome-cleanup-cancel"}:
+                await asyncio.wait_for(write_started.wait(), 3)
+                task.cancel()
+                await asyncio.wait_for(write_cleanup.wait(), 3)
+                task.cancel()
+                await asyncio.sleep(0)
+                allow_write_cleanup.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert write_settled == [True], "repeated cancellation interrupted write cleanup"
+            elif mode == "authority-cleanup-cancel":
                 await asyncio.wait_for(authority_cleanup.wait(), 3)
                 task.cancel()
                 await asyncio.sleep(0)  # Let cancellation reach the await boundary, not an elapsed-time guess.
@@ -119,10 +147,12 @@ async def test_outer_io_matches_stream_and_result_before_upload_or_outcome(tmp_p
                 assert not isinstance(failure.value, TimeoutError), "launcher cleanup timed out"
         assert all(process.returncode is not None for process in processes)
         assert list(spool.iterdir()) == []
-        assert calls == (["upload", "outcome"] if mode in {"success", "outcome-error"} else ["outcome"] if mode == "failed"
-            else ["upload"] if mode in {"upload-error", "early-upload-reply"} else [])
+        assert calls == (["upload", "outcome"] if mode in {"success", "outcome-error", "outcome-cleanup-cancel"}
+            else ["outcome"] if mode == "failed"
+            else ["upload"] if mode in {"upload-error", "early-upload-reply", "upload-cleanup-cancel"} else [])
     finally:
         allow_authority_cleanup.set()
+        allow_write_cleanup.set()
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
