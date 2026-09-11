@@ -360,10 +360,7 @@ def _assert_profile_binding(context: TrustedLaunchContextV2) -> OperatorResource
 
     # Revalidate after the digest check so model_copy cannot bypass profile invariants.
     OperatorLaunchProfileV2.model_validate(profile.model_dump(mode="python"))
-    if profile.native_execution is not None:
-        root = profile.native_execution.trust_root()
-        if not root.activated_at <= context.submitted_at < root.expires_at:
-            raise TrustedLaunchRenderError("native execution root is not valid at submission")
+    assert_native_root_at_submission(profile, context.submitted_at)
     if (
         binding.pool_id != profile.pool_id
         or binding.pool_generation != profile.pool_generation
@@ -402,6 +399,15 @@ def _assert_profile_binding(context: TrustedLaunchContextV2) -> OperatorResource
     if len(binding.node_ids) > MAX_SLURM_NODES:
         raise TrustedLaunchRenderError("intent node set exceeds the scheduler bound")
     return selected[0]
+
+
+def assert_native_root_at_submission(profile: OperatorLaunchProfileV2, submitted_at: datetime) -> None:
+    """Apply the same native root lifetime fence before either ownership signer."""
+
+    if profile.native_execution is not None:
+        root = profile.native_execution.trust_root()
+        if not root.activated_at <= submitted_at < root.expires_at:
+            raise TrustedLaunchRenderError("native execution root is not valid at submission")
 
 
 def build_executable_ownership_metadata(
