@@ -17,7 +17,9 @@ the local node that opt in through the closed comment
 Only ``root`` can register a system slice, which is what lets the unprivileged
 worker trust a slice it did not create.  The guard only ever touches cgroups
 that carry the reviewed comment and slices named ``loom-job-<digits>.slice``;
-it tears a slice down once its job leaves the queue.  It never edits
+it tears a slice down once its job leaves the all-state node queue. Failed
+per-job readback or an unrecognized comment is not job-absence evidence: such
+jobs cannot acquire a new slice, but their existing slice is preserved. It never edits
 ``slurm.conf``, ``cgroup.conf``, or any co-tenant cgroup.
 """
 
@@ -62,6 +64,19 @@ class JobIntent:
     memory_max_bytes: int
 
 
+@dataclass(frozen=True)
+class JobDiscovery:
+    """Separate admission evidence from scheduler presence used for cleanup.
+
+    A failed per-job lookup, an unrecognized comment, or a non-running job is
+    not evidence that an existing allocation has disappeared. In particular,
+    signed protected jobs are not admitted by the legacy comment parser.
+    """
+
+    intents: dict[str, JobIntent]
+    present_job_ids: frozenset[str]
+
+
 class GuardError(RuntimeError):
     """A recoverable per-job failure; logged and retried on the next pass."""
 
@@ -104,21 +119,29 @@ def _scontrol_fields(config: GuardConfig, job_id: str) -> dict[str, str]:
 def discover_job_intents(config: GuardConfig) -> dict[str, JobIntent]:
     """Return reviewed job intents currently running on this node."""
 
+    return discover_jobs(config).intents
+
+
+def discover_jobs(config: GuardConfig) -> JobDiscovery:
+    """Observe all queued jobs, admitting only independently readable RUNNING jobs."""
+
     raw = _run(
         config,
         (
             config.squeue_path,
             "--noheader",
-            "--states=RUNNING",
+            "--states=all",
             f"--nodelist={config.node}",
             "--format=%i|%k",
         ),
     )
     intents: dict[str, JobIntent] = {}
+    present_job_ids: set[str] = set()
     for line in raw.splitlines():
         job_id, separator, comment = line.strip().partition("|")
         if not separator or _JOB_ID_RE.fullmatch(job_id) is None:
             continue
+        present_job_ids.add(job_id)
         comment_match = _COMMENT_RE.fullmatch(comment.strip())
         if comment_match is None:
             continue
@@ -126,6 +149,8 @@ def discover_job_intents(config: GuardConfig) -> dict[str, JobIntent]:
             fields = _scontrol_fields(config, job_id)
         except GuardError as exc:
             _log(f"job {job_id}: {exc}")
+            continue
+        if fields.get("JobId") != job_id or fields.get("JobState") != "RUNNING":
             continue
         memory_bytes = _parse_alloc_memory_bytes(fields.get("AllocTRES", ""))
         if memory_bytes <= 0:
@@ -137,7 +162,7 @@ def discover_job_intents(config: GuardConfig) -> dict[str, JobIntent]:
             cpu_max_percent=0,
             memory_max_bytes=memory_bytes,
         )
-    return intents
+    return JobDiscovery(intents=intents, present_job_ids=frozenset(present_job_ids))
 
 
 def find_job_cgroup(cgroup_root: Path, job_id: str) -> Path | None:
@@ -254,9 +279,9 @@ def active_loom_slices(config: GuardConfig) -> dict[str, str]:
     return units
 
 
-def teardown_stale_slices(config: GuardConfig, active_job_ids: set[str]) -> None:
+def teardown_stale_slices(config: GuardConfig, present_job_ids: frozenset[str]) -> None:
     for job_id, unit in active_loom_slices(config).items():
-        if job_id in active_job_ids:
+        if job_id in present_job_ids:
             continue
         try:
             _run(config, (config.systemctl_path, "stop", unit))
@@ -268,9 +293,9 @@ def teardown_stale_slices(config: GuardConfig, active_job_ids: set[str]) -> None
 def run_once(config: GuardConfig) -> int:
     """Reconcile every opted-in job on the node once; return the count applied."""
 
-    intents = discover_job_intents(config)
+    discovery = discover_jobs(config)
     applied = 0
-    for job_id, intent in intents.items():
+    for job_id, intent in discovery.intents.items():
         job_cgroup = find_job_cgroup(config.cgroup_root, job_id)
         if job_cgroup is None:
             _log(f"job {job_id}: cgroup not present yet")
@@ -281,7 +306,7 @@ def run_once(config: GuardConfig) -> int:
             applied += 1
         except GuardError as exc:
             _log(f"job {job_id}: {exc}")
-    teardown_stale_slices(config, set(intents))
+    teardown_stale_slices(config, discovery.present_job_ids)
     return applied
 
 
