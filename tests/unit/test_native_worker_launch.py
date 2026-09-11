@@ -146,9 +146,20 @@ async def test_failed_native_launch_never_retries_or_claims_unconfirmed_cleanup(
         assert (directory / reference).with_suffix(".launched").is_file()
 
 
-async def test_trusted_process_selects_native_branch_without_legacy_credential_environment(tmp_path, monkeypatch):
+@pytest.mark.parametrize("tamper", (None, "physical", "node"))
+async def test_trusted_process_selects_native_branch_without_legacy_credential_environment(tmp_path, monkeypatch, tamper):
+    import json
+
+    from loom_capacity_agent.admission import CurrentExecutableBootstrapV2
     from loom_capacity_executor import native_worker_launch
-    from loom_capacity_executor.trusted_launcher import run_trusted_launcher_process
+    from loom_capacity_executor.bootstrap_handoff import resolve_bootstrap_handoff_physical_binding
+    from loom_capacity_executor.native_bootstrap_delivery import (
+        NativeBootstrapReceiver,
+        export_native_bootstrap,
+        native_delivery_directory,
+    )
+    from loom_capacity_executor.trusted_launcher import _parser, run_trusted_launcher_process
+    from loom_capacity_manager.executable_contracts import canonical_executable_digest
     from tests.unit.test_capacity_executor_bootstrap_handoff import (
         _trusted_candidate_config_payload,
         _trusted_launcher_process_argv_for_candidate_config,
@@ -156,6 +167,8 @@ async def test_trusted_process_selects_native_branch_without_legacy_credential_e
     )
 
     directory, admission_directory = tmp_path / "handoff", tmp_path / "admission"
+    controller = tmp_path / "controller"
+    controller.mkdir(mode=0o700)
     directory.mkdir(mode=0o700)
     admission_directory.mkdir(mode=0o700)
     candidate = tmp_path / "docker"
@@ -167,7 +180,33 @@ async def test_trusted_process_selects_native_branch_without_legacy_credential_e
         "native_execution": bootstrap.native_execution.model_dump(mode="json"),
         "canonical_worker_settings": bootstrap.canonical_worker_settings,
         "docker_config_directory": "/etc/loom/empty-docker", "pids_max": 128})
-    argv = _trusted_launcher_process_argv_for_candidate_config(tmp_path, config_payload=config)
+    argv = _trusted_launcher_process_argv_for_candidate_config(tmp_path, config_payload=config,
+        source_handoff_directory=controller)
+    args = _parser().parse_args(list(argv[1:]))
+    physical = resolve_bootstrap_handoff_physical_binding(controller, args.bootstrap_handoff,
+        operation_id=UUID(args.operation_id), slurm_job_id="101", ownership_token=args.ownership_token,
+        trusted_launcher_release_sha256=args.release_sha256, now=lambda: _NOW)
+    wire = export_native_bootstrap(BootstrapHandoffStore(controller), physical, now=lambda: _NOW)
+    record = json.loads(wire)["record"]
+
+    class Admission(_Admission):
+        async def observe_current_bootstrap(self, request):
+            assert request == physical
+            return CurrentExecutableBootstrapV2(physical_binding=physical, agent_incarnation=UUID(int=987),
+                bootstrap_sha256=record["capability_sha256"], observed_at=_NOW,
+                bootstrap_expires_at=_NOW + timedelta(minutes=5), request_digest=canonical_executable_digest(physical))
+
+    admission = Admission()
+    receiver = NativeBootstrapReceiver(directory=directory, target_node=physical.binding.node_ids[0],
+        pool_id=physical.binding.pool_id, trusted_release_sha256=args.release_sha256,
+        admission=admission, now=lambda: _NOW)
+    await receiver.receive(wire)
+    delivered = native_delivery_directory(directory, args.bootstrap_handoff)
+    if tamper is not None:
+        path = delivered / "delivery-receipt.json"
+        value = json.loads(path.read_text())
+        value["physical_binding_sha256" if tamper == "physical" else "target_node"] = "f" * 64
+        path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")))
     observed = []
 
     async def native(**kwargs):
@@ -177,11 +216,19 @@ async def test_trusted_process_selects_native_branch_without_legacy_credential_e
         pytest.fail("native launch fell back to legacy credential environment")
 
     monkeypatch.setattr(native_worker_launch, "run_native_worker_on_host", native)
+    if tamper is not None:
+        with pytest.raises(BootstrapHandoffError, match="delivery"):
+            await run_trusted_launcher_process(argv, environment={"SLURM_JOB_ID": "101"},
+                now=lambda: _NOW, admission_factory=lambda *args, **kwargs: admission, execvpe=forbidden_exec)
+        assert observed == []
+        return
     await run_trusted_launcher_process(argv, environment={"SLURM_JOB_ID": "101", "EVIL": "ambient"},
-        now=lambda: _NOW, admission_factory=lambda *args, **kwargs: _Admission(), execvpe=forbidden_exec)
+        now=lambda: _NOW, admission_factory=lambda *args, **kwargs: admission, execvpe=forbidden_exec)
     assert len(observed) == 1
     assert observed[0]["physical"].slurm_job_id == "101"
     assert observed[0]["image_digest"] == config["candidate_image_digest"]
+    assert observed[0]["directory"] == delivered
+    assert not (directory / args.bootstrap_handoff).exists()
     assert "ambient" not in repr(observed)
 
 

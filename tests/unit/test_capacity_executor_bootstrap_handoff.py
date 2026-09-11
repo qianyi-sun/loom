@@ -761,6 +761,7 @@ def _trusted_launcher_process_argv_for_candidate_config(
     *,
     config_payload: dict[str, object],
     process_image_digest: str = _CANDIDATE_IMAGE,
+    source_handoff_directory: Path | None = None,
 ) -> tuple[str, ...]:
     from dataclasses import replace
 
@@ -773,7 +774,7 @@ def _trusted_launcher_process_argv_for_candidate_config(
         SlurmFileIdentityV2,
     )
 
-    directory = Path(config_payload["handoff_directory"])
+    directory = source_handoff_directory or Path(config_payload["handoff_directory"])
     launcher_path = tmp_path / "trusted-launcher"
     launcher_path.write_text("#!/bin/sh\nexit 70\n", encoding="utf-8")
     launcher_path.chmod(0o755)
