@@ -2307,11 +2307,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         _validate_host_root(args.host_root)
         command_prefix = (
-            () if args.host_root == Path("/") else ("/usr/sbin/chroot", str(args.host_root))
+            () if args.host_root == Path("/") else (
+                "/usr/sbin/chroot", str(args.host_root),
+                "/usr/bin/nsenter", "--target", "1", "--net", "--uts", "--",
+            )
         )
+        context = InstallContext(root=args.host_root, command_prefix=command_prefix)
+        runner = SubprocessRunner()
+        hostname = None
+        if command_prefix:
+            # chroot and --pid=host alone retain the container's isolated UTS
+            # and network namespaces. Enter only the validated host PID 1's
+            # namespaces for fixed host commands, not the installer process.
+            observed_hostname = runner.run(context.argv("/usr/bin/hostname"))
+            if (
+                observed_hostname.returncode != 0
+                or observed_hostname.stderr
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}\n?", observed_hostname.stdout)
+                is None
+            ):
+                raise CapacityExecutorInstallError("installer host hostname is invalid")
+            hostname = observed_hostname.stdout.strip().split(".", 1)[0]
         installer = ControllerInstaller(
-            context=InstallContext(root=args.host_root, command_prefix=command_prefix),
-            runner=SubprocessRunner(),
+            context=context,
+            runner=runner,
+            hostname=hostname,
         )
         if args.operation == "install":
             if args.image is None or args.source_sha is None or args.runtime_image is not None:
