@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
+import subprocess
+import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
@@ -15,6 +20,22 @@ from scripts.ops.capacity_executor_release import (
 
 _SOURCE_SHA = "1" * 40
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_build_admission_imports_from_executor_release_package_set(tmp_path: Path) -> None:
+    dockerfile = (_REPO_ROOT / "deploy/Dockerfile.capacity-executor").read_text()
+    packages = re.findall(r"^COPY src/(loom\w*) ./src/\1$",dockerfile,re.MULTILINE)
+    assert "loom_capacity_executor" in packages
+    for package in packages:
+        shutil.copytree(_REPO_ROOT/"src"/package,tmp_path/package)
+    shutil.copytree(_REPO_ROOT/"packages/loom-bundle-checksum/loom_bundle_checksum",tmp_path/"loom_bundle_checksum")
+    # No site initialization/.pth/editable checkouts: only actual release source
+    # packages plus installed third-party dependencies may satisfy the imports.
+    result = subprocess.run([sys.executable,"-I","-S","-c",
+        "import sys; sys.path[:0]=sys.argv[1:]; import loom_capacity_executor.build_admission_client",
+        str(tmp_path),sysconfig.get_path("purelib"),sysconfig.get_path("platlib")],
+        cwd=tmp_path,check=False,capture_output=True,text=True)
+    assert result.returncode == 0,result.stderr
 
 
 def test_offline_release_wheels_and_hash_pins_neutral_checksum_dependency() -> None:
