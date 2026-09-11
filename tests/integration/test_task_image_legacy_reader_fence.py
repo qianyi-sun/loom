@@ -33,16 +33,29 @@ from tests.integration.test_task_image_registry_credentials import (
 
 
 async def _trial(session, image, team_id, *, priority):
-    session.add(Task(
-        id=image.task_id, checksum=image.task_checksum, config=image.task_config,
-        source=image.task_source, source_provenance=image.task_source_provenance,
-    ))
+    session.add(
+        Task(
+            id=image.task_id,
+            checksum=image.task_checksum,
+            config=image.task_config,
+            source=image.task_source,
+            source_provenance=image.task_source_provenance,
+        )
+    )
     await session.flush()
     trial = Trial(
-        id=uuid4(), team_id=team_id, task_id=image.task_id, config={},
-        requires_caps={"os": "linux", "cpu_arch": image.cpu_arch, "gpu_vendor": "none",
-                       "network_policies": ["public"]},
-        state="queued", submit_priority=priority,
+        id=uuid4(),
+        team_id=team_id,
+        task_id=image.task_id,
+        config={},
+        requires_caps={
+            "os": "linux",
+            "cpu_arch": image.cpu_arch,
+            "gpu_vendor": "none",
+            "network_policies": ["public"],
+        },
+        state="queued",
+        submit_priority=priority,
         submitted_at=datetime.now(UTC) - timedelta(minutes=1),
     )
     session.add(trial)
@@ -55,11 +68,22 @@ async def _trial(session, image, team_id, *, priority):
 async def _identities(session, *, cpu_arch="arm64"):
     team = Team(id=uuid4(), name="legacy-reader-" + uuid4().hex)
     worker = Worker(
-        id=uuid4(), hostname="legacy-reader", version="legacy",
-        capabilities=[{"os": "linux", "cpu_arch": cpu_arch, "gpu_vendor": "none",
-                       "network_policies": ["public"]}],
-        registered_at=datetime.now(UTC), last_seen_at=datetime.now(UTC), status="active",
-        capability_snapshot_digest="a" * 64, auth_token_hash=b"b" * 32,
+        id=uuid4(),
+        hostname="legacy-reader",
+        version="legacy",
+        capabilities=[
+            {
+                "os": "linux",
+                "cpu_arch": cpu_arch,
+                "gpu_vendor": "none",
+                "network_policies": ["public"],
+            }
+        ],
+        registered_at=datetime.now(UTC),
+        last_seen_at=datetime.now(UTC),
+        status="active",
+        capability_snapshot_digest="a" * 64,
+        auth_token_hash=b"b" * 32,
         supported_work_kinds=["trial"],
     )
     session.add_all([team, worker])
@@ -88,38 +112,52 @@ async def _seed(session, issuer, *, include_legacy):
 
 async def _claim(session, reader, worker):
     arguments = dict(
-        worker_id=worker.id, worker_os=["linux"],
+        worker_id=worker.id,
+        worker_os=["linux"],
         worker_cpu_arches=[worker.capabilities[0]["cpu_arch"]],
-        worker_gpu_vendors=["none"], worker_network_policies=["public"],
+        worker_gpu_vendors=["none"],
+        worker_network_policies=["public"],
     )
     if reader == "trial":
         return await claim_one(session, **arguments)
     result = await claim_work(
-        session, **arguments, capability_snapshot_digest="a" * 64,
-        worker_token_hash=b"b" * 32, supported_work_kinds=["trial"], free_slots=1,
+        session,
+        **arguments,
+        capability_snapshot_digest="a" * 64,
+        worker_token_hash=b"b" * 32,
+        supported_work_kinds=["trial"],
+        free_slots=1,
     )
     return result[0] if result else None
 
 
 async def test_unsigned_snapshot_refuses_native_ready_image(
-    registry_authority_session, registry_issuer,
+    registry_authority_session,
+    registry_issuer,
 ):
     async with registry_authority_session() as session:
         _, native_trial, _ = await _seed(session, registry_issuer, include_legacy=False)
         with pytest.raises(RuntimeError, match="ready task-image materialization"):
             await get_trial_task_image_execution_grant(
-                session, trial_id=native_trial.id, cpu_arches=["arm64"],
+                session,
+                trial_id=native_trial.id,
+                cpu_arches=["arm64"],
             )
 
 
 @pytest.mark.parametrize("reader", ["trial", "work"])
 @pytest.mark.parametrize("include_legacy", [False, True])
 async def test_legacy_selector_skips_native_without_starving_phase1(
-    registry_authority_session, registry_issuer, reader, include_legacy,
+    registry_authority_session,
+    registry_issuer,
+    reader,
+    include_legacy,
 ):
     async with registry_authority_session() as session:
         worker, native_trial, legacy_trial = await _seed(
-            session, registry_issuer, include_legacy=include_legacy,
+            session,
+            registry_issuer,
+            include_legacy=include_legacy,
         )
         claimed = await _claim(session, reader, worker)
         if legacy_trial is None:
@@ -134,7 +172,9 @@ async def test_legacy_selector_skips_native_without_starving_phase1(
 
 @pytest.mark.parametrize("reader", ["snapshot", "trial", "work"])
 async def test_strong_source_is_not_mistaken_for_native_readiness(
-    registry_authority_session, tmp_path, reader,
+    registry_authority_session,
+    tmp_path,
+    reader,
 ):
     spec = _spec(tmp_path)
     ticket = await _upload(registry_authority_session, spec)
@@ -151,7 +191,9 @@ async def test_strong_source_is_not_mistaken_for_native_readiness(
         await session.commit()
         if reader == "snapshot":
             grant = await get_trial_task_image_execution_grant(
-                session, trial_id=trial.id, cpu_arches=[image.cpu_arch],
+                session,
+                trial_id=trial.id,
+                cpu_arches=[image.cpu_arch],
             )
             assert grant is not None and grant.materialization_id == image.id
         else:

@@ -135,6 +135,9 @@ async def _seed_protected_worker(
     environment_id: str = "staging",
     tier_id: str = "staging",
     resources: ResourceVectorV1 | None = None,
+    pool_id: str = "oldlab",
+    hostname: str = _HOSTNAME,
+    cpu_arch: str = "x86_64",
 ) -> _SeededProtectedWorker:
     template = _bootstrap(UUID(int=301), UUID(int=302))
     binding = template.binding.model_copy(
@@ -145,9 +148,11 @@ async def _seed_protected_worker(
                 identity=_CANDIDATE_SHA,
                 publication_sha256="b" * 64,
             ),
-            "pool_id": "oldlab",
-            "shape_instance_id": "staging-oldlab-node-3",
-            "shape_id": "staging-oldlab-cpu",
+            "pool_id": pool_id,
+            "executor_id": f"{pool_id}-executor",
+            "profile_id": f"{pool_id}-default",
+            "shape_instance_id": f"staging-{pool_id}-node-{hostname.rsplit('-', 1)[-1]}",
+            "shape_id": f"staging-{pool_id}-cpu",
             "concurrency_slots": 1,
             "resources": resources
             or ResourceVectorV1(
@@ -155,7 +160,7 @@ async def _seed_protected_worker(
                 cpu_millicores=1000,
                 memory_bytes=1024,
             ),
-            "node_ids": (_HOSTNAME,),
+            "node_ids": (hostname,),
         }
     )
     request = ExecutableBootstrapRegistrationV2(
@@ -170,6 +175,7 @@ async def _seed_protected_worker(
         reporter_incarnation=UUID(int=303),
         protected_admission_sha256="c" * 64,
         environment_id=environment_id,
+        cpu_arch=cpu_arch,
     )
     bootstrap_capability = "single-use-staging-bootstrap-capability"
     protected = await _protect_bootstrap(
@@ -177,6 +183,7 @@ async def _seed_protected_worker(
         registration,
         bootstrap_sha256=hashlib.sha256(bootstrap_capability.encode("ascii")).hexdigest(),
         request=request,
+        cpu_arch=cpu_arch,
     )
     physical = PhysicalJobBindingV2(
         operation_id=UUID(int=304),
