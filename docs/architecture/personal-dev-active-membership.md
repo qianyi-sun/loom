@@ -272,8 +272,9 @@ checks, while the manager's original loader still requires its operator. This
 does not configure an endpoint or grant access by itself. Management database
 credentials and application-worker credentials must never reach build containers.
 
-The management service mounts internal HTTPS `capacity-build/pools/{pool}/intents/
-{intent}/prepare` and `bind` endpoints, unavailable without separately installed
+The management service mounts internal HTTPS
+`/api/v1/internal/capacity-build/pools/{pool}/intents/{intent}/prepare` and `bind`
+endpoints, unavailable without separately installed
 private sessions and an executor verifier. They authenticate complete pool and
 executor identity, derive the installation lookup from subject/incarnation/
 deployment, and let protected SQL resolve the actual native installation. Requests
@@ -281,6 +282,20 @@ and transactions are bounded; receipts leave only after the outer commit. Databa
 diagnostics and credentials never form response bodies. The legacy native-builder
 V1 router is unchanged. Deployment configuration and the pool client's authenticated
 typed route remain to be connected; endpoint presence does not enable build intake.
+
+The pool-side build-admission client uses a separate controller-only bearer token
+and verified mTLS files. It pins pool generation and executor identity, bounds
+request deadlines and response sizes, rejects redirects, and validates canonical
+receipts against every request binding and digest. Restart retries reconstruct
+identical requests. Real loopback mTLS tests exercise this client through the
+management router and private SQL on both pool identities, including rejection
+without a client certificate. This is local transport evidence, not a deployed
+endpoint or a contained native build. The shared request envelope carries only
+bootstrap hashes, never a source capability or an application worker credential.
+The envelope resides in the shared agent package already shipped by the executor
+release; no management build-guard package or database adapter is added to that
+image. The installed-runtime probe imports the client when present, while preserving
+compatibility with older immutable releases that predate it.
 
 Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
 preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release

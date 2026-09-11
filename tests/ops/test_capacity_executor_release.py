@@ -170,6 +170,8 @@ def test_component_authority_publishes_the_executor_installation_artifact() -> N
         "scripts/ops/install_capacity_executor.py",
         "src/loom/models/capabilities.py",
         "src/loom_capacity_executor/runtime.py",
+        "src/loom_capacity_executor/build_admission_client.py",
+        "src/loom_capacity_agent/build_admission.py",
         "src/loom_capacity_pool_controller/runtime.py",
         "src/loom_capacity_pool_executor/slurm_inventory.py",
         "scripts/ops/global_fleet_pool_executor_once.py",

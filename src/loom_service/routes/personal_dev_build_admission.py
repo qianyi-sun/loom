@@ -11,21 +11,15 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from loom_capacity_agent.admission import PhysicalJobBindingV2
+from loom_capacity_agent.build_admission import BuildPreparationRequestV1
 from loom_capacity_build_guard.execution_store import BuildGuardExecutionStore
 from loom_capacity_manager.auth import AuthorizationError, CapacityPrincipalVerifier
-from loom_capacity_manager.contracts import Digest, StrictV1Model
 from loom_capacity_manager.executable_contracts import (
-    ExecutableBootstrapRegistrationV2,
     canonical_executable_bytes,
 )
 
 router = APIRouter(include_in_schema=False)
 _MAX_REQUEST_BYTES = 1024 * 1024
-
-
-class BuildPreparationRequestV1(StrictV1Model):
-    registration: ExecutableBootstrapRegistrationV2
-    bootstrap_sha256: Digest
 
 
 async def _admit(request: Request, *, pool_id: str, intent_id: UUID, prepare: bool) -> Response:

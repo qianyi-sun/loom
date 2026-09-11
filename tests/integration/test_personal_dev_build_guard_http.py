@@ -160,3 +160,80 @@ async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_inpu
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="https://management.test",
         headers={"Authorization":"Bearer executor-secret"}) as client:
         assert (await client.post(route(registration,"prepare"),json=preparation(registration,digest))).status_code == 200
+
+
+async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepared_input,tmp_path):
+    import asyncio
+    import socket
+    import ssl
+
+    import uvicorn
+    from cryptography.hazmat.primitives import serialization
+
+    from loom_capacity_agent.client import DemandReporterConnection, DemandReporterTLSFiles
+    from loom_capacity_executor.build_admission_client import (
+        BuildAdmissionClient,
+        BuildAdmissionExecutorV1,
+    )
+    from tests.integration.test_capacity_manager_mtls import (
+        _new_ca,
+        _private_key_bytes,
+        _signed_certificate,
+        _write,
+    )
+
+    _factory,engine,_installation,_plan,_source,_request = prepared_input
+    registration,digest = await admitted(prepared_input)
+    app = application(prepared_input,tmp_path)
+    ca_key,ca = _new_ca("build-admission-ca")
+    server_key,server_cert = _signed_certificate("localhost",ca_key,ca,server=True)
+    client_key,client_cert = _signed_certificate("build-executor",ca_key,ca,server=False)
+    pem = serialization.Encoding.PEM
+    ca_path = _write(tmp_path/"ca.pem",ca.public_bytes(pem))
+    server_cert_path = _write(tmp_path/"server.pem",server_cert.public_bytes(pem))
+    server_key_path = _write(tmp_path/"server-key.pem",_private_key_bytes(server_key))
+    tls_files = DemandReporterTLSFiles(ca_file=ca_path,
+        certificate_file=_write(tmp_path/"client.pem",client_cert.public_bytes(pem)),
+        private_key_file=_write(tmp_path/"client-key.pem",_private_key_bytes(client_key)))
+    token_path = _write(tmp_path/"executor-token",b"executor-secret")
+    listener = socket.socket()
+    listener.bind(("127.0.0.1",0))
+    origin = f"https://127.0.0.1:{listener.getsockname()[1]}"
+    server = uvicorn.Server(uvicorn.Config(app,log_level="error",lifespan="off",
+        ssl_keyfile=str(server_key_path),ssl_certfile=str(server_cert_path),ssl_ca_certs=str(ca_path),
+        ssl_cert_reqs=ssl.CERT_REQUIRED))
+    task = asyncio.create_task(server.serve(sockets=[listener]))
+    client = None
+    try:
+        async with asyncio.timeout(5):
+            while not server.started:
+                if task.done():
+                    await task
+                    raise AssertionError("test TLS server failed to start")
+                await asyncio.sleep(0.01)
+        binding = registration.binding
+        identity = BuildAdmissionExecutorV1(pool_id=binding.pool_id,pool_generation=binding.pool_generation,
+            executor_id=binding.executor_id,executor_incarnation=binding.executor_incarnation)
+        client = BuildAdmissionClient.from_files(identity,DemandReporterConnection(manager_origin=origin,
+            bearer_token_file=token_path,tls_files=tls_files,timeout_seconds=5.0))
+        prepared = await client.prepare_worker(registration,bootstrap_sha256=digest)
+        assert prepared.intent_id == binding.intent_id
+        bound = await client.bind_slurm_job(physical(registration))
+        assert bound.intent_id == binding.intent_id
+        # A valid bearer without its client certificate cannot reach the API.
+        context = ssl.create_default_context(cafile=str(ca_path))
+        async with httpx.AsyncClient(verify=context,trust_env=False,timeout=2) as unauthenticated:
+            with pytest.raises(httpx.HTTPError):
+                await unauthenticated.post(origin+route(registration,"prepare"),
+                    headers={"Authorization":"Bearer executor-secret"},json=preparation(registration,digest))
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == 2
+    finally:
+        if client is not None:
+            await client.aclose()
+        server.should_exit = True
+        try:
+            async with asyncio.timeout(5):
+                await task
+        finally:
+            listener.close()

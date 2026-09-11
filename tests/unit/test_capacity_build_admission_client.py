@@ -93,3 +93,34 @@ async def test_client_requires_exact_https_origin(origin):
     async with httpx.AsyncClient() as http:
         with pytest.raises(ValueError):
             client_for(http,registration(),origin=origin)
+
+
+@pytest.mark.parametrize("boundary", ["missing-token", "unsafe-token", "invalid-token", "missing-ca", "unsafe-ca", "timeout"])
+def test_file_configuration_fails_before_opening_http_client(tmp_path,monkeypatch,boundary):
+    from loom_capacity_agent.client import DemandReporterConnection, DemandReporterTLSFiles
+    from tests.unit.test_capacity_agent_client import _owner_file
+
+    module = import_module("loom_capacity_executor.build_admission_client")
+    request = registration()
+    identity = module.BuildAdmissionExecutorV1(pool_id=request.binding.pool_id,pool_generation=request.binding.pool_generation,
+        executor_id=request.binding.executor_id,executor_incarnation=request.binding.executor_incarnation)
+    token = tmp_path/"token"
+    if boundary!="missing-token":
+        _owner_file(token,b"invalid internal space" if boundary=="invalid-token" else b"scoped-token")
+        if boundary=="unsafe-token":
+            token.chmod(0o644)
+    ca = tmp_path/"ca.pem"
+    if boundary!="missing-ca":
+        _owner_file(ca,b"invalid PEM")
+        if boundary=="unsafe-ca":
+            ca.chmod(0o644)
+    connection = DemandReporterConnection(manager_origin="https://management.test",bearer_token_file=token,
+        tls_files=DemandReporterTLSFiles(ca_file=ca,certificate_file=tmp_path/"client.pem",private_key_file=tmp_path/"key.pem"),
+        timeout_seconds=0.001 if boundary=="timeout" else 5.0)
+
+    def unexpected_http(*args,**kwargs):
+        pytest.fail("invalid credentials/configuration must be rejected before creating a client")
+
+    monkeypatch.setattr(module.httpx,"AsyncClient",unexpected_http)
+    with pytest.raises((ValueError,OSError)):
+        module.BuildAdmissionClient.from_files(identity,connection)
