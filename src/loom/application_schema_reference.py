@@ -89,26 +89,26 @@ def application_schema_reference(
     image = application_reference_postgres_image(postgres_major=postgres_major)
     digests = {
         16: (
-            "d898323c91f7207e82aa0dd58a9ed5b5de66944bf3bddbdeec8ce095bb4a4d25",
-            "cf6fede818ac1f169a121f4f41e1367b99c17fda711f3c788fcd3d096b0073e4",
-            "d37e4461a82658fd13b21b4289012ed409634c90be342f8e879ceb3c899d5330",
-            "5f488fe4301d28c18acb8da4753afc202bc4480af002ac22da6317d0d1d1266c",
+            "ebe929a7e0aeafdc9635b8057f4e35a9548fd5ddea9a900d16a6e1f8356677cd",
+            "4004bc803c1b2f34d847b2d697d08b82d4d439108281ecd9ad0bdd7dbb232cce",
+            "cb1ce7d26a26c35e010da1cc023d6977736a0490444e82d737b0d7a8ac36e2d7",
+            "1195111c215e4bac289e8eeac39ef0e1655aed5682ae6a8673db34f4bf9d34a4",
         ),
         17: (
-            "c4b9d4aba6e9def2f3832de278bbc02092cbeb32f9d8ca5d57343e2993f2d2bf",
-            "e888842b2e3cf7548ab99985e5be6422a8a3a632af506eb2bb6dcb6b00ad8252",
-            "33dee6f2a80c732fa28a36ee970a4afd780717130fdf944dac1805f20766c8ba",
-            "9390d8fcc54686bc64ab92d324fc95f8dcfc3782e44ec70cf6e6997822a7a56c",
+            "9cefe03124a862f02045294c8cfb65090bb8360fe37dc8bb460971c903cbf937",
+            "1a4e2140e730682e5edf8a8e0740b95eb8ed51fbc23bf992876f160578ff3db2",
+            "0b7662d95ff0320448acffef140436a113bec487932c65b5bb59a23ae45694ba",
+            "a81fb3aacc203e475b0a5496a668851a3802b707c3e2c7bd23b0d0095748b423",
         ),
     }
     return ApplicationSchemaReference(
         format_version=1,
         profile=profile,
-        application_head="0137",
-        guard_head="guard_0031",
+        application_head="0142",
+        guard_head="guard_0033",
         postgres_image=image,
         postgres_major=postgres_major,
-        object_count=7078 if profile in {"legacy-owner", "staging-readonly-legacy-owner"} else 7080,
+        object_count=7227 if profile in {"legacy-owner", "staging-readonly-legacy-owner"} else 7229,
         inventory_sha256=digests[postgres_major][profiles.index(profile)],
     )
 

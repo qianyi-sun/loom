@@ -2456,7 +2456,7 @@ async def test_guard_0020_downgrade_serializes_committing_executable_evidence(
         application_name=application_name,
     )
     # Keep exercising the older migration's blocking lock order separately
-    # from guard0031's new nonblocking whole-schema retirement boundary.
+    # from guard0033's new nonblocking whole-schema retirement boundary.
     command.downgrade(config, "guard_0030")
 
     executor_engine = create_async_engine(
@@ -2527,7 +2527,7 @@ async def test_guard_0020_downgrade_serializes_committing_executable_evidence(
             await downgrade_task
         await executor_engine.dispose()
 
-    assert version == "guard_0033"
+    assert version == "guard_0030"
     assert evidence == 1
 
 
@@ -2639,7 +2639,7 @@ async def test_guard_0020_downgrade_gates_new_executor_calls_before_evidence(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("starting_revision", ["guard_0030", "guard_0031"])
+@pytest.mark.parametrize("starting_revision", ["guard_0030", "guard_0033"])
 async def test_guard_0020_downgrade_does_not_deadlock_terminal_projection(
     capacity_guard_database: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
