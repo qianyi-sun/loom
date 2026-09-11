@@ -138,6 +138,10 @@ def complete_application_handoff_database(
             handoff_backend=handoff_backend, coordination_guard=coordination_guard,
             runtime_password=password,
         )
+        _require_retired_client_work(
+            maintenance, target=target, handoff_backend=handoff_backend,
+            coordination_guard=coordination_guard, provisioner=provisioner,
+        )
         with connection.transaction():
             transfer_application_ownership(
                 connection, owner_role=target.successor_role, role_bindings=bindings,
@@ -163,6 +167,52 @@ def complete_application_handoff_database(
     if not login_enabled():
         raise RuntimeError("application handoff completion login changed")
     return ApplicationHandoffDatabaseOutcome(target, coordination_guard)
+
+
+def _require_retired_client_work(
+    maintenance: ApplicationDatabaseConnection, *, target: ApplicationDatabaseAdmissionTarget,
+    handoff_backend: ApplicationDatabaseHandoffBackend,
+    coordination_guard: ApplicationDatabaseCoordinationGuard, provisioner: str,
+) -> None:
+    """Observe cluster-wide client retirement before ownership changes.
+
+    Role DDL accepted through postgres or another database outlives application
+    admission closure. Under the enclosing manager replacement and external
+    writer exclusion, require no such clients or prepared work. Never signal an
+    unknown peer or infer retirement from an idle/query-text observation. Native
+    background and replication processes remain subject to the separately
+    admitted SQL/process profile; this is not proof of arbitrary SQL silence.
+    """
+    with _maintenance_transaction(maintenance, database=target.database, provisioner_role=provisioner):
+        maintenance.execute("SET TRANSACTION READ ONLY")
+        _require_handoff_identity(maintenance, target, handoff_backend)
+        _require_coordination_guard(maintenance, target, coordination_guard)
+        # Startup acquires this cluster-wide shared-object lock before its
+        # session statistics become visible. Inspect locks before fresh stats.
+        if maintenance.execute(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE locktype='object' "
+            "AND classid='pg_catalog.pg_database'::regclass AND mode='RowExclusiveLock')"
+        ).fetchone() != (False,):
+            raise RuntimeError("application handoff client work has a pending database startup")
+        if maintenance.execute("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_prepared_xacts)").fetchone() != (False,):
+            raise RuntimeError("application handoff client work has a prepared transaction")
+        maintenance.execute("SELECT pg_catalog.pg_stat_clear_snapshot()")
+        if maintenance.execute(application_sql(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a WHERE "
+            "a.pid<>pg_catalog.pg_backend_pid() AND NOT ("
+            "a.pid={} AND a.backend_start={}::pg_catalog.timestamptz AND a.datid={} "
+            "AND a.usename={} AND a.backend_type='client backend') AND NOT ("
+            "a.pid={} AND a.backend_start={}::pg_catalog.timestamptz AND a.datid={} "
+            "AND a.usesysid={} AND a.application_name={} AND a.backend_type='client backend') "
+            "AND (a.backend_type IS NULL OR a.backend_type NOT IN ("
+            "'autovacuum launcher','autovacuum worker','background writer','checkpointer',"
+            "'archiver','walwriter','walsender','walreceiver','logical replication launcher')))",
+            handoff_backend.pid, handoff_backend.started_at, target.database_oid, provisioner,
+            coordination_guard.backend.pid, coordination_guard.backend.started_at, target.database_oid,
+            coordination_guard.role_oid, coordination_guard.application_name,
+        )).fetchone() != (False,):
+            raise RuntimeError("application handoff client work has surviving or unknown backends")
+        _require_coordination_guard(maintenance, target, coordination_guard)
 
 
 def application_handoff_recovery_login_enabled(
