@@ -3,6 +3,7 @@
 from dataclasses import replace
 from uuid import uuid4
 
+import psycopg
 import pytest
 from psycopg import sql
 
@@ -46,9 +47,9 @@ async def test_readonly_observation_never_restores_a_pending_login(transfer_data
         ) is ApplicationRuntimeLoginState.RESTORED
 
 
-@pytest.mark.parametrize("drift", ["credential", "database", "owner", "privileges", "membership"])
+@pytest.mark.parametrize("drift", ["credential", "database", "owner", "privileges", "membership", "admission"])
 async def test_open_login_alone_is_never_terminal_evidence(transfer_database, drift):  # noqa: F811
-    admin, _url, owner, runtime, bindings, target = await _prepare(transfer_database)
+    admin, url, owner, runtime, bindings, target = await _prepare(transfer_database)
     password = uuid4().hex
     with admin:
         restore_application_runtime_login(
@@ -63,10 +64,15 @@ async def test_open_login_alone_is_never_terminal_evidence(transfer_database, dr
             admin.execute(sql.SQL("ALTER ROLE {} LOGIN").format(sql.Identifier(owner)))
         elif drift == "privileges":
             admin.execute(sql.SQL("GRANT TRUNCATE ON public.trials TO {}").format(sql.Identifier(runtime)))
-        else:
+        elif drift == "membership":
             admin.execute(sql.SQL("GRANT {} TO {} WITH INHERIT FALSE").format(
                 sql.Identifier(owner), sql.Identifier(runtime),
             ))
+        else:
+            with psycopg.connect(url, dbname="postgres", autocommit=True) as maintenance:
+                maintenance.execute(sql.SQL("ALTER DATABASE {} ALLOW_CONNECTIONS false").format(
+                    sql.Identifier(target.database),
+                ))
         admin.execute("SET default_transaction_read_only=on")
         with pytest.raises(RuntimeError):
             observe_application_runtime_login(

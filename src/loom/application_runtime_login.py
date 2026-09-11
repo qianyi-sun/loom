@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from enum import StrEnum
 
 import psycopg
 from psycopg import sql
@@ -31,6 +32,36 @@ from loom.application_schema_reference import (
 
 class ApplicationRuntimeLoginError(RuntimeError):
     """Runtime login cannot be restored without changing the admitted authority."""
+
+
+class ApplicationRuntimeLoginState(StrEnum):
+    """Validated credential state; neither value proves workload or fence recovery."""
+
+    SEALED = "sealed"
+    RESTORED = "restored"
+
+
+def observe_application_runtime_login(
+    connection: ApplicationDatabaseConnection,
+    *,
+    owner_role: str,
+    role_bindings: Mapping[str, str],
+    password: str,
+    target: ApplicationDatabaseAdmissionTarget,
+    schema_acl_profile: ApplicationSchemaAclProfile = "application-only",
+) -> ApplicationRuntimeLoginState:
+    """Classify a saved restoration without changing login, password or grants.
+
+    Both states require the exact separated ownership, trusted schema/ACL profile,
+    saved database/role identities and open admission. Unknown credentials or
+    authority drift refuse. This supplies the database part of recovery evidence;
+    it does not authorize fence release or prove administrator exclusion.
+    """
+    return _application_runtime_login(
+        connection, owner_role=owner_role, role_bindings=role_bindings,
+        password=password, target=target, schema_acl_profile=schema_acl_profile,
+        restore=False,
+    )
 
 
 def restore_application_runtime_login(
@@ -53,6 +84,23 @@ def restore_application_runtime_login(
     The protected caller must carry the same trusted schema_acl_profile used in
     ownership transfer; neither live grants nor caller-provided hashes select it.
     """
+    _application_runtime_login(
+        connection, owner_role=owner_role, role_bindings=role_bindings,
+        password=password, target=target, schema_acl_profile=schema_acl_profile,
+        restore=True,
+    )
+
+
+def _application_runtime_login(
+    connection: ApplicationDatabaseConnection,
+    *,
+    owner_role: str,
+    role_bindings: Mapping[str, str],
+    password: str,
+    target: ApplicationDatabaseAdmissionTarget,
+    schema_acl_profile: ApplicationSchemaAclProfile,
+    restore: bool,
+) -> ApplicationRuntimeLoginState:
     profile = application_schema_profile(ownership="sealed-owner", acl_profile=schema_acl_profile)
     aliases = {
         "application-owner",
@@ -88,6 +136,8 @@ def restore_application_runtime_login(
     if target.owner_role != runtime or target.successor_role != owner_role:
         raise ApplicationRuntimeLoginError("application runtime login saved role identity changed")
     with connection.transaction():
+        if not restore:
+            connection.execute("SET TRANSACTION READ ONLY")
         connection.execute("SELECT pg_catalog.set_config('search_path','pg_catalog,pg_temp',true)")
         if connection.execute(
             "SELECT pg_catalog.current_setting('transaction_isolation')"
@@ -174,11 +224,13 @@ def restore_application_runtime_login(
             and state[2] is True
             and matches_application_scram(password, state[1])
         ):
-            return
+            return ApplicationRuntimeLoginState.RESTORED
         if state is None or state[0] is not False or (
             state[1] is not None and not matches_application_scram(password, state[1])
         ):
             raise ApplicationRuntimeLoginError("application runtime login credential state changed")
+        if not restore:
+            return ApplicationRuntimeLoginState.SEALED
         # PostgreSQL accepts precomputed verifiers verbatim. This also treats
         # a verifier-shaped literal password as a password, not as supplied hash.
         verifier = application_scram_verifier(password)
@@ -207,3 +259,4 @@ def restore_application_runtime_login(
             raise ApplicationRuntimeLoginError(
                 "application runtime login credential update was not exact"
             )
+        return ApplicationRuntimeLoginState.RESTORED
