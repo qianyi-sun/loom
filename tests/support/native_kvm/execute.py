@@ -39,7 +39,11 @@ def main():
     output.mkdir(mode=0o700)
     os.chown(output, 1000, 1000)
     (workspace / "buildkit-run").mkdir(mode=0o1777)
-    sandbox_id = json.loads((fixtures / "identity.json").read_text())["sandbox_id"]
+    identity = json.loads((fixtures / "identity.json").read_text())
+    sandbox_id = identity["sandbox_id"]
+    buildkit_id = identity["buildkit_id"]
+    client_id = identity["client_id"]
+    probe_id, lifecycle_id, late_id = (role + "-" + sandbox_id for role in ("probe", "lifecycle", "late"))
     runtime = ["/runtime/runsc", "--root=/tmp/runsc-state", "--platform=kvm",
         "--network=none", "--ignore-cgroups=true", "--gvisor-marker-file=true",
         "--host-settings=check", "--sidecar-release-enforcement-policy=ALWAYS",
@@ -48,8 +52,7 @@ def main():
     started = []
     logs = []
     try:
-        for component, suffix in (("pause", ""), ("buildkit", "-buildkit")):
-            name = sandbox_id + suffix
+        for component, name in (("pause", sandbox_id), ("buildkit", buildkit_id)):
             started.append(name)
             log = open("/tmp/" + component + ".log", "w+")
             logs.append(log)
@@ -57,24 +60,24 @@ def main():
                 stdout=log, stderr=subprocess.STDOUT, check=True, timeout=20)
         deadline = time.monotonic() + 20
         while True:
-            ready = subprocess.run([*runtime, "exec", sandbox_id + "-buildkit", "/usr/bin/test", "-S",
+            ready = subprocess.run([*runtime, "exec", buildkit_id, "/usr/bin/test", "-S",
                 "/var/run/loom-buildkit/buildkitd.sock"], capture_output=True, timeout=5)
             if ready.returncode == 0:
                 break
             if time.monotonic() >= deadline:
                 raise RuntimeError(f"BuildKit socket did not become ready: {ready.stdout!r} {ready.stderr!r}")
             time.sleep(0.1)
-        subprocess.run([*runtime, "exec", sandbox_id + "-buildkit", "/bin/touch",
+        subprocess.run([*runtime, "exec", buildkit_id, "/bin/touch",
             "/tmp/sidecar-private"], check=True, timeout=5)
         probe = json.loads((fixtures / "client/config.json").read_bytes())
         probe["process"]["args"] = ["/usr/bin/python3", "/opt/client_probe.py"]
         Path("/tmp/probe-bundle").mkdir()
         Path("/tmp/probe-bundle/config.json").write_text(json.dumps(probe))
-        started.append(sandbox_id + "-probe")
-        subprocess.run([*runtime, "run", "--bundle=/tmp/probe-bundle", sandbox_id + "-probe"],
+        started.append(probe_id)
+        subprocess.run([*runtime, "run", "--bundle=/tmp/probe-bundle", probe_id],
             check=True, timeout=15)
-        started.append(sandbox_id + "-client")
-        subprocess.run([*runtime, "run", "--bundle=/fixtures/client", sandbox_id + "-client"],
+        started.append(client_id)
+        subprocess.run([*runtime, "run", "--bundle=/fixtures/client", client_id],
             check=True, timeout=120)
         shutil.copyfile(output / "build/artifacts.tar", "/result/artifacts.tar")
         os.chmod("/result/artifacts.tar", 0o644)
@@ -87,8 +90,8 @@ def main():
         lifecycle["process"]["args"] = ["/usr/bin/python3", "/opt/lifecycle_probe.py"]
         Path("/tmp/lifecycle-bundle").mkdir()
         Path("/tmp/lifecycle-bundle/config.json").write_text(json.dumps(lifecycle))
-        started.append(sandbox_id + "-lifecycle")
-        subprocess.run([*runtime, "run", "--detach", "--bundle=/tmp/lifecycle-bundle", sandbox_id + "-lifecycle"],
+        started.append(lifecycle_id)
+        subprocess.run([*runtime, "run", "--detach", "--bundle=/tmp/lifecycle-bundle", lifecycle_id],
             check=True, timeout=15)
         pulse = output / "lifecycle-pulse"
         deadline = time.monotonic() + 10
@@ -101,16 +104,15 @@ def main():
         while True:
             states = [json.loads(subprocess.run([*runtime, "state", name], check=True,
                 capture_output=True, text=True, timeout=5).stdout)["status"]
-                for name in (sandbox_id, sandbox_id + "-buildkit", sandbox_id + "-lifecycle")]
+                for name in (sandbox_id, buildkit_id, lifecycle_id)]
             if states == ["stopped"] * 3:
                 break
             if time.monotonic() >= deadline:
                 raise RuntimeError(f"sandbox root stop left live children: {states}")
             time.sleep(0.05)
         stopped_pulse = pulse.read_bytes()
-        late_name = sandbox_id + "-late"
-        started.append(late_name)
-        late = subprocess.run([*runtime, "run", "--detach", "--bundle=/tmp/lifecycle-bundle", late_name],
+        started.append(late_id)
+        late = subprocess.run([*runtime, "run", "--detach", "--bundle=/tmp/lifecycle-bundle", late_id],
             capture_output=True, timeout=5)
         assert late.returncode != 0, "stopped sandbox accepted a late child"
         assert pulse.read_bytes() == stopped_pulse
