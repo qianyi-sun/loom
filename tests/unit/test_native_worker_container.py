@@ -62,6 +62,18 @@ def _allocation():
         hostname="oldlab-5", candidate_sha="a" * 64)
 
 
+@pytest.mark.parametrize("parent", [
+    "loom-job-101.slice", "/loom.slice/loom-job.slice/loom-job-101.slice", "/",
+    "/system.slice/slurmstepd.scope/job_202", "/system.slice/slurmstepd.scope/job_101/step_batch",
+    "/system.slice/slurmstepd.scope/job_101/../job_202", "/system.slice/foreign.scope/job_101",
+])
+def test_native_allocation_requires_exact_slurm_job_ancestor(parent):
+    from loom_capacity_executor.native_worker_container import NativeContainerError
+
+    with pytest.raises(NativeContainerError, match="allocation"):
+        replace(_allocation(), cgroup_parent=parent)
+
+
 def test_fixed_create_removes_loader_environment_and_has_no_secret_or_command_override():
     from loom_capacity_executor.native_worker_container import native_create_argv
 

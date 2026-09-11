@@ -196,9 +196,21 @@ def test_native_daemon_readback_uses_machine_readable_docker_info():
     class DaemonCLI:
         def json(self, *args):
             assert args == ("info", "--format={{json .}}")
+            return {"CgroupVersion": "2", "CgroupDriver": "cgroupfs"}
+
+    assert native_daemon_cgroup_driver(DaemonCLI()) == "cgroupfs"
+
+
+def test_native_daemon_rejects_systemd_sibling_slice_topology():
+    from loom_capacity_executor.native_worker_container import NativeContainerError
+    from loom_capacity_executor.native_worker_launch import native_daemon_cgroup_driver
+
+    class DaemonCLI:
+        def json(self, *args):
             return {"CgroupVersion": "2", "CgroupDriver": "systemd"}
 
-    assert native_daemon_cgroup_driver(DaemonCLI()) == "systemd"
+    with pytest.raises(NativeContainerError, match="cgroupfs"):
+        native_daemon_cgroup_driver(DaemonCLI())
 
 
 async def test_complete_bootstrap_frame_checked_before_handoff(tmp_path, monkeypatch):
