@@ -39,3 +39,30 @@ def test_mapped_parent_requires_original_rootless_chain(tmp_path, monkeypatch, b
 def test_native_proc_parent_reader_uses_current_process_stat():
     module = import_module("loom_capacity_executor.native_rootless_parent")
     assert module._process_parent(os.getpid()) == os.getppid()
+
+
+@pytest.mark.parametrize("publish", [True, False])
+def test_rootless_empty_created_marker_waits_with_a_deadline(tmp_path, monkeypatch, publish):
+    module = import_module("loom_capacity_executor.native_rootless_parent")
+    state = tmp_path / "rootlesskit"
+    state.mkdir(mode=0o700)
+    marker = state / "child_pid"
+    marker.touch(mode=0o444)
+    monkeypatch.setattr(module.os, "getppid", lambda: 321)
+    monkeypatch.setattr(module, "bind_native_parent_death", lambda parent: None)
+    monkeypatch.setattr(module, "_process_parent", lambda pid: 123)
+    clock = iter([0, 0, 6_000_000_000])
+    monkeypatch.setattr(module.time, "clock_gettime_ns", lambda _: next(clock))
+
+    def parent_write(_seconds):
+        if publish:
+            marker.chmod(0o644)
+            marker.write_bytes(b"321")
+            marker.chmod(0o444)
+
+    monkeypatch.setattr(module.time, "sleep", parent_write)
+    if publish:
+        assert module.bind_native_rootless_parent(state, expected_rootless_pid=123) == 321
+    else:
+        with pytest.raises(RuntimeError, match="did not become ready"):
+            module.bind_native_rootless_parent(state, expected_rootless_pid=123)
