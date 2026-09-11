@@ -93,3 +93,43 @@ def test_partial_rootfs_failure_does_not_remove_replacement_directory(tmp_path, 
             expected_sha256=digest, expected_size_bytes=archive.stat().st_size,
             max_unpacked_bytes=1024, max_entries=100)
     assert (destination / "keep").read_text() == "foreign"
+
+
+@pytest.mark.parametrize("replacement", ["root", "file"])
+def test_rootfs_rejects_replaced_created_material(tmp_path, monkeypatch, replacement):
+    module = import_module("loom_capacity_executor.native_rootfs_archive")
+    archive = tmp_path / "rootfs.tar"
+    digest = rootfs_archive(archive)
+    destination = tmp_path / "rootfs"
+    changed = False
+    original_open, original_sync = module.os.open, module.os.fsync
+
+    def opened(path, flags, *args, **kwargs):
+        nonlocal changed
+        if replacement == "root" and path == "rootfs" and flags & os.O_DIRECTORY and not changed:
+            changed = True
+            destination.rename(tmp_path / "retained-root")
+            destination.mkdir(mode=0o700)
+            (destination / "keep").write_text("foreign")
+        return original_open(path, flags, *args, **kwargs)
+
+    def synced(fd):
+        nonlocal changed
+        original_sync(fd)
+        target = destination / "usr/bin/tool"
+        if replacement == "file" and not changed and target.exists():
+            changed = True
+            target.rename(tmp_path / "retained-file")
+            target.write_bytes(b"foreign file")
+
+    monkeypatch.setattr(module.os, "open", opened)
+    monkeypatch.setattr(module.os, "fsync", synced)
+    with pytest.raises(ValueError, match="changed"):
+        module.unpack_native_rootfs_archive(archive=archive, destination=destination,
+            expected_sha256=digest, expected_size_bytes=archive.stat().st_size,
+            max_unpacked_bytes=1024, max_entries=100)
+    if replacement == "root":
+        assert list(destination.iterdir()) == [destination / "keep"]
+        assert destination.stat().st_mode & 0o777 == 0o700
+    else:
+        assert (destination / "usr/bin/tool").read_bytes() == b"foreign file"
