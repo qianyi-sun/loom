@@ -87,3 +87,24 @@ async def test_coordinator_commits_closure_before_cleanup_publication(prepared_i
     receipt = await coordinator.publish_closure(proposal.plan_id)
     assert receipt.disposition_digest == retained_closure.digest
     assert calls[0] == calls[1]
+
+
+async def test_restart_replays_retained_closure_before_new_manager_reason(prepared_input):
+    coordinator_type = import_module("loom_capacity_build_guard.coordinator").BuildPlanCoordinator
+    sessions, _engine, retained, proposal, _, _ = prepared_input
+    calls = []
+
+    class Publisher:
+        async def publish_executable_admission_closure_acknowledgement(self, ack, *, idempotency_key):
+            calls.append((ack, idempotency_key))
+            return ExecutableAdmissionPlanClosureAcknowledgementReceiptV2(closure_id=ack.closure_id,
+                disposition_kind=ack.disposition_kind, disposition_digest=ack.disposition_digest,
+                receipt_digest=canonical_executable_digest(ack), replayed=False, executable=False)
+
+    first = ExecutableAdmissionPlanClosureV2(closure_id=uuid4(), proposal=proposal, close_reason="manager-closed")
+    await coordinator_type(sessions, installation=retained, publisher=Publisher()).close(first)
+    changed = first.model_copy(update={"closure_id": uuid4(), "close_reason": "expired"})
+    restarted = coordinator_type(sessions, installation=retained, publisher=Publisher())
+    receipt = await restarted.reconcile_closure(changed)
+    assert receipt.closure_id == first.closure_id
+    assert calls[0][0].close_reason == "manager-closed"
