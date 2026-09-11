@@ -133,3 +133,55 @@ def test_rootfs_rejects_replaced_created_material(tmp_path, monkeypatch, replace
         assert destination.stat().st_mode & 0o777 == 0o700
     else:
         assert (destination / "usr/bin/tool").read_bytes() == b"foreign file"
+
+
+def test_rootfs_failure_cleans_owned_readonly_directories(tmp_path, monkeypatch):
+    module = import_module("loom_capacity_executor.native_rootfs_archive")
+    archive = tmp_path / "rootfs.tar"
+    with tarfile.open(archive, "w") as output:
+        for name, kind in (("private", tarfile.DIRTYPE), ("private/file", tarfile.REGTYPE)):
+            member = tarfile.TarInfo(name)
+            member.type, member.uid, member.gid, member.mode = kind, os.getuid(), os.getgid(), 0o555
+            output.addfile(member)
+    destination = tmp_path / "rootfs"
+
+    def failed_verification(*args):
+        raise OSError("fixture verification read failed")
+
+    monkeypatch.setattr(module, "_verify_members", failed_verification)
+    with pytest.raises(OSError, match="fixture verification"):
+        module.unpack_native_rootfs_archive(archive=archive, destination=destination,
+            expected_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(), expected_size_bytes=archive.stat().st_size,
+            max_unpacked_bytes=1024, max_entries=100)
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("fault", ["metadata-limit", "changed-during-copy"])
+def test_rootfs_rejects_excessive_metadata_and_mutating_archive(tmp_path, monkeypatch, fault):
+    module = import_module("loom_capacity_executor.native_rootfs_archive")
+    archive = tmp_path / "rootfs.tar"
+    if fault == "metadata-limit":
+        with tarfile.open(archive, "w", format=tarfile.PAX_FORMAT) as output:
+            member = tarfile.TarInfo("file")
+            member.pax_headers = {"comment": "a" * (1024**2 + 1)}
+            output.addfile(member)
+    else:
+        rootfs_archive(archive)
+        original = module.os.fsync
+        changed = False
+
+        def mutate(fd):
+            nonlocal changed
+            original(fd)
+            if not changed:
+                changed = True
+                with archive.open("ab") as output:
+                    output.write(b"changed")
+
+        monkeypatch.setattr(module.os, "fsync", mutate)
+    destination = tmp_path / "rootfs"
+    with pytest.raises(ValueError):
+        module.unpack_native_rootfs_archive(archive=archive, destination=destination,
+            expected_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(), expected_size_bytes=archive.stat().st_size,
+            max_unpacked_bytes=1024, max_entries=100)
+    assert not destination.exists()
