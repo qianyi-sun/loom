@@ -163,6 +163,10 @@ Each root shard has a bounded 40-minute whole-job budget, including environment
 setup, tests, wheel verification, coverage upload, and cleanup. This leaves
 headroom after the observed approximately 29-minute test phase; it does not
 relax per-test timeouts or remove any required checks.
+Each integration shard has a bounded 60-minute whole-job budget. The previous
+40-minute limit interrupted a normally progressing shard at 99%; this headroom
+includes coverage upload and cleanup without changing test selection, per-test
+timeouts, or the requirement for every selected shard to pass.
 `repository-checks` enforces every selected result after the independent lanes
 finish. Docs-only PRs skip the no-input `fast-checks` job and let
 `repository-checks` validate that skipped result directly, avoiding a no-op

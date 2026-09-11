@@ -993,14 +993,14 @@ jobs:
   # Fast integration tier — testcontainers Postgres + MinIO only.
   # Excludes the `@pytest.mark.docker` tests (real DockerDriver,
   # network-policy, trial-e2e, subprocess-agent, gateway-with-litellm).
-  # Issue #7: split into fast + docker tiers so the fast tier fits in
-  # ~10 min and the planner selects each tier from paths or opt-in labels.
+  # The planner selects each tier from paths or opt-in labels. The growing
+  # integration shards need bounded headroom for tests, coverage and cleanup.
   integration:
     name: integration (${{ matrix.shard }})
     runs-on: >-
       ${{ fromJSON(needs.ci-route.outputs.routes)[format('integration-{0}', matrix.shard)] }}
     needs: [workflow-plan, ci-route]
-    timeout-minutes: 40
+    timeout-minutes: 60
     if: >-
       needs.workflow-plan.outputs.gate_mode == 'full' &&
       needs.workflow-plan.outputs.integration == 'true'
