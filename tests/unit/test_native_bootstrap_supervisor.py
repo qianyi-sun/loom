@@ -33,14 +33,14 @@ def configuration(request):
         path = base / name
         path.write_bytes(raw)
         path.chmod(0o600)
-        return {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(), "owner_uid": os.geteuid()}
+        return {"schema_version": 2, "path": str(path), "sha256": hashlib.sha256(raw).hexdigest(), "owner_uid": os.geteuid()}
 
     receiver_pin = write("receiver.json", receiver.model_dump(mode="json", by_alias=True))
-    tls = {name: {"path": str(base / f"{name}.pem"), "sha256": "c" * 64}
+    tls = {name: {"schema_version": 1, "path": str(base / f"{name}.pem"), "sha256": "c" * 64}
         for name in ("ca", "certificate", "private_key")}
     data = {"schema": "loom.native-bootstrap-supervisor-config/v1", "listen_address": "127.0.0.1",
         "listen_port": 9443, "target_node": "oldlab-5", "pool_id": "oldlab", "trusted_release_sha256": "a" * 64,
-        "identity": tls, "receiver": {"interpreter": {"path": sys.executable, "sha256": "b" * 64,
+        "identity": tls, "receiver": {"interpreter": {"schema_version": 2, "path": sys.executable, "sha256": "b" * 64,
         "owner_uid": os.geteuid(), "mode": 0o555}, "configuration": receiver_pin,
         "timeout_seconds": 15.0, "cleanup_wait_seconds": 1.0, "maximum_processes": 2},
         "limits": {"maximum_connections": 8, "maximum_operations": 2, "handshake_seconds": 3.0, "total_seconds": 20.0},
@@ -213,3 +213,23 @@ raise SystemExit(result)
     result = subprocess.run([sys.executable, "-I", "-B", "-c", probe], capture_output=True, timeout=10)
     assert result.returncode == 2 and result.stdout == b""
     assert result.stderr == b"native bootstrap supervisor unavailable or refused\n"
+
+
+def test_main_loads_pinned_config_and_sigterm_requests_owned_shutdown(configuration):
+    pin = configuration.write("supervisor.json", configuration.data)
+    arguments = ["--configuration", pin["path"], "--configuration-sha256", pin["sha256"],
+        "--configuration-owner-uid", str(os.geteuid())]
+    probe = f"""
+import asyncio, ctypes, os, resource, signal
+import loom_capacity_executor.native_bootstrap_supervisor as module
+async def service(config, stop):
+    assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
+    assert ctypes.CDLL(None).prctl(3, 0, 0, 0, 0) == 0
+    assert config.target_node == 'oldlab-5'
+    os.kill(os.getpid(), signal.SIGTERM)
+    await asyncio.wait_for(stop.wait(), 1)
+module.run_native_bootstrap_supervisor = service
+raise SystemExit(module.main({arguments!r}))
+"""
+    result = subprocess.run([sys.executable, "-I", "-B", "-c", probe], capture_output=True, timeout=10)
+    assert result.returncode == 0 and result.stdout == result.stderr == b""
