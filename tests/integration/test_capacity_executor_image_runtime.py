@@ -250,7 +250,19 @@ async def _assert_native_attachment_loss_needs_container_cleanup(image: str) -> 
         container = None
         attached = None
         try:
-            assert native_daemon_cgroup_driver(cli) in {"cgroupfs", "systemd"}
+            daemon = cli.json("info", "--format={{json .}}")
+            assert isinstance(daemon, dict)
+            if daemon.get("CgroupVersion") == "2" and daemon.get("CgroupDriver") == "cgroupfs":
+                assert native_daemon_cgroup_driver(cli) == "cgroupfs"
+            else:
+                # A diagnostic container can exercise Docker's attachment mechanics
+                # on this host, but the actual native preflight must refuse its
+                # incompatible topology. Do not turn transport proof into Slurm
+                # containment acceptance or weaken the native check for this test.
+                from loom_capacity_executor.native_worker_container import NativeContainerError
+
+                with pytest.raises(NativeContainerError, match="cgroupfs"):
+                    native_daemon_cgroup_driver(cli)
             diagnostic = (
                 "from loom_capacity_executor.native_worker_bootstrap import consume_native_worker_bootstrap; "
                 "consume_native_worker_bootstrap(); import time; time.sleep(120)"
