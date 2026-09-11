@@ -508,8 +508,9 @@ async def test_trusted_wrapper_concurrent_recovery_launches_candidate_once(
 # Production break caught: the shipped trusted-launcher process entry must
 # construct the physical binding and admission route from Slurm launch inputs
 # instead of relying on a test-only helper to inject them.
+@pytest.mark.parametrize("native", [False, True])
 async def test_trusted_launcher_process_entry_derives_physical_binding_from_slurm_inputs(
-    tmp_path: Path,
+    tmp_path: Path, native: bool,
 ) -> None:
     from dataclasses import replace
 
@@ -526,6 +527,8 @@ async def test_trusted_launcher_process_entry_derives_physical_binding_from_slur
         TrustedLauncherConfigV2,
         run_trusted_launcher_process,
     )
+    from loom_capacity_executor import trusted_launcher as launcher_module
+    from loom_capacity_executor.build_admission_client import BuildAdmissionExecutorV1
 
     directory = tmp_path / "handoff"
     directory.mkdir(mode=0o700)
@@ -537,7 +540,10 @@ async def test_trusted_launcher_process_entry_derives_physical_binding_from_slur
     candidate_path = tmp_path / "candidate-worker"
     _write_candidate(candidate_path)
     context = launch_context_fixture()
-    trusted_config = TrustedLauncherConfigV2(
+    identity = BuildAdmissionExecutorV1(pool_id=context.binding.pool_id, pool_generation=context.binding.pool_generation,
+        executor_id=context.binding.executor_id, executor_incarnation=context.binding.executor_incarnation)
+    config_type = launcher_module.NativeTrustedLauncherConfigV3 if native else TrustedLauncherConfigV2
+    trusted_config = config_type(
         handoff_directory=str(directory),
         admission_directory=str(admission_directory),
         admission_directory_sha256=_Admission.route_sha256,
@@ -549,6 +555,7 @@ async def test_trusted_launcher_process_entry_derives_physical_binding_from_slur
         },
         candidate_image_digest=context.profile.image_digest,
         candidate_argv=(str(candidate_path), "--once"),
+        **({"executor": identity} if native else {}),
     )
     config_path = tmp_path / "trusted-launcher-config.json"
     config_path.write_bytes(canonical_executable_bytes(trusted_config))
@@ -602,29 +609,51 @@ async def test_trusted_launcher_process_entry_derives_physical_binding_from_slur
     )
     admission = _Admission()
     exec_calls: list[tuple[str, tuple[str, ...], dict[str, str]]] = []
+    packets = []
+    admission.purpose = lambda binding: "personal-build-worker"
 
     def admission_factory(directory_arg: Path, *, expected_directory_sha256: str) -> _Admission:
+        assert not native, "native launcher opened application admission"
         assert directory_arg == admission_directory
         assert expected_directory_sha256 == _Admission.route_sha256
         return admission
 
+    def typed_factory(directory_arg, *, expected_sha256, executor):
+        assert native
+        assert directory_arg == admission_directory
+        assert expected_sha256 == _Admission.route_sha256
+        assert executor == identity
+        return admission
+
     def fake_execvpe(file: str, argv: tuple[str, ...], env: dict[str, str]) -> None:
         exec_calls.append((file, argv, env))
+        if native:
+            from loom_capacity_executor.native_worker_handoff import NATIVE_WORKER_HANDOFF_ENV, consume_native_worker_handoff
+
+            assert "LOOM_DB_PASSWORD" not in env and "PYTHONPATH" not in env
+            assert WORKER_CREDENTIAL_ENV not in env
+            descriptor = int(env[NATIVE_WORKER_HANDOFF_ENV])
+            packets.append(consume_native_worker_handoff(os.dup(descriptor)))
         raise _ExecBoundaryError
 
     with pytest.raises(_ExecBoundaryError):
         await run_trusted_launcher_process(
             launch_request.trusted_launcher_argv(),
-            environment={"SLURM_JOB_ID": "101"},
+            environment={"SLURM_JOB_ID": "101", "LOOM_DB_PASSWORD": "do-not-inherit", "PYTHONPATH": "/feature/path"},
             now=lambda: _NOW,
             admission_factory=admission_factory,
+            typed_admission_factory=typed_factory,
             execvpe=fake_execvpe,
         )
 
     assert len(exec_calls) == 1
     assert exec_calls[0][0].startswith("/proc/self/fd/")
     assert exec_calls[0][1] == (str(candidate_path), "--once")
-    worker_credential = exec_calls[0][2][WORKER_CREDENTIAL_ENV]
+    worker_credential = packets[0].worker_credential if native else exec_calls[0][2][WORKER_CREDENTIAL_ENV]
+    if native:
+        assert packets[0].registration == admission.requests[0]
+        assert packets[0].executor == identity
+        assert packets[0].admission.path == str(admission_directory)
     assert (
         admission.requests[0].worker_credential_sha256
         == hashlib.sha256(worker_credential.encode("ascii")).hexdigest()
