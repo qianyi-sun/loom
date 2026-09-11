@@ -77,7 +77,9 @@ class Runner:
             resource = raw.rsplit("/", 1)[1]
             kind = {"deployments": "Deployment", "cronjobs": "CronJob", "jobs": "Job",
                     "replicasets": "ReplicaSet", "pods": "Pod", "horizontalpodautoscalers": "HorizontalPodAutoscaler"}[resource]
-            return json.dumps({"apiVersion": "v1", "kind": kind + "List", "metadata": {"resourceVersion": "101"},
+            version = {"Deployment": "apps/v1", "ReplicaSet": "apps/v1", "CronJob": "batch/v1",
+                       "Job": "batch/v1", "Pod": "v1", "HorizontalPodAutoscaler": "autoscaling/v2"}[kind]
+            return json.dumps({"apiVersion": version, "kind": kind + "List", "metadata": {"resourceVersion": "101"},
                                "items": [obj for obj in self.objects if obj["kind"] == kind]}).encode()
         name = argv[argv.index("get") + 2]
         return json.dumps(next(obj for obj in self.objects if obj["metadata"]["name"] == name)).encode()
@@ -120,6 +122,35 @@ def _context(tmp_path):
         assert application_guard_is_retained(tmp_path / "state", request_id=plan.request_id, service_uid=os.getuid(), guard=evidence, acknowledge=True)
         journal.record_application_admission_recovery(target=_target(), handoff_backend=_handoff(), coordination_guard=saved)
     return plan, journal, evidence, saved, runner, admit
+
+
+@pytest.mark.parametrize("change", ["typed-list", "member-kind", "member-version", "list-version"])
+def test_fixed_workload_list_binds_omitted_member_types_and_refuses_conflicts(tmp_path, change):
+    from loom_cli.rollout.operator.protected_application_workload_runtime import _list
+
+    *_, runner, _admit = _context(tmp_path)
+    capture = runner.capture_stdout
+
+    def response(*args, **kwargs):
+        value = json.loads(capture(*args, **kwargs))
+        for item in value["items"]:
+            item.pop("kind")
+            item.pop("apiVersion")
+        if change == "member-kind":
+            value["items"][0]["kind"] = "Job"
+        elif change == "member-version":
+            value["items"][0]["apiVersion"] = "v1"
+        elif change == "list-version":
+            value["apiVersion"] = "v1"
+        return json.dumps(value).encode()
+    runner.capture_stdout = response
+    if change == "typed-list":
+        observed = _list(runner, "Deployment")
+        assert len(observed) == 7
+        assert all(item["kind"] == "Deployment" and item["apiVersion"] == "apps/v1" for item in observed)
+    else:
+        with pytest.raises(ValueError, match="list"):
+            _list(runner, "Deployment")
 
 
 @pytest.mark.parametrize("interruption", [None, "pause", "restore"])

@@ -39,6 +39,8 @@ _LISTS = {
     "Pod": "/api/v1/namespaces/loom-staging/pods",
     "HorizontalPodAutoscaler": "/apis/autoscaling/v2/namespaces/loom-staging/horizontalpodautoscalers",
 }
+_API_VERSIONS = {"Deployment": "apps/v1", "ReplicaSet": "apps/v1", "CronJob": "batch/v1",
+                 "Job": "batch/v1", "Pod": "v1", "HorizontalPodAutoscaler": "autoscaling/v2"}
 
 
 class ApplicationWorkloadRunner(Protocol):
@@ -95,11 +97,21 @@ def _list(runner: ApplicationWorkloadRunner, kind: str) -> list[dict[str, object
         env=runner.environment, timeout_seconds=30,
     ))
     metadata, items = _mapping(value.get("metadata")), value.get("items")
-    if (value.get("kind") != kind + "List" or not isinstance(items, list) or len(items) > 1024
+    if (value.get("kind") != kind + "List" or value.get("apiVersion") != _API_VERSIONS[kind]
+            or not isinstance(items, list) or len(items) > 1024
             or not isinstance(metadata.get("resourceVersion"), str) or not metadata["resourceVersion"]
             or metadata.get("continue", "") != "" or metadata.get("remainingItemCount", 0) != 0):
         raise ValueError("application workload list is incomplete")
-    return [_mapping(item) for item in items]
+    documents = []
+    for item in items:
+        document = _mapping(item)
+        # Typed Kubernetes lists omit TypeMeta on members. Bind it to this
+        # validated fixed endpoint/envelope; never accept conflicting metadata.
+        if (document.get("kind", kind) != kind
+                or document.get("apiVersion", _API_VERSIONS[kind]) != _API_VERSIONS[kind]):
+            raise ValueError("application workload list member type changed")
+        documents.append({**document, "kind": kind, "apiVersion": _API_VERSIONS[kind]})
+    return documents
 
 
 def _owner(document: Mapping[str, object]) -> tuple[str, str, str] | None:

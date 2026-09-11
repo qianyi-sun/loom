@@ -153,6 +153,7 @@ async def test_real_workload_pause_and_sql_recovery_survive_lost_patch_ack(
                     mode[0] = "restore"
                     lost_ack[0] = True
                 restore_application_workloads(plan, journal=journal, runner=runner, guard=evidence)
+                assert original_inventory == [journal.read_application_workloads(plan)]
                 raise RuntimeError("workload section verified; no handoff terminal")
 
             with monkeypatch.context() as transport:
@@ -164,7 +165,6 @@ async def test_real_workload_pause_and_sql_recovery_survive_lost_patch_ack(
                 with pytest.raises(RuntimeError, match="workload section verified"):
                     journal.execute(plan, [_component(apply)])
             assert len(completions) == 2 and len(patched) == 16
-            assert original_inventory == [journal.read_application_workloads(plan)]
             assert all(item.original_value == 1 for item in original_inventory[0] if item.kind == "Deployment")
             assert batch.read_namespaced_cron_job(cron.metadata.name, _NAMESPACE).spec.suspend is True
             _wait(lambda: len(pods()) == 8 and all(p.status.phase == "Running" for p in pods()),
