@@ -189,6 +189,8 @@ def fixture(
     )
     if kind == "protected":
         claim.update(receipt_sha256="a" * 64, worker_incarnation=IDENTITY, claim_high_water=7)
+    else:
+        claim["claim_id"] = "33333333-3333-4333-8333-333333333333"
     payload = dict(
         schema="loom.task-image-execution-grant/v2",
         grant_id=IDENTITY,
@@ -249,7 +251,7 @@ def test_complete_signed_evidence_accepts_historical_build_and_returns_no_start(
 
 
 @pytest.mark.parametrize(
-    "field", ["trial_id", "team_id", "worker_id", "worker_lease_epoch", "trial_attempt_count"]
+    "field", ["trial_id", "team_id", "worker_id", "worker_lease_epoch", "trial_attempt_count", "claim_id"]
 )
 def test_signed_claim_cannot_replace_independent_claim_authority(field):
     payload, key, kwargs = fixture()
@@ -426,6 +428,34 @@ def test_caller_constructed_claim_cannot_bypass_validation():
     kwargs["expected_claim"] = claim
     with pytest.raises(ValueError):
         module().verify_execution_grant(**kwargs)
+
+
+def test_legacy_claim_requires_nonrefundable_identity():
+    # node_setup_health refunds attempt_count before requeue; the same worker
+    # can legitimately reclaim with every field below unchanged. None identifies
+    # that new claim. The scheduler must persist a separate ID atomically.
+    ambiguous = dict(
+        kind="legacy", trial_id=IDENTITY, team_id=IDENTITY, worker_id=IDENTITY,
+        worker_lease_epoch=2, trial_attempt_count=3,
+    )
+    with pytest.raises(ValueError, match="claim_id"):
+        module().decode_execution_claim(rfc8785.dumps(ambiguous))
+
+
+def test_old_grant_cannot_authorize_refunded_attempt_reclaim():
+    payload, _, kwargs = fixture()
+    successor = dict(payload["claim"], claim_id="44444444-4444-4444-8444-444444444444")
+    kwargs["expected_claim"] = module().decode_execution_claim(rfc8785.dumps(successor))
+    with pytest.raises(ValueError, match="claim, lifetime or attachment binding"):
+        module().verify_execution_grant(**kwargs)
+
+
+@pytest.mark.parametrize("claim_id", [None, "", "0" * 32, "00000000-0000-0000-0000-000000000000", 7])
+def test_legacy_claim_id_must_be_nonzero_canonical_uuid(claim_id):
+    payload, _, _ = fixture()
+    payload["claim"]["claim_id"] = claim_id
+    with pytest.raises(ValueError, match="claim_id"):
+        module().decode_execution_claim(rfc8785.dumps(payload["claim"]))
 
 
 @pytest.mark.parametrize(
