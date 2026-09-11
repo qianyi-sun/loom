@@ -1,6 +1,7 @@
 """Protected registry publication must not drop another owner or rotation."""
 
 import os
+import stat
 from hashlib import sha256
 from importlib import import_module
 
@@ -28,7 +29,7 @@ def test_registry_locks_private_directory_and_preserves_exact_replay(tmp_path):
         assert reopened.current is None
 
 
-@pytest.mark.parametrize("boundary", ["mode", "symlink", "invalid-file", "file-symlink", "file-mode"])
+@pytest.mark.parametrize("boundary", ["mode", "symlink", "invalid-file", "file-symlink", "file-mode", "fifo"])
 def test_registry_rejects_unsafe_or_invalid_existing_state(tmp_path, boundary):
     registry = registry_type()
     directory = tmp_path / "registry"
@@ -39,6 +40,8 @@ def test_registry_rejects_unsafe_or_invalid_existing_state(tmp_path, boundary):
         link = tmp_path / "link"
         link.symlink_to(directory, target_is_directory=True)
         directory = link
+    elif boundary == "fifo":
+        os.mkfifo(directory / "management.json", mode=0o600)
     else:
         path = _owner_file(directory / "management.json", b'{"schema_version":1}')
         if boundary == "file-mode":
@@ -52,10 +55,14 @@ def test_registry_rejects_unsafe_or_invalid_existing_state(tmp_path, boundary):
 
 
 def test_registry_atomic_publication_and_stale_writer_fencing(tmp_path, monkeypatch):
+    from loom.personal_dev_build_platform_requests import runtime_installation_digest
+    from loom_capacity_build_guard.installation_store import (
+        BuildGuardInstallationV1,
+        RetainedBuildInstallation,
+        _identity,
+    )
     from tests.integration.test_personal_dev_build_management_service import inputs
     from tests.unit.test_personal_dev_build_admission import admission_input
-    from loom_capacity_build_guard.installation_store import BuildGuardInstallationV1, RetainedBuildInstallation, _identity
-    from loom.personal_dev_build_platform_requests import runtime_installation_digest
 
     # Static candidate facts suffice here; startup/installer separately validate
     # committed private DB evidence. This test covers only filesystem authority.
@@ -79,6 +86,8 @@ def test_registry_atomic_publication_and_stale_writer_fencing(tmp_path, monkeypa
         writer.publish(proposed)
     wire = (directory / "management.json").read_bytes()
     assert wire == canonical_bytes(management)
+    snapshot = directory / f"management-{sha256(wire).hexdigest()}.json"
+    assert snapshot.read_bytes() == wire
     assert os.stat(directory / "management.json").st_mode & 0o777 == 0o600
     with registry(directory) as writer:
         assert writer.current == management
@@ -100,7 +109,59 @@ def test_registry_atomic_publication_and_stale_writer_fencing(tmp_path, monkeypa
         with pytest.raises(OSError):
             writer.publish(proposed)
         assert (directory / "management.json").read_bytes() == wire
-        assert sorted(path.name for path in directory.iterdir()) == ["management.json"]
+        assert not any(path.name.endswith(".tmp") for path in directory.iterdir())
+        assert snapshot.read_bytes() == wire
         monkeypatch.setattr(os, "replace", original)
         writer.publish(proposed)
     assert BuildManagementServiceConfigV1.model_validate_json((directory / "management.json").read_bytes()).scopes == (scope, successor)
+    assert snapshot.read_bytes() == wire
+
+
+def test_registry_replay_reestablishes_durability_after_post_rename_sync_failure(tmp_path, monkeypatch):
+    from tests.integration.test_personal_dev_build_scope_installer import installer_config
+
+    module, config = installer_config(tmp_path, "private_build_owner")
+    scope = module.prepare_build_scope_installation(config).scope
+    directory = tmp_path / "registry"
+    original = os.fsync
+    attempts = []
+
+    def fail_directory(descriptor):
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            attempts.append("directory")
+            raise OSError("test-only directory sync failure after rename")
+        original(descriptor)
+
+    monkeypatch.setattr(os, "fsync", fail_directory)
+    for _attempt in range(2):
+        with registry_type()(directory) as registry:
+            proposed = registry.propose(scope, expected_sha256=None)
+            with pytest.raises(OSError, match="sync failure"):
+                registry.publish(proposed)
+        assert (directory / "management.json").read_bytes() == canonical_bytes(proposed)
+    assert attempts == ["directory", "directory"]
+    monkeypatch.setattr(os, "fsync", original)
+    with registry_type()(directory) as registry:
+        registry.publish(registry.propose(scope, expected_sha256=None))
+
+
+def test_reporter_file_retry_recovers_linked_but_unsynced_materialization(tmp_path, monkeypatch):
+    directory = tmp_path / "registry"
+    directory.mkdir(mode=0o700)
+    original = os.fsync
+
+    def fail_directory(descriptor):
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError("test-only reporter directory sync failed")
+        original(descriptor)
+
+    monkeypatch.setattr(os, "fsync", fail_directory)
+    for _ in range(2):
+        with registry_type()(directory) as registry:
+            with pytest.raises(OSError, match="sync failed"):
+                registry.retain_reporter_file("bearer_token", b"test-only-owner-reporter")
+    assert len(list(directory.iterdir())) == 1
+    monkeypatch.setattr(os, "fsync", original)
+    with registry_type()(directory) as registry:
+        retained = registry.retain_reporter_file("bearer_token", b"test-only-owner-reporter")
+        assert retained.read() == b"test-only-owner-reporter"

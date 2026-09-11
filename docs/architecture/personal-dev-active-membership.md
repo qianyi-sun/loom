@@ -506,8 +506,37 @@ Parallel scope loops share the private admission connection pool. Shutdown stops
 all loops before closing their clients and then that private engine. Partial
 startup failure closes previously constructed clients too. Neither this
 configuration nor loop health changes builder availability or native readiness.
-Owner onboarding still needs the protected installer to retain and materialize
-these scopes; this is not automatic personal-namespace provisioning.
+The protected scope installer retains and materializes these scopes. Applying
+the resulting pinned configuration to a service remains a separate protected
+rollout; this is not automatic personal-namespace provisioning.
+
+`python -m loom_capacity_build_guard.installer --config-file <private-file>
+--config-sha256 <approved-digest>` consumes an exact owner-only canonical
+`BuildScopeInstallConfigV1`. It joins the retained typed create/update envelope,
+approved release evidence, complete native pool policies, separate management
+and reporter credentials, and private non-login database owner role. Credential
+clients consume verified snapshots. The installer checks retained deployment
+facts before sending membership, then commits guard retention before publishing
+the recovery registry. Output contains only the immutable snapshot path, digest
+and mode.
+Errors do not print connection strings or tokens.
+
+The registry directory must already exist as current-UID-owned `0700` storage
+outside feature source; `management.json` is canonical `0600` data. Directory
+locking and expected-hash comparison fence simultaneous onboarding writers
+before membership submission. Publication retains all existing owners and
+rotated scopes, fsyncs the file, atomically replaces it, and fsyncs the directory.
+Each publication also retains `management-<sha256>.json`; services pin this
+immutable snapshot, never the mutable `management.json` head. Reporter token
+and TLS files are copied from verified bytes into separate digest-named `0600`
+files in this private registry. Rotating installer input paths cannot invalidate
+an older service snapshot. Management tokens and owner database credentials
+are never materialized into the service registry.
+An exact replay also retries directory durability after a lost post-rename sync.
+Neither lost HTTP replies nor failed local output create a fresh request key.
+This path does not install schemas, activate execution, issue grants, enable
+intake, or restart services. The new registry digest must be adopted through
+protected service rollout and startup verification before consumers are running.
 
 Protected onboarding uses `/v2/personal-memberships/checkpoint` and the typed
 `PUT /v2/personal-memberships/{subject_id}` transport. Both require the unbound

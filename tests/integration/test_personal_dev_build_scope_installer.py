@@ -9,17 +9,35 @@ import httpx
 import pytest
 from cryptography.hazmat.primitives import serialization
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
-from loom.personal_dev_typed_membership_client import CapacityManagerPersonalDevTypedMembershipClient, PersonalDevTypedMembershipEnvelopeV1
+from loom.personal_dev_typed_membership_client import (
+    CapacityManagerPersonalDevTypedMembershipClient,
+    PersonalDevTypedMembershipEnvelopeV1,
+)
 from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 from loom_capacity_manager.executable_contracts import canonical_executable_digest
 from loom_capacity_manager.membership_contracts import PersonalMembershipCheckpointV1
 from loom_capacity_manager.membership_digest import canonical_membership_event_head
-from loom_capacity_manager.typed_membership_commands import PersonalMembershipResultV2, derive_build_member
-from loom_service.personal_dev_build_management import BuildManagementFileV1, BuildManagementServiceConfigV1
-from tests.integration.test_capacity_manager_mtls import _new_ca, _private_key_bytes, _signed_certificate
-from tests.integration.test_personal_dev_build_guard_installations import owner_sessions as owner_sessions
-from tests.integration.test_personal_dev_build_guard_migrations import build_guard_database as build_guard_database
+from loom_capacity_manager.typed_membership_commands import (
+    PersonalMembershipResultV2,
+    derive_build_member,
+)
+from loom_service.personal_dev_build_management import (
+    BuildManagementFileV1,
+    BuildManagementServiceConfigV1,
+)
+from tests.integration.test_capacity_manager_mtls import (
+    _new_ca,
+    _private_key_bytes,
+    _signed_certificate,
+)
+from tests.integration.test_personal_dev_build_guard_installations import (
+    owner_sessions as owner_sessions,
+)
+from tests.integration.test_personal_dev_build_guard_migrations import (
+    build_guard_database as build_guard_database,
+)
 from tests.unit.test_capacity_agent_client import _configuration, _owner_file
 from tests.unit.test_capacity_typed_membership_commands import typed_build_mutation
 from tests.unit.test_personal_dev_build_runtime_installation import installation_input
@@ -147,8 +165,91 @@ async def test_installer_rejects_inconsistent_protected_inputs_before_membership
     async with httpx.AsyncClient(transport=httpx.MockTransport(forbidden)) as http:
         manager = CapacityManagerPersonalDevTypedMembershipClient(manager_origin=config.manager_origin,
             bearer_token="test-only-private-membership-manager", http_client=http)
-        with pytest.raises(Exception):
+        with pytest.raises((ValueError, DBAPIError)):
             prepared = module.prepare_build_scope_installation(config)
             await module.install_build_scope(prepared, sessions=sessions, manager=manager)
     async with sessions() as session:
         assert await session.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.installations")) == 0
+
+
+async def test_installer_output_loads_actual_private_service_runtime(owner_sessions, build_guard_database, tmp_path):
+    from types import SimpleNamespace
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from loom_service.personal_dev_build_management import build_personal_build_management_runtime
+
+    sessions, owner = owner_sessions
+    module, config = installer_config(tmp_path, owner)
+    prepared = module.prepare_build_scope_installation(config)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200,
+        content=canonical_bytes(response_for(config)), headers={"Content-Type": "application/json"}))) as http:
+        manager = CapacityManagerPersonalDevTypedMembershipClient(manager_origin=config.manager_origin,
+            bearer_token="test-only-private-membership-manager", http_client=http)
+        result = await module.install_build_scope(prepared, sessions=sessions, manager=manager)
+    # A later installer input rotation cannot invalidate an installed snapshot.
+    _owner_file(tmp_path / "reporter.token", b"later-input-rotation")
+    engine = create_async_engine(build_guard_database[4].set(drivername="postgresql+psycopg"), isolation_level="SERIALIZABLE")
+    try:
+        settings = SimpleNamespace(personal_dev_build_management_config_file=tmp_path / "registry" / f"management-{sha256(canonical_bytes(result)).hexdigest()}.json",
+            personal_dev_build_management_config_sha256=sha256(canonical_bytes(result)).hexdigest())
+        admission = SimpleNamespace(mode="native-claims", sessions=async_sessionmaker(engine))
+        runtime = await build_personal_build_management_runtime(settings, admission=admission)
+        assert len(runtime.managers) == len(runtime.clients) == 1
+        assert runtime.clients[0]._configuration == prepared.scope.reporter
+        await runtime.aclose()
+        assert runtime.clients[0]._http.is_closed
+    finally:
+        await engine.dispose()
+
+
+async def test_installer_second_owner_preserves_first_snapshot_and_fences_stale_registry(owner_sessions, tmp_path):
+    from loom_capacity_manager.build_value_contracts import personal_build_subject_id
+
+    sessions, owner = owner_sessions
+    module, first = installer_config(tmp_path, owner)
+    second_path = tmp_path / "second-owner"
+    second_path.mkdir()
+    _module, second = installer_config(second_path, owner)
+    request = second.envelope.request
+    owner_id, incarnation, reporter_id = uuid4(), uuid4(), uuid4()
+    subject_id = personal_build_subject_id(request.namespace_id, owner_id)
+    reporter_token = b"test-only-second-owner-reporter"
+    _owner_file(second_path / "reporter.token", reporter_token)
+    token_file = second.reporter_credentials.bearer_token.model_copy(update={"sha256": sha256(reporter_token).hexdigest()})
+    first_result = response_for(first)
+    request = request.model_copy(update={"expected_revision": first_result.revision,
+        "command": request.command.model_copy(update={
+            "projection": request.command.projection.model_copy(update={"owner_id": owner_id, "subject_incarnation": incarnation,
+                "demand_reporter_incarnation": reporter_id, "demand_reporter_token_sha256": token_file.sha256, "operation_id": uuid4()}),
+            "acknowledgement": request.command.acknowledgement.model_copy(update={"subject_id": subject_id,
+                "subject_incarnation": incarnation, "reporter_incarnation": reporter_id})})})
+    second = second.model_copy(update={"registry_directory": first.registry_directory,
+        "reporter_credentials": second.reporter_credentials.model_copy(update={"bearer_token": token_file}),
+        "reporter": second.reporter.model_copy(update={"subject_id": subject_id, "subject_incarnation": incarnation, "reporter_incarnation": reporter_id}),
+        "envelope": second.envelope.model_copy(update={"request": request, "idempotency_key": uuid4(),
+            "expected_checkpoint": second.envelope.expected_checkpoint.model_copy(update={"revision": first_result.revision,
+                "head_sha256": first_result.head_sha256})})})
+    sent = []
+    current = first
+
+    async def handle(request):
+        sent.append(request.content)
+        return httpx.Response(200, content=canonical_bytes(response_for(current)), headers={"Content-Type": "application/json"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        manager = CapacityManagerPersonalDevTypedMembershipClient(manager_origin=first.manager_origin,
+            bearer_token="test-only-private-membership-manager", http_client=http)
+        initial = await module.install_build_scope(module.prepare_build_scope_installation(first), sessions=sessions, manager=manager)
+        initial_wire = canonical_bytes(initial)
+        with pytest.raises(ValueError, match="registry changed"):
+            await module.install_build_scope(module.prepare_build_scope_installation(second), sessions=sessions, manager=manager)
+        assert len(sent) == 1
+        current = second.model_copy(update={"expected_registry_sha256": sha256(initial_wire).hexdigest()})
+        result = await module.install_build_scope(module.prepare_build_scope_installation(current), sessions=sessions, manager=manager)
+        assert result.scopes[0] == initial.scopes[0]
+        assert {scope.installation.owner_user_id for scope in result.scopes} == {first_result.member.owner_id, owner_id}
+    assert (tmp_path / "registry" / f"management-{sha256(initial_wire).hexdigest()}.json").read_bytes() == initial_wire
+    assert all(b"test-only-private-membership-manager" not in path.read_bytes() for path in (tmp_path / "registry").iterdir())
+    async with sessions() as session:
+        assert await session.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.installations")) == 2
