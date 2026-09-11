@@ -290,7 +290,13 @@ one NUL byte, and original canonical grant bytes. The verified result's
 `envelope_sha256` identifies the **complete envelope**, not the inner digest.
 
 Both claim variants bind trial/team/worker-registration UUIDs, actual worker lease
-epoch and trial attempt count. The explicitly discriminated protected variant
+epoch and trial attempt count. The ordinary variant additionally requires a
+nonzero `claim_id`, created and persisted atomically by its future scheduler
+adapter for each new claim. It must remain stable for that claim's grant refreshes
+and change on requeue/reclaim, even when `node_setup_health` refunds attempt count.
+Neither the grant issuer nor the worker may invent or derive it from refundable
+counters or a timestamp. The current ordinary scheduler has no such identity and
+remains V2-ineligible until that adapter exists. The explicitly discriminated protected variant
 additionally binds the canonical protected receipt digest, actual worker
 incarnation UUID and claim high-water; these cannot be inferred from ordinary
 trial attempt count. The expected claim and purpose come from independent

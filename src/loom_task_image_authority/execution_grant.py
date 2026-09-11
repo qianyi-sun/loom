@@ -80,6 +80,10 @@ class _ExecutionClaim(_ClosedPublicationModel):
 
 class LegacyExecutionClaim(_ExecutionClaim):
     kind: Literal["legacy"]
+    # Created and persisted by the scheduler for each claim, never synthesized
+    # by the grant issuer/worker. Trial attempt_count is refundable on setup
+    # failure and therefore cannot fence a later claim of the same trial.
+    claim_id: CanonicalUUID
 
 
 class ProtectedExecutionClaim(_ExecutionClaim):
