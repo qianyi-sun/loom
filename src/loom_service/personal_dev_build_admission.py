@@ -74,6 +74,17 @@ async def _assert_private_agent(connection: AsyncConnection) -> None:
     namespace = await connection.scalar(text("SELECT to_regnamespace('loom_capacity_build_guard')"))
     if namespace is None:
         raise RuntimeError("build admission private guard is absent")
+    safe_owner = await connection.scalar(
+        text("""
+        SELECT NOT (r.rolcanlogin OR r.rolinherit OR r.rolsuper OR r.rolcreatedb
+            OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls)
+            AND NOT EXISTS (SELECT 1 FROM pg_auth_members WHERE member=r.oid)
+        FROM pg_namespace n JOIN pg_roles r ON r.oid=n.nspowner
+        WHERE n.nspname='loom_capacity_build_guard'
+    """)
+    )
+    if safe_owner is not True:
+        raise RuntimeError("build admission private owner privilege changed")
     safe_schema = await connection.scalar(
         text("""
         SELECT has_schema_privilege(current_user,'loom_capacity_build_guard','USAGE')
@@ -101,7 +112,9 @@ async def _assert_private_agent(connection: AsyncConnection) -> None:
                     AND EXISTS (SELECT 1 FROM aclexplode(p.proacl) a
                         WHERE a.grantee=(SELECT oid FROM pg_roles WHERE rolname=current_user)
                             AND a.privilege_type='EXECUTE' AND NOT a.is_grantable)
-                    AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee=0))
+                    AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a
+                        WHERE a.grantee NOT IN (p.proowner,
+                            (SELECT oid FROM pg_roles WHERE rolname=current_user))))
         """),
             {"signature": f"loom_capacity_build_guard.{signature}"},
         )
