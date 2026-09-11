@@ -2121,6 +2121,13 @@ Permission arrival cannot start a fresh lifetime; late renewals cannot revive
 cleanup. Revocation is bounded by the remaining permission window, not
 instantaneous. An independent deadline monitor and exact runtime cleanup remain
 required, with physical capacity charged until manager terminal/release proof.
+`NativeExecutionDeadline` provides the local serialized state: one pending
+challenge, request-start BOOTTIME plus the server lifetime, and an irreversible
+stop on expiry, clock failure, protocol error, cancellation or cleanup. It
+subtracts transport and validation delay, refuses renewals across an expired
+older permission, and never falls back to a suspend-blind clock. This helper
+does not schedule its own timer, start/kill children, persist one-shot exclusion,
+or prove physical release; the independent runtime watchdog must consume it.
 The route requires `native-execution`, which production service configuration
 currently rejects. Isolated route tests exercise it without opening installed
 execution; source/claim receipts remain inert and no runtime launcher is enabled.
