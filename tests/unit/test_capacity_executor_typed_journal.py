@@ -16,6 +16,10 @@ from tests.unit.test_capacity_executor_typed_launch_renderer import typed_contex
 def typed_executor(tmp_path, *, pool="oldlab", purpose="personal-build-worker", policy_change=None):
     legacy, journal, manager, admission, slurm, _ = executor_fixture(tmp_path, work=None)
     context = typed_context(pool=pool, purpose=purpose)
+    from unittest.mock import AsyncMock
+
+    admission.purpose = lambda binding: purpose
+    manager.launch_subject = AsyncMock(return_value=facts(context))
     registration = legacy.registration.model_copy(
         update={
             "execution": ExecutionContextV2.model_validate(
