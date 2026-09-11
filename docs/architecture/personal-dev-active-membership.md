@@ -2207,7 +2207,17 @@ stop message without retries; silence or a stuck helper still expires independen
 in the monitor. The disposable supervised KVM fixture uses this adapter with a
 fixture-only authority client, including a blocked renewal. This is not installed
 helper composition or an authenticated live-service acceptance result.
-These fixtures remain rootful and offline (`--network=none`); restricted external
+The rootless prerequisite fixture now starts the pinned RootlessKit as container
+UID/GID 1000, with only the packaged UID/GID mapping-helper capabilities in its
+bounding set. A caller-created user/mount/network namespace then runs the same
+fixed KVM runtime command successfully. It changes no host policy and does not
+certify Docker's host UID mapping, installed AppArmor/subordinate-ID policy, or
+the complete BuildKit/death chain. A separate real mapping probe confirms that
+the mapped namespace's trusted reader can read private mode-0700 builder output
+while the original outer UID cannot. The IO composition must keep verification
+in the mapped ownership context or explicitly transfer the artifact; it must not
+assume the outer helper can traverse private subordinate-UID directories.
+The complete supervised-build fixtures remain rootful and offline (`--network=none`); restricted external
 dependency fetching, protected material/rootless installation, Slurm containment,
 ARM64 supervision, authenticated IO-helper composition and native artifact GC
 remain acceptance gaps before installed intake can be enabled.

@@ -44,6 +44,7 @@ BUILDERS = {
     "x86_64": "sha256:23099633b78bce84207e7a2418df1b941a360163a7d13b3f514f180bc29a89f9",
     "aarch64": "sha256:fff10d1d2fe52187693498edbda9e40b88c9a3c0a4b66515a7c113b89b825ff6",
 }
+BUSYBOX = "busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616"
 
 
 def checked(*args, **kwargs):
@@ -76,6 +77,90 @@ def prepare_runtime(tmp_path, arch):
             target.write_bytes(payload)
             target.chmod(0o555)
     return runtime
+
+
+def test_rootless_private_output_requires_mapped_reader():
+    """Mode-0700 mapped output is not readable by the original outer UID."""
+    if platform.machine() != "x86_64":
+        pytest.skip("rootless ownership fixture currently requires AMD64")
+    name = "loom-rootless-ownership-" + uuid4().hex
+    try:
+        result = checked("docker", "run", "--rm", "--init", "--name", name,
+            "--network=none", "--cpus=1", "--memory=256m", "--pids-limit=64",
+            "--user=1000:1000", "--cap-drop=ALL", "--cap-add=SETUID", "--cap-add=SETGID",
+            "--security-opt=apparmor=unconfined", "--security-opt=seccomp=unconfined", "--read-only",
+            "--tmpfs=/tmp:rw,nodev,size=64m,mode=1777",
+            "--mount", f"type=bind,src={ROOT / 'tests/support/native_kvm'},dst=/test-support,readonly",
+            "--entrypoint=/usr/bin/python3", "ghcr.io/qianyi-sun/loom-personal-dev-builder@" + BUILDERS["x86_64"],
+            "/test-support/rootless_ownership.py", "outer", capture_output=True, text=True)
+        assert "mapped-helper-read-private-output" in result.stdout
+        assert "outer-helper-cannot-read-private-output" in result.stdout
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(f"rootless ownership prerequisite failed:\n{exc.stdout}\n{exc.stderr}")
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
+
+
+def test_unprivileged_rootlesskit_launches_fixed_native_kvm_runtime(tmp_path):
+    """Rootless outer runtime prerequisite, not complete native build acceptance.
+
+    Use the pinned builder's real RootlessKit/newuidmap files at their packaged
+    paths. No host sysctl, AppArmor profile, subordinate ID or group mutation.
+    Docker itself remains a privileged disposable test harness. RootlessKit
+    starts as container UID/GID 1000 with only SETUID/SETGID in the bounding set
+    for its packaged mapping helpers; Docker's host UID mapping is not certified.
+    """
+    from loom_capacity_executor.native_runsc import NativeRunscLayout
+
+    arch = platform.machine()
+    if arch != "x86_64" or not Path("/dev/kvm").exists():
+        pytest.skip("rootless prerequisite fixture currently requires AMD64 KVM")
+    runtime = prepare_runtime(tmp_path, arch)
+    rootfs, pause = tmp_path / "rootfs", tmp_path / "pause"
+    rootfs.mkdir(mode=0o755)
+    pause.mkdir(mode=0o755)
+    name = "loom-rootless-kvm-" + uuid4().hex
+    export_name = name + "-rootfs"
+    try:
+        checked("docker", "create", "--name", export_name, BUSYBOX, capture_output=True)
+        exported = checked("docker", "export", export_name, capture_output=True).stdout
+        # Only immutable trusted image bytes; never personal source extraction.
+        with tarfile.open(fileobj=io.BytesIO(exported)) as archive:
+            archive.extractall(rootfs, filter="fully_trusted")
+    finally:
+        subprocess.run(["docker", "rm", "-f", export_name], capture_output=True, timeout=20, check=False)
+    spec = {
+        "ociVersion": "1.2.0", "root": {"path": "/rootfs", "readonly": True},
+        "process": {"terminal": False, "user": {"uid": 1000, "gid": 1000},
+            "args": ["/bin/sh", "-c", "test -f /proc/gvisor/kernel_is_gvisor && test $(id -u) = 1000 && echo native-rootless-kvm-ok"],
+            "env": ["PATH=/bin:/usr/bin", "LANG=C.UTF-8"], "cwd": "/",
+            "capabilities": {key: [] for key in ("bounding", "effective", "inheritable", "permitted", "ambient")},
+            "noNewPrivileges": True},
+        "mounts": [{"destination": "/proc", "type": "proc", "source": "proc", "options": ["nosuid", "noexec", "nodev"]},
+            {"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "mode=755", "size=65536k"]},
+            {"destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "mode=1777", "size=65536k"]}],
+        "linux": {"namespaces": [{"type": kind} for kind in ("pid", "network", "ipc", "uts", "mount")]},
+    }
+    (pause / "config.json").write_text(json.dumps(spec))
+    layout = NativeRunscLayout(Path("/runtime/runsc"), Path("/tmp/runsc-state"), Path("/bundles"), "a" * 64)
+    try:
+        result = checked("docker", "run", "--rm", "--init", "--name", name,
+            "--network=none", "--cpus=2", "--memory=1g", "--pids-limit=256",
+            "--user=1000:1000", f"--group-add={Path('/dev/kvm').stat().st_gid}", "--device=/dev/kvm",
+            "--cap-drop=ALL", "--cap-add=SETUID", "--cap-add=SETGID",
+            "--security-opt=apparmor=unconfined", "--security-opt=seccomp=unconfined", "--read-only",
+            "--tmpfs=/tmp:rw,nodev,size=256m,mode=1777",
+            "--mount", f"type=bind,src={runtime},dst=/runtime,readonly",
+            "--mount", f"type=bind,src={rootfs},dst=/rootfs,readonly",
+            "--mount", f"type=bind,src={pause},dst=/bundles/pause,readonly",
+            "--entrypoint=/usr/bin/rootlesskit", "ghcr.io/qianyi-sun/loom-personal-dev-builder@" + BUILDERS[arch],
+            "--net=none", "--state-dir=/tmp/rootless-probe",
+            *layout.command("start", "pause"), capture_output=True, text=True)
+        assert "native-rootless-kvm-ok" in result.stdout
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(f"rootless native KVM prerequisite failed:\n{exc.stdout}\n{exc.stderr}")
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
 
 
 @pytest.mark.parametrize("root_stop", ["signal", "launcher-death", "supervisor-death", "monitored", "monitored-expiry"])
