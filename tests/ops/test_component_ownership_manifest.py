@@ -1486,6 +1486,10 @@ def test_manifest_integration_shard_pins_are_exact_and_target_second_shard() -> 
         ("tests/integration/test_executable_global_capacity_bridge.py", 1),
         ("tests/integration/test_capacity_manager_migrate.py", 1),
         ("tests/integration/test_migration_task_set_materialization_jobs.py", 1),
+        ("tests/integration/test_personal_dev_build_guard_http.py", 1),
+        ("tests/integration/test_capacity_manager_execution_store.py", 1),
+        ("tests/integration/test_capacity_final_release_witness.py", 1),
+        ("tests/integration/test_capacity_typed_terminal_sql.py", 1),
     }
 
 
