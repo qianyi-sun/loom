@@ -359,6 +359,7 @@ def test_executor_role_is_distinct_and_has_only_bounded_guard_procedures(
             "admit_executable_claim",
             "begin_executable_worker_drain",
             "bind_executable_slurm_job",
+            "observe_current_executable_bootstrap",
             "observe_executable_intent",
             "prepare_executable_worker",
             "register_executable_worker",
