@@ -342,8 +342,9 @@ Purpose resolution does not require an unexpired manager launch permit, preservi
 cleanup access after cancellation/expiry. The backend still validates protected
 installation authority. Unsupported native lifecycle methods reject before loading
 credentials; they never fall back to application admission. This router is not
-yet wired into an activation artifact: V2 remains unchanged and typed execution
-stays disabled until all lifecycle and allocation-contained consumers are complete.
+used by legacy V2 activation. The distinct V3 artifact below composes it with
+typed policy, but execution stays disabled until all lifecycle and
+allocation-contained consumers are complete.
 
 The native unsubmitted close consumer can revoke before first preparation. It
 requires a retained exact bootstrap proposal, checkpoint-covered journal, no job
@@ -362,6 +363,19 @@ binding, bootstrap epoch/evidence and next command sequence before revoking.
 An absent close or another owner's work does not authorize cancellation. Physical
 or ambiguous submissions still require separate terminal cleanup; the public
 typed execution interlock stays closed.
+
+`ActivationRuntimeArtifactV3` and its explicit pinned loader compose the exact
+typed admission file, complete purpose/profile policy, approved profile digest,
+execution fence and controller-local manifest. Assembly verifies route executor,
+configuration epoch and allowed purpose before acquiring runtime resources, and
+checks pool/Slurm identity and trusted launcher release across profiles. Journal
+ownership is released on partial construction failure. V2 wire fields and its
+separate loader/assembly remain compatible and reject V3 input. The shared nested
+Slurm JSON boundary round-trips strict tuple data without accepting coerced CPU
+quantities. This assembly has no positive CLI activation path: public typed
+tick/recovery gates remain closed. Router purpose must additionally agree with
+manager-authenticated launch facts before launch is enabled; native physical
+cleanup, claims/exchange, protected release and contained execution remain required.
 
 Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
 preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release

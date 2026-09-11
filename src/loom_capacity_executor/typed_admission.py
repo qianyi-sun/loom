@@ -94,6 +94,22 @@ _BUILD_CONSUMERS = frozenset({
 })
 
 
+def load_typed_admission_directory(
+    path: Path, *, expected_sha256: str, executor: BuildAdmissionExecutorV1,
+) -> TypedAdmissionDirectoryV3:
+    root = PinnedAdmissionFileV1(path=str(path), sha256=expected_sha256)
+    identity = BuildAdmissionExecutorV1.model_validate_json(executor.model_dump_json())
+    wire = read_owner_only_bytes(Path(root.path), max_bytes=MAX_CONTRACT_BYTES)
+    if not hmac.compare_digest(sha256(wire).hexdigest(), root.sha256):
+        raise ValueError("typed admission directory digest changed")
+    document = TypedAdmissionDirectoryV3.model_validate_json(wire)
+    if canonical_executable_bytes(document) != wire:
+        raise ValueError("typed admission directory is not canonical")
+    if document.executor != identity:
+        raise ValueError("typed admission executor binding changed")
+    return document
+
+
 class TypedAdmissionRouter:
     """Verify the immutable directory on every operation and dispose its client."""
 
@@ -110,15 +126,8 @@ class TypedAdmissionRouter:
         self._load_verified()
 
     def _load_verified(self) -> TypedAdmissionDirectoryV3:
-        wire = read_owner_only_bytes(Path(self._root.path), max_bytes=MAX_CONTRACT_BYTES)
-        if not hmac.compare_digest(sha256(wire).hexdigest(), self._root.sha256):
-            raise ValueError("typed admission directory digest changed")
-        document = TypedAdmissionDirectoryV3.model_validate_json(wire)
-        if canonical_executable_bytes(document) != wire:
-            raise ValueError("typed admission directory is not canonical")
-        if document.executor != self._executor:
-            raise ValueError("typed admission executor binding changed")
-        return document
+        return load_typed_admission_directory(Path(self._root.path),
+            expected_sha256=self._root.sha256, executor=self._executor)
 
     def _resolve(self, binding: ExecutableIntentBindingV2) -> TypedAdmissionEntryV3:
         if not isinstance(binding, ExecutableIntentBindingV2):

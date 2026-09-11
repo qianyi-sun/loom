@@ -92,7 +92,7 @@ async def test_typed_runtime_assembles_exact_routes_but_remains_interlocked(tmp_
         build_executable_runtime(config,artifact,manager_client=object(),current_context=artifact.execution)
 
 
-@pytest.mark.parametrize("boundary", ["policy","profiles","local-manifest","route-root","route-epoch","context"])
+@pytest.mark.parametrize("boundary", ["policy","profiles","local-manifest","route-root","route-epoch","route-executor","context"])
 def test_typed_runtime_rejects_drift_before_opening_resources(tmp_path,boundary):
     from pathlib import Path
 
@@ -112,7 +112,8 @@ def test_typed_runtime_rejects_drift_before_opening_resources(tmp_path,boundary)
             path.write_bytes(path.read_bytes()+b" ")
         else:
             routes = TypedAdmissionDirectoryV3.model_validate_json(path.read_bytes())
-            changed = routes.model_copy(update={"entries":(routes.entries[0].model_copy(update={"configuration_epoch":99}),)})
+            changed = (routes.model_copy(update={"executor":routes.executor.model_copy(update={"executor_id":"foreign"})})
+                if boundary == "route-executor" else routes.model_copy(update={"entries":(routes.entries[0].model_copy(update={"configuration_epoch":99}),)}))
             wire = canonical_executable_bytes(changed)
             path.write_bytes(wire)
             artifact = artifact.model_copy(update={"admission":artifact.admission.model_copy(update={"sha256":sha256(wire).hexdigest()})})
@@ -146,3 +147,50 @@ def test_typed_artifact_loader_requires_canonical_pinned_owner_file(tmp_path,bou
     else:
         with pytest.raises((ValueError,RuntimeError,OSError)):
             module.load_typed_activation_runtime_artifact(path,expected_sha256=digest)
+
+
+def test_typed_runtime_rejects_admission_purpose_not_in_launch_policy(tmp_path):
+    from pathlib import Path
+
+    from loom_capacity_executor.typed_admission import PinnedBuildAdmissionConnectionV1
+
+    module,config,artifact = runtime_inputs(tmp_path,"oldlab","application-worker")
+    path = Path(artifact.admission.path)
+    routes = TypedAdmissionDirectoryV3.model_validate_json(path.read_bytes())
+    entry = routes.entries[0].model_copy(update={"purpose":"personal-build-worker","database":None,
+        "build":PinnedBuildAdmissionConnectionV1(origin="https://management.test",**pinned_inputs(tmp_path))})
+    routes = TypedAdmissionDirectoryV3.model_validate_json(routes.model_copy(update={"entries":(entry,)}).model_dump_json())
+    wire = canonical_executable_bytes(routes)
+    path.write_bytes(wire)
+    artifact = artifact.model_copy(update={"admission":artifact.admission.model_copy(update={"sha256":sha256(wire).hexdigest()})})
+    with pytest.raises(RuntimeAssemblyError,match="scope"):
+        module.build_typed_executable_runtime(config,artifact,manager_client=object(),current_context=artifact.execution)
+    assert not config.journal_file.exists()
+
+
+@pytest.mark.parametrize("cancelled", [False,True])
+def test_typed_runtime_failed_assembly_releases_journal_lock(tmp_path,cancelled):
+    import asyncio
+
+    from loom_capacity_executor.journal import ExecutorJournal
+
+    module,config,artifact = runtime_inputs(tmp_path,"gb10","personal-build-worker")
+    error = asyncio.CancelledError if cancelled else RuntimeError
+
+    def fail(authority):
+        raise error("construction failed")
+
+    with pytest.raises(error):
+        module.build_typed_executable_runtime(config,artifact,manager_client=object(),current_context=artifact.execution,
+            slurm_backend_factory=fail)
+    with ExecutorJournal(config.journal_file) as reopened:
+        assert reopened.head.sequence == 0
+
+
+@pytest.mark.parametrize("value", ["64",True,64.0])
+def test_typed_artifact_slurm_json_remains_strict(tmp_path,value):
+    module,_config,artifact = runtime_inputs(tmp_path,"oldlab","application-worker")
+    payload = artifact.model_dump(mode="json")
+    payload["slurm_authority"]["resource_ceiling"]["cpus"] = value
+    with pytest.raises(ValueError):
+        module.ActivationRuntimeArtifactV3.model_validate_json(json.dumps(payload))

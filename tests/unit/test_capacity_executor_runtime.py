@@ -466,6 +466,10 @@ def test_activation_runtime_artifact_builds_exact_executor_runtime(tmp_path: Pat
     manager = object()
     admission = object()
     seen: list[SlurmAuthorityV2] = []
+    artifact_path = tmp_path / "legacy-activation.json"
+    artifact_path.write_bytes(canonical_executable_bytes(artifact))
+    artifact_path.chmod(0o600)
+    assert load_activation_runtime_artifact(artifact_path) == artifact
 
     def slurm_factory(authority: SlurmAuthorityV2) -> object:
         seen.append(authority)

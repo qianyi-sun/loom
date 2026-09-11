@@ -223,8 +223,8 @@ class _ResolvedAdmissionBinding:
     database_url: bytes
 
 
-class ActivationRuntimeArtifactV2(StrictV2Model):
-    """Operator-supplied immutable positive runtime artifact for one pool executor."""
+class _ActivationRuntimeArtifactBaseV2(StrictV2Model):
+    """Local identity/path inputs shared by distinct activation wire contracts."""
 
     execution: ExecutionContextV2
     pool_id: Literal["gb10", "oldlab"]
@@ -237,15 +237,23 @@ class ActivationRuntimeArtifactV2(StrictV2Model):
     signing_key_id: Annotated[str, Field(min_length=1, max_length=128)]
     signing_key_sha256: Digest
     immutable_manifest_sha256: Digest
-    admission_directory: Annotated[str, Field(min_length=1, max_length=4096)]
-    admission_directory_sha256: Digest
     handoff_directory: Annotated[str, Field(min_length=1, max_length=4096)]
     journal_file: Annotated[str, Field(min_length=1, max_length=4096)]
     state_directory: Annotated[str, Field(min_length=1, max_length=4096)]
     slurm_authority: SlurmAuthorityV2
     profiles: Annotated[tuple[OperatorLaunchProfileV2, ...], Field(min_length=1)]
 
-    @field_validator("admission_directory", "handoff_directory", "state_directory")
+    @field_validator("slurm_authority", mode="before")
+    @classmethod
+    def _slurm_json_boundary(cls, value: object) -> object:
+        # The executable root normalizes JSON into Python values. Restore the
+        # nested scheduler's strict JSON boundary, where arrays encode tuples;
+        # Python-mode strict validation otherwise rejects its own serialized data.
+        if isinstance(value, dict):
+            return SlurmAuthorityV2.model_validate_json(json.dumps(value, allow_nan=False))
+        return value
+
+    @field_validator("handoff_directory", "state_directory")
     @classmethod
     def _owner_private_directory(cls, value: str) -> str:
         path = _absolute_owner_path(value)
@@ -290,6 +298,18 @@ class ActivationRuntimeArtifactV2(StrictV2Model):
             ):
                 raise ValueError("journal file must be a current-UID-owned 0600 nonsymlink")
         return value
+
+
+class ActivationRuntimeArtifactV2(_ActivationRuntimeArtifactBaseV2):
+    """Operator-supplied immutable legacy runtime artifact for one pool executor."""
+
+    admission_directory: Annotated[str, Field(min_length=1, max_length=4096)]
+    admission_directory_sha256: Digest
+
+    @field_validator("admission_directory")
+    @classmethod
+    def _private_admission_directory(cls, value: str) -> str:
+        return cls._owner_private_directory(value)
 
 
 def _load_owner_runtime_payload(path: Path, *, label: str) -> bytes:
@@ -425,7 +445,7 @@ def build_executable_runtime(
 
 def _assert_config_artifact_binding(
     config: PoolExecutorConfig,
-    artifact: ActivationRuntimeArtifactV2,
+    artifact: _ActivationRuntimeArtifactBaseV2,
 ) -> None:
     if not hmac.compare_digest(
         artifact.approved_profiles_sha256,
