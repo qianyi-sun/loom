@@ -11,7 +11,12 @@ from sqlalchemy import select, update
 
 from loom.db.schema import PersonalDevBuildPlatformRequest, PersonalDevCandidate
 from loom.personal_dev_build_demand import personal_build_work_identity
-from loom_capacity_agent.build_admission import BuildArtifactV1, BuildClaimRequestV1, BuildOutcomeReceiptV1, BuildOutcomeRequestV1
+from loom_capacity_agent.build_admission import (
+    BuildArtifactV1,
+    BuildClaimRequestV1,
+    BuildOutcomeReceiptV1,
+    BuildOutcomeRequestV1,
+)
 from loom_capacity_manager.contracts import canonical_digest
 from tests.integration.test_personal_dev_build_platform_requests import build_service
 from tests.integration.test_personal_dev_native_builder_store import _seed_running_attempt
@@ -22,6 +27,10 @@ from tests.unit.test_native_build_source import sealed_source as sealed_source
 
 @pytest.fixture
 async def attempt_input(sessions, sealed_source, tmp_path):
+    return await make_attempt_input(sessions, sealed_source, tmp_path)
+
+
+async def make_attempt_input(sessions, sealed_source, tmp_path):
     original, _archive, _workspace = sealed_source
     registration = await _seed_running_attempt(sessions, now=datetime.now(UTC))
     values = {name: getattr(original.candidate, name) for name in (
@@ -48,7 +57,7 @@ def receipt_for(registration, member, platform, *, result="artifact-ready"):
     return BuildOutcomeReceiptV1(request=outcome, request_digest=canonical_digest(outcome))
 
 
-@pytest.mark.parametrize("boundary", ["exact", "failed", "cancelled-result", "wrong-request", "bad-digest", "db-error", "timeout", "cancel", "export-failure", "source", "pre-cancel"])
+@pytest.mark.parametrize("boundary", ["exact", "failed", "cancelled-result", "wrong-request", "bad-digest", "db-error", "timeout", "cancel", "export-failure", "resolver-drift", "source", "pre-cancel"])
 async def test_native_attempt_stages_both_platforms_and_never_publishes_partial_work(attempt_input, sessions, boundary):
     module = import_module("loom.personal_dev_native_attempt_executor")
     registration, archive, member, runtime = attempt_input
@@ -67,6 +76,8 @@ async def test_native_attempt_stages_both_platforms_and_never_publishes_partial_
             entered.set()
             if boundary == "db-error":
                 raise RuntimeError("database unavailable")
+            if boundary == "resolver-drift":
+                exporter.accepted_artifact_resolver = None
             if boundary in {"timeout", "cancel"}:
                 await asyncio.Event().wait()
             if observed.count(platform) == 1:
@@ -90,8 +101,10 @@ async def test_native_attempt_stages_both_platforms_and_never_publishes_partial_
                 raise RuntimeError("publication rejected")
             return {"verified-publication": True}
 
+    outcomes, exporter = Outcomes(), Exporter()
+    exporter.accepted_artifact_resolver = outcomes
     executor = module.NativePersonalDevBuildExecutor(session_factory=sessions, member=member, runtime=runtime,
-        outcomes=Outcomes(), exporter=Exporter(), poll_interval_seconds=0.01,
+        outcomes=outcomes, exporter=exporter, poll_interval_seconds=0.01,
         wait_timeout_seconds=0.2 if boundary == "timeout" else 10)
     if boundary == "source":
         archive.write_bytes(b"changed-source")
@@ -123,3 +136,106 @@ async def test_native_attempt_stages_both_platforms_and_never_publishes_partial_
         rows = (await session.scalars(select(PersonalDevBuildPlatformRequest))).all()
         assert len(rows) == 2 and all(row.cancelled_at is not None for row in rows)
     await executor.cleanup(registration)  # Exact replay cannot requeue demand.
+
+
+@pytest.mark.parametrize("boundary", ["legacy-exporter", "foreign-resolver", "infinite-poll", "nan-deadline", "boolean-timeout", "long-poll"])
+async def test_native_attempt_rejects_unbounded_timing_and_legacy_publication(attempt_input, sessions, boundary):
+    from types import SimpleNamespace
+
+    module = import_module("loom.personal_dev_native_attempt_executor")
+    _registration, _archive, member, runtime = attempt_input
+    outcomes = object()
+    exporter = SimpleNamespace(accepted_artifact_resolver=outcomes)
+    timing = {}
+    if boundary == "legacy-exporter":
+        exporter.accepted_artifact_resolver = None
+    elif boundary == "foreign-resolver":
+        exporter.accepted_artifact_resolver = object()
+    elif boundary == "infinite-poll":
+        timing["poll_interval_seconds"] = float("inf")
+    elif boundary == "nan-deadline":
+        timing["wait_timeout_seconds"] = float("nan")
+    elif boundary == "boolean-timeout":
+        timing["wait_timeout_seconds"] = True
+    else:
+        timing.update(wait_timeout_seconds=1, poll_interval_seconds=2)
+    with pytest.raises(ValueError):
+        module.NativePersonalDevBuildExecutor(session_factory=sessions, member=member, runtime=runtime,
+            outcomes=outcomes, exporter=exporter, **timing)
+
+
+async def test_two_owner_whole_attempt_coordinators_route_heartbeat_finish_and_cancel_demand(sessions, sealed_source, tmp_path):
+    from contextlib import asynccontextmanager
+
+    from loom.db.schema import PersonalDevCandidateBuildAttempt
+    from loom.personal_dev_builder import PersonalDevBuildCoordinator
+    from loom.personal_dev_candidate import PersonalDevCandidateLimits
+    from loom_service.personal_dev_builder import SessionPersonalDevBuildAuthority
+    from tests.unit.test_personal_dev_builder import _publication
+
+    module = import_module("loom.personal_dev_native_attempt_executor")
+    router_type = module.NativePersonalDevBuildExecutorRouter
+    inputs = [await make_attempt_input(sessions, sealed_source, tmp_path) for _ in range(2)]
+    async with sessions.begin() as session:
+        await session.execute(update(PersonalDevCandidateBuildAttempt).values(state="queued", claimed_by=None,
+            lease_expires_at=None, started_at=None))
+    entered, release = set(), asyncio.Event()
+    executors, publications = {}, []
+
+    def executor_for(value):
+        registration, _archive, member, runtime = value
+        owner = registration.candidate.owner_user_id
+
+        class Outcomes:
+            async def observe(self, incoming, *, platform):
+                assert incoming.candidate.owner_user_id == owner
+                entered.add(owner)
+                if len(entered) == 2:
+                    release.set()
+                await asyncio.wait_for(release.wait(), timeout=5)
+                # Exercise coordinator heartbeats while both owners are waiting.
+                await asyncio.sleep(0.12)
+                return receipt_for(incoming, member, platform)
+
+        outcomes = Outcomes()
+
+        class Exporter:
+            accepted_artifact_resolver = outcomes
+
+            async def publish(self, incoming):
+                assert incoming.candidate.owner_user_id == owner
+                publications.append(owner)
+                return _publication(incoming.candidate)
+
+        return module.NativePersonalDevBuildExecutor(session_factory=sessions, member=member, runtime=runtime,
+            outcomes=outcomes, exporter=Exporter(), poll_interval_seconds=0.01, wait_timeout_seconds=10)
+
+    for value in inputs:
+        executors[value[0].candidate.owner_user_id] = executor_for(value)
+    router = router_type(executors=executors)
+    executors.clear()  # Caller mutation cannot remove/rebind in-flight ownership.
+
+    @asynccontextmanager
+    async def source(candidate):
+        yield tmp_path / "sealed.tar"
+
+    class Authority(SessionPersonalDevBuildAuthority):
+        heartbeats = 0
+
+        async def heartbeat_build(self, **kwargs):
+            self.heartbeats += 1
+            return await super().heartbeat_build(**kwargs)
+
+    authority = Authority(sessions, limits=PersonalDevCandidateLimits())
+    coordinators = [PersonalDevBuildCoordinator(authority=authority, source=source, executor=router,
+        builder_id=f"native-coordinator-{index}", lease_seconds=10, heartbeat_interval_seconds=0.05) for index in range(2)]
+    assert await asyncio.gather(*(item.build_once(now=datetime.now(UTC)) for item in coordinators)) == [True, True]
+    assert authority.heartbeats >= 2 and set(publications) == entered and len(publications) == 2
+    async with sessions() as session:
+        attempts = (await session.scalars(select(PersonalDevCandidateBuildAttempt))).all()
+        candidates = (await session.scalars(select(PersonalDevCandidate))).all()
+        requests = (await session.scalars(select(PersonalDevBuildPlatformRequest))).all()
+        assert len(attempts) == len(candidates) == 2 and len(requests) == 4
+        assert all(row.state == "succeeded" and row.lease_expires_at is None for row in attempts)
+        assert all(row.status == "ready" for row in candidates)
+        assert all(row.cancelled_at is not None for row in requests)
