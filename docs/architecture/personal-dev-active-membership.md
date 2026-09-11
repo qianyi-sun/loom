@@ -149,6 +149,15 @@ acknowledgement and issues no bootstrap or source capability. Publication,
 closure/release, receipt readback and the native management adapter must be wired
 before intake or readiness can be enabled.
 
+The management plan store decodes the actual SQL preparation response into a
+frozen receipt, checking the complete assignment set against the exact proposal,
+source snapshots and retained runtime installation. It gives the internal
+installation/proposal/assignment document a deterministic canonical digest;
+SQL assignment storage bytes remain distinct from this encoding. Preparation
+requires a caller-owned transaction, and response validation failure rolls back
+its savepoint so a caught error cannot commit unusable holds. This receipt alone
+is not an admission acknowledgement or an execution capability.
+
 Migration `capacity_0021` retains V3 terminal evidence under V4 manifests and
 preserves legacy evidence under V2/V3 manifests. Insertion and predecessor-release
 verification bind the exact historical configuration, acknowledgement and member

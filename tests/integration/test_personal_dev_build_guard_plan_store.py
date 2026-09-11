@@ -48,3 +48,36 @@ async def test_agent_store_requires_outer_transaction_and_complete_source_set(pr
             await store_type(session, installation=retained).prepare(proposal, sources={})
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.plans")) == 0
+
+
+@pytest.mark.parametrize("boundary", ["proposal", "missing", "duplicate", "source", "sequence", "lease", "unknown"])
+async def test_agent_store_rejects_corrupt_receipt_and_rolls_back_holds(prepared_input, monkeypatch, boundary):
+    store_type = import_module("loom_capacity_build_guard.plan_store").BuildGuardPlanStore
+    sessions, engine, retained, proposal, registration, request = prepared_input
+    async with sessions.begin() as session:
+        scalar = session.scalar
+
+        async def corrupt(*args, **kwargs):
+            receipt = await scalar(*args, **kwargs)
+            if boundary == "proposal":
+                receipt["proposal_digest"] = "f" * 64
+            elif boundary == "missing":
+                receipt["assignments"] = []
+            elif boundary == "duplicate":
+                receipt["assignments"] *= 2
+            elif boundary == "source":
+                receipt["assignments"][0]["source_binding_sha256"] = "f" * 64
+            elif boundary == "sequence":
+                receipt["assignments"][0]["request_sequence"] = True
+            elif boundary == "lease":
+                receipt["assignments"][0]["lease_not_after_epoch_microseconds"] += 10**12
+            else:
+                receipt["assignments"][0]["unknown"] = "unexpected"
+            return receipt
+
+        monkeypatch.setattr(session, "scalar", corrupt)
+        with pytest.raises(ValueError):
+            await store_type(session, installation=retained).prepare(proposal, sources={request.id: registration})
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.plans")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 0
