@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -93,7 +94,7 @@ def test_complete_frame_without_eof_is_not_accepted() -> None:
         os.close(writer)
 
 
-def test_regular_file_is_not_a_one_use_bootstrap_transport(tmp_path) -> None:
+def test_regular_file_is_not_a_one_use_bootstrap_transport(tmp_path: Path) -> None:
     path = tmp_path / "retained-bootstrap"
     path.write_bytes(encode_native_bootstrap(_bootstrap()))
     with path.open("rb") as stream:
