@@ -534,7 +534,8 @@ def verify_bound_personal_dev_build_artifact(
                     "lease_epoch": binding.lease_epoch,
                     "platform": platform,
                 }
-                if any(manifest[key] != value for key, value in bindings.items()):
+                if any(type(manifest[key]) is not type(value) or manifest[key] != value
+                    for key, value in bindings.items()):
                     raise PersonalDevBuildArtifactError(
                         "personal-dev build artifact platform or attempt binding is invalid"
                     )
