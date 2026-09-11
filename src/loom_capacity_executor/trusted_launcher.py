@@ -31,6 +31,7 @@ from loom_capacity_executor.bootstrap_handoff import (
     resolve_bootstrap_handoff_physical_binding,
 )
 from loom_capacity_executor.build_admission_client import BuildAdmissionExecutorV1
+from loom_capacity_executor.native_worker_container import NativeWorkerContainerPolicyV2
 from loom_capacity_executor.native_worker_handoff import (
     NATIVE_WORKER_HANDOFF_ENV,
     NativeWorkerHandoffV1,
@@ -105,6 +106,7 @@ class TrustedLauncherConfigV2(StrictV2Model):
     candidate_executable: TrustedCandidateExecutableV2
     candidate_image_digest: Annotated[str, Field(max_length=512, pattern=_IMAGE_DIGEST_PATTERN)]
     candidate_argv: Annotated[tuple[str, ...], Field(min_length=1, max_length=128)]
+    native_worker: NativeWorkerContainerPolicyV2 | None = None
 
     @field_validator("handoff_directory", "admission_directory")
     @classmethod
@@ -123,6 +125,8 @@ class TrustedLauncherConfigV2(StrictV2Model):
     def _candidate_binding(self) -> TrustedLauncherConfigV2:
         if self.candidate_argv[0] != self.candidate_executable.path:
             raise ValueError("trusted launcher candidate argv differs from executable identity")
+        if self.native_worker is not None and self.candidate_argv != (self.candidate_executable.path,):
+            raise ValueError("native trusted launcher accepts no candidate command suffix")
         return self
 
 
