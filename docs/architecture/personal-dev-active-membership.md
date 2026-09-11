@@ -380,6 +380,19 @@ An absent close or another owner's work does not authorize cancellation. Physica
 or ambiguous submissions still require separate terminal cleanup; the public
 typed execution interlock stays closed.
 
+Physically bound builds that never registered use the distinct protected
+`withdraw_unregistered_worker` operation. Build-guard revision `build_guard_0012`
+retains an immutable withdrawal with exact prior-committed bootstrap, Slurm job
+and ownership digest. Serializable installation/bootstrap/physical locks fence
+conflicting operations; exact replay survives cancellation and expiry. Observation
+exposes withdrawal only after commit, and the existing revocation fence blocks
+new bootstrap publication or physical binding. This authenticates bootstrap
+revocation, **not** scheduler termination: capacity holds remain, no source grant
+is issued, and no terminal/release receipt is fabricated. Future native worker
+exchange must check this fence under the same locks. The pool-authenticated HTTP
+route, pinned client and typed router preserve the exact request and receipt;
+runtime initialization verifies the installed procedure and narrow privileges.
+
 `ActivationRuntimeArtifactV3` and its explicit pinned loader compose the exact
 typed admission file, complete purpose/profile policy, approved profile digest,
 execution fence and controller-local manifest. Assembly verifies route executor,

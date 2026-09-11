@@ -47,7 +47,10 @@ def receipt(request):
 async def test_client_validates_bound_bootstrap_withdrawal(boundary):
     from uuid import uuid4
 
-    from loom_capacity_agent.admission import ExecutableWorkerWithdrawalRequestV2, WithdrawnExecutableWorkerV2
+    from loom_capacity_agent.admission import (
+        ExecutableWorkerWithdrawalRequestV2,
+        WithdrawnExecutableWorkerV2,
+    )
 
     request = ExecutableWorkerWithdrawalRequestV2(operation_id=uuid4(), binding=registration().binding,
         bootstrap_registration_epoch=1, protected_registration_epoch=2,

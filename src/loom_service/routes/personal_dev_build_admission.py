@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from loom_capacity_agent.admission import (
     ExecutablePreparedBootstrapRevocationV2,
+    ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
 )
 from loom_capacity_agent.build_admission import BuildPreparationRequestV1
@@ -32,7 +33,7 @@ async def _admit(
     *,
     pool_id: str,
     intent_id: UUID,
-    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap"],
+    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap", "withdraw"],
 ) -> Response:
     sessions = getattr(request.app.state, "personal_dev_build_admission_sessions", None)
     verifier = getattr(request.app.state, "personal_dev_build_admission_verifier", None)
@@ -70,6 +71,8 @@ async def _admit(
                     if operation_name == "observe"
                     else ExecutablePreparedBootstrapRevocationV2.model_validate_json(bytes(body))
                     if operation_name == "revoke-bootstrap"
+                    else ExecutableWorkerWithdrawalRequestV2.model_validate_json(bytes(body))
+                    if operation_name == "withdraw"
                     else PhysicalJobBindingV2.model_validate_json(bytes(body))
                 )
             except ValueError:
@@ -104,6 +107,8 @@ async def _admit(
                     wire = canonical_executable_bytes(
                         await store.revoke_prepared_bootstrap(operation)
                     )
+                elif isinstance(operation, ExecutableWorkerWithdrawalRequestV2):
+                    wire = canonical_executable_bytes(await store.withdraw_unregistered_worker(operation))
                 else:
                     assert isinstance(operation, PhysicalJobBindingV2)
                     wire = canonical_executable_bytes(await store.bind_slurm_job(operation))
@@ -136,3 +141,8 @@ async def revoke_build_bootstrap(request: Request, pool_id: str, intent_id: UUID
     return await _admit(
         request, pool_id=pool_id, intent_id=intent_id, operation_name="revoke-bootstrap"
     )
+
+
+@router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/withdraw")
+async def withdraw_build_worker(request: Request, pool_id: str, intent_id: UUID) -> Response:
+    return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="withdraw")

@@ -11,10 +11,12 @@ import httpx
 from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
     ExecutablePreparedBootstrapRevocationV2,
+    ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
     PreparedExecutableAdmissionV2,
     ProtectedIntentObservationV2,
     RevokedExecutableBootstrapV2,
+    WithdrawnExecutableWorkerV2,
 )
 from loom_capacity_agent.build_admission import BuildPreparationRequestV1
 from loom_capacity_agent.client import (
@@ -168,6 +170,20 @@ class BuildAdmissionClient:
             or receipt.slurm_job_id != request.slurm_job_id or receipt.ownership_evidence_sha256 != request.ownership_evidence_sha256
             or receipt.request_digest != digest or receipt.binding_digest != digest):
             raise BuildAdmissionTransportError("build admission physical receipt binding changed")
+        return receipt
+
+    async def withdraw_unregistered_worker(self, request: ExecutableWorkerWithdrawalRequestV2) -> WithdrawnExecutableWorkerV2:
+        request = ExecutableWorkerWithdrawalRequestV2.model_validate_json(request.model_dump_json())
+        receipt = await self._post(request.binding,"withdraw",canonical_executable_bytes(request),WithdrawnExecutableWorkerV2)
+        digest = canonical_executable_digest(request)
+        if (receipt.subject_id != request.binding.subject_id or receipt.subject_incarnation != request.binding.subject_incarnation
+            or receipt.intent_id != request.binding.intent_id
+            or receipt.bootstrap_registration_epoch != request.bootstrap_registration_epoch
+            or receipt.protected_registration_epoch != request.protected_registration_epoch
+            or receipt.slurm_job_id != request.slurm_job_id
+            or receipt.ownership_evidence_sha256 != request.ownership_evidence_sha256
+            or receipt.request_digest != digest or receipt.withdrawal_digest != digest):
+            raise BuildAdmissionTransportError("build admission withdrawal binding changed")
         return receipt
 
     async def observe_intent(self, binding: ExecutableIntentBindingV2) -> ProtectedIntentObservationV2:

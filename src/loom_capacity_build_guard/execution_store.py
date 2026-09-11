@@ -11,10 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
     ExecutablePreparedBootstrapRevocationV2,
+    ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
     PreparedExecutableAdmissionV2,
     ProtectedIntentObservationV2,
     RevokedExecutableBootstrapV2,
+    WithdrawnExecutableWorkerV2,
 )
 from loom_capacity_build_guard.installation_store import (
     BuildGuardInstallationV1,
@@ -126,6 +128,29 @@ class BuildGuardExecutionStore:
                 or receipt.protected_registration_epoch != request.protected_registration_epoch
                 or receipt.request_digest != digest or receipt.protected_release_sha256 != digest):
                 raise ValueError("build bootstrap revocation receipt changed")
+            return receipt
+
+    async def withdraw_unregistered_worker(self, request: ExecutableWorkerWithdrawalRequestV2) -> WithdrawnExecutableWorkerV2:
+        if not self._session.in_transaction():
+            raise ValueError("build withdrawal requires an outer transaction")
+        request = ExecutableWorkerWithdrawalRequestV2.model_validate_json(request.model_dump_json())
+        wire = canonical_executable_bytes(request)
+        digest = canonical_executable_digest(request)
+        async with self._session.begin_nested():
+            returned = await self._session.scalar(text("""SELECT loom_capacity_build_guard.withdraw_unregistered_worker(
+                :installation,CAST(:payload AS jsonb),:wire,:digest)"""),
+                {"installation":self._installation.id,"payload":wire.decode("ascii"),"wire":wire,"digest":digest})
+            receipt = WithdrawnExecutableWorkerV2.model_validate_json(returned)
+            if (canonical_executable_bytes(receipt).decode("ascii") != returned
+                or receipt.subject_id != self._installation.subject_id
+                or receipt.subject_incarnation != self._installation.subject_incarnation
+                or receipt.intent_id != request.binding.intent_id
+                or receipt.bootstrap_registration_epoch != request.bootstrap_registration_epoch
+                or receipt.protected_registration_epoch != request.protected_registration_epoch
+                or receipt.slurm_job_id != request.slurm_job_id
+                or receipt.ownership_evidence_sha256 != request.ownership_evidence_sha256
+                or receipt.request_digest != digest or receipt.withdrawal_digest != digest):
+                raise ValueError("build withdrawal receipt changed")
             return receipt
 
     async def bind_slurm_job(self, request: PhysicalJobBindingV2) -> BoundExecutableWorkerV2:
