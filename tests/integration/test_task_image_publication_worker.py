@@ -295,19 +295,26 @@ def _worker(factory, registry, values, **limits):
 async def _renewed_unlocked(factory, initial):
     async with asyncio.timeout(5):
         while True:
-            async with factory() as session:
-                job = (await session.scalars(select(TaskImagePublicationJob))).one()
-                expiry = job.worker_expires_at
-                if expiry is not None and expiry > initial:
-                    for model in (
-                        TaskImagePublicationState,
-                        TaskImagePublicationKey,
-                        TaskImageBuildGrant,
-                        TaskImageMaterialization,
-                        TaskImagePublicationJob,
-                    ):
-                        await session.scalar(select(model).with_for_update(nowait=True))
-                    return expiry
+            try:
+                async with factory() as session:
+                    job = (await session.scalars(select(TaskImagePublicationJob))).one()
+                    expiry = job.worker_expires_at
+                    if expiry is not None and expiry > initial:
+                        for model in (
+                            TaskImagePublicationState,
+                            TaskImagePublicationKey,
+                            TaskImageBuildGrant,
+                            TaskImageMaterialization,
+                            TaskImagePublicationJob,
+                        ):
+                            await session.scalar(select(model).with_for_update(nowait=True))
+                        return expiry
+            except OperationalError as error:
+                # Renewal briefly locks its job in a separate transaction. Wait
+                # for a real unlocked observation while the I/O gate remains
+                # closed; locks retained across I/O still fail the outer bound.
+                if getattr(error.orig, "sqlstate", None) != "55P03":
+                    raise
             await asyncio.sleep(0.01)
 
 
@@ -319,22 +326,37 @@ async def test_real_streaming_and_signing_renew_without_authority_locks(
         tls_registry,
         token_key,
         names=("task", "sidecar:cache"),
-        delay=0.08,
     )
     job, _, signer, _, _ = values
+    # This success case proves committed renewal during two kinds of unlocked
+    # I/O, not the speed of a CI runner. Gate the real stream/signing explicitly
+    # and advance a controlled clock after each gate is observed. Separate tests
+    # below retain real-time short-lease expiry and cancellation coverage.
+    now = NOW + timedelta(seconds=14)
+    values = (*values[:4], lambda: now)
+    signer.clock = values[4]
+    stream_proceed = asyncio.Event()
+    next(
+        response for path, response in tls_registry.routes.items() if "/manifests/" in path
+    ).continue_after_first_chunk = stream_proceed
     signer.proceed.clear()
     worker = _worker(
         registry_authority_session,
         tls_registry,
         values,
-        lease_seconds=0.6,
+        lease_seconds=60,
         renewal_interval_seconds=0.08,
     )
     task = asyncio.create_task(worker.run(UUID(job.operation_id)))
     try:
         await asyncio.wait_for(tls_registry.first_chunk_sent.wait(), 5)
-        first = await _renewed_unlocked(registry_authority_session, NOW + timedelta(seconds=14.7))
+        initial_expiry = now + timedelta(seconds=60)
+        now += timedelta(seconds=1)
+        first = await _renewed_unlocked(registry_authority_session, initial_expiry)
+        assert not signer.entered.is_set() and tls_registry.active_requests == 1
+        stream_proceed.set()
         await asyncio.wait_for(signer.entered.wait(), 5)
+        now += timedelta(seconds=1)
         await _renewed_unlocked(registry_authority_session, first)
         signer.proceed.set()
         receipt = await asyncio.wait_for(task, 5)
@@ -344,6 +366,7 @@ async def test_real_streaming_and_signing_renew_without_authority_locks(
         assert await worker.run(UUID(job.operation_id)) == receipt
         assert signer.calls == 2 and len(tls_registry.requests) == 6
     finally:
+        stream_proceed.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
