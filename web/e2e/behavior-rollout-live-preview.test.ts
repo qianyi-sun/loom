@@ -133,6 +133,22 @@ test("Stage 1 preview is bounded, accessible, conditional, and hands off to the 
     ],
   });
 
+  let releaseHandoff!: () => void;
+  const allowHandoff = new Promise<void>((resolve) => { releaseHandoff = resolve; });
+  let signalHandoffRequest!: () => void;
+  const handoffRequested = new Promise<void>((resolve) => { signalHandoffRequest = resolve; });
+  let metadataRequests = 0;
+  await page.route(new RegExp(`${metadataPath}$`, "u"), async (route) => {
+    metadataRequests += 1;
+    if (metadataRequests === 3) {
+      signalHandoffRequest();
+      // Keep the preview mounted while axe examines it. The closed fixture
+      // still supplies and accounts for the exact handoff response afterward.
+      await allowHandoff;
+    }
+    await route.fallback();
+  });
+
   let frameIndex = 0;
   await page.route(new RegExp(`/api/v1/pipeline-runs/${runId}/stages/${stageId}/attempts/${attemptId}/live-preview/frames/[01]$`, "u"), async (route) => {
     const index = Number(new URL(route.request().url()).pathname.split("/").at(-1));
@@ -149,17 +165,24 @@ test("Stage 1 preview is bounded, accessible, conditional, and hands off to the 
     frameIndex += 1;
   });
 
-  await page.goto(`${browserHarness.baseURL}/pipelines/${runId}`);
-  await page.getByRole("cell", { name: "rollout" }).click();
-  await expect(page.getByText("LIVE / UNVERIFIED")).toBeVisible();
-  const image = page.getByRole("img", { name: /Live unverified composite/ });
-  await expect(image).toHaveCount(1);
-  await expect(image).toHaveAttribute("data-sequence", "0");
-  await expect(image).toHaveAttribute("data-sequence", "1", { timeout: 2_000 });
-  await expect(page.locator("img")).toHaveCount(1);
-  expect((await new AxeBuilder({ page }).include("[role=dialog]").analyze()).violations).toEqual([]);
+  try {
+    await page.goto(`${browserHarness.baseURL}/pipelines/${runId}`);
+    await page.getByRole("cell", { name: "rollout" }).click();
+    await expect(page.getByText("LIVE / UNVERIFIED")).toBeVisible();
+    const image = page.getByRole("img", { name: /Live unverified composite/ });
+    await expect(image).toHaveCount(1);
+    await expect(image).toHaveAttribute("data-sequence", "0");
+    await expect(image).toHaveAttribute("data-sequence", "1", { timeout: 2_000 });
+    await expect(page.locator("img")).toHaveCount(1);
+    // Exercise a pending handoff even when the browser/audit runs quickly.
+    await handoffRequested;
+    expect((await new AxeBuilder({ page }).include("[role=dialog]").analyze()).violations).toEqual([]);
+  } finally {
+    releaseHandoff();
+  }
 
   await expect(page).toHaveURL(new RegExp(`/pipelines/${runId}/stages/${stageId}/artifacts/${artifactId}$`, "u"), { timeout: 2_000 });
   await expect(page.getByText("behavior_rollout_bundle.v1")).toBeVisible();
   expect(frameIndex).toBe(2);
+  expect(metadataRequests).toBe(3);
 });
