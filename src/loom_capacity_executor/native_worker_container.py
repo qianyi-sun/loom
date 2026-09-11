@@ -15,6 +15,7 @@ import re
 import selectors
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import Annotated, Any
@@ -125,7 +126,7 @@ class NativeWorkerAllocation:
                 str(UUID(self.intent_id)) != self.intent_id
                 or self.pool_id not in {"oldlab", "gb10"}
                 or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", self.hostname) is None
-                or re.fullmatch(r"[0-9a-f]{40}", self.candidate_sha) is None
+                or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", self.candidate_sha) is None
                 or re.fullmatch(r"[1-9][0-9]*", self.job_id) is None
                 or not self.cgroup_parent or any(char in self.cgroup_parent for char in "\0\n\r,")
                 or not path.is_relative_to("/var/lib/loom/native-workers")
@@ -134,6 +135,7 @@ class NativeWorkerAllocation:
                 or any(char in self.scratch_directory for char in "\0\n\r,:")
                 or any(type(value) is not int or not 0 < value < (1 << 63) for value in (
                     self.cpu_millicores, self.memory_bytes, self.pids_max, self.concurrency_slots))
+                or self.cpu_millicores % 1000 != 0 or self.memory_bytes % (1024 * 1024) != 0
                 or any(type(value) is not int or not 0 < value < (1 << 31) for value in (
                     self.runtime_uid, self.runtime_gid, self.docker_socket_gid))
             ):
@@ -202,17 +204,21 @@ class FixedDockerCLI:
     executable: str
     descriptor: int
     config_directory: str
+    stop_requested: Callable[[], bool] | None = None
 
     def argv(self, *arguments: str) -> tuple[str, ...]:
         return (self.executable, f"--config={self.config_directory}",
                 "--host=unix:///var/run/docker.sock", *arguments)
 
-    def call(self, *arguments: str, timeout: int = 60) -> bytes:
+    def call(self, *arguments: str, timeout: int = 60, interruptible: bool = True) -> bytes:
         try:
+            if interruptible and self.stop_requested is not None and self.stop_requested():
+                raise NativeContainerError("native Docker operation interrupted before invocation")
             with subprocess.Popen(self.argv(*arguments),
                 executable=self.executable, env={}, pass_fds=(self.descriptor,),
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
-                return capture_native_control_output(process, timeout=timeout)
+                return capture_native_control_output(process, timeout=timeout,
+                    stop_requested=self.stop_requested if interruptible else None)
         except (OSError, subprocess.SubprocessError):
             raise NativeContainerError("native Docker operation failed or has uncertain outcome") from None
 
@@ -223,7 +229,8 @@ class FixedDockerCLI:
             raise NativeContainerError("native Docker readback is invalid") from None
 
 
-def capture_native_control_output(process: subprocess.Popen[bytes], *, timeout: float) -> bytes:
+def capture_native_control_output(process: subprocess.Popen[bytes], *, timeout: float,
+                                  stop_requested: Callable[[], bool] | None = None) -> bytes:
     """Bound both streams while reading; failure leaves daemon outcome uncertain.
 
     Used only for short control operations. The attached worker lifetime must
@@ -240,10 +247,12 @@ def capture_native_control_output(process: subprocess.Popen[bytes], *, timeout: 
             selector.register(process.stdout, selectors.EVENT_READ, True)
             selector.register(process.stderr, selectors.EVENT_READ, False)
             while selector.get_map():
+                if stop_requested is not None and stop_requested():
+                    raise NativeContainerError("native Docker operation interrupted with uncertain outcome")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise NativeContainerError("native Docker operation timed out with uncertain outcome")
-                for key, _event in selector.select(remaining):
+                for key, _event in selector.select(min(remaining, 0.1)):
                     chunk = os.read(key.fd, 65536)
                     if not chunk:
                         selector.unregister(key.fileobj)
@@ -253,7 +262,11 @@ def capture_native_control_output(process: subprocess.Popen[bytes], *, timeout: 
                         raise NativeContainerError("native Docker output exceeded its bound; outcome uncertain")
                     if key.data:
                         output.extend(chunk)
-            if process.wait(timeout=max(0.001, deadline - time.monotonic())) != 0:
+            while process.poll() is None:
+                if time.monotonic() >= deadline or (stop_requested is not None and stop_requested()):
+                    raise NativeContainerError("native Docker operation interrupted with uncertain outcome")
+                time.sleep(0.05)
+            if process.returncode != 0:
                 raise NativeContainerError("native Docker operation failed")
         return bytes(output)
     finally:
@@ -283,11 +296,11 @@ def remove_native_container(cli: FixedDockerCLI, container_id: str) -> None:
     if _CONTAINER_ID.fullmatch(container_id) is None:
         raise NativeContainerError("native cleanup container identity is invalid")
     try:
-        cli.call("container", "rm", "--force", container_id)
+        cli.call("container", "rm", "--force", container_id, interruptible=False)
     except NativeContainerError:
         # Resolve a lost remove response only by successful exact-ID readback.
-        if cli.call("container", "ls", "--all", "--quiet", "--no-trunc", f"--filter=id={container_id}").strip():
+        if cli.call("container", "ls", "--all", "--quiet", "--no-trunc", f"--filter=id={container_id}", interruptible=False).strip():
             raise NativeContainerError("native worker cleanup is unconfirmed") from None
         return
-    if cli.call("container", "ls", "--all", "--quiet", "--no-trunc", f"--filter=id={container_id}").strip():
+    if cli.call("container", "ls", "--all", "--quiet", "--no-trunc", f"--filter=id={container_id}", interruptible=False).strip():
         raise NativeContainerError("native worker cleanup is unconfirmed")
