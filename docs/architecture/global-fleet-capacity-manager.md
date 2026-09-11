@@ -692,6 +692,17 @@ workload recovery. The installed caller must retain its journaled authority,
 process/DDL exclusion and workload containment, and open any replacement peer
 through the existing bounded recovery chain before invoking this sequence.
 
+The protected staging command runner binds this sequence to the active original
+component journal. It requires acknowledged guard retention, the saved database
+and coordination identity, an observed manager executable replacement, and no
+pending peer publication. The selected peer is exactly the original or latest
+journaled replacement. Credentials are recovered from the original backup and
+matching live Secrets; callers cannot supply passwords or change staging's role
+bindings or schema ACL profile. This database-only step publishes no component
+terminal and cannot release the retained guard. The enclosing component still
+must prove harmful manager SQL retirement, external writer exclusion and workload
+recovery; the executable replacement receipt supplies none of those proofs.
+
 The installed staging mutation guard is a necessary surviving connection, not an
 application worker to stop: it holds the database-local advisory lock that excludes
 lifecycle GC. Moving that lock to the maintenance database would lose coordination.

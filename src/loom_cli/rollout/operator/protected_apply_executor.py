@@ -24,6 +24,7 @@ from loom.application_database_admission import (
     reopen_application_database_for_handoff_recovery,
     require_application_database_drained,
 )
+from loom.application_handoff_completion import ApplicationHandoffDatabaseOutcome
 from loom_cli.rollout.external_supervisor_controller import (
     parse_external_supervisor_controller_bindings,
 )
@@ -83,6 +84,7 @@ from .protected_production_defaults_component import (
     KubernetesProtectedProductionDefaultsComponent,
     ProductionDefaultsTransport,
 )
+from .staging_mutation_guard import MutationGuardEvidence
 
 PROTECTED_KUBECONFIG_PATH = Path("/var/lib/loom-staging-rollout/kubeconfig")
 _MAX_OUTPUT_BYTES = 1024 * 1024
@@ -233,6 +235,24 @@ class SubprocessProtectedApplyCommandRunner:
         identity for recovery. Local process retirement never proves rollback.
         """
         return self._open_staging_peer(maintenance=False)
+
+    def complete_staging_application_database(
+        self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal,
+        connection: PeerDatabaseConnection, guard: MutationGuardEvidence,
+    ) -> ApplicationHandoffDatabaseOutcome:
+        """Complete the journal-bound SQL phases under the enclosing handoff authority.
+
+        External process/DDL/workload exclusion and harmful SQL retirement remain
+        enclosing component requirements. Database success cannot release a fence
+        or the retained guard before actual workload recovery is verified.
+        """
+        from .protected_application_database_completion import (
+            complete_protected_application_database,
+        )
+
+        return complete_protected_application_database(
+            plan, journal=journal, runner=self, connection=connection, guard=guard,
+        )
 
     def issue_staging_manager_replacement(
         self, *, journal: ProtectedApplyJournal, runtime_password: str | None = None,
