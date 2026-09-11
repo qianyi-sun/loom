@@ -4,7 +4,7 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from loom.nebius_kubernetes import NebiusKubernetesConnection, connection_from_fields
-from loom_execution_actuator.task_image_controller import NativeTaskImageSettings
+from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
 
 
 class ExecutionActuatorSettings(BaseSettings):

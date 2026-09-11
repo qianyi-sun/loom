@@ -812,7 +812,7 @@ def _execution_quota(config: dict[str, Any], documents: list[dict[str, Any]]) ->
 
 
 def _task_image_builder_settings(config: dict[str, Any], *, service_image: str) -> Any:
-    from loom_execution_actuator.task_image_controller import NativeTaskImageSettings
+    from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
 
     supplied = config.get("task_image_builder")
     if supplied is None:
