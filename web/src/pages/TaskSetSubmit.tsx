@@ -6,6 +6,7 @@ import { api, type ApiError, type TaskSetSubmitResponse } from "../api/client";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import DocsCallout from "../components/DocsCallout";
+import { taskSetHref } from "../utils/taskSetLinks";
 
 export default function TaskSetSubmit(): JSX.Element {
   const navigate = useNavigate();
@@ -18,7 +19,7 @@ export default function TaskSetSubmit(): JSX.Element {
   const submit = useMutation({
     mutationFn: (formData: FormData) => api.submitTaskSet(formData),
     onSuccess: (res: TaskSetSubmitResponse) => {
-      navigate(`/task-sets/${encodeURIComponent(res.task_set_id)}`);
+      navigate(taskSetHref(res.task_set_id));
     },
     onError: (err: unknown) => {
       const apiErr = err as ApiError | undefined;
