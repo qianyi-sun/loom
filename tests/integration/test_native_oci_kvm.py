@@ -268,6 +268,7 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
         if root_stop.startswith("monitored-rootless"):
             built = checked("docker", "build", "--quiet", "-f",
                 str(ROOT / "tests/support/native_kvm/Dockerfile.rootless"),
+                "--build-context", f"trusted-src={ROOT / 'src'}",
                 str(ROOT / "tests/support/native_kvm"), capture_output=True, text=True)
             fixture_image = built.stdout.strip().splitlines()[-1]
             assert fixture_image.startswith("sha256:")

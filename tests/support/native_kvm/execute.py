@@ -1,10 +1,8 @@
 """Disposable Docker fixture only. Not an installer or an execution authority."""
 
-import asyncio
 import json
 import os
 import shutil
-import socket
 import subprocess
 import sys
 import tarfile
@@ -23,13 +21,7 @@ def native_runtime_command():
 def main():
     fixtures = Path("/fixtures")
     identity = json.loads((fixtures / "identity.json").read_text())
-    outer_io = "-outer" in identity["root_stop"]
-    if outer_io:
-        assert os.getuid() == 0 and os.environ["LISTEN_PID"] == str(os.getpid())
-        assert os.environ["LISTEN_FDS"] == "2"
-        outer_authority, artifact_channel = socket.socket(fileno=3), socket.socket(fileno=4)
-        outer_authority.set_inheritable(False)
-        artifact_channel.set_inheritable(False)
+    prepare_only = sys.argv[1:] == ["prepare"]
     rootfs = Path("/tmp/native-rootfs")
     rootfs.mkdir()
     # The outer test exported this immutable, digest-selected trusted image.
@@ -58,6 +50,9 @@ def main():
     output.mkdir(mode=0o700)
     os.chown(output, 1000, 1000)
     (workspace / "buildkit-run").mkdir(mode=0o1777)
+    if prepare_only:
+        workspace.chmod(0o700)
+        return
     sandbox_id = identity["sandbox_id"]
     buildkit_id = identity["buildkit_id"]
     client_id = identity["client_id"]
@@ -77,8 +72,7 @@ def main():
             native_session = identity["root_stop"].startswith("monitored-rootless")
             if native_session:
                 workspace.chmod(0o700)
-            supervised_build(expiry=expiry, native_session=native_session,
-                outer_authority=outer_authority if outer_io else None)
+            supervised_build(expiry=expiry, native_session=native_session)
             # Production reconciliation already deleted these exact IDs once.
             # Keep independent final empty-list verification, not duplicate writes.
             if expiry:
@@ -91,17 +85,8 @@ def main():
                 assert late.returncode != 0 and pulse.read_bytes() == stopped
                 print("native-supervised-expiry-stopped-live-client", flush=True)
                 return
-            if outer_io:
-                from loom_capacity_agent.build_admission import BuildSourceContextV1
-                from loom_capacity_executor.native_artifact_transfer import send_native_artifact
-
-                context = BuildSourceContextV1.model_validate_json((fixtures / "context.json").read_bytes())
-                asyncio.run(send_native_artifact(artifact_channel, archive=output / "build/artifacts.tar",
-                    claim_digest=context.claim_digest, source_binding_sha256=context.source_binding_sha256,
-                    max_artifact_bytes=32 * 1024**2, timeout_seconds=30))
-            else:
-                shutil.copyfile(output / "build/artifacts.tar", "/result/artifacts.tar")
-                os.chmod("/result/artifacts.tar", 0o644)
+            shutil.copyfile(output / "build/artifacts.tar", "/result/artifacts.tar")
+            os.chmod("/result/artifacts.tar", 0o644)
             assert list((output / "build/images").iterdir()) == []
             print("native-allocated-client-artifact-ok", flush=True)
             return  # The same exact cleanup below is still mandatory.
