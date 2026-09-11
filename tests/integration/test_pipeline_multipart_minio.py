@@ -12,7 +12,10 @@ pytestmark = pytest.mark.docker
 
 
 async def test_real_minio_multipart_commit_and_readback() -> None:
-    with MinioContainer().waiting_for(HttpWaitStrategy(9000, "/minio/health/cluster")) as container:
+    # Upstream publishes on Quay; retain testcontainers' exact release.
+    with MinioContainer("quay.io/minio/minio:RELEASE.2022-12-02T19-19-22Z").waiting_for(
+        HttpWaitStrategy(9000, "/minio/health/cluster")
+    ) as container:
         config = container.get_config()
         store = MinioObjectStore(
             endpoint_url="http://" + config["endpoint"],

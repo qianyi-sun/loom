@@ -48,7 +48,10 @@ def test_real_acl_dump_restores_without_source_roles_and_verifies_s3(tmp_path, m
     root = Path(__file__).resolve().parents[2]
     with (
         PostgresContainer("postgres:16") as source,
-        MinioContainer().waiting_for(HttpWaitStrategy(9000, "/minio/health/cluster")) as storage,
+        # Upstream publishes on Quay; retain testcontainers' exact release.
+        MinioContainer("quay.io/minio/minio:RELEASE.2022-12-02T19-19-22Z").waiting_for(
+            HttpWaitStrategy(9000, "/minio/health/cluster")
+        ) as storage,
     ):
         url = make_url(source.get_connection_url()).set(drivername="postgresql+psycopg")
         monkeypatch.setenv("LOOM_DB_URL", url.render_as_string(hide_password=False))
