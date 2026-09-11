@@ -1796,13 +1796,13 @@ export const api = {
   listTaskSets: () =>
     apiFetch<TaskSetListResponse>("/api/v1/tasksets"),
   getTaskSet: (id: string) =>
-    apiFetch<TaskSetDetailResponse>(`/api/v1/tasksets/${id}`),
+    apiFetch<TaskSetDetailResponse>(`/api/v1/tasksets/${id.split("/").map(encodeURIComponent).join("/")}`),
   submitTaskSet: (formData: FormData) =>
     apiUpload<TaskSetSubmitResponse>("/api/v1/tasksets", formData),
   rebuildTaskSet: (id: string) =>
-    apiFetch<TaskSetSubmitResponse>(`/api/v1/tasksets/${id}/rebuild`, {
+    apiFetch<TaskSetSubmitResponse>(`/api/v1/tasksets/${id.split("/").map(encodeURIComponent).join("/")}/rebuild`, {
       method: "POST",
     }),
   deleteTaskSet: (id: string) =>
-    apiFetch<void>(`/api/v1/tasksets/${id}`, { method: "DELETE" }),
+    apiFetch<void>(`/api/v1/tasksets/${id.split("/").map(encodeURIComponent).join("/")}`, { method: "DELETE" }),
 };

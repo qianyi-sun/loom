@@ -59,7 +59,7 @@ describe("TaskSetsList", () => {
     );
 
     renderWithProviders(<TaskSetsList />);
-    expect(await screen.findByText("Task set 0")).toHaveAttribute("href", "/task-sets/task-set-0");
+    expect(await screen.findByText("Task set 0")).toHaveAttribute("href", "/task-sets/detail?id=task-set-0");
     for (const [, , , label] of variants) {
       expect(screen.getAllByText(label).length).toBeGreaterThan(0);
     }

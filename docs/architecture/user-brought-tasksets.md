@@ -27,6 +27,28 @@ Statuses are:
 Task filtering rechecks TaskSet ownership even when callers supply exact task
 IDs. A TaskSet must be `ready` or `partial` before its tasks can run.
 
+## Browser links
+
+Share `/task-sets/detail?id=ts%2F<team-id>%2F<slug>` (under the configured
+`/dev`, `/prod`, or `/staging` prefix where applicable). The list and upload
+redirect use the same query-based URL; tabs preserve the ID. API identifiers
+and team authorization are unchanged. Missing or malformed IDs and unavailable
+TaskSets show an application error with a link back to the list.
+
+The SPA nginx redirects old `/task-sets/ts%2F...` links to the query URL,
+preserving query parameters such as `tab`. This exception matches only the
+exact lowercase TaskSet route and a single encoded identifier. Encoded
+prefixes, mixed-case prefixes, raw separators and unrelated encoded paths
+remain rejected. Existing unencoded single-segment in-app links also resolve.
+
+To exercise the actual production bundle, nginx configuration and runtime
+entrypoint with local API fixtures, run `cd web && npm run build && npm run
+smoke:tasksets` with Docker and Playwright Chromium installed. This disposable
+smoke covers root and environment prefixes, direct entry, refresh, legacy
+redirects, list navigation, reserved characters, invalid IDs and unavailable
+team UI. API tenant isolation is covered separately by the service integration
+tests; a fixture 404 alone is not evidence of backend authorization.
+
 ## Manifest
 
 Submissions contain `manifest.yaml` and, depending on the source, optional

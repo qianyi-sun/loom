@@ -7,6 +7,7 @@ import { Card } from "../components/Card";
 import EmptyState from "../components/EmptyState";
 import LoadingState from "../components/LoadingState";
 import { StatusPill, type StatusVariant } from "../components/StatusPill";
+import { taskSetHref } from "../utils/taskSetLinks";
 
 function taskSetStatusVariant(status: string): StatusVariant {
   switch (status) {
@@ -111,7 +112,7 @@ export default function TaskSetsList(): JSX.Element {
                   <tr key={ts.task_set_id} className="hover:bg-slate-50/50">
                     <td className="px-4 py-3">
                       <Link
-                        to={`/task-sets/${encodeURIComponent(ts.task_set_id)}`}
+                        to={taskSetHref(ts.task_set_id)}
                         className="font-medium text-accent hover:underline"
                       >
                         {ts.display_name}
