@@ -17,8 +17,11 @@ import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
+from loom_capacity_executor.bootstrap_handoff import (
+    claim_bootstrap_handoff_launch,
+    consume_bootstrap_handoff,
+)
 from loom_capacity_executor.pinned_admission_transport import PinnedAdmissionFileV1
-from loom_capacity_executor.bootstrap_handoff import claim_bootstrap_handoff_launch, consume_bootstrap_handoff
 from tests.unit.test_native_bootstrap_delivery import delivery as delivery
 from tests.unit.test_native_bootstrap_delivery import objects
 from tests.unit.test_task_image_publication_transport import _identity, _new_ca
@@ -195,17 +198,25 @@ from loom_capacity_executor import native_bootstrap_transport as module
 from loom_capacity_executor.native_worker_bootstrap import _disable_bootstrap_dumps
 from loom_capacity_executor.pinned_admission_transport import PinnedAdmissionFileV1
 assert ctypes.CDLL(None).prctl(4, 1, 0, 0, 0) == 0
+config = json.loads(sys.stdin.read())
+identity = module.NativeBootstrapTLSIdentity(**{key: PinnedAdmissionFileV1.model_validate(value) for key, value in config.items()})
+read_pinned = module._read_pinned
+reads = []
+def read_identity(*args, **kwargs):
+    reads.append(True)
+    return read_pinned(*args, **kwargs)
+module._read_pinned = read_identity
 try:
-    module._assert_private_process()
+    module._tls_context(identity, server=False)
 except ValueError:
     pass
 else:
     raise AssertionError('unhardened process accepted')
+assert not reads
 _disable_bootstrap_dumps()
-config = json.loads(sys.stdin.read())
-identity = module.NativeBootstrapTLSIdentity(**{key: PinnedAdmissionFileV1.model_validate(value) for key, value in config.items()})
 context = module._tls_context(identity, server=False)
 assert context.check_hostname and context.verify_mode == 2
+assert len(reads) == 3
 print('protected TLS identity loaded')
 """
         result = await asyncio.to_thread(subprocess.run, [sys.executable, "-B", "-c", probe],
@@ -374,3 +385,26 @@ async def test_listener_failure_is_observable_and_closes_listener(delivery, monk
         assert "private-accept-detail" not in str(caught.value)
         assert setup.server._listener.fileno() == -1
         assert setup.server.active_connections == 0
+
+
+async def test_client_total_pending_requests_are_bounded_before_enqueue(delivery, monkeypatch):
+    async with service(delivery, monkeypatch) as setup:
+        entered = asyncio.Event()
+
+        async def blocked(raw):
+            entered.set()
+            await asyncio.Future()
+
+        monkeypatch.setattr(setup.server._operations, "receive", blocked)
+        limits = setup.module.NativeBootstrapTransportLimits(maximum_connections=1, maximum_operations=1)
+        client = setup.module.NativeBootstrapTLSClient(route=setup.route, identity=setup.identity, limits=limits)
+        first = asyncio.create_task(client.deliver(setup.payload))
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            with pytest.raises(ValueError):
+                await asyncio.wait_for(client.deliver(setup.payload), 0.1)
+            assert len(client._tasks) == 1
+        finally:
+            first.cancel()
+            await asyncio.gather(first, return_exceptions=True)
+            await client.aclose()
