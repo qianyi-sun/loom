@@ -354,6 +354,14 @@ Retained launch replay checks the pinned purpose against its journaled facts,
 never a fresh manager lookup. Mismatches cannot prepare, render or launch, while
 exact confirmed replay and native unsubmitted revocation survive permit expiry.
 
+Typed application claims retain the caller's full intent binding through the
+database client. A single savepoint observes that exact protected binding, calls
+the existing claim procedure and checks the returned intent before committing.
+Wrong-intent mutations roll back even when the caller catches the error. The
+existing procedure still owns worker eligibility and immutable receipt replay,
+so replay after drain or worker replacement does not depend on current-worker
+equality. Native builds cannot use this application claim path.
+
 The native unsubmitted close consumer can revoke before first preparation. It
 requires a retained exact bootstrap proposal, checkpoint-covered journal, no job
 or physical-binding history, and no consumed/physical handoff sidecars. It never

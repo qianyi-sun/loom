@@ -3707,18 +3707,32 @@ async def test_claimability_is_independent_for_concurrent_intents(
 
 
 @pytest.mark.asyncio
-async def test_intent_bound_claim_replays_after_drain_and_rejects_binding_drift(
+@pytest.mark.parametrize("lifecycle", ["drain", "replacement"])
+async def test_intent_bound_claim_replays_after_lifecycle_and_rejects_binding_drift(
     capacity_guard_database: dict[str, object],
+    lifecycle: str,
 ) -> None:
     registration, worker, claim, _terminal = await _prepare_claim_terminal_race(capacity_guard_database)
     async with _serializable_executor_session(capacity_guard_database) as session:
         store = ExecutableAdmissionStore(session, registration=registration)
         admitted = await store.admit_claim_for_intent(worker.binding, claim)
         assert admitted is not None
-        await store.begin_drain(ExecutableDrainRequestV2(
-            operation_id=UUID(int=501), binding=worker.binding,
-            worker_id=worker.worker_id, worker_incarnation=worker.worker_incarnation,
-            expected_claim_high_water=1, drain_epoch=1))
+        if lifecycle == "drain":
+            await store.begin_drain(ExecutableDrainRequestV2(
+                operation_id=UUID(int=501), binding=worker.binding,
+                worker_id=worker.worker_id, worker_incarnation=worker.worker_incarnation,
+                expected_claim_high_water=1, drain_epoch=1))
+        else:
+            replacement = worker.model_copy(update={
+                "operation_id": UUID(int=501), "worker_id": UUID(int=502),
+                "worker_incarnation": UUID(int=503),
+                "protected_registration_epoch": worker.protected_registration_epoch + 1,
+                "worker_credential_sha256": hashlib.sha256(b"replacement-credential").hexdigest(),
+                "predecessor_worker_incarnation": worker.worker_incarnation})
+            await store.register_worker(replacement,
+                predecessor_worker_credential="worker-credential-one")
+            observed = await store.observe_intent(worker.binding)
+            assert observed.worker_incarnation == replacement.worker_incarnation
         assert await store.admit_claim_for_intent(worker.binding, claim) == admitted
         with pytest.raises(ExecutableAdmissionError, match="binding"):
             await store.admit_claim_for_intent(

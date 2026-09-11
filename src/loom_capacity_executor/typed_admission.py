@@ -198,4 +198,4 @@ class TypedAdmissionRouter:
         return await self._call(request.binding, "acknowledge_release", request, current_worker_credential=current_worker_credential)
 
     async def admit_claim(self, binding: ExecutableIntentBindingV2, proposal: ExecutableClaimProposalV2) -> Any:
-        return await self._call(binding, "admit_claim", proposal)
+        return await self._call(binding, "admit_claim_for_intent", binding, proposal)

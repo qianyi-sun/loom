@@ -420,6 +420,24 @@ class ExecutableAdmissionStore:
                 raise ExecutableAdmissionError("protected executable intent binding changed")
         return observation
 
+    async def admit_claim_for_intent(
+        self,
+        binding: ExecutableIntentBindingV2,
+        proposal: ExecutableClaimProposalV2,
+    ) -> ExecutableClaimReceiptV2 | None:
+        """Keep routing authority and the claim mutation in one savepoint.
+
+        The protected procedure owns current-worker eligibility and immutable
+        receipt replay. Checking the returned intent before this savepoint exits
+        rolls back a wrong-intent claim even if the caller catches the error.
+        """
+        async with self._session.begin_nested():
+            await self.observe_intent(binding)
+            receipt = await self.admit_claim(proposal)
+            if receipt is not None and receipt.intent_id != binding.intent_id:
+                raise ExecutableAdmissionError("protected claim differs from routed intent")
+        return receipt
+
     async def admit_claim(
         self,
         proposal: ExecutableClaimProposalV2,
