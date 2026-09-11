@@ -49,6 +49,11 @@ from .protected_cnpg_fence_recovery import (
     CNPGFenceObjectReceipt,
     CNPGFenceRequest,
 )
+from .protected_cnpg_manager_replacement import (
+    CNPGManagerIdentity,
+    CNPGManagerReplacementIntent,
+    CNPGManagerReplacementReceipt,
+)
 from .protected_cnpg_writer_configuration import CNPGWriterConfigurationBinding
 from .protected_external_supervisor_transport import (
     COMPENSATION_RECONCILIATION_FAILURE_CODES,
@@ -1208,6 +1213,95 @@ class ProtectedApplyJournal:
         if type(observed.get("schema_version")) is not int or observed != record:
             raise ProtectedApplyJournalError("application credential recovery readback changed")
         self._sync_application_recovery(root, path.name)
+
+    def read_application_manager_replacement(
+        self,
+    ) -> tuple[CNPGManagerReplacementIntent, bool, CNPGManagerReplacementReceipt | None] | None:
+        root, component = self._application_admission_context()
+        admission = self.read_application_admission_recovery()
+        names = (
+            "application-manager-intent.json", "application-manager-dispatch.json",
+            "application-manager-receipt.json",
+        )
+        if not (root / names[0]).exists():
+            if any((root / name).exists() for name in names[1:]):
+                raise ProtectedApplyJournalError("CNPG manager record lacks its original intent")
+            return None
+        intent = CNPGManagerReplacementIntent.from_dict(self._read(root / names[0]))
+        if (admission is None or admission.coordination_guard is None
+                or intent.component_intent_digest != component.intent_digest
+                or intent.admission_digest != admission_record_digest(admission.to_dict())):
+            raise ProtectedApplyJournalError("CNPG manager replacement requires original admission guard")
+        self._sync_application_recovery(root, names[0])
+        dispatched = (root / names[1]).exists()
+        if dispatched:
+            marker = self._read(root / names[1])
+            if (type(marker.get("schema_version")) is not int
+                    or marker != {"schema_version": 1, "intent_digest": intent.digest}):
+                raise ProtectedApplyJournalError("CNPG manager dispatch binding changed")
+            self._sync_application_recovery(root, names[1])
+        receipt = None
+        if (root / names[2]).exists():
+            if not dispatched:
+                raise ProtectedApplyJournalError("CNPG manager receipt precedes dispatch")
+            receipt = CNPGManagerReplacementReceipt.from_dict(
+                self._read(root / names[2]), intent=intent,
+            )
+            self._sync_application_recovery(root, names[2])
+        return intent, dispatched, receipt
+
+    def prepare_application_manager_replacement(
+        self, *, identity: CNPGManagerIdentity,
+    ) -> CNPGManagerReplacementIntent:
+        root, component = self._application_admission_context()
+        admission = self.read_application_admission_recovery()
+        if admission is None or admission.coordination_guard is None:
+            raise ProtectedApplyJournalError("CNPG manager replacement requires original admission guard")
+        intent = CNPGManagerReplacementIntent(
+            component.intent_digest, admission_record_digest(admission.to_dict()), identity,
+        )
+        self._publish_or_match(root / "application-manager-intent.json", intent.to_dict())
+        record = self.read_application_manager_replacement()
+        if record is None or record[0] != intent:
+            raise ProtectedApplyJournalError("CNPG manager replacement intent readback changed")
+        return intent
+
+    def begin_application_manager_replacement(self) -> bool:
+        """Authorize one local dispatch only after durable intent and issuance.
+
+        False means already issued, even if the preceding caller never reached
+        PUT. Recovery observes the exact transition; it must never resend.
+        """
+        root, _component = self._application_admission_context()
+        record = self.read_application_manager_replacement()
+        if record is None:
+            raise ProtectedApplyJournalError("CNPG manager dispatch requires original intent")
+        intent, dispatched, _receipt = record
+        if dispatched:
+            return False
+        self._publish_or_match(
+            root / "application-manager-dispatch.json",
+            {"schema_version": 1, "intent_digest": intent.digest},
+        )
+        after = self.read_application_manager_replacement()
+        if after is None or after[:2] != (intent, True):
+            raise ProtectedApplyJournalError("CNPG manager dispatch readback changed")
+        return True
+
+    def record_application_manager_replacement(
+        self, *, identity: CNPGManagerIdentity,
+    ) -> CNPGManagerReplacementReceipt:
+        root, _component = self._application_admission_context()
+        record = self.read_application_manager_replacement()
+        if record is None or not record[1]:
+            raise ProtectedApplyJournalError("CNPG manager receipt requires durable dispatch")
+        intent, _dispatched, _previous = record
+        receipt = CNPGManagerReplacementReceipt.validate(intent, identity)
+        self._publish_or_match(root / "application-manager-receipt.json", receipt.to_dict())
+        after = self.read_application_manager_replacement()
+        if after is None or after[2] != receipt:
+            raise ProtectedApplyJournalError("CNPG manager receipt readback changed")
+        return receipt
 
     def record_application_admission_recovery(
         self,
