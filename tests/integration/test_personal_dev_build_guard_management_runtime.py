@@ -282,3 +282,55 @@ async def test_stale_pending_publication_does_not_starve_other_pool_admission(pr
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.dispositions WHERE kind='publication'")) == 1
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 2
+
+
+async def test_management_recovers_after_shared_database_pool_exhaustion(prepared_input):
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from loom_service.personal_dev_build_management import PersonalBuildManagementServiceRuntime
+
+    factory, _engine, installation, *_ = prepared_input
+    pooled = create_async_engine(factory.kw["bind"].url, isolation_level="SERIALIZABLE",
+        pool_size=2, max_overflow=0, pool_timeout=0.05)
+    admission_seen = asyncio.Event()
+
+    async def handle(outgoing):
+        path = outgoing.url.path
+        if "/reports/demand/" in path:
+            snapshot = DemandSnapshotV1.model_validate_json(outgoing.content)
+            return httpx.Response(200, json={"snapshot_id": str(uuid4()), "digest": canonical_digest(snapshot),
+                "sequence": snapshot.sequence, "replayed": False})
+        assert path.endswith("/admission-work")
+        admission_seen.set()
+        return httpx.Response(200, content=b"null")
+
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+            manager = DemandReporterClient(configuration_for(installation), manager_origin="https://manager.example",
+                bearer_token="test-only-token", http_client=http)
+            managed = runtime(async_sessionmaker(pooled), installation, manager)
+            service = PersonalBuildManagementServiceRuntime(managers=(managed,), clients=())
+            running = None
+            try:
+                async with pooled.connect(), pooled.connect():
+                    service.start()
+                    seen = asyncio.create_task(admission_seen.wait())
+                    running = asyncio.create_task(service.wait())
+                    try:
+                        done, _ = await asyncio.wait((seen, running), timeout=2, return_when=asyncio.FIRST_COMPLETED)
+                        if running in done:
+                            await running  # Preserve the actual unexpected exception.
+                        assert seen in done and not running.done()
+                    finally:
+                        seen.cancel()
+                        await asyncio.gather(seen, return_exceptions=True)
+                        # Do not cancel the waiter: that would cancel service.
+                assert (await managed.run_once(admission_enabled=False)).failed_stages == ()
+            finally:
+                await service.aclose()
+                if running is not None:
+                    await asyncio.gather(running, return_exceptions=True)
+    finally:
+        await pooled.dispose()

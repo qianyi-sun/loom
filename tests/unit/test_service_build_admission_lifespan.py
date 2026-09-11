@@ -32,6 +32,20 @@ def test_service_owns_private_admission_through_startup_and_shutdown(monkeypatch
     async def noop(*args, **kwargs):
         pass
 
+    class Management:
+        def start(self):
+            events.append("management-started")
+
+        async def aclose(self):
+            events.append("management-closed")
+
+    async def build_management(settings, *, admission):
+        if admission is None:
+            return None
+        assert admission is runtime
+        events.append("management-built")
+        return Management()
+
     async def idle(**kwargs):
         events.append("task-started")
         try:
@@ -48,6 +62,7 @@ def test_service_owns_private_admission_through_startup_and_shutdown(monkeypatch
     monkeypatch.setattr(service_app, "create_async_engine", lambda *a, **k: Engine())
     monkeypatch.setattr(service_app, "create_minio_client", lambda *a, **k: object())
     monkeypatch.setattr(service_app, "build_personal_build_admission_runtime", build, raising=False)
+    monkeypatch.setattr(service_app, "build_personal_build_management_runtime", build_management, raising=False)
     monkeypatch.setattr(service_app, "install_behavior_pipeline_public_adapter", configure)
     for name in ("batch_run_loop", "taskset_materializer_run_loop", "taskset_gc_run_loop"):
         monkeypatch.setattr(service_app, name, idle)
@@ -75,7 +90,10 @@ def test_service_owns_private_admission_through_startup_and_shutdown(monkeypatch
     assert events[-1] == "service-closed"
     if boundary in {"normal", "later-failure"}:
         assert events.count("admission-closed") == 1
+        assert events.count("management-closed") == 1
+        assert events.index("management-closed") < events.index("admission-closed")
         if boundary == "normal":
+            assert events.count("management-started") == 1
             assert events.count("task-stopped") == 3
             assert max(i for i, event in enumerate(events) if event == "task-stopped") < events.index("admission-closed")
     else:
