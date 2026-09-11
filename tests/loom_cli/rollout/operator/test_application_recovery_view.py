@@ -28,6 +28,37 @@ def test_absent_recovery_view_does_not_create_a_journal(tmp_path):
     assert not (tmp_path / "absent").exists()
 
 
+@pytest.mark.parametrize("state", ["pending", "oid", "corrupt-oid", "changed-owner"])
+def test_owner_creation_recovery_view_is_readonly_and_validates_before_admission(tmp_path, monkeypatch, state):
+    plan, journal = _plan(tmp_path), _journal(tmp_path)
+    saved = []
+    def apply(_):
+        saved.append(journal.prepare_application_owner_creation(plan, backend=_handoff(), coordination_guard=_guard()))
+        if state != "pending":
+            journal.record_application_owner_oid(plan, ordinal=1, role_oid=98765)
+        raise RuntimeError("before admission capture")
+    component = _component(apply)
+    with pytest.raises(RuntimeError, match="before admission capture"):
+        journal.execute(plan, [component])
+    root = journal.root / "00-application-ownership-handoff"
+    if state in {"corrupt-oid", "changed-owner"}:
+        path = root / ("application-owner-01-oid.json" if state == "corrupt-oid" else "application-owner-01-intent.json")
+        value = json.loads(path.read_text())
+        value["role_oid" if state == "corrupt-oid" else "owner_role"] = True if state == "corrupt-oid" else "foreign_owner"
+        path.write_text(json.dumps(value))
+    def forbid(*_args, **_kwargs):
+        pytest.fail("owner classification must not publish, fsync, or acquire apply authority")
+    monkeypatch.setattr(journal, "_sync_application_recovery", forbid)
+    monkeypatch.setattr(journal, "_publish_or_match", forbid)
+    if state in {"corrupt-oid", "changed-owner"}:
+        with pytest.raises((ValueError, RuntimeError)):
+            journal.read_application_recovery_view(plan, component, ordinal=0)
+    else:
+        view = journal.read_application_recovery_view(plan, component, ordinal=0)
+        assert view.admission is None
+        assert view.owner_creations == ((saved[0], None if state == "pending" else 98765),)
+
+
 def _interrupted(tmp_path):
     plan, journal = _plan(tmp_path), _journal(tmp_path)
 
