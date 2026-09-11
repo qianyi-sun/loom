@@ -185,3 +185,39 @@ async def test_sql_boundary_rejects_non_contract_proposals(prepared_input, bound
                 "sources": json.dumps({str(request.id): canonical_build_source(registration).decode("ascii")})})
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.plans")) == 0
+
+
+async def test_every_protocol_object_requires_its_canonical_field_set(prepared_input):
+    from copy import deepcopy
+    from hashlib import sha256
+
+    from sqlalchemy.exc import DBAPIError
+
+    sessions, engine, retained, proposal, registration, request = prepared_input
+    original = json.loads(canonical_executable_bytes(proposal))
+    paths = ((), ("shapes", 0), ("shapes", 0, "binding"),
+        ("shapes", 0, "binding", "execution"), ("allowances", 0))
+    async with sessions.begin() as session:
+        for path in paths:
+            target = original
+            for segment in path:
+                target = target[segment]
+            for field in (*target, "unexpected"):
+                payload = deepcopy(original)
+                changed = payload
+                for segment in path:
+                    changed = changed[segment]
+                if field == "unexpected":
+                    changed[field] = "not-authority"
+                else:
+                    del changed[field]
+                wire = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii")
+                with pytest.raises(DBAPIError):
+                    async with session.begin_nested():
+                        await session.execute(text("""SELECT loom_capacity_build_guard.prepare_plan(
+                            :installation, CAST(:payload AS jsonb), :wire, :digest, CAST(:sources AS jsonb))
+                        """), {"installation": retained.id, "payload": wire.decode("ascii"), "wire": wire,
+                            "digest": sha256(wire).hexdigest(),
+                            "sources": json.dumps({str(request.id): canonical_build_source(registration).decode("ascii")})})
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.plans")) == 0

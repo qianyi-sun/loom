@@ -8,11 +8,14 @@ SCHEMA = "loom_capacity_build_guard"
 def verify_migration_privileges(connection: Connection, *, owner: str, agent: str) -> None:
     """Check explicit defaults and effective schema/object/column ACLs on every run.
 
-    This initial, non-executable schema grants the agent only schema USAGE.
+    The agent has schema USAGE and only the revision's exact preparation entrypoint.
     Future callable procedures must amend this verifier with their exact surface.
     The check is also valid before initial creation and after empty downgrade.
     """
-    parameters = {"schema": SCHEMA, "owner": owner, "agent": agent}
+    version_table = connection.scalar(text("SELECT to_regclass('loom_capacity_build_guard.alembic_version')"))
+    revision = connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) if version_table else None
+    parameters = {"schema": SCHEMA, "owner": owner, "agent": agent,
+        "prepare_installed": revision == "build_guard_0003"}
     defaults = connection.scalar(text("""
         SELECT EXISTS (
             SELECT 1 FROM pg_default_acl d
@@ -35,10 +38,12 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
         ), objects AS (
             SELECT c.relowner AS owner_oid, COALESCE(c.relacl,
                 acldefault(CASE WHEN c.relkind='S' THEN 's'::"char" ELSE 'r'::"char" END,
-                    c.relowner)) AS acl
+                    c.relowner)) AS acl, false AS agent_callable
             FROM pg_class c JOIN namespace n ON n.oid=c.relnamespace
             UNION ALL
-            SELECT p.proowner, COALESCE(p.proacl, acldefault('f', p.proowner))
+            SELECT p.proowner, COALESCE(p.proacl, acldefault('f', p.proowner)),
+                :prepare_installed AND p.oid=to_regprocedure('loom_capacity_build_guard.prepare_plan(uuid,jsonb,bytea,text,jsonb)')
+                AND p.prosecdef AND p.proconfig=ARRAY['search_path=pg_catalog']::text[]
             FROM pg_proc p JOIN namespace n ON n.oid=p.pronamespace
         )
         SELECT EXISTS (
@@ -50,7 +55,10 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
         ) OR EXISTS (
             SELECT 1 FROM objects o WHERE
                 o.owner_oid <> (SELECT oid FROM pg_roles WHERE rolname=:owner)
-                OR EXISTS (SELECT 1 FROM aclexplode(o.acl) a WHERE a.grantee <> o.owner_oid)
+                OR EXISTS (SELECT 1 FROM aclexplode(o.acl) a WHERE a.grantee <> o.owner_oid AND NOT (
+                    COALESCE(o.agent_callable, false)
+                    AND a.grantee=(SELECT oid FROM pg_roles WHERE rolname=:agent)
+                    AND a.privilege_type='EXECUTE' AND NOT a.is_grantable))
         ) OR EXISTS (
             SELECT 1 FROM pg_attribute c
             JOIN pg_class t ON t.oid=c.attrelid
@@ -61,3 +69,33 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
     """), parameters)
     if drift:
         raise RuntimeError("build guard has unexpected schema or object privileges")
+    if revision is not None:
+        usage = connection.scalar(text("SELECT has_schema_privilege(:agent, :schema, 'USAGE')"), parameters)
+        if usage is not True:
+            raise RuntimeError("build guard required schema privilege is absent")
+        helpers = ["reject_evidence_mutation()"]
+        if revision in {"build_guard_0002", "build_guard_0003"}:
+            helpers.append("assert_current_source(uuid,uuid,jsonb,bytea,text)")
+        if revision == "build_guard_0003":
+            helpers.extend(("canonical_plan_json(jsonb)",
+                "assert_plan_fields(jsonb,text[],text[],text[],text[],text[])", "assert_plan_contract(jsonb,bytea)"))
+        for signature in helpers:
+            present = connection.scalar(text("""
+                SELECT EXISTS (SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure(:signature)
+                    AND pg_get_userbyid(p.proowner)=:owner AND NOT p.prosecdef
+                    AND p.proconfig=ARRAY['search_path=pg_catalog']::text[])
+            """), {"signature": f"{SCHEMA}.{signature}", "owner": owner})
+            if present is not True:
+                raise RuntimeError("build guard required helper surface is absent or changed")
+    if revision == "build_guard_0003":
+        surface = connection.scalar(text("""
+            SELECT EXISTS (SELECT 1 FROM pg_proc p
+                WHERE p.oid=to_regprocedure('loom_capacity_build_guard.prepare_plan(uuid,jsonb,bytea,text,jsonb)')
+                  AND pg_get_userbyid(p.proowner)=:owner
+                  AND p.prosecdef AND p.proconfig=ARRAY['search_path=pg_catalog']::text[]
+                  AND EXISTS (SELECT 1 FROM aclexplode(p.proacl) a
+                    WHERE a.grantee=(SELECT oid FROM pg_roles WHERE rolname=:agent)
+                      AND a.privilege_type='EXECUTE' AND NOT a.is_grantable))
+        """), parameters)
+        if surface is not True:
+            raise RuntimeError("build guard required preparation surface is absent or changed")

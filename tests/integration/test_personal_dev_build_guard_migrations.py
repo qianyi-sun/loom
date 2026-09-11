@@ -122,14 +122,18 @@ def test_build_guard_rejects_preexisting_schema_create_grant(build_guard_databas
         command.upgrade(config, "head")
 
 
-@pytest.mark.parametrize("boundary", ["function", "execute", "usage"])
+@pytest.mark.parametrize("boundary", ["function", "source-function", "contract-function", "execute", "usage"])
 def test_build_guard_requires_revision_callable_surface(build_guard_database, boundary):
     config, engine, _owner, agent, _url = build_guard_database
     command.upgrade(config, "head")
     quote = engine.dialect.identifier_preparer.quote
     function = "loom_capacity_build_guard.prepare_plan(uuid,jsonb,bytea,text,jsonb)"
     with engine.begin() as connection:
-        if boundary == "function":
+        if boundary == "source-function":
+            connection.exec_driver_sql("DROP FUNCTION loom_capacity_build_guard.assert_current_source(uuid,uuid,jsonb,bytea,text)")
+        elif boundary == "contract-function":
+            connection.exec_driver_sql("DROP FUNCTION loom_capacity_build_guard.assert_plan_contract(jsonb,bytea)")
+        elif boundary == "function":
             connection.exec_driver_sql(f"DROP FUNCTION {function}")
         elif boundary == "execute":
             connection.exec_driver_sql(f"REVOKE EXECUTE ON FUNCTION {function} FROM {quote(agent)}")
