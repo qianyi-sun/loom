@@ -136,6 +136,44 @@ async def test_client_authenticates_exact_native_platform_claim(pool, boundary):
             assert "private credential" not in str(failure.value)
 
 
+@pytest.mark.parametrize("boundary", ["exact", "worker", "count", "digest"])
+async def test_client_validates_registered_native_drain(boundary):
+    from uuid import uuid4
+
+    from loom_capacity_agent.admission import DrainedExecutableWorkerV2, ExecutableDrainRequestV2
+
+    worker = native_registration()
+    request = ExecutableDrainRequestV2(binding=worker.binding, operation_id=uuid4(),
+        worker_id=worker.worker_id, worker_incarnation=worker.worker_incarnation,
+        expected_claim_high_water=1, drain_epoch=3)
+    digest = canonical_executable_digest(request)
+    expected = DrainedExecutableWorkerV2(subject_id=worker.binding.subject_id,
+        subject_incarnation=worker.binding.subject_incarnation, intent_id=worker.binding.intent_id,
+        worker_id=worker.worker_id, worker_incarnation=worker.worker_incarnation,
+        claim_high_water=1, live_claim_count=1, drain_epoch=3, request_digest=digest,
+        drain_digest=digest, protected_high_water=4)
+
+    async def handle(outgoing):
+        assert outgoing.url.path.endswith("/drain")
+        assert outgoing.content == canonical_executable_bytes(request)
+        result = expected
+        if boundary == "worker":
+            result = result.model_copy(update={"worker_incarnation": uuid4()})
+        elif boundary == "count":
+            result = result.model_copy(update={"live_claim_count": 0})
+        elif boundary == "digest":
+            result = result.model_copy(update={"drain_digest": "f" * 64})
+        return httpx.Response(200, content=canonical_executable_bytes(result))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = client_for(http, worker)
+        if boundary == "exact":
+            assert await client.begin_drain(request) == expected
+        else:
+            with pytest.raises(RuntimeError, match="binding"):
+                await client.begin_drain(request)
+
+
 @pytest.mark.parametrize("boundary", ["exact", "subject_id", "subject_incarnation", "intent_id",
     "slurm_job_id", "ownership_evidence_sha256", "bootstrap_registration_epoch",
     "protected_registration_epoch", "request_digest", "withdrawal_digest"])
