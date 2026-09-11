@@ -6,10 +6,18 @@ import posixpath
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 MAX_SLURM_QUANTITY = (1 << 63) - 1
 MAX_SLURM_NODES = 128
@@ -245,6 +253,14 @@ class SlurmLaunchRequestV2(StrictSlurmV2Model):
         str | None,
         Field(max_length=128, pattern=r"^[0-9a-f]{64}\.json$"),
     ] = None
+    native_lifetime: Literal["single-use-no-requeue/v1"] | None = None
+
+    @model_serializer(mode="wrap")
+    def _preserve_legacy_wire(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        payload: dict[str, Any] = handler(self)
+        if self.native_lifetime is None:
+            payload.pop("native_lifetime", None)
+        return payload
 
     @field_validator("nodes")
     @classmethod

@@ -494,6 +494,7 @@ def _render_slurm_request(
         launcher_release_sha256=profile.trusted_launcher_release_sha256,
         image_digest=profile.image_digest,
         ownership_token=ownership_token,
+        native_lifetime="single-use-no-requeue/v1" if profile.native_execution is not None else None,
     )
 
 
