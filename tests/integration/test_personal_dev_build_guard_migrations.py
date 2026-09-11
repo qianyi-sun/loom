@@ -50,7 +50,7 @@ def test_build_guard_is_private_owner_only_and_empty_rollback_is_reversible(buil
     config, engine, owner, agent, agent_url = build_guard_database
     command.upgrade(config, "head")
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0003"
+        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0004"
         assert connection.scalar(text("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='loom_capacity_build_guard'")) == owner
         assert connection.scalar(text("SELECT has_schema_privilege(:agent,'loom_capacity_build_guard','USAGE')"), {"agent": agent})
     runtime = create_engine(agent_url)
@@ -122,14 +122,25 @@ def test_build_guard_rejects_preexisting_schema_create_grant(build_guard_databas
         command.upgrade(config, "head")
 
 
-@pytest.mark.parametrize("boundary", ["function", "source-function", "contract-function", "execute", "usage"])
+@pytest.mark.parametrize("boundary", ["function", "source-function", "contract-function", "execute", "usage",
+    "publication-function", "publication-execute", "publication-search-path", "publication-grant-option"])
 def test_build_guard_requires_revision_callable_surface(build_guard_database, boundary):
     config, engine, _owner, agent, _url = build_guard_database
     command.upgrade(config, "head")
     quote = engine.dialect.identifier_preparer.quote
     function = "loom_capacity_build_guard.prepare_plan(uuid,jsonb,bytea,text,jsonb)"
     with engine.begin() as connection:
-        if boundary == "source-function":
+        if boundary.startswith("publication-"):
+            publication = "loom_capacity_build_guard.authorize_publication(uuid,uuid)"
+            if boundary == "publication-function":
+                connection.exec_driver_sql(f"DROP FUNCTION {publication}")
+            elif boundary == "publication-execute":
+                connection.exec_driver_sql(f"REVOKE EXECUTE ON FUNCTION {publication} FROM {quote(agent)}")
+            elif boundary == "publication-search-path":
+                connection.exec_driver_sql(f"ALTER FUNCTION {publication} SET search_path=public")
+            else:
+                connection.exec_driver_sql(f"GRANT EXECUTE ON FUNCTION {publication} TO {quote(agent)} WITH GRANT OPTION")
+        elif boundary == "source-function":
             connection.exec_driver_sql("DROP FUNCTION loom_capacity_build_guard.assert_current_source(uuid,uuid,jsonb,bytea,text)")
         elif boundary == "contract-function":
             connection.exec_driver_sql("DROP FUNCTION loom_capacity_build_guard.assert_plan_contract(jsonb,bytea)")
@@ -164,7 +175,7 @@ def test_retained_installation_is_immutable_and_blocks_downgrade(build_guard_dat
     with pytest.raises(DBAPIError, match="retained evidence"):
         command.downgrade(config, "base")
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0003"
+        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0004"
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.installations")) == 1
 
 

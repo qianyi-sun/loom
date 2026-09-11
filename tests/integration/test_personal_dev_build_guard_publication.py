@@ -93,3 +93,56 @@ async def test_publication_rolls_back_with_caller(prepared_input):
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.dispositions")) == 0
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
+
+
+@pytest.mark.parametrize("kind", ["closure", "release"])
+async def test_terminal_disposition_prevents_publication_without_freeing_hold(prepared_input, kind):
+    from hashlib import sha256
+
+    sessions, engine, retained, proposal, registration, request = prepared_input
+    async with sessions.begin() as session:
+        await BuildGuardPlanStore(session, installation=retained).prepare(proposal, sources={request.id: registration})
+    with engine.begin() as connection:
+        connection.execute(text("""INSERT INTO loom_capacity_build_guard.dispositions
+            (id,plan_id,kind,payload,wire_payload,payload_sha256) VALUES (:id,:plan,:kind,'{}',:wire,:digest)"""),
+            {"id": uuid4(), "plan": proposal.plan_id, "kind": kind, "wire": b"{}", "digest": sha256(b"{}").hexdigest()})
+    async with sessions.begin() as session:
+        with pytest.raises(DBAPIError, match="terminal disposition"):
+            await publish(session, retained, proposal.plan_id)
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
+
+
+async def test_publication_keeps_source_locked_until_callers_manager_receipt(prepared_input):
+    sessions, engine, retained, proposal, registration, request = prepared_input
+    async with sessions.begin() as session:
+        await BuildGuardPlanStore(session, installation=retained).prepare(proposal, sources={request.id: registration})
+    async with sessions.begin() as session:
+        await publish(session, retained, proposal.plan_id)
+        # A separate database actor cannot cancel while the caller is publishing.
+        with engine.begin() as connection:
+            connection.execute(text("SET LOCAL lock_timeout='50ms'"))
+            with pytest.raises(DBAPIError, match="lock timeout"):
+                connection.execute(text("UPDATE personal_dev_build_platform_requests SET cancelled_at=now() WHERE id=:id"),
+                    {"id": request.id})
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE personal_dev_build_platform_requests SET cancelled_at=now() WHERE id=:id"), {"id": request.id})
+
+
+@pytest.mark.parametrize("nested", [False, True])
+async def test_publication_requires_preparation_committed_before_outer_transaction(prepared_input, nested):
+    sessions, engine, retained, proposal, registration, request = prepared_input
+    async with sessions.begin() as session:
+        store = BuildGuardPlanStore(session, installation=retained)
+        if nested:
+            async with session.begin_nested():
+                await store.prepare(proposal, sources={request.id: registration})
+        else:
+            await store.prepare(proposal, sources={request.id: registration})
+        with pytest.raises(DBAPIError, match="committed preparation"):
+            await store.authorize_publication(proposal.plan_id)
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.dispositions")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
+    async with sessions.begin() as session:
+        await BuildGuardPlanStore(session, installation=retained).authorize_publication(proposal.plan_id)
