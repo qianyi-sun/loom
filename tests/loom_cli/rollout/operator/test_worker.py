@@ -1720,3 +1720,37 @@ def test_final_admission_recovers_component_journal_without_outer_apply(
 
     assert result is resumed_admission
     assert published == [(2, resumed_admission)]
+
+
+@pytest.mark.parametrize("outcome", ["run", "successor", "epoch", "missing-epoch-reader"])
+def test_attempt_uses_original_retained_guard_at_live_advanced_epoch(tmp_path, monkeypatch, outcome):
+    from tests.loom_cli.rollout.operator.test_application_guard_retention import _guard
+    from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
+
+    bundle, envelope = advanced_epoch_resume_fakes()
+    guard = FakeMutationGuard(bundle.order)
+    original = _guard(_plan(tmp_path))
+    guard.assert_ready = lambda _: (
+        replace(original, database_backend_pid=9999) if outcome == "successor" else original
+    )
+    calls = []
+
+    def retained(state_root, **bindings):
+        calls.append(bindings)
+        assert bindings["recovery_attempt"] == 1
+        assert bindings["candidate_tree"] == envelope.resolved_tree
+        return original
+
+    monkeypatch.setattr(worker_module, "find_advanced_epoch_attempt", lambda *a, **k: 1)
+    monkeypatch.setattr(worker_module, "retained_application_guard_for_resume", retained, raising=False)
+    dependencies = replace(bundle.deps, mutation_guard=guard,
+                           read_mutation_epoch=(None if outcome == "missing-epoch-reader"
+                                                else lambda: 9 if outcome == "epoch" else 8))
+    if outcome == "run":
+        assert run_attempt(envelope, dependencies) == 0
+        assert "driver-run" in bundle.order
+    else:
+        with pytest.raises(ValueError, match="staging mutation guard"):
+            run_attempt(envelope, dependencies)
+        assert "driver-run" not in bundle.order and "driver-lock-acquire" not in bundle.order
+    assert len(calls) == 1

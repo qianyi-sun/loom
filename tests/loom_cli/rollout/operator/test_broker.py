@@ -3770,3 +3770,56 @@ def test_group_resolution_includes_primary_and_supplementary_groups(
         "loom-staging-operators",
         "docker",
     }
+
+
+@pytest.mark.parametrize("outcome", ["launch", "launch-failure", "successor", "lost", "epoch"])
+def test_resume_reuses_only_original_retained_guard(tmp_path, monkeypatch, outcome):
+    from tests.loom_cli.rollout.operator.test_application_guard_retention import _guard
+    from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
+
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    deps.store.active = None
+    deps.store.append_event(RequestEvent(
+        request_id=REQUEST_ID, event="attempt_failed", occurred_at="2026-07-14T12:10:00Z",
+        operator="hongjian", operator_uid=2002, attempt_number=1,
+        unit_name=f"loom-staging-rollout-{REQUEST_ID}-1.service", status="failed",
+        reason="driver_failed",
+    ))
+    guard = _enable_guarded_resume(deps)
+    original = _guard(_plan(tmp_path))
+    calls = []
+
+    def retained(state_root, **bindings):
+        assert state_root == deps.config.state_root
+        assert bindings == dict(
+            request_id=REQUEST_ID, service_uid=os.geteuid(), recovery_attempt=1,
+            candidate_sha=SHA, candidate_tree="b" * 40, attestation_digest="3" * 64,
+            starting_mutation_epoch=7,
+        )
+        return original
+
+    def ready(request_id):
+        calls.append(request_id)
+        if outcome == "lost":
+            raise RuntimeError("original guard lost")
+        if outcome == "successor":
+            return replace(original, database_backend_pid=9999)
+        return original
+
+    def launch_failure(_):
+        raise RuntimeError("injected launch failure")
+
+    guard.assert_ready = ready
+    deps.dependencies.read_mutation_epoch = lambda: 9 if outcome == "epoch" else 8
+    monkeypatch.setattr(broker_module, "find_advanced_epoch_attempt", lambda *a, **k: 1)
+    monkeypatch.setattr(broker_module, "retained_application_guard_for_resume", retained, raising=False)
+    if outcome == "launch-failure":
+        deps.dependencies.lifecycle.launch = launch_failure
+    starts_before = deps.systemd.start_count
+    assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == (
+        0 if outcome == "launch" else 1
+    )
+    assert calls == [REQUEST_ID]
+    assert guard.acquired == [] and guard.released == []
+    assert deps.systemd.start_count == starts_before + (outcome == "launch")
