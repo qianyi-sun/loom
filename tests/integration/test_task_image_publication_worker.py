@@ -159,14 +159,19 @@ async def _prepared(
     return job, issuer, signer, Distribution(distribution), clock
 
 
+@pytest.mark.parametrize("startup_delay_seconds", [0, 1])
 @pytest.mark.parametrize("expired_before_claim", [False, True])
 async def test_total_deadline_has_durable_terminal_disposition(
-    registry_authority_session, tls_registry, token_key, expired_before_claim
+    registry_authority_session, tls_registry, token_key, expired_before_claim, startup_delay_seconds
 ):
     values = await _prepared(
         registry_authority_session, tls_registry, token_key, lifetime_seconds=0.5
     )
     job = values[0]
+    # Explicitly simulate setup finishing after the half-second job budget.
+    # This advances the trusted test clock without guessing at machine speed.
+    original_clock = values[4]
+    values = (*values[:4], lambda: original_clock() + timedelta(seconds=startup_delay_seconds))
     if expired_before_claim:
         values = (*values[:4], lambda: job.deadline)
     else:
@@ -188,8 +193,59 @@ async def test_total_deadline_has_durable_terminal_disposition(
         assert stored.worker_id is None and stored.worker_expires_at is None
         row = (await session.scalars(select(TaskImageMaterialization))).one()
         assert not row.registry_images and row.ready_at is None and row.attempt_count == 0
-    if not expired_before_claim:
+        assert not list(await session.scalars(select(TaskImagePublicationEnvelope)))
+    # Expiry is allowed before a connection ever opens. The real-time test
+    # establishes terminal disposition; the event-gated test below proves I/O
+    # cleanup only after observing actual network admission.
+    if expired_before_claim or startup_delay_seconds:
+        assert not tls_registry.requests
+
+
+async def test_observed_registry_io_closes_when_renewal_detects_total_deadline(
+    registry_authority_session, tls_registry, token_key
+):
+    values = await _prepared(registry_authority_session, tls_registry, token_key)
+    job, _, signer, _, _ = values
+    now = NOW + timedelta(seconds=14)
+    values = (*values[:4], lambda: now)
+    signer.clock = values[4]
+    target, response = next(
+        (path, response) for path, response in tls_registry.routes.items() if "/manifests/" in path
+    )
+    response.wait_for_peer_close_before_response = True
+    worker = _worker(
+        registry_authority_session, tls_registry, values,
+        lease_seconds=60, renewal_interval_seconds=0.05,
+    )
+    task = asyncio.create_task(worker.run(UUID(job.operation_id)))
+    try:
+        await asyncio.wait_for(tls_registry.request_received.wait(), 5)
+        assert [request.target for request in tls_registry.requests] == [target]
+        assert not tls_registry.peer_closed.is_set()
+        # Move the trusted job clock only after network admission. Renewal
+        # detects expiry and cancels work; this does not fast-forward the
+        # monotonic outer timer. The separate real-time deadline cases remain above.
+        now = job.deadline
+        completed, _ = await asyncio.wait((task,), timeout=5)
+        assert task in completed, "worker did not detect expiry without harness cancellation"
+        with pytest.raises((RuntimeError, TimeoutError)):
+            await task
         await asyncio.wait_for(tls_registry.peer_closed.wait(), 5)
+        assert signer.closed.is_set() and signer.calls == 0
+        assert not [
+            pending for pending in asyncio.all_tasks()
+            if pending.get_name().startswith("publication-")
+        ]
+        async with registry_authority_session() as session:
+            stored = await session.get(TaskImagePublicationJob, UUID(job.operation_id))
+            assert stored.state == "failed" and stored.failure_code == "deadline"
+            assert stored.worker_id is None and stored.worker_expires_at is None
+            row = (await session.scalars(select(TaskImageMaterialization))).one()
+            assert not row.registry_images and row.ready_at is None and row.attempt_count == 0
+            assert not list(await session.scalars(select(TaskImagePublicationEnvelope)))
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.parametrize(

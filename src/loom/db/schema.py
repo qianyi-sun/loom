@@ -3769,6 +3769,61 @@ class TaskImagePublicationKey(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
 
+class TaskImagePublicationKeyset(Base):
+    """Original signed distribution artifact; never a worker-readiness certificate."""
+
+    __tablename__ = "task_image_publication_keysets"
+    __table_args__ = (
+        CheckConstraint(
+            "keyset_version BETWEEN 1 AND 9007199254740991 "
+            "AND revocation_epoch BETWEEN 0 AND 9007199254740991",
+            name="task_image_publication_keysets_counters_check",
+        ),
+        CheckConstraint(
+            "environment ~ '^[a-z0-9][a-z0-9_.-]{0,127}$' "
+            "AND execution_key_id ~ '^[a-z0-9][a-z0-9_.-]{0,127}$' "
+            "AND root_sha256 ~ '^[0-9a-f]{64}$' AND keyset_sha256 ~ '^[0-9a-f]{64}$'",
+            name="task_image_publication_keysets_identity_check",
+        ),
+        CheckConstraint(
+            "octet_length(canonical_envelope) BETWEEN 1 AND 131072 "
+            "AND snapshot_sha256 = encode(sha256(canonical_envelope), 'hex')",
+            name="task_image_publication_keysets_bytes_check",
+        ),
+        CheckConstraint(
+            "isfinite(issued_at) AND isfinite(expires_at) "
+            "AND date_trunc('second', issued_at) = issued_at "
+            "AND date_trunc('second', expires_at) = expires_at "
+            "AND expires_at > issued_at AND expires_at <= issued_at + interval '15 minutes'",
+            name="task_image_publication_keysets_interval_check",
+        ),
+    )
+    keyset_version: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    revocation_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    environment: Mapped[str] = mapped_column(String(128), nullable=False)
+    execution_key_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    root_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    keyset_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    snapshot_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    canonical_envelope: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
+class TaskImagePublicationKeysetMember(Base):
+    """Restrictive immutable membership preserves historical public identities."""
+
+    __tablename__ = "task_image_publication_keyset_members"
+    keyset_version: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("task_image_publication_keysets.keyset_version", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    key_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("task_image_publication_keys.key_id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+
+
 class TaskImagePublicationEnvelope(Base):
     """Immutable signed audit bytes, distinct from live artifact retention pins.
 
