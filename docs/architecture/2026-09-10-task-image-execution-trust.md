@@ -4,7 +4,8 @@ Status: signed-keyset verification, durable distribution adapter and dedicated
 signer service/client implemented; host signing service provisioning, runtime
 distribution, complete execution grants and online start remain uncomposed.
 
-This increment implements the keyset wire described by the
+This document covers the keyset wire, durable distribution and dedicated signer
+implementation of the
 [Phase 2 production design](2026-09-02-task-image-builder-phase2-production.md).
 It does not activate builders or authorize a trial runtime. The
 [publication boundary](2026-09-05-task-image-builder-phase2d2-verification.md)
@@ -252,9 +253,10 @@ signing, exact replay, key-insert serialization, unsupported isolation, cached o
 pending state, unchanged expiry and rollback on expiration during persistence.
 These are local contract tests, not live distribution or native acceptance.
 
-The dedicated signing service policy, versioned complete grant, source binding,
-worker reader and serialized one-use start/revocation must still be implemented
-and integrated with this distributor. Production remains
+The dedicated signing service policy and distributor are implemented but not
+provisioned or runtime-composed. The versioned complete grant, source binding,
+worker reader and serialized one-use start/revocation still require implementation
+and integration. Production remains
 disabled pending those gates, genuine shadow isolation, both native containment
 and scheduling campaigns, Phase 1 continuity, incident acceptance, rollback and
 soak. No private signing keys, live state changes or runtime defaults are supplied
