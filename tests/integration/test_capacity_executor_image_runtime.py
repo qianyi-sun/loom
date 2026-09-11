@@ -69,6 +69,24 @@ class CapacityExecutorImageRuntimeTest(unittest.TestCase):
         self.assertIn("discover-controller", result.stdout)
         self.assertIn("converge-prerequisite", result.stdout)
 
+    def test_native_receiver_installed_process_hardens_and_sanitizes_exit(self) -> None:
+        probe = """
+import ctypes, os, resource, stat
+from loom_capacity_executor.native_bootstrap_receiver import run_native_bootstrap_receiver_process
+def factory():
+    assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
+    assert ctypes.CDLL(None).prctl(3, 0, 0, 0, 0) == 0
+    raise SystemExit('disposable-private-admission-detail')
+result = run_native_bootstrap_receiver_process(factory)
+assert stat.S_ISCHR(os.fstat(0).st_mode) and os.read(0, 1) == b''
+raise SystemExit(result)
+"""
+        result = subprocess.run([sys.executable, "-I", "-B", "-c", probe],
+            input=b"disposable-capability-bytes", capture_output=True, check=False, timeout=30)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, b"")
+        self.assertEqual(result.stderr, b"native bootstrap receiver refused\n")
+
     def test_invalid_discovery_reaches_validation_without_host_access(self) -> None:
         result = subprocess.run(
             [sys.executable, "-I", "-B", str(_INSTALLER), "--operation", "discover-controller"],
