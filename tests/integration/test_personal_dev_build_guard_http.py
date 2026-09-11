@@ -71,7 +71,10 @@ async def test_http_prepare_bind_and_lost_reply_replay_are_committed(prepared_in
 
 async def test_http_revocation_before_preparation_is_committed_and_replayable(prepared_input, tmp_path):
     from loom_capacity_agent.admission import ExecutablePreparedBootstrapRevocationV2
-    from loom_capacity_executor.build_admission_client import BuildAdmissionClient, BuildAdmissionExecutorV1
+    from loom_capacity_executor.build_admission_client import (
+        BuildAdmissionClient,
+        BuildAdmissionExecutorV1,
+    )
 
     _factory, engine, _installation, _plan, _source, platform_request = prepared_input
     registration, _digest = await admitted(prepared_input)
@@ -97,7 +100,7 @@ async def test_http_revocation_before_preparation_is_committed_and_replayable(pr
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
 
 
-@pytest.mark.parametrize("operation", ["prepare", "observe"])
+@pytest.mark.parametrize("operation", ["prepare", "observe", "revoke-bootstrap"])
 @pytest.mark.parametrize("boundary", ["credential", "path-pool", "path-intent", "pool-generation", "executor", "incarnation", "subject", "body", "oversized", "http"])
 async def test_http_rejects_untrusted_admission_without_writes(prepared_input, tmp_path, boundary, operation):
     _factory, engine, _installation, _plan, _source, _request = prepared_input
@@ -120,6 +123,12 @@ async def test_http_rejects_untrusted_admission_without_writes(prepared_input, t
             reply = await client.post(url,content=b"{" if boundary=="body" else b"x"*(1024*1024+1))
         elif operation == "observe":
             reply = await client.post(url,content=canonical_executable_bytes(registration.binding))
+        elif operation == "revoke-bootstrap":
+            from loom_capacity_agent.admission import ExecutablePreparedBootstrapRevocationV2
+
+            revoke = ExecutablePreparedBootstrapRevocationV2(operation_id=uuid4(), binding=registration.binding,
+                bootstrap_registration_epoch=1,protected_registration_epoch=2)
+            reply = await client.post(url,content=canonical_executable_bytes(revoke))
         else:
             reply = await client.post(url,json=preparation(registration,digest))
     assert reply.status_code in {400,401,403,409,413}, reply.text
@@ -127,6 +136,7 @@ async def test_http_rejects_untrusted_admission_without_writes(prepared_input, t
     assert "executor-secret" not in reply.text
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.bootstrap_revocations")) == 0
 
 
 async def test_http_defaults_closed_without_private_configuration(tmp_path):

@@ -104,6 +104,7 @@ async def _assert_private_agent(connection: AsyncConnection) -> None:
         "prepare_worker(uuid,jsonb,bytea,text,text)",
         "bind_slurm_job(uuid,jsonb,bytea,text)",
         "observe_intent(uuid,jsonb,bytea,text)",
+        "revoke_prepared_bootstrap(uuid,jsonb,bytea,text)",
     ):
         callable_safe = await connection.scalar(
             text("""

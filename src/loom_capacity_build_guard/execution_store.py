@@ -10,9 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
+    ExecutablePreparedBootstrapRevocationV2,
     PhysicalJobBindingV2,
     PreparedExecutableAdmissionV2,
     ProtectedIntentObservationV2,
+    RevokedExecutableBootstrapV2,
 )
 from loom_capacity_build_guard.installation_store import (
     BuildGuardInstallationV1,
@@ -103,6 +105,27 @@ class BuildGuardExecutionStore:
             receipt = ProtectedIntentObservationV2.model_validate_json(returned)
             if canonical_executable_bytes(receipt).decode("ascii") != returned or receipt.binding != binding:
                 raise ValueError("build observation receipt changed")
+            return receipt
+
+    async def revoke_prepared_bootstrap(self, request: ExecutablePreparedBootstrapRevocationV2) -> RevokedExecutableBootstrapV2:
+        """Fence an exact unbound bootstrap; never remove its capacity hold."""
+        if not self._session.in_transaction():
+            raise ValueError("build bootstrap revocation requires an outer transaction")
+        request = ExecutablePreparedBootstrapRevocationV2.model_validate_json(request.model_dump_json())
+        wire = canonical_executable_bytes(request)
+        digest = canonical_executable_digest(request)
+        async with self._session.begin_nested():
+            returned = await self._session.scalar(text("""SELECT loom_capacity_build_guard.revoke_prepared_bootstrap(
+                :installation,CAST(:payload AS jsonb),:wire,:digest)"""),
+                {"installation":self._installation.id,"payload":wire.decode("ascii"),"wire":wire,"digest":digest})
+            receipt = RevokedExecutableBootstrapV2.model_validate_json(returned)
+            if (canonical_executable_bytes(receipt).decode("ascii") != returned or receipt.binding != request.binding
+                or receipt.binding.subject_id != self._installation.subject_id
+                or receipt.binding.subject_incarnation != self._installation.subject_incarnation
+                or receipt.bootstrap_registration_epoch != request.bootstrap_registration_epoch
+                or receipt.protected_registration_epoch != request.protected_registration_epoch
+                or receipt.request_digest != digest or receipt.protected_release_sha256 != digest):
+                raise ValueError("build bootstrap revocation receipt changed")
             return receipt
 
     async def bind_slurm_job(self, request: PhysicalJobBindingV2) -> BoundExecutableWorkerV2:

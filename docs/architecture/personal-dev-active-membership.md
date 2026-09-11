@@ -302,6 +302,19 @@ request hold nor manufactures a terminal release receipt. This revision has no
 worker exchange or claims; observation must be extended atomically when those
 consumers are installed. The typed executor activation interlock remains closed.
 
+Revision `build_guard_0011` adds unbound bootstrap revocation, including when
+cancellation or expiry prevented the first preparation. Its append-only receipt
+binds the committed bootstrap and server-selected reporter and shares the protected
+execution high-water. It rejects any existing physical binding and fences later
+new preparation, binding and bootstrap publication; exact committed preparation
+replay remains available for recovery. Observation requires committed revocation
+before returning its terminal receipt. The executor-authenticated
+`revoke-bootstrap` endpoint commits before replying and supports exact retry.
+Revocation never removes request holds or proves scheduler absence. The executor
+must separately prove that no submission was attempted, or follow physical-job
+cleanup, before manager release. Typed cleanup routing, manager release publication,
+worker exchange/claims and contained execution remain interlocked and unfinished.
+
 The pool-side build-admission client uses a separate controller-only bearer token
 and verified mTLS files. It pins pool generation and executor identity, bounds
 request deadlines and response sizes, rejects redirects, and validates canonical

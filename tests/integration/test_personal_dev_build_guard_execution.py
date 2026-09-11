@@ -221,7 +221,7 @@ async def test_execution_direct_sql_rejects_non_contract_requests(prepared_input
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == int(operation=="bind")
 
 
-@pytest.mark.parametrize("signature", ["prepare_worker(uuid,jsonb,bytea,text,text)", "bind_slurm_job(uuid,jsonb,bytea,text)", "observe_intent(uuid,jsonb,bytea,text)"])
+@pytest.mark.parametrize("signature", ["prepare_worker(uuid,jsonb,bytea,text,text)", "bind_slurm_job(uuid,jsonb,bytea,text)", "observe_intent(uuid,jsonb,bytea,text)", "revoke_prepared_bootstrap(uuid,jsonb,bytea,text)"])
 @pytest.mark.parametrize("boundary", ["execute", "search-path", "grant-option"])
 def test_execution_required_privileges_are_pinned(build_guard_database, signature, boundary):
     from alembic import command

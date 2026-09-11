@@ -10,9 +10,11 @@ import httpx
 
 from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
+    ExecutablePreparedBootstrapRevocationV2,
     PhysicalJobBindingV2,
     PreparedExecutableAdmissionV2,
     ProtectedIntentObservationV2,
+    RevokedExecutableBootstrapV2,
 )
 from loom_capacity_agent.build_admission import BuildPreparationRequestV1
 from loom_capacity_agent.client import (
@@ -158,4 +160,14 @@ class BuildAdmissionClient:
         receipt = await self._post(binding,"observe",canonical_executable_bytes(binding),ProtectedIntentObservationV2)
         if receipt.binding != binding:
             raise BuildAdmissionTransportError("build admission observation binding changed")
+        return receipt
+
+    async def revoke_prepared_bootstrap(self, request: ExecutablePreparedBootstrapRevocationV2) -> RevokedExecutableBootstrapV2:
+        request = ExecutablePreparedBootstrapRevocationV2.model_validate_json(request.model_dump_json())
+        receipt = await self._post(request.binding,"revoke-bootstrap",canonical_executable_bytes(request),RevokedExecutableBootstrapV2)
+        digest = canonical_executable_digest(request)
+        if (receipt.binding != request.binding or receipt.bootstrap_registration_epoch != request.bootstrap_registration_epoch
+            or receipt.protected_registration_epoch != request.protected_registration_epoch
+            or receipt.request_digest != digest or receipt.protected_release_sha256 != digest):
+            raise BuildAdmissionTransportError("build admission revocation binding changed")
         return receipt
