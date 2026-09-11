@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import subprocess
+import sys
 import time
 from datetime import UTC, datetime
 from importlib import import_module
@@ -52,7 +54,7 @@ def preparation(tmp_path):
     payload = {
         "schema": "loom.native-worker-cgroup-preparation/v1", "purpose": "prepare-application-worker-cgroup",
         "policy_sha256": hashlib.sha256(canonical(policy)).hexdigest(),
-        "grant_id": str(UUID(int=13)), "intent_id": str(UUID(int=14)),
+        "grant_id": str(UUID(int=13)), "grant_generation": 1, "intent_id": str(UUID(int=14)),
         "binding_sha256": "5" * 64, "physical_binding_sha256": "6" * 64,
         "bootstrap_registration_epoch": 1, "bootstrap_sha256": "7" * 64,
         "agent_incarnation": str(UUID(int=15)), "ownership_evidence_sha256": "8" * 64,
@@ -87,7 +89,7 @@ def test_native_preparation_matches_independent_policy_and_scheduler(preparation
     "duplicate", "noncanonical", "oversize", "wrong-domain",
 ))
 def test_native_preparation_rejects_scope_replay_and_wire_substitution(preparation, changed):
-    module, key, policy, payload, scheduler, observed = preparation
+    module, key, policy, payload, _scheduler, _observed = preparation
     packet = None
     if changed in {"uid", "node", "key"}:
         if changed == "uid":
@@ -143,3 +145,116 @@ def test_native_preparation_rejects_scope_replay_and_wire_substitution(preparati
             packet += b" " * 32769
     with pytest.raises(module.NativeContainmentVerificationError):
         verify(preparation, packet=packet)
+
+
+@pytest.mark.parametrize("changed", ("extra", "epoch-alias", "duplicate-profile", "zero-pids", "expires", "unknown-pool"))
+def test_root_policy_is_closed_and_strict(preparation, changed):
+    module, _key, policy, payload, *_ = preparation
+    if changed == "extra":
+        policy["executable"] = "/untrusted/openssl"
+    elif changed == "epoch-alias":
+        policy["execution_epoch"] = True
+    elif changed == "duplicate-profile":
+        policy["profiles"] *= 2
+    elif changed == "zero-pids":
+        policy["profiles"][0]["pids_max"] = 0
+    elif changed == "expires":
+        policy["expires_at_ms"] = payload["expires_at_ms"] - 1
+    else:
+        policy["pool_id"] = "foreign"
+    payload["policy_sha256"] = hashlib.sha256(canonical(policy)).hexdigest()
+    with pytest.raises(module.NativeContainmentVerificationError):
+        verify(preparation)
+
+
+def test_native_preparation_rechecks_expiry_after_crypto(preparation, monkeypatch):
+    module, _key, _policy, payload, *_ = preparation
+    original = module.verify_native_ed25519
+
+    def delayed(**kwargs):
+        original(**kwargs)
+        monkeypatch.setattr(module.time, "time_ns", lambda: payload["expires_at_ms"] * 1_000_000)
+
+    monkeypatch.setattr(module, "verify_native_ed25519", delayed)
+    with pytest.raises(module.NativeContainmentVerificationError, match="expired"):
+        verify(preparation)
+
+
+def test_expired_preparation_is_rejected_before_starting_crypto(preparation, monkeypatch):
+    module, _key, _policy, payload, *_ = preparation
+    monkeypatch.setattr(module.time, "time_ns", lambda: payload["expires_at_ms"] * 1_000_000)
+
+    def should_not_start(**kwargs):
+        pytest.fail("expired requests must not spend privileged verifier capacity")
+
+    monkeypatch.setattr(module, "verify_native_ed25519", should_not_start)
+    with pytest.raises(module.NativeContainmentVerificationError, match="expired"):
+        verify(preparation)
+
+
+@pytest.mark.parametrize("field,replacement", (
+    ("environment", "production"), ("pool_generation", 2),
+    ("authority_incarnation", str(UUID(int=81))), ("executor_incarnation", str(UUID(int=82))),
+    ("execution_epoch", 2), ("trusted_fleet_release_sha256", "f" * 64),
+))
+def test_signed_preparation_cannot_move_to_another_root_policy(preparation, field, replacement):
+    module, key, policy, payload, *_ = preparation
+    packet = signed(key, payload)
+    policy[field] = replacement
+    with pytest.raises(module.NativeContainmentVerificationError, match="policy differs"):
+        verify(preparation, packet=packet)
+
+
+@pytest.mark.parametrize("delta_ms", (-10_001, 1000))
+def test_scheduler_clock_must_be_current_before_crypto(preparation, monkeypatch, delta_ms):
+    from datetime import timedelta
+
+    module, *_ = preparation
+    observed = preparation[-1]
+    monkeypatch.setattr(module.time, "time_ns", lambda: int(observed.timestamp() * 1000) * 1_000_000)
+    changed = (*preparation[:-1], observed + timedelta(milliseconds=delta_ms))
+
+    def should_not_start(**kwargs):
+        pytest.fail("invalid observation clocks must not start verification")
+
+    monkeypatch.setattr(module, "verify_native_ed25519", should_not_start)
+    with pytest.raises(module.NativeContainmentVerificationError, match="expired"):
+        verify(changed)
+
+
+def test_preparation_rejects_clock_rollback_during_crypto(preparation, monkeypatch):
+    module, _key, _policy, payload, *_ = preparation
+    original = module.verify_native_ed25519
+    initial_ns = (payload["issued_at_ms"] + 200) * 1_000_000
+    monkeypatch.setattr(module.time, "time_ns", lambda: initial_ns)
+
+    def delayed(**kwargs):
+        original(**kwargs)
+        monkeypatch.setattr(module.time, "time_ns", lambda: initial_ns - 1_000_000)
+
+    monkeypatch.setattr(module, "verify_native_ed25519", delayed)
+    with pytest.raises(module.NativeContainmentVerificationError, match="during verification"):
+        verify(preparation)
+
+
+def test_complete_native_preparation_verifier_is_stdlib_only(preparation):
+    module, key, policy, payload, scheduler, observed = preparation
+    probe = """
+import json, runpy, sys
+from datetime import datetime
+namespace = runpy.run_path(sys.argv[1])
+value = json.load(sys.stdin)
+for key in ('signed_packet', 'root_policy'):
+    value[key] = value[key].encode('ascii')
+value['scheduler_observed_at'] = datetime.fromisoformat(value['scheduler_observed_at'])
+print(json.dumps(namespace['verify_native_preparation'](**value), sort_keys=True))
+"""
+    data = {
+        "signed_packet": signed(key, payload).decode("ascii"), "root_policy": canonical(policy).decode("ascii"),
+        "scheduler_raw": scheduler, "scheduler_observed_at": observed.isoformat(),
+        "openssl_path": "/usr/bin/openssl", "openssl_sha256": hashlib.sha256(Path("/usr/bin/openssl").read_bytes()).hexdigest(),
+    }
+    result = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", probe, module.__file__],
+        input=json.dumps(data), capture_output=True, text=True, check=False, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == payload

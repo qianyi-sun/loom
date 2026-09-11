@@ -16,9 +16,12 @@ import re
 import signal
 import stat
 import subprocess
+import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
+from typing import cast
+from uuid import UUID
 
 _MAX_BYTES = 1024 * 1024
 _MEMORY = re.compile(r"([1-9][0-9]{0,18})([KMGT])", re.ASCII)
@@ -34,6 +37,173 @@ _MAX_SIGNATURE_INPUT_BYTES = 32768
 _MAX_OPENSSL_BYTES = 64 * 1024 * 1024
 # RFC 8410 SubjectPublicKeyInfo header for one raw 32-byte Ed25519 public key.
 _ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
+_DIGEST = re.compile(r"[0-9a-f]{64}", re.ASCII)
+_KEY_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,127}", re.ASCII)
+_PREPARATION_DOMAIN = b"loom.native-worker-cgroup-preparation-signature/v1\0"
+_POLICY_FIELDS = frozenset({
+    "schema", "environment", "pool_id", "pool_generation", "node", "cluster", "submitter", "uid",
+    "account", "partition", "qos", "authority_incarnation", "execution_epoch",
+    "execution_manifest_sha256", "executor_id", "executor_incarnation",
+    "controller_authority_sha256", "trusted_fleet_release_sha256", "issuer_key_id",
+    "issuer_public_key_hex", "not_before_ms", "expires_at_ms", "profiles",
+})
+_PREPARATION_FIELDS = frozenset({
+    "schema", "purpose", "policy_sha256", "grant_id", "grant_generation", "intent_id", "binding_sha256",
+    "physical_binding_sha256", "bootstrap_registration_epoch", "bootstrap_sha256",
+    "agent_incarnation", "ownership_evidence_sha256", "manager_observation_sha256",
+    "bootstrap_observation_sha256", "scheduler_observation_sha256", "profile_digest",
+    "pids_max", "job_id", "ownership_token", "cpus", "memory_bytes", "submitted_at_ms",
+    "started_at_ms", "issued_at_ms", "expires_at_ms",
+})
+
+
+def _canonical_native(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
+
+
+def _closed_mapping(value: object, fields: frozenset[str]) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != fields:
+        raise NativeContainmentVerificationError("native preparation fields are invalid")
+    return cast(dict[str, object], value)
+
+
+def _closed_native_document(raw: bytes, fields: frozenset[str]) -> dict[str, object]:
+    if type(raw) is not bytes or not 0 < len(raw) <= _MAX_SIGNATURE_INPUT_BYTES:
+        raise NativeContainmentVerificationError("native preparation document exceeds its bound")
+    value = _closed_mapping(json.loads(raw.decode("ascii"), object_pairs_hook=_object, parse_constant=_constant), fields)
+    if _canonical_native(value) != raw:
+        raise NativeContainmentVerificationError("native preparation document is not canonical")
+    return value
+
+
+def _native_text(value: object, pattern: re.Pattern[str]) -> str:
+    if type(value) is not str or pattern.fullmatch(value) is None:
+        raise NativeContainmentVerificationError("native preparation identity is invalid")
+    return value
+
+
+def _native_quantity(value: object, *, minimum: int = 1, maximum: int = (1 << 53) - 1) -> int:
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise NativeContainmentVerificationError("native preparation quantity is invalid")
+    return value
+
+
+def _native_uuid(value: object) -> None:
+    if type(value) is not str or str(UUID(value)) != value or UUID(value).int == 0:
+        raise NativeContainmentVerificationError("native preparation UUID is invalid")
+
+
+def _native_millis(value: datetime) -> int:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise NativeContainmentVerificationError("native observation clock is invalid")
+    delta = value - datetime(1970, 1, 1, tzinfo=UTC)
+    return delta.days * 86_400_000 + delta.seconds * 1000 + delta.microseconds // 1000
+
+
+def _validate_native_policy(policy: dict[str, object]) -> dict[str, int]:
+    if policy["schema"] != "loom.native-worker-cgroup-policy/v1" or policy["pool_id"] not in {"oldlab", "gb10"}:
+        raise NativeContainmentVerificationError("native root policy schema or pool is invalid")
+    for name in ("environment", "node", "cluster", "submitter", "account", "partition", "qos", "executor_id"):
+        _native_text(policy[name], _IDENTIFIER)
+    for name in ("authority_incarnation", "executor_incarnation"):
+        _native_uuid(policy[name])
+    for name in ("execution_manifest_sha256", "controller_authority_sha256", "trusted_fleet_release_sha256", "issuer_public_key_hex"):
+        _native_text(policy[name], _DIGEST)
+    _native_text(policy["issuer_key_id"], _KEY_ID)
+    _native_quantity(policy["uid"], minimum=0, maximum=(1 << 31) - 1)
+    for name in ("pool_generation", "execution_epoch", "not_before_ms", "expires_at_ms"):
+        _native_quantity(policy[name])
+    if cast(int, policy["not_before_ms"]) >= cast(int, policy["expires_at_ms"]):
+        raise NativeContainmentVerificationError("native root policy interval is invalid")
+    profiles = policy["profiles"]
+    if not isinstance(profiles, list) or not 1 <= len(profiles) <= 128:
+        raise NativeContainmentVerificationError("native root profiles are invalid")
+    result: dict[str, int] = {}
+    previous = ""
+    for value in profiles:
+        profile = _closed_mapping(value, frozenset({"profile_digest", "pids_max"}))
+        digest = _native_text(profile["profile_digest"], _DIGEST)
+        if digest <= previous:
+            raise NativeContainmentVerificationError("native root profiles are not uniquely ordered")
+        result[digest] = _native_quantity(profile["pids_max"], maximum=1_048_576)
+        previous = digest
+    return result
+
+
+def _validate_native_preparation(payload: dict[str, object], policy: dict[str, object], profiles: dict[str, int], policy_digest: str) -> None:
+    if (payload["schema"] != "loom.native-worker-cgroup-preparation/v1"
+        or payload["purpose"] != "prepare-application-worker-cgroup"
+        or payload["policy_sha256"] != policy_digest):
+        raise NativeContainmentVerificationError("native preparation purpose or policy differs")
+    for name in ("grant_id", "intent_id", "agent_incarnation"):
+        _native_uuid(payload[name])
+    for name in (
+        "binding_sha256", "physical_binding_sha256", "bootstrap_sha256", "ownership_evidence_sha256",
+        "manager_observation_sha256", "bootstrap_observation_sha256", "scheduler_observation_sha256", "profile_digest",
+    ):
+        _native_text(payload[name], _DIGEST)
+    for name in ("grant_generation", "bootstrap_registration_epoch", "submitted_at_ms", "started_at_ms", "issued_at_ms", "expires_at_ms"):
+        _native_quantity(payload[name])
+    _native_text(payload["job_id"], _JOB_ID)
+    _native_text(payload["ownership_token"], _OWNERSHIP)
+    _native_quantity(payload["cpus"], maximum=65_536)
+    _native_quantity(payload["memory_bytes"], maximum=(1 << 63) - 1)
+    pids = _native_quantity(payload["pids_max"], maximum=1_048_576)
+    if profiles.get(cast(str, payload["profile_digest"])) != pids:
+        raise NativeContainmentVerificationError("native preparation profile or PID cap is not approved")
+    submitted, started, issued, expires = (cast(int, payload[name]) for name in (
+        "submitted_at_ms", "started_at_ms", "issued_at_ms", "expires_at_ms"))
+    if (submitted % 1000 or started % 1000 or not submitted <= started <= issued < expires
+        or expires - issued > 10_000
+        or not cast(int, policy["not_before_ms"]) <= issued < expires <= cast(int, policy["expires_at_ms"])):
+        raise NativeContainmentVerificationError("native preparation interval is invalid")
+
+
+def verify_native_preparation(
+    *, signed_packet: bytes, root_policy: bytes, scheduler_raw: str,
+    scheduler_observed_at: datetime, openssl_path: str, openssl_sha256: str,
+) -> dict[str, object]:
+    """Authenticate preparation scope and fresh exact scheduler incarnation.
+
+    Policy and executable pins MUST come from the independently root-installed
+    bundle, never the packet. The guard supplies its own bounded scheduler read
+    and pre-query timestamp. This does not consume a grant, delegate controllers,
+    inspect cgroup ancestry, or replace durable admission/cleanup bookkeeping.
+    """
+    try:
+        policy = _closed_native_document(root_policy, _POLICY_FIELDS)
+        profiles = _validate_native_policy(policy)
+        packet = _closed_native_document(signed_packet, frozenset({"schema", "key_id", "payload", "signature_hex"}))
+        if packet["schema"] != "loom.native-worker-cgroup-envelope/v1" or packet["key_id"] != policy["issuer_key_id"]:
+            raise NativeContainmentVerificationError("native preparation envelope or issuer differs")
+        payload = _closed_mapping(packet["payload"], _PREPARATION_FIELDS)
+        _validate_native_preparation(payload, policy, profiles, hashlib.sha256(root_policy).hexdigest())
+        signature = _native_text(packet["signature_hex"], re.compile(r"[0-9a-f]{128}", re.ASCII))
+        message = _PREPARATION_DOMAIN + _canonical_native({key: value for key, value in packet.items() if key != "signature_hex"})
+        now_ms = time.time_ns() // 1_000_000
+        observed_ms = _native_millis(scheduler_observed_at)
+        if not cast(int, payload["issued_at_ms"]) <= now_ms < cast(int, payload["expires_at_ms"]) or not observed_ms <= now_ms < observed_ms + 10_000:
+            raise NativeContainmentVerificationError("native preparation or scheduler observation expired")
+        verify_native_ed25519(message=message, signature=bytes.fromhex(signature),
+            public_key=bytes.fromhex(cast(str, policy["issuer_public_key_hex"])),
+            openssl_path=openssl_path, openssl_sha256=openssl_sha256)
+        facts = parse_native_scheduler_record(scheduler_raw, observed_at=scheduler_observed_at, expected={
+            "job_id": payload["job_id"], "cluster": policy["cluster"], "hostname": policy["node"],
+            "submitter": policy["submitter"], "uid": policy["uid"], "account": policy["account"],
+            "partition": policy["partition"], "qos": policy["qos"], "cpus": payload["cpus"],
+            "memory_bytes": payload["memory_bytes"], "ownership_token": payload["ownership_token"],
+        })
+        if (_native_millis(cast(datetime, facts["submitted_at"])) != payload["submitted_at_ms"]
+            or _native_millis(cast(datetime, facts["started_at"])) != payload["started_at_ms"]):
+            raise NativeContainmentVerificationError("native preparation scheduler incarnation changed")
+        final_ms = time.time_ns() // 1_000_000
+        if not now_ms <= final_ms < min(cast(int, payload["expires_at_ms"]), observed_ms + 10_000):
+            raise NativeContainmentVerificationError("native preparation expired during verification")
+        return payload
+    except NativeContainmentVerificationError:
+        raise
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError, OSError, RecursionError):
+        raise NativeContainmentVerificationError("native preparation evidence is malformed") from None
 
 
 class NativeContainmentVerificationError(ValueError):

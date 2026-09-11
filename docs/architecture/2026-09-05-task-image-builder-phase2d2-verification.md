@@ -1573,9 +1573,20 @@ a PID already reaped by `Popen.wait` is no longer safe to signal. The interprete
 dynamic libraries and default provider remain root-managed OS dependencies, not
 dependencies authenticated by the executable hash alone.
 
-These primitives do not yet implement the signed preparation envelope, issuer,
-root key/purpose policy, atomic versioned installation, retained cgroup admission,
-or cleanup. The issuer must fetch current manager/bootstrap observations itself;
+The shared module also verifies a closed, canonical, bounded preparation envelope
+against an independently installed root policy. The signature has a fixed
+preparation-only domain and purpose. Its policy digest binds the environment,
+pool/execution/executor incarnations, release, node, scheduler scope, issuer key
+and approved profile/PID caps. The payload binds the exact intent, physical and
+unused-bootstrap references, observation digests, grant ID/generation, ownership,
+resources and scheduler submission/start incarnation. Its validity is at most ten
+seconds, within the policy interval. Own-clock expiry and scheduler observation
+age are checked before crypto and again before returning; clock rollback fails
+closed. Tests exercise real signatures and complete isolated stdlib execution.
+
+This does not implement the issuer, protected policy loading, atomic versioned
+installation, durable replay admission, retained cgroup preparation, or cleanup.
+The issuer must fetch current manager/bootstrap observations itself;
 signing caller-supplied unsigned observations would not establish root authority.
 The existing root guard remains the sole lifecycle owner. Expired preparation
 authority must block new preparation without removing existing resource limits.
