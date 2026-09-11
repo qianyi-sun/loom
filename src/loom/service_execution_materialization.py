@@ -26,7 +26,7 @@ from loom.execution_runtime_contract import (
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.pipeline.keys import canonical_digest
-from loom.task_image_materialization import TaskImageExecutionGrantV1
+from loom.task_image_materialization import TaskImageExecutionGrantV1, resolve_prepared_task
 
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -275,17 +275,6 @@ def automatic_service_execution_rejections(
         ):
             reasons.append("exact_artifact_paths_required")
     return tuple(dict.fromkeys(reasons))
-
-
-def resolve_prepared_task(task: TaskConfig, grant: TaskImageExecutionGrantV1) -> TaskConfig:
-    """Use the ready image for resource admission without changing its frozen source."""
-    payload = task.model_dump(mode="json")
-    payload["environment"].update(
-        dockerfile=None, docker_build_context=None, docker_build_args={},
-        docker_build_target=None, docker_image=grant.registry_images["task"],
-        cpu_arch=grant.cpu_arch,
-    )
-    return TaskConfig.model_validate(payload)
 
 
 def compile_service_execution_plan(

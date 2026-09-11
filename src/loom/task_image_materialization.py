@@ -73,6 +73,17 @@ class TaskImageExecutionGrantV1(BaseModel):
         return self
 
 
+def resolve_prepared_task(task: TaskConfig, grant: TaskImageExecutionGrantV1) -> TaskConfig:
+    """Use the ready image for resource admission without changing its frozen source."""
+    payload = task.model_dump(mode="json")
+    payload["environment"].update(
+        dockerfile=None, docker_build_context=None, docker_build_args={},
+        docker_build_target=None, docker_image=grant.registry_images["task"],
+        cpu_arch=grant.cpu_arch,
+    )
+    return TaskConfig.model_validate(payload)
+
+
 def canonical_task_checksum(task_checksum: str) -> str:
     checksum = task_checksum.removeprefix("sha256:")
     if _CHECKSUM_RE.fullmatch(checksum) is None:

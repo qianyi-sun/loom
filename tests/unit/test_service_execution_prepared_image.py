@@ -14,9 +14,8 @@ from loom.models.task import TaskConfig
 from loom.pipeline.keys import canonical_digest
 from loom.service_execution_materialization import (
     compile_service_execution_plan,
-    resolve_prepared_task,
 )
-from loom.task_image_materialization import TaskImageExecutionGrantV1
+from loom.task_image_materialization import TaskImageExecutionGrantV1, resolve_prepared_task
 from loom_execution_actuator.renderer import ExecutionTargetRuntime, render_execution_job
 from tests.unit.test_execution_actuator import _lease
 from tests.unit.test_service_execution_materialization import _REVISION, _provenance

@@ -50,8 +50,10 @@ from loom.execution_runtime_contract import (
 )
 from loom.models.task import TaskConfig
 from loom.pipeline.keys import canonical_digest, canonical_uuid5
-from loom.service_execution_materialization import resolve_prepared_task
-from loom.task_image_materialization import get_trial_task_image_execution_grant
+from loom.task_image_materialization import (
+    get_trial_task_image_execution_grant,
+    resolve_prepared_task,
+)
 from loom.terminal_result_semantics import aggregate_reward_scalar
 from loom_control_plane.execution_admission import (
     ExecutionAdmissionBlockedError,

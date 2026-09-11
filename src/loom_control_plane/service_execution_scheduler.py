@@ -27,9 +27,11 @@ from loom.pipeline.keys import canonical_digest, canonical_uuid5
 from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
     compile_service_execution_plan,
+)
+from loom.task_image_materialization import (
+    get_trial_task_image_execution_grant,
     resolve_prepared_task,
 )
-from loom.task_image_materialization import get_trial_task_image_execution_grant
 from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
 from loom_control_plane.service_execution import reserve_trial_execution
 

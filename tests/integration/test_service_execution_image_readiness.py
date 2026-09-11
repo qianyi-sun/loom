@@ -28,11 +28,11 @@ from loom.models.trial import TrialConfig
 from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
     compile_service_execution_plan,
-    resolve_prepared_task,
 )
 from loom.task_image_materialization import (
     ensure_task_image_materializations,
     get_trial_task_image_execution_grant,
+    resolve_prepared_task,
 )
 from loom_control_plane.service_execution import ServiceExecutionConflict, reserve_trial_execution
 from loom_control_plane.service_execution_scheduler import reserve_next_service_execution

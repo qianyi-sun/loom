@@ -477,6 +477,7 @@ source_paths = [
   "src/loom/pipeline/__init__.py",
   "src/loom/pipeline/keys.py",
   "src/loom/startup_retry.py",
+  "src/loom/task_image_materialization.py",
   "src/loom/terminal_result_semantics.py",
   "src/loom_control_plane/__init__.py",
   "src/loom_control_plane/execution_admission.py",
