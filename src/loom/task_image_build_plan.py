@@ -420,6 +420,6 @@ __all__ = [
     "MAX_TASK_IMAGE_BUILD_TIMEOUT_SECONDS",
     "TaskImageBuildComponentV1",
     "TaskImageBuildPlanV1",
-    "derive_task_image_build_plan",
     "derive_task_image_build_components",
+    "derive_task_image_build_plan",
 ]

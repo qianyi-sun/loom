@@ -3,9 +3,10 @@
 variable "integration_platform" {
   description = "Independent pure Nebius integration footprint; null creates nothing."
   type = object({
-    bucket_prefix       = string
-    system_preset       = optional(string, "4vcpu-16gb")
-    execution_max_nodes = optional(number, 100)
+    bucket_prefix           = string
+    system_preset           = optional(string, "4vcpu-16gb")
+    execution_max_nodes     = optional(number, 100)
+    native_builder_group_id = optional(string)
   })
   default = null
   validation {
@@ -13,7 +14,8 @@ variable "integration_platform" {
       can(regex("^[a-z0-9][a-z0-9-]{5,45}$", var.integration_platform.bucket_prefix)) &&
       contains(["4vcpu-16gb", "8vcpu-32gb"], var.integration_platform.system_preset) &&
       var.integration_platform.execution_max_nodes >= 1 && var.integration_platform.execution_max_nodes <= 100 &&
-      floor(var.integration_platform.execution_max_nodes) == var.integration_platform.execution_max_nodes
+      floor(var.integration_platform.execution_max_nodes) == var.integration_platform.execution_max_nodes &&
+      (var.integration_platform.native_builder_group_id == null ? true : can(regex("^group-[a-z0-9]+$", var.integration_platform.native_builder_group_id)))
     )
     error_message = "Integration needs a unique bucket prefix and an integer execution ceiling from 1 through the native API maximum of 100 nodes."
   }
@@ -31,6 +33,38 @@ locals {
     backups      = { identity = "backup", versioning = "ENABLED" }
   }
   integration_identities = var.integration_platform == null ? toset([]) : toset(["canonical", "source", "backup"])
+  # The dedicated builder identity is provisioned by the operator; only its
+  # non-secret group reference belongs in Terraform state. Keep cache retention
+  # local to its prefix because canonical artifacts retain version history.
+  native_builder_enabled = try(var.integration_platform.native_builder_group_id, null) != null
+  native_builder_rules = local.native_builder_enabled ? [
+    {
+      group_id = var.integration_platform.native_builder_group_id
+      paths    = ["*"]
+      roles    = ["storage.object-viewer", "storage.object-lister"]
+    },
+    {
+      group_id = var.integration_platform.native_builder_group_id
+      paths    = ["task-build-cache/*"]
+      roles    = ["storage.object-editor"]
+    }
+  ] : []
+  native_builder_lifecycle = [
+    {
+      id                            = "task-build-cache-retention"
+      status                        = "ENABLED"
+      filter                        = { prefix = "task-build-cache/" }
+      expiration                    = { days = 7, expired_object_delete_marker = null }
+      noncurrent_version_expiration = { noncurrent_days = 1 }
+    },
+    {
+      id                            = "task-build-cache-delete-markers"
+      status                        = "ENABLED"
+      filter                        = { prefix = "task-build-cache/" }
+      expiration                    = { days = null, expired_object_delete_marker = true }
+      noncurrent_version_expiration = null
+    }
+  ]
   integration_nodes = var.integration_platform == null ? {} : {
     system    = { preset = var.integration_platform.system_preset, minimum = 1, maximum = 1, disk = 80 }
     execution = { preset = "16vcpu-64gb", minimum = 0, maximum = var.integration_platform.execution_max_nodes, disk = 80 }
@@ -81,18 +115,18 @@ resource "nebius_storage_v1_bucket" "integration" {
   object_audit_logging  = "ALL"
   versioning_policy     = each.value.versioning
   bucket_policy = {
-    rules = [{
+    rules = concat([{
       group_id = nebius_iam_v1_group.integration_store[each.value.identity].id
       paths    = ["*"]
       roles    = ["storage.object-editor"]
-    }]
+    }], each.key == "artifacts" ? local.native_builder_rules : [])
   }
   lifecycle_configuration = {
-    rules = [{
+    rules = concat([{
       id                                = "abort-incomplete-uploads"
       status                            = "ENABLED"
       abort_incomplete_multipart_upload = { days_after_initiation = 7 }
-    }]
+    }], [for rule in local.native_builder_lifecycle : rule if each.key == "artifacts" && local.native_builder_enabled])
   }
   lifecycle { prevent_destroy = true }
 }

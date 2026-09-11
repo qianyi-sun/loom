@@ -778,8 +778,15 @@ supports at most eight components and each OCI archive at most 3 GiB. Component
 outputs must fit the shared volume together. BuildKit scratch is cleared between
 components. The disposable cache uses the frozen materialization identity;
 publication trims entries older than seven days and evicts oldest entries toward
-4 GiB. This is publication-time cleanup, not a periodic retention guarantee or a
-provider-enforced object-storage quota. Ready images use the existing
+4 GiB of current objects. This is publication-time cleanup, not a
+provider-enforced object-storage quota. Set the operator-provisioned group's
+non-secret ID in Terraform's `integration_platform.native_builder_group_id` to
+retain the source-read/cache-write policy across later applies. The same option
+adds lifecycle rules only under `task-build-cache/`: current objects expire
+after seven days, noncurrent versions after one day, and expired delete markers
+are removed. Other artifact paths and bucket versioning remain unchanged.
+Version cleanup follows the provider's lifecycle schedule, so retained versions
+can temporarily exceed the current-object cache target. Ready images use the existing
 materialization reference/retention lifecycle.
 
 Acceptance must exercise ordinary submission, ready-image admission and retrieval:

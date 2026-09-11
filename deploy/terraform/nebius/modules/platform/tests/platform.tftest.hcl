@@ -75,3 +75,32 @@ run "reject_fractional_node_ceiling" {
   variables { integration_platform = { bucket_prefix = "loom-platform-test", execution_max_nodes = 2.5 } }
   expect_failures = [var.integration_platform]
 }
+
+run "disabled_preserves_existing_buckets" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-native-test-artifacts" } }
+  assert {
+    condition     = length(nebius_storage_v1_bucket.integration["artifacts"].bucket_policy.rules) == 1
+    error_message = "Disabled builder must not change bucket access."
+  }
+}
+run "enabled_scopes_access_and_retention" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-native-test-artifacts", native_builder_group_id = "group-e00nativebuilder" } }
+  assert {
+    condition     = length(nebius_storage_v1_bucket.integration["artifacts"].bucket_policy.rules) == 3
+    error_message = "Builder requires two scoped rules in addition to canonical access."
+  }
+  assert {
+    condition     = alltrue([for key in ["source", "backups", "trajectories"] : length(nebius_storage_v1_bucket.integration[key].bucket_policy.rules) == 1 && length(nebius_storage_v1_bucket.integration[key].lifecycle_configuration.rules) == 1])
+    error_message = "Builder must not alter unrelated buckets."
+  }
+  assert {
+    condition     = nebius_storage_v1_bucket.integration["artifacts"].bucket_policy.rules[2].paths == tolist(["task-build-cache/*"])
+    error_message = "Write permission must be restricted to cache."
+  }
+  assert {
+    condition     = nebius_storage_v1_bucket.integration["artifacts"].lifecycle_configuration.rules[1].filter.prefix == "task-build-cache/" && nebius_storage_v1_bucket.integration["artifacts"].lifecycle_configuration.rules[1].noncurrent_version_expiration.noncurrent_days == 1
+    error_message = "Version retention must be scoped to cache."
+  }
+}
