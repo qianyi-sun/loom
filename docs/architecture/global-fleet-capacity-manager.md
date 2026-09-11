@@ -521,8 +521,10 @@ The internal `retire_application_migrator` cleanup requires the saved transient
 role name/OID, original database/postmaster and coordination guard, committed
 NOLOGIN/PASSWORD NULL, and closed database admission. Revoking SET membership
 does not revoke sessions that already assumed the owner. Cleanup observes
-startup locks before session statistics, refuses prepared work and foreign
-sessions, then retires only the saved login's exact backends. It removes that
+startup locks across databases before session statistics, since a role-wide
+login may have authenticated in another database without publishing its backend
+row yet. It refuses prepared work and foreign sessions, then retires only the
+saved login's exact backends. It removes that
 login's database grant and role without deleting owned objects or signalling
 other workloads. Same-name replacement, unexpected ownership/grants or owner
 membership drift are refusals. Lost cleanup acknowledgements can be reconciled

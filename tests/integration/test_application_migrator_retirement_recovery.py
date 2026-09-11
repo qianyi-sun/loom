@@ -34,7 +34,11 @@ def transfer_postgres(request):
 @contextmanager
 def _migration(database_fixture):
     with _closed(database_fixture) as (peer, maintenance, guard, arguments):
-        complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
+        try:
+            complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
+        except Exception as exc:
+            activity = peer.execute("SELECT pid,usename,backend_type,state FROM pg_stat_activity WHERE datname=current_database()").fetchall()
+            raise AssertionError(f"disposable migration setup was not quiescent: {activity!r}") from exc
         target = arguments["target"]
         name = "app_migrate_" + uuid4().hex
         peer.execute(sql.SQL("CREATE ROLE {} LOGIN NOINHERIT PASSWORD 'test-only'").format(sql.Identifier(name)))
