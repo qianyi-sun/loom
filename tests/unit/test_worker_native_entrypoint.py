@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -19,6 +22,11 @@ from tests.unit.test_native_worker_bootstrap import _bootstrap
 
 def _configured_bootstrap(**overrides: object) -> NativeWorkerBootstrap:
     bootstrap = _bootstrap()
+    now = datetime.now(UTC).replace(microsecond=0)
+    native = bootstrap.native_execution.model_copy(update={
+        "root_activated_at": (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "root_expires_at": (now + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    })
     settings: dict[str, object] = {
         "token": "disposable-worker-api-token",
         "minio_access_key": "disposable-storage-access",
@@ -28,7 +36,7 @@ def _configured_bootstrap(**overrides: object) -> NativeWorkerBootstrap:
     }
     settings.update(overrides)
     return NativeWorkerBootstrap(
-        native_execution=bootstrap.native_execution,
+        native_execution=native,
         worker_credential=bootstrap.worker_credential,
         canonical_worker_settings=json.dumps(settings, sort_keys=True, separators=(",", ":")),
     )
@@ -113,3 +121,98 @@ def test_invalid_worker_settings_error_never_echoes_configuration() -> None:
         native_worker_settings(_configured_bootstrap(max_concurrent="private-invalid-value"))
     assert "private-invalid-value" not in str(caught.value)
     assert "disposable-storage-secret" not in str(caught.value)
+
+
+def test_native_entrypoint_passes_memory_settings_into_existing_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_worker import native_main
+
+    bootstrap = _configured_bootstrap()
+    events: list[str] = []
+
+    def consume() -> NativeWorkerBootstrap:
+        events.append("consume")
+        return bootstrap
+
+    async def worker(settings: object) -> None:
+        assert isinstance(settings, native_main.NativeWorkerSettings)
+        assert settings.native_execution == bootstrap.native_execution
+        assert settings.executor_worker_credential is not None
+        assert settings.executor_worker_credential.get_secret_value() == bootstrap.worker_credential
+        events.append("worker")
+
+    monkeypatch.setattr(native_main, "consume_native_worker_bootstrap", consume)
+    monkeypatch.setattr(native_main, "_configure_logging", lambda _: events.append("logging"))
+    monkeypatch.setattr(native_main, "start_http_server", lambda _: events.append("metrics"))
+    monkeypatch.setattr(native_main, "run_worker", worker)
+    assert native_main.main(()) == 0
+    assert events == ["consume", "logging", "metrics", "worker"]
+
+
+@pytest.mark.parametrize("argv", [(), ("--env-file", "/tmp/unapproved-settings")])
+def test_native_entrypoint_failure_starts_no_metrics_or_worker(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: tuple[str, ...],
+) -> None:
+    from loom_worker import native_main
+
+    def reject_bootstrap() -> NativeWorkerBootstrap:
+        raise NativeBootstrapError("private-error-text")
+
+    def forbidden(*args: object) -> None:
+        raise AssertionError("worker side effects before accepted startup")
+
+    monkeypatch.setattr(native_main, "consume_native_worker_bootstrap", reject_bootstrap)
+    monkeypatch.setattr(native_main, "_configure_logging", forbidden)
+    monkeypatch.setattr(native_main, "start_http_server", forbidden)
+    monkeypatch.setattr(native_main, "run_worker", forbidden)
+    assert native_main.main(argv) == 65
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip() == "native worker bootstrap unavailable or malformed"
+
+
+@pytest.mark.parametrize("raw", [
+    '{"token":"first","token":"second"}', '{ "token": "pretty" }',
+    "[]", "null", '{"container_cpus":NaN}', '{"hostname":"' + "x" * 2048 + '"}',
+])
+def test_settings_subdocument_is_canonical_closed_and_bounded(raw: str) -> None:
+    bootstrap = _bootstrap()
+    with pytest.raises(NativeBootstrapError):
+        NativeWorkerBootstrap(
+            native_execution=bootstrap.native_execution,
+            worker_credential=bootstrap.worker_credential,
+            canonical_worker_settings=raw,
+        )
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_real_native_entrypoint_process_accepts_only_its_stdin_handoff(missing: bool) -> None:
+    # The worker loop is replaced at its boundary, not the real bootstrap,
+    # settings loader or kernel hardening. This is not registration acceptance.
+    script = """
+import ctypes, os, resource, sys
+from loom_worker import native_main
+native_main.start_http_server = lambda port: None
+async def worker(settings):
+    assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
+    assert ctypes.CDLL(None).prctl(3, 0, 0, 0, 0) == 0
+    assert os.read(0, 1) == b''
+    assert str(settings.control_plane_url) == 'http://approved-control-plane:8080/'
+    assert settings.executor_worker_credential is not None
+    print('accepted')
+native_main.run_worker = worker
+raise SystemExit(native_main.main(()))
+"""
+    bootstrap = _configured_bootstrap()
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", script],
+        input=b"" if missing else encode_native_bootstrap(bootstrap),
+        capture_output=True, check=False, timeout=30,
+    )
+    assert completed.returncode == (65 if missing else 0), completed.stderr.decode()
+    assert completed.stdout.strip() == (b"" if missing else b"accepted")
+    assert completed.stderr.strip() == (
+        b"native worker bootstrap unavailable or malformed" if missing else b""
+    )
+    assert bootstrap.worker_credential.encode() not in completed.stdout + completed.stderr
