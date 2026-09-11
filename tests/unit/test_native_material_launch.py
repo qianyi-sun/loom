@@ -114,7 +114,7 @@ def test_mapped_v2_prepares_after_parent_binding_before_any_session(tmp_path, mo
             channel.close()
 
 
-@pytest.mark.parametrize("failed", [None, "unpack", "capabilities", "bundles", "reused"])
+@pytest.mark.parametrize("failed", [None, "unpack", "capabilities", "bundles", "reused", "replaced-after-unpack"])
 def test_material_composition_is_ordered_and_never_reuses_scratch(tmp_path, monkeypatch, failed):
     _runtime, spec, _path, _digest = material_spec(tmp_path)
     module = import_module("loom_capacity_executor.native_rootless_material")
@@ -130,6 +130,10 @@ def test_material_composition_is_ordered_and_never_reuses_scratch(tmp_path, monk
             if name == "unpack":
                 assert kwargs["destination"] == material / "rootfs"
                 assert kwargs["expected_sha256"] == spec.material.archive_sha256
+                if failed == "replaced-after-unpack":
+                    material.rename(tmp_path / "retained-material")
+                    material.mkdir(mode=0o700)
+                    (material / "keep").write_text("foreign")
             elif name == "capabilities":
                 assert args == (material / "rootfs",)
             else:
@@ -148,6 +152,8 @@ def test_material_composition_is_ordered_and_never_reuses_scratch(tmp_path, monk
             module.prepare_native_rootless_material(spec)
         if failed == "reused":
             assert (material / "keep").read_text() == "foreign" and events == []
+        elif failed == "replaced-after-unpack":
+            assert (material / "keep").read_text() == "foreign" and events == ["unpack"]
         else:
             assert events == ["unpack", "capabilities", "bundles"][:["unpack", "capabilities", "bundles"].index(failed) + 1]
     else:
