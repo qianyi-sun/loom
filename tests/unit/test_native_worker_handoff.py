@@ -43,7 +43,7 @@ def packet_for(physical, registration, credential, tmp_path):
     return module.NativeWorkerHandoffV1(registration=registration, physical=physical,
         worker_credential=credential, admission={"path": str(tmp_path / "admission.json"), "sha256": "f" * 64},
         executor={"pool_id": binding.pool_id, "pool_generation": binding.pool_generation,
-            "executor_id": binding.executor_id, "executor_incarnation": str(binding.executor_incarnation)})
+            "executor_id": binding.executor_id, "executor_incarnation": binding.executor_incarnation})
 
 
 @pytest.mark.parametrize("boundary", ["exact", "credential", "physical", "executor"])
@@ -79,3 +79,37 @@ async def test_native_packet_validates_identity_and_sealed_transfer(tmp_path, bo
     with pytest.raises(OSError):
         os.fstat(descriptor)
     assert packet.registration.worker_credential_sha256 == hashlib.sha256(credential.encode("ascii")).hexdigest()
+
+
+@pytest.mark.parametrize("boundary", ["unsealed", "mode", "empty", "oversize", "noncanonical", "invalid-secret"])
+async def test_native_handoff_rejection_closes_fd_without_disclosing_input(tmp_path, boundary):
+    import json
+
+    from loom_capacity_executor.trusted_launcher import _create_candidate_snapshot_descriptor, _seal_candidate_snapshot, _write_all
+    from loom_capacity_manager.contracts import canonical_bytes
+
+    _directory, _lease, physical, admission, credential = await prepared_worker(tmp_path)
+    packet = packet_for(physical, admission.requests[0], credential, tmp_path)
+    module = import_module("loom_capacity_executor.native_worker_handoff")
+    wire = canonical_bytes(packet)
+    if boundary == "empty":
+        wire = b""
+    elif boundary == "oversize":
+        wire = b"x" * 65537
+    elif boundary == "noncanonical":
+        wire += b" "
+    elif boundary == "invalid-secret":
+        payload = json.loads(wire)
+        payload["worker_credential"] = "private-invalid-secret\n" * 3
+        wire = json.dumps(payload).encode()
+    descriptor = _create_candidate_snapshot_descriptor()
+    os.fchmod(descriptor, 0o644 if boundary == "mode" else 0o600)
+    _write_all(descriptor, wire)
+    if boundary != "unsealed":
+        _seal_candidate_snapshot(descriptor)
+    with pytest.raises((ValueError, OSError)) as failure:
+        module.consume_native_worker_handoff(descriptor)
+    assert "private-invalid-secret" not in str(failure.value)
+    assert credential not in str(failure.value)
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
