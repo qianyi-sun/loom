@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -28,6 +31,11 @@ class CapacityExecutorImageRuntimeTest(unittest.TestCase):
     __test__ = False
 
     def test_native_bootstrap_contract_is_installed(self) -> None:
+        from loom_capacity_executor.native_worker_launch import run_native_worker_on_host
+        from loom_control_plane.slurm_job_cgroup import discover_docker_cgroup_parent
+
+        self.assertTrue(callable(run_native_worker_on_host))
+        self.assertTrue(callable(discover_docker_cgroup_parent))
         from loom_capacity_executor.launch_renderer import NativeTaskImageExecutionV2
         from loom_capacity_executor.native_worker_bootstrap import (
             NativeWorkerBootstrap,
@@ -84,11 +92,65 @@ def test_capacity_executor_image_build() -> None:
         )
         assert result.returncode == 0, result.stdout + result.stderr
         _assert_native_docker_stdin_is_not_retained(image)
+        _assert_native_image_environment_is_removed(image)
+        asyncio.run(_assert_native_attachment_loss_needs_container_cleanup(image))
     finally:
         subprocess.run(
             ["docker", "image", "rm", image],
             capture_output=True, check=False, timeout=30,
         )
+
+
+def _assert_native_image_environment_is_removed(image: str) -> None:
+    """Exercise production environment flags against inherited Docker image ENV.
+
+    Uses a disposable diagnostic command, not the actual worker, so this is
+    loader/environment-mechanism evidence rather than protected registration.
+    """
+    from loom_capacity_executor.native_worker_container import (
+        PreparedNativeImage,
+        native_create_argv,
+    )
+    from tests.unit.test_native_worker_container import _allocation
+
+    cli = shutil.which("docker")
+    assert cli is not None
+    derived = f"loom-native-env-test:{uuid4().hex}"
+    container = None
+    try:
+        build = subprocess.run([cli, "build", "--quiet", "--tag", derived, "-"],
+            input=(f"FROM {image}\nENV LD_PRELOAD=/invalid.so PYTHONHOME=/invalid "
+                   "PYTHONPATH=/invalid DOCKER_HOST=tcp://foreign:2375\n").encode(),
+            capture_output=True, check=False, timeout=60)
+        assert build.returncode == 0, build.stderr.decode()
+        actual = json.loads(subprocess.check_output([cli, "image", "inspect", derived], timeout=15))[0]
+        prepared = PreparedNativeImage(image_id=actual["Id"],
+            platform=f"{actual['Os']}/{actual['Architecture']}",
+            inherited_environment=tuple(item.split("=", 1)[0] for item in actual["Config"]["Env"]))
+        environment_flags = [arg for arg in native_create_argv(prepared, _allocation(),
+            name="loom-native-env-test", ownership="a" * 64) if arg.startswith("--env=")]
+        diagnostic = (
+            "import os; assert not ({'LD_PRELOAD','PYTHONHOME','PYTHONPATH'} & os.environ.keys()); "
+            "assert os.environ['DOCKER_HOST']=='unix:///var/run/docker.sock'; print('isolated')"
+        )
+        container = subprocess.check_output([cli, "container", "create", "--read-only",
+            "--network=none", "--entrypoint=/usr/local/bin/python", *environment_flags,
+            actual["Id"], "-I", "-c", diagnostic], env={}, timeout=15).decode().strip()
+        assert re.fullmatch(r"[0-9a-f]{64}", container)
+        inspected = json.loads(subprocess.check_output([cli, "container", "inspect", container], env={}, timeout=15))[0]
+        # Docker retains bare names in Config.Env as explicit unset markers;
+        # only NAME=value becomes a process environment variable. The actual
+        # Python startup below proves loader/config variables are unavailable.
+        installed_environment = dict(item.split("=", 1) for item in inspected["Config"]["Env"] if "=" in item)
+        assert not ({"LD_PRELOAD", "PYTHONHOME", "PYTHONPATH"} & installed_environment.keys())
+        started = subprocess.run([cli, "container", "start", "--attach", container], env={},
+            capture_output=True, check=False, timeout=30)
+        assert started.returncode == 0, started.stderr.decode()
+        assert started.stdout.strip() == b"isolated"
+    finally:
+        if container is not None:
+            subprocess.run([cli, "container", "rm", "--force", container], capture_output=True, check=True, timeout=30)
+        subprocess.run([cli, "image", "rm", derived], capture_output=True, check=False, timeout=30)
 
 
 def _assert_native_docker_stdin_is_not_retained(image: str) -> None:
@@ -165,6 +227,67 @@ print('accepted')
         subprocess.run(
             ["docker", "rm", "--force", container], capture_output=True, check=True, timeout=30,
         )
+
+
+async def _assert_native_attachment_loss_needs_container_cleanup(image: str) -> None:
+    """Use a diagnostic container to exercise real attachment and exact cleanup."""
+    from loom_capacity_executor.native_worker_container import (
+        FixedDockerCLI,
+        remove_native_container,
+    )
+    from loom_capacity_executor.native_worker_launch import (
+        native_daemon_cgroup_driver,
+        run_attached_native_worker,
+    )
+    from tests.unit.test_worker_native_entrypoint import _configured_bootstrap
+
+    executable = shutil.which("docker")
+    assert executable is not None
+    descriptor = os.open(executable, os.O_RDONLY | os.O_CLOEXEC)
+    with tempfile.TemporaryDirectory(prefix="loom-native-cli-test-") as configuration:
+        cli = FixedDockerCLI(executable=f"/proc/self/fd/{descriptor}", descriptor=descriptor,
+            config_directory=configuration)
+        container = None
+        attached = None
+        try:
+            assert native_daemon_cgroup_driver(cli) in {"cgroupfs", "systemd"}
+            diagnostic = (
+                "from loom_capacity_executor.native_worker_bootstrap import consume_native_worker_bootstrap; "
+                "consume_native_worker_bootstrap(); import time; time.sleep(120)"
+            )
+            container = cli.call("container", "create", "--interactive", "--restart=no", "--read-only",
+                "--network=none", "--cpus=0.25", "--memory=256m", "--pids-limit=32",
+                "--entrypoint=/usr/local/bin/python", image, "-I", "-c", diagnostic).decode().strip()
+            assert re.fullmatch(r"[0-9a-f]{64}", container)
+            attached = asyncio.create_task(run_attached_native_worker(cli, container, _configured_bootstrap()))
+            for _attempt in range(100):
+                await asyncio.sleep(0.1)
+                if cli.json("container", "inspect", container)[0]["State"]["Running"]:
+                    break
+            else:
+                raise AssertionError("diagnostic container never started")
+            attached.cancel()
+            try:
+                await attached
+            except asyncio.CancelledError:
+                pass
+            else:
+                raise AssertionError("attachment ended before cancellation")
+            # Killing/reaping Docker's attached CLI is explicitly NOT cleanup.
+            assert cli.json("container", "inspect", container)[0]["State"]["Running"]
+            remove_native_container(cli, container)
+            assert not cli.call("container", "ls", "--all", "--quiet", f"--filter=id={container}").strip()
+            container = None
+        finally:
+            if attached is not None and not attached.done():
+                attached.cancel()
+                try:
+                    await attached
+                except asyncio.CancelledError:
+                    pass
+            if container is not None:
+                remove_native_container(cli, container)
+            os.close(descriptor)
 
 
 if __name__ == "__main__":

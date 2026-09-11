@@ -1383,6 +1383,9 @@ profiles omit the new field from canonical serialization, preserving their
 existing authority hashes; they do not acquire native eligibility. Rendering
 refuses roots outside their validity at submission. Actual launch must recheck
 validity after any Slurm queue delay.
+The typed renderer applies the same pre-signing lifetime fence. Its policy set
+also rejects native task-image execution profiles assigned to personal-development
+build workers; those are a different purpose from application trial workers.
 
 The native bootstrap codec transfers the bounded credential/root document through
 a memory-only, EOF-terminated pipe, not container environment or retained files.
@@ -1414,13 +1417,52 @@ worker entrypoint and its environment configuration remain unchanged. Subprocess
 tests exercise the production startup path with the worker-loop boundary replaced;
 they are not evidence of actual protected registration.
 
+The trusted launcher now has an opt-in native worker branch in its pinned config.
+The candidate executable is the verified Docker executable snapshot and accepts
+no command suffix. A fixed Unix endpoint and empty operator-owned Docker config
+replace ambient CLI configuration. Image prefetch and actual digest/platform
+readback precede capability exchange. Allocation-derived pool, hostname,
+candidate, concurrency and resource limits replace caller settings; conflicting
+settings fail before exchange. The complete bootstrap is size-checked with the
+maximum credential length before consuming the launch marker. The host adapter
+currently supports CPU-only trial allocations on OLDLAB and GB10, refusing GPU,
+pipeline, singleton/sandbox and worker-vLLM modes until their equivalent native
+admission paths exist. Phase 1 keeps its existing supported modes.
+
+The fixed container invocation uses an absolute isolated Python entrypoint, a
+read-only root, a non-root user, explicit Docker parent/resource limits, no
+restart or healthcheck, and only the Docker socket and per-launch scratch bind.
+Image ENV is explicitly removed or replaced before Python starts. Control-command
+output is incrementally bounded on both streams; attached worker output streams
+without accumulating supervisor buffers. A native-only termination latch handles
+SIGTERM, SIGHUP and SIGINT even while a synchronous Docker operation is reading;
+repeated signals do not interrupt the subsequent bounded exact-ID cleanup.
+SIGKILL and host loss still require administrator-owned cleanup. The scoped credential/root/settings
+arrive only through the private EOF-terminated stdin pipe. After its marker is
+consumed, launch is never retried. A known created container is removed by exact
+ID with responsive-daemon absence readback, including attachment failures.
+An uncertain create response still requires administrator-owned allocation
+inventory/cleanup: instantaneous absence cannot exclude delayed creation.
+Each invocation gets fresh private scratch with retained inode identities. A
+proven pre-create failure removes only its still-matching empty directories,
+allowing an unconsumed handoff to retry without reusing stale files. After a
+possible create, scratch data is retained until allocation/runtime cleanup; worker-container
+removal alone does not authorize deleting files still used by trial descendants.
+Durable descendant-cleanup admission and scratch retirement remain part of the
+unfinished native runtime/retention composition, not proof supplied by this launcher.
+
 The complete native adapter remains incomplete. The new entrypoint advertises no
-native capability and still uses the existing V1-only worker loop. It must be
-connected to one fixed, immutable-image launcher, owner-projected eligibility,
-authenticated native claims and one-use start. Init-only settings do not control
-the entire process environment: Docker SDK configuration and Slurm/GPU discovery
-also read ambient inputs. The fixed launcher must bind those inputs and the
-actual worker image; the startup entrypoint does not independently attest them.
+native capability and still uses the existing V1-only worker loop. Owner-projected
+eligibility, authenticated native claims and one-use trial start remain unwired.
+The checked-in legacy Slurm cgroup guard recognizes only
+`loom-cgroup-v1:pids=<N>` comments, whereas the protected executor submits its
+ownership token as the entire comment. That guard does not provision native
+protected-worker parents, and its stale-slice sweep cannot be assumed to preserve
+parents created independently. A coordinated owner-authenticated guard adapter
+is still required before host launch acceptance; neither the signed ownership
+comment nor the legacy guard's opt-in format may be silently replaced.
+Installed-image diagnostic tests cover transport, loader-environment clearing and
+Docker client-loss cleanup, not actual protected worker registration acceptance.
 The worker container and all descendants require verified allocation containment.
 Docker client loss is not container termination. Unique in-memory execution
 ownership, durable grant finalization/start consumption and positive owned

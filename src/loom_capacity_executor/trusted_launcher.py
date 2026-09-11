@@ -523,6 +523,19 @@ async def run_trusted_launcher_process(
             trusted_launcher_release_sha256=release_sha256,
             now=now,
         )
+        if config.native_worker is not None:
+            from loom_capacity_executor.native_worker_container import FixedDockerCLI
+            from loom_capacity_executor.native_worker_launch import run_native_worker_on_host
+
+            await run_native_worker_on_host(
+                directory=Path(config.handoff_directory), reference=args.bootstrap_handoff,
+                physical=physical, admission=admission, policy=config.native_worker,
+                cli=FixedDockerCLI(executable=f"/proc/self/fd/{candidate_descriptor}",
+                    descriptor=candidate_descriptor,
+                    config_directory=config.native_worker.docker_config_directory),
+                image_digest=config.candidate_image_digest, now=now,
+            )
+            return
         await exec_bootstrap_handoff_candidate(
             Path(config.handoff_directory),
             args.bootstrap_handoff,

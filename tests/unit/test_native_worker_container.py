@@ -59,7 +59,7 @@ def _allocation():
         cgroup_parent="loom-job-101.slice", cpu_millicores=1000, memory_bytes=1024**3,
         pids_max=128, concurrency_slots=1, scratch_directory="/var/lib/loom/native-workers/test",
         docker_socket_gid=998, runtime_uid=65532, runtime_gid=65532, pool_id="oldlab",
-        hostname="oldlab-5", candidate_sha="a" * 40)
+        hostname="oldlab-5", candidate_sha="a" * 64)
 
 
 def test_fixed_create_removes_loader_environment_and_has_no_secret_or_command_override():
@@ -95,7 +95,7 @@ def test_runtime_settings_bind_allocation_and_refuse_ungated_runtime_modes():
     assert settings["max_concurrent"] == 1
     assert settings["pool_name"] == "oldlab"
     assert settings["hostname"] == "oldlab-5"
-    assert settings["candidate_sha"] == "a" * 40
+    assert settings["candidate_sha"] == "a" * 64
     assert result.worker_credential == original.worker_credential
     for overrides in ({"enable_worker_vllm": True}, {"sandbox_isolation": True}, {"pool_name": "task-image-builder"},
                       {"cgroup_parent": "/foreign"}, {"docker_socket": "/foreign.sock"}):
