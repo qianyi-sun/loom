@@ -62,6 +62,32 @@ run "reject_unbounded_capacity" {
   expect_failures = [var.integration_platform]
 }
 
+run "native_builder_scales_from_zero" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-platform-test", execution_max_nodes = 2 } }
+  assert {
+    condition = nebius_mk8s_v1_node_group.integration["execution"].template.metadata.labels == tomap({
+      "loom.nebius/node-role"        = "integration-execution"
+      "loom.nebius/platform"         = "integration"
+      "loom.nebius/cluster-scope-id" = var.cluster_scope_id
+      "loom.nebius/node-os"          = "linux"
+      "loom.nebius/node-arch"        = "amd64"
+    })
+    error_message = "Zero-node execution templates must match native builds' complete node selector."
+  }
+  assert {
+    condition = (
+      nebius_mk8s_v1_node_group.integration["execution"].autoscaling.min_node_count == 0 &&
+      nebius_mk8s_v1_node_group.integration["execution"].autoscaling.max_node_count == 2 &&
+      nebius_mk8s_v1_node_group.integration["execution"].template.resources.platform == "cpu-e2" &&
+      nebius_mk8s_v1_node_group.integration["execution"].template.resources.preset == "16vcpu-64gb" &&
+      nebius_mk8s_v1_node_group.integration["execution"].template.boot_disk.size_gibibytes == 80 &&
+      !contains(keys(nebius_mk8s_v1_node_group.integration["system"].template.metadata.labels), "loom.nebius/node-arch")
+    )
+    error_message = "Template label repair must preserve capacity and leave the system node group unchanged."
+  }
+}
+
 run "preserve_explicit_operator_ceiling" {
   command = plan
   variables { integration_platform = { bucket_prefix = "loom-platform-test", execution_max_nodes = 3 } }

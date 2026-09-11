@@ -166,11 +166,16 @@ resource "nebius_mk8s_v1_node_group" "integration" {
     service_account_id = var.node_registry_pull_service_account_id
     max_pods           = 64
     metadata = {
-      labels = {
+      # Zero-node autoscaler templates need the same OS/architecture labels
+      # required by native builds; kubelet cannot add them before scale-up.
+      labels = merge({
         "loom.nebius/node-role"        = each.key == "execution" ? "integration-execution" : each.key
         "loom.nebius/platform"         = "integration"
         "loom.nebius/cluster-scope-id" = var.cluster_scope_id
-      }
+        }, each.key == "execution" ? {
+        "loom.nebius/node-os"   = "linux"
+        "loom.nebius/node-arch" = "amd64"
+      } : {})
     }
     taints = concat([
       { key = "loom.nebius/platform", value = "integration", effect = "NO_SCHEDULE" }
