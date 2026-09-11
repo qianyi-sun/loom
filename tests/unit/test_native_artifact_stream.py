@@ -29,7 +29,7 @@ async def test_artifact_frame_round_trip_across_arbitrary_boundaries(fragment):
     assert b"".join([chunk async for chunk in chunks]) == b"artifact"
 
 
-@pytest.mark.parametrize("boundary", ["magic", "short", "length", "noncanonical", "secret", "chunk"])
+@pytest.mark.parametrize("boundary", ["magic", "short", "length", "noncanonical", "secret"])
 async def test_invalid_artifact_header_fails_bounded_without_echoing_credentials(boundary):
     module = import_module("loom_capacity_agent.build_artifact_stream")
     from loom_capacity_manager.contracts import canonical_bytes
@@ -47,14 +47,29 @@ async def test_invalid_artifact_header_fails_bounded_without_echoing_credentials
         wire = wire[:-1]
     elif boundary == "length":
         wire = wire[:8] + (65537).to_bytes(4, "big")
-    elif boundary == "chunk":
-        wire += b"x" * 1048577
     async def chunks():
         yield wire
     with pytest.raises(ValueError) as error:
         await module.decode_artifact_stream(chunks())
     assert packet.worker_credential not in str(error.value)
     assert "private-invalid-secret" not in str(error.value)
+
+
+async def test_artifact_frame_accepts_coalesced_transport_without_unbounded_logical_chunks():
+    module = import_module("loom_capacity_agent.build_artifact_stream")
+    packet = envelope(module)
+    packet = packet.model_copy(update={"artifact": packet.artifact.model_copy(update={"archive_size_bytes": 2 * 1048576})})
+    async def payload():
+        yield b"a" * 1048576
+        yield b"b" * 1048576
+    wire = b"".join([chunk async for chunk in module.encode_artifact_stream(packet, payload())])
+    async def coalesced():
+        yield wire
+    decoded, chunks = await module.decode_artifact_stream(coalesced())
+    observed = [chunk async for chunk in chunks]
+    assert decoded == packet
+    assert all(0 < len(chunk) <= 1048576 for chunk in observed)
+    assert b"".join(observed) == b"a" * 1048576 + b"b" * 1048576
 
 
 @pytest.mark.parametrize("boundary", ["exact", "claim", "artifact"])
@@ -88,3 +103,46 @@ async def test_native_client_streams_artifact_and_checks_exact_receipt(boundary)
             with pytest.raises(RuntimeError):
                 await client.upload_artifact(packet.claim, worker_credential=packet.worker_credential,
                     artifact=packet.artifact, chunks=payload())
+
+
+@pytest.mark.parametrize("purpose", ["application-worker", "personal-build-worker"])
+@pytest.mark.parametrize("boundary", ["exact", "error", "invalid"])
+async def test_artifact_router_selects_only_pinned_build_authority(tmp_path, purpose, boundary):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from loom_capacity_manager.contracts import canonical_digest
+    from tests.unit.test_capacity_typed_admission_routing import configured
+
+    module = import_module("loom_capacity_agent.build_artifact_stream")
+    router_module, registration, document, path, digest = configured(tmp_path, "gb10", purpose)
+    packet = envelope(module)
+    packet = packet.model_copy(update={"claim": packet.claim.model_copy(update={"binding": registration.binding})})
+    response = module.BuildArtifactUploadReceiptV1(claim_digest=canonical_digest(packet.claim), artifact=packet.artifact)
+    upload = AsyncMock(return_value=object() if boundary == "invalid" else response,
+        side_effect=RuntimeError("transport failed") if boundary == "error" else None)
+    close = AsyncMock()
+    def application(*args, **kwargs):
+        pytest.fail("artifact upload reached application database")
+    def build(identity, connection):
+        assert identity == document.executor and connection == document.entries[0].build
+        return SimpleNamespace(upload_artifact=upload, aclose=close)
+    router = router_module.TypedAdmissionRouter(path, expected_sha256=digest, executor=document.executor,
+        application_client_factory=application, build_client_factory=build)
+    async def payload():
+        yield b"artifact"
+    chunks = payload()
+    if purpose == "personal-build-worker" and boundary == "exact":
+        assert await router.upload_artifact(packet.claim, worker_credential=packet.worker_credential,
+            artifact=packet.artifact, chunks=chunks) == response
+    else:
+        with pytest.raises((RuntimeError, ValueError)):
+            await router.upload_artifact(packet.claim, worker_credential=packet.worker_credential,
+                artifact=packet.artifact, chunks=chunks)
+    assert close.await_count == (1 if purpose == "personal-build-worker" else 0)
+    if purpose == "personal-build-worker":
+        upload.assert_awaited_once_with(packet.claim, worker_credential=packet.worker_credential,
+            artifact=packet.artifact, chunks=chunks)
+    else:
+        upload.assert_not_awaited()
+    await chunks.aclose()
