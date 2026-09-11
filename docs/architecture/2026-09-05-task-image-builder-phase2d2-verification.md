@@ -1519,6 +1519,30 @@ incarnation evidence, and the node guard must independently authenticate the
 result. Direct SQL callers likewise own snapshot freshness. Containment renewal,
 root delegation, and positive cleanup are not implemented by this observation.
 
+The manager's separate `current-application-allocation` observation is for
+post-submission preparation. The existing `launch-subject` endpoint remains
+pre-submit-only: consuming its permit changes the intent to `submitting-unknown`,
+and the original permit may expire while Slurm retains the allocation. The new
+observation does not reconsume a permit or reapply latest-plan/headroom/rate
+admission to already charged work. It rechecks the exact current executor and
+execution fence, operator policy, subject/reporter generation and application
+purpose, then reconstructs the consumed permit and its immutable command receipt.
+Closing, released, quarantined, draining, terminal and unknown observations fail
+closed. An inventory-known Slurm identity is retained for comparison with the
+local physical binding and fresh scheduler evidence; physical identity fields
+alone are not terminal evidence.
+
+This API owns a fresh SERIALIZABLE transaction through commit, rejects ambient
+or externally owned transactions, and refreshes retained ORM objects. Its lock
+order is authority, execution/executor, then intent. Lock/statement waits are
+bounded and timeouts require a whole-read retry. Snapshot age starts at the
+transaction timestamp; validity is at most ten seconds and never exceeds the
+executor lease. The bounded authenticated client rechecks exact intent, expiry
+and future timestamps against its own clock. These are unsigned manager facts
+with `executable=false`, not root admission, a new allocation, or a runtime start.
+The containment issuer must still combine them with current unused-bootstrap
+and scheduler evidence, and the node guard must authenticate its delegation.
+
 Native scheduler readback is a separate versioned contract, not an extension of
 retained V2 inventory records. The existing digest-pinned command runner requests
 one exact job using `scontrol --json=v0.0.40`; the parser rejects partial/error
