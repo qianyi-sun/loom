@@ -1871,6 +1871,35 @@ def test_gb10_partition_drift_still_rejects(
             installer.observe_prerequisite(request)
 
 
+@pytest.mark.parametrize("drift", ["missing-builder", "extra-node", "duplicate-node"])
+def test_gb10_discovery_requires_metadata_for_the_observed_partition(
+    tmp_path: Path, drift: str,
+) -> None:
+    _controller_request(tmp_path, "gb10")
+    nodes = tuple(f"trt-gb10-{index}" for index in range(1, 16))
+    metadata_nodes = nodes
+    if drift == "missing-builder":
+        metadata_nodes = tuple(node for node in nodes if node != "trt-gb10-2")
+    elif drift == "extra-node":
+        metadata_nodes += ("trt-gb10-16",)
+    else:
+        metadata_nodes += ("trt-gb10-2",)
+    runner = FakeHostRunner(
+        tmp_path, slurm_cluster="trt-gb10", slurm_nodes=nodes,
+        slurm_metadata_nodes=metadata_nodes, partition_allow_groups="ALL",
+        partition_allow_accounts="loom-staging", partition_allow_qos="loom-staging",
+    )
+    runner.group_present = runner.user_present = True
+    installer = ControllerInstaller(
+        context=_context(tmp_path), runner=runner, machine="aarch64",
+        hostname="gx10-01c7", effective_uid=0,
+    )
+    with pytest.raises(CapacityExecutorInstallError, match="Slurm metadata drifted"):
+        installer.discover_controller(ControllerDiscoveryRequest(
+            schema_version=1, pool_id="gb10", transport_authority_sha256="8" * 64,
+        ))
+
+
 def test_gb10_discovery_requires_exact_executor_account_partition_and_qos(
     tmp_path: Path,
 ) -> None:

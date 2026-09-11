@@ -277,6 +277,14 @@ it must not depend on the working directory, `PYTHONPATH`, or adding the helper
 directory to `sys.path`. Keep both helpers together in the verified release.
 A missing import must fail the image build, before installation.
 
+GB10's canonical `loom-staging` partition includes nodes 1–15, while the
+executor's trial inventory excludes reserved builder `trt-gb10-2`. Discovery
+and prerequisite readback accept this partition or the exact 14 eligible nodes;
+they reject missing workers, duplicate nodes, and any other extra node. Slurm
+metadata must describe the same observed partition. Discovery evidence and
+executor bindings retain only the 14 eligible nodes; this does not change
+partition configuration or authorize trial placement on the builder.
+
 ```bash
 executor_source_sha=1111111111111111111111111111111111111111
 executor_image="ghcr.io/qianyi-sun/loom-capacity-executor@sha256:1111111111111111111111111111111111111111111111111111111111111111"

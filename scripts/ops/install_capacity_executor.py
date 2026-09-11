@@ -159,6 +159,18 @@ class CapacityExecutorInstallError(RuntimeError):
     """The controller installation could not converge without weakening safety."""
 
 
+def _partition_nodes_match(
+    pool_id: str, nodes: tuple[str, ...], target_nodes: tuple[str, ...],
+) -> bool:
+    """Allow only the fixed reserved builder beyond the executor's node set."""
+    observed = set(nodes)
+    targets = set(target_nodes)
+    return len(nodes) == len(observed) and (
+        observed == targets
+        or (pool_id == "gb10" and observed == targets | {"trt-gb10-2"})
+    )
+
+
 def _canonical_json_bytes(value: object) -> bytes:
     return (
         json.dumps(
@@ -919,7 +931,7 @@ class ControllerInstaller:
             label="Slurm node inventory",
         )
         nodes = tuple(line.strip() for line in nodes_output.splitlines() if line.strip())
-        if len(nodes) != len(set(nodes)) or set(nodes) != set(request.target_nodes):
+        if not _partition_nodes_match(request.pool_id, nodes, request.target_nodes):
             raise CapacityExecutorInstallError("controller prerequisite Slurm authority drifted")
         job_visibility_evidence_sha256 = self._job_visibility_evidence(
             pool_id=request.pool_id,
@@ -1025,7 +1037,7 @@ class ControllerInstaller:
             label="Slurm node inventory",
         )
         nodes = tuple(line.strip() for line in nodes_output.splitlines() if line.strip())
-        if len(nodes) != len(set(nodes)) or set(nodes) != set(expected_nodes):
+        if not _partition_nodes_match(request.pool_id, nodes, expected_nodes):
             raise CapacityExecutorInstallError("controller discovery Slurm authority drifted")
         job_visibility_evidence_sha256 = self._job_visibility_evidence(
             pool_id=request.pool_id,
@@ -1084,7 +1096,7 @@ class ControllerInstaller:
         if (
             any(not isinstance(node, str) for node in metadata_nodes)
             or len(metadata_nodes) != len(set(metadata_nodes))
-            or set(metadata_nodes) != set(expected_nodes)
+            or set(metadata_nodes) != set(nodes)
         ):
             raise CapacityExecutorInstallError("controller discovery Slurm metadata drifted")
         route_output = self._bounded_stdout(
