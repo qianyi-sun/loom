@@ -150,3 +150,53 @@ receiver_process._disable_bootstrap_dumps = fail_hardening
     assert stdout == b""
     assert stderr == b"native bootstrap receiver refused\n"
     assert list(private_delivery.node.iterdir()) == []
+
+
+@pytest.mark.parametrize("exception", ("RuntimeError", "asyncio.CancelledError"))
+async def test_receiver_exception_is_sanitized_after_stdin_detach(private_delivery, exception):
+    _module, payload, _receiver = objects(private_delivery)
+    injected = f"""
+async def failed_receive(self, raw):
+    raise {exception}('private-adapter-credential-never-log')
+NativeBootstrapReceiver.receive = failed_receive
+"""
+    code, stdout, stderr = await _run(private_delivery, payload, injected=injected)
+    assert code == 2
+    assert stdout == b""
+    assert stderr == b"native bootstrap receiver refused\n"
+    assert list(private_delivery.node.iterdir()) == []
+
+
+async def test_receiver_replays_retained_delivery_after_output_failure(private_delivery):
+    module, payload, _receiver = objects(private_delivery)
+    injected = """
+def failed_output(raw):
+    raise BrokenPipeError('private-transport-detail-never-log')
+receiver_process._write_receipt_stdout = failed_output
+"""
+    code, stdout, stderr = await _run(private_delivery, payload, injected=injected)
+    assert (code, stdout, stderr) == (2, b"", b"native bootstrap receiver refused\n")
+    directory = module.native_delivery_directory(private_delivery.node, private_delivery.lease.reference)
+    before = {path.name: (path.stat().st_ino, path.read_bytes()) for path in directory.iterdir()}
+    code, stdout, stderr = await _run(private_delivery, payload)
+    assert code == 0, stderr.decode()
+    assert json.loads(stdout)["executable"] is False
+    assert before == {path.name: (path.stat().st_ino, path.read_bytes()) for path in directory.iterdir()}
+
+
+async def test_receiver_rejects_symlink_ancestor_before_input(private_delivery):
+    base = private_delivery.node
+    destination = base / "actual"
+    destination.mkdir(mode=0o700)
+    (base / "alias").symlink_to(destination, target_is_directory=True)
+    (destination / "node").mkdir(mode=0o700)
+    private_delivery.node = base / "alias" / "node"
+    _module, payload, _receiver = objects(private_delivery)
+    injected = """
+def forbidden_read(*args, **kwargs):
+    raise AssertionError('must reject symlink ancestry before reading capability')
+receiver_process._read_delivery_stdin = forbidden_read
+"""
+    code, stdout, stderr = await _run(private_delivery, payload, injected=injected)
+    assert (code, stdout, stderr) == (2, b"", b"native bootstrap receiver refused\n")
+    assert list(private_delivery.node.iterdir()) == []
