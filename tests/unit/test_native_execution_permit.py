@@ -91,3 +91,41 @@ def test_production_config_cannot_enable_uninstalled_execution_runtime():
     with pytest.raises(ValueError):
         BuildAdmissionServiceConfigV1(mode="native-execution", database_url_file="/etc/loom/db",
             database_url_sha256="a" * 64, principals_file="/etc/loom/principals", principals_sha256="b" * 64)
+
+
+@pytest.mark.parametrize("purpose", ["personal-build-worker", "application-worker"])
+@pytest.mark.parametrize("boundary", ["exact", "wrong-challenge", "invalid"])
+async def test_execution_permission_never_uses_application_route(tmp_path, purpose, boundary):
+    from types import SimpleNamespace
+
+    from tests.unit.test_capacity_typed_admission_routing import configured
+
+    module, physical, document, path, digest = configured(tmp_path, "oldlab", purpose)
+    request = execution_request().model_copy(update={"claim": claim_for(physical.binding)})
+    now = datetime.now(UTC)
+    calls = []
+
+    async def authorize(incoming, **kwargs):
+        calls.append("authorize")
+        assert incoming == request and kwargs == {"worker_credential": "x" * 43}
+        changed = request.model_copy(update={"challenge": uuid4()}) if boundary == "wrong-challenge" else request
+        return object() if boundary == "invalid" else protocol.BuildExecutionPermitV1(
+            request=changed, request_digest=canonical_digest(changed), issued_at=now, not_after=now + timedelta(seconds=10))
+
+    async def close():
+        calls.append("close")
+
+    def factory(*args):
+        return SimpleNamespace(authorize_execution=authorize, aclose=close)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("execution permission reached application authority")
+
+    router = module.TypedAdmissionRouter(path, expected_sha256=digest, executor=document.executor,
+        build_client_factory=factory, application_client_factory=forbidden)
+    if purpose == "personal-build-worker" and boundary == "exact":
+        assert (await router.authorize_execution(request, worker_credential="x" * 43)).request == request
+    else:
+        with pytest.raises(ValueError):
+            await router.authorize_execution(request, worker_credential="x" * 43)
+    assert calls == ([] if purpose == "application-worker" else ["authorize", "close"])
