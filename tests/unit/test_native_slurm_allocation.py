@@ -21,7 +21,7 @@ def _document(request, uid):
     return {
         "meta": {"plugin": {"data_parser": "v0.0.40"}}, "errors": [], "warnings": [],
         "jobs": [{
-            "job_id": 101, "cluster": request.cluster, "job_state": ["RUNNING"],
+            "job_id": 101, "cluster": request.cluster, "job_state": ["RUNNING"], "batch_flag": True,
             "user_name": request.submitter, "user_id": uid, "account": request.account,
             "partition": request.partition, "qos": request.qos, "comment": request.ownership_token,
             "nodes": request.nodes[0], "node_count": _number(1), "cpus": _number(request.cpus),
@@ -62,7 +62,7 @@ def test_native_observation_binds_live_incarnation_and_exact_allocation(tmp_path
     "state", "state-flags", "cpus", "memory", "tres-cpus", "tres-nodes", "gpu", "duplicate-tres",
     "array", "array-task", "array-string", "heterogeneous", "requeue", "restart", "boolean-restart",
     "unset-time", "infinite-time", "future-start", "reversed-times", "boolean-time", "parser",
-    "duplicate-job", "error", "warning", "duplicate-json", "oversize",
+    "duplicate-job", "error", "warning", "duplicate-json", "oversize", "non-batch",
 ])
 def test_native_observation_rejects_ambiguous_or_foreign_facts(tmp_path, boundary):
     module = import_module("loom_capacity_executor.native_slurm_allocation")
@@ -87,6 +87,7 @@ def test_native_observation_rejects_ambiguous_or_foreign_facts(tmp_path, boundar
         "future-start": ("start_time", _number(int(_NOW.timestamp()) + 60)),
         "reversed-times": ("submit_time", _number(int(_NOW.timestamp()) - 1)),
         "boolean-time": ("start_time", _number(True)),
+        "non-batch": ("batch_flag", False),
     }
     if boundary in changes:
         key, value = changes[boundary]
@@ -130,3 +131,16 @@ async def test_backend_rejects_nonphysical_job_identity_before_reading(tmp_path,
     with pytest.raises(ValueError):
         await fake.backend().observe_native_allocation(request, job_id=job_id)
     assert not fake.calls
+
+
+@pytest.mark.parametrize("field,value", [("schema_version", True), ("restart_count", False), ("requeue", 0)])
+def test_projected_native_observation_has_no_boolean_integer_aliases(tmp_path, field, value):
+    from pydantic import ValidationError
+
+    module = import_module("loom_capacity_executor.native_slurm_allocation")
+    fake, request, raw = _fixture(tmp_path)
+    observed = module.parse_native_allocation(json.dumps(raw), request=request, job_id="101",
+        expected_uid=fake.backend().authority.local_uid, observed_at=_NOW)
+    wire = json.dumps(observed.model_dump(mode="json") | {field: value})
+    with pytest.raises(ValidationError):
+        module.NativeSlurmAllocationV1.model_validate_json(wire)
