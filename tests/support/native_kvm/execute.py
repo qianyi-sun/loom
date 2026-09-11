@@ -64,7 +64,7 @@ def main():
             # Production reconciliation owns these IDs even if it returns
             # uncertain after a partial delete. Do not put them in the fixture
             # retry list: failure cleanup is outer-container disposal only.
-            expiry = identity["root_stop"] == "monitored-expiry"
+            expiry = identity["root_stop"].endswith("expiry")
             supervised_build(expiry=expiry)
             # Production reconciliation already deleted these exact IDs once.
             # Keep independent final empty-list verification, not duplicate writes.

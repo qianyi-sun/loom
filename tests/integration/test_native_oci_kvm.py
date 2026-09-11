@@ -79,7 +79,7 @@ def prepare_runtime(tmp_path, arch):
     return runtime
 
 
-@pytest.mark.parametrize("mode", ["export", "kill", "kill-unbound"])
+@pytest.mark.parametrize("mode", ["export", "kill", "kill-unbound", "io-kill", "io-kill-unbound"])
 def test_rootless_activation_channels_transfer_private_artifact_and_observe_parent_death(mode):
     if platform.machine() != "x86_64":
         pytest.skip("rootless transport fixture currently requires AMD64")
@@ -96,7 +96,9 @@ def test_rootless_activation_channels_transfer_private_artifact_and_observe_pare
             "/test-support/rootless_transport.py", mode, capture_output=True, text=True)
         expected = {"export": "rootless-private-artifact-transfer-ok",
             "kill": "rootless-parent-death-stopped-mapped-child",
-            "kill-unbound": "rootless-unbound-child-survival-detected"}
+            "kill-unbound": "rootless-unbound-child-survival-detected",
+            "io-kill": "outer-io-death-stopped-rootless-chain",
+            "io-kill-unbound": "rootless-unbound-child-survival-detected"}
         assert expected[mode] in result.stdout
     except subprocess.CalledProcessError as exc:
         pytest.fail(f"rootless transport prerequisite failed:\n{exc.stdout}\n{exc.stderr}")
@@ -188,7 +190,7 @@ def test_unprivileged_rootlesskit_launches_fixed_native_kvm_runtime(tmp_path):
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
 
 
-@pytest.mark.parametrize("root_stop", ["signal", "launcher-death", "supervisor-death", "monitored", "monitored-expiry"])
+@pytest.mark.parametrize("root_stop", ["signal", "launcher-death", "supervisor-death", "monitored", "monitored-expiry", "monitored-rootless", "monitored-rootless-expiry"])
 def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path, root_stop):
     arch = platform.machine()
     if arch not in BUILDERS or not Path("/dev/kvm").exists():
@@ -250,7 +252,7 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
     for component in ("pause", "buildkit", "client"):
         (fixtures / component).mkdir()
         document = getattr(bundles, component)
-        if root_stop == "monitored-expiry" and component == "client":
+        if root_stop.endswith("expiry") and component == "client":
             probe = json.loads(document)
             probe["process"]["args"] = ["/usr/bin/python3", "/opt/lifecycle_probe.py"]
             document = json.dumps(probe).encode()
@@ -263,31 +265,48 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
         "personal_dev_sandbox_builder", "personal_dev_source"):
         shutil.copyfile(ROOT / "src/loom" / (module + ".py"), modules / (module + ".py"))
     try:
+        if root_stop.startswith("monitored-rootless"):
+            built = checked("docker", "build", "--quiet", "-f",
+                str(ROOT / "tests/support/native_kvm/Dockerfile.rootless"),
+                str(ROOT / "tests/support/native_kvm"), capture_output=True, text=True)
+            fixture_image = built.stdout.strip().splitlines()[-1]
+            assert fixture_image.startswith("sha256:")
+            # Only fixture output is shared with mapped root (outer UID1000).
+            # The feature's actual output stays private under /tmp/native-work.
+            result_dir.chmod(0o777)
+            rootless_args = ["--user=1000:1000", f"--group-add={Path('/dev/kvm').stat().st_gid}",
+                "--cap-drop=ALL", "--cap-add=SETUID", "--cap-add=SETGID"]
+            fixture_command = [fixture_image, "/usr/bin/rootlesskit", "--net=none",
+                "--state-dir=/tmp/rootless-probe", "python3", "/test-support/execute.py"]
+        else:
+            rootless_args = ["--user=0:0", "--cap-add=SYS_ADMIN", "--cap-add=SYS_PTRACE"]
+            fixture_command = [EXECUTOR if root_stop.startswith("monitored") else PYTHON,
+                "python3", "/test-support/execute.py"]
         # Detached runsc helpers need an orphan reaper. Python as container PID1
         # leaves zombies that runsc's kill(pid, 0) liveness test sees as running.
         output = checked("docker", "run", "--init", "--name", name, "--network=none", "--cpus=2", "--memory=4g",
-            "--user=0:0", "--env=PYTHONPATH=/trusted-src", "--env=PYTHONDONTWRITEBYTECODE=1",
-            "--pids-limit=512", "--device=/dev/kvm", "--cap-add=SYS_ADMIN", "--cap-add=SYS_PTRACE",
+            *rootless_args, "--env=PYTHONPATH=/trusted-src", "--env=PYTHONDONTWRITEBYTECODE=1",
+            "--pids-limit=512", "--device=/dev/kvm",
             "--security-opt=apparmor=unconfined", "--security-opt=seccomp=unconfined", "--read-only",
-            "--tmpfs=/tmp:rw,nodev,size=2g",
+            "--tmpfs=/tmp:rw,nodev,exec,size=2g,mode=1777",
             "--mount", f"type=bind,src={fixtures},dst=/fixtures,readonly",
             "--mount", f"type=bind,src={runtime},dst=/runtime,readonly",
             "--mount", f"type=bind,src={result_dir},dst=/result",
             "--mount", f"type=bind,src={ROOT / 'tests/support/native_kvm'},dst=/test-support,readonly",
             "--mount", f"type=bind,src={ROOT / 'src'},dst=/trusted-src,readonly",
-            EXECUTOR if root_stop.startswith("monitored") else PYTHON, "python3", "/test-support/execute.py", capture_output=True, text=True)
+            *fixture_command, capture_output=True, text=True)
     except subprocess.CalledProcessError as exc:
         pytest.fail(f"rendered native KVM fixture failed:\n{exc.stdout}\n{exc.stderr}")
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
     assert "native-allocated-runtime-cleanup-ok" in output.stdout
-    if root_stop == "monitored-expiry":
+    if root_stop.endswith("expiry"):
         assert "native-supervised-expiry-stopped-live-client" in output.stdout
         assert "native-supervised-cleanup-confirmed" in output.stdout
         assert not (result_dir / "artifacts.tar").exists()
         return
     assert "native-allocated-client-artifact-ok" in output.stdout
-    if root_stop == "monitored":
+    if root_stop in {"monitored", "monitored-rootless"}:
         assert "native-supervised-build-completed" in output.stdout
         assert "native-supervised-cleanup-confirmed" in output.stdout
     else:

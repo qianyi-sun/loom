@@ -2217,7 +2217,22 @@ the mapped namespace's trusted reader can read private mode-0700 builder output
 while the original outer UID cannot. The IO composition must keep verification
 in the mapped ownership context or explicitly transfer the artifact; it must not
 assume the outer helper can traverse private subordinate-UID directories.
-The complete supervised-build fixtures remain rootful and offline (`--network=none`); restricted external
+The activation-channel fixture passes one sequenced-packet authority channel and
+one artifact stream through RootlessKit without exposing either to its feature
+child. It verifies private artifact transfer and active parent death at both
+the RootlessKit-to-mapped-child and outer-IO-to-RootlessKit boundaries. Deliberately
+unbound negative controls must survive: child timeouts cannot masquerade as
+working kernel lifetime binding. These are active-process tests, not proof of
+the mapping-time startup window or installed Slurm containment.
+The complete AMD64 supervised-build fixture now also runs inside RootlessKit
+started as UID 1000 with only the two mapping-helper capabilities available.
+It builds all ten images from modified local source, verifies their OCI payloads,
+and confirms exact runtime cleanup. A blocked-renewal case expires a live client,
+confirms cleanup, rejects a late child, and emits no artifact. The disposable
+fixture assembles the trusted root filesystem on explicitly executable tmpfs;
+an inherited locked `noexec` mount cannot be relaxed by a rootless gofer. Its
+mapping helpers use exact UID/GID file capabilities instead of set-ID bits.
+These fixtures remain offline (`--network=none`); restricted external
 dependency fetching, protected material/rootless installation, Slurm containment,
 ARM64 supervision, authenticated IO-helper composition and native artifact GC
 remain acceptance gaps before installed intake can be enabled.
