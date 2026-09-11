@@ -24,7 +24,7 @@ from loom_capacity_executor.native_authority_bridge import _readable
 from loom_capacity_executor.native_build_source import _settled_io
 from loom_capacity_executor.native_rootless_runtime import (
     NativeRootlessResultV1,
-    NativeRootlessSpecV1,
+    NativeRootlessSpec,
     read_native_rootless_spec,
 )
 from loom_capacity_executor.native_runtime_input import prepare_native_runtime_input
@@ -101,7 +101,7 @@ async def _spawn(spec_path: Path, digest: str, authority_fd: int, artifact_fd: i
         raise
 
 
-async def _result(process: asyncio.subprocess.Process, spec: NativeRootlessSpecV1) -> NativeRootlessResultV1:
+async def _result(process: asyncio.subprocess.Process, spec: NativeRootlessSpec) -> NativeRootlessResultV1:
     if process.stdout is None:
         raise ValueError("native rootless result pipe is absent")
     wire = bytearray()
@@ -122,7 +122,7 @@ async def _result(process: asyncio.subprocess.Process, spec: NativeRootlessSpecV
     return result
 
 
-async def _receive(stack: AsyncExitStack, channel: socket.socket, spec: NativeRootlessSpecV1,
+async def _receive(stack: AsyncExitStack, channel: socket.socket, spec: NativeRootlessSpec,
     workspace: Path, timeout_seconds: int,
 ) -> NativeReceivedArtifact | None:
     channel.setblocking(False)

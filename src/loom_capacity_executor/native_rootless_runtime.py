@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from typing import NoReturn, Self
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, Field, TypeAdapter, model_validator
 
 from loom_capacity_agent.build_admission import (
     BuildArtifactV1,
@@ -28,10 +28,15 @@ from loom_capacity_agent.build_admission import (
 from loom_capacity_executor.native_artifact_transfer import send_native_artifact
 from loom_capacity_executor.native_build_session import execute_native_build_session
 from loom_capacity_executor.native_parent_death import bind_native_parent_death
+from loom_capacity_executor.native_rootless_material import (
+    NativeRootlessMaterialV1,
+    prepare_native_rootless_material,
+)
 from loom_capacity_executor.native_rootless_parent import bind_native_rootless_parent
 from loom_capacity_executor.native_runsc import NativeRunscLayout
 from loom_capacity_executor.native_sandbox_contract import render_native_sandbox_contract
 from loom_capacity_manager.contracts import Digest, StrictV1Model, canonical_bytes, canonical_digest
+from loom_capacity_manager.executable_contracts import StrictV2Model, canonical_executable_bytes
 
 _MAX_SPEC = 64 * 1024
 
@@ -44,7 +49,7 @@ def _path(value: str) -> Path:
     return path
 
 
-class NativeRootlessSpecV1(StrictV1Model):
+class _NativeRootlessSpec(BaseModel):
     claim: BuildClaimRequestV1
     context: BuildSourceContextV1
     runsc: str
@@ -76,6 +81,34 @@ class NativeRootlessSpecV1(StrictV1Model):
         return NativeRunscLayout(Path(self.runsc), Path(self.state_root), Path(self.bundle_root), self.context.claim_digest)
 
 
+class NativeRootlessSpecV1(_NativeRootlessSpec, StrictV1Model):
+    """Compatibility: V1 consumes already prepared mapped material."""
+
+
+class NativeRootlessSpecV2(_NativeRootlessSpec, StrictV2Model):
+    """V2 prepares fixed attempt-local material inside its sole mapped launch."""
+
+    material: NativeRootlessMaterialV1
+
+    @model_validator(mode="after")
+    def _material_paths(self) -> Self:
+        workspace = Path(self.workspace)
+        attempt = workspace.parent
+        material = attempt / "material"
+        archive = _path(self.material.archive)
+        if (attempt == Path("/") or workspace.name in {"material", "runsc"}
+            or Path(self.bundle_root) != material / "bundles" or Path(self.state_root) != attempt / "runsc"
+            or any(path == attempt or attempt in path.parents or path in attempt.parents
+                for path in (archive, Path(self.runsc)))):
+            raise ValueError("native V2 material paths must be fixed and disjoint")
+        self.material.policy(workspace)
+        return self
+
+
+NativeRootlessSpec = NativeRootlessSpecV1 | NativeRootlessSpecV2
+_SPEC_ADAPTER = TypeAdapter(NativeRootlessSpec)
+
+
 class NativeRootlessResultV1(StrictV1Model):
     """Bounded local observations, not artifact publication or release authority."""
 
@@ -87,7 +120,7 @@ class NativeRootlessResultV1(StrictV1Model):
     artifact: BuildArtifactV1 | None
 
 
-def read_native_rootless_spec(path: Path, *, expected_sha256: str) -> NativeRootlessSpecV1:
+def read_native_rootless_spec(path: Path, *, expected_sha256: str) -> NativeRootlessSpec:
     _path(str(path))
     if len(expected_sha256) != 64 or any(c not in "0123456789abcdef" for c in expected_sha256):
         raise ValueError("native rootless specification digest is invalid")
@@ -110,8 +143,9 @@ def read_native_rootless_spec(path: Path, *, expected_sha256: str) -> NativeRoot
             os.close(descriptor)
     finally:
         os.close(directory)
-    spec = NativeRootlessSpecV1.model_validate_json(wire)
-    if canonical_bytes(spec) != wire or path != Path(spec.workspace) / "runtime-spec.json":
+    spec = _SPEC_ADAPTER.validate_json(wire)
+    encoded = canonical_executable_bytes(spec) if isinstance(spec, NativeRootlessSpecV2) else canonical_bytes(spec)
+    if encoded != wire or path != Path(spec.workspace) / "runtime-spec.json":
         raise ValueError("native rootless specification is not canonical or workspace-bound")
     return spec
 
@@ -194,6 +228,8 @@ def run_native_mapped_runtime(spec_path: Path, *, expected_sha256: str,
     spec = read_native_rootless_spec(spec_path, expected_sha256=expected_sha256)
     authority, artifact_channel = _activation_channels()
     with authority, artifact_channel:
+        if isinstance(spec, NativeRootlessSpecV2):
+            prepare_native_rootless_material(spec)
         result = execute_native_build_session(claim=spec.claim, context=spec.context, layout=spec.layout(),
             workspace=Path(spec.workspace), authority=authority, expected_parent_pid=parent,
             max_artifact_bytes=spec.max_artifact_bytes, max_image_archive_bytes=spec.max_image_archive_bytes)

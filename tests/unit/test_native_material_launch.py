@@ -8,7 +8,7 @@ from importlib import import_module
 
 import pytest
 
-from loom_capacity_manager.contracts import canonical_bytes
+from loom_capacity_manager.executable_contracts import canonical_executable_bytes
 from tests.unit.test_native_rootless_runtime import spec_file
 
 
@@ -24,7 +24,7 @@ def material_spec(tmp_path):
             "tmp_bytes": 64 * 1024**2, "buildkit_state_bytes": 1024**3})
     spec = module.NativeRootlessSpecV2.model_validate_json(json.dumps(document))
     path.chmod(0o600)
-    path.write_bytes(canonical_bytes(spec))
+    path.write_bytes(canonical_executable_bytes(spec))
     path.chmod(0o400)
     return module, spec, path, hashlib.sha256(path.read_bytes()).hexdigest()
 
