@@ -143,6 +143,7 @@ def test_cli_create_plain_candidate_and_check_shape(tmp_path: Path) -> None:
     assert "signature" not in manifest and "profile_sha256" not in manifest
     assert "source_tree" not in manifest
     assert all(set(row) == {"image_ref"} for row in manifest["images"].values())
+    assert "tb90_task" not in manifest["images"]
     manifest["images"]["web"]["image_ref"] = "image:mutable"
     (output / "candidate.json").write_text(json.dumps(manifest))
     result = subprocess.run(verify, capture_output=True, text=True, env=environment)
@@ -190,6 +191,9 @@ def test_profile_and_independent_signer_binding(tmp_path: Path) -> None:
     assert parsed.task_image_ref == manifest["images"]["service"]["image_ref"]
     assert parsed.runtime_image_ref == manifest["images"]["execution_runtime"]["image_ref"]
     assert parsed.agent_image_ref == manifest["images"]["harbor_runtime"]["image_ref"]
+    assert {row.statement.image_ref for row in parsed.image_admission.admissions} == {
+        parsed.task_image_ref, parsed.runtime_image_ref, parsed.agent_image_ref,
+    }
     verify_execution_image_admission(
         parsed.image_admission,
         required_image_refs=tuple(
@@ -211,8 +215,9 @@ def test_profile_and_independent_signer_binding(tmp_path: Path) -> None:
         )
 
 
-def test_historical_candidate_is_readable_but_new_publication_requires_execution_images(
-    tmp_path: Path,
+@pytest.mark.parametrize("generation", ["six-images", "worker-tb90", "harbor-tb90"])
+def test_historical_candidate_is_readable_but_new_publication_requires_current_images(
+    tmp_path: Path, generation: str,
 ) -> None:
     document, private, trust = inputs(tmp_path)
     document["images"] = {
@@ -220,11 +225,25 @@ def test_historical_candidate_is_readable_but_new_publication_requires_execution
         for key, value in document["images"].items()
         if key in candidate.LEGACY_COMPONENTS
     }
+    if generation != "six-images":
+        components = {"tb90_task": "loom-nebius-terminal-bench"}
+        if generation == "worker-tb90":
+            components["worker"] = "loom-worker"
+        else:
+            components["harbor_runtime"] = "loom-harbor-runtime"
+        for component, name in components.items():
+            document["images"][component] = {
+                "image_ref": f"{document['registry_prefix']}/{name}@sha256:" + "a" * 64,
+            }
     candidate.validate_identity(document)
     with pytest.raises(ValueError, match="configured platform and execution images"):
         candidate.create_candidate(
             document, signing_key=private, signing_key_id="publisher", keyring_json=trust
         )
+    if generation != "six-images":
+        document["images"]["tb90_task"]["image_ref"] = "docker.io/foreign@sha256:" + "a" * 64
+        with pytest.raises(ValueError, match="candidate image identity"):
+            candidate.validate_identity(document)
 
 
 def test_build_rejects_pr_before_any_process_or_output(
@@ -352,6 +371,7 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
     builds = [call for call in calls if len(call) > 1 and call[1] == "build"]
     expected = 1 if mode == "harness-only" else len(candidate.COMPONENTS)
     assert len(builds) == expected
+    assert not any("nebius-terminal-bench" in arg for call in calls for arg in call)
     harbor = next(call for call in builds if "filename=Dockerfile.harbor-runtime" in call)
     assert f"build-arg:LOOM_AGENT_VERSION={version}" in harbor
     assert len([call for call in calls if call[:2] == ("skopeo", "copy")]) == expected
@@ -363,6 +383,7 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
         manifest = json.loads((output / "candidate.json").read_text())
         profile = json.loads((output / "runtime-profile.json").read_text())
         assert "worker" not in manifest["images"]
+        assert "tb90_task" not in manifest["images"]
         assert profile["agent_image_ref"] == manifest["images"]["harbor_runtime"]["image_ref"]
         assert release["image_admission"] in profile["image_admission"]["admissions"]
 

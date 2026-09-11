@@ -15,8 +15,10 @@ New Nebius candidates use `images.harbor_runtime` (`loom-harbor-runtime`) for
 the trusted Terminus-2 controller. The dedicated Python 3.12 image includes the
 Harbor compatibility pin and current-user tool patch, without installing the
 Loom worker or platform packages. Historical candidates with `images.worker`
-remain readable. `tb90_task` remains a regression fixture in the platform
-publication; generic task images use their existing preparation path.
+remain readable, including releases with `images.tb90_task`. New platform
+publication does not build or admit the Terminal-Bench task image. Task images
+use the ordinary Dockerfile preparation path; the single-task source and local
+regression fixture remain in `deploy/catalog/nebius-terminal-bench/`.
 
 The existing GitHub-hosted `nebius-candidate` workflow also supports manual
 `mode=harness-only`, with an explicit `agent_version` label. This builds, scans
