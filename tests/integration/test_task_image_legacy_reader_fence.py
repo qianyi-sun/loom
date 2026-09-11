@@ -18,8 +18,10 @@ from loom.db.schema import (
 from loom.task_image_materialization import (
     ensure_task_image_materializations,
     get_trial_task_image_execution_grant,
+    task_image_materialization_key,
 )
 from loom_control_plane.scheduler.claim import claim_one, claim_work
+from tests.integration import test_task_image_publication_completion as completion_fixtures
 from tests.integration.test_task_bundle_source_admission import _task
 from tests.integration.test_task_bundle_source_journal import _publish, _receipts, _spec, _upload
 from tests.integration.test_task_image_authority_materializations import _queued_materialization
@@ -50,7 +52,7 @@ async def _trial(session, image, team_id, *, priority):
         config={},
         requires_caps={
             "os": "linux",
-            "cpu_arch": image.cpu_arch,
+            "cpu_arch": image.task_config["environment"]["cpu_arch"],
             "gpu_vendor": "none",
             "network_policies": ["public"],
         },
@@ -199,3 +201,51 @@ async def test_strong_source_is_not_mistaken_for_native_readiness(
         else:
             claimed = await _claim(session, reader, worker)
             assert claimed is not None and claimed["id"] == trial.id
+
+
+@pytest.mark.parametrize("architectures", [["x86_64"], ["arm64", "x86_64"]])
+async def test_native_architecture_does_not_veto_same_task_legacy_snapshot(
+    registry_authority_session,
+    registry_issuer,
+    monkeypatch,
+    architectures,
+):
+    async def architecture_neutral_task(session):
+        image = await _queued_materialization(session)
+        config = dict(image.task_config)
+        config["environment"] = dict(config["environment"], cpu_arch="any")
+        image.task_config = config
+        await session.flush()
+        return image
+
+    monkeypatch.setattr(completion_fixtures, "_queued_materialization", architecture_neutral_task)
+    async with registry_authority_session() as session:
+        _, trial, _ = await _seed(session, registry_issuer, include_legacy=False)
+        native = (await session.scalars(select(TaskImageMaterialization))).one()
+        legacy = TaskImageMaterialization(
+            materialization_key=task_image_materialization_key(
+                task_id=native.task_id,
+                task_checksum=native.task_checksum,
+                cpu_arch="x86_64",
+            ),
+            task_id=native.task_id,
+            task_checksum=native.task_checksum,
+            cpu_arch="x86_64",
+            task_config=native.task_config,
+            task_source=native.task_source,
+            task_source_provenance=native.task_source_provenance,
+            state="ready",
+            registry_images={"task": "registry.example/task@sha256:" + "e" * 64},
+        )
+        session.add(legacy)
+        await session.flush()
+        session.add(TrialTaskImageMaterialization(trial_id=trial.id, materialization_id=legacy.id))
+        await session.commit()
+        grant = await get_trial_task_image_execution_grant(
+            session,
+            trial_id=trial.id,
+            cpu_arches=architectures,
+        )
+        assert grant is not None and grant.materialization_id == legacy.id
+        assert grant.cpu_arch == "x86_64"
+        assert native.ready_publication_operation_id is not None
