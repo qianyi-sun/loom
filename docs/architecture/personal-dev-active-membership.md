@@ -2160,11 +2160,32 @@ expiry. It always kills and reaps its exact broker child on return. Its result
 reports only observed client success and broker reaping, not artifact acceptance,
 complete runtime cleanup or physical release. The caller retains the authority
 channel and must settle any pending reply before a subsequent artifact phase.
-The fixed runtime broker, helper setup/death binding and installed orchestration
-are not yet connected. Real helper-process tests prove deadline behavior under
+Real helper-process tests prove deadline behavior under
 blocked IO, silence, protocol failures and queued cancellation, while simulated
 BOOTTIME jumps cover queued starts and completion after suspend-like expiry.
 They do not establish installed rootless or Slurm containment.
+
+`run_native_runtime_broker` now connects that monitor to fixed attached runsc
+starts. Its readiness acknowledgment binds the inherited channel to its PID,
+expected parent and claim digest; the caller must verify it before requesting
+execution permission. `exec_native_runsc` binds each command wrapper to its
+broker parent, checks start expiry immediately before exec, and clears inherited
+environment. Commands and role IDs are fixed; control messages cannot carry a
+shell command, runtime flag, mount or path. Pause and BuildKit readiness require
+living attached launchers and exact runtime state; BuildKit additionally needs
+its fixed private socket. Control stdout is bounded during capture, not afterward.
+Repeated starts, dead parent launchers and control EOF stop progression.
+
+The disposable AMD64 KVM fixture runs all ten modified-source builds through the
+actual monitor/broker/launcher chain and verifies their artifacts. A second run
+blocks authority renewal while a restricted client is live; expiry stops that
+client and rejects a late start. Cleanup waits for successful stopped/absent
+runtime readback before exact deletion, then checks empty state. Broker reaping
+alone is insufficient, and neither result proves physical capacity release.
+These fixtures remain rootful and offline (`--network=none`); restricted external
+dependency fetching, protected material/rootless installation, Slurm containment,
+ARM64 supervision, authenticated IO-helper composition and native artifact GC
+remain acceptance gaps before installed intake can be enabled.
 The route requires `native-execution`, which production service configuration
 currently rejects. Isolated route tests exercise it without opening installed
 execution; source/claim receipts remain inert and no runtime launcher is enabled.
