@@ -45,6 +45,8 @@ from loom_capacity_manager.executable_contracts import (
 from loom_capacity_manager.typed_ownership_contracts import _exact_schema_types
 
 _MAX_DELIVERY_BYTES = 256 * 1024
+_MAX_QUERY_BYTES = 64 * 1024
+_MAX_RECEIPT_BYTES = 4096
 _RECEIPT = "delivery-receipt.json"
 
 
@@ -77,6 +79,16 @@ class NativeBootstrapDeliveryReceiptV1(BaseModel):
     executable: Literal[False] = False
 
 
+class NativeBootstrapDeliveryQueryV1(BaseModel):
+    """Exact historical lookup, with no bootstrap capability or new authority."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_name: Literal["loom.native-bootstrap-delivery-query/v1"] = Field(default="loom.native-bootstrap-delivery-query/v1", alias="schema")
+    physical: PhysicalJobBindingV2
+    expected: NativeBootstrapDeliveryReceiptV1
+
+
 class _Admission(Protocol):
     async def observe_current_bootstrap(self, request: PhysicalJobBindingV2) -> CurrentExecutableBootstrapV2: ...
 
@@ -107,6 +119,60 @@ def _decode(raw: bytes) -> NativeBootstrapDeliveryV1:
         return value
     except (ValueError, TypeError, AttributeError, RecursionError):
         raise BootstrapDeliveryError("native bootstrap delivery is invalid") from None
+
+
+def expected_native_delivery_receipt(raw: bytes) -> NativeBootstrapDeliveryReceiptV1:
+    value = _decode(raw)
+    record, physical = value.record, value.physical
+    binding = physical.binding
+    return NativeBootstrapDeliveryReceiptV1(target_node=binding.node_ids[0], reference=_reference(binding),
+        binding_sha256=canonical_executable_digest(binding), physical_binding_sha256=canonical_executable_digest(physical),
+        bootstrap_sha256=record.capability_sha256, source_payload_sha256=hashlib.sha256(raw).hexdigest(),
+        expires_at=record.expires_at)
+
+
+def parse_native_delivery_receipt(raw: bytes) -> NativeBootstrapDeliveryReceiptV1:
+    try:
+        if type(raw) is not bytes or not 0 < len(raw) <= _MAX_RECEIPT_BYTES:
+            raise ValueError
+        receipt = NativeBootstrapDeliveryReceiptV1.model_validate_json(raw)
+        _record_path(Path("/"), receipt.reference)  # Grammar only, no filesystem access.
+        digests = (receipt.binding_sha256, receipt.physical_binding_sha256,
+            receipt.bootstrap_sha256, receipt.source_payload_sha256)
+        if (_canonical(receipt) != raw or receipt.executable is not False
+            or receipt.binding_sha256 != receipt.reference[:-5]
+            or not 0 < len(receipt.target_node) <= 128
+            or any(len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest) for digest in digests)
+            or receipt.expires_at.tzinfo is None or receipt.expires_at.utcoffset() is None):
+            raise ValueError
+        return receipt
+    except (ValueError, RuntimeError, OSError, TypeError, AttributeError):
+        raise BootstrapDeliveryError("native bootstrap delivery receipt is invalid") from None
+
+
+def parse_native_delivery_query(raw: bytes) -> NativeBootstrapDeliveryQueryV1:
+    try:
+        if type(raw) is not bytes or not 0 < len(raw) <= _MAX_QUERY_BYTES:
+            raise ValueError
+        query = NativeBootstrapDeliveryQueryV1.model_validate_json(raw)
+        physical, expected = query.physical, query.expected
+        parse_native_delivery_receipt(_canonical(expected))
+        if (_canonical(query) != raw or physical.binding.node_ids != (expected.target_node,)
+            or physical.executable is not True
+            or physical.operation_id != uuid5(_OPERATION_NAMESPACE, f"physical-bind:{physical.binding.intent_id}")
+            or canonical_executable_digest(physical) != expected.physical_binding_sha256
+            or canonical_executable_digest(physical.binding) != expected.binding_sha256):
+            raise ValueError
+        return query
+    except (ValueError, RuntimeError, OSError, TypeError, AttributeError):
+        raise BootstrapDeliveryError("native bootstrap delivery query is invalid") from None
+
+
+def encode_native_delivery_query(physical: PhysicalJobBindingV2,
+    expected: NativeBootstrapDeliveryReceiptV1) -> bytes:
+    raw = _canonical(NativeBootstrapDeliveryQueryV1(physical=physical, expected=expected))
+    parse_native_delivery_query(raw)
+    return raw
 
 
 def export_native_bootstrap(store: BootstrapHandoffStore, physical: PhysicalJobBindingV2,
@@ -142,10 +208,8 @@ def read_native_delivery_receipt(directory: Path, reference: str) -> NativeBoots
         _record_path(directory, reference)
         _private_directory(directory)
         raw = _open_private_regular(directory / _RECEIPT)
-        receipt = NativeBootstrapDeliveryReceiptV1.model_validate_json(raw)
-        if (_canonical(receipt) != raw or receipt.executable is not False or receipt.reference != reference
-            or receipt.binding_sha256 != reference[:-5]
-            or receipt.expires_at.tzinfo is None or receipt.expires_at.utcoffset() is None):
+        receipt = parse_native_delivery_receipt(raw)
+        if receipt.reference != reference:
             raise ValueError
         return receipt
     except (ValueError, RuntimeError, OSError, TypeError, AttributeError):
@@ -229,6 +293,29 @@ class NativeBootstrapReceiver:
         except (ValueError, RuntimeError, OSError, TypeError, AttributeError):
             raise BootstrapDeliveryError("native bootstrap delivery refused") from None
 
+    async def observe_receipt(self, raw: bytes) -> NativeBootstrapDeliveryReceiptV1 | None:
+        """Read historical delivery only; absence is unknown, never safe cleanup.
+
+        This does not reread unused-bootstrap admission: a historical receipt
+        remains useful after registration/expiry. It neither renews validity nor
+        reconstructs deleted files. The transport authenticates the caller.
+        """
+        try:
+            self._assert_directory()
+            query = parse_native_delivery_query(raw)
+            binding = query.physical.binding
+            if (binding.node_ids != (self.target_node,) or binding.pool_id != self.pool_id
+                or binding.execution.trusted_fleet_release_sha256 != self.trusted_release_sha256):
+                raise BootstrapDeliveryError("native bootstrap status scope differs")
+            directory = native_delivery_directory(self.directory, query.expected.reference)
+            try:
+                directory.lstat()
+            except FileNotFoundError:
+                return None
+            return self._retained(directory, query.expected)
+        except (ValueError, RuntimeError, OSError, TypeError, AttributeError):
+            raise BootstrapDeliveryError("native bootstrap status refused") from None
+
     async def _receive(self, raw: bytes) -> NativeBootstrapDeliveryReceiptV1:
         self._assert_directory()
         value = _decode(raw)
@@ -239,10 +326,7 @@ class NativeBootstrapReceiver:
             or record.protected_admission_route_sha256 != _route_sha256(self.admission, binding)):
             raise BootstrapDeliveryError("native bootstrap receiver scope differs")
         reference = _reference(binding)
-        receipt = NativeBootstrapDeliveryReceiptV1(target_node=self.target_node, reference=reference,
-            binding_sha256=canonical_executable_digest(binding), physical_binding_sha256=canonical_executable_digest(physical),
-            bootstrap_sha256=record.capability_sha256, source_payload_sha256=hashlib.sha256(raw).hexdigest(),
-            expires_at=record.expires_at)
+        receipt = expected_native_delivery_receipt(raw)
         final = native_delivery_directory(self.directory, reference)
         if final.exists() or final.is_symlink():
             return self._retained(final, receipt)

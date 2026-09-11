@@ -1409,6 +1409,13 @@ reconstructed physical reference before invoking the native runtime. Legacy
 launch retains its existing path. Two-filesystem and concurrent-receiver tests
 exercise this storage composition, not live host transport authentication.
 
+Historical recovery also supports an exact, capability-free status query containing
+the physical reference and expected receipt. It remains valid after bootstrap
+expiry/consumption without rereading unused-bootstrap authority or renewing it.
+A missing directory is an unknown delivery outcome, not proof of nonexecution or
+safe cleanup. Scope conflicts, an unreadable directory or a missing/corrupt receipt
+are refusals, not absence. Returned receipts retain `executable=false`.
+
 The dedicated one-shot receiver process applies and reads back dump protections
 before constructing its fixed configuration/admission factory or reading secret
 input. A descriptor-relative walk requires root/receiver-owned, non-group/world-
