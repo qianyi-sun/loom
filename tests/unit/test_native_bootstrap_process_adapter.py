@@ -295,3 +295,32 @@ async def test_cancelled_close_retains_spawn_slot_and_descriptor(process_fixture
         request.cancel()
         await asyncio.gather(request, return_exceptions=True)
         await adapter.aclose()
+
+
+async def test_close_does_not_retry_success_before_its_done_callback(process_fixture, monkeypatch):
+    value = process_fixture
+    adapter = value.module.NativeBootstrapProcessAdapter(value.policy)
+    calls, errors = [], []
+    loop = asyncio.get_running_loop()
+    original_handler = loop.get_exception_handler()
+
+    async def cleanup(spawn, io):
+        calls.append(True)
+
+    monkeypatch.setattr(adapter, "_cleanup", cleanup)
+    loop.set_exception_handler(lambda loop, context: errors.append(context))
+    spawn = asyncio.create_task(asyncio.sleep(0))
+    try:
+        cleanup_task = adapter._start_cleanup(spawn, [])
+        # Resume after cleanup completes, before its call_soon done callback.
+        await asyncio.sleep(0)
+        assert cleanup_task.done()
+        await adapter._close()
+        await asyncio.sleep(0)
+        assert calls == [True]
+        assert errors == []
+        assert adapter.active_operations == 0
+    finally:
+        loop.set_exception_handler(original_handler)
+        await spawn
+        await adapter.aclose()
