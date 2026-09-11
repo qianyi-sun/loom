@@ -148,3 +148,37 @@ def test_source_access_empty_downgrade_preserves_prior_head(build_guard_database
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT to_regprocedure('loom_capacity_build_guard.authorize_source(uuid,jsonb,bytea,text,text)')")) is None
     command.upgrade(config, "head")
+
+
+async def test_source_access_rejects_terminal_job_before_outcome(prepared_input, monkeypatch):
+    from tests.integration.test_personal_dev_build_guard_registered_release import (
+        registered_release_input,
+    )
+    from tests.integration.test_personal_dev_build_guard_terminal import terminal_store
+
+    factory, _engine, installation, *_ = prepared_input
+    _release, claim, terminal, _drain = await registered_release_input(prepared_input, monkeypatch,
+        result="live", drain=False)
+    async with factory.begin() as session:
+        await store(session, installation).authorize_source(claim, worker_credential=CREDENTIAL)
+    async with factory.begin() as session:
+        await terminal_store(session, installation).import_evidence(terminal)
+    async with factory.begin() as session:
+        with pytest.raises(DBAPIError, match="execution is closed"):
+            await store(session, installation).authorize_source(claim, worker_credential=CREDENTIAL)
+
+
+async def test_source_access_tracks_current_whole_attempt_heartbeat(prepared_input, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    factory, engine, installation, _plan, source, _platform = prepared_input
+    claim = await claim_input(prepared_input, monkeypatch)
+    async with factory.begin() as session:
+        await store(session, installation).claim_platform(claim, worker_credential=CREDENTIAL)
+    renewed = (datetime.now(UTC) + timedelta(minutes=5)).replace(microsecond=0)
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE personal_dev_candidate_build_attempts SET lease_expires_at=:expiry WHERE id=:id"),
+            {"id": source.build_attempt.id, "expiry": renewed})
+    async with factory.begin() as session:
+        access = await store(session, installation).authorize_source(claim, worker_credential=CREDENTIAL)
+        assert access.lease_not_after == renewed

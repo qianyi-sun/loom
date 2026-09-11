@@ -39,10 +39,12 @@ def inputs(values, tmp_path):
     return settings, config, SimpleNamespace(sessions=factory, mode="native-claims")
 
 
-@pytest.mark.parametrize("boundary", ["exact", "credential-replaced", "document", "procedure", "credential", "reporter", "duplicate", "intake-mode", "admission"])
+@pytest.mark.parametrize("boundary", ["exact", "native-source", "credential-replaced", "document", "procedure", "credential", "reporter", "duplicate", "intake-mode", "admission"])
 async def test_management_startup_requires_exact_private_installed_scope(prepared_input, tmp_path, monkeypatch, boundary):
     module = import_module("loom_service.personal_dev_build_management")
     settings, config, admission = inputs(prepared_input, tmp_path)
+    if boundary == "native-source":
+        admission.mode = "native-source"
     _factory, engine, _installation, *_ = prepared_input
     calls = []
     opened_paths = []
@@ -91,7 +93,7 @@ async def test_management_startup_requires_exact_private_installed_scope(prepare
     wire = canonical_bytes(config)
     _owner_file(settings.personal_dev_build_management_config_file, wire)
     settings.personal_dev_build_management_config_sha256 = sha256(wire).hexdigest()
-    if boundary in {"exact", "credential-replaced"}:
+    if boundary in {"exact", "credential-replaced", "native-source"}:
         runtime = await module.build_personal_build_management_runtime(settings, admission=admission)
         assert len(runtime.managers) == 1 and len(runtime.clients) == 1
         await runtime.aclose()

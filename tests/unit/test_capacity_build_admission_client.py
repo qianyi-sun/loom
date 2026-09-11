@@ -52,6 +52,52 @@ def native_registration(pool="gb10"):
         worker_id=uuid4(), worker_incarnation=uuid4(), worker_credential_sha256=sha256(b"w" * 43).hexdigest())
 
 
+@pytest.mark.parametrize("boundary", ["exact", "digest", "offset", "truncated", "base64", "oversize", "redirect"])
+async def test_source_client_checks_bounded_exact_reply(boundary):
+    import base64
+    from uuid import uuid4
+
+    from loom_capacity_agent.build_admission import BuildClaimRequestV1, BuildSourceReadReceiptV1
+    from loom_capacity_executor.build_admission_client import BuildAdmissionTransportError
+    from loom_capacity_manager.contracts import canonical_digest
+
+    worker = native_registration()
+    claim = BuildClaimRequestV1(binding=worker.binding, operation_id=uuid4(), request_id=uuid4(),
+        worker_id=worker.worker_id, worker_incarnation=worker.worker_incarnation)
+    result = BuildSourceReadReceiptV1(claim_digest=canonical_digest(claim), source_binding_sha256="a" * 64,
+        archive_sha256="b" * 64, archive_size_bytes=100, offset=0,
+        data_base64=base64.b64encode(b"source").decode("ascii"))
+
+    async def handle(outgoing):
+        assert outgoing.url.path.endswith("/source")
+        body = json.loads(outgoing.content)
+        assert body["claim"] == claim.model_dump(mode="json")
+        assert body["offset"] == 0 and body["length"] == 6
+        assert body["worker_credential"] == "x" * 43
+        payload = result.model_dump(mode="json")
+        if boundary == "digest":
+            payload["claim_digest"] = "f" * 64
+        elif boundary == "offset":
+            payload["offset"] = 1
+        elif boundary == "truncated":
+            payload["data_base64"] = base64.b64encode(b"short").decode("ascii")
+        elif boundary == "base64":
+            payload["data_base64"] = "!bad"
+        elif boundary == "oversize":
+            return httpx.Response(200, content=b"x" * 1400001)
+        elif boundary == "redirect":
+            return httpx.Response(307, headers={"Location": "https://foreign.test/source"})
+        return httpx.Response(200, content=json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = client_for(http, claim)
+        if boundary == "exact":
+            assert (await client.read_source(claim, worker_credential="x" * 43, offset=0, length=6)).data == b"source"
+        else:
+            with pytest.raises(BuildAdmissionTransportError):
+                await client.read_source(claim, worker_credential="x" * 43, offset=0, length=6)
+
+
 @pytest.mark.parametrize("pool", ["gb10", "oldlab"])
 @pytest.mark.parametrize("boundary", ["exact", "subject_id", "subject_incarnation", "intent_id",
     "worker_id", "worker_incarnation", "predecessor_worker_incarnation",

@@ -112,3 +112,41 @@ async def test_cancelled_read_keeps_thread_capacity_until_body_closed(monkeypatc
     async with asyncio.timeout(5):
         await reader._slots.acquire()
     assert result["Body"].closed
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_reader_shutdown_drains_io_and_rejects_new_reads(monkeypatch, cancelled):
+    from threading import Event
+
+    reader, claim, _source, _authorize, result, _calls = reader_input(monkeypatch)
+    started, finish = Event(), Event()
+    old_read = result["Body"].read
+
+    def slow_read(size):
+        started.set()
+        assert finish.wait(5)
+        return old_read(size)
+
+    monkeypatch.setattr(result["Body"], "read", slow_read)
+    task = asyncio.create_task(reader.read(claim, worker_credential="x" * 43, offset=0, length=6))
+    assert await asyncio.to_thread(started.wait, 5)
+    if cancelled:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    close = asyncio.create_task(reader.aclose())
+    try:
+        # Observe the close transition, not an arbitrary wall-clock delay.
+        async with asyncio.timeout(5):
+            while not reader._closed:
+                await asyncio.sleep(0)
+        assert not close.done()
+        with pytest.raises(ValueError, match="closed"):
+            await reader.read(claim, worker_credential="x" * 43, offset=0, length=6)
+    finally:
+        finish.set()
+    if not cancelled:
+        await task
+    await close
+    assert result["Body"].closed
+    await reader.aclose()
