@@ -79,3 +79,15 @@ def test_native_start_never_executes_without_current_deadline_and_parent(monkeyp
     with pytest.raises((ValueError, RuntimeError)):
         module.exec_native_runsc(layout(), operation="start", role="client", expected_parent_pid=123,
             deadline_boottime_ns=True if boundary == "invalid-deadline" else 100)
+
+
+@pytest.mark.parametrize("operation,role", [("state", "pause"), ("ready", "buildkit"), ("delete", "client")])
+@pytest.mark.parametrize("deadline", [1, True])
+def test_control_commands_cannot_repurpose_start_permission(monkeypatch, operation, role, deadline):
+    from loom_capacity_executor import native_runsc as module
+
+    monkeypatch.setattr(module, "bind_native_parent_death", lambda _parent: None)
+    monkeypatch.setattr(module.os, "execve", lambda *_args: pytest.fail("invalid control exec"))
+    with pytest.raises(ValueError):
+        module.exec_native_runsc(layout(), operation=operation, role=role, expected_parent_pid=123,
+            deadline_boottime_ns=deadline)

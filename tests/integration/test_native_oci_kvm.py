@@ -29,12 +29,17 @@ from loom_capacity_executor.native_oci_bundles import (
     render_native_oci_bundles,
 )
 from loom_capacity_executor.native_sandbox_contract import render_native_sandbox_contract
+from loom_capacity_manager.contracts import canonical_digest
+from tests.unit.test_native_execution_permit import execution_request
 from tests.unit.test_native_sandbox_consumer import bound_context
 from tests.unit.test_personal_dev_builder import _attempt, _candidate
 
 pytestmark = [pytest.mark.docker, pytest.mark.timeout(600)]
 ROOT = Path(__file__).resolve().parents[2]
 PYTHON = "python@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534"
+# This immutable AMD64 fixture supplies the executor's locked Python dependencies;
+# current trusted source is read-only overlaid below. It is not a fleet release.
+EXECUTOR = "ghcr.io/qianyi-sun/loom-capacity-executor@sha256:26d6a31e82838187398889cc958236f5f7e309353caca8c82dc3160828332604"
 BUILDERS = {
     "x86_64": "sha256:23099633b78bce84207e7a2418df1b941a360163a7d13b3f514f180bc29a89f9",
     "aarch64": "sha256:fff10d1d2fe52187693498edbda9e40b88c9a3c0a4b66515a7c113b89b825ff6",
@@ -73,11 +78,13 @@ def prepare_runtime(tmp_path, arch):
     return runtime
 
 
-@pytest.mark.parametrize("root_stop", ["signal", "launcher-death", "supervisor-death"])
+@pytest.mark.parametrize("root_stop", ["signal", "launcher-death", "supervisor-death", "monitored", "monitored-expiry"])
 def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path, root_stop):
     arch = platform.machine()
     if arch not in BUILDERS or not Path("/dev/kvm").exists():
         pytest.skip("native KVM acceptance requires x86_64/aarch64 with /dev/kvm")
+    if root_stop.startswith("monitored") and arch != "x86_64":
+        pytest.skip("supervised fixture currently has an AMD64-only dependency image")
     runtime = prepare_runtime(tmp_path, arch)
     fixtures, result_dir = tmp_path / "fixtures", tmp_path / "result"
     fixtures.mkdir()
@@ -119,6 +126,10 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
         dirty=snapshot.manifest.dirty, manifest_json=asdict(snapshot.manifest))
     registration = CandidateRegistration(candidate=candidate, build_attempt=_attempt(state="running"), created=False)
     context = bound_context(registration, "oldlab" if arch == "x86_64" else "gb10")
+    claim = execution_request("oldlab" if arch == "x86_64" else "gb10").claim
+    context = context.model_copy(update={"claim_digest": canonical_digest(claim), "request_id": claim.request_id})
+    (fixtures / "claim.json").write_text(claim.model_dump_json())
+    (fixtures / "context.json").write_text(context.model_dump_json())
     wire = (ROOT / "deploy/personal-dev-builder/client-seccomp-v1.json").read_bytes()
     policy = NativeOciBundlePolicy(rootfs=Path("/tmp/native-rootfs"), workspace=Path("/tmp/native-work"),
         client_seccomp=wire, client_seccomp_sha256=hashlib.sha256(wire).hexdigest(),
@@ -128,7 +139,12 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
         "buildkit_id": bundles.buildkit_id, "client_id": bundles.client_id, "root_stop": root_stop}))
     for component in ("pause", "buildkit", "client"):
         (fixtures / component).mkdir()
-        (fixtures / component / "config.json").write_bytes(getattr(bundles, component))
+        document = getattr(bundles, component)
+        if root_stop == "monitored-expiry" and component == "client":
+            probe = json.loads(document)
+            probe["process"]["args"] = ["/usr/bin/python3", "/opt/lifecycle_probe.py"]
+            document = json.dumps(probe).encode()
+        (fixtures / component / "config.json").write_bytes(document)
     (fixtures / "input/contract.json").write_bytes(render_native_sandbox_contract(context,
         max_artifact_bytes=32 * 1024**2, max_image_archive_bytes=3 * 1024**2))
     modules = fixtures / "client-modules"
@@ -140,6 +156,7 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
         # Detached runsc helpers need an orphan reaper. Python as container PID1
         # leaves zombies that runsc's kill(pid, 0) liveness test sees as running.
         output = checked("docker", "run", "--init", "--name", name, "--network=none", "--cpus=2", "--memory=4g",
+            "--user=0:0", "--env=PYTHONPATH=/trusted-src", "--env=PYTHONDONTWRITEBYTECODE=1",
             "--pids-limit=512", "--device=/dev/kvm", "--cap-add=SYS_ADMIN", "--cap-add=SYS_PTRACE",
             "--security-opt=apparmor=unconfined", "--security-opt=seccomp=unconfined", "--read-only",
             "--tmpfs=/tmp:rw,nodev,size=2g",
@@ -147,15 +164,23 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
             "--mount", f"type=bind,src={runtime},dst=/runtime,readonly",
             "--mount", f"type=bind,src={result_dir},dst=/result",
             "--mount", f"type=bind,src={ROOT / 'tests/support/native_kvm'},dst=/test-support,readonly",
-            PYTHON, "python3", "/test-support/execute.py", capture_output=True, text=True)
+            "--mount", f"type=bind,src={ROOT / 'src'},dst=/trusted-src,readonly",
+            EXECUTOR if root_stop.startswith("monitored") else PYTHON, "python3", "/test-support/execute.py", capture_output=True, text=True)
     except subprocess.CalledProcessError as exc:
         pytest.fail(f"rendered native KVM fixture failed:\n{exc.stdout}\n{exc.stderr}")
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
-    assert "native-allocated-client-artifact-ok" in output.stdout
-    assert "native-client-isolation-probes-ok" in output.stdout
-    assert "native-root-stop-children-and-late-start-ok" in output.stdout
     assert "native-allocated-runtime-cleanup-ok" in output.stdout
+    if root_stop == "monitored-expiry":
+        assert "native-supervised-expiry-stopped-live-client" in output.stdout
+        assert not (result_dir / "artifacts.tar").exists()
+        return
+    assert "native-allocated-client-artifact-ok" in output.stdout
+    if root_stop == "monitored":
+        assert "native-supervised-build-completed" in output.stdout
+    else:
+        assert "native-client-isolation-probes-ok" in output.stdout
+        assert "native-root-stop-children-and-late-start-ok" in output.stdout
     verified_dir = tmp_path / "verified"
     verified_dir.mkdir()
     verified = verify_personal_dev_build_artifact(result_dir / "artifacts.tar", registration,
