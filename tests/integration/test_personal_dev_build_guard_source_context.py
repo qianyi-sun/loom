@@ -70,3 +70,61 @@ async def test_native_context_is_compact_and_requires_current_claim(prepared_inp
         assert len(payload) < 8192
         for forbidden in ("object_bucket", "object_key", "manifest_json", "worker_credential", "claimed_by"):
             assert forbidden not in payload
+
+
+@pytest.mark.parametrize("boundary", ["exact", "disabled", "credential", "cancelled"])
+async def test_native_context_crosses_protected_http_only_for_live_claim(prepared_input, tmp_path, monkeypatch, boundary):
+    import httpx
+
+    from tests.integration.test_personal_dev_build_guard_http import application
+    from tests.unit.test_capacity_build_admission_client import client_for
+
+    factory, engine, installation, _plan, source, platform = prepared_input
+    claim = await claim_input(prepared_input, monkeypatch)
+    async with factory.begin() as session:
+        await store(session, installation).claim_platform(claim, worker_credential=CREDENTIAL)
+    app = application(prepared_input, tmp_path)
+    app.state.personal_dev_build_admission_mode = "native-claims" if boundary == "disabled" else "native-source"
+    if boundary == "cancelled":
+        with engine.begin() as connection:
+            connection.execute(text("UPDATE personal_dev_build_platform_requests SET cancelled_at=now() WHERE id=:id"), {"id": platform.id})
+    responses = []
+    async def capture(response):
+        responses.append(response)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), event_hooks={"response": [capture]}) as http:
+        client = client_for(http, claim)
+        if boundary == "exact":
+            context = await client.read_source_context(claim, worker_credential=CREDENTIAL)
+            assert context.candidate_id == source.candidate.id
+            assert responses[0].headers["cache-control"] == "no-store"
+        else:
+            with pytest.raises(RuntimeError):
+                await client.read_source_context(claim, worker_credential="x" * 43 if boundary == "credential" else CREDENTIAL)
+
+
+@pytest.mark.parametrize("boundary", ["execute", "public", "search-path"])
+def test_native_context_private_acl_is_verified(build_guard_database, boundary):
+    from alembic import command
+
+    config, engine, _owner, agent, _url = build_guard_database
+    command.upgrade(config, "head")
+    signature = "loom_capacity_build_guard.read_source_context(uuid,jsonb,bytea,text,text)"
+    statements = {"execute": f"REVOKE EXECUTE ON FUNCTION {signature} FROM {engine.dialect.identifier_preparer.quote(agent)}",
+        "public": f"GRANT EXECUTE ON FUNCTION {signature} TO PUBLIC",
+        "search-path": f"ALTER FUNCTION {signature} SET search_path=public"}
+    with engine.begin() as connection:
+        connection.execute(text(statements[boundary]))
+    with pytest.raises(RuntimeError, match=r"privilege|surface"):
+        command.upgrade(config, "head")
+
+
+def test_context_downgrade_preserves_prior_source_access(build_guard_database):
+    from alembic import command
+
+    config, engine, _owner, _agent, _url = build_guard_database
+    command.upgrade(config, "head")
+    command.downgrade(config, "build_guard_0027")
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT to_regprocedure('loom_capacity_build_guard.read_source_context(uuid,jsonb,bytea,text,text)')")) is None
+        assert connection.scalar(text("SELECT to_regprocedure('loom_capacity_build_guard.authorize_source(uuid,jsonb,bytea,text,text)')")) is not None
+    command.upgrade(config, "head")
