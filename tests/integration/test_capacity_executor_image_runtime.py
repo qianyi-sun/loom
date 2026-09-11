@@ -73,9 +73,11 @@ class CapacityExecutorImageRuntimeTest(unittest.TestCase):
         probe = """
 import ctypes, os, resource, stat
 from loom_capacity_executor.native_bootstrap_receiver import run_native_bootstrap_receiver_process
+from loom_capacity_executor.native_bootstrap_transport import _assert_private_process
 def factory():
     assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
     assert ctypes.CDLL(None).prctl(3, 0, 0, 0, 0) == 0
+    _assert_private_process()
     raise SystemExit('disposable-private-admission-detail')
 result = run_native_bootstrap_receiver_process(factory)
 assert stat.S_ISCHR(os.fstat(0).st_mode) and os.read(0, 1) == b''
