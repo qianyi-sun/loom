@@ -1,11 +1,12 @@
 # Task-image execution trust
 
-Status: signed-keyset verification, durable distribution adapter and dedicated
-signer service/client implemented; host signing service provisioning, runtime
-distribution, complete execution grants and online start remain uncomposed.
+Status: signed-keyset, complete publication-set and signed V2 execution-evidence
+verification, durable distribution adapter and dedicated signer service/client
+implemented; host signing service provisioning, grant issuance, runtime
+distribution and online start remain uncomposed.
 
-This document covers the keyset wire, durable distribution and dedicated signer
-implementation of the
+This document covers the keyset, distribution, dedicated signer and
+execution-evidence contracts of the
 [Phase 2 production design](2026-09-02-task-image-builder-phase2-production.md).
 It does not activate builders or authorize a trial runtime. The
 [publication boundary](2026-09-05-task-image-builder-phase2d2-verification.md)
@@ -71,7 +72,7 @@ key retires. A revocation epoch increase for another key does not itself invalid
 an unaffected historical publication: its key must remain present and nonrevoked.
 Publication issued exactly at its key's retirement boundary is rejected.
 
-This is deliberately one-component verification, not proof of a complete image
+The keyset helper is deliberately one-component verification, not proof of a complete image
 set or a current claim. The future worker reader must bind all expected components
 and exact envelopes into its versioned execution grant, verify the immutable task
 source and enforce reader capability gating. Immediately before the first task
@@ -237,6 +238,88 @@ restricted login, owner-only key files and mTLS. This is not a production key
 ceremony or native activation. There is still no installed service account, live
 listener, worker delivery, complete execution grant or one-use start evidence.
 
+## Complete publication-set verification
+
+`verify_publication_set` composes the existing keyset/publication verifier over
+the exact Dockerfile-backed component set derived from a frozen `TaskConfig`.
+Its expected full unsigned identities, original envelope SHA-256 pins, task
+snapshot and keyset counters/digest must come from an independently authenticated
+execution grant; they are not inferred from the envelopes under examination.
+Prebuilt-only sidecars are not extra builder components. Duplicate sidecar names,
+including Dockerfile/prebuilt collisions, and non-Linux task snapshots are refused
+before the expected set is derived.
+
+The bounded inputs preserve the existing producer ordering (task first, followed
+by unique lexical sidecars) and common native
+task/materialization, attempt/lease/grant/session, frozen-plan, environment,
+purpose/campaign and build/containment provenance. Component graphs, repository
+names and observed bases may differ. Missing, extra, repeated or reordered
+components and mixed otherwise-valid signed build authorities are refused.
+Each pin hashes the complete original publication envelope, not its inner
+statement or image digest. The immutable output uses verified native manifest
+references, matching publication completion even when a root is an OCI index.
+
+This pure helper is not runtime-composed and returns no readiness or start
+authority. Signed versioned trial grants, actual immutable task-source byte
+verification, old-worker capability gating and online one-use start serialized
+with revocation remain required before any Phase 2 trial runtime. A verified
+shadow set remains shadow evidence, never production execution authority.
+
+## Signed V2 execution evidence
+
+`TaskImageExecutionGrantV2` is a closed, immutable canonical wire with schema
+`loom.task-image-execution-grant/v2`. It binds a nonzero grant UUID and positive
+revision, exact claim, environment/purpose/campaign, materialization identity,
+native architecture, source-qualified checksum identity, historical build-plan
+digest, complete publication-envelope pins and native image mapping, keyset
+envelope digest/version/revocation epoch, and whole-second UTC issue/expiry.
+Its validity is at most fifteen minutes and entirely within its authenticated
+keyset and release-pinned execution root. Replacement revisions require future
+durable authority; this verifier cannot issue, refresh or commit them.
+
+The original frozen task configuration and source provenance are RFC 8785 JSON
+object strings (`canonical_task_config`, `canonical_source_provenance`), each
+bounded to 64 KiB of UTF-8. This preserves signed original bytes without returning
+mutable nested task collections as verified authority. Source provenance must
+include the strong content manifest and exact file-metadata digest; V1's missing-
+manifest fallback is explicitly refused. The inner grant is at most 256 KiB and
+its signature envelope at most 512 KiB. The envelope carries `canonical_grant`,
+`grant_sha256` (inner digest), `key_id`, fixed `Ed25519`, and canonical unpadded
+base64url signature. The signing preimage is `loom-task-image-execution-grant-v2`,
+one NUL byte, and original canonical grant bytes. The verified result's
+`envelope_sha256` identifies the **complete envelope**, not the inner digest.
+
+Both claim variants bind trial/team/worker-registration UUIDs, actual worker lease
+epoch and trial attempt count. The ordinary variant additionally requires a
+nonzero `claim_id`, created and persisted atomically by its future scheduler
+adapter for each new claim. It must remain stable for that claim's grant refreshes
+and change on requeue/reclaim, even when `node_setup_health` refunds attempt count.
+Neither the grant issuer nor the worker may invent or derive it from refundable
+counters or a timestamp. The current ordinary scheduler has no such identity and
+remains V2-ineligible until that adapter exists. The explicitly discriminated protected variant
+additionally binds the canonical protected receipt digest, actual worker
+incarnation UUID and claim high-water; these cannot be inferred from ordinary
+trial attempt count. The expected claim and purpose come from independent
+authenticated authority. Verifying a signature never supplies that authority.
+
+`verify_execution_grant` verifies both canonical layers and the execution-root
+signature, then the original canonical V2 build plan, frozen task/component
+derivation, source location/manifest/modes identity and complete original signed
+publication attachments. Pins are authenticated **before** unsigned publication
+inputs are reconstructed; the complete-set verifier still checks the real
+publication and keyset signatures. All publication identities must agree with
+the historical plan's grant/session and current signed task/purpose/environment.
+Verified native manifest references must exactly equal the signed mapping.
+Historical build authorization expiry does not invalidate a reusable published
+image: current execution validity comes from the new grant and keyset.
+
+The result is immutable evidence, not a start receipt. It neither verifies actual
+downloaded source bytes nor proves a current committed grant revision, worker
+capability, claim liveness or one-use start consumption. No signer operation,
+database migration, claim/worker adapter, catalog fallback or runtime default is
+added. Those boundaries must remain fail-closed before any sidecar, task or
+verifier container starts; Phase 1 behavior is unchanged.
+
 ## Evidence and remaining activation gates
 
 Tests use independently generated execution/publication keys and directly check
@@ -254,9 +337,9 @@ pending state, unchanged expiry and rollback on expiration during persistence.
 These are local contract tests, not live distribution or native acceptance.
 
 The dedicated signing service policy and distributor are implemented but not
-provisioned or runtime-composed. The versioned complete grant, source binding,
-worker reader and serialized one-use start/revocation still require implementation
-and integration. Production remains
+provisioned or runtime-composed. The durable complete-grant issuer, actual source-byte
+binding, worker reader and serialized one-use start/revocation still require
+implementation and integration. Production remains
 disabled pending those gates, genuine shadow isolation, both native containment
 and scheduling campaigns, Phase 1 continuity, incident acceptance, rollback and
 soak. No private signing keys, live state changes or runtime defaults are supplied
