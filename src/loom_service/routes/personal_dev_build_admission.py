@@ -19,6 +19,7 @@ from loom_capacity_agent.admission import (
 )
 from loom_capacity_agent.build_admission import (
     BuildClaimExchangeV1,
+    BuildOutcomeExchangeV1,
     BuildPreparationRequestV1,
     BuildRegistrationRequestV1,
 )
@@ -39,7 +40,7 @@ async def _admit(
     *,
     pool_id: str,
     intent_id: UUID,
-    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap", "withdraw", "register", "claim", "drain"],
+    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap", "withdraw", "register", "claim", "drain", "outcome"],
 ) -> Response:
     sessions = getattr(request.app.state, "personal_dev_build_admission_sessions", None)
     verifier = getattr(request.app.state, "personal_dev_build_admission_verifier", None)
@@ -51,7 +52,7 @@ async def _admit(
         request.app.state, "personal_dev_build_admission_mode", None
     ) not in {"native-registration", "native-claims"}:
         raise HTTPException(503, "build registration unavailable")
-    if operation_name == "claim" and getattr(
+    if operation_name in {"claim", "outcome"} and getattr(
         request.app.state, "personal_dev_build_admission_mode", None
     ) != "native-claims":
         raise HTTPException(503, "native claims unavailable")
@@ -73,6 +74,10 @@ async def _admit(
                     raise HTTPException(413, "build admission request exceeds byte bound")
                 body.extend(chunk)
             try:
+                outcome = (
+                    BuildOutcomeExchangeV1.model_validate_json(bytes(body))
+                    if operation_name == "outcome" else None
+                )
                 claim = (
                     BuildClaimExchangeV1.model_validate_json(bytes(body))
                     if operation_name == "claim" else None
@@ -87,7 +92,9 @@ async def _admit(
                     else None
                 )
                 operation = (
-                    claim.claim
+                    outcome.outcome.claim
+                    if outcome is not None
+                    else claim.claim
                     if claim is not None
                     else registration.registration
                     if registration is not None
@@ -123,7 +130,10 @@ async def _admit(
                 await session.execute(text("SET LOCAL statement_timeout='10000ms'"))
                 await session.execute(text("SET LOCAL lock_timeout='5000ms'"))
                 store = BuildGuardExecutionStore(session, binding=binding)
-                if claim is not None:
+                if outcome is not None:
+                    wire = canonical_bytes(await store.record_outcome(
+                        outcome.outcome, worker_credential=outcome.worker_credential))
+                elif claim is not None:
                     wire = canonical_bytes(await store.claim_platform(
                         claim.claim, worker_credential=claim.worker_credential))
                 elif registration is not None:
@@ -198,3 +208,8 @@ async def claim_build_platform(request: Request, pool_id: str, intent_id: UUID) 
 @router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/drain")
 async def drain_build_worker(request: Request, pool_id: str, intent_id: UUID) -> Response:
     return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="drain")
+
+
+@router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/outcome")
+async def record_build_outcome(request: Request, pool_id: str, intent_id: UUID) -> Response:
+    return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="outcome")

@@ -230,12 +230,20 @@ async def test_real_service_mounts_admission_closed_by_default(monkeypatch):
     assert result.status_code == 503
 
 
-@pytest.mark.parametrize("operation", ["prepare", "register", "claim", "drain"])
+@pytest.mark.parametrize("operation", ["prepare", "register", "claim", "drain", "outcome"])
 async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_input,tmp_path,monkeypatch,operation):
     from sqlalchemy import event
 
     factory, engine, _installation, _plan, _source, _request = prepared_input
-    if operation == "drain":
+    if operation == "outcome":
+        from tests.integration.test_personal_dev_build_guard_drain import drain_input
+        from tests.integration.test_personal_dev_build_guard_outcomes import outcome_request
+        from tests.integration.test_personal_dev_build_guard_registration import CREDENTIAL
+
+        _drain, registration = await drain_input(prepared_input, monkeypatch, claimed=True)
+        payload = {"schema_version": 1, "outcome": outcome_request(registration).model_dump(mode="json"),
+            "worker_credential": CREDENTIAL}
+    elif operation == "drain":
         from tests.integration.test_personal_dev_build_guard_drain import drain_input
 
         registration, _claim = await drain_input(prepared_input, monkeypatch, claimed=True)
@@ -264,7 +272,7 @@ async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_inpu
     reached_outer_commit = []
     store_completed = []
     store_type = import_module("loom_capacity_build_guard.execution_store").BuildGuardExecutionStore
-    method = {"prepare": "prepare_worker", "register": "register_worker", "claim": "claim_platform", "drain": "begin_drain"}[operation]
+    method = {"prepare": "prepare_worker", "register": "register_worker", "claim": "claim_platform", "drain": "begin_drain", "outcome": "record_outcome"}[operation]
     original = getattr(store_type, method)
 
     async def prepare_then_observe(*args,**kwargs):
@@ -294,9 +302,10 @@ async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_inpu
         assert "drain_digest" not in result.text
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == (0 if operation == "prepare" else 2)
-            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_registrations")) == (1 if operation in {"claim", "drain"} else 0)
-            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_claims")) == (1 if operation == "drain" else 0)
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_registrations")) == (1 if operation in {"claim", "drain", "outcome"} else 0)
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_claims")) == (1 if operation in {"drain", "outcome"} else 0)
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_drains")) == 0
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_outcomes")) == 0
     finally:
         event.remove(target,"before_commit",fail_commit)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="https://management.test",
@@ -304,8 +313,28 @@ async def test_http_commit_failure_cannot_emit_preparation_receipt(prepared_inpu
         assert (await client.post(route(registration,operation),json=payload)).status_code == 200
 
 
+@pytest.mark.parametrize("mode", ["prepare-bind-only", "native-registration", "native-claims"])
+async def test_outcome_route_requires_claims_mode_and_exact_worker_credential(prepared_input, tmp_path, monkeypatch, mode):
+    from tests.integration.test_personal_dev_build_guard_drain import drain_input
+    from tests.integration.test_personal_dev_build_guard_outcomes import outcome_request
+
+    _factory, engine, _installation, *_ = prepared_input
+    _drain, claim = await drain_input(prepared_input, monkeypatch, claimed=True)
+    app = application(prepared_input, tmp_path)
+    app.state.personal_dev_build_admission_mode = mode
+    payload = {"schema_version": 1, "outcome": outcome_request(claim).model_dump(mode="json"), "worker_credential": "x" * 43}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://management.test",
+        headers={"Authorization": "Bearer executor-secret"}) as client:
+        reply = await client.post(route(claim, "outcome"), json=payload)
+        assert reply.status_code == (409 if mode == "native-claims" else 503)
+        assert "x" * 43 not in reply.text
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_outcomes")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
+
+
 @pytest.mark.parametrize("pinned", [False,True,"typed"])
-@pytest.mark.parametrize("register", [False, True, "claim"])
+@pytest.mark.parametrize("register", [False, True, "claim", "outcome"])
 async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepared_input,tmp_path,pinned,register,monkeypatch):
     import asyncio
     import socket
@@ -335,7 +364,7 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
     _factory,engine,_installation,_plan,_source,_request = prepared_input
     registration,digest = await admitted(prepared_input)
     app = application(prepared_input,tmp_path)
-    app.state.personal_dev_build_admission_mode = ("native-claims" if register == "claim"
+    app.state.personal_dev_build_admission_mode = ("native-claims" if register in {"claim", "outcome"}
         else "native-registration" if register else "prepare-bind-only")
     ca_key,ca = _new_ca("build-admission-ca")
     server_key,server_cert = _signed_certificate("localhost",ca_key,ca,server=True)
@@ -418,7 +447,7 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
             registered = await client.register_worker(worker, bootstrap_capability=BOOTSTRAP)
             assert await client.register_worker(worker, bootstrap_capability=BOOTSTRAP) == registered
             assert (await client.observe_intent(binding)).worker_id == worker.worker_id
-            if register == "claim":
+            if register in {"claim", "outcome"}:
                 from loom_capacity_agent.build_admission import BuildClaimRequestV1
 
                 claim = BuildClaimRequestV1(binding=binding, operation_id=uuid4(), request_id=_request.id,
@@ -427,11 +456,20 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
                 assert claimed.request == claim
                 assert await client.claim_platform(claim, worker_credential="w" * 43) == claimed
                 assert (await client.observe_intent(binding)).claim_high_water == 1
+                if register == "outcome":
+                    from tests.integration.test_personal_dev_build_guard_outcomes import (
+                        outcome_request,
+                    )
+
+                    outcome = outcome_request(claim)
+                    completed = await client.record_outcome(outcome, worker_credential="w" * 43)
+                    assert completed.request == outcome and not completed.executable
+                    assert await client.record_outcome(outcome, worker_credential="w" * 43) == completed
             from loom_capacity_agent.admission import ExecutableDrainRequestV2
 
             drain = ExecutableDrainRequestV2(binding=binding, operation_id=uuid4(),
                 worker_id=worker.worker_id, worker_incarnation=worker.worker_incarnation,
-                expected_claim_high_water=int(register == "claim"), drain_epoch=3)
+                expected_claim_high_water=int(register in {"claim", "outcome"}), drain_epoch=3)
             drained = await client.begin_drain(drain)
             assert drained.live_claim_count == int(register == "claim")
             assert await client.begin_drain(drain) == drained
@@ -451,7 +489,8 @@ async def test_real_mtls_client_reaches_guard_and_rejects_untrusted_peer(prepare
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.execution_events")) == 2
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_withdrawals")) == (0 if register else 1)
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_registrations")) == (1 if register else 0)
-            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_claims")) == (1 if register == "claim" else 0)
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_claims")) == (1 if register in {"claim", "outcome"} else 0)
+            assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.platform_outcomes")) == int(register == "outcome")
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_drains")) == (1 if register else 0)
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 1
     finally:

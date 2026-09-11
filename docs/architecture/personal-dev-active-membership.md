@@ -293,9 +293,10 @@ admission procedures, and rejects incomplete inputs or privilege drift. The
 registration mode additionally verifies the private registration/drain procedures
 and their exact privileges before enabling `register` and `drain`; preparation-only
 configuration keeps those endpoints closed.
-The `native-claims` mode also verifies the private claim procedure and enables
-`claim`; registration-only configuration cannot claim work. Both operations
-retain pool/executor authentication. Claim exchange additionally presents the
+The `native-claims` mode also verifies the private claim/outcome procedures and
+enables `claim` and `outcome`; registration-only configuration cannot claim work
+or submit results. These operations retain pool/executor authentication. Claim
+and outcome exchanges additionally present the
 opaque registered worker credential, which is never retained in claim payloads.
 The service owns this independent connection pool through normal shutdown and
 partial startup failure; it removes admission access before disposing the pool.
@@ -511,8 +512,10 @@ and schema upgrades. Artifact-ready and cancelled requests are excluded from
 pending demand and fresh source admission. A failed request can retry only after
 its old hold is authoritatively retired. No outcome writes public candidate
 status, releases capacity, or grants fresh execution. Lost-result terminal
-settlement, registered release, native outcome transport and verified artifact
-publication remain required before runtime readiness.
+settlement, registered release and verified artifact publication remain required
+before runtime readiness. The pool-authenticated outcome route and pinned native
+client retain exact receipt checks, worker-credential separation, and outer-commit
+publication. Typed outcome routing rejects application-purpose subjects.
 
 Build-guard revision `build_guard_0018` adds registered-worker drain. It joins the
 exact committed registration and observed claim high-water under the same locks

@@ -26,6 +26,9 @@ from loom_capacity_agent.build_admission import (
     BuildClaimExchangeV1,
     BuildClaimReceiptV1,
     BuildClaimRequestV1,
+    BuildOutcomeExchangeV1,
+    BuildOutcomeReceiptV1,
+    BuildOutcomeRequestV1,
     BuildPreparationRequestV1,
     BuildRegistrationRequestV1,
 )
@@ -214,6 +217,18 @@ class BuildAdmissionClient:
         receipt = await self._post(request.binding, "claim", canonical_bytes(exchange), BuildClaimReceiptV1)
         if receipt.request != request or receipt.request_digest != canonical_digest(request):
             raise BuildAdmissionTransportError("native claim receipt binding changed")
+        return receipt
+
+    async def record_outcome(self, request: BuildOutcomeRequestV1, *, worker_credential: str) -> BuildOutcomeReceiptV1:
+        try:
+            exchange = BuildOutcomeExchangeV1.model_validate_json(BuildOutcomeExchangeV1(
+                outcome=request, worker_credential=worker_credential).model_dump_json())
+        except ValueError:
+            raise ValueError("native outcome exchange is invalid") from None
+        request = exchange.outcome
+        receipt = await self._post(request.claim.binding, "outcome", canonical_bytes(exchange), BuildOutcomeReceiptV1)
+        if receipt.request != request or receipt.request_digest != canonical_digest(request):
+            raise BuildAdmissionTransportError("native outcome receipt binding changed")
         return receipt
 
     async def bind_slurm_job(self, request: PhysicalJobBindingV2) -> BoundExecutableWorkerV2:

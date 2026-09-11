@@ -53,8 +53,9 @@ async def test_application_claim_passes_routing_binding_into_atomic_admission(tm
 
 
 @pytest.mark.parametrize("pool", ["gb10", "oldlab"])
-async def test_native_claim_cannot_fall_back_to_application_authority(tmp_path, pool):
-    from loom_capacity_agent.build_admission import BuildClaimRequestV1
+@pytest.mark.parametrize("operation", ["claim", "outcome"])
+async def test_native_claim_cannot_fall_back_to_application_authority(tmp_path, pool, operation):
+    from loom_capacity_agent.build_admission import BuildClaimRequestV1, BuildOutcomeRequestV1
 
     module, request, document, path, digest = configured(tmp_path, pool, "application-worker")
 
@@ -66,7 +67,10 @@ async def test_native_claim_cannot_fall_back_to_application_authority(tmp_path, 
     claim = BuildClaimRequestV1(binding=request.binding, operation_id=uuid4(), request_id=uuid4(),
         worker_id=uuid4(), worker_incarnation=uuid4())
     with pytest.raises(ValueError, match="build-purpose"):
-        await router.claim_platform(claim, worker_credential="w" * 43)
+        if operation == "outcome":
+            await router.record_outcome(BuildOutcomeRequestV1(claim=claim, operation_id=uuid4(), result="failed"), worker_credential="w" * 43)
+        else:
+            await router.claim_platform(claim, worker_credential="w" * 43)
 
 
 @pytest.mark.parametrize("pool", ["gb10","oldlab"])

@@ -113,7 +113,7 @@ async def _assert_private_agent(connection: AsyncConnection, *, registration_ena
     if registration_enabled:
         signatures += ("register_worker(uuid,jsonb,bytea,text,text)", "begin_drain(uuid,jsonb,bytea,text)")
     if claims_enabled:
-        signatures += ("claim_platform(uuid,jsonb,bytea,text,text)",)
+        signatures += ("claim_platform(uuid,jsonb,bytea,text,text)", "record_outcome(uuid,jsonb,bytea,text,text)")
     for signature in signatures:
         callable_safe = await connection.scalar(
             text("""

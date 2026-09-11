@@ -82,6 +82,14 @@ class BuildOutcomeReceiptV1(StrictV1Model):
     executable: Literal[False] = False
 
 
+class BuildOutcomeExchangeV1(StrictV1Model):
+    """Transport-only wrapper authentication, never retained outcome evidence."""
+
+    outcome: BuildOutcomeRequestV1
+    worker_credential: str = Field(min_length=43, max_length=512,
+        pattern=r"^[A-Za-z0-9_-]+$", repr=False)
+
+
 def native_build_artifact_key(claim: BuildClaimRequestV1) -> str:
     """A retry cannot overwrite another assignment's accepted archive identity."""
     claim = BuildClaimRequestV1.model_validate_json(claim.model_dump_json())
