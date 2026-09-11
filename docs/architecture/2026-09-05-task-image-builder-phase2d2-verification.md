@@ -1491,8 +1491,11 @@ may have its own path/digest and omit unrelated entries, but installation must
 project the original application credential paths/bytes under equivalent protection.
 Build-purpose entries are rejected before client creation. Only current-bootstrap
 observation, exact route readback and worker registration are exposed. An explicit
-typed selection never falls back to V2. Legacy configs omit the new optional field
-from serialization and keep the existing V2 factory and canonical bytes.
+typed selection never falls back to V2. Launcher configs omit both application
+options when absent, preserving the original canonical bytes of existing V2 and
+personal-build V3 documents. The personal-build V3 launcher rejects application
+native policies; its typed build route and sealed-descriptor handoff remain
+separate from this application-only node transport.
 
 Protected transport/receiver installation,
 controller delivery journaling, remote revocation/cleanup convergence and crash-orphan
