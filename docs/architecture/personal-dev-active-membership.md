@@ -579,6 +579,20 @@ before extraction and separately fence execution and artifact publication.
 This transport does not enable source intake, launch containers or report builder
 readiness. Contained execution, artifact return and live acceptance remain required.
 
+`NativeClaimBuildSource` consumes a protected launch's `CandidateRegistration`
+through this client. Before IO it binds the claim to the exact platform request
+and pool and enforces the approved source-size limit. Each chunk must match the
+launch's canonical source digest and candidate archive hash/size. It stages in a
+private owner-controlled allocation workspace, anchored by an open directory
+descriptor, and verifies the complete archive and existing candidate manifest
+before yielding any path. It extracts nothing on the host. The yielded path is
+valid only in the caller's context; pass its contents into the sandbox.
+Normal exit, failed transfer/verification and cancellation remove temporary data.
+Cancellation waits for filesystem threads, including a late failing verifier,
+before cleanup. This adapter still needs the protected full worker-contract
+handoff and allocation-contained execution entrypoint; staging success grants
+neither execution authority nor candidate publication.
+
 `BuildManagementRuntime` composes installation-scoped terminal recovery, protected
 release publication, final retirement, demand reporting, bootstrap registration
 and plan convergence. Each pass performs cleanup before new admission. Expected
