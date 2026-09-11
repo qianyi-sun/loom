@@ -68,7 +68,7 @@ def _closed(database_fixture):
             peer.execute("DROP ROLE loom_rollout_readonly")
 
 
-class LostAcknowledgement(RuntimeError):
+class LostAcknowledgementError(RuntimeError):
     pass
 
 
@@ -99,7 +99,7 @@ class InterruptCommit:
             yield
         if outer and self.armed and not self.interrupted:
             self.interrupted = True
-            raise LostAcknowledgement(self.phase)
+            raise LostAcknowledgementError(self.phase)
 
 
 @pytest.mark.asyncio
@@ -113,7 +113,7 @@ async def test_completion_recovers_each_committed_phase_with_original_guard(tran
         original_server = guard.execute("SELECT pg_postmaster_start_time()").fetchone()
         if interruption:
             channel = InterruptCommit(maintenance if interruption == "reopen" else peer, interruption)
-            with pytest.raises(LostAcknowledgement, match=interruption):
+            with pytest.raises(LostAcknowledgementError, match=interruption):
                 complete_application_handoff_database(
                     peer if interruption == "reopen" else channel,
                     maintenance=channel if interruption == "reopen" else maintenance, **arguments,
@@ -148,3 +148,44 @@ async def test_completion_refuses_lost_guard_before_database_mutation(transfer_d
         with pytest.raises(RuntimeError, match="coordination guard"):
             complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
         assert peer.execute("SELECT pg_get_userbyid(datdba),datallowconn FROM pg_database WHERE datname=current_database()").fetchone() == (arguments["target"].owner_role, False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["reopen", "login"])
+async def test_guard_loss_inside_final_mutation_rolls_back_that_phase(transfer_database, phase):  # noqa: F811
+    from loom.application_handoff_completion import complete_application_handoff_database
+
+    with _closed(transfer_database) as (peer, maintenance, guard, arguments):
+        class LoseGuard(InterruptCommit):
+            def execute(self, query):
+                result = super().execute(query)
+                if self.armed:
+                    self.armed = False
+                    assert guard.execute("SELECT pg_advisory_unlock(5498691230183247727)").fetchone() == (True,)
+                return result
+
+        channel = LoseGuard(maintenance if phase == "reopen" else peer, phase)
+        with pytest.raises(RuntimeError, match="coordination guard"):
+            complete_application_handoff_database(
+                peer if phase == "reopen" else channel,
+                maintenance=channel if phase == "reopen" else maintenance, **arguments,
+            )
+        assert peer.execute("SELECT pg_get_userbyid(datdba),datallowconn FROM pg_database WHERE datname=current_database()").fetchone() == (arguments["target"].successor_role, phase == "login")
+        assert peer.execute("SELECT rolcanlogin,rolpassword FROM pg_authid WHERE oid=%s", (arguments["target"].owner_oid,)).fetchone() == (False, None)
+
+
+@pytest.mark.asyncio
+async def test_restored_replay_preserves_unknown_password_and_rejects_schema_drift(transfer_database):  # noqa: F811
+    from loom.application_handoff_completion import complete_application_handoff_database
+
+    with _closed(transfer_database) as (peer, maintenance, _guard, arguments):
+        complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
+        before = peer.execute("SELECT rolcanlogin,rolpassword FROM pg_authid WHERE oid=%s", (arguments["target"].owner_oid,)).fetchone()
+        with pytest.raises(RuntimeError, match="credential"):
+            complete_application_handoff_database(peer, maintenance=maintenance,
+                                                  **{**arguments, "password": "a-different-password"})
+        peer.execute("CREATE TABLE public.unexpected_handoff_object(id integer)")
+        with pytest.raises(RuntimeError, match="trusted reference"):
+            complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
+        assert peer.execute("SELECT rolcanlogin,rolpassword FROM pg_authid WHERE oid=%s", (arguments["target"].owner_oid,)).fetchone() == before
+        assert peer.execute("SELECT datallowconn FROM pg_database WHERE datname=current_database()").fetchone() == (True,)

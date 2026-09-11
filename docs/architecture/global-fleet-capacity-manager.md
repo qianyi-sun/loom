@@ -676,6 +676,22 @@ already false: an interrupted maintenance backend may still have an uncommitted
 reopen. The update must serialize behind that transaction or fail with the
 bounded lock timeout; a stale closed snapshot alone cannot certify cleanup.
 
+The database completion sequence now composes the guarded transfer, reopening
+and original-password login restoration. `complete_application_handoff_database`
+requires the saved target, exact current handoff peer, original guard, original
+credential and fixed schema ACL profile. A sealed retry first serializes closure
+against an uncertain reopen, verifies the drain, and validates or performs the
+ownership transfer. Reopening then requires committed successor ownership and
+checks the original guard before and after the admission change. Login restoration
+also checks that guard inside its transaction. An already-restored retry only
+observes the exact ordinary login and trusted schema; it never reseals the account
+or overwrites an unexpected password to force recovery. Lost commit acknowledgements
+at transfer, reopen and login are reconciled from actual PostgreSQL state.
+The returned database outcome is not a component terminal or proof of CNPG or
+workload recovery. The installed caller must retain its journaled authority,
+process/DDL exclusion and workload containment, and open any replacement peer
+through the existing bounded recovery chain before invoking this sequence.
+
 The installed staging mutation guard is a necessary surviving connection, not an
 application worker to stop: it holds the database-local advisory lock that excludes
 lifecycle GC. Moving that lock to the maintenance database would lose coordination.

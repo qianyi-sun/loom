@@ -470,6 +470,7 @@ def _require_database_drained(
     coordination_guard: ApplicationDatabaseCoordinationGuard | None,
     handoff_present: bool,
     reopen_after_drain: bool = False,
+    require_successor_owner: bool = False,
 ) -> None:
     with _maintenance_transaction(
         connection, database=target.database, provisioner_role=provisioner_role
@@ -530,12 +531,40 @@ def _require_database_drained(
             )
         if coordination_guard is not None:
             _require_coordination_guard(connection, target, coordination_guard)
+        if require_successor_owner and connection.execute(application_sql(
+            "SELECT datdba={} FROM pg_catalog.pg_database WHERE oid={}",
+            target.successor_oid, target.database_oid,
+        )).fetchone() != (True,):
+            raise ApplicationDatabaseAdmissionError("application ownership transfer is not committed")
         if reopen_after_drain:
             connection.execute(sql.SQL("ALTER DATABASE {} ALLOW_CONNECTIONS true").format(sql.Identifier(target.database)))
             if not _checked_state(connection, target, runtime_password=runtime_password):
                 raise ApplicationDatabaseAdmissionError("application recovery admission did not reopen")
             if coordination_guard is not None:
                 _require_coordination_guard(connection, target, coordination_guard)
+
+
+def reopen_application_database_after_handoff(
+    connection: ApplicationDatabaseConnection,
+    *,
+    target: ApplicationDatabaseAdmissionTarget,
+    provisioner_role: str,
+    handoff_backend: ApplicationDatabaseHandoffBackend,
+    coordination_guard: ApplicationDatabaseCoordinationGuard,
+    runtime_password: str,
+) -> None:
+    """Reopen after committed transfer with the original guard and exact live peer.
+
+    The caller must already have verified the complete sealed schema profile.
+    Admission remains closed on detected guard loss, startup work, surviving
+    clients or uncommitted ownership. Runtime LOGIN is restored separately.
+    """
+    _require_database_drained(
+        connection, target=target, provisioner_role=provisioner_role,
+        handoff_backend=handoff_backend, coordination_guard=coordination_guard,
+        runtime_password=runtime_password, handoff_present=True,
+        reopen_after_drain=True, require_successor_owner=True,
+    )
 
 
 def reopen_application_database_for_handoff_recovery(
