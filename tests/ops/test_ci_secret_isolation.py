@@ -31,9 +31,9 @@ def _ubuntu_amd64_runner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
 def _validation_env() -> dict[str, str]:
     return {
-        "IMAGE_NAME": "worker",
-        "IMAGE_DIGEST_NAME": "loom-worker",
-        "DOCKERFILE": "deploy/Dockerfile.worker",
+        "IMAGE_NAME": "service",
+        "IMAGE_DIGEST_NAME": "loom-service",
+        "DOCKERFILE": "deploy/Dockerfile.service",
         "BUILD_CONTEXT": ".",
         "EVENT_NAME": "pull_request",
         "REF_NAME": "42/merge",
@@ -110,9 +110,9 @@ def test_image_build_emits_only_local_archives_without_registry_authority() -> N
 @pytest.mark.parametrize(
     ("field", "payload", "error_marker"),
     [
-        ("IMAGE_NAME", "worker$(id)", "component ownership validation failed:"),
-        ("IMAGE_DIGEST_NAME", "loom-worker; id", "component ownership validation failed:"),
-        ("DOCKERFILE", "../deploy/Dockerfile.worker", "component ownership validation failed:"),
+        ("IMAGE_NAME", "service$(id)", "component ownership validation failed:"),
+        ("IMAGE_DIGEST_NAME", "loom-service; id", "component ownership validation failed:"),
+        ("DOCKERFILE", "../deploy/Dockerfile.service", "component ownership validation failed:"),
         ("BUILD_CONTEXT", "..", "component ownership validation failed:"),
         ("EVENT_NAME", "pull_request\npush", "FAIL:"),
         ("EVENT_NAME", "pull_request_target", "FAIL:"),
@@ -135,7 +135,7 @@ def test_image_input_validation_never_evaluates_command_substitution(
     tmp_path: Path, field: str,
 ) -> None:
     sentinel = tmp_path / "shell-injection-ran"
-    result = _run_image_validation(**{field: f"worker$(touch {sentinel})"})
+    result = _run_image_validation(**{field: f"service$(touch {sentinel})"})
     assert result.returncode != 0
     assert not sentinel.exists()
 
