@@ -127,6 +127,7 @@ def _render_ignore_bytes(exceptions: tuple[TrivyException, ...]) -> bytes:
 
 
 TRIVY_IGNORE_BYTES = _render_ignore_bytes(TRIVY_EXCEPTIONS)
+TRIVY_NO_EXCEPTIONS_BYTES = b"vulnerabilities: []\n"
 TRIVY_CONFIG_SHA256 = "bd8896276b5d8d00d8bb3c3d7a51d359b4931ea2811c21cb8ed692766a7eb8cf"
 TRIVY_IGNORE_SHA256 = "11f957c7a63686da04c9f38e39aa2ca1eeef743b36c75810054afc84571ed2f7"
 
@@ -215,26 +216,36 @@ def write_release_policy(
     ignore_file: Path,
     *,
     today: date | None = None,
+    use_exceptions: bool = True,
 ) -> None:
     """Atomically write and verify the reviewed config and temporary exceptions."""
 
     _verify_constant_hashes()
-    _verify_exception_policy(today or datetime.now(UTC).date())
+    if use_exceptions:
+        _verify_exception_policy(today or datetime.now(UTC).date())
     if config_file == ignore_file:
         raise TrivyPolicyError("controlled Trivy policy paths must be distinct")
     if ignore_file.suffix not in {".yaml", ".yml"}:
         raise TrivyPolicyError("controlled Trivy ignore path must select YAML parsing")
     _write_exact_regular_file(config_file, TRIVY_CONFIG_BYTES, TRIVY_CONFIG_SHA256)
-    _write_exact_regular_file(ignore_file, TRIVY_IGNORE_BYTES, TRIVY_IGNORE_SHA256)
+    ignore_bytes = TRIVY_IGNORE_BYTES if use_exceptions else TRIVY_NO_EXCEPTIONS_BYTES
+    _write_exact_regular_file(ignore_file, ignore_bytes, _sha256(ignore_bytes))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config-file", type=Path, required=True)
     parser.add_argument("--ignore-file", type=Path, required=True)
+    parser.add_argument(
+        "--no-exceptions", action="store_true",
+        help="Use an empty ignore file instead of the reviewed legacy exceptions.",
+    )
     arguments = parser.parse_args()
     try:
-        write_release_policy(arguments.config_file, arguments.ignore_file)
+        write_release_policy(
+            arguments.config_file, arguments.ignore_file,
+            use_exceptions=not arguments.no_exceptions,
+        )
     except (OSError, TrivyPolicyError):
         sys.stderr.write("error: controlled Trivy policy generation failed\n")
         raise SystemExit(1) from None

@@ -4,18 +4,15 @@ The initial task is `file-archive-manifest` from the old staging catalog
 `terminal-bench-2-harbor-90`, using `terminus-2` and Gateway model `glm-5.2`.
 This prepares one task, not a claim that all 90 tasks support Nebius.
 
-## Prepare the image and upload files
+## Prepare Dockerfile upload files
 
-The existing GitHub-hosted `nebius-candidate` publication builds the worker and
-this task image alongside the platform components, using the same image scan
-and admission mechanism. Its candidate has `images.worker` and `images.tb90_task`;
-the runtime profile uses the worker as `agent_image_ref`. The compiler chooses
-the task's admitted image independently. Direct-completion continues using the
-existing service image. No separate Nebius runner or CI gate is required.
-Batch admission, Control Plane Trial creation and the execution compiler share
-the runtime profile's image compatibility check: a Terminus task image may
-differ from the default task image, but both it and the controller must be
-present in the published profile's admitted images.
+The existing GitHub-hosted `nebius-candidate` publication builds the trusted
+`images.harbor_runtime` controller with the platform components. It does not
+build or admit this task image. The ordinary task-image queue prepares the
+submitted Dockerfile and binds the ready image to the Trial's frozen task
+revision. The compiler uses that image for task and isolated verifier, and the
+published Harbor runtime for the controller. Direct-completion continues using
+the existing service image. No separate Nebius runner or CI gate is required.
 
 For a local environment check, build from the repository root:
 
@@ -26,19 +23,32 @@ docker build --platform linux/amd64 \
   deploy/catalog/nebius-terminal-bench/file-archive-manifest
 ```
 
-For the upload, use the `images.tb90_task.image_ref` digest returned by the
-existing candidate publication for both task and verifier. Prepare the directory:
+Prepare the ordinary upload directory without a prebuilt image:
 
 ```sh
 PYTHONPATH=src:. python scripts/ops/prepare_nebius_terminal_bench.py \
-  --image '<registry>/loom-terminal-bench-file-archive-manifest@sha256:<digest>' \
   --output /tmp/nebius-terminal-bench-taskset
+loom tasksets submit /tmp/nebius-terminal-bench-taskset --format json
+loom tasksets status '<returned TaskSet ID>' --format json
 ```
 
 The helper writes `manifest.yaml`, `bundle.tar.gz` and `taskset-build.json`.
 It does not build, publish, submit, create resources or call a model. Loom's
 existing TaskSet upload contract uses TAR archives; ZIP is not accepted.
 The output directory must be absent or empty to preserve existing operator work.
+The default manifest uses a distinct `-dockerfile` name. Its task environment
+declares `dockerfile="environment/Dockerfile"`,
+`docker_build_context="environment"` and no `docker_image`. The context contains
+only the reviewed prepared Dockerfile. Unchanged `instruction.md` and
+`tests/test_outputs.py`, the offline `verifier/run.sh`, and source provenance
+remain outside that context in the uploaded task directory. No oracle is uploaded.
+
+The optional `--image '<registry>/image@sha256:<digest>'` retains preparation
+for a prebuilt image already admitted by the target runtime profile. It does
+not grant admission to arbitrary images. Historical prebuilt TaskSets remain
+historical inputs; submitting them against a new profile without their image
+admission is unsupported. Preserve old candidates and image references needed
+by existing frozen Batches.
 
 Import the directory through the ordinary TaskSet path after the target runtime
 supports Terminus-2. In **Task Sets → Submit Task Set**, select `manifest.yaml`
@@ -65,8 +75,9 @@ architecture-independent task may also have an arm64 prerequisite; that row
 does not block the x86_64 Nebius execution path. A failed x86_64 prerequisite
 finishes the waiting Trial with `task_image_build_failed` and no consumed attempt.
 
-This connection consumes existing ready-image records. It does not enable a
-new builder or permit arbitrary prebuilt images. The trusted controller and
+When the platform's native task-image builder is enabled, its existing actuator
+prepares and publishes the queued Dockerfile image. Import alone does not
+activate a builder or permit arbitrary prebuilt images. The trusted controller and
 runtime still come from the published platform profile; only the task and its
 private verifier sandbox use the image associated with the frozen task revision.
 Direct-completion cannot use this Dockerfile path. The other existing CPU,
@@ -81,6 +92,14 @@ A retired cache with no remaining consumer does not retain historical inputs.
 Preparing the same content again after cache retirement uses the current upload
 location; ready cache reuse preserves its existing frozen source.
 
+Native preparation reads ordinary TaskSet file modes from the frozen
+`service_execution_input` manifest already published by TaskSet materialization.
+It verifies that binding and the transferred bundle revision; ordinary uploads
+do not need the benchmark publisher's `.loom-bundle-files.v1.json` sidecar.
+Benchmark sources without an input-manifest binding retain the sidecar path.
+A missing or corrupt bound manifest fails preparation; it does not fall back to
+unbound modes or a different source revision.
+
 ## What changes from old staging
 
 The original instruction and `tests/test_outputs.py` are copied byte for byte.
@@ -91,11 +110,18 @@ oracle solution and original package installer are not uploaded. Source identity
 also travels in the TaskSet's `source-provenance.json`; the materializer remains
 responsible for its existing database input-manifest provenance.
 
-Only architecture and environment preparation change. Ubuntu fixtures are
-architecture independent, and the derived image preinstalls Python 3.13,
+This is an explicitly adapted AMD64/non-root/offline execution profile. The
+old staging `task.toml` explicitly declares ARM64 and a root verifier; that
+original execution profile remains unsupported on this Nebius path. The saved
+objects do not establish whether those declarations originated upstream or
+in the old importer. The instruction, fixture commands and assertions contain
+no architecture or UID dependency. The derived image preinstalls Python 3.13,
 pytest 8.4.1, pytest-json-ctrf 0.3.5, bash, tmux and asciinema. Trials use non-root
 UID/GID 65532, `/app`, and gateway-only networking. The original runtime apt/curl/
-uv bootstrap is retained as source history and is not executed.
+uv bootstrap is retained as source history and is not executed. The offline
+wrapper replaces `tests/test.sh` execution with the same pytest invocation and
+unchanged test assertions; this is a verifier bootstrap adaptation, not a claim
+that the original verifier script runs unchanged.
 `archive_manifest.json` and `build_manifest.py` are collected when present; the
 original task declares no required artifact. Missing or incorrect answers must
 reach the original verifier and yield numeric reward zero, not turn into an
@@ -125,7 +151,7 @@ selecting a model alone is insufficient. Configure the connection through the
 normal provider API using a secret reference. A platform provider entry used by
 direct-completion is not automatically a Terminus BYO connection.
 
-The worker applies the [Harbor current-user probe patch](../../deploy/patches/README.md)
+The Harbor runtime applies the [Harbor current-user probe patch](../../deploy/patches/README.md)
 at image build time. Read-only tool checks use the sandbox default user; only
 actual installation requests root. Nebius images must have tools preinstalled,
 and unsupported root execution still fails normally. Remove the #1550 patch
@@ -147,3 +173,13 @@ verifier reward, successful `archive_manifest.json` output, full Trial artifacts
 resource release/scale-zero. Do not infer any of these from a successful image
 build or local oracle. This preparation does not submit a paid Trial or activate
 cross-region capacity.
+
+To establish the generic path, inspect the Trial's task-image materialization
+link and native build attempt, its ready image, and the runtime plan's non-empty
+`task_image_materialization_id`. The task/verifier image must match that ready
+record, independently of the controller image; a different image digest alone
+is insufficient. Image preparation must not consume a Trial attempt or call a
+model. Then verify the real Trial's usage, cost, trajectory and original reward
+assertions. A single-attempt acceptance request should retain
+`retry={"max_attempts":1,"retry_on":[]}` through the ordinary Batch API; the
+current `loom eval batch create` command does not expose retry configuration.

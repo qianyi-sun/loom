@@ -1144,7 +1144,7 @@ def test_pipeline_core_fixture_is_conformance_only_and_never_a_rollout_image() -
     }
 
 
-def test_native_release_image_matrix_builds_each_active_nebius_image_once_on_amd64() -> None:
+def test_native_matrix_preserves_the_default_legacy_image_set() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
 
     images = component_ownership.release_image_matrix(manifest)
@@ -1162,6 +1162,82 @@ def test_native_release_image_matrix_builds_each_active_nebius_image_once_on_amd
         matching = [entry for entry in matrix if entry["image"] == image["image"]]
         assert [entry["architecture"] for entry in matching] == ["amd64"]
         assert all({key: entry[key] for key in image} == image for entry in matching)
+
+
+def test_nebius_matrix_contains_only_the_seven_published_manifest_images() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    images = component_ownership.release_image_matrix(manifest, image_set="nebius")
+    assert len(images) == 7
+    assert {row["image_name"] for row in images} == set(
+        component_ownership.NEBIUS_PLATFORM_IMAGES.values()
+    )
+    for image in images:
+        assert component_ownership.validate_release_image_pair(
+            manifest, image=image["image"], image_name=image["image_name"],
+            dockerfile=image["dockerfile"], build_context=image["context"], image_set="nebius",
+        ) == []
+    harbor = next(row for row in images if row["image"] == "harbor-runtime")
+    assert component_ownership.validate_release_image_pair(
+        manifest, image=harbor["image"], image_name=harbor["image_name"],
+        dockerfile=harbor["dockerfile"], build_context=harbor["context"],
+    )  # Explicit Nebius selection does not enable Harbor in legacy callers.
+    worker = next(row for row in component_ownership.release_image_matrix(manifest)
+                  if row["image"] == "worker")
+    assert component_ownership.validate_release_image_pair(
+        manifest, image=worker["image"], image_name=worker["image_name"],
+        dockerfile=worker["dockerfile"], build_context=worker["context"], image_set="nebius",
+    )
+
+
+@pytest.mark.parametrize("path", [
+    "deploy/Dockerfile.harbor-runtime", "deploy/harbor-runtime-requirements.txt",
+    "deploy/patches/harbor-current-user-tool-probes.patch", "src/loom/models/task.py",
+    "src/loom/agent/terminus2/runtime.py",
+])
+def test_nebius_selection_includes_affected_harbor_inputs(path: str) -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    rows = component_ownership.select_release_image_matrix(
+        manifest, changed_paths=(path,), force_all=False, image_set="nebius",
+    )
+    assert "harbor-runtime" in {row["image"] for row in rows}
+    assert {row["image_name"] for row in rows} <= set(
+        component_ownership.NEBIUS_PLATFORM_IMAGES.values()
+    )
+
+
+@pytest.mark.parametrize("path", [
+    "deploy/Dockerfile.worker", "deploy/Dockerfile.pipeline-orchestrator",
+    "deploy/Dockerfile.agent-sandbox",
+])
+def test_nebius_selection_excludes_unrelated_legacy_images(path: str) -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    assert component_ownership.select_release_image_matrix(
+        manifest, changed_paths=(path,), force_all=False, image_set="nebius",
+    ) == ()
+
+
+@pytest.mark.parametrize("path,force_all,fallback_all", [
+    ("docs/readme.md", True, False), ("docs/readme.md", False, True),
+    ("src/loom_control_plane/worker_pool_autoscaler.py", False, True),
+    ("config/component-ownership.toml", False, False),
+])
+def test_nebius_all_selection_stays_within_its_seven_images(
+    path: str, force_all: bool, fallback_all: bool,
+) -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    assert component_ownership.select_release_image_matrix(
+        manifest, changed_paths=(path,), force_all=force_all,
+        fallback_all=fallback_all, image_set="nebius",
+    ) == component_ownership.release_image_matrix(manifest, image_set="nebius")
+
+
+def test_nebius_selection_requires_every_published_component_in_the_manifest() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    manifest = replace(manifest, components=tuple(
+        component for component in manifest.components if component.id != "harbor-runtime"
+    ))
+    with pytest.raises(component_ownership.ManifestError, match="one manifest owner"):
+        component_ownership.release_image_matrix(manifest, image_set="nebius")
 
 
 

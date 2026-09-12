@@ -27,6 +27,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
+from scripts.component_ownership import NEBIUS_PLATFORM_IMAGES as COMPONENTS
 from scripts.component_ownership import load_manifest, release_image_matrix
 from scripts.install_trivy import install_trivy
 from scripts.ops.collect_nebius_runtime_evidence_via_gateway import _severity
@@ -47,19 +48,12 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCE_REF = "refs/heads/codex/nebius-main"
 REPOSITORY = "qianyi-sun/loom"
 WORKFLOW = ".github/workflows/nebius-candidate.yml"
-COMPONENTS = {
-    "service": "loom-service",
-    "control_plane": "loom-control-plane",
-    "web": "loom-web",
-    "gateway": "loom-llm-gateway",
-    "execution_runtime": "loom-execution-runtime",
-    "execution_actuator": "loom-execution-actuator",
-    "harbor_runtime": "loom-harbor-runtime",
-    "tb90_task": "loom-nebius-terminal-bench",
-}
-EXECUTION_COMPONENTS = ("service", "execution_runtime", "harbor_runtime", "tb90_task")
-LEGACY_COMPONENTS = frozenset(COMPONENTS) - {"harbor_runtime", "tb90_task"}
+EXECUTION_COMPONENTS = ("service", "execution_runtime", "harbor_runtime")
+LEGACY_COMPONENTS = frozenset(COMPONENTS) - {"harbor_runtime"}
 HISTORICAL_COMPONENTS = LEGACY_COMPONENTS | {"worker", "tb90_task"}
+HISTORICAL_HARBOR_COMPONENTS = frozenset(COMPONENTS) | {"tb90_task"}
+# Read old releases without requiring their workload images in new publication.
+HISTORICAL_IMAGE_NAMES = {"worker": "loom-worker", "tb90_task": "loom-nebius-terminal-bench"}
 AGENT_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -141,11 +135,11 @@ def validate_identity(document: dict[str, Any], *, require_current_images: bool 
     images = document.get("images")
     allowed = {frozenset(COMPONENTS)}
     if not require_current_images:
-        allowed.update((LEGACY_COMPONENTS, HISTORICAL_COMPONENTS))
+        allowed.update((LEGACY_COMPONENTS, HISTORICAL_COMPONENTS, HISTORICAL_HARBOR_COMPONENTS))
     if not isinstance(images, dict) or frozenset(images) not in allowed:
         raise ValueError("candidate must contain the configured platform and execution images")
     for component in images:
-        name = "loom-worker" if component == "worker" else COMPONENTS[component]
+        name = COMPONENTS.get(component) or HISTORICAL_IMAGE_NAMES[component]
         row = images[component]
         prefix = f"{document['registry_prefix']}/{name}@"
         if (
@@ -421,19 +415,9 @@ def build(args: argparse.Namespace) -> None:
         raise ValueError("invalid agent version label")
     args.output.mkdir(parents=True, exist_ok=False)
     _diagnostic_dir = args.output
-    manifest = load_manifest(ROOT / "config/component-ownership.toml")
-    rows = release_image_matrix(manifest)
+    component_manifest = load_manifest(ROOT / "config/component-ownership.toml")
+    rows = release_image_matrix(component_manifest, image_set="nebius")
     ownership = {row["image_name"]: row for row in rows}
-    harbor = next(component for component in manifest.components if component.id == "harbor-runtime")
-    ownership[COMPONENTS["harbor_runtime"]] = {
-        "image": harbor.id, "context": harbor.build_context, "dockerfile": harbor.dockerfile,
-    }
-    # This workload belongs only to Nebius publication, not legacy dev/main releases.
-    ownership[COMPONENTS["tb90_task"]] = {
-        "image": "nebius-terminal-bench",
-        "context": "deploy/catalog/nebius-terminal-bench/file-archive-manifest",
-        "dockerfile": "deploy/catalog/nebius-terminal-bench/file-archive-manifest/Dockerfile",
-    }
     document: dict[str, Any] = {
         "schema_version": "loom.nebius-candidate.v1",
         "repository": REPOSITORY,
@@ -448,7 +432,7 @@ def build(args: argparse.Namespace) -> None:
         work = Path(temporary)
         scanner = install_trivy(work, architecture="amd64")
         policy, exceptions = work / "trivy.yaml", work / "ignore.yaml"
-        write_release_policy(policy, exceptions)
+        write_release_policy(policy, exceptions, use_exceptions=False)
         document["policy_sha256"] = sha256(policy.read_bytes() + exceptions.read_bytes())
         components = {"harbor_runtime": COMPONENTS["harbor_runtime"]} if mode == "harness-only" else COMPONENTS
         for component, name in components.items():
@@ -514,7 +498,9 @@ def build(args: argparse.Namespace) -> None:
                     str(exceptions),
                     "--show-suppressed",
                 )
-                validate_trivy_release_report(owner["image"], "amd64", policy_report, exceptions)
+                validate_trivy_release_report(
+                    owner["image"], "amd64", policy_report, exceptions, use_exceptions=False,
+                )
                 _run(
                     str(scanner),
                     "image",

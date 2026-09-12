@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -11,9 +12,13 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+import tomli_w
 from botocore.exceptions import ClientError
 from loom_bundle_checksum import sha256_of_dir
 
+from loom.models.taskset import UserTaskSetManifest, bundle_object_key
+from loom.taskset.materialize import _publish_service_execution_input_manifest, materialize_task_set
+from loom.taskset.storage_bytes import taskset_root
 from loom.trajectory.storage import (
     BUNDLE_FILE_METADATA_NAME,
     bundle_file_metadata_body,
@@ -103,6 +108,9 @@ class FakeS3:
     def close(self) -> None:
         self.closed = True
 
+    def put_object(self, **kwargs):
+        self.objects[kwargs["Key"]] = kwargs["Body"]
+
     def upload_file(self, filename: str, bucket: str, key: str) -> None:
         self.uploads.append((bucket, key, Path(filename).read_bytes()))
 
@@ -162,6 +170,127 @@ def test_download_restores_verified_source_bytes_and_executable_modes(
     assert stat.S_IMODE((destination / "instruction.md").stat().st_mode) == 0o644
     assert not (destination / BUNDLE_FILE_METADATA_NAME).exists()
     assert source.bodies and all(body.closed for body in source.bodies)
+
+
+def test_download_ordinary_uploaded_taskset_without_benchmark_sidecar(source_bundle, tmp_path):
+    claim, source = source_bundle
+    manifest = UserTaskSetManifest.model_validate({
+        "apiVersion": "loom.taskset/v1", "kind": "UserTaskSet",
+        "metadata": {"name": "native-input", "display_name": "Native input"},
+        "source": {"type": "bundle-upload", "locator": "bundle.tar.gz", "subset": "tasks"},
+    })
+    buffer = io.BytesIO()
+    files = {
+        "task.toml": tomli_w.dumps(claim["task_config"]).encode(),
+        "instruction.md": b"Run the task.\n",
+        "environment/Dockerfile": b"FROM scratch\n",
+    }
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for name, body in files.items():
+            member = tarfile.TarInfo("tasks/test/" + name)
+            member.size = len(body)
+            member.mode = 0o644
+            archive.addfile(member, io.BytesIO(body))
+    source.objects = {
+        bundle_object_key(
+            prefix=taskset_root(team_id="team-test", slug=manifest.slug).removesuffix("/"),
+            relative_path=manifest.source.locator,
+        ): buffer.getvalue()
+    }
+    result = materialize_task_set(
+        manifest=manifest, task_set_id="ts/team-test/native-input", owning_team_id="team-test",
+        materialization_job_id=uuid4(), materialization_epoch=1,
+        intents=["trajectory_generation"], verifier_blob_uri=None, minio_client=source,
+        artifacts_bucket="source", upstream_cache_root=tmp_path / "upstream",
+    )
+    assert result.status == "ready", result.error_summary
+    row, = result.task_rows
+    assert "service_execution_input" in row.source_provenance
+    assert not any(key.endswith(BUNDLE_FILE_METADATA_NAME) for key in source.objects)
+    claim.update(task_source=row.source, task_checksum=row.checksum,
+                 task_config=row.config, task_source_provenance=row.source_provenance)
+    runtime.download_bundle(claim, source, tmp_path / "download")
+    assert sha256_of_dir(tmp_path / "download") == row.checksum
+    assert (tmp_path / "download/environment/Dockerfile").read_bytes() == b"FROM scratch\n"
+
+
+@pytest.fixture
+def input_manifest_bundle(source_bundle, tmp_path):
+    claim, source = source_bundle
+    del source.objects["tasks/revision/" + BUNDLE_FILE_METADATA_NAME]
+    provenance, _ = _publish_service_execution_input_manifest(
+        source, bucket="source", manifest_key="task-inputs/revision.json",
+        bundle_dir=tmp_path / "original", task_checksum_value=claim["task_checksum"],
+    )
+    claim["task_source_provenance"].update(provenance)
+    return claim, source
+
+
+def test_input_manifest_restores_frozen_executable_modes(input_manifest_bundle, tmp_path):
+    claim, source = input_manifest_bundle
+    runtime.download_bundle(claim, source, tmp_path / "download")
+    assert stat.S_IMODE((tmp_path / "download/run.sh").stat().st_mode) == 0o755
+    assert stat.S_IMODE((tmp_path / "download/instruction.md").stat().st_mode) == 0o644
+    assert not any(key.endswith(BUNDLE_FILE_METADATA_NAME) for key in source.gets)
+    assert all(body.closed for body in source.bodies)
+
+
+@pytest.mark.parametrize("change,match", [
+    ("manifest_bytes", "frozen binding"),
+    ("content", "content does not match"),
+    ("missing_file", "frozen bundle"),
+    ("extra_file", "frozen bundle"),
+    ("revision", "frozen bundle"),
+    ("count", "frozen bundle"),
+    ("total", "frozen bundle"),
+    ("unsafe_mode", "Input should be"),
+    ("mode", "file modes do not match"),
+    ("noncanonical", "frozen bundle"),
+    ("outside_bucket", "outside the configured source bucket"),
+])
+def test_input_manifest_rejects_frozen_input_drift(input_manifest_bundle, tmp_path, change, match):
+    claim, source = input_manifest_bundle
+    key = "task-inputs/revision.json"
+    binding = claim["task_source_provenance"]["service_execution_input"]
+    if change == "manifest_bytes":
+        source.objects[key] += b" "
+    elif change == "content":
+        source.objects["tasks/revision/instruction.md"] = b"changed bytes"
+    elif change == "missing_file":
+        del source.objects["tasks/revision/run.sh"]
+    elif change == "extra_file":
+        source.objects["tasks/revision/extra"] = b"unlisted"
+    elif change == "outside_bucket":
+        binding["manifest_uri"] = "s3://other/task-inputs/revision.json"
+    elif change in {"count", "total"}:
+        binding["file_count" if change == "count" else "total_bytes"] += 1
+    else:
+        manifest = json.loads(source.objects[key])
+        if change == "revision":
+            manifest["task_revision_sha256"] = "sha256:" + "0" * 64
+        elif change in {"mode", "unsafe_mode"}:
+            next(row for row in manifest["files"] if row["relative_path"] == "run.sh")[
+                "mode"
+            ] = "0644" if change == "mode" else "4755"
+        body = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+        if change == "noncanonical":
+            body += b" "
+        source.objects[key] = body
+        binding["manifest_sha256"] = "sha256:" + hashlib.sha256(body).hexdigest()
+    with pytest.raises(ValueError, match=match):
+        runtime.download_bundle(claim, source, tmp_path / "download")
+    assert all(body.closed for body in source.bodies)
+
+
+def test_missing_bound_manifest_does_not_fall_back_to_sidecar(input_manifest_bundle, tmp_path):
+    claim, source = input_manifest_bundle
+    del source.objects["task-inputs/revision.json"]
+    source.objects["tasks/revision/" + BUNDLE_FILE_METADATA_NAME] = bundle_file_metadata_body(
+        tmp_path / "original"
+    )
+    with pytest.raises(ClientError, match="NoSuchKey"):
+        runtime.download_bundle(claim, source, tmp_path / "download")
+    assert source.gets == ["task-inputs/revision.json"]
 
 
 @pytest.mark.parametrize(

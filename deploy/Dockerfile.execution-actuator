@@ -1,5 +1,8 @@
 FROM python:3.11-slim
 ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
+RUN apt-get update -qq && \
+    apt-get install -y --only-upgrade --no-install-recommends perl-base && \
+    rm -rf /var/lib/apt/lists/*
 ENV PYTHONPATH=/app/src
 WORKDIR /app
 COPY deploy/execution-actuator-requirements.txt ./deploy/execution-actuator-requirements.txt

@@ -138,7 +138,17 @@ def test_policy_writer_ignores_checkout_local_trivy_overrides(tmp_path: Path) ->
     result = subprocess.run(
         [
             sys.executable,
-            str(POLICY_SCRIPT),
+            "-c",
+            "import importlib.util\n"
+            "from datetime import UTC, datetime\n"
+            f"spec = importlib.util.spec_from_file_location('policy', {str(POLICY_SCRIPT)!r})\n"
+            "policy = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(policy)\n"
+            "class Clock(datetime):\n"
+            " @classmethod\n"
+            " def now(cls, tz=None): return datetime(2026, 8, 12, tzinfo=UTC)\n"
+            "policy.datetime = Clock\n"
+            "policy.main()\n",
             "--config-file",
             str(config),
             "--ignore-file",
@@ -204,6 +214,7 @@ def test_workflow_scans_only_the_controlled_absolute_policy_files() -> None:
         assert policy_step["name"] == "Generate controlled Trivy policy"
         assert policy_step["run"].strip() == (
             "python3 scripts/write_trivy_release_policy.py \\\n"
+            "  --no-exceptions \\\n"
             "  --config-file /tmp/loom-trivy-release.yaml \\\n"
             "  --ignore-file /tmp/loom-trivy-release.ignore.yaml"
         )
@@ -214,6 +225,7 @@ def test_workflow_scans_only_the_controlled_absolute_policy_files() -> None:
         assert "--show-suppressed" in scan["run"]
         validation = (
             "python3 scripts/validate_trivy_release_report.py \\\n"
+            "  --no-exceptions \\\n"
             '  --component "$IMAGE_NAME" \\\n'
             '  --architecture "$ARCHITECTURE" \\\n'
             '  --report "$REPORT" \\\n'

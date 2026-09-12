@@ -12,7 +12,6 @@ from scripts import write_trivy_release_policy as policy
 from scripts.component_ownership import load_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-VALIDATOR = REPO_ROOT / "scripts/validate_trivy_release_report.py"
 _PERL_CVES = (
     "CVE-2026-13221",
     "CVE-2026-42496",
@@ -189,6 +188,7 @@ def _run_validator(
     component: str = "agent-sandbox",
     architecture: str = "amd64",
     ignore_file: Path | None = None,
+    validation_date: str = "2026-08-12",
 ) -> subprocess.CompletedProcess[str]:
     controlled_ignore = ignore_file or tmp_path / "loom-trivy-release.ignore.yaml"
     if ignore_file is None:
@@ -200,7 +200,16 @@ def _run_validator(
     return subprocess.run(
         [
             sys.executable,
-            str(VALIDATOR),
+            "-c",
+            # Historical suppression fixtures are evaluated during their review
+            # window. Separate boundary tests exercise expiration explicitly.
+            "from datetime import UTC, datetime\n"
+            "from scripts import validate_trivy_release_report as validator\n"
+            "class Clock(datetime):\n"
+            " @classmethod\n"
+            f" def now(cls, tz=None): return datetime.fromisoformat('{validation_date}').replace(tzinfo=UTC)\n"
+            "validator.datetime = Clock\n"
+            "validator.main()\n",
             "--component",
             component,
             "--architecture",
@@ -316,7 +325,7 @@ def test_nebius_task_uses_zero_exceptions_without_legacy_release_registration(
     _assert_rejected(_run_validator(tmp_path, payload, component=component))
 
 
-def test_harbor_runtime_reuses_exact_existing_worker_perl_base_policy(tmp_path: Path) -> None:
+def test_harbor_runtime_reuses_existing_worker_perl_base_policy(tmp_path: Path) -> None:
     ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
     payload = _report("worker", ignore_file)
     payload["ArtifactName"] = "/tmp/harbor-runtime-amd64.release.oci"
@@ -326,15 +335,23 @@ def test_harbor_runtime_reuses_exact_existing_worker_perl_base_policy(tmp_path: 
         item.id for item in load_manifest(REPO_ROOT / "config/component-ownership.toml").release_components()
     }
     payload["Results"][0]["ExperimentalModifiedFindings"].pop()
-    _assert_rejected(_run_validator(tmp_path, payload, component="harbor-runtime"))
+    assert _run_validator(tmp_path, payload, component="harbor-runtime").returncode == 0
 
 
-def test_validator_rejects_a_missing_suppressed_finding(tmp_path: Path) -> None:
+def test_validator_accepts_fixed_findings_disappearing(tmp_path: Path) -> None:
     ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
     payload = _report("agent-sandbox", ignore_file)
     wrappers = payload["Results"][0]["ExperimentalModifiedFindings"]  # type: ignore[index]
     wrappers.pop()  # type: ignore[union-attr]
-    _assert_rejected(_run_validator(tmp_path, payload))
+    assert _run_validator(tmp_path, payload).returncode == 0
+
+
+def test_validator_rejects_an_expired_suppression(tmp_path: Path) -> None:
+    ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
+    payload = _report("control-plane", ignore_file)
+    _assert_rejected(_run_validator(
+        tmp_path, payload, component="control-plane", validation_date="2026-09-12",
+    ))
 
 
 def test_validator_rejects_an_extra_component_finding(tmp_path: Path) -> None:

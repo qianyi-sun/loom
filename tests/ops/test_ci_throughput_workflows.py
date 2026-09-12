@@ -540,8 +540,8 @@ def test_unknown_active_input_selects_every_active_native_image(tmp_path: Path, 
     result, values = _run_image_plan(tmp_path, paths=paths, required="true", unowned="true")
     assert result.returncode == 0, result.stderr
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    expected = component_ownership.release_image_matrix(manifest)
-    assert expected
+    expected = component_ownership.release_image_matrix(manifest, image_set="nebius")
+    assert len(expected) == 7
     assert json.loads(values["images"]) == list(expected)
     native_builds = json.loads(values["native_builds"])
     assert native_builds == list(component_ownership.native_release_image_matrix(expected))
@@ -661,5 +661,16 @@ def test_retired_only_image_plan_honors_explicit_validation_request(tmp_path: Pa
     assert result.returncode == 0, result.stderr
     assert values["required"] == str(requested).lower()
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    expected = component_ownership.release_image_matrix(manifest) if requested else ()
+    expected = component_ownership.release_image_matrix(manifest, image_set="nebius") if requested else ()
     assert json.loads(values["images"]) == list(expected)
+
+
+@pytest.mark.parametrize("path", [
+    "deploy/Dockerfile.harbor-runtime", "deploy/harbor-runtime-requirements.txt",
+])
+def test_workflow_image_plan_selects_harbor_without_legacy_builds(tmp_path: Path, path: str) -> None:
+    result, values = _run_image_plan(tmp_path, paths=(path,), required="true", unowned="false")
+    assert result.returncode == 0, result.stderr
+    rows = json.loads(values["native_builds"])
+    assert [row["image"] for row in rows] == ["harbor-runtime"]
+    assert rows[0]["architecture"] == "amd64"

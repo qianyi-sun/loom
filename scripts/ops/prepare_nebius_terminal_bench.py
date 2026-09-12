@@ -24,20 +24,26 @@ SOURCE = ROOT / "deploy/catalog/nebius-terminal-bench/file-archive-manifest"
 _IMAGE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}\Z")
 
 
-def task_config(image: str) -> bytes:
-    if not _IMAGE.fullmatch(image):
+def task_config(image: str | None = None) -> bytes:
+    if image is not None and not _IMAGE.fullmatch(image):
         raise ValueError("image must be an immutable OCI reference ending in @sha256:<64 hex>")
+    environment_source = (
+        f'docker_image = "{image}"'
+        if image is not None
+        else 'dockerfile = "environment/Dockerfile"\n'
+        'docker_build_context = "environment"\nbuild_timeout_sec = 600'
+    )
     raw = f'''schema_version = "1"
 
 [task]
 id = "file-archive-manifest"
-name = "File archive manifest (Nebius AMD64)"
-labels = ["terminal-bench-2-harbor-90", "file-archive-manifest", "nebius-amd64"]
+name = "File archive manifest (Nebius AMD64 offline adaptation)"
+labels = ["terminal-bench-2-harbor-90", "file-archive-manifest", "nebius-amd64", "offline-adaptation"]
 
 [environment]
 os = "linux"
 cpu_arch = "x86_64"
-docker_image = "{image}"
+{environment_source}
 workdir = "/app"
 user = "agent"
 cpus = 2
@@ -69,7 +75,7 @@ artifacts = ["archive_manifest.json", "build_manifest.py"]
     return raw.encode()
 
 
-def prepare(*, image: str, output: Path, source: Path = SOURCE) -> dict[str, Any]:
+def prepare(*, output: Path, image: str | None = None, source: Path = SOURCE) -> dict[str, Any]:
     config = task_config(image)
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise ValueError("output must be absent or an empty directory")
@@ -78,8 +84,10 @@ def prepare(*, image: str, output: Path, source: Path = SOURCE) -> dict[str, Any
         "apiVersion": "loom.taskset/v1",
         "kind": "UserTaskSet",
         "metadata": {
-            "name": "nebius-terminal-bench-file-archive-manifest",
-            "display_name": "Terminal Bench 2 Harbor: File Archive Manifest (Nebius)",
+            "name": "nebius-terminal-bench-file-archive-manifest" + (
+                "-dockerfile" if image is None else ""
+            ),
+            "display_name": "Terminal Bench 2 Harbor: File Archive Manifest (Nebius adaptation)",
         },
         "intents": ["evaluation"],
         "source": {"type": "bundle-upload", "locator": "bundle.tar.gz", "subset": "tasks"},
@@ -93,6 +101,10 @@ def prepare(*, image: str, output: Path, source: Path = SOURCE) -> dict[str, Any
         "verifier/run.sh": (source / "verifier/run.sh").read_bytes(),
         "source-provenance.json": (source / "source-provenance.json").read_bytes(),
     }
+    if image is None:
+        # Only the declared Dockerfile enters the build context. Private verifier
+        # inputs stay outside it, and no oracle is included in either input path.
+        files["environment/Dockerfile"] = (source / "Dockerfile").read_bytes()
     buffer = io.BytesIO()
     with gzip.GzipFile(fileobj=buffer, mode="wb", filename="", mtime=0) as compressed:
         with tarfile.open(fileobj=compressed, mode="w") as archive:
@@ -103,8 +115,11 @@ def prepare(*, image: str, output: Path, source: Path = SOURCE) -> dict[str, Any
                 archive.addfile(info, io.BytesIO(payload))
     evidence = {
         "task_count": 1,
+        "environment_source": "dockerfile" if image is None else "prebuilt",
         "task_image_ref": image,
         "verifier_image_ref": image,
+        "adaptation_profile": "nebius-amd64-nonroot-offline",
+        "original_profile_supported": False,
         "agent": "terminus-2",
         "model": "glm-5.2",
         "source_provenance": provenance,
@@ -120,7 +135,9 @@ def prepare(*, image: str, output: Path, source: Path = SOURCE) -> dict[str, Any
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image", required=True, help="Published task/verifier OCI image digest")
+    parser.add_argument(
+        "--image", help="Use an already admitted task/verifier digest instead of Dockerfile preparation"
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:

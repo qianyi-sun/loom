@@ -15,8 +15,10 @@ New Nebius candidates use `images.harbor_runtime` (`loom-harbor-runtime`) for
 the trusted Terminus-2 controller. The dedicated Python 3.12 image includes the
 Harbor compatibility pin and current-user tool patch, without installing the
 Loom worker or platform packages. Historical candidates with `images.worker`
-remain readable. `tb90_task` remains a regression fixture in the platform
-publication; generic task images use their existing preparation path.
+remain readable, including releases with `images.tb90_task`. New platform
+publication does not build or admit the Terminal-Bench task image. Task images
+use the ordinary Dockerfile preparation path; the single-task source and local
+regression fixture remain in `deploy/catalog/nebius-terminal-bench/`.
 
 The existing GitHub-hosted `nebius-candidate` workflow also supports manual
 `mode=harness-only`, with an explicit `agent_version` label. This builds, scans
@@ -35,10 +37,33 @@ and reuse the original release JSON when registering or retrying registration.
 The same version label cannot be rebound to a different image or re-signed
 record. To publish a changed runtime, use a new version label.
 
-The split Harbor image retains the worker's existing Debian `perl-base` policy
-mapping. It must match exactly the same three reviewed findings; no CVE, package
-scope, severity allowance or expiration is added. The existing policy expiry
-still blocks publication unless its owning review renews or removes the finding.
+Nebius publication uses the existing Trivy 0.74.0 CRITICAL policy with **no
+exceptions**. The empty ignore file is explicit; active or suppressed findings
+cannot pass report validation. Expired exceptions for unrelated legacy images
+do not block this lane before a scan. No exception deadline is extended.
+The pure-Nebius image CI workflow passes `--no-exceptions` to both
+`write_trivy_release_policy.py` and `validate_trivy_release_report.py`, matching
+the candidate publisher's Python calls. Omitting the flag retains the legacy
+CLI policy; selecting it only on the writer or only on the validator is invalid.
+
+The GitHub-hosted native image CI selects from the same seven published platform
+and Harbor image names. `plan-images --image-set nebius` uses their manifest-owned
+source paths; explicit full/fallback coverage builds those seven AMD64 images.
+The reusable build lane validates each row with `validate-image --image-set nebius`.
+General release tooling retains its existing default image set.
+
+Control Plane, Gateway, execution actuator and Harbor use Debian Python slim
+bases. Their Dockerfiles update `perl-base` through the normal Debian repository;
+`5.40.1-6+deb13u1` fixes the three previously excepted findings in Debian trixie.
+See Debian's records for [CVE-2026-13221](https://security-tracker.debian.org/tracker/CVE-2026-13221),
+[CVE-2026-42496](https://security-tracker.debian.org/tracker/CVE-2026-42496) and
+[CVE-2026-8376](https://security-tracker.debian.org/tracker/CVE-2026-8376).
+The runtime package remains installed. These Dockerfiles are shared with other
+release consumers, but the existing dev workflow and CRITICAL blocking level
+remain unchanged. The legacy report validator permits a subset of reviewed
+exceptions as packages are fixed; it still rejects unreviewed/mismatched PURLs,
+expired suppressed findings and active vulnerabilities. Legacy policy generation
+continues to enforce its own exception expiry. New Nebius images require none.
 
 For local tooling tests, `nebius_candidate.py create-runtime-release` accepts
 the single-image build record plus the existing signing-key/keyring arguments.
