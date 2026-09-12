@@ -142,6 +142,7 @@ jobs:
           done
           args=(
             plan-images
+            --image-set nebius
             --changed-files "$CHANGED_FILES"
             --github-output "$GITHUB_OUTPUT"
           )

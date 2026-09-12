@@ -27,6 +27,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
+from scripts.component_ownership import NEBIUS_PLATFORM_IMAGES as COMPONENTS
 from scripts.component_ownership import load_manifest, release_image_matrix
 from scripts.install_trivy import install_trivy
 from scripts.ops.collect_nebius_runtime_evidence_via_gateway import _severity
@@ -47,15 +48,6 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCE_REF = "refs/heads/codex/nebius-main"
 REPOSITORY = "qianyi-sun/loom"
 WORKFLOW = ".github/workflows/nebius-candidate.yml"
-COMPONENTS = {
-    "service": "loom-service",
-    "control_plane": "loom-control-plane",
-    "web": "loom-web",
-    "gateway": "loom-llm-gateway",
-    "execution_runtime": "loom-execution-runtime",
-    "execution_actuator": "loom-execution-actuator",
-    "harbor_runtime": "loom-harbor-runtime",
-}
 EXECUTION_COMPONENTS = ("service", "execution_runtime", "harbor_runtime")
 LEGACY_COMPONENTS = frozenset(COMPONENTS) - {"harbor_runtime"}
 HISTORICAL_COMPONENTS = LEGACY_COMPONENTS | {"worker", "tb90_task"}
@@ -424,14 +416,8 @@ def build(args: argparse.Namespace) -> None:
     args.output.mkdir(parents=True, exist_ok=False)
     _diagnostic_dir = args.output
     component_manifest = load_manifest(ROOT / "config/component-ownership.toml")
-    rows = release_image_matrix(component_manifest)
+    rows = release_image_matrix(component_manifest, image_set="nebius")
     ownership = {row["image_name"]: row for row in rows}
-    harbor = next(
-        component for component in component_manifest.components if component.id == "harbor-runtime"
-    )
-    ownership[COMPONENTS["harbor_runtime"]] = {
-        "image": harbor.id, "context": harbor.build_context, "dockerfile": harbor.dockerfile,
-    }
     document: dict[str, Any] = {
         "schema_version": "loom.nebius-candidate.v1",
         "repository": REPOSITORY,

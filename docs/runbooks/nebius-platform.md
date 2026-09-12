@@ -46,6 +46,12 @@ The pure-Nebius image CI workflow passes `--no-exceptions` to both
 the candidate publisher's Python calls. Omitting the flag retains the legacy
 CLI policy; selecting it only on the writer or only on the validator is invalid.
 
+The GitHub-hosted native image CI selects from the same seven published platform
+and Harbor image names. `plan-images --image-set nebius` uses their manifest-owned
+source paths; explicit full/fallback coverage builds those seven AMD64 images.
+The reusable build lane validates each row with `validate-image --image-set nebius`.
+General release tooling retains its existing default image set.
+
 Control Plane, Gateway, execution actuator and Harbor use Debian Python slim
 bases. Their Dockerfiles update `perl-base` through the normal Debian repository;
 `5.40.1-6+deb13u1` fixes the three previously excepted findings in Debian trixie.
