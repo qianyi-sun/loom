@@ -236,9 +236,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config-file", type=Path, required=True)
     parser.add_argument("--ignore-file", type=Path, required=True)
+    parser.add_argument(
+        "--no-exceptions", action="store_true",
+        help="Use an empty ignore file instead of the reviewed legacy exceptions.",
+    )
     arguments = parser.parse_args()
     try:
-        write_release_policy(arguments.config_file, arguments.ignore_file)
+        write_release_policy(
+            arguments.config_file, arguments.ignore_file,
+            use_exceptions=not arguments.no_exceptions,
+        )
     except (OSError, TrivyPolicyError):
         sys.stderr.write("error: controlled Trivy policy generation failed\n")
         raise SystemExit(1) from None

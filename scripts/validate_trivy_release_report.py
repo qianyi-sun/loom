@@ -379,6 +379,10 @@ def main() -> None:
     parser.add_argument("--architecture", required=True)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--ignore-file", type=Path, required=True)
+    parser.add_argument(
+        "--no-exceptions", action="store_true",
+        help="Require an empty ignore file and reject every suppressed finding.",
+    )
     arguments = parser.parse_args()
     try:
         validate_trivy_release_report(
@@ -386,6 +390,7 @@ def main() -> None:
             arguments.architecture,
             arguments.report,
             arguments.ignore_file,
+            use_exceptions=not arguments.no_exceptions,
         )
     except (OSError, RecursionError, UnicodeError, ValueError, TrivyReportError):
         sys.stderr.write("error: Trivy release report validation failed\n")

@@ -41,6 +41,10 @@ Nebius publication uses the existing Trivy 0.74.0 CRITICAL policy with **no
 exceptions**. The empty ignore file is explicit; active or suppressed findings
 cannot pass report validation. Expired exceptions for unrelated legacy images
 do not block this lane before a scan. No exception deadline is extended.
+The pure-Nebius image CI workflow passes `--no-exceptions` to both
+`write_trivy_release_policy.py` and `validate_trivy_release_report.py`, matching
+the candidate publisher's Python calls. Omitting the flag retains the legacy
+CLI policy; selecting it only on the writer or only on the validator is invalid.
 
 Control Plane, Gateway, execution actuator and Harbor use Debian Python slim
 bases. Their Dockerfiles update `perl-base` through the normal Debian repository;

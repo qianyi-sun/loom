@@ -111,6 +111,7 @@ jobs:
           set -euo pipefail
 
           python3 scripts/component_ownership.py validate-image \
+            --image-set nebius \
             --image "$IMAGE_NAME" \
             --image-name "$IMAGE_DIGEST_NAME" \
             --dockerfile "$DOCKERFILE" \
@@ -220,6 +221,7 @@ jobs:
       - name: Generate controlled Trivy policy
         run: |
           python3 scripts/write_trivy_release_policy.py \
+            --no-exceptions \
             --config-file /tmp/loom-trivy-release.yaml \
             --ignore-file /tmp/loom-trivy-release.ignore.yaml
 
@@ -248,6 +250,7 @@ jobs:
             exit "$scan_status"
           fi
           python3 scripts/validate_trivy_release_report.py \
+            --no-exceptions \
             --component "$IMAGE_NAME" \
             --architecture "$ARCHITECTURE" \
             --report "$REPORT" \
