@@ -92,6 +92,14 @@ A retired cache with no remaining consumer does not retain historical inputs.
 Preparing the same content again after cache retirement uses the current upload
 location; ready cache reuse preserves its existing frozen source.
 
+Native preparation reads ordinary TaskSet file modes from the frozen
+`service_execution_input` manifest already published by TaskSet materialization.
+It verifies that binding and the transferred bundle revision; ordinary uploads
+do not need the benchmark publisher's `.loom-bundle-files.v1.json` sidecar.
+Benchmark sources without an input-manifest binding retain the sidecar path.
+A missing or corrupt bound manifest fails preparation; it does not fall back to
+unbound modes or a different source revision.
+
 ## What changes from old staging
 
 The original instruction and `tests/test_outputs.py` are copied byte for byte.

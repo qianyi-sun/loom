@@ -7,6 +7,7 @@ Configuration is mounted separately, read-only, by the trusted actuator.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -23,6 +24,11 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 from loom_bundle_checksum import sha256_of_dir
 
+from loom.service_execution_materialization import (
+    MAX_INPUT_MANIFEST_BYTES,
+    ServiceExecutionInputManifestV1,
+    service_execution_input_binding,
+)
 from loom.task_image_build_plan import derive_task_image_build_components
 from loom.trajectory.storage import (
     BUNDLE_FILE_METADATA_NAME,
@@ -111,6 +117,35 @@ def _download(client: Any, *, bucket: str, key: str, destination: Path, limit: i
     return size
 
 
+def _input_manifest_modes(
+    claim: dict[str, Any], client: Any, objects: list[str],
+) -> dict[str, int] | None:
+    binding = service_execution_input_binding(claim["task_source_provenance"])
+    if binding is None:
+        return None
+    _, _, location = binding.manifest_uri.partition("s3://")
+    bucket, _, key = location.partition("/")
+    if bucket != claim["source_bucket"]:
+        raise BuildPreparationError("task input manifest is outside the configured source bucket")
+    _validate_bundle_relative_path(key)
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "input-manifest.json"
+        _download(client, bucket=bucket, key=key, destination=path, limit=MAX_INPUT_MANIFEST_BYTES)
+        body = path.read_bytes()
+    if "sha256:" + hashlib.sha256(body).hexdigest() != binding.manifest_sha256:
+        raise BuildPreparationError("task input manifest does not match its frozen binding")
+    manifest = ServiceExecutionInputManifestV1.model_validate_json(body)
+    if (
+        manifest.canonical_bytes() != body
+        or manifest.task_revision_sha256 != "sha256:" + claim["task_checksum"]
+        or len(manifest.files) != binding.file_count
+        or sum(item.size_bytes for item in manifest.files) != binding.total_bytes
+        or {item.relative_path for item in manifest.files} != set(objects)
+    ):
+        raise BuildPreparationError("task input manifest does not match its frozen bundle")
+    return {item.relative_path: int(item.mode, 8) for item in manifest.files}
+
+
 def download_bundle(claim: dict[str, Any], client: Any, directory: Path) -> None:
     prefix = claim["task_source"].split("/", 3)[3]
     objects: list[str] = []
@@ -129,6 +164,9 @@ def download_bundle(claim: dict[str, Any], client: Any, directory: Path) -> None
                 raise BuildPreparationError("task bundle exceeds native build limits")
     if not objects:
         raise BuildPreparationError("task bundle is empty")
+    # Ordinary TaskSets already publish a frozen input manifest containing modes.
+    # Benchmark publishers use the older dedicated mode sidecar instead.
+    modes = _input_manifest_modes(claim, client, objects)
     directory.mkdir(parents=True, exist_ok=False)
     downloaded = 0
     for relative in sorted(objects):
@@ -139,18 +177,19 @@ def download_bundle(claim: dict[str, Any], client: Any, directory: Path) -> None
             destination=directory / relative,
             limit=_BUNDLE_BYTES - downloaded,
         )
-    metadata = directory / BUNDLE_FILE_METADATA_NAME
-    _download(
-        client,
-        bucket=claim["source_bucket"],
-        key=prefix + BUNDLE_FILE_METADATA_NAME,
-        destination=metadata,
-        limit=4 * 1024 * 1024,
-    )
-    modes = _parse_bundle_file_metadata(metadata.read_bytes(), expected_paths=set(objects))
+    if modes is None:
+        metadata = directory / BUNDLE_FILE_METADATA_NAME
+        _download(
+            client,
+            bucket=claim["source_bucket"],
+            key=prefix + BUNDLE_FILE_METADATA_NAME,
+            destination=metadata,
+            limit=4 * 1024 * 1024,
+        )
+        modes = _parse_bundle_file_metadata(metadata.read_bytes(), expected_paths=set(objects))
+        metadata.unlink()
     for relative, mode in modes.items():
         (directory / relative).chmod(mode)
-    metadata.unlink()
     # This is the source transfer boundary; downstream phases use these bytes.
     if sha256_of_dir(directory) != claim["task_checksum"]:
         raise BuildPreparationError("task bundle content does not match its frozen revision")
