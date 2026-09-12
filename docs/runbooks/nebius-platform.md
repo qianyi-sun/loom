@@ -37,10 +37,23 @@ and reuse the original release JSON when registering or retrying registration.
 The same version label cannot be rebound to a different image or re-signed
 record. To publish a changed runtime, use a new version label.
 
-The split Harbor image retains the worker's existing Debian `perl-base` policy
-mapping. It must match exactly the same three reviewed findings; no CVE, package
-scope, severity allowance or expiration is added. The existing policy expiry
-still blocks publication unless its owning review renews or removes the finding.
+Nebius publication uses the existing Trivy 0.74.0 CRITICAL policy with **no
+exceptions**. The empty ignore file is explicit; active or suppressed findings
+cannot pass report validation. Expired exceptions for unrelated legacy images
+do not block this lane before a scan. No exception deadline is extended.
+
+Control Plane, Gateway, execution actuator and Harbor use Debian Python slim
+bases. Their Dockerfiles update `perl-base` through the normal Debian repository;
+`5.40.1-6+deb13u1` fixes the three previously excepted findings in Debian trixie.
+See Debian's records for [CVE-2026-13221](https://security-tracker.debian.org/tracker/CVE-2026-13221),
+[CVE-2026-42496](https://security-tracker.debian.org/tracker/CVE-2026-42496) and
+[CVE-2026-8376](https://security-tracker.debian.org/tracker/CVE-2026-8376).
+The runtime package remains installed. These Dockerfiles are shared with other
+release consumers, but the existing dev workflow and CRITICAL blocking level
+remain unchanged. The legacy report validator permits a subset of reviewed
+exceptions as packages are fixed; it still rejects unreviewed/mismatched PURLs,
+expired suppressed findings and active vulnerabilities. Legacy policy generation
+continues to enforce its own exception expiry. New Nebius images require none.
 
 For local tooling tests, `nebius_candidate.py create-runtime-release` accepts
 the single-image build record plus the existing signing-key/keyring arguments.

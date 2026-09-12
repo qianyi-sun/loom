@@ -138,7 +138,17 @@ def test_policy_writer_ignores_checkout_local_trivy_overrides(tmp_path: Path) ->
     result = subprocess.run(
         [
             sys.executable,
-            str(POLICY_SCRIPT),
+            "-c",
+            "import importlib.util\n"
+            "from datetime import UTC, datetime\n"
+            f"spec = importlib.util.spec_from_file_location('policy', {str(POLICY_SCRIPT)!r})\n"
+            "policy = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(policy)\n"
+            "class Clock(datetime):\n"
+            " @classmethod\n"
+            " def now(cls, tz=None): return datetime(2026, 8, 12, tzinfo=UTC)\n"
+            "policy.datetime = Clock\n"
+            "policy.main()\n",
             "--config-file",
             str(config),
             "--ignore-file",

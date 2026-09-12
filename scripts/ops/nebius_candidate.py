@@ -446,7 +446,7 @@ def build(args: argparse.Namespace) -> None:
         work = Path(temporary)
         scanner = install_trivy(work, architecture="amd64")
         policy, exceptions = work / "trivy.yaml", work / "ignore.yaml"
-        write_release_policy(policy, exceptions)
+        write_release_policy(policy, exceptions, use_exceptions=False)
         document["policy_sha256"] = sha256(policy.read_bytes() + exceptions.read_bytes())
         components = {"harbor_runtime": COMPONENTS["harbor_runtime"]} if mode == "harness-only" else COMPONENTS
         for component, name in components.items():
@@ -512,7 +512,9 @@ def build(args: argparse.Namespace) -> None:
                     str(exceptions),
                     "--show-suppressed",
                 )
-                validate_trivy_release_report(owner["image"], "amd64", policy_report, exceptions)
+                validate_trivy_release_report(
+                    owner["image"], "amd64", policy_report, exceptions, use_exceptions=False,
+                )
                 _run(
                     str(scanner),
                     "image",

@@ -7,7 +7,7 @@ WORKDIR /app
 COPY deploy/harbor-runtime-requirements.txt /tmp/harbor-runtime-requirements.txt
 COPY deploy/patches/harbor-current-user-tool-probes.patch /tmp/harbor-current-user-tool-probes.patch
 RUN apt-get update -qq && \
-    apt-get install -y --no-install-recommends git patch && \
+    apt-get install -y --no-install-recommends git patch perl-base && \
     pip install --no-cache-dir --requirement /tmp/harbor-runtime-requirements.txt \
       "harbor @ git+https://github.com/harbor-framework/harbor.git@${HARBOR_COMPAT_SHA}" && \
     patch --batch --forward -p1 -d "$(python -I -c 'import harbor; print(next(iter(harbor.__path__)))')" < /tmp/harbor-current-user-tool-probes.patch && \

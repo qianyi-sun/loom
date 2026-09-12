@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate exact suppressed-vulnerability evidence from Trivy v0.74.0."""
+"""Validate suppressed-vulnerability scope and active findings from Trivy v0.74.0."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from scripts.component_ownership import load_manifest
 from scripts.write_trivy_release_policy import (
     TRIVY_EXCEPTIONS,
     TRIVY_IGNORE_BYTES,
+    TRIVY_NO_EXCEPTIONS_BYTES,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -107,7 +108,7 @@ _PURL = re.compile(
 
 
 class TrivyReportError(RuntimeError):
-    """The report does not prove the exact controlled exception inventory."""
+    """The report does not satisfy the controlled vulnerability policy."""
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -169,8 +170,6 @@ def _policy_statements() -> dict[str, str]:
     statements = {exception.vulnerability_id: exception.statement for exception in TRIVY_EXCEPTIONS}
     if len(statements) != len(TRIVY_EXCEPTIONS):
         raise TrivyReportError("controlled exception identifiers are duplicated")
-    if any(datetime.now(UTC).date() >= item.expires_at for item in TRIVY_EXCEPTIONS):
-        raise TrivyReportError("controlled exception policy is expired")
     authorized = {
         (exception.vulnerability_id, purl)
         for exception in TRIVY_EXCEPTIONS
@@ -271,6 +270,11 @@ def _validate_wrapper(
     vulnerability_id = _required_string(finding, "VulnerabilityID")
     if wrapper["Statement"] != statements.get(vulnerability_id):
         raise TrivyReportError("modified-finding statement is uncontrolled")
+    exception = next(
+        (item for item in TRIVY_EXCEPTIONS if item.vulnerability_id == vulnerability_id), None,
+    )
+    if exception is None or datetime.now(UTC).date() >= exception.expires_at:
+        raise TrivyReportError("suppressed finding has no unexpired controlled exception")
     if finding.get("Severity") != "CRITICAL":
         raise TrivyReportError("suppressed vulnerability is not critical")
     if "FixedVersion" in finding and finding["FixedVersion"] != "":
@@ -290,16 +294,21 @@ def validate_trivy_release_report(
     architecture: str,
     report: Path,
     ignore_file: Path,
+    *,
+    use_exceptions: bool = True,
 ) -> None:
-    """Reject any report that does not exactly prove the controlled inventory."""
+    """Reject active vulnerabilities and any suppression outside its reviewed scope."""
 
     expected = _EXPECTED_FINDINGS.get(component)
     if expected is None or architecture not in {"amd64", "arm64"}:
         raise TrivyReportError("unknown component or architecture")
     _validate_release_component(component)
-    if _read_regular_file(ignore_file, len(TRIVY_IGNORE_BYTES)) != TRIVY_IGNORE_BYTES:
+    ignore_bytes = TRIVY_IGNORE_BYTES if use_exceptions else TRIVY_NO_EXCEPTIONS_BYTES
+    if _read_regular_file(ignore_file, len(ignore_bytes)) != ignore_bytes:
         raise TrivyReportError("controlled ignore file is invalid")
-    statements = _policy_statements()
+    statements = _policy_statements() if use_exceptions else {}
+    if not use_exceptions:
+        expected = frozenset()
 
     payload = _object(
         json.loads(
@@ -360,8 +369,8 @@ def validate_trivy_release_report(
 
     if len(observed) != len(set(observed)):
         raise TrivyReportError("report contains duplicate suppressed findings")
-    if frozenset(observed) != expected:
-        raise TrivyReportError("report suppressed inventory is not exact")
+    if not frozenset(observed).issubset(expected):
+        raise TrivyReportError("report suppressed inventory exceeds the reviewed scope")
 
 
 def main() -> None:

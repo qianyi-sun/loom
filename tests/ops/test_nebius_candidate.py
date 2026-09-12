@@ -360,7 +360,11 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
 
     monkeypatch.setattr(candidate, "_run", run)
     monkeypatch.setattr(candidate, "install_trivy", lambda *args, **kwargs: Path("scanner"))
-    monkeypatch.setattr(candidate, "validate_trivy_release_report", lambda *args: None)
+    validation_options = []
+    monkeypatch.setattr(
+        candidate, "validate_trivy_release_report",
+        lambda *args, **kwargs: validation_options.append(kwargs),
+    )
     monkeypatch.setattr(candidate, "refresh_registry_auth", lambda *args: None)
     output = tmp_path / "publication"
     candidate.build(argparse.Namespace(
@@ -372,6 +376,7 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
     expected = 1 if mode == "harness-only" else len(candidate.COMPONENTS)
     assert len(builds) == expected
     assert not any("nebius-terminal-bench" in arg for call in calls for arg in call)
+    assert validation_options == [{"use_exceptions": False}] * expected
     harbor = next(call for call in builds if "filename=Dockerfile.harbor-runtime" in call)
     assert f"build-arg:LOOM_AGENT_VERSION={version}" in harbor
     assert len([call for call in calls if call[:2] == ("skopeo", "copy")]) == expected
