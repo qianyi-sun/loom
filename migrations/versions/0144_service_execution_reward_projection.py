@@ -1,7 +1,7 @@
 """Backfill missing scalar rewards from service-execution verifier results.
 
-Revision ID: 0143
-Revises: 0142
+Revision ID: 0144
+Revises: 0143
 """
 
 from __future__ import annotations
@@ -12,8 +12,8 @@ import math
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0143"
-down_revision = "0142"
+revision = "0144"
+down_revision = "0143"
 branch_labels = None
 depends_on = None
 

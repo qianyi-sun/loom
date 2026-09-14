@@ -506,7 +506,7 @@ Service execution persists the verifier's named rewards and a scalar
 same rule as the worker: a single metric retains its value, multiple metrics
 use their mean, and absent rewards remain null. Zero is a valid score. Finalize
 replays and archive materialization preserve this projection and the raw runtime
-result. Alembic revision `0143` (`0133` on the historical isolated branch) backfills older service-execution results that
+result. Alembic revision `0144` (`0133` on the historical isolated branch) backfills older service-execution results that
 have a missing/null scalar and nonempty finite numeric rewards matching the
 runtime verifier rewards. It leaves explicit scores, unrelated results and
 invalid/missing rewards untouched. The migration changes only the derived

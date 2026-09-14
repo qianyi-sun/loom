@@ -1,12 +1,12 @@
 """Retain native task-image Job identity and resource observations per attempt.
 
-Revision ID: 0145
-Revises: 0144
+Revision ID: 0146
+Revises: 0145
 """
 from alembic import op
 
-revision = "0145"
-down_revision = "0144"
+revision = "0146"
+down_revision = "0145"
 branch_labels = None
 depends_on = None
 

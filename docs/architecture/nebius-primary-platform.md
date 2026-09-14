@@ -36,9 +36,9 @@ platform code remains available during the separately qualified migration.
 ## Database lineage when moving from the isolated branch
 
 The branches independently used revisions `0133`–`0135` for different changes.
-`dev` keeps its published history through `0142`; the Nebius reward projection,
+`dev` keeps its published history through `0143`; the Nebius reward projection,
 zero-quota observation and native-build observation migrations are appended as
-`0143`, `0144` and `0145`. Fresh databases and existing `dev` databases upgrade
+`0144`, `0145` and `0146`. Fresh databases and existing `dev` databases upgrade
 through that single chain.
 
 An existing isolated-branch Nebius database at `0133`, `0134` or `0135` is **not**

@@ -24,12 +24,12 @@ def _result(rewards: Any, **changes: Any) -> dict[str, Any]:
     }
 
 
-def test_0143_repairs_only_missing_valid_matching_scores(
+def test_0144_repairs_only_missing_valid_matching_scores(
     isolated_migration_postgres_url: str,
 ) -> None:
     config = Config("migrations/alembic.ini")
     config.set_main_option("sqlalchemy.url", isolated_migration_postgres_url)
-    command.downgrade(config, "0142")
+    command.downgrade(config, "0143")
     cases = {
         "missing": _result({"artifact_complete": 1.0}),
         "null": _result({"artifact_complete": 1.0}, aggregate_reward=None),
@@ -110,12 +110,12 @@ def test_0143_repairs_only_missing_valid_matching_scores(
         for name in repaired:
             original = expected[ids[name]]["result"]
             original["aggregate_reward"] = aggregate_reward_scalar(original["reward"])
-        command.upgrade(config, "0143")
+        command.upgrade(config, "0144")
         assert snapshot() == expected
         # Downgrading/re-upgrading cannot erase a score or rewrite explicit results.
-        command.downgrade(config, "0142")
+        command.downgrade(config, "0143")
         assert snapshot() == expected
-        command.upgrade(config, "0143")
+        command.upgrade(config, "0144")
         assert snapshot() == expected
     finally:
         engine.dispose()
