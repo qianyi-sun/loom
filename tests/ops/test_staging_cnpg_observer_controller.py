@@ -8,6 +8,8 @@ import json
 import os
 import stat
 import subprocess
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -232,3 +234,55 @@ def test_original_key_and_directory_are_synced_before_publication(tmp_path, monk
     monkeypatch.setattr(module.os, "fsync", record)
     monkeypatch.setattr(module, "_write", verify)
     module.prepare_controller(**args)
+
+
+def test_installer_siblings_load_under_isolated_python_without_pythonpath(tmp_path):
+    from scripts.ops import staging_cnpg_observer_controller as module
+
+    result = subprocess.run([sys.executable, "-I", "-B", "-c",
+        "import importlib.util; from pathlib import Path; "
+        f"s=importlib.util.spec_from_file_location('observer', {str(module.__file__)!r}); "
+        "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+        "h=m._host_installer(); print(h.REPO_ROOT)"],
+        cwd=tmp_path, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(module.Path(module.__file__).resolve().parents[2])
+
+
+@pytest.mark.parametrize("refusal", [None, "source", "record", "history", "parent", "executable"])
+def test_real_authority_wiring_runs_before_any_output(tmp_path, monkeypatch, refusal):
+    from scripts.ops import staging_cnpg_observer_controller as module
+
+    authority = module._require_authority
+    module, args = _context(tmp_path, monkeypatch)
+    events = []
+
+    def check(name, result=None):
+        def operation(*positional, **kwargs):
+            events.append((name, positional, kwargs))
+            if refusal == name:
+                raise ValueError("authority refusal")
+            return result
+        return operation
+
+    system = SimpleNamespace(
+        validate_invocation_checkout=check("source", "a" * 40),
+        validate_install_record_authority=check("record"),
+        validate_invocation_dev_head=check("history"))
+    host = SimpleNamespace(HostSystem=lambda runner: system, SubprocessRunner=lambda: None,
+        LocalFilesystem=lambda: SimpleNamespace(load_install_record=lambda: {"source_sha": "b" * 40}),
+        _validate_root_authority_parent_chain=check("parent"),
+        _safe_root_executable=check("executable"))
+    monkeypatch.setattr(module, "_host_installer", lambda: host)
+    monkeypatch.setattr(module, "_require_authority", authority)
+    monkeypatch.setattr(module.socket, "gethostname", lambda: "TRT-EAI-OLDLAB-1")
+    monkeypatch.setattr(module.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid()))
+    if refusal:
+        with pytest.raises(ValueError, match="authority refusal"):
+            module.prepare_controller(**args)
+        assert not module.STATE.exists()
+    else:
+        module.prepare_controller(**args)
+        assert [item[0] for item in events[:3]] == ["source", "record", "history"]
+        assert events[2][1] == ("a" * 40, "b" * 40)
+        assert args["inventory_file"] in [event[1][0] for event in events if event[0] == "parent"]
