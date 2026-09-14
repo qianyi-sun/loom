@@ -95,9 +95,9 @@ class NativeAllocatedIO:
         finally:
             self._operations.discard(task)
 
-    async def read_recovery_admission(self, *, node_id: str, boot_id: UUID) -> NativeRecoveryAdmissionV1:
+    async def read_recovery_admission(self, *, boot_id: UUID) -> NativeRecoveryAdmissionV1:
         with self._operation() as credential:
-            request = NativeRecoveryAdmissionRequestV1(claim=self.claim, node_id=node_id, boot_id=boot_id)
+            request = NativeRecoveryAdmissionRequestV1(claim=self.claim, boot_id=boot_id)
             admission = await self._client.read_recovery_admission(request, worker_credential=credential)
             if not isinstance(admission, NativeRecoveryAdmissionV1):
                 raise ValueError("native recovery admission is not typed")

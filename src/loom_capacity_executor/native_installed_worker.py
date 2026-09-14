@@ -55,7 +55,6 @@ from loom_capacity_executor.native_worker_handoff import (
 )
 from loom_capacity_manager.contracts import (
     Digest,
-    Identifier,
     StrictV1Model,
     canonical_bytes,
     canonical_digest,
@@ -90,11 +89,10 @@ class NativeInstalledWorkerConfigV1(StrictV1Model):
 
 
 class NativeInstalledWorkerConfigV2(NativeInstalledWorkerConfigV1):
-    """Static recovery-capable config; boot facts remain separately admitted."""
+    """Pool-common recovery config; node/boot facts remain separately admitted."""
 
     schema_version: Literal[2] = 2  # type: ignore[assignment]
     host_identity_path: str
-    node_id: Identifier
 
     @field_validator("schema_version", mode="before")
     @classmethod
@@ -272,7 +270,7 @@ async def _execute(packet: NativeWorkerHandoffV1, *, config_path: Path, config_s
                     tmp_bytes=config.tmp_bytes, buildkit_state_bytes=config.buildkit_state_bytes))
             if isinstance(config, NativeInstalledWorkerConfigV2):
                 boot_id = await _settled_io(read_native_recovery_boot_id)
-                admission = await owner.read_recovery_admission(node_id=config.node_id, boot_id=boot_id)
+                admission = await owner.read_recovery_admission(boot_id=boot_id)
                 if (admission.profile.worker_config_sha256 != config_sha256
                     or admission.profile.release_manifest_sha256 != config.release_manifest_sha256):
                     raise ValueError("native installed recovery profile differs from fixed configuration")

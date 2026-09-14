@@ -35,15 +35,10 @@ class NativeRecoveryProfileV1(StrictV1Model):
 
 
 class NativeRecoveryAdmissionRequestV1(StrictV1Model):
-    claim: BuildClaimRequestV1
-    node_id: Identifier
-    boot_id: UUID
+    """Resolve the admitted node by actual boot within the exact allocation."""
 
-    @model_validator(mode="after")
-    def _node(self) -> Self:
-        if self.node_id not in self.claim.binding.node_ids:
-            raise ValueError("native recovery admission node is outside allocation")
-        return self
+    claim: BuildClaimRequestV1
+    boot_id: UUID
 
 
 class NativeRecoveryAdmissionV1(StrictV1Model):
@@ -56,7 +51,7 @@ class NativeRecoveryAdmissionV1(StrictV1Model):
         binding = self.request.claim.binding
         if (self.profile.installation_id != build_installation_id(binding.subject_id, binding.subject_incarnation, binding.deployment_generation)
             or self.profile.pool_id != binding.pool_id
-            or self.host.node_id != self.request.node_id or self.host.boot_id != self.request.boot_id):
+            or self.host.node_id not in binding.node_ids or self.host.boot_id != self.request.boot_id):
             raise ValueError("native recovery admission binding changed")
         return self
 

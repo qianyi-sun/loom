@@ -2274,12 +2274,16 @@ suspend time, and rejects downgrade or foreign finalization. The outer authority
 bridge forwards only the selected version and exact digest; credentials do not
 enter monitor packets. Production `native-execution` activation remains rejected.
 
-`NativeInstalledWorkerConfigV2` adds the protected host-record path and allocated
-node identity while preserving V1 configuration bytes. The original-UID worker
-reads its actual boot and obtains the exact committed profile and boot record
+`NativeInstalledWorkerConfigV2` adds the protected host-record path while
+preserving V1 configuration bytes. The static config is common to the pool:
+embedding a node name would conflict with the pool's single admitted config
+digest. Node/boot-specific records occupy the same protected path on each host.
+The original-UID worker reads its actual kernel boot ID and obtains the exact
+committed profile and unique matching boot record within its allocated nodes
 through authenticated `recovery-admission`. The response binds the claim's
-derived installation, pool, node and boot. Missing, ambiguous or uncommitted
-admission fails; current source authority is required. The worker verifies the
+derived installation, pool, allocated node and boot. Missing, ambiguous or
+uncommitted admission fails; current source authority is required. Neither an
+environment hostname nor a caller-selected node supplies host authority. The worker verifies the
 protected local host record against that admitted digest, captures original
 preparation, and publishes it before launching the mapper.
 
