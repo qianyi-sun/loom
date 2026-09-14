@@ -111,6 +111,7 @@ async def test_real_workload_pause_and_sql_recovery_survive_lost_patch_ack(
                 suspended_resource_version=cron.metadata.resource_version)
             original_server = db_guard.execute("SELECT pg_postmaster_start_time()").fetchone()
             completions = []
+            lost_completion_ack = [True]
 
             class Runner(SubprocessProtectedApplyCommandRunner):
                 @contextmanager
@@ -119,8 +120,12 @@ async def test_real_workload_pause_and_sql_recovery_survive_lost_patch_ack(
                         yield connection
 
                 def recover_and_complete_staging_application_database(self, plan, *, journal, guard):
+                    assert journal.application_workloads_restoring(plan)
                     outcome = complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
                     completions.append(outcome)
+                    if lost_completion_ack[0]:
+                        lost_completion_ack[0] = False
+                        raise subprocess.TimeoutExpired("actual SQL completion acknowledgement lost", 30)
                     return outcome
 
             runner = Runner()
@@ -150,7 +155,13 @@ async def test_real_workload_pause_and_sql_recovery_survive_lost_patch_ack(
                     handoff_backend=arguments["handoff_backend"], coordination_guard=arguments["coordination_guard"])
                 if mode[0] == "pause":
                     pause_application_workloads(plan, journal=journal, runner=runner, guard=evidence)
-                    assert not pods()
+                    remaining = pods()
+                    assert all(p.status.phase in {"Failed", "Succeeded"} and all(
+                        c.state.terminated is not None for c in (
+                            (p.status.container_statuses or []) + (p.status.init_container_statuses or [])
+                            + (p.status.ephemeral_container_statuses or [])
+                        )
+                    ) for p in remaining), [(p.metadata.name, p.status.to_dict()) for p in remaining]
                     assert peer.execute("SELECT datallowconn FROM pg_database WHERE datname='loom'").fetchone() == (False,)
                     original_inventory.append(journal.read_application_workloads(plan))
                     mode[0] = "restore"
@@ -161,18 +172,20 @@ async def test_real_workload_pause_and_sql_recovery_survive_lost_patch_ack(
 
             with monkeypatch.context() as transport:
                 transport.setattr("loom_cli.rollout.operator.protected_apply_executor.subprocess.run", isolated_run)
-                # Lose an ACK after a real pause, then another after a real restore.
-                for _ in range(2):
+                # Lose ACKs after real pause, SQL completion, and workload restore.
+                for _ in range(3):
                     with pytest.raises(subprocess.TimeoutExpired, match="acknowledgement lost"):
                         journal.execute(plan, [_component(apply)])
                 with pytest.raises(RuntimeError, match="workload section verified"):
                     journal.execute(plan, [_component(apply)])
-            assert len(completions) == 2 and len(patched) == 16
+            assert len(completions) == 3 and len(patched) == 16
             assert all(item.original_value == 1 for item in original_inventory[0] if item.kind == "Deployment")
             assert batch.read_namespaced_cron_job(cron.metadata.name, _NAMESPACE).spec.suspend is True
-            _wait(lambda: len(pods()) == 8 and all(p.status.phase == "Running" for p in pods()),
+            def running_pods():
+                return [p for p in pods() if p.status.phase == "Running"]
+            _wait(lambda: len(running_pods()) == 8,
                   lambda: [(p.metadata.name, p.status.phase, [(c.name, c.state.to_dict()) for c in (p.status.container_statuses or [])]) for p in pods()])
-            assert not original_pod_uids.intersection(p.metadata.uid for p in pods())
+            assert not original_pod_uids.intersection(p.metadata.uid for p in running_pods())
             assert db_guard.execute("SELECT pg_postmaster_start_time()").fetchone() == original_server
             from loom_cli.rollout.operator.staging_mutation_guard import _HEALTH_SQL
             assert db_guard.execute(_HEALTH_SQL).fetchone() == (evidence.database_backend_pid, True)

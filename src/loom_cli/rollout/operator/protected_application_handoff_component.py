@@ -168,6 +168,8 @@ class ProtectedApplicationAuthorityHandoffComponent:
         component = self.component(plan)
         view = self.journal.read_application_recovery_view(plan, component, ordinal=self.ordinal)
         credential, runtime, external = self._inputs(plan, view)
+        if self._guard(plan) != guard:
+            raise RuntimeError('application handoff original guard changed during classification')
         if view is not None and view.fences_retiring:
             restoration = observe_application_restoration(plan, view=view, runner=self.runner, guard=guard,
                                                           service_uid=self.journal.service_uid)
@@ -201,6 +203,8 @@ class ProtectedApplicationAuthorityHandoffComponent:
         if self._guard(plan) != guard:
             raise RuntimeError('application handoff original guard changed between phases')
         self._inputs(plan, self.journal.read_active_application_recovery_view(plan))
+        if self._guard(plan) != guard:
+            raise RuntimeError('application handoff original guard changed during observation')
 
     def apply(self, plan: FinalGatePlan) -> None:
         view = self.journal.read_active_application_recovery_view(plan)

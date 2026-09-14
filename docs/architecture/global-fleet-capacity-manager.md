@@ -535,11 +535,26 @@ children before pausing them. Every patch tests the saved UID, current resource
 version and complete spec. It checks the retained original database guard before
 and after each patch, rejects other scale controllers and unowned Pods using the
 application credentials, and waits for owned Pods to drain. Recovery repeats
-actual database completion before publishing its restoration direction, restores
-only the saved controllers, and checks their serving generation. The CronJob
+a durable forward-restoration intent before actual database completion. A lost
+completion reply resumes that forward path without re-entering login sealing or
+manager replacement. Successful database completion is still required before any
+workload restart. Recovery restores only the saved controllers and checks their
+serving generation. The CronJob
 remains suspended under the original rollout guard until that guard is released.
 These operations are parts of the application handoff, not component terminal or
 CNPG input-fence release authority.
+
+The internal application handoff component composes original guard retention,
+credential/configuration and primary-runtime binding, CNPG input fencing, SQL
+profile admission for `loom`, `postgres` and `template1`, database preparation,
+workload drain, one-shot manager replacement, forward restoration and retained-name
+fence retirement in one original component journal. Every phase rechecks the
+original guard and inputs; only freshly observed restoration and retired fences
+permit an exact terminal. External operator/process/storage writer admission and
+supervised guard/epoch readers are required enclosing capabilities. Their binding
+is recorded before SQL mutation; a recorded digest does not establish authority.
+The installed executor and early worker recovery still need those capabilities
+and this component wired into the full chain.
 
 The read-only restoration observer combines the exact replacement runtime,
 original credential/configuration bindings, PostgreSQL's restored login/schema
