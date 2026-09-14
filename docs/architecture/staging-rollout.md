@@ -7,6 +7,14 @@ request to the broker; the broker validates the caller, selects a freshly
 fetched allowed branch head, creates a protected backup, and launches a
 detached systemd unit.
 
+The dedicated CNPG operator observation channel has a separate root-owned
+[controller trust preparation tool](../runbooks/staging-cnpg-observer-trust.md).
+It accepts explicit host-key pins for OLDLAB3–5 and prepares a nonrotating
+service identity with interruption recovery. It neither contacts remote hosts
+nor admits application handoff: endpoint provisioning and fresh fixed-channel
+runtime evidence are separate requirements. It grants no SQL, Slurm, worker
+activation, or general remote-command capability.
+
 ## Command surface
 
 Every command selects an installed authority explicitly:
