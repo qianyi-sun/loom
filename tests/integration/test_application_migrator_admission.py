@@ -24,7 +24,7 @@ from tests.integration.test_application_ownership_transfer import (
 pytestmark = pytest.mark.parametrize("transfer_postgres", [16, 17], indirect=True)
 
 
-class LostAdmissionReply(RuntimeError):
+class LostAdmissionReplyError(RuntimeError):
     pass
 
 
@@ -49,7 +49,7 @@ class LoseCommit:
             yield
         if self.armed and not self.interrupted:
             self.interrupted = True
-            raise LostAdmissionReply("committed admission reply lost")
+            raise LostAdmissionReplyError("committed admission reply lost")
 
 
 @pytest.mark.asyncio
@@ -73,7 +73,7 @@ async def test_cleanup_admission_recovers_commits_and_preserves_original_runtime
             close_application_migrator_admission(maintenance, **authority, identity=identity)
         seal_application_migrator(maintenance, **authority, identity=identity)
         if interruption == "close":
-            with pytest.raises(LostAdmissionReply):
+            with pytest.raises(LostAdmissionReplyError):
                 close_application_migrator_admission(LoseCommit(maintenance), **authority, identity=identity)
         close_application_migrator_admission(maintenance, **authority, identity=identity)
         assert peer.execute("SELECT datallowconn FROM pg_database WHERE oid=%s", (target.database_oid,)).fetchone() == (False,)
@@ -83,7 +83,7 @@ async def test_cleanup_admission_recovers_commits_and_preserves_original_runtime
         with pytest.raises(RuntimeError, match="runtime"):
             reopen_application_migrator_admission(maintenance, **authority, identity=identity, runtime_password="wrong-original-password")
         if interruption == "reopen":
-            with pytest.raises(LostAdmissionReply):
+            with pytest.raises(LostAdmissionReplyError):
                 reopen_application_migrator_admission(LoseCommit(maintenance), **authority, identity=identity, runtime_password=args["password"])
         for _ in range(2):
             reopen_application_migrator_admission(maintenance, **authority, identity=identity, runtime_password=args["password"])

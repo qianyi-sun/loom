@@ -609,6 +609,15 @@ removes the password; the separate closed-admission retirement step must still
 terminate surviving owner sessions and remove the role. These SQL phases do not
 deliver a Secret, run a migration Job or publish lifecycle completion.
 
+Post-handoff migrator cleanup has separate admission phases on the maintenance
+database. Closure requires the exact sealed migrator and saved owner/guard.
+Reopening requires the migrator role and its sessions to be absent, owner
+memberships retired, no pending database startup and the unchanged original
+runtime credential. Both phases reconcile lost commit acknowledgements without
+rotating credentials. The lifecycle must journal its maintenance peer and intents,
+establish that an earlier peer cannot still commit, and stop its owned Job before
+using these phases.
+
 Ownership handoff and application migration use separate append-only guard
 retention requests and acknowledgements. The guard validates both records before
 acknowledging the sole pending operation, and remembers every component it has
