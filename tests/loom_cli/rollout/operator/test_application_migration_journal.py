@@ -125,3 +125,29 @@ def test_migration_event_rejects_malformed_fields_without_type_errors(field, val
     record["event_digest"] = admission_record_digest(record)
     with pytest.raises(ValueError, match="migration event"):
         ApplicationMigrationEvent.from_dict(record)
+
+
+def test_migration_retirement_journals_replacement_peer_before_continuing(tmp_path):
+    from loom_cli.rollout.operator.protected_application_migration_journal import ApplicationMigrationJournal
+
+    plan, journal = _setup(tmp_path)
+    guard = _guard(plan)
+    def apply(_):
+        journal.retain_application_guard(plan, guard=guard)
+        application_guard_is_retained(tmp_path / "state", request_id=plan.request_id,
+            service_uid=os.getuid(), guard=guard, acknowledge=True)
+        migration = ApplicationMigrationJournal(journal=journal, plan=plan, component=component, ordinal=0)
+        migration.append("authority", _authority(plan, component, guard), guard=guard)
+        migration.append("generation", _generation(), guard=guard)
+        migration.append("role", {"oid": 91}, guard=guard)
+        migration.append("retirement", {"successful": False,
+            "maintenance_backend": asdict(replace(_handoff(), pid=777, database_oid=5))}, guard=guard)
+        migration.append("job-stopped", {}, guard=guard)
+        migration.append("maintenance-peer", {"backend": asdict(replace(_handoff(), pid=778, database_oid=5))}, guard=guard)
+        migration.append("closed", {}, guard=guard)
+        with pytest.raises(ValueError, match="migration"):
+            migration.append("maintenance-peer", {"backend": asdict(replace(_handoff(), pid=777, database_oid=5))}, guard=guard)
+        raise RuntimeError("end test")
+    component = replace(_component(apply), component_id="database-migration")
+    with pytest.raises(RuntimeError, match="end test"):
+        journal.execute(plan, [component])
