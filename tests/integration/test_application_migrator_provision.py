@@ -132,3 +132,53 @@ async def test_migrator_creation_never_adopts_ambient_role_or_outlives_failed_jo
             assert bool(recorded) == (failure != "collision")
         finally:
             peer.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(name)))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transfer_database", ["baseline"], indirect=True)
+async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(transfer_database, monkeypatch):  # noqa: F811
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy.engine import make_url
+
+    from loom.application_completed_authority import observe_completed_application_authority
+    from loom.application_migrator_admission import (
+        close_application_migrator_admission,
+        reopen_application_migrator_admission,
+    )
+    from loom.application_migrator_provision import (
+        arm_application_migrator,
+        create_application_migrator,
+        seal_application_migrator,
+    )
+    from loom.application_migrator_retirement import retire_application_migrator
+
+    with _closed(transfer_database) as (peer, maintenance, _guard, args):
+        args.update(schema_revision="0134/guard_0030", schema_acl_profile="cnpg-staging")
+        complete_application_handoff_database(peer, maintenance=maintenance, **args)
+        target = args["target"]
+        authority = dict(target=target, coordination_guard=args["coordination_guard"],
+            provisioner_role=next(n for n, a in args["role_bindings"].items() if a == "provisioner"))
+        identity = create_application_migrator(peer, **authority, migrator_role="app_migrator_" + uuid4().hex,
+            persist_identity=lambda _: None)
+        password = uuid4().hex
+        arm_application_migrator(peer, **authority, identity=identity, password=password,
+            expires_at=datetime.now(UTC) + timedelta(minutes=45))
+        root = Path(__file__).resolve().parents[2]
+        config = Config(str(root / "migrations/alembic.ini"))
+        config.set_main_option("script_location", str(root / "migrations"))
+        url = make_url(transfer_database[0]).set(drivername="postgresql+psycopg", username=identity.role_name, password=password)
+        config.set_main_option("sqlalchemy.url", url.render_as_string(hide_password=False).replace("%", "%%"))
+        monkeypatch.setenv("LOOM_DB_OWNER_ROLE", target.successor_role)
+        try:
+            command.upgrade(config, "0142")
+            assert peer.execute("SELECT version_num FROM public.alembic_version").fetchone() == ("0142",)
+            observe_completed_application_authority(peer, target=target, runtime_password=args["password"], successor=identity)
+        finally:
+            seal_application_migrator(maintenance, **authority, identity=identity)
+            close_application_migrator_admission(maintenance, **authority, identity=identity)
+            retire_application_migrator(maintenance, **authority, migrator_role=identity.role_name, migrator_oid=identity.role_oid)
+            reopen_application_migrator_admission(maintenance, **authority, identity=identity, runtime_password=args["password"])
+        observe_completed_application_authority(peer, target=target, runtime_password=args["password"])
