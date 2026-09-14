@@ -46,6 +46,53 @@ else:
 '''
 
 
+def test_fake_runtime_state_is_not_visible_until_publication(tmp_path):
+    """Hold the exact file-open/write gap that can race a broker state probe."""
+    instrumentation = r'''
+import time
+def paused_write(self, data, **kwargs):
+    with self.open('w', **kwargs) as output:
+        (root / '.write-opened').touch()
+        until = time.monotonic() + 5
+        while not (root / '.continue-write').exists():
+            if time.monotonic() >= until:
+                raise RuntimeError('fixture publication barrier timed out')
+            time.sleep(0.01)
+        return output.write(data)
+Path.write_text = paused_write
+'''
+    runtime = tmp_path / "runsc"
+    runtime.write_text(f"#!{sys.executable}\n" + FAKE_RUNTIME.replace(
+        "from pathlib import Path\n", "from pathlib import Path\n" + instrumentation))
+    runtime.chmod(0o700)
+    state = tmp_path / "state"
+    state.mkdir()
+    identity = "loom-native-client-" + "a" * 64
+    child = subprocess.Popen([str(runtime), f"--root={state}", "run", identity],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        until = time.monotonic() + 5
+        while not (state / ".write-opened").exists():
+            assert child.poll() is None, "fixture writer exited before opening publication"
+            if time.monotonic() >= until:
+                pytest.fail("fixture writer did not reach the publication barrier")
+            time.sleep(0.01)
+        result = subprocess.run([str(runtime), f"--root={state}", "state", identity],
+            capture_output=True, timeout=5)
+        assert result.returncode != 0, "uncommitted state was reported as a successful runtime observation"
+        (state / ".continue-write").touch()
+        assert child.wait(timeout=5) == 0
+        result = subprocess.run([str(runtime), f"--root={state}", "state", identity],
+            capture_output=True, timeout=5, check=True)
+        assert json.loads(result.stdout)["id"] == identity
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=5)
+        if child.stderr is not None:
+            child.stderr.close()
+
+
 @pytest.mark.parametrize("boundary", ["wrong-order", "malformed", "expired", "eof"])
 def test_real_broker_rejects_invalid_control_without_executing_runtime(tmp_path, boundary):
     from loom_capacity_executor.native_runtime_broker import NativeBrokerReady
