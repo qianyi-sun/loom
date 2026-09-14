@@ -2211,8 +2211,9 @@ creation, capability restoration or mapped pruning. The bounded immutable
 observation rejects parent-root mappings, invalid ranges and overlaps in either
 coordinate; UID and GID ranges remain separate. These outside IDs are relative
 to the parent user namespace, not authenticated host IDs. This observation is
-not yet persisted in the V1 locator or bound to protected executor evidence, and
-does not authorize interrupted-attempt deletion or certify subid retention.
+not persisted in the legacy V1 locator. Recovery-capable V3 launches publish it
+through the protected two-phase route below. It does not authorize
+interrupted-attempt deletion or certify subid retention.
 
 `loom_capacity_agent.native_recovery` defines bounded canonical preparation and
 final V2 observation records. Preparation binds the original locator, admitted
@@ -2234,8 +2235,9 @@ cgroup-namespace device/inode. The unprivileged worker compares only its own pro
 namespace link; inspecting root PID1 namespace links would require privileges it
 must not have. Boot/account/namespace mismatches fail closed and are rechecked
 before returning facts. The installer must genuinely occupy host namespaces and
-retain old records by digest; reboot requires fresh protected installation and
-admission, not worker-side replacement of expected facts. The launch-profile hash
+retain old records by digest; reboot requires fresh protected host-record
+admission, not worker-side replacement of expected facts. Static configuration
+does not embed the boot-specific digest. The launch-profile hash
 is supplied separately by protected authority to avoid a self-referential config
 hash. Host PID/proc namespace and worker-account isolation remain installer requirements.
 Read-only kernel coverage checks the actual cgroup2 mount and rejects an ordinary
@@ -2272,12 +2274,31 @@ suspend time, and rejects downgrade or foreign finalization. The outer authority
 bridge forwards only the selected version and exact digest; credentials do not
 enter monitor packets. Production `native-execution` activation remains rejected.
 
-The installed worker still writes only its unchanged V1 locator. Capture and
-mapped finalization are not yet composed with publication and the digest-bound
-monitor/authority interfaces. No mapped material may be created through that
-future route before committed preparation/finalization acknowledgment. Intake
-remains disabled; these database, HTTP and monitor checks are not installed Slurm
-or multi-owner acceptance evidence.
+`NativeInstalledWorkerConfigV2` adds the protected host-record path and allocated
+node identity while preserving V1 configuration bytes. The original-UID worker
+reads its actual boot and obtains the exact committed profile and boot record
+through authenticated `recovery-admission`. The response binds the claim's
+derived installation, pool, node and boot. Missing, ambiguous or uncommitted
+admission fails; current source authority is required. The worker verifies the
+protected local host record against that admitted digest, captures original
+preparation, and publishes it before launching the mapper.
+
+`NativeRootlessSpecV3` contains that acknowledged preparation and otherwise uses
+the V2 material/transfer/pruning path. The existing private authority socket
+first carries actual complete maps and the final runtime-spec binding. Original-
+UID IO validates and publishes finalization once, then acknowledges its exact
+publication digest. Only afterward may the mapper prepare material or start
+feature execution. Permission renewal on both sides binds that same digest;
+there are never two readers competing for the authority socket. Directory
+identity, mode and ownership are checked across acknowledgment. Failed or lost
+publication replies retain the attempt without retrying writes or starting
+material. The legacy locator remains alongside retained protected history.
+
+Intake remains disabled. Real networkless KVM V3 build/renewal-expiry coverage,
+protected-config tests and database/HTTP composition are not installed Slurm or
+multi-owner acceptance. Installed recovery after interruption, restricted
+dependency networking, release publication and concurrent-owner acceptance
+remain activation requirements.
 
 The versioned client policy is
 `deploy/personal-dev-builder/client-seccomp-v1.json`. It permits ordinary
