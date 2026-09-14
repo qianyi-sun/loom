@@ -708,6 +708,13 @@ jobs:
           terraform -chdir=deploy/terraform/nebius/modules/execution-target test
           terraform -chdir=deploy/terraform/nebius/stack init -backend=false -input=false
           terraform -chdir=deploy/terraform/nebius/stack validate
+          terraform -chdir=deploy/terraform/nebius/modules/platform init -backend=false -input=false
+          terraform -chdir=deploy/terraform/nebius/modules/platform test
+          terraform -chdir=deploy/terraform/nebius/platform init -backend=false -input=false
+          terraform -chdir=deploy/terraform/nebius/platform validate
+          terraform -chdir=deploy/terraform/nebius/modules/regional-execution init -backend=false -input=false
+          terraform -chdir=deploy/terraform/nebius/modules/regional-execution test
+          terraform -chdir=deploy/terraform/nebius/platform test
 
   # The fast Python checks run in parallel above; this aggregator owns
   # their result validation and the final fast-tier coverage gate. Docs-only
