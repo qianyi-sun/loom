@@ -24,7 +24,10 @@ from loom_cli.cluster_backup_guard import validate_backup_manifest
 from loom_cli.rollout.credential_authority import TrustedFileRead, read_trusted_file
 
 from .final_gate_plan import FinalGatePlan
-from .protected_cnpg_writer_configuration import capture_cnpg_writer_configuration
+from .protected_cnpg_writer_configuration import (
+    CNPGWriterConfigurationBinding,
+    observe_cnpg_writer_configuration,
+)
 from .protected_secret_inventory import canonical_secret_export, inspect_secret_inventory
 
 if TYPE_CHECKING:
@@ -87,10 +90,24 @@ class ApplicationCredentialRecoveryBinding:
                 raise ValueError("application credential recovery binding is invalid")
 
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> ApplicationCredentialRecoveryBinding:
+        if set(value) != set(cls.__dataclass_fields__) or any(not isinstance(item, str) for item in value.values()):
+            raise ValueError('application credential binding fields are invalid')
+        return cls(**{key: str(item) for key, item in value.items()})
+
+
 @dataclass(frozen=True, slots=True)
 class ApplicationRuntimeCredential:
     username: str
     password: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ApplicationCredentialObservation:
+    credential: ApplicationRuntimeCredential = field(repr=False)
+    binding: ApplicationCredentialRecoveryBinding
+    configuration: CNPGWriterConfigurationBinding
 
 
 def _object(payload: bytes) -> dict[str, object]:
@@ -313,10 +330,29 @@ def recover_application_runtime_credential(
     The returned password is sensitive and must not enter logs or SQL plaintext.
     """
     journal.require_application_credential_context(plan)
+    observed = observe_application_runtime_credential(plan, runner=runner, service_uid=journal.service_uid)
+    journal.record_application_cnpg_configuration(plan, binding=observed.configuration)
+    journal.record_application_credential_recovery(plan, binding=observed.binding)
+    return observed.credential
+
+
+def observe_application_runtime_credential(
+    plan: FinalGatePlan, *, runner: CredentialRecoveryRunner, service_uid: int,
+) -> ApplicationCredentialObservation:
+    """Read trusted originals and actual live inputs without publishing records.
+
+    The installed classifier supplies its admitted plan and service identity.
+    Matching readback is evidence only, not apply or writer-exclusion authority.
+    The returned credential is sensitive and must never be serialized or logged.
+    """
+    if (type(service_uid) is not int or service_uid < 0 or FinalGatePlan.from_dict(plan.to_dict()) != plan
+            or plan.namespace != _NAMESPACE or plan.checkpoint_schema_version != 3
+            or plan.checkpoint_component_sha256 is None):
+        raise ValueError('application credential observation plan binding is invalid')
     try:
-        app, cnpg, inventory_hash, component_hash = _backup_sources(plan, journal.service_uid)
+        app, cnpg, inventory_hash, component_hash = _backup_sources(plan, service_uid)
         credential = _credential(app, cnpg)
-        capture_cnpg_writer_configuration(plan, journal=journal, runner=runner)
+        configuration = observe_cnpg_writer_configuration(runner)
         first = (_live_identity(runner, _APPLICATION, app), _live_identity(runner, _CNPG, cnpg))
         second = (_live_identity(runner, _APPLICATION, app), _live_identity(runner, _CNPG, cnpg))
         if first != second:
@@ -335,5 +371,4 @@ def recover_application_runtime_credential(
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
         # Never propagate parser/transport errors containing original credentials.
         raise ValueError("application credential recovery source validation failed") from None
-    journal.record_application_credential_recovery(plan, binding=binding)
-    return credential
+    return ApplicationCredentialObservation(credential, binding, configuration)

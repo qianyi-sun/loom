@@ -904,6 +904,8 @@ class ApplicationRecoveryView:
     workloads_restoring: bool = False
     owner_creations: tuple[tuple[ApplicationOwnerCreationIntent, int | None], ...] = ()
     cnpg_runtime: CNPGPrimaryRuntime | None = None
+    credential_binding: ApplicationCredentialRecoveryBinding | None = None
+    cnpg_configuration: CNPGWriterConfigurationBinding | None = None
 
 
 class ProtectedApplyJournal:
@@ -1040,7 +1042,35 @@ class ProtectedApplyJournal:
         runtime = self._read_application_cnpg_runtime(root, expected, durable=False)
         if names != {path.name for path in root.iterdir() if path.name.startswith("application-")}:
             raise ProtectedApplyJournalError("application recovery view changed during runtime read")
-        return ApplicationRecoveryView(expected, admission, recoveries, manager, workloads, restoring, owners, runtime)
+        credentials = self._read_application_source_binding(root, expected, "application-credentials.json")
+        configuration = self._read_application_source_binding(root, expected, "application-cnpg-configuration.json")
+        binding = ApplicationCredentialRecoveryBinding.from_dict(credentials) if credentials is not None else None
+        cnpg = CNPGWriterConfigurationBinding.from_dict(configuration) if configuration is not None else None
+        if binding is not None and (
+            binding.manifest_sha256 != plan.backup_manifest_sha256 or plan.checkpoint_component_sha256 is None
+            or binding.component_sha256 != plan.checkpoint_component_sha256["k8s_secrets"]
+        ):
+            raise ProtectedApplyJournalError("application recovery credential source changed")
+        if runtime is not None and cnpg is not None and runtime.cluster_uid != cnpg.cluster_uid:
+            raise ProtectedApplyJournalError("application recovery CNPG Cluster changed")
+        if names != {path.name for path in root.iterdir() if path.name.startswith("application-")}:
+            raise ProtectedApplyJournalError("application recovery view changed during source read")
+        return ApplicationRecoveryView(expected, admission, recoveries, manager, workloads, restoring, owners, runtime, binding, cnpg)
+
+    def _read_application_source_binding(
+        self, root: Path, intent: ComponentIntent, filename: str,
+    ) -> dict[str, object] | None:
+        if filename not in {"application-credentials.json", "application-cnpg-configuration.json"}:
+            raise ProtectedApplyJournalError("application recovery source is invalid")
+        try:
+            record = self._read(root / filename)
+        except FileNotFoundError:
+            return None
+        if (set(record) != {"schema_version", "intent_digest", "binding"}
+                or type(record["schema_version"]) is not int or record["schema_version"] != 1
+                or record["intent_digest"] != intent.intent_digest or not isinstance(record["binding"], dict)):
+            raise ProtectedApplyJournalError("application recovery source binding changed")
+        return record["binding"]
 
     def _sync_application_recovery(self, root: Path, filename: str) -> None:
         # A prior publisher can exit after making its link visible but BEFORE

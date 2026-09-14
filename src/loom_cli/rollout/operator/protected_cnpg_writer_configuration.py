@@ -81,6 +81,16 @@ class CNPGWriterConfigurationBinding:
             raise ValueError("CNPG writer configuration binding is invalid")
 
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> CNPGWriterConfigurationBinding:
+        if (set(value) != set(cls.__dataclass_fields__) or type(value['cluster_generation']) is not int
+                or any(not isinstance(value[key], str) for key in value if key != 'cluster_generation')):
+            raise ValueError('CNPG writer configuration binding fields are invalid')
+        return cls(str(value['cluster_uid']), int(str(value['cluster_generation'])),
+                   str(value['monitoring_uid']), str(value['monitoring_resource_version']),
+                   str(value['configuration_sha256']))
+
+
 def _mapping(value: object) -> dict[str, object]:
     if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
         raise ValueError("CNPG writer configuration object is invalid")
@@ -249,11 +259,17 @@ def capture_cnpg_writer_configuration(
     This does not freeze Kubernetes inputs or drain cached controller actions.
     """
     journal.require_application_credential_context(plan)
+    first = observe_cnpg_writer_configuration(runner)
+    journal.record_application_cnpg_configuration(plan, binding=first)
+    return first
+
+
+def observe_cnpg_writer_configuration(runner: CredentialRecoveryRunner) -> CNPGWriterConfigurationBinding:
+    """Read twice without publishing authority or certifying writer exclusion."""
     try:
         first, second = _observe(runner), _observe(runner)
         if first != second:
             raise ValueError("CNPG writer configuration changed during capture")
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
         raise ValueError("CNPG writer configuration validation failed") from None
-    journal.record_application_cnpg_configuration(plan, binding=first)
     return first
