@@ -37,6 +37,7 @@ class ApplicationMigrationRuntime(Protocol):
     def begin_retirement(self, generation: ApplicationMigrationEvent,
                          peers: Sequence[ApplicationDatabaseHandoffBackend]) -> ApplicationDatabaseHandoffBackend: ...
     def role_exists(self, generation: ApplicationMigrationEvent, oid: int | None) -> bool: ...
+    def require_role_retired(self, generation: ApplicationMigrationEvent, oid: int | None) -> None: ...
     def seal(self, generation: ApplicationMigrationEvent, oid: int) -> None: ...
     def close(self, generation: ApplicationMigrationEvent, oid: int) -> None: ...
     def retire(self, generation: ApplicationMigrationEvent, oid: int) -> None: ...
@@ -74,10 +75,10 @@ class ApplicationMigrationLifecycle:
             events = self._events()
             revision = self.runtime.read_revision()
             self.runtime.checkpoint()
-            if revision == self.migration.plan.migration_target_revision:
+            if revision == self.migration.target_revision:
                 self._append("noop", {"revision": revision})
                 return
-            if revision != self.migration.plan.schema_revision:
+            if revision != self.migration.source_revision:
                 raise RuntimeError("application migration schema changed outside the admitted transaction")
             ordinal = sum(event.phase == "generation" for event in events) + 1
             if ordinal > 8:
@@ -122,18 +123,17 @@ class ApplicationMigrationLifecycle:
         for event in events:
             if event.phase == "generation":
                 generation = event
-                oid = None
+                oid = self._original_capacity_oid(events)
             elif event.phase == "role":
                 oid = _integer(event.payload, "oid")
             elif event.phase in {"abandoned", "complete"}:
                 assert generation is not None
                 self.runtime.resources(generation).require_retired()
-                if self.runtime.role_exists(generation, oid):
-                    raise RuntimeError("application migration retired role returned")
+                self.runtime.require_role_retired(generation, oid)
         self.runtime.checkpoint()
 
     def _require_target(self) -> None:
-        if self.runtime.read_revision() != self.migration.plan.migration_target_revision:
+        if self.runtime.read_revision() != self.migration.target_revision:
             raise RuntimeError("application migration completed target revision changed")
         self.runtime.checkpoint()
 
@@ -146,7 +146,7 @@ class ApplicationMigrationLifecycle:
         current = [event for event in events if event.sequence > generation.sequence]
         by_phase = {event.phase: event for event in current}
         role = by_phase.get("role")
-        oid = None if role is None else _integer(role.payload, "oid")
+        oid = self._original_capacity_oid(events) if role is None else _integer(role.payload, "oid")
         previous_peers = [
             _backend(event.payload["maintenance_backend"] if event.phase == "retirement" else event.payload["backend"])
             for event in current if event.phase in {"retirement", "maintenance-peer"}
@@ -192,6 +192,7 @@ class ApplicationMigrationLifecycle:
                 self._append("role-retire", {})
             self.runtime.checkpoint()
             self.runtime.retire(generation, oid)
+            self.runtime.require_role_retired(generation, oid)
             self._append("role-retired", {})
         if "secret-deleted" not in by_phase:
             self.runtime.checkpoint()
@@ -208,6 +209,7 @@ class ApplicationMigrationLifecycle:
                 self._append("reopen", {})
             self.runtime.checkpoint()
             resources.require_retired()
+            self.runtime.require_role_retired(generation, oid)
             self.runtime.reopen(generation, oid)
             self._append("reopened", {})
         resources.require_retired()
@@ -215,3 +217,13 @@ class ApplicationMigrationLifecycle:
         retirement = next(event for event in events if event.sequence > generation.sequence and event.phase == "retirement")
         revision = self.runtime.read_revision()
         self._append("complete", {"successful": retirement.payload["successful"], "revision": revision})
+
+    def _original_capacity_oid(self, events: Sequence[ApplicationMigrationEvent]) -> int | None:
+        if not self.migration.capacity_bootstrap:
+            return None
+        # The permanent identity was durably admitted before the generation.
+        # A loss immediately after generation publication cannot erase it.
+        identity = events[0].payload["guard_migrator"]
+        if not isinstance(identity, Mapping):
+            raise RuntimeError("application capacity original migrator identity changed")
+        return _integer(identity, "role_oid")

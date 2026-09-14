@@ -195,6 +195,10 @@ class ProtectedApplicationMigrationRuntime:
             identity=ApplicationOwnerSuccessor(application_migration_role(generation), oid))
         self.checkpoint()
 
+    def require_role_retired(self, generation: ApplicationMigrationEvent, oid: int | None) -> None:
+        if self.role_exists(generation, oid):
+            raise RuntimeError("application migration retired role returned")
+
     def close(self, generation: ApplicationMigrationEvent, oid: int) -> None:
         self._generation(generation)
         close_application_migrator_admission(self._maintenance_peer(), target=self.target,
