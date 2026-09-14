@@ -28,7 +28,8 @@ def test_endpoint_renders_separate_fixed_sshd_and_exact_noarg_sudo():
     assert 'SSH_ORIGINAL_COMMAND' in gate and 'exec /usr/bin/sudo -n -- ' + configured.release_root + '/helper' in gate
     assert 'NOSETENV:' in assets.sudoers.decode() and configured.release_root + '/helper ""' in assets.sudoers.decode()
     helper = assets.helper.decode()
-    assert helper.startswith("#!" + configured.python + " -I\n")
+    # Root must not create bytecode in the closed protected import tree.
+    assert helper.startswith("#!" + configured.python + " -IB\n")
     assert configured.policy_sha256 in helper and "run_native_recovery_helper" in helper
     compile(helper, "fixed-node-helper", "exec")
 
