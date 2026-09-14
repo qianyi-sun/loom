@@ -10,10 +10,16 @@ An admitted connection-startup barrier and workload shutdown remain required.
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
 from psycopg import sql
 from psycopg.pq import TransactionStatus
 
+from loom.application_database_admission import (
+    ApplicationDatabaseCoordinationGuard,
+    ApplicationDatabaseHandoffBackend,
+    _read_coordination_guard,
+)
 from loom.application_database_connection import ApplicationDatabaseConnection, application_sql
 from loom.application_ownership_transfer import require_application_role_scope
 
@@ -24,6 +30,60 @@ class ApplicationLoginSealingError(RuntimeError):
 
 def seal_application_login(
     connection: ApplicationDatabaseConnection, *, database: str, role: str, provisioner_role: str
+) -> None:
+    """Commit a legacy login seal under the caller's enclosing DDL exclusion.
+
+    Protected handoffs with a retained database guard use
+    :func:`seal_guarded_application_login` to check that original authority within
+    the sealing transaction as well.
+    """
+    _seal_application_login(connection, database=database, role=role, provisioner_role=provisioner_role,
+                            handoff_backend=None, coordination_guard=None)
+
+
+def seal_guarded_application_login(
+    connection: ApplicationDatabaseConnection, *, database: str, role: str, provisioner_role: str,
+    handoff_backend: ApplicationDatabaseHandoffBackend,
+    coordination_guard: ApplicationDatabaseCoordinationGuard,
+) -> None:
+    """Seal on the exact saved peer, checking the original guard inside the transaction.
+
+    The enclosing journal must retain the guard and preserve its original server
+    identity before calling. Neither a discovered guard nor a caller callback can
+    substitute for the actual saved backend/lock observation. Detected loss after
+    ALTER rolls back the login/password changes; no guard is reacquired here.
+    """
+    if (type(handoff_backend) is not ApplicationDatabaseHandoffBackend
+            or type(coordination_guard) is not ApplicationDatabaseCoordinationGuard):
+        raise ApplicationLoginSealingError("application login guard identity is invalid")
+    _seal_application_login(connection, database=database, role=role, provisioner_role=provisioner_role,
+                            handoff_backend=handoff_backend, coordination_guard=coordination_guard)
+
+
+def _require_guarded_peer(connection: ApplicationDatabaseConnection,
+                          backend: ApplicationDatabaseHandoffBackend,
+                          guard: ApplicationDatabaseCoordinationGuard) -> None:
+    row = connection.execute(
+        "SELECT a.pid,a.backend_start::text,s.system_identifier::text,"
+        "pg_catalog.pg_postmaster_start_time()::text,a.datid::bigint "
+        "FROM pg_catalog.pg_stat_activity a CROSS JOIN pg_catalog.pg_control_system() s "
+        "WHERE a.pid=pg_backend_pid()"
+    ).fetchone()
+    if (row is None or len(row) != 5 or row[0] != backend.pid or row[2] != backend.system_identifier
+            or row[4] != backend.database_oid or not isinstance(row[1], str) or not isinstance(row[3], str)
+            or datetime.fromisoformat(row[1]) != datetime.fromisoformat(backend.started_at)
+            or datetime.fromisoformat(row[3]) != datetime.fromisoformat(backend.server_started_at)
+            or backend.pid == guard.backend.pid):
+        raise ApplicationLoginSealingError("application login original peer changed")
+    if _read_coordination_guard(connection, target=backend, backend_pid=guard.backend.pid,
+                                 application_name=guard.application_name) != guard:
+        raise ApplicationLoginSealingError("application login original guard changed")
+
+
+def _seal_application_login(
+    connection: ApplicationDatabaseConnection, *, database: str, role: str, provisioner_role: str,
+    handoff_backend: ApplicationDatabaseHandoffBackend | None,
+    coordination_guard: ApplicationDatabaseCoordinationGuard | None,
 ) -> None:
     """Commit NOLOGIN/NOINHERIT/PASSWORD NULL for the ordinary legacy owner.
 
@@ -68,6 +128,8 @@ def seal_application_login(
         connection.execute(
             "SELECT pg_catalog.set_config('statement_timeout','30s',true) FROM pg_catalog.pg_settings WHERE name='statement_timeout' AND (setting::integer=0 OR setting::integer>30000)"
         )
+        if handoff_backend is not None and coordination_guard is not None:
+            _require_guarded_peer(connection, handoff_backend, coordination_guard)
         if connection.execute(
             application_sql(
                 "SELECT d.datname=pg_catalog.current_database() AND r.rolname={} "
@@ -119,3 +181,5 @@ def seal_application_login(
             )
         ).fetchone() != (True,):
             raise ApplicationLoginSealingError("application login seal was not exact")
+        if handoff_backend is not None and coordination_guard is not None:
+            _require_guarded_peer(connection, handoff_backend, coordination_guard)
