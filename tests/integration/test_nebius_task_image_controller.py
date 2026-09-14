@@ -295,6 +295,30 @@ async def test_two_replicas_do_not_start_two_jobs(controller_setup):
     assert row.state == "running" and len(attempts) == 1 and kube.ensure_calls == 1
 
 
+@pytest.mark.parametrize("concurrency", [1, 2])
+async def test_concurrent_claims_respect_build_slots_until_cleanup(controller_setup, concurrency):
+    controller, sessions, team_id, kube = controller_setup
+    controller.settings = controller.settings.model_copy(update={"max_concurrent": concurrency})
+    images = [await seed_image(sessions, team_id) for _ in range(3)]
+    claimed = await asyncio.gather(*(controller._claim() for _ in range(3)))
+    assert sum(attempt is not None for attempt in claimed) == concurrency
+    for attempt in claimed:
+        if attempt is not None:
+            await controller._reconcile(attempt)
+    assert len(kube.jobs) == concurrency
+    first_id = next(attempt for attempt in claimed if attempt is not None)
+    async with sessions() as session, session.begin():
+        first = await session.get(TaskImageMaterializationAttempt, first_id)
+        trial_id = next(trial for image, trial in images if image == first.materialization_id)
+        (await session.get(Trial, trial_id)).state = "cancelled"
+    kube.allow_delete = False
+    await controller._reconcile(first_id)
+    assert await controller._claim() is None
+    kube.allow_delete = True
+    await controller._reconcile(first_id)
+    assert await controller._claim() is not None
+
+
 async def test_unstarted_expired_attempt_is_cleaned_by_db_scan(controller_setup):
     controller, sessions, team_id, kube = controller_setup
     image_id, _ = await seed_image(sessions, team_id)

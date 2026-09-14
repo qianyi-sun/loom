@@ -11,12 +11,14 @@ from loom.nebius_platform_render import NebiusPlatformError, build_platform, wri
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize("concurrency", [1, 2])
 def test_native_builds_share_the_actuator_but_have_an_isolated_namespace(
-    platform_inputs: tuple,
+    platform_inputs: tuple, concurrency: int,
 ) -> None:
     config, candidate, profile = platform_inputs
     config["task_image_builder"] = {
-        "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images"
+        "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
+        "max_concurrent": concurrency,
     }
     files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
     namespaces = {doc["metadata"]["name"]: doc for doc in files["00-namespaces.yaml"]}
@@ -50,8 +52,13 @@ def test_native_builds_share_the_actuator_but_have_an_isolated_namespace(
         rule["verbs"] for rule in role["rules"] if rule["resources"] == ["pods"]
     )
     quota = next(doc for doc in build_docs if doc["kind"] == "ResourceQuota")
-    assert quota["spec"]["hard"]["requests.ephemeral-storage"] == "16384Mi"
-    assert quota["spec"]["hard"]["count/configmaps"] == "2"
+    assert settings["max_concurrent"] == concurrency
+    assert quota["spec"]["hard"]["pods"] == str(concurrency)
+    assert quota["spec"]["hard"]["count/jobs.batch"] == str(concurrency)
+    assert quota["spec"]["hard"]["requests.cpu"] == f"{1000 * concurrency}m"
+    assert quota["spec"]["hard"]["requests.memory"] == f"{2048 * concurrency}Mi"
+    assert quota["spec"]["hard"]["requests.ephemeral-storage"] == f"{16384 * concurrency}Mi"
+    assert quota["spec"]["hard"]["count/configmaps"] == str(concurrency + 1)
     network = next(doc for doc in build_docs if doc["kind"] == "NetworkPolicy")
     assert network["spec"]["ingress"] == []
     public = network["spec"]["egress"][1]
