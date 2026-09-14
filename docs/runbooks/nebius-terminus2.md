@@ -238,3 +238,10 @@ timeout failures use fixed transport categories. Request bodies, commands,
 environments, response bodies and endpoint URLs are excluded. These codes
 identify the failed boundary; a completed model conversation alone does not
 prove workspace handoff or verifier success.
+
+Process cleanup checks the effective UID and state from the same `/proc/<pid>/status`
+read. It tolerates process disappearance (`ENOENT`/`ESRCH`), while foreign effective
+UIDs, malformed status and other read failures stop cleanup. Proc directory
+ownership alone is not authoritative: Linux can return a successful root-owned
+stat after a process has been reaped. The runtime must still be PID 1 of its own
+sandbox, and workspace export still requires completed cleanup.
