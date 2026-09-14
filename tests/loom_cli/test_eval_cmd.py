@@ -3188,3 +3188,24 @@ def test_eval_batch_list_not_logged_in(
     rc = main(["eval", "batch", "list"])
     assert rc == 2
     assert "not logged in" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("current", [False, True])
+def test_batch_rerun_failed_submits_linked_selection(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str], current: bool,
+) -> None:
+    path = f"/api/v1/batches/{_BATCH_ID}/rerun-failed"
+    mock_server.canned[("POST", path)] = httpx.Response(201, json={
+        "batch_id": "new-supplemental-batch", "expected_trial_count": 1,
+        "rerun_of_batch_id": _BATCH_ID,
+    })
+    args = ["eval", "batch", "rerun-failed", _BATCH_ID,
+            "--task-id", "task/failed", "--include-operator-approval", "--format", "json"]
+    if current:
+        args.append("--use-current-runtime")
+    assert main(args) == 0
+    assert json.loads(mock_server[0].content) == {
+        "task_ids": ["task/failed"], "include_operator_approval": True,
+        "use_current_runtime": current,
+    }
+    assert json.loads(capsys.readouterr().out)["rerun_of_batch_id"] == _BATCH_ID

@@ -862,6 +862,31 @@ def _batch_rerun_plan(args: argparse.Namespace) -> int:
     return _run_with_error_handling(_body)
 
 
+def _batch_rerun_failed(args: argparse.Namespace) -> int:
+    def _body() -> int:
+        cfg = require_logged_in()
+        with authed_client(cfg) as c:
+            resp = c.post(
+                f"/api/v1/batches/{args.batch_id}/rerun-failed",
+                json={
+                    "task_ids": args.task_id or [],
+                    "include_operator_approval": args.include_operator_approval,
+                    "use_current_runtime": args.use_current_runtime,
+                },
+            )
+        body = assert_2xx(resp, action=f"rerun failed cases from batch {args.batch_id!r}")
+        if args.format == "json":
+            _dump_json(body)
+        else:
+            print(
+                f"Created supplemental batch {body['batch_id']} "
+                f"with {body['expected_trial_count']} trial(s)."
+            )
+        return 0
+
+    return _run_with_error_handling(_body)
+
+
 def _diagnose_batch(args: argparse.Namespace) -> int:
     def _body() -> int:
         cfg = require_logged_in()
@@ -1696,6 +1721,22 @@ def dispatch(argv: list[str]) -> int:
         default="text",
     )
     p_brp.set_defaults(handler=_batch_rerun_plan)
+
+    p_brf = batch_sub.add_parser(
+        "rerun-failed", help="Submit a linked batch for the selected failed cases.",
+    )
+    p_brf.add_argument("batch_id", help="Source batch UUID.")
+    p_brf.add_argument("--task-id", action="append", default=[],
+                       help="Rerun only this task id. Repeat to select multiple tasks.")
+    p_brf.add_argument("--include-operator-approval", action="store_true",
+                       help="Include operator-approval rows from the existing rerun plan.")
+    p_brf.add_argument(
+        "--use-current-runtime", action="store_true",
+        help=("Use the current deployed native Terminus runtime; "
+              "default replays the frozen runtime."),
+    )
+    p_brf.add_argument("--format", choices=["text", "json"], default="text")
+    p_brf.set_defaults(handler=_batch_rerun_failed)
 
     p_bx = batch_sub.add_parser(
         "cancel",

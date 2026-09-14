@@ -652,6 +652,18 @@ copy/paste task-list launches; `supplemental_coordinates` preserves every
 `task_id`/`sample_idx`/`combination_idx` row when multiple samples or
 combinations for the same task need rerun.
 
+Submit the selected failures as a linked child Batch with
+`loom eval batch rerun-failed <batch-id> --task-id <task-id>`. The same
+`--include-operator-approval` option includes those rows from the rerun plan.
+By default, the child replays the parent's frozen runtime. After a native
+Terminus platform repair, add `--use-current-runtime` to select the current
+deployed runtime and Harbor controller. This opt-in preserves the original
+model, provider, task/sample/combination coordinates, deadlines and retry policy;
+it clears the child's old explicit agent version and freezes the deployed
+controller image instead. It leaves the parent unchanged. Missing or incompatible
+current runtimes are rejected before a child is created. The opt-in supports
+automatic native Nebius Terminus tasks, not pre-bound execution templates.
+
 ## Quickstart: Submit from the Web App
 
 Use this path when working through the public UI.

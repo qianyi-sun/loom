@@ -2,6 +2,7 @@
 
 import base64
 import json
+from copy import deepcopy
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -24,6 +25,7 @@ from tests.integration.test_service_batches_crud import (
     RAW_ADMIN_TOKEN,
     _automatic_service_execution_task_config,
     _service_execution_runtime_profile,
+    _service_execution_task_config,
 )
 from tests.integration.test_service_batches_crud import camp_setup as camp_setup
 from tests.support.agent_runtime import release
@@ -118,7 +120,10 @@ async def test_registration_real_auth_idempotency_rebind_and_public_catalog(
 
 
 @pytest.mark.parametrize("combinations", [False, True])
-async def test_public_batch_freezes_versions_and_rerun_keeps_snapshot(camp_setup, combinations):
+@pytest.mark.parametrize("runtime_mode", ["frozen", "current", "unavailable", "no_controller", "prebound", "legacy", "other_agent"])
+async def test_public_batch_freezes_versions_and_rerun_keeps_snapshot(
+    camp_setup, combinations, runtime_mode,
+):
     app, user_token, team = camp_setup
     a, b = release("a-" + uuid4().hex), release("b-" + uuid4().hex, "9")
     profile = _service_execution_runtime_profile()
@@ -198,7 +203,11 @@ async def test_public_batch_freezes_versions_and_rerun_keeps_snapshot(camp_setup
             "name": "version freeze",
             "task_filter": {"task_ids": [task_id], "subset_kind": "explicit"},
             "backend": "nebius",
-            "trial_config": {} if combinations else selected[0],
+            "trial_config": {
+                "retry": {"max_attempts": 1, "retry_on": []},
+                "override_agent_timeout_sec": 120,
+                **({} if combinations else selected[0]),
+            },
         }
         if combinations:
             payload["combinations"] = selected
@@ -221,7 +230,19 @@ async def test_public_batch_freezes_versions_and_rerun_keeps_snapshot(camp_setup
             batch_id = UUID(response.json()["batch_id"])
             async with app.state.session_factory() as session, session.begin():
                 batch = await session.get(Batch, batch_id)
-                frozen = batch.service_execution_runtime_profile
+                frozen = deepcopy(batch.service_execution_runtime_profile)
+                if runtime_mode == "legacy":
+                    batch.backend = "docker"
+                    batch.service_execution_runtime_profile = None
+                if runtime_mode == "other_agent":
+                    if combinations:
+                        batch.combinations = [{**item, "agent_name": "oracle"}
+                                              for item in batch.combinations]
+                    else:
+                        batch.trial_config = {**batch.trial_config, "agent_name": "oracle"}
+                parent_profile = deepcopy(batch.service_execution_runtime_profile)
+                original_config = deepcopy(batch.trial_config)
+                original_combinations = deepcopy(batch.combinations)
                 assert len(frozen["agent_runtime_bindings"]) == (2 if combinations else 1)
                 assert frozen["agent_runtime_bindings"][0]["agent_image_ref"] == a.agent_image_ref
                 batch.state = "finished"
@@ -249,19 +270,78 @@ async def test_public_batch_freezes_versions_and_rerun_keeps_snapshot(camp_setup
                             sample_idx=0,
                         )
                     )
-            # Today's default is now absent. Rerun must use the original frozen profile.
-            app.state.settings = app.state.settings.model_copy(
-                update={"service_execution_runtime_profile_json": "{}"}
-            )
+            if runtime_mode == "prebound":
+                async with app.state.session_factory() as session, session.begin():
+                    task_row = await session.get(Task, task_id)
+                    task_row.config = {
+                        **task_row.config,
+                        "service_execution": _service_execution_task_config(task_id)["service_execution"],
+                    }
+            current_profile = profile.model_copy(update={
+                "candidate_sha": "2" * 40,
+                "agent_image_ref": b.agent_image_ref,
+                "image_admission": profile.image_admission.model_copy(update={
+                    "admissions": (*profile.image_admission.admissions, b.image_admission),
+                }),
+            })
+            if runtime_mode == "no_controller":
+                current_profile = current_profile.model_copy(update={"agent_image_ref": None})
+            app.state.settings = app.state.settings.model_copy(update={
+                "service_execution_runtime_profile_json": (
+                    current_profile.model_dump_json()
+                    if runtime_mode not in {"frozen", "unavailable"} else "{}"
+                ),
+            })
             async with app.state.session_factory() as session, session.begin():
                 await session.execute(
                     delete(Agent).where(Agent.version.in_([a.agent_version, b.agent_version]))
                 )
-            rerun = await client.post(f"/api/v1/batches/{batch_id}/rerun-failed", headers=headers)
+            rerun = await client.post(
+                f"/api/v1/batches/{batch_id}/rerun-failed", headers=headers,
+                json={"use_current_runtime": runtime_mode != "frozen"},
+            )
+            if runtime_mode not in {"frozen", "current"}:
+                assert rerun.status_code == 400, rerun.text
+                async with app.state.session_factory() as session:
+                    children = (await session.scalars(select(Batch).where(
+                        Batch.rerun_of_batch_id == batch_id,
+                    ))).all()
+                    assert children == []
+                    parent = await session.get(Batch, batch_id)
+                    assert parent.trial_config == original_config
+                    assert parent.combinations == original_combinations
+                    assert parent.service_execution_runtime_profile == parent_profile
+                return
             assert rerun.status_code == 201, rerun.text
             async with app.state.session_factory() as session:
                 row = await session.get(Batch, UUID(rerun.json()["batch_id"]))
-                assert row.service_execution_runtime_profile == frozen
+                parent = await session.get(Batch, batch_id)
+                assert parent.trial_config == original_config
+                assert parent.combinations == original_combinations
+                assert parent.service_execution_runtime_profile == parent_profile
+                assert row.rerun_of_batch_id == batch_id
+                assert row.trial_config["retry"] == original_config["retry"]
+                assert row.trial_config["override_agent_timeout_sec"] == 120
+                assert row.provider_connection_id == parent.provider_connection_id
+                assert row.provider_model_id == parent.provider_model_id
+                assert row.resolved_task_ids == [task_id]
+                if runtime_mode == "current":
+                    assert row.service_execution_runtime_profile == current_profile.model_dump(mode="json")
+                    selections = row.combinations or [row.trial_config]
+                    assert all(x.get("agent_version") is None for x in selections)
+                    expected_config = deepcopy(original_config)
+                    expected_config.pop("agent_version", None)
+                    expected_config["model_switch_plan_mode"] = "inherit"
+                    expected_combinations = deepcopy(original_combinations)
+                    for item in expected_combinations:
+                        item.pop("agent_version", None)
+                    assert row.trial_config == expected_config
+                    assert row.combinations == expected_combinations
+                    assert [(x["sample_idx"], x["combination_idx"]) for x in row.rerun_targets] == (
+                        [(0, 0), (0, 1)] if combinations else [(0, 0)]
+                    )
+                else:
+                    assert row.service_execution_runtime_profile == frozen
                 actual = (
                     await session.scalars(select(Trial).where(Trial.batch_id == batch_id))
                 ).all()

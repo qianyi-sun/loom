@@ -741,6 +741,13 @@ host ports bind to
   those task/sample/combination coordinates. Detail views expose both original
   rollups and effective rollups where successful supplemental trials replace
   the original replaceable failures.
+  Runtime replay remains frozen by default. Explicit `use_current_runtime: true`
+  on this route selects the deployed profile through the normal new-submission
+  resolver and clears only the child's explicit agent versions. The current
+  controller image is frozen with that profile; no catalog "latest" lookup or
+  parent mutation occurs. Automatic Nebius Terminus execution is required for
+  every selected task, and unsupported or unavailable runtimes fail before
+  creating a child. Source provenance records the opt-in.
 - **Runnable task counts** — benchmark `task_count` and
   `POST /api/v1/tasks/count` are user-facing runnable counts, not raw
   task-table row counts. Placeholder rows with empty or incomplete

@@ -263,6 +263,7 @@ class _AdminCreateBatchOnBehalf(_CreateBatch):
 class _RerunFailedBatch(BaseModel):
     task_ids: list[str] = Field(default_factory=list, max_length=5000)
     include_operator_approval: bool = False
+    use_current_runtime: bool = False
     model_switch_plan_mode: Literal["inherit", "resample"] = "inherit"
 
 
@@ -415,6 +416,7 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
     combinations: Sequence[Combination | dict[str, Any]],
     runtime_profile_json: str,
     resolve_versions: bool = True,
+    automatic_only: bool = False,
 ) -> ServiceExecutionRuntimeProfileV1 | None:
     """Require fresh execution capacity or a compatible cold-start policy.
 
@@ -463,6 +465,11 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
             provenance = task_entry[1] if task_entry is not None else {}
             binding = task_config.service_execution if task_config is not None else None
             reasons: tuple[str, ...] = ()
+            if binding is not None and automatic_only:
+                raise HTTPException(
+                    status_code=400,
+                    detail="current runtime rerun requires automatic native execution for every task",
+                )
             if binding is not None and any(version is not None for _, version in selections):
                 raise HTTPException(status_code=400, detail="agent_version requires automatic native execution")
             if binding is None and task_config is not None:
@@ -2769,17 +2776,35 @@ async def rerun_failed_batch(
             status_code=400,
             detail=invalid_task_config_detail(invalid_rerun_tasks),
         )
+    rerun_trial_config = dict(b.trial_config)
+    combinations = [dict(item) for item in b.combinations or []]
+    runtime_profile_json = json.dumps(b.service_execution_runtime_profile or {})
+    if request_payload.use_current_runtime:
+        selections = combinations or [rerun_trial_config]
+        if b.backend != NEBIUS_BACKEND or any(
+            item.get("agent_name") != "terminus-2" for item in selections
+        ):
+            _reject_submission(
+                reason="invalid_input", status_code=400,
+                detail="current runtime rerun supports only native Nebius terminus-2",
+            )
+        # A missing explicit version selects the deployment-owned controller,
+        # exactly as an ordinary new submission does. Never mutate the parent.
+        rerun_trial_config.pop("agent_version", None)
+        for item in combinations:
+            item.pop("agent_version", None)
+        runtime_profile_json = request.app.state.settings.service_execution_runtime_profile_json
     service_execution_runtime_profile = await _reject_if_backend_cannot_execute_or_cold_start(
         s,
         backend=b.backend,
         task_ids=valid_rerun_task_ids,
-        trial_config=b.trial_config,
-        combinations=b.combinations or [],
-        runtime_profile_json=json.dumps(b.service_execution_runtime_profile or {}),
-        resolve_versions=False,
+        trial_config=rerun_trial_config,
+        combinations=combinations,
+        runtime_profile_json=runtime_profile_json,
+        resolve_versions=request_payload.use_current_runtime,
+        automatic_only=request_payload.use_current_runtime,
     )
     agent_task_pairs: list[tuple[str, str]] = []
-    combinations = list(b.combinations or [])
     for target in targets:
         task_id = str(target["task_id"])
         combination_idx = int(target["combination_idx"])
@@ -2833,7 +2858,7 @@ async def rerun_failed_batch(
         task_filter={"subset_kind": "explicit", "task_ids": task_ids},
         resolved_task_ids=list(rerun_task_result.task_ids),
         trial_config=apply_plan_mode(
-            dict(b.trial_config),
+            rerun_trial_config,
             mode=request_payload.model_switch_plan_mode,
         ),
         state="submitted",
@@ -2844,7 +2869,7 @@ async def rerun_failed_batch(
         expected_trial_count=len(targets),
         n_per_task=1,
         backend=b.backend,
-        combinations=list(b.combinations or []),
+        combinations=combinations,
         service_execution_runtime_profile=(
             service_execution_runtime_profile.model_dump(mode="json")
             if service_execution_runtime_profile is not None
@@ -2858,6 +2883,7 @@ async def rerun_failed_batch(
             {
                 "kind": "supplemental_rerun",
                 "source_batch_id": str(b.id),
+                **({"use_current_runtime": True} if request_payload.use_current_runtime else {}),
             },
             *rerun_task_result.benchmark_selection_provenance,
         ],
