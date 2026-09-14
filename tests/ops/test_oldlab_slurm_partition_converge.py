@@ -304,6 +304,24 @@ def test_concurrent_configuration_change_is_not_overwritten(tmp_path: Path) -> N
     assert not reload_count.exists()
 
 
+def test_existing_snapshot_can_match_intended_post_partition_bytes(tmp_path: Path) -> None:
+    canonical = f"{INITIAL_CONFIG}{PARTITION_LINE}\n"
+
+    def prepare(_config: Path, authority: Path, _bin: Path) -> None:
+        authority.mkdir(mode=0o755)
+        snapshot = authority / "slurm.conf.before-root-authority"
+        snapshot.write_text(canonical)
+        snapshot.chmod(0o600)
+
+    result, config, authority, reload_count = _run_converger(tmp_path, prepare_fixture=prepare)
+    assert result.returncode == 0, result.stderr
+    assert config.read_text() == canonical
+    assert stat.S_IMODE(config.stat().st_mode) == 0o644
+    assert (authority / "slurm.conf.before-root-authority").read_text() == canonical
+    assert (authority / "slurm.conf.before-loom-staging-partition").read_text() == INITIAL_CONFIG
+    assert reload_count.read_text() == "1\n"
+
+
 def test_unsafe_snapshot_directory_is_not_adopted_before_partition_change(tmp_path: Path) -> None:
     def prepare(_config: Path, authority: Path, _bin: Path) -> None:
         authority.mkdir()

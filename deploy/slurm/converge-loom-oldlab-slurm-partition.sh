@@ -41,6 +41,30 @@ loom_oldlab_validate_state_root() {
   fi
 }
 
+loom_oldlab_validate_snapshot_before_partition() {
+  local partition_present="$1"
+  local snapshot="$STATE_ROOT/slurm.conf.before-root-authority"
+  if [ "$input_mode" != "0664" ] \
+    || { [ ! -e "$snapshot" ] && [ ! -L "$snapshot" ]; }; then
+    return
+  fi
+  if [ -L "$snapshot" ] \
+    || [ "$(stat -c '%U:%G:%a:%F:%h' "$snapshot")" != "$STATE_OWNER:$STATE_GROUP:600:regular file:1" ]; then
+    echo "error: OLDLAB authority snapshot is unsafe or stale" >&2
+    exit 1
+  fi
+  if [ "$partition_present" = "0" ]; then
+    if ! awk -v anchor="$ANCHOR_LINE" -v partition="$PARTITION_LINE" \
+      '{ print; if ($0 == anchor) print partition }' "$CONFIG" | cmp -s "$snapshot" -; then
+      echo "error: OLDLAB authority snapshot is unsafe or stale" >&2
+      exit 1
+    fi
+  elif ! cmp -s "$snapshot" "$CONFIG"; then
+    echo "error: OLDLAB authority snapshot is unsafe or stale" >&2
+    exit 1
+  fi
+}
+
 loom_oldlab_harden_authority() {
   local snapshot="$STATE_ROOT/slurm.conf.before-root-authority"
   local temporary=""
@@ -198,6 +222,7 @@ loom_oldlab_converge_partition() {
     exit 1
   fi
   if [ "$partition_count" = "0" ] && [ "$named_count" = "0" ]; then
+    loom_oldlab_validate_snapshot_before_partition 0
     install -d -o "$STATE_OWNER" -g "$STATE_GROUP" -m 0755 "$STATE_ROOT"
     if [ -e "$BACKUP" ]; then
       if [ -L "$BACKUP" ] \
@@ -227,6 +252,8 @@ loom_oldlab_converge_partition() {
   elif [ "$partition_count" != "1" ] || [ "$named_count" != "1" ]; then
     echo "error: OLDLAB staging partition line does not match authority" >&2
     exit 1
+  else
+    loom_oldlab_validate_snapshot_before_partition 1
   fi
 
   if [ "$(grep -Fxc "$PARTITION_LINE" "$CONFIG" || true)" != "1" ]; then
