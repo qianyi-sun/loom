@@ -33,7 +33,7 @@ async def test_recovery_admission_requires_live_exact_claim_and_committed_boot(p
     _contracts, claim, profile, prepared, _final = await recovery_input(prepared_input, owner_sessions, monkeypatch,
         admit=boundary != "no-profile")
     factory, engine, installation, _proposal, source, *_ = prepared_input
-    request = contracts.NativeRecoveryAdmissionRequestV1(claim=claim, node_id=prepared.node_id,
+    request = contracts.NativeRecoveryAdmissionRequestV1(claim=claim,
         boot_id=uuid4() if boundary == "boot" else prepared.boot_id)
     if boundary == "claim":
         request = request.model_copy(update={"claim": claim.model_copy(update={"operation_id": uuid4()})})
@@ -64,7 +64,7 @@ async def test_installed_admission_client_uses_authenticated_no_store_readback(p
     contracts, claim, profile, prepared, _final = await recovery_input(prepared_input, owner_sessions, monkeypatch)
     app = application(prepared_input, tmp_path)
     app.state.personal_dev_build_admission_mode = "disabled" if boundary == "disabled" else "native-execution"
-    request = contracts.NativeRecoveryAdmissionRequestV1(claim=claim, node_id=prepared.node_id, boot_id=prepared.boot_id)
+    request = contracts.NativeRecoveryAdmissionRequestV1(claim=claim, boot_id=prepared.boot_id)
     responses = []
 
     async def observe(response):
@@ -97,7 +97,7 @@ async def test_reboot_admission_preserves_static_config_and_rejects_ambiguous_or
     owner_factory, owner_role = owner_sessions
     host = contracts.NativeRecoveryHostIdentityV1(node_id=prepared.node_id, boot_id=uuid4(), original_uid=24850,
         original_gid=24851, cgroup_namespace_device=4, cgroup_namespace_inode=201)
-    request = contracts.NativeRecoveryAdmissionRequestV1(claim=claim, node_id=host.node_id, boot_id=host.boot_id)
+    request = contracts.NativeRecoveryAdmissionRequestV1(claim=claim, boot_id=host.boot_id)
     async with owner_factory.begin() as session:
         await session.execute(text(f"SET LOCAL ROLE {owner_role}"))
         retained = NativeRecoveryInstallationStore(session, expected_owner_role=owner_role)

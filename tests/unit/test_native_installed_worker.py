@@ -62,7 +62,7 @@ async def test_installed_worker_closes_handoff_before_checks_and_retains_recover
     if recovery:
         from loom_capacity_build_guard.installation_store import _identity
         config = module.NativeInstalledWorkerConfigV2.model_validate({**config.model_dump(), "schema_version": 2,
-            "host_identity_path": "/protected/host.json", "node_id": physical.binding.node_ids[0]})
+            "host_identity_path": "/protected/host.json"})
     claim = module.allocated_claim_request(packet.registration).model_dump()
     from loom_capacity_agent.build_admission import BuildClaimRequestV1
     claim = BuildClaimRequestV1.model_validate({**claim, "request_id": uuid4()})
@@ -117,7 +117,7 @@ async def test_installed_worker_closes_handoff_before_checks_and_retains_recover
         )
         from tests.unit.test_native_recovery_contracts import observation
 
-        host = NativeRecoveryHostIdentityV1(node_id=config.node_id, boot_id=uuid4(), original_uid=24850,
+        host = NativeRecoveryHostIdentityV1(node_id=physical.binding.node_ids[0], boot_id=uuid4(), original_uid=24850,
             original_gid=24851, cgroup_namespace_device=4, cgroup_namespace_inode=100)
         profile = NativeRecoveryProfileV1(installation_id=_identity(claim.binding.subject_id, claim.binding.subject_incarnation,
             claim.binding.deployment_generation), pool_id="oldlab", launch_profile_sha256="e" * 64,
@@ -146,7 +146,7 @@ async def test_installed_worker_closes_handoff_before_checks_and_retains_recover
         class Client:
             async def read_recovery_admission(self, request, *, worker_credential):
                 checked("admission")
-                assert request.claim == claim and request.node_id == host.node_id and request.boot_id == host.boot_id
+                assert request.claim == claim and request.boot_id == host.boot_id
                 assert worker_credential == credential
                 return NativeRecoveryAdmissionV1(request=request, profile=profile, host=host)
 
@@ -271,7 +271,7 @@ def test_config_reader_requires_protected_canonical_bytes(release, monkeypatch, 
         max_image_archive_bytes=1024**2, max_unpacked_bytes=1024**2, max_rootfs_entries=100,
         tmp_bytes=1024**2, buildkit_state_bytes=1024**2, timeout_seconds=60)
     if version == 2:
-        document.update(schema_version=2, host_identity_path="/protected/host.json", node_id="oldlab1")
+        document.update(schema_version=2, host_identity_path="/protected/host.json")
     if fault == "float-version":
         document["schema_version"] = float(version)
     if fault == "unknown":
