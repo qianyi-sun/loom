@@ -28,6 +28,8 @@ def test_fixed_host_transport_binds_program_request_and_trust_files(monkeypatch,
         if drift == 'config-owner' and path == module._CONFIG:
             metadata.st_uid = 9999
         payload = b'fixed admitted input'
+        if path == module._CONFIG:
+            payload = b'Host trt-eai-oldlab-4\n  HostName fixture-node.example\n  Port 22\n'
         if drift == 'config-changed' and changes[0] and path == module._CONFIG:
             payload = b'changed config'
         return SimpleNamespace(payload=payload, metadata=metadata,
@@ -66,3 +68,40 @@ def test_fixed_host_transport_binds_program_request_and_trust_files(monkeypatch,
         assert first['pod_uid'] == identity.pod_uid
         module.inspect_staging_cnpg_operator(identity)
         assert json.loads(inputs[0][1]['input'])['nonce'] != json.loads(inputs[1][1]['input'])['nonce']
+
+
+@pytest.mark.parametrize('drift', [None, 'nonce', 'source', 'extra', 'duplicate', 'oversize'])
+def test_host_protocol_admits_only_current_program_and_bounded_identity(monkeypatch, drift):
+    import hashlib
+    from pathlib import Path
+
+    from loom_cli.rollout.operator import protected_cnpg_operator_host as host
+
+    identity = {'node_name': 'trt-eai-oldlab-4', 'pod_name': _pod()['metadata']['name'],
+                'pod_uid': _pod()['metadata']['uid'], 'container_id': 'a' * 64}
+    request = {'schema_version': 1, 'nonce': 'b' * 32,
+               'observer_sha256': hashlib.sha256(Path(host.__file__).read_bytes()).hexdigest(), 'identity': identity}
+    calls = []
+    def observe(value):
+        calls.append(value)
+        return {'observed': 'fixture'}
+    monkeypatch.setattr(host, 'inspect_cnpg_operator_host', observe)
+    if drift == 'nonce':
+        request['nonce'] = 'unbound'
+    elif drift == 'source':
+        request['observer_sha256'] = '0' * 64
+    elif drift == 'extra':
+        request['command'] = 'untrusted'
+    payload = json.dumps(request).encode()
+    if drift == 'duplicate':
+        payload = payload[:-1] + b',"nonce":"' + b'c' * 32 + b'"}'
+    elif drift == 'oversize':
+        payload += b' ' * 8192
+    if drift:
+        with pytest.raises((ValueError, RuntimeError), match='CNPG operator'):
+            host.handle_request(payload)
+        assert not calls
+    else:
+        reply = host.handle_request(payload)
+        assert reply == {**request, 'observation': {'observed': 'fixture'}}
+        assert calls == [identity]
