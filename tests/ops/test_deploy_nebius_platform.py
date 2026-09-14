@@ -171,6 +171,23 @@ def rendered(tmp_path: Path) -> tuple[argparse.Namespace, dict, dict, dict]:
     return args, config, manifest, files
 
 
+@pytest.mark.parametrize("kind", ["ClusterRole", "ClusterRoleBinding"])
+def test_usage_cluster_resources_must_belong_to_target(rendered, kind):
+    args, config, _, files = rendered
+    resource = next(
+        row for row in files["60-execution.yaml"]
+        if row["kind"] == kind
+        and row["metadata"]["name"] == config["execution_namespace"] + "-actuator-usage"
+    )
+    deploy.load_render(args.render_dir)
+    resource["metadata"]["name"] = "different-environment-actuator-usage"
+    (args.render_dir / "60-execution.yaml").write_text(
+        yaml.safe_dump_all(files["60-execution.yaml"])
+    )
+    with pytest.raises(deploy.DeploymentError, match="does not belong"):
+        deploy.load_render(args.render_dir)
+
+
 class FakeKubectl(deploy.Kubectl):
     def __init__(self, config: dict, files: dict, *, database: bool = False):
         self.config = config

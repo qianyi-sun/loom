@@ -355,8 +355,9 @@ def test_actuator_manifest_is_namespace_scoped_and_active_for_development() -> N
         )
     )
     kinds = [document["kind"] for document in documents]
-    assert "ClusterRole" not in kinds
-    assert "ClusterRoleBinding" not in kinds
+    assert "ClusterRoleBinding" in kinds
+    usage_role = next(d for d in documents if d["kind"] == "ClusterRole")
+    assert usage_role["rules"] == [{"apiGroups": [""], "resources": ["nodes/proxy"], "verbs": ["get"]}]
     quota = next(document for document in documents if document["kind"] == "ResourceQuota")
     assert quota["metadata"]["namespace"] == "loom-nebius-development"
     assert quota["spec"]["hard"] == {
