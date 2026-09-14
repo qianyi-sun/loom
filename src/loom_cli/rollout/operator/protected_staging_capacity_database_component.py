@@ -32,6 +32,7 @@ from loom_capacity_agent.contracts import (
 )
 from loom_capacity_guard.contracts import GuardFenceV1, canonical_bytes
 from loom_capacity_guard.schema_startup import capacity_guard_schema_head
+from loom_cli.rollout.application_migration_contract import APPLICATION_OWNER_ROLE
 
 from .final_gate_plan import FinalGatePlan
 from .postgres_sql import single_line_sql
@@ -771,6 +772,11 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
     recovery_plan_reader: Callable[[FinalGatePlan, str, str, str], FinalGatePlan | None] | None = (
         None
     )
+    application_owner_role: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.application_owner_role, str) or self.application_owner_role not in {"", APPLICATION_OWNER_ROLE}:
+            raise ValueError("protected capacity application owner selection is invalid")
 
     def classify(self, plan: FinalGatePlan) -> tuple[ComponentState, str]:
         try:
@@ -824,6 +830,8 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         return ComponentState.DRIFTED
 
     def apply(self, plan: FinalGatePlan) -> None:
+        if self.application_owner_role:
+            raise RuntimeError("separated owner capacity bootstrap requires the retained lifecycle")
         seed = self.seed_reader()
         payload = self._manifest(plan, seed)
         before = self._snapshot(plan, seed=seed, manifest=payload)
@@ -1149,7 +1157,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             "authority": expected_fence.model_dump(mode="json"),
             "database_privileges": {
                 "loom_cap_staging_agent": {
-                    "acl": [{"grantable": False, "grantor": "loom", "privilege": "CONNECT"}],
+                    "acl": [{"grantable": False, "grantor": self.application_owner_role or "loom", "privilege": "CONNECT"}],
                     "connect": True,
                     "create": False,
                     "temporary": False,
@@ -1167,7 +1175,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                     "temporary": False,
                 },
                 "loom_cap_staging_observer": {
-                    "acl": [{"grantable": False, "grantor": "loom", "privilege": "CONNECT"}],
+                    "acl": [{"grantable": False, "grantor": self.application_owner_role or "loom", "privilege": "CONNECT"}],
                     "connect": True,
                     "create": False,
                     "temporary": False,
@@ -1179,7 +1187,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                     "temporary": False,
                 },
                 "loom_cap_staging_runtime": {
-                    "acl": [{"grantable": False, "grantor": "loom", "privilege": "CONNECT"}],
+                    "acl": [{"grantable": False, "grantor": self.application_owner_role or "loom", "privilege": "CONNECT"}],
                     "connect": True,
                     "create": False,
                     "temporary": False,
@@ -2588,6 +2596,8 @@ COMMIT;
         self._run_peer_payload(payload)
 
     def _arm_transient_migrator(self, seed: Mapping[str, object]) -> None:
+        if self.application_owner_role:
+            raise RuntimeError("separated owner capacity bootstrap requires the retained lifecycle")
         migrator_password = sql.Literal(
             _seed_credential(seed, "migrator_database_password")
         ).as_string()
