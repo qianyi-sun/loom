@@ -143,12 +143,15 @@ class NativeQuarantineJournal:
     def _save(self, phase: Phase) -> None:
         progress = NativeQuarantineProgressV1(key=self._key, source=str(self._source),
             identity_sha256=self._identity_digest, phase=phase)
+        wire = canonical_bytes(progress)
+        if len(wire) > 4096:
+            raise ValueError("quarantine journal exceeds byte bound")
         fd = os.open(".pending", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
             0o600, dir_fd=self._descriptor())
         try:
             _regular(fd)  # Validate an interrupted pending file before truncation.
             os.ftruncate(fd, 0)
-            _write_all(fd, canonical_bytes(progress))
+            _write_all(fd, wire)
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -175,13 +178,17 @@ class NativeQuarantineJournal:
         _require_initial_root()
         destination = self._descriptor()
         with ExitStack() as stack:
+            quarantined = self._attempt(destination, "attempt", stack)
+            if self._progress is not None and self._progress.phase == "completed":
+                if quarantined is not None:
+                    raise ValueError("completed quarantine unexpectedly reappeared")
+                return "completed"  # Owner teardown may already have removed its scratch root.
             source_parent = _open_directory(self._source.parent, stack)
             metadata = os.fstat(source_parent)
             if ((metadata.st_uid, metadata.st_gid) != (self._identity.uid_ranges[0][0], self._identity.gid_ranges[0][0])
                 or stat.S_IMODE(metadata.st_mode) != 0o700 or _mount_id(source_parent) != self._identity.mount_id):
                 raise ValueError("quarantine source parent identity changed")
             source = self._attempt(source_parent, self._source.name, stack)
-            quarantined = self._attempt(destination, "attempt", stack)
             if self._progress is None:
                 if source is None or quarantined is not None:
                     raise ValueError("quarantine has no retained transition explaining its location")
@@ -199,10 +206,6 @@ class NativeQuarantineJournal:
                 self._save("quarantined")
             if source is not None:
                 raise ValueError("quarantine source unexpectedly reappeared")
-            if self._progress.phase == "completed":
-                if quarantined is not None:
-                    raise ValueError("completed quarantine unexpectedly reappeared")
-                return "completed"
             if quarantined is None:
                 if self._progress.phase != "removing":
                     raise ValueError("quarantine absence lacks a durable removal transition")
@@ -211,7 +214,12 @@ class NativeQuarantineJournal:
             if self._progress.phase == "quarantined":
                 prune_native_quarantine(quarantined, identity=self._identity)
                 self._save("pruned")
-            names = os.listdir(quarantined)
+            names: list[str] = []
+            with os.scandir(quarantined) as children:
+                for child in children:
+                    names.append(child.name)
+                    if len(names) > 1:
+                        break  # Finalization accepts at most the single retained locator.
             if names not in (["recovery.json"], []) or (not names and self._progress.phase != "removing"):
                 raise ValueError("quarantine finalization residue changed")
             if names:

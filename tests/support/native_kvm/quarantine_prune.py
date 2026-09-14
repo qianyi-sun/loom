@@ -97,6 +97,38 @@ def journal_main(interruption):
     finally:
         os.close(descriptor)
     key = "a" * 64
+    if interruption in {"lock", "identity", "unexplained", "pending-link"}:
+        from dataclasses import replace
+
+        expected_identity = replace(identity, inode=identity.inode + 1) if interruption == "identity" else identity
+        with journal_module.NativeQuarantineJournal(ledger, key=key, source=attempt, identity=expected_identity) as journal:
+            if interruption == "lock":
+                try:
+                    with journal_module.NativeQuarantineJournal(ledger, key=key, source=attempt, identity=identity):
+                        raise AssertionError("same-attempt lock did not exclude a second invocation")
+                except BlockingIOError:
+                    pass
+            else:
+                if interruption == "unexplained":
+                    journal._save("quarantining")
+                    attempt.rename(scratch / "retained-outside-transition")
+                elif interruption == "pending-link":
+                    sentinel = base / "sentinel"
+                    sentinel.write_bytes(b"never-truncate")
+                    sentinel.chmod(0o600)
+                    (ledger / key / ".pending").hardlink_to(sentinel)
+                try:
+                    journal.reconcile()
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("invalid journal transition was accepted")
+                if interruption == "pending-link":
+                    assert sentinel.read_bytes() == b"never-truncate"
+            retained = scratch / "retained-outside-transition" if interruption == "unexplained" else attempt
+            assert (retained / "data").read_bytes() == b"subordinate"
+        print("quarantine-prune-journal-" + interruption + "-verified", flush=True)
+        return
     original_save = journal_module.NativeQuarantineJournal._save
     fired = False
 
