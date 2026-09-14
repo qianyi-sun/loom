@@ -36,8 +36,18 @@ async def _prepared_insert(factory, issuer):
 
 
 async def _retire(factory, attempt_id):
-    await observe(factory, attempt_id, NOW + timedelta(hours=1))
-    result = await observe(factory, attempt_id, NOW + timedelta(hours=25))
+    # Retirement is setup for the direct-ingress assertion, not the behavior
+    # under test. A loaded runner can let PostgreSQL abort the bounded setup
+    # transaction. Retry that exact known rollback once in a fresh transaction;
+    # never relax the production timeout or retry ambiguous/other failures.
+    for instant in (NOW + timedelta(hours=1), NOW + timedelta(hours=25)):
+        for retry in range(2):
+            try:
+                result = await observe(factory, attempt_id, instant)
+                break
+            except DBAPIError as error:
+                if retry or getattr(error.orig, "sqlstate", None) != "25P03":
+                    raise
     assert result.status == "retired"
 
 
