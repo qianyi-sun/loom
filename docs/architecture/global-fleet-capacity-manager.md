@@ -208,6 +208,17 @@ networking or hostname identity. The executor image integration test verifies
 this boundary inside a disposable container with its own root and namespaces,
 without mounting the real host or invoking Slurm.
 
+OLDLAB's supported partition provisioner converges the scheduler configuration
+to the same root-owned, non-group-writable authority required by executor
+discovery. It accepts the precise legacy ownership only as a migration input,
+preserves configuration bytes in a private snapshot, and atomically publishes
+an independent protected inode so retained legacy writable descriptors cannot
+alter the new authority. This metadata transition alone never reloads Slurm;
+it requires coordinated exclusion of conflicting administrator writes and does
+not change foreign jobs or activate the executor. Disposable-container coverage
+exercises actual ownership, retained descriptors and the unchanged executor
+authority-file validator.
+
 The separate `loom_capacity_pool_executor` namespace in the Loom wheel can
 capture one controller-local Slurm 23.11 snapshot with only `scontrol show
 nodes --json` and `squeue --json`. It brackets the node read with two queue
