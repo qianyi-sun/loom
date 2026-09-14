@@ -59,6 +59,8 @@ def retire_application_guard_migrator(
                 sql.Identifier(identity.guard_owner.role_name), sql.Identifier(identity.role_name)))
         connection.execute(sql.SQL("REVOKE ALL PRIVILEGES ON DATABASE {} FROM {}").format(
             sql.Identifier(target.database), sql.Identifier(identity.role_name)))
+        connection.execute(sql.SQL("REVOKE CREATE ON DATABASE {} FROM {}").format(
+            sql.Identifier(target.database), sql.Identifier(identity.guard_owner.role_name)))
         # Restore the permanent role profile only after its password, sessions
         # and owner memberships are gone. No credential survives this change.
         connection.execute(sql.SQL("ALTER ROLE {} VALID UNTIL 'infinity'").format(sql.Identifier(identity.role_name)))
@@ -97,6 +99,11 @@ def require_application_guard_migrator_retired(
 def _require_retired(connection: ApplicationDatabaseConnection, target: ApplicationDatabaseAdmissionTarget,
                      identity: ApplicationOwnerSuccessor) -> None:
     _sealed(connection, target, identity)
+    assert identity.guard_owner is not None
+    if connection.execute(application_sql(
+        "SELECT has_database_privilege({},{}::oid,'CREATE')", identity.guard_owner.role_oid, target.database_oid,
+    )).fetchone() != (False,):
+        raise RuntimeError("application guard owner schema creation grant has not retired")
     if _memberships(connection, target, identity):
         raise RuntimeError("application guard migrator memberships have not retired")
     if connection.execute(
