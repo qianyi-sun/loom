@@ -209,7 +209,9 @@ async def test_cancellation_does_not_restore_submission_authority(
     assert len(runner.requests) == 1
 
 
-@pytest.mark.parametrize("boundary", ["disabled", "environment", "expired", "policy"])
+@pytest.mark.parametrize(
+    "boundary", ["disabled", "environment", "expired", "not_yet_valid", "policy"]
+)
 async def test_admission_failure_does_not_consume_or_dispatch(
     grant_session: async_sessionmaker[AsyncSession],  # noqa: F811
     boundary: str,
@@ -228,6 +230,8 @@ async def test_admission_failure_does_not_consume_or_dispatch(
     )
     if boundary == "expired":
         coordinator.clock = lambda: _NOW + timedelta(hours=3)
+    if boundary == "not_yet_valid":
+        coordinator.clock = lambda: _NOW - timedelta(hours=1)
     if boundary == "policy":
         coordinator.provider.policy = coordinator.provider.policy.model_copy(
             update={
@@ -394,8 +398,10 @@ async def test_stored_legacy_v1_authority_cannot_be_submitted(
         assert row is not None and row.state == "issued" and row.journal_sequence == 1
 
 
-async def test_expiry_during_commit_preserves_consumption_without_dispatch(
+@pytest.mark.parametrize("clock_moves_backwards", [False, True])
+async def test_clock_drift_during_commit_preserves_consumption_without_dispatch(
     grant_session: async_sessionmaker[AsyncSession],  # noqa: F811
+    clock_moves_backwards: bool,
 ) -> None:
     grant = await _issue(grant_session)
 
@@ -404,9 +410,14 @@ async def test_expiry_during_commit_preserves_consumption_without_dispatch(
 
     runner = _Runner(forbidden)
     coordinator = _coordinator(grant_session, runner)
-    times = iter([_NOW, grant.authority.expires_at])
+    after_commit = (
+        grant.authority.issued_at - timedelta(seconds=1)
+        if clock_moves_backwards
+        else grant.authority.expires_at
+    )
+    times = iter([_NOW, after_commit])
     coordinator.clock = lambda: next(times)
-    with pytest.raises(TaskImageBuildGrantConflictError, match="expired after invocation commit"):
+    with pytest.raises(TaskImageBuildGrantConflictError, match="after invocation commit"):
         await coordinator.submit_once(grant.grant_id)
     with pytest.raises(TaskImageBuildGrantConflictError):
         await _coordinator(grant_session, runner).submit_once(grant.grant_id)
