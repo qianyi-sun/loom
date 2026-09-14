@@ -21,6 +21,8 @@ _REQUEST = "application-guard-retention.json"
 _ACK = "application-guard-retention-ack.json"
 _COMPONENT = "application-ownership-handoff"
 _MIGRATION_COMPONENT = "database-migration"
+_CAPACITY_COMPONENT = "staging-capacity-database"
+_COMPONENTS = (_COMPONENT, _MIGRATION_COMPONENT, _CAPACITY_COMPONENT)
 
 
 def _retention_names(component_id: str) -> tuple[str, str]:
@@ -28,6 +30,8 @@ def _retention_names(component_id: str) -> tuple[str, str]:
         return _REQUEST, _ACK
     if component_id == _MIGRATION_COMPONENT:
         return "application-migration-guard-retention.json", "application-migration-guard-retention-ack.json"
+    if component_id == _CAPACITY_COMPONENT:
+        return "application-capacity-guard-retention.json", "application-capacity-guard-retention-ack.json"
     raise ValueError("application guard retention component is invalid")
 
 
@@ -63,7 +67,7 @@ def _journal_context(
     starting_epoch: int,
 ) -> tuple[Path, dict[str, object]]:
     if (
-        intent.component_id not in {_COMPONENT, _MIGRATION_COMPONENT}
+        intent.component_id not in _COMPONENTS
         or guard.state != "ready"
         or guard.request_id != intent.request_id
         or guard.mutation_epoch not in ({starting_epoch} if intent.component_id == _COMPONENT
@@ -124,14 +128,14 @@ def _read_pending_retention(
     observed_components: set[str] | None = None,
     component_id: str | None = None,
 ) -> _PendingRetention | None:
-    """Observe both operation records before acknowledging a single pending owner.
+    """Observe all operation records before acknowledging a single pending owner.
 
     The supervised guard remembers every observed component, so deleting a later
     migration's request and ACK cannot be hidden by an earlier completed handoff.
     Component-specific readers require only their own completion record.
     """
-    selected = (_COMPONENT, _MIGRATION_COMPONENT) if component_id is None else (component_id,)
-    if observed_components is not None and not observed_components <= {_COMPONENT, _MIGRATION_COMPONENT}:
+    selected = _COMPONENTS if component_id is None else (component_id,)
+    if observed_components is not None and not observed_components <= set(_COMPONENTS):
         raise ValueError("application guard retention history is invalid")
     root = _request_root(state_root, request_id)
     pending = []
