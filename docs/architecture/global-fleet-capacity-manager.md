@@ -573,6 +573,26 @@ reads before retention acknowledgement, then the original guard mailbox while
 admission can be closed; both paths recheck guard identity. The enclosing executor
 and early worker recovery still need the component wired into the full chain.
 
+A completed handoff uses a separate replay path. The journal first validates the
+original restoration, fence retirement, terminal and retention acknowledgement.
+Fresh observations then bracket the current protected guard and epoch, original
+credential and cluster identities, current operator/storage and SQL admission,
+retired fence names and any independently admitted successor role. The SQL reader
+checks enduring ownership, the original runtime password and absence of runtime
+DDL authority. It permits later owner migrations to advance schema markers and
+add objects, while admitting only the fixed reviewed public SECURITY DEFINER
+bodies. An unknown or modified trigger definer is rejected even when runtime
+EXECUTE privileges are absent, because trigger invocation bypasses that ACL.
+
+The optional successor identity constrains one exact application migrator with
+non-inheriting SET membership in the application owner. It does not authorize a
+role discovered in the live catalog or replace successor credential, Job and
+retirement evidence. Completed replay preserves the historical terminal only
+after these fresh checks; later components certify their own schema and workload
+effects. Pending handoffs retain strict original-guard and original-schema
+recovery. The real successor lifecycle and installed executor wiring remain
+required before this completed replay path can be used in a rollout.
+
 The read-only CNPG operator observer admits the fixed 1.25.1 command, environment,
 security context, volume projections and absent configuration overrides. It brackets
 a host-process observation with unchanged Kubernetes inputs. The host reader binds

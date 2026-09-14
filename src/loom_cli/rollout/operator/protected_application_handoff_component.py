@@ -42,6 +42,7 @@ from .protected_apply_journal import (
     ApplicationRecoveryView,
     ComponentObservation,
     ComponentState,
+    ComponentTerminal,
     ProtectedApplyComponent,
     ProtectedApplyJournal,
     ProtectedApplyJournalError,
@@ -63,7 +64,7 @@ from .protected_cnpg_writer_configuration import _json, _mapping
 from .staging_mutation_guard import MutationGuardEvidence
 
 _COMPONENT = 'application-ownership-handoff'
-_IMPLEMENTATION = hashlib.sha256(b'loom-application-authority-handoff-v1').hexdigest()
+_IMPLEMENTATION = hashlib.sha256(b'loom-application-authority-handoff-v2-completed-effect').hexdigest()
 
 
 class ApplicationHandoffRunner(CNPGFenceRetirementRunner, ApplicationRestorationRunner, Protocol):
@@ -102,10 +103,11 @@ class ProtectedApplicationAuthorityHandoffComponent:
     guard_source: Callable[[FinalGatePlan], MutationGuardEvidence]
     epoch_source: Callable[[FinalGatePlan], int]
     observe_external_authority: Callable[[FinalGatePlan, CNPGPrimaryRuntime], str]
+    observe_completed_effect: Callable[[FinalGatePlan, ApplicationRecoveryView, ComponentTerminal], ComponentObservation]
 
     def __post_init__(self) -> None:
         if (type(self.ordinal) is not int or not 1 <= self.ordinal < 32
-                or not all(callable(value) for value in (self.guard_source, self.epoch_source, self.observe_external_authority))):
+                or not all(callable(value) for value in (self.guard_source, self.epoch_source, self.observe_external_authority, self.observe_completed_effect))):
             raise ValueError('application handoff enclosing authority is invalid')
 
     def component(self, plan: FinalGatePlan) -> ProtectedApplyComponent:
@@ -166,9 +168,19 @@ class ProtectedApplicationAuthorityHandoffComponent:
         return credential, runtime, external
 
     def classify(self, plan: FinalGatePlan) -> ComponentObservation:
-        guard = self._guard(plan)
         component = self.component(plan)
         view = self.journal.read_application_recovery_view(plan, component, ordinal=self.ordinal)
+        terminal = self.journal.read_application_handoff_terminal(plan, component, ordinal=self.ordinal)
+        if terminal is not None:
+            assert view is not None
+            observed = self.observe_completed_effect(plan, view, terminal)
+            if (observed.state is not ComponentState.EXACT or observed.evidence_digest != terminal.evidence_digest
+                    or observed.observed_epoch != terminal.observed_epoch
+                    or self.journal.read_application_handoff_terminal(plan, component, ordinal=self.ordinal) != terminal
+                    or self.journal.read_application_recovery_view(plan, component, ordinal=self.ordinal) != view):
+                raise RuntimeError('completed application handoff effect or journal changed')
+            return observed
+        guard = self._guard(plan)
         credential, runtime, external = self._inputs(plan, view)
         if self._guard(plan) != guard:
             raise RuntimeError('application handoff original guard changed during classification')

@@ -50,6 +50,27 @@ END
 """
 
 
+def application_public_definer_references() -> tuple[tuple[str, str, str], ...]:
+    """Reviewed public definer identities; not callable grants or transfer authority."""
+    # Exact prosrc hashes from application migrations 0127 and 0132. Real
+    # migration-to-handoff tests verify these pins; the installed wheel must
+    # not import application migrations, which are deployment image payload.
+    # Never adopt an arbitrary live SECURITY DEFINER body under a stronger owner.
+    return (
+        ("loom_drop_trial_writer_triggers", hashlib.sha256(_BODY.encode()).hexdigest(), "void"),
+        (
+            "loom_close_protected_runtime_trial_claim",
+            "e3dcf5b0e35a49c7c048b8ae298212ee5c13cebc8b6bf9b64444bd2278e15044",
+            "trigger",
+        ),
+        (
+            "loom_transform_protected_runtime_trial_requeue",
+            "764078e4f54716642d962a293f5291eb76381ed02867e9fa02bfdb5f464e00ef",
+            "trigger",
+        ),
+    )
+
+
 def application_trigger_owner_handoff_ddl(
     *, previous_owner: str, application_owner: str, guard_owner: str,
     coordination_guard: ApplicationDatabaseCoordinationGuard | None = None,
@@ -76,23 +97,7 @@ def application_trigger_owner_handoff_ddl(
         re.fullmatch(r"[a-z][a-z0-9_]{0,62}", role) is None for role in roles
     ):
         raise ValueError("application trigger handoff roles are invalid")
-    # Exact prosrc hashes from application migrations 0127 and 0132. Real
-    # migration-to-handoff tests verify these pins; the installed wheel must
-    # not import application migrations, which are deployment image payload.
-    # Never adopt an arbitrary live SECURITY DEFINER body under a stronger owner.
-    definers: tuple[tuple[str, str, str], ...] = (
-        ("loom_drop_trial_writer_triggers", hashlib.sha256(_BODY.encode()).hexdigest(), "void"),
-        (
-            "loom_close_protected_runtime_trial_claim",
-            "e3dcf5b0e35a49c7c048b8ae298212ee5c13cebc8b6bf9b64444bd2278e15044",
-            "trigger",
-        ),
-        (
-            "loom_transform_protected_runtime_trial_requeue",
-            "764078e4f54716642d962a293f5291eb76381ed02867e9fa02bfdb5f464e00ef",
-            "trigger",
-        ),
-    )
+    definers = application_public_definer_references()
     if baseline:
         definers = definers[1:]
     expected = sql.SQL(", ").join(

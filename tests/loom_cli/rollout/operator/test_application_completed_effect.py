@@ -6,7 +6,11 @@ import pytest
 
 from loom.application_completed_authority import ApplicationOwnerSuccessor
 from loom_cli.rollout.operator.protected_application_restoration import _bound_evidence
-from loom_cli.rollout.operator.protected_apply_journal import ComponentObservation, ComponentState, ComponentTerminal
+from loom_cli.rollout.operator.protected_apply_journal import (
+    ComponentObservation,
+    ComponentState,
+    ComponentTerminal,
+)
 from loom_cli.rollout.operator.staging_mutation_guard import MutationGuardEvidence
 from tests.loom_cli.rollout.operator.test_application_restoration import _inputs
 
