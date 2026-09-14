@@ -1984,7 +1984,15 @@ class ProtectedApplyJournal:
     def recover_pending_application_handoff(
         self, plan: FinalGatePlan, components: Sequence[ProtectedApplyComponent], *, guard: MutationGuardEvidence,
     ) -> ComponentTerminal | None:
-        """Resume only the saved handoff, before ordinary database preflight reads.
+        """Compatibility entrypoint restricted to the original ownership handoff."""
+        return self.recover_pending_application_operation(plan, components, guard=guard,
+                                                          component_id="application-ownership-handoff")
+
+    def recover_pending_application_operation(
+        self, plan: FinalGatePlan, components: Sequence[ProtectedApplyComponent], *, guard: MutationGuardEvidence,
+        component_id: str | None = None,
+    ) -> ComponentTerminal | None:
+        """Resume the sole saved application operation before ordinary DB reads.
 
         The installed caller must first verify the original supervised guard's
         liveness, fresh +1 epoch and enclosing writer/process authority. This
@@ -1992,12 +2000,23 @@ class ProtectedApplyJournal:
         moves the handoff to ordinal zero, or runs other component callbacks.
         Normal preflight and the full component chain must still run afterward.
         """
-        from .protected_application_guard_retention import retained_application_guard_for_resume
+        from .protected_application_guard_retention import (
+            _read_pending_retention,
+            retained_application_guard_for_resume,
+        )
 
         if self._active_apply is not None:
             raise ProtectedApplyJournalError("application early recovery cannot nest active apply")
         if plan.request_id != self.request_id or plan.attempt_number != self.attempt_number:
             raise ProtectedApplyJournalError("application early recovery plan changed")
+        if component_id not in {None, "application-ownership-handoff", "database-migration"}:
+            raise ProtectedApplyJournalError("application early recovery selection is invalid")
+        pending = _read_pending_retention(self.attempt_root.parents[3], request_id=self.request_id,
+                                          service_uid=self.service_uid, guard=guard)
+        if pending is None:
+            return None
+        if component_id is not None and component_id != pending.intent.component_id:
+            raise ProtectedApplyJournalError("application early recovery pending component changed")
 
         def require_retention() -> bool:
             original = retained_application_guard_for_resume(
@@ -2010,6 +2029,9 @@ class ProtectedApplyJournal:
                 return False
             if original != guard:
                 raise ProtectedApplyJournalError("application early recovery original guard changed")
+            if _read_pending_retention(self.attempt_root.parents[3], request_id=self.request_id,
+                    service_uid=self.service_uid, guard=guard) != pending:
+                raise ProtectedApplyJournalError("application early recovery pending operation changed")
             return True
 
         if not require_retention():
@@ -2018,7 +2040,7 @@ class ProtectedApplyJournal:
                 or len({component.component_id for component in components}) != len(components)):
             raise ProtectedApplyJournalError("application early recovery chain is invalid")
         selected = [(ordinal, component) for ordinal, component in enumerate(components)
-                    if component.component_id == "application-ownership-handoff"]
+                    if component.component_id == pending.intent.component_id]
         epochs = [ordinal for ordinal, component in enumerate(components)
                   if component.component_id == "mutation-epoch-claim"]
         if (len(selected) != 1 or len(epochs) != 1 or epochs[0] >= selected[0][0]
@@ -2026,6 +2048,8 @@ class ProtectedApplyJournal:
                 or selected[0][1].terminal_recovery_authority is not None):
             raise ProtectedApplyJournalError("application early recovery original ordering changed")
         ordinal, component = selected[0]
+        if ComponentIntent.build(plan, component, ordinal) != pending.intent:
+            raise ProtectedApplyJournalError("application early recovery original component intent changed")
         # Deliberately no _ensure, O_CREAT, directory creation or new lock name.
         lock_fd = os.open(self.lock_path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
         try:
@@ -2042,7 +2066,8 @@ class ProtectedApplyJournal:
                     continue
                 if ComponentIntent.from_dict(self._read(root / "intent.json")) != ComponentIntent.build(plan, item, index):
                     raise ProtectedApplyJournalError("application early recovery chain intent changed")
-            if self.read_application_recovery_view(plan, component, ordinal=ordinal) is None:
+            if (component.component_id == "application-ownership-handoff"
+                    and self.read_application_recovery_view(plan, component, ordinal=ordinal) is None):
                 raise ProtectedApplyJournalError("application early recovery original intent disappeared")
 
             def classify(bound: FinalGatePlan) -> ComponentObservation:
