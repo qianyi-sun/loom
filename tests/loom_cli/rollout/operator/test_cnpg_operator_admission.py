@@ -54,14 +54,14 @@ def _pod():
 
 
 class Runner:
-    environment = {'KUBECONFIG': '/fixture'}
     def __init__(self):
+        self.environment = {'KUBECONFIG': '/fixture'}
         self.pod = _pod()
         self.override = b''
         self.change = None
         self.inspections = []
     def capture_stdout(self, argv, **kwargs):
-        if 'pods' in argv:
+        if '--raw=/api/v1/namespaces/cnpg-system/pods' in argv:
             return json.dumps({'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {'resourceVersion': '200'}, 'items': [self.pod]}).encode()
         assert 'cnpg-controller-manager-config' in argv
         return self.override
@@ -132,3 +132,65 @@ def test_operator_inventory_ignores_only_verified_terminal_container_records():
         select_cnpg_operator([pod, terminal])
     terminal['status']['containerStatuses'][0]['state'] = {'terminated': {'exitCode': 137}}
     assert select_cnpg_operator([pod, terminal]).pod_uid == pod['metadata']['uid']
+
+
+@pytest.mark.parametrize('change', ['node', 'container', 'pod', 'uid', 'extra'])
+def test_host_observer_refuses_unbounded_input_before_any_runtime_command(monkeypatch, change):
+    from loom_cli.rollout.operator import protected_cnpg_operator_host as host
+
+    request = {'node_name': 'trt-eai-oldlab-4', 'pod_name': _pod()['metadata']['name'],
+               'pod_uid': str(uuid4()), 'container_id': 'a' * 64}
+    key, value = {'node': ('node_name', 'trt-eai-oldlab-2'), 'container': ('container_id', 'x;command'),
+        'pod': ('pod_name', '../foreign'), 'uid': ('pod_uid', 'missing'),
+        'extra': ('command', 'untrusted')}[change]
+    request[key] = value
+    monkeypatch.setattr(host.subprocess, 'run', lambda *args, **kwargs: pytest.fail('refused request reached runtime'))
+    with pytest.raises(RuntimeError, match='CNPG operator'):
+        host.inspect_cnpg_operator_host(request)
+
+
+@pytest.mark.parametrize('change', [None, 'bytes', 'size', 'during-read'])
+def test_host_binary_observation_reads_actual_bytes_and_refuses_inflight_change(tmp_path, monkeypatch, change):
+    import hashlib
+
+    from loom_cli.rollout.operator import protected_cnpg_operator_host as host
+
+    expected = b'admitted executable bytes'
+    executable = tmp_path / 'executable'
+    executable.write_bytes(expected)
+    monkeypatch.setattr(host, '_BINARY_SHA256', hashlib.sha256(expected).hexdigest())
+    monkeypatch.setattr(host, '_BINARY_SIZE', len(expected))
+    if change == 'bytes':
+        executable.write_bytes(b'x' * len(expected))
+    elif change == 'size':
+        executable.write_bytes(expected + b'x')
+    elif change == 'during-read':
+        digest = host.hashlib.file_digest
+        def changed(stream, algorithm):
+            result = digest(stream, algorithm)
+            executable.write_bytes(b'x' * len(expected))
+            return result
+        monkeypatch.setattr(host.hashlib, 'file_digest', changed)
+    if change:
+        with pytest.raises(RuntimeError, match='CNPG operator'):
+            host._binary(executable)
+    else:
+        device, inode, digest = host._binary(executable)
+        assert (device, inode) == (executable.stat().st_dev, executable.stat().st_ino)
+        assert digest == hashlib.sha256(expected).hexdigest()
+
+
+def test_host_process_admission_refuses_a_second_process_in_operator_namespace(tmp_path, monkeypatch):
+    from loom_cli.rollout.operator import protected_cnpg_operator_host as host
+
+    monkeypatch.setattr(host, '_PROC', tmp_path)
+    for pid, namespace in ((1000, 'pid:[100]'), (2000, 'pid:[200]')):
+        path = tmp_path / str(pid) / 'ns'
+        path.mkdir(parents=True)
+        (path / 'pid').symlink_to(namespace)
+    host._only_operator_in_namespace(1000, 'pid:[100]')
+    path = tmp_path / '2000/ns/pid'
+    path.unlink()
+    path.symlink_to('pid:[100]')
+    with pytest.raises(RuntimeError, match='CNPG operator'):
+        host._only_operator_in_namespace(1000, 'pid:[100]')
