@@ -12,9 +12,8 @@ from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
 
 
 class Runner:
-    environment = {"KUBECONFIG": "/var/lib/loom-staging-rollout/kubeconfig"}
-
     def __init__(self):
+        self.environment = {"KUBECONFIG": "/var/lib/loom-staging-rollout/kubeconfig"}
         self.objects = {}
         self.pods = []
         self.events = []
@@ -49,7 +48,9 @@ class Runner:
 
 
 def _resources(tmp_path):
-    from loom_cli.rollout.operator.protected_application_migration_resources import ProtectedApplicationMigrationResources
+    from loom_cli.rollout.operator.protected_application_migration_resources import (
+        ProtectedApplicationMigrationResources,
+    )
 
     guard = _guard(_plan(tmp_path))
     job = yaml.safe_load(render_migration_manifest(image_tag="staging-aaaaaaa", namespace="loom-staging",
