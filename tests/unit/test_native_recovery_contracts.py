@@ -53,7 +53,7 @@ def test_legacy_locator_remains_readable_but_is_not_final_recovery_evidence():
             expected_preparation=record.preparation)
 
 
-@pytest.mark.parametrize("fault", ["node", "job", "path", "uid", "gid", "overlap", "root", "overflow", "boolean", "empty", "extra"])
+@pytest.mark.parametrize("fault", ["node", "job", "no-slurm", "nested-job", "path", "uid", "gid", "overlap", "root", "overflow", "boolean", "empty", "extra"])
 def test_final_record_rejects_mismatched_or_unsafe_facts(fault):
     module, record = observation()
     document = json.loads(record.model_dump_json())
@@ -61,6 +61,10 @@ def test_final_record_rejects_mismatched_or_unsafe_facts(fault):
         document["preparation"]["node_id"] = "foreign-node"
     elif fault == "job":
         document["preparation"]["cgroup_path"] = "/slurm/job_999"
+    elif fault == "no-slurm":
+        document["preparation"]["cgroup_path"] = "/foreign/job_101"
+    elif fault == "nested-job":
+        document["preparation"]["cgroup_path"] = "/slurm/job_999/job_101"
     elif fault == "path":
         document["preparation"]["locator"]["directory"] = "/scratch/../foreign"
     elif fault in {"uid", "gid"}:
@@ -87,3 +91,14 @@ def test_matching_hash_does_not_accept_noncanonical_or_oversized_record():
         with pytest.raises(ValueError):
             module.read_final_native_recovery(wire, expected_sha256=hashlib.sha256(wire).hexdigest(),
                 expected_preparation=record.preparation)
+
+
+@pytest.mark.parametrize("field,value", [("launch_profile_sha256", "f" * 64),
+    ("node_configuration_sha256", "f" * 64), ("cgroup_inode", 999), ("cgroup_mount_id", 99)])
+def test_protected_preparation_drift_is_not_overridden_by_local_digest(field, value):
+    module, record = observation()
+    wire = canonical_executable_bytes(record)
+    expected = record.preparation.model_copy(update={field: value})
+    with pytest.raises(ValueError, match="preparation"):
+        module.read_final_native_recovery(wire, expected_sha256=hashlib.sha256(wire).hexdigest(),
+            expected_preparation=expected)
