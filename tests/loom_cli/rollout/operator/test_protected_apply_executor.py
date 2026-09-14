@@ -777,6 +777,69 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
     assert all(not call.endswith("-apply") for call in convergence_calls)
 
 
+def test_separated_owner_apply_and_convergence_share_original_component_order(tmp_path):
+    from loom_cli.rollout.operator.protected_apply_journal import ProtectedApplyJournal
+
+    state = tmp_path / "state"
+    _attempt(state)
+    plan = _plan(tmp_path)
+    runner = Runner(revision="0069", epoch=7)
+    runner.plan_digest = plan.plan_digest
+    applied = set()
+    bindings = []
+
+    class Factory:
+        def new_journal(self, candidate):
+            return ProtectedApplyJournal(state, request_id=candidate.request_id,
+                attempt_number=candidate.attempt_number, service_uid=os.geteuid())
+
+        def components(self, candidate, *, journal, ordinal):
+            assert candidate == plan and ordinal == 2
+            bindings.append((journal, ordinal))
+
+            def build(name):
+                def classify(_):
+                    runner.calls.append(name + "-owner-read")
+                    return ComponentObservation(ComponentState.EXACT if name in applied else ComponentState.READY,
+                        "e" * 64, plan.starting_mutation_epoch + 1)
+
+                def apply(_):
+                    if name == "database-migration":
+                        assert "application-ownership-handoff" in applied
+                        runner.revision = plan.migration_target_revision
+                    applied.add(name)
+                    runner.calls.append(name + "-owner-apply")
+
+                return ProtectedApplyComponent(name, "a" * 64, "b" * 64, classify, apply)
+
+            return tuple(build(name) for name in ("application-ownership-handoff", "database-migration"))
+
+    factory = Factory()
+    credentials = {"gx10-01c7": CredentialTransport("gx10-01c7")}
+    common = dict(service_uid=os.geteuid(), runner=runner, gb10_transport=GB10Fleet(),
+        environment_state_transport=EnvironmentState(), candidate_root=tmp_path / "candidate",
+        staging_capacity_runtime=StagingCapacityRuntime(runner.calls), external_supervisor_transport=ExternalSupervisors(),
+        external_supervisor_execution_host="gx10-01c7", external_supervisor_credential_transports=credentials,
+        external_supervisor_credential_identities=_credential_identities(credentials),
+        production_defaults_request=_defaults_request, application_factory=factory)
+    executor = MigrationEpochProtectedApplyExecutor(state_root=state, **common)
+    journal = factory.new_journal(plan)
+    components = executor.build_components(plan, journal=journal)
+    assert tuple(c.component_id for c in components)[1:4] == (
+        "mutation-epoch-claim", "application-ownership-handoff", "database-migration")
+    assert runner.calls == [] and bindings == [(journal, 2)]
+    assert executor("final.protected-apply", CheckOperation.APPLY, plan).ready
+    assert runner.calls.index("epoch-apply") < runner.calls.index("application-ownership-handoff-owner-apply")
+    assert runner.calls.index("application-ownership-handoff-owner-apply") < runner.calls.index("database-migration-owner-apply")
+    before = list(runner.calls)
+    assert KubernetesProtectedConvergenceExecutor(**common)("final.convergence", CheckOperation.VERIFY, plan).ready
+    assert "application-ownership-handoff-owner-read" in runner.calls[len(before):]
+    assert "database-migration-owner-read" in runner.calls[len(before):]
+    assert "migration-read" not in runner.calls and "migration-apply" not in runner.calls
+    assert all(j.root == journal.root and ordinal == 2 for j, ordinal in bindings)
+    assert all(not call.endswith("-apply") for call in runner.calls[len(before):])
+
+
 def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
     runner = Runner(revision="0069", epoch=9)
