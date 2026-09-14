@@ -113,3 +113,5 @@ def test_installed_future_rollout_selects_historical_observer_and_same_origin_fo
         base=KubernetesProtectedStagingCapacityDatabaseComponent(runner, "registry.example", lambda: {}), seed_source=lambda: {})
     assert capacity.apply.__self__.handoff_plan_source() == original
     assert not journal.root.exists()
+    with pytest.raises(ValueError, match="ordinal"):
+        factory.components(plan, journal=journal, ordinal=1)
