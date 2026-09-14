@@ -44,3 +44,35 @@ async def test_recovery_admission_requires_live_exact_claim_and_committed_boot(p
                     worker_credential="x" * 43 if boundary == "credential" else CREDENTIAL)
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.native_recovery_records")) == 0
+
+
+@pytest.mark.parametrize("boundary", ["exact", "disabled", "credential", "http"])
+async def test_installed_admission_client_uses_authenticated_no_store_readback(prepared_input, owner_sessions, tmp_path, monkeypatch, boundary):
+    import httpx
+
+    from tests.integration.test_personal_dev_build_guard_http import application
+    from tests.unit.test_capacity_build_admission_client import client_for
+
+    contracts, claim, profile, prepared, _final = await recovery_input(prepared_input, owner_sessions, monkeypatch)
+    app = application(prepared_input, tmp_path)
+    app.state.personal_dev_build_admission_mode = "disabled" if boundary == "disabled" else "native-execution"
+    request = contracts.NativeRecoveryAdmissionRequestV1(claim=claim, node_id=prepared.node_id, boot_id=prepared.boot_id)
+    responses = []
+
+    async def observe(response):
+        responses.append(response)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), event_hooks={"response": [observe]}) as http:
+        client = client_for(http, claim)
+        client._token = "executor-secret"
+        if boundary == "http":
+            client._origin = "http://management.test"
+        if boundary == "exact":
+            result = await client.read_recovery_admission(request, worker_credential=CREDENTIAL)
+            assert result.request == request and result.profile == profile
+            assert responses[-1].headers["cache-control"] == "no-store"
+        else:
+            from loom_capacity_executor.build_admission_client import BuildAdmissionTransportError
+
+            with pytest.raises(BuildAdmissionTransportError):
+                await client.read_recovery_admission(request, worker_credential="x" * 43 if boundary == "credential" else CREDENTIAL)
