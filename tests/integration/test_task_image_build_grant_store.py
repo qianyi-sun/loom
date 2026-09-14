@@ -10,6 +10,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.db.schema import TaskImageBuildGrant, TaskImageBuildGrantEvent
+from loom_control_plane import task_image_build_grants as grant_store
 from loom_control_plane.task_image_build_environment import (
     RootlessBuildResourceRequestV1,
     SlurmBuildEnvironmentPolicyV1,
@@ -577,6 +578,102 @@ async def test_protocol_violation_cannot_bind_after_partial_cancellation(
         row = await session.get(TaskImageBuildGrant, grant.grant_id)
         assert row is not None and row.state == "revoked"
         assert row.bound_at is None and row.slurm_job_id is None
+
+
+@pytest.mark.parametrize("initial_state", ["submitting", "bound", "released", "revoked"])
+async def test_expired_grant_cleanup_preserves_history_without_execution_authority(
+    grant_session: async_sessionmaker[AsyncSession],
+    initial_state: str,
+) -> None:
+    cleanup = getattr(grant_store, "reconcile_task_image_build_cleanup", None)
+    assert cleanup is not None, "expired grants need a cleanup-only transition"
+    grant = _grant(expires_at=_NOW + timedelta(seconds=10))
+    async with grant_session() as session:
+        await issue_task_image_build_grant(
+            session, environment="staging", grant=grant, ambiguity_settle_seconds=1, now=_NOW
+        )
+        await begin_task_image_build_submission(session, grant_id=grant.grant_id, now=_NOW)
+        if initial_state in {"bound", "released"}:
+            await reconcile_task_image_build_submission(
+                session,
+                grant_id=grant.grant_id,
+                inventory=_inventory(grant, job_id="12345", state="pending", held=True),
+                now=_NOW,
+            )
+        if initial_state == "released":
+            await record_task_image_build_release(
+                session, grant_id=grant.grant_id, job_id="12345", now=_NOW
+            )
+        if initial_state == "revoked":
+            await reconcile_task_image_build_submission(
+                session,
+                grant_id=grant.grant_id,
+                inventory=_inventory(grant, job_id="12345", state="running", held=False),
+                now=_NOW,
+            )
+        await session.commit()
+        inventory = _inventory(
+            grant,
+            job_id="12345",
+            state="running",
+            held=False,
+            observed_at=grant.authority.expires_at,
+        )
+        decision = await cleanup(
+            session, grant_id=grant.grant_id, inventory=inventory, now=inventory.observed_at
+        )
+        assert decision.action == "cancel_then_reconcile"
+        assert decision.cancel_job_ids == ("12345",)
+        assert decision.bind_job_id is None
+        await session.commit()
+    async with grant_session() as session:
+        row = await session.get(TaskImageBuildGrant, grant.grant_id)
+        assert row is not None and row.state == "revoked"
+        assert row.released_at == (_NOW if initial_state == "released" else None)
+        assert row.bound_at == (_NOW if initial_state in {"bound", "released"} else None)
+        assert row.slurm_job_id == ("12345" if initial_state in {"bound", "released"} else None)
+        sequence = row.journal_sequence
+        replay = await cleanup(
+            session, grant_id=grant.grant_id, inventory=inventory, now=inventory.observed_at
+        )
+        assert replay == decision
+        assert row.journal_sequence == sequence
+        for operation in (begin_task_image_build_submission, record_task_image_build_release):
+            kwargs = {"job_id": "12345"} if operation is record_task_image_build_release else {}
+            with pytest.raises(TaskImageBuildGrantConflictError):
+                await operation(
+                    session, grant_id=grant.grant_id, now=inventory.observed_at, **kwargs
+                )
+
+
+async def test_cleanup_cannot_retire_live_authority_or_target_foreign_jobs(
+    grant_session: async_sessionmaker[AsyncSession],
+) -> None:
+    cleanup = getattr(grant_store, "reconcile_task_image_build_cleanup", None)
+    assert cleanup is not None, "expired grants need a cleanup-only transition"
+    grant = _grant(expires_at=_NOW + timedelta(seconds=10))
+    async with grant_session() as session:
+        await issue_task_image_build_grant(
+            session, environment="staging", grant=grant, ambiguity_settle_seconds=1, now=_NOW
+        )
+        await begin_task_image_build_submission(session, grant_id=grant.grant_id, now=_NOW)
+        await session.commit()
+        inventory = _inventory(grant, job_id="12345", state="pending", held=True)
+        with pytest.raises(TaskImageBuildGrantConflictError):
+            await cleanup(session, grant_id=grant.grant_id, inventory=inventory, now=_NOW)
+        foreign = inventory.model_copy(
+            update={
+                "observed_at": grant.authority.expires_at,
+                "jobs": (inventory.jobs[0].model_copy(update={"comment": "foreign"}),),
+            }
+        )
+        decision = await cleanup(
+            session, grant_id=grant.grant_id, inventory=foreign, now=foreign.observed_at
+        )
+        assert decision.action == "wait"
+        assert decision.cancel_job_ids == () and decision.bind_job_id is None
+        row = await session.get(TaskImageBuildGrant, grant.grant_id)
+        assert row is not None and row.state == "revoked"
 
 
 async def test_revoked_grant_does_not_cancel_foreign_inventory(
