@@ -1327,7 +1327,7 @@ def hold_request_guard(
     acquired = False
     unsafe_loss = False
     ready_published = False
-    application_retention_seen = False
+    application_retention_seen: set[str] = set()
     ready: MutationGuardEvidence | None = None
     try:
         _require_before_readiness_deadline(
@@ -1484,9 +1484,8 @@ def hold_request_guard(
                         if application_guard_is_retained(
                             config.state_root, request_id=request_id, service_uid=service_uid,
                             guard=ready, acknowledge=True,
-                            require_record=application_retention_seen,
+                            observed_components=application_retention_seen,
                         ):
-                            application_retention_seen = True
                             if now >= deadline_monotonic:
                                 unsafe_loss = True
                                 raise MutationGuardError(

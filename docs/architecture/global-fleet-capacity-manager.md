@@ -609,6 +609,16 @@ removes the password; the separate closed-admission retirement step must still
 terminate surviving owner sessions and remove the role. These SQL phases do not
 deliver a Secret, run a migration Job or publish lifecycle completion.
 
+Ownership handoff and application migration use separate append-only guard
+retention requests and acknowledgements. The guard validates both records before
+acknowledging the sole pending operation, and remembers every component it has
+observed. Deleting a migration's retention files cannot be masked by a completed
+handoff. Each component requires its own acknowledgement before sensitive work;
+only its bound terminal releases that retention. A migration may retain the
+original guard or the exact successor at the already-claimed epoch. A completed
+handoff's historical reader checks its own retention independently while the
+migration keeps the current guard alive.
+
 The read-only CNPG operator observer admits the fixed 1.25.1 command, environment,
 security context, volume projections and absent configuration overrides. It brackets
 a host-process observation with unchanged Kubernetes inputs. The host reader binds
