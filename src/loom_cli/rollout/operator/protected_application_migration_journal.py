@@ -92,7 +92,7 @@ class ApplicationMigrationJournal:
     ordinal: int
 
     def __post_init__(self) -> None:
-        if (self.component.component_id != "database-migration" or type(self.ordinal) is not int
+        if (self.component.component_id not in {"database-migration", "staging-capacity-database"} or type(self.ordinal) is not int
                 or not 0 <= self.ordinal < 32 or self.plan.request_id != self.journal.request_id
                 or self.plan.attempt_number != self.journal.attempt_number
                 or FinalGatePlan.from_dict(self.plan.to_dict()) != self.plan):
@@ -100,7 +100,21 @@ class ApplicationMigrationJournal:
 
     @property
     def root(self) -> Path:
-        return self.journal.root / f"{self.ordinal:02d}-database-migration"
+        return self.journal.root / f"{self.ordinal:02d}-{self.component.component_id}"
+
+    @property
+    def capacity_bootstrap(self) -> bool:
+        return self.component.component_id == "staging-capacity-database"
+
+    @property
+    def source_revision(self) -> str:
+        return "pending" if self.capacity_bootstrap else self.plan.schema_revision
+
+    @property
+    def target_revision(self) -> str:
+        # Capacity completion includes the exact desired authority and runtime
+        # credentials, not only its guard Alembic version.
+        return "exact" if self.capacity_bootstrap else self.plan.migration_target_revision
 
     @property
     def intent(self) -> ComponentIntent:
@@ -128,7 +142,7 @@ class ApplicationMigrationJournal:
                 raise ValueError("application migration history binding changed")
             events.append(event)
             previous = event.event_digest
-        _validate_history(self.plan, events)
+        _validate_history(self.plan, events, capacity=self.capacity_bootstrap)
         for path in paths:
             self.journal._sync_application_recovery(self.root, path.name)
         if sorted(self.root.glob("migration-event-*.json")) != paths:
@@ -146,7 +160,7 @@ class ApplicationMigrationJournal:
         event = ApplicationMigrationEvent.build(sequence=len(events), phase=phase, payload=payload,
             intent_digest=intent.intent_digest, guard_digest=guard.evidence_digest,
             previous_digest=events[-1].event_digest if events else intent.intent_digest)
-        _validate_history(self.plan, (*events, event))
+        _validate_history(self.plan, (*events, event), capacity=self.capacity_bootstrap)
         path = self.root / f"migration-event-{event.sequence:04d}.json"
         self.journal._publish_or_match(path, event.to_dict())
         observed = self.read()
@@ -160,13 +174,14 @@ def _fields(payload: Mapping[str, object], keys: set[str]) -> None:
         raise ValueError("application migration phase fields are invalid")
 
 
-def _validate_history(plan: FinalGatePlan, events: Sequence[ApplicationMigrationEvent]) -> None:
+def _validate_history(plan: FinalGatePlan, events: Sequence[ApplicationMigrationEvent], *, capacity: bool = False) -> None:
     if not events:
         return
     first = events[0]
     if first.phase != "authority":
         raise ValueError("application migration requires original authority first")
-    _fields(first.payload, {"admission", "guard", "handoff_digest", "credential_digest", "inputs_digest"})
+    _fields(first.payload, {"admission", "guard", "handoff_digest", "credential_digest", "inputs_digest"}
+        | ({"guard_owner", "guard_migrator", "runtime_role_oids", "seed_digest", "migration_digest"} if capacity else set()))
     admission = ApplicationAdmissionRecoveryRecord.from_dict(_mapping(first.payload["admission"]))
     guard = MutationGuardEvidence.from_dict(_mapping(first.payload["guard"]))
     coordination = admission.coordination_guard
@@ -182,6 +197,9 @@ def _validate_history(plan: FinalGatePlan, events: Sequence[ApplicationMigration
                 candidate_sha=guard.candidate_sha, candidate_tree=guard.candidate_tree, generation=guard.generation)
             or any(not _sha(first.payload[key]) for key in ("handoff_digest", "credential_digest", "inputs_digest"))):
         raise ValueError("application migration original authority changed")
+    capacity_oid = _capacity_authority(first, admission) if capacity else None
+    source_revision = "pending" if capacity else plan.schema_revision
+    target_revision = "exact" if capacity else plan.migration_target_revision
     previous = "authority"
     generations = 0
     phases: set[str] = set()
@@ -239,12 +257,12 @@ def _validate_history(plan: FinalGatePlan, events: Sequence[ApplicationMigration
             maintenance_peers.append(backend)
             continue
         elif phase == "abandoned":
-            if previous not in {"generation", "role", "retirement"} or "secret-dispatch" in phases:
+            if capacity or previous not in {"generation", "role", "retirement"} or "secret-dispatch" in phases:
                 raise ValueError("application migration cannot abandon delivered credentials")
             _fields(payload, set())
         elif phase == "noop":
             _fields(payload, {"revision"})
-            if previous not in {"authority", "abandoned", "complete"} or payload["revision"] != plan.migration_target_revision:
+            if previous not in {"authority", "abandoned", "complete"} or payload["revision"] != target_revision:
                 raise ValueError("application migration no-op binding changed")
         else:
             if _NEXT.get(phase) != previous:
@@ -256,7 +274,8 @@ def _validate_history(plan: FinalGatePlan, events: Sequence[ApplicationMigration
             elif phase == "role":
                 _fields(payload, {"oid"})
                 if (type(payload["oid"]) is not int or not 0 < _integer(payload, "oid") < 2**32
-                        or payload["oid"] in {admission.target.owner_oid, admission.target.successor_oid, coordination.role_oid}):
+                        or payload["oid"] in {admission.target.owner_oid, admission.target.successor_oid, coordination.role_oid}
+                        or (capacity_oid is not None and payload["oid"] != capacity_oid)):
                     raise ValueError("application migration role OID is invalid")
             elif phase in {"secret-dispatch", "job-dispatch"}:
                 _fields(payload, {"manifest_sha256"})
@@ -269,8 +288,28 @@ def _validate_history(plan: FinalGatePlan, events: Sequence[ApplicationMigration
             elif phase == "complete":
                 _fields(payload, {"successful", "revision"})
                 if (type(payload["successful"]) is not bool or payload["successful"] != successful
-                        or payload["revision"] not in {plan.schema_revision, plan.migration_target_revision}
-                        or (successful and payload["revision"] != plan.migration_target_revision)):
+                        or payload["revision"] not in {source_revision, target_revision}
+                        or (successful and payload["revision"] != target_revision)):
                     raise ValueError("application migration completion binding changed")
         phases.add(phase)
         previous = phase
+
+
+def _capacity_authority(event: ApplicationMigrationEvent, admission: ApplicationAdmissionRecoveryRecord) -> int:
+    """Bind permanent role OIDs before any capacity credential can be armed."""
+    owner = _mapping(event.payload["guard_owner"])
+    migrator = _mapping(event.payload["guard_migrator"])
+    runtime = _mapping(event.payload["runtime_role_oids"])
+    _fields(owner, {"role_name", "role_oid"})
+    _fields(migrator, {"role_name", "role_oid"})
+    _fields(runtime, {"loom_cap_staging_agent", "loom_cap_staging_executor",
+        "loom_cap_staging_observer", "loom_cap_staging_runtime"})
+    assert admission.coordination_guard is not None
+    oids = [owner["role_oid"], migrator["role_oid"], *runtime.values(), admission.target.owner_oid,
+        admission.target.successor_oid, admission.coordination_guard.role_oid]
+    if (owner["role_name"] != "loom_cap_staging_owner" or migrator["role_name"] != "loom_cap_staging_migrator"
+            or any(type(oid) is not int or not 0 < oid < 2**32 for oid in oids)
+            or len(set(oids)) != 9
+            or any(not _sha(event.payload[key]) for key in ("seed_digest", "migration_digest"))):
+        raise ValueError("application capacity original role authority changed")
+    return _integer(migrator, "role_oid")
