@@ -22,7 +22,7 @@ from tests.integration.test_personal_dev_build_guard_execution import store
 from tests.integration.test_personal_dev_build_guard_registration import CREDENTIAL
 
 
-async def retained_attempt(values, owner_sessions, monkeypatch, *, finalized=True):
+async def retained_attempt(values, owner_sessions, monkeypatch, *, finalized=True, credential=CREDENTIAL):
     from tests.integration import test_personal_dev_build_guard_registration as registration
     from tests.integration.test_personal_dev_build_guard_terminal import terminal_input
 
@@ -34,16 +34,16 @@ async def retained_attempt(values, owner_sessions, monkeypatch, *, finalized=Tru
         return None, None, None, binding, None
 
     monkeypatch.setattr(registration, "bound_input", physical)
-    contracts, claim, profile, preparation, final = await recovery_input(values, owner_sessions, monkeypatch)
+    contracts, claim, profile, preparation, final = await recovery_input(values, owner_sessions, monkeypatch, credential=credential)
     factory, _engine, installation, *_ = values
     async with factory.begin() as session:
         prepared = await store(session, installation).publish_recovery(
-            contracts.NativeRecoveryPublicationV1(claim=claim, record=preparation), worker_credential=CREDENTIAL)
+            contracts.NativeRecoveryPublicationV1(claim=claim, record=preparation), worker_credential=credential)
     finalized_receipt = None
     if finalized:
         async with factory.begin() as session:
             finalized_receipt = await store(session, installation).publish_recovery(
-                contracts.NativeRecoveryPublicationV1(claim=claim, record=final), worker_credential=CREDENTIAL)
+                contracts.NativeRecoveryPublicationV1(claim=claim, record=final), worker_credential=credential)
     return claim, profile, prepared, finalized_receipt, witnesses[0]
 
 
@@ -198,7 +198,7 @@ async def test_terminal_recovery_rejects_mutated_release_response(prepared_input
             return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
         monkeypatch.setattr(session, "scalar", corrupted)
-        with pytest.raises(ValueError, match=r"release|binding"):
+        with pytest.raises(ValueError, match=r"release|binding|response"):
             await NativeTerminalRecoveryStore(session, installation=installation).read(claim.operation_id)
 
 
@@ -224,13 +224,17 @@ async def test_terminal_discovery_pages_and_resets_across_retried_allocations(pr
     from loom_capacity_build_guard.native_terminal_recovery import NativeTerminalRecoveryStore
     from loom_capacity_build_guard.terminal_recovery import BuildTerminalRecoveryCoordinator
     from tests.integration import test_personal_dev_build_guard_terminal as terminal_fixture
-    from tests.integration.test_personal_dev_build_guard_hold_retirement import release_witness, retirement
+    from tests.integration.test_personal_dev_build_guard_hold_retirement import (
+        release_witness,
+        retirement,
+    )
     from tests.integration.test_personal_dev_build_guard_release_outbox import outbox
 
     factory, _engine, installation, plan, source, platform = prepared_input
 
     async def settle(values, *, retire_hold):
-        claim, _profile, _prepared, _final, terminal = await retained_attempt(values, owner_sessions, monkeypatch)
+        claim, _profile, _prepared, _final, terminal = await retained_attempt(values, owner_sessions, monkeypatch,
+            credential="a" * 43 if retire_hold else "z" * 43)
 
         class Manager:
             async def get_build_terminal_inventory_evidence(self, intent_id):

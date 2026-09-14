@@ -62,6 +62,9 @@ class NativeTerminalRecoveryV1(StrictV1Model):
             or canonical_digest(self.host) != prepared.node_configuration_sha256
             or self.host.node_id != prepared.node_id or self.host.boot_id != prepared.boot_id
             or self.host.original_uid != prepared.original_uid or self.host.original_gid != prepared.original_gid
+            or self.release.request_digest != self.release.protected_release_sha256
+            or self.release.bootstrap_registration_epoch != 1
+            or self.release.protected_registration_epoch != 2 or self.release.release_epoch != 4
             or not self.release.bootstrap_revoked or not self.release.worker_credentials_revoked
             or self.release.live_claim_count != 0 or self.release.claim_high_water != 1):
             raise ValueError("terminal recovery historical binding changed")
@@ -132,6 +135,7 @@ class NativeTerminalRecoveryStore:
             result = NativeTerminalRecoveryV1.model_validate_json(returned)
             if (canonical_bytes(result).decode("ascii") != returned
                 or result.profile.installation_id != self._installation.id
+                or result.release.reporter_incarnation != self._installation.document.reporter_incarnation
                 or result.preparation.request.claim.operation_id != claim_operation_id):
                 raise ValueError("terminal recovery response changed")
             return result
