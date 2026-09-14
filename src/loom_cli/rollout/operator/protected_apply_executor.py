@@ -688,6 +688,39 @@ class MigrationEpochProtectedApplyExecutor:
     ) -> FinalGateResult:
         if check_id != "final.protected-apply" or operation is not CheckOperation.APPLY:
             raise ValueError("protected apply executor operation is invalid")
+        journal = ProtectedApplyJournal(
+            self.state_root, request_id=plan.request_id, attempt_number=plan.attempt_number,
+            service_uid=self.service_uid,
+        )
+        components = self.build_components(plan, journal=journal)
+        terminals = journal.execute(plan, components)
+        observed_epoch = max(terminal.observed_epoch for terminal in terminals.values())
+        if observed_epoch != plan.starting_mutation_epoch + 1:
+            raise RuntimeError("protected apply component chain did not advance one epoch")
+        return FinalGateResult(
+            check_id=check_id,
+            operation=operation,
+            candidate_sha=plan.candidate_sha,
+            attestation_digest=plan.attestation_digest,
+            observed_epoch=observed_epoch,
+            evidence_digest=_terminal_evidence_digest(terminals),
+            protected_mutation=True,
+            blockers={},
+        )
+
+    def build_components(
+        self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal,
+    ) -> tuple[ProtectedApplyComponent, ...]:
+        """Build the full original chain without classification or mutation.
+
+        Active handoff closures and the enclosing executor share this exact journal.
+        Early recovery must use the same chain and original ordinal, even when
+        surrounding component database reads are temporarily unavailable.
+        """
+        if (journal.request_id != plan.request_id or journal.attempt_number != plan.attempt_number
+                or journal.service_uid != self.service_uid
+                or journal.attempt_root != self.state_root / "requests" / plan.request_id / "attempts" / str(plan.attempt_number)):
+            raise ValueError("protected apply component journal binding changed")
         environment = self.runner.environment
         if environment.get("KUBECONFIG") is None:
             raise ValueError("protected apply executor command environment is invalid")
@@ -799,25 +832,7 @@ class MigrationEpochProtectedApplyExecutor:
                 *external_supervisors,
             )
         )
-        terminals = ProtectedApplyJournal(
-            self.state_root,
-            request_id=plan.request_id,
-            attempt_number=plan.attempt_number,
-            service_uid=self.service_uid,
-        ).execute(plan, components)
-        observed_epoch = max(terminal.observed_epoch for terminal in terminals.values())
-        if observed_epoch != plan.starting_mutation_epoch + 1:
-            raise RuntimeError("protected apply component chain did not advance one epoch")
-        return FinalGateResult(
-            check_id=check_id,
-            operation=operation,
-            candidate_sha=plan.candidate_sha,
-            attestation_digest=plan.attestation_digest,
-            observed_epoch=observed_epoch,
-            evidence_digest=_terminal_evidence_digest(terminals),
-            protected_mutation=True,
-            blockers={},
-        )
+        return components
 
     def _staging_capacity_components(
         self,
