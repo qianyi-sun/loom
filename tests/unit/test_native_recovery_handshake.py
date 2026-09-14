@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import os
 import socket
 from importlib import import_module
 
@@ -91,3 +92,66 @@ async def test_mapped_handshake_waits_for_commit_without_credentials(tmp_path, m
         release.set()
         outer.close()
         mapped.close()
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_mapped_v3_acknowledges_before_material_and_binds_session(tmp_path, monkeypatch, failed):
+    from types import SimpleNamespace
+
+    module, spec, path, digest = recovery_spec(tmp_path)
+    events = []
+    authority, peer = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    artifact, artifact_peer = socket.socketpair()
+
+    def acknowledge(channel, **kwargs):
+        assert events == ["parent"] and channel is authority
+        assert kwargs == {"spec": spec, "runtime_spec_sha256": digest}
+        events.append("committed")
+        if failed:
+            raise ValueError("publication failed")
+        return "e" * 64
+
+    def prepare(observed):
+        assert observed == spec and events == ["parent", "committed"]
+        events.append("material")
+
+    def execute(**kwargs):
+        assert kwargs["recovery_finalization_sha256"] == "e" * 64
+        assert events == ["parent", "committed", "material", "scratch"]
+        events.append("execute")
+        return SimpleNamespace(artifact=None, supervision=SimpleNamespace(
+            client_succeeded=False, broker_reaped=True), cleanup=SimpleNamespace(confirmed=True))
+
+    monkeypatch.setenv("LISTEN_PID", str(os.getpid()))
+    monkeypatch.setenv("LISTEN_FDS", "2")
+    monkeypatch.setattr(module, "bind_native_rootless_parent", lambda **kwargs: events.append("parent") or 321)
+    monkeypatch.setattr(module, "_activation_channels", lambda: (authority, artifact))
+    monkeypatch.setattr(module, "acknowledge_mapped_recovery", acknowledge)
+    monkeypatch.setattr(module, "prepare_native_rootless_material", prepare)
+    monkeypatch.setattr(module, "capture_native_mapped_scratch", lambda spec: events.append("scratch") or object())
+    monkeypatch.setattr(module, "execute_native_build_session", execute)
+    monkeypatch.setattr(module, "clean_native_mapped_scratch", lambda spec: events.append("clean"))
+    try:
+        if failed:
+            with pytest.raises(ValueError, match="publication failed"):
+                module.run_native_mapped_runtime(path, expected_sha256=digest, expected_rootless_pid=123)
+            assert events == ["parent", "committed"]
+        else:
+            module.run_native_mapped_runtime(path, expected_sha256=digest, expected_rootless_pid=123)
+            assert events == ["parent", "committed", "material", "scratch", "execute", "clean"]
+    finally:
+        for channel in (authority, peer, artifact, artifact_peer):
+            channel.close()
+
+
+def test_mapped_scratch_accepts_exact_v3_and_revalidates_copies(tmp_path, monkeypatch):
+    module = import_module("loom_capacity_executor.native_mapped_scratch")
+    _runtime, spec, _path, _digest = recovery_spec(tmp_path)
+    from pathlib import Path
+
+    Path(spec.workspace).mkdir(mode=0o700, exist_ok=True)
+    monkeypatch.setattr(module, "_require_mapped_root", lambda: None)
+    assert module.capture_native_mapped_scratch(spec).attempt.inode == tmp_path.stat().st_ino
+    bad = spec.model_copy(update={"workspace": str(tmp_path / "elsewhere/work")})
+    with pytest.raises(ValueError):
+        module.capture_native_mapped_scratch(bad)
