@@ -13,6 +13,7 @@ import os
 import shlex
 import sys
 import tomllib
+from glob import escape
 from pathlib import Path, PurePosixPath
 from uuid import UUID
 
@@ -41,6 +42,24 @@ from loom.trial.workspace_snapshot import (
 
 _PRIVATE_PATHS = ("tests/**", "verifier/**", "solution/**", "upstream-task.toml", ".loom/**")
 _POLICY = WorkspaceStagingPolicy(_PRIVATE_PATHS, _PRIVATE_PATHS, ())
+
+
+def _agent_input_exclusions(task: TaskConfig) -> tuple[str, ...]:
+    """Keep declared build-only inputs in the controller, not the agent upload.
+
+    A dedicated context directory is supplied to the image builder. Uploading
+    it again can restore setup scripts or duplicate verifier tests the image
+    deliberately omitted. A root context is ambiguous: preserve runtime assets
+    there and omit only its Dockerfile. Image-only tasks retain ordinary inputs.
+    """
+    excluded = [".loom/**"]
+    env = task.environment
+    if env.dockerfile is not None:
+        excluded.append(escape(env.dockerfile.as_posix()))
+        context = env.docker_build_context
+        if context is not None and context != PurePosixPath("."):
+            excluded.append(escape(context.as_posix()) + "/**")
+    return tuple(excluded)
 
 
 def sandbox_driver(role: str, task: TaskConfig) -> ServiceSandboxDriver:
@@ -86,7 +105,7 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
     try:
         await materialize_workspace(
             driver=driver, task_dir=workspace, dst=task.environment.workdir, policy=_POLICY,
-            excluded_paths=(".loom/**",),
+            excluded_paths=_agent_input_exclusions(task),
         )
         instruction = _safe_workspace_path(workspace, str(task.steps[0].instruction_file)).read_text()
         try:
