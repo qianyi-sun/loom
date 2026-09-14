@@ -9,7 +9,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Completeness = Literal["complete", "partial", "unavailable"]
-ContainerRole = Literal["agent", "verifier", "sidecar"]
+ContainerRole = Literal["agent", "verifier", "sidecar", "controller", "task", "pod"]
 
 
 class ResourceCounters(BaseModel):
@@ -17,6 +17,10 @@ class ResourceCounters(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    cpu_sampled_max_nanocores: int | None = Field(default=None, ge=0)
+    memory_sampled_max_bytes: int | None = Field(default=None, ge=0)
+    filesystem_sampled_max_bytes: int | None = Field(default=None, ge=0)
+    ephemeral_storage_sampled_max_bytes: int | None = Field(default=None, ge=0)
     cpu_usage_usec: int | None = Field(default=None, ge=0)
     cpu_user_usec: int | None = Field(default=None, ge=0)
     cpu_system_usec: int | None = Field(default=None, ge=0)
@@ -55,7 +59,11 @@ class TrialResourceUsageReport(BaseModel):
     schema_version: Literal[1] = 1
     trial_id: UUID
     attempt_count: int = Field(gt=0)
-    worker_id: UUID
+    worker_id: UUID | None = None
+    execution_lease_id: UUID | None = None
+    resource_generation: int | None = Field(default=None, gt=0)
+    target_id: str | None = None
+    pod_uid: str | None = Field(default=None, min_length=1, max_length=128)
     execution_key: str = Field(pattern=r"^[0-9a-f]{64}$")
     runtime_id_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     container_role: ContainerRole
@@ -67,7 +75,7 @@ class TrialResourceUsageReport(BaseModel):
         default=None,
         pattern=r"^(?:sha256:)?[0-9a-f]{64}$",
     )
-    source: Literal["docker_stats", "provider", "unsupported"]
+    source: Literal["docker_stats", "provider", "unsupported", "kubelet_summary"]
     observation_seq: int = Field(ge=0)
     container_started_at: datetime | None = None
     first_observed_at: datetime
@@ -106,6 +114,14 @@ class TrialResourceUsageReport(BaseModel):
 
     @model_validator(mode="after")
     def _finalization_is_consistent(self) -> TrialResourceUsageReport:
+        native = (self.execution_lease_id, self.resource_generation, self.target_id, self.pod_uid)
+        if self.worker_id is None:
+            if not all(value is not None for value in native):
+                raise ValueError(
+                    "native resource usage requires lease, generation, target and Pod UID"
+                )
+        elif any(value is not None for value in native):
+            raise ValueError("worker resource usage cannot carry native identity")
         if self.finalized_at is None and self.completeness != "partial":
             raise ValueError("unfinished resource usage must be partial")
         if self.finalized_at is not None and self.finalized_at < self.last_observed_at:
@@ -124,7 +140,11 @@ def aggregate_resource_usage(
     """
 
     def total(name: str) -> int | None:
-        values = [getattr(report.counters, name) for report in reports]
+        values = [
+            getattr(report.counters, name)
+            for report in reports
+            if (report.container_role == "pod") == (name == "ephemeral_storage_sampled_max_bytes")
+        ]
         known = [int(value) for value in values if value is not None]
         return sum(known) if known else None
 
@@ -150,6 +170,8 @@ def aggregate_resource_usage(
         "cpu_throttled_usec": total("cpu_throttled_usec"),
         "cpu_periods": total("cpu_periods"),
         "cpu_throttled_periods": total("cpu_throttled_periods"),
+        "memory_sampled_max_sum_bytes": total("memory_sampled_max_bytes"),
+        "pod_ephemeral_storage_sampled_max_sum_bytes": total("ephemeral_storage_sampled_max_bytes"),
         "memory_peak_upper_bound_bytes": total("memory_peak_bytes"),
         "pids_peak_upper_bound": total("pids_peak"),
         "io_read_bytes": total("io_read_bytes"),

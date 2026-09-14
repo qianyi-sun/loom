@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from alembic.script import ScriptDirectory
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.rollout.browser_runtime_readiness import browser_report_schema_digest
@@ -1936,8 +1937,8 @@ def test_registered_migration_plan_binds_exact_candidate_graph_and_policy() -> N
     )
 
     assert result.passed
-    assert result.evidence["head"] == "0147"
-    assert result.evidence["revision-count"] == 148
+    assert result.evidence["head"] == "0148"
+    assert result.evidence["revision-count"] == 149
     assert result.evidence["linear"] is True
     assert result.evidence["policy-digest"] == policy_digest
 

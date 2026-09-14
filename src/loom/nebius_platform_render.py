@@ -986,14 +986,15 @@ def _execution_documents(
             if not doc or doc["kind"] in {"Namespace", "PodDisruptionBudget"}:
                 continue
             doc = _replace_tree(doc, replacements)
-            if doc["kind"] == "ClusterRole":
+            if doc["kind"] == "ClusterRole" and filename == "nebius-capacity-collector.yaml":
                 doc["rules"].append(
                     {"apiGroups": ["apps"], "resources": ["daemonsets"], "verbs": ["get", "list"]}
                 )
             if doc["kind"] in {"ClusterRole", "ClusterRoleBinding"}:
-                doc["metadata"]["name"] = ex + "-collector"
+                role_name = ex + ("-collector" if filename == "nebius-capacity-collector.yaml" else "-actuator-usage")
+                doc["metadata"]["name"] = role_name
                 if doc["kind"] == "ClusterRoleBinding":
-                    doc["roleRef"]["name"] = ex + "-collector"
+                    doc["roleRef"]["name"] = role_name
             if doc["kind"] == "NetworkPolicy":
                 for rule in doc["spec"].get("egress", []):
                     for peer in rule.get("to", []):
@@ -1171,7 +1172,7 @@ def _regional_documents(
                     )
             primary.append(doc)
         elif kind in {"RoleBinding", "ClusterRoleBinding"}:
-            role = "actuator" if kind == "RoleBinding" else "collector"
+            role = "actuator" if kind == "RoleBinding" or name.endswith("-actuator-usage") else "collector"
             doc["subjects"] = [
                 {"kind": "User", "apiGroup": "rbac.authorization.k8s.io", "name": identities[role]}
             ]

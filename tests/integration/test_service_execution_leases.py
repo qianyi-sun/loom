@@ -45,6 +45,7 @@ from loom.db.schema import (
     TeamQuota,
     Trial,
     TrialEvent,
+    TrialResourceUsage,
 )
 from loom.execution_contract import (
     NEBIUS_CPU_EXECUTION_CLASS_V1,
@@ -198,6 +199,7 @@ async def _cleanup_service_execution_test_rows(postgres_url: str):  # type: igno
                     ExecutionCostReservation.id.in_(owned_cost_reservations)
                 )
             )
+            await session.execute(delete(TrialResourceUsage).where(TrialResourceUsage.trial_id.in_(owned_trials)))
             await session.execute(
                 delete(ServiceExecutionLease).where(
                     ServiceExecutionLease.trial_id.in_(owned_trials)

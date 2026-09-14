@@ -42,6 +42,8 @@ async def put_trial_resource_usage(
     execution_lease_id: OptionalExecutionLeaseIdHeader = None,
     execution_generation: OptionalExecutionGenerationHeader = None,
 ) -> dict[str, object]:
+    if report.worker_id is None or report.execution_lease_id is not None:
+        raise HTTPException(status_code=403, detail="native usage is actuator-owned")
     if report.trial_id != trial_id:
         raise HTTPException(status_code=400, detail="trial_id path/body mismatch")
     async with request.app.state.session_factory() as session:
