@@ -97,7 +97,9 @@ def test_handoff_component_resumes_original_phases_without_resealing_or_redispat
     monkeypatch.setattr(restoration, 'observe_application_restoration',
         lambda *args, view, **kwargs: restoration._bound_evidence(view))
     monkeypatch.setattr(module, 'observe_application_restoration', restoration.observe_application_restoration)
-    monkeypatch.setattr(module, 'observe_application_cnpg_fence_retirement', lambda *args, **kwargs: 'f' * 64)
+    monkeypatch.setattr(module, 'observe_application_cnpg_fence_retirement',
+        lambda candidate, **kwargs: journal.read_application_cnpg_fence_retirement_view(
+            candidate, kwargs['component'], ordinal=kwargs['ordinal'])[2])
     def retire(candidate, *, journal, runner, guard):
         journal.observe_and_record_application_restoration(candidate, runner=runner, guard=guard)
         journal.begin_application_cnpg_fence_retirement(candidate, guard=guard)
@@ -143,6 +145,12 @@ def test_handoff_component_resumes_original_phases_without_resealing_or_redispat
     with pytest.raises(RuntimeError, match='current completed effect drifted'):
         journal.execute(plan, [epoch, component])
     assert events == before
+    if interrupt is None:
+        reads = len(completed_reads)
+        (journal.root / '01-application-ownership-handoff/application-restoration.json').unlink()
+        with pytest.raises(RuntimeError, match='restoration'):
+            journal.execute(plan, [epoch, component])
+        assert len(completed_reads) == reads
 
 
 @pytest.mark.parametrize('boundary', ['classify', 'checkpoint'])

@@ -1024,6 +1024,44 @@ class ProtectedApplyJournal:
             raise ProtectedApplyJournalError("application recovery view intent changed")
         return self._read_application_recovery_view(plan, root, expected, durable=False)
 
+    def read_application_handoff_terminal(
+        self, plan: FinalGatePlan, component: ProtectedApplyComponent, *, ordinal: int,
+    ) -> ComponentTerminal | None:
+        """Admit a completed original operation before a different live replay check.
+
+        This is historical journal authority only. The caller must freshly verify
+        the enduring effect and every admitted successor before returning EXACT.
+        A partial/pending handoff cannot enter that relaxed schema/guard path.
+        """
+        view = self.read_application_recovery_view(plan, component, ordinal=ordinal)
+        if view is None:
+            return None
+        root = self.root / f"{ordinal:02d}-{component.component_id}"
+        try:
+            terminal = ComponentTerminal.from_dict(self._read(root / "terminal.json"))
+        except FileNotFoundError:
+            return None
+        if (not view.fences_retiring or view.restoration is None or view.external_authority_sha256 is None
+                or terminal.intent_digest != view.intent.intent_digest
+                or terminal.component_id != component.component_id
+                or terminal.observed_epoch != plan.starting_mutation_epoch + 1):
+            raise ProtectedApplyJournalError("completed application handoff terminal binding changed")
+        expected = _hash_json({
+            "restoration": view.restoration.digest,
+            "retirement": _hash_json(self._application_fence_retirement_record(root, view)),
+            "external": view.external_authority_sha256,
+        })
+        if terminal.evidence_digest != expected:
+            raise ProtectedApplyJournalError("completed application handoff evidence changed")
+        from .protected_application_guard_retention import _read_pending_retention
+        if _read_pending_retention(self.attempt_root.parents[3], request_id=plan.request_id,
+                service_uid=self.service_uid, require_record=True) is not None:
+            raise ProtectedApplyJournalError("completed application handoff retention is still pending")
+        if self.read_application_recovery_view(plan, component, ordinal=ordinal) != view:
+            raise ProtectedApplyJournalError("completed application handoff records changed")
+        self._sync_application_recovery(root, "terminal.json")
+        return terminal
+
     def read_active_application_recovery_view(self, plan: FinalGatePlan) -> ApplicationRecoveryView:
         """Read and flush original phase records inside the owning component apply."""
         self.require_application_credential_context(plan)

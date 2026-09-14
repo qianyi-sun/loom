@@ -22,6 +22,7 @@ from loom.application_database_connection import ApplicationDatabaseConnection, 
 from loom.application_ownership_transfer import require_application_role_scope
 from loom.application_password import matches_application_scram
 from loom.application_schema_inventory import require_application_event_trigger_policy
+from loom.trial_writer_trigger_authority import application_public_definer_references
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +68,8 @@ def observe_completed_application_authority(
             "SELECT current_user=session_user AND rolsuper FROM pg_catalog.pg_roles WHERE rolname=current_user"
         ).fetchone() != (True,):
             raise RuntimeError("completed application observer is not the protected administrator")
+        if connection.execute("SELECT current_setting('transaction_isolation')").fetchone() != ("read committed",):
+            raise RuntimeError("completed application observation requires READ COMMITTED")
         require_application_event_trigger_policy(connection)
         if connection.execute(application_sql(
             "SELECT s.system_identifier::text={} AND d.oid={} AND d.datname={} "
@@ -118,6 +121,7 @@ def observe_completed_application_authority(
             target.successor_oid, target.successor_oid, target.owner_oid, target.owner_oid,
         )).fetchone() != (True,):
             raise RuntimeError("completed application runtime DDL or object ownership changed")
+        _require_fixed_definers(connection)
     return hashlib.sha256(json.dumps(asdict(target), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -144,3 +148,32 @@ def _require_successor(
     expected = [] if successor is None else [(successor.role_oid, target.successor_oid, False, False, True)]
     if memberships != expected:
         raise RuntimeError("completed application owner or runtime memberships changed")
+
+
+def _require_fixed_definers(connection: ApplicationDatabaseConnection) -> None:
+    # Trigger functions run without checking the DML caller's EXECUTE ACL. A
+    # hidden/new definer can therefore give the runtime DDL despite no explicit
+    # routine grant. Only the reviewed bridge/helper bodies may retain elevation.
+    references = {name: (body, result, ["search_path=pg_catalog"])
+                  for name, body, result in application_public_definer_references()}
+    # Exact source body from migration0135, independently verified by fresh
+    # provisioning. Its retention trigger also fixes row_security=off.
+    references["task_image_registry_reject_retired_attempt"] = (
+        "9e7666277888bc7a3a457ece3e417938a7d04a0ae70f1440d92c279ed22e5e04",
+        "trigger", ["search_path=pg_catalog", "row_security=off"],
+    )
+    rows = connection.execute(
+        "SELECT p.proname,encode(sha256(convert_to(p.prosrc,'UTF8')),'hex'),p.prorettype::regtype::text, "
+        "p.prokind='f' AND p.pronargs=0 AND NOT p.proretset AND NOT p.proisstrict AND NOT p.proleakproof "
+        "AND p.prosupport=0 AND p.provolatile='v' AND p.proparallel='u' "
+        "AND l.lanname='plpgsql',p.proconfig "
+        "FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace "
+        "JOIN pg_catalog.pg_language l ON l.oid=p.prolang WHERE n.nspname='public' AND p.prosecdef "
+        "ORDER BY p.proname,p.oid"
+    ).fetchall()
+    names = {row[0] for row in rows}
+    required = {"loom_close_protected_runtime_trial_claim", "loom_transform_protected_runtime_trial_requeue"}
+    if (len(names) != len(rows) or not required <= names
+            or any(not isinstance(name, str) or references.get(name) != (body, result, config)
+                   or valid is not True for name, body, result, valid, config in rows)):
+        raise RuntimeError("completed application elevated definer authority changed")
