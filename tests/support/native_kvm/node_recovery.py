@@ -32,6 +32,8 @@ from loom_capacity_executor.native_node_recovery_policy import (
 from loom_capacity_executor.native_recovery_observation import read_native_recovery_boot_id
 from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 
+sys.dont_write_bytecode = True
+
 
 def ssh_recover(request, policy_path, policy_digest):
     from loom_capacity_executor.native_recovery_installation import (
@@ -100,7 +102,13 @@ def ssh_recover(request, policy_path, policy_digest):
             host_sha256=canonical_digest(request.history.host), identity=str(client_key),
             identity_sha256=hashlib.sha256(client_key.read_bytes()).hexdigest(), known_hosts=str(known_hosts),
             known_hosts_sha256=hashlib.sha256(known_hosts.read_bytes()).hexdigest())
+        # Force a cache miss in the container's installed copy. Root's isolated
+        # helper must not mutate that closed tree merely by importing its code.
+        cache = Path("/usr/local/lib/python3.12/site-packages/loom_capacity_executor/__pycache__/") / \
+            "native_node_recovery.cpython-312.pyc"
+        cache.unlink(missing_ok=True)
         reply = asyncio.run(_exchange(target, canonical_bytes(request), timeout_seconds=30))
+        assert not cache.exists(), "root helper wrote bytecode into protected release"
         parsed = NativeNodeRecoveryResultV1.model_validate_json(reply)
         assert canonical_bytes(parsed) + b"\n" == reply
         return parsed

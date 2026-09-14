@@ -59,7 +59,7 @@ def render_native_recovery_endpoint(config: NativeRecoveryEndpointV1) -> NativeR
     config = NativeRecoveryEndpointV1.model_validate_json(canonical_bytes(config))
     helper = str(Path(config.release_root) / "helper")
     entry = str(Path(config.release_root) / "ssh-entry")
-    helper_wire = f'''#!{config.python} -I
+    helper_wire = f'''#!{config.python} -IB
 import signal
 import sys
 from loom_capacity_executor.native_node_recovery import run_native_recovery_helper
