@@ -310,3 +310,34 @@ def test_recovery_rechecks_saved_uid_after_serving_generation_read(tmp_path):
         raise RuntimeError("replacement cannot satisfy recovery")
     with pytest.raises(RuntimeError, match="replacement cannot"):
         journal.execute(plan, [_component(apply)])
+
+
+@pytest.mark.parametrize("change", [None, "paused", "template", "not-ready", "foreign-client"])
+def test_restored_workload_observation_is_readonly_and_requires_actual_readiness(tmp_path, monkeypatch, change):
+    from loom_cli.rollout.operator.protected_application_workload_runtime import observe_recovered_application_workloads
+    from loom_cli.rollout.operator.protected_application_workloads import ApplicationWorkload
+
+    plan, _journal, guard, _database, runner, _admit = _context(tmp_path)
+    saved = tuple(ApplicationWorkload.capture(obj) for obj in runner.objects)
+    monkeypatch.setattr('loom_cli.rollout.operator.protected_application_workload_runtime.deployment_is_ready',
+                        lambda *args, **kwargs: change != 'not-ready')
+    def forbidden(*args, **kwargs):
+        pytest.fail('read-only workload observation attempted recovery')
+    monkeypatch.setattr(runner, 'capture_stdout_with_input', forbidden)
+    monkeypatch.setattr(runner, 'recover_and_complete_staging_application_database', forbidden)
+    if change == 'paused':
+        runner.objects[0]['spec']['replicas'] = 0
+    elif change == 'template':
+        runner.objects[0]['spec']['template']['metadata']['labels']['unexpected'] = 'changed'
+    elif change == 'foreign-client':
+        runner.objects.append({'apiVersion': 'v1', 'kind': 'Pod',
+            'metadata': {'name': 'unknown', 'uid': str(uuid4()), 'namespace': 'loom-staging',
+                         'labels': {'app': 'loom-service'}}, 'spec': {}, 'status': {'phase': 'Running'}})
+    if change:
+        with pytest.raises((RuntimeError, ValueError)):
+            observe_recovered_application_workloads(plan, runner=runner, guard=guard, workloads=saved)
+    else:
+        first = observe_recovered_application_workloads(plan, runner=runner, guard=guard, workloads=saved)
+        assert first == observe_recovered_application_workloads(plan, runner=runner, guard=guard, workloads=saved)
+        assert len(first) == 64
+    assert runner.patch_calls == []
