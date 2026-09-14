@@ -1243,15 +1243,15 @@ removal or database ownership changes. The disposable Kubernetes test drops a
 real CREATE reply, resumes from the journal, and verifies preservation of the
 original UID and idempotent repeated acquisition without duplicates.
 
-The proposed release path retains all ten intent-specific object names rather
-than deleting them while CREATE requests might still be outstanding.
+The internal retirement path retains all ten intent-specific object names while
+CREATE requests might still be outstanding.
 `prepare_cnpg_fence_retirement_patch` prepares an exact UID/resourceVersion/spec
 tested JSON Patch that changes only a policy's matchConditions to literal false.
 Kubernetes then skips the policy; bindings and every original UID remain retained.
 Late CREATEs conflict with occupied names instead of restoring an active fence.
 Exact retired generation-2 readback is idempotent, and active acquisition refuses
-that retired state. This is a patch-preparation primitive, not a release executor
-or evidence that database/workload recovery is safe.
+that retired state. The patch-preparation function alone is not evidence that
+database/workload recovery is safe.
 
 The disposable Kubernetes test exercises retirement through the protected runner's
 kubectl transport, retains all ten identities, rejects stale patches and delayed
@@ -1261,12 +1261,19 @@ so a Python client can fail the full-spec test on differently escaped CEL string
 even when decoded specs agree. Kubectl normalizes the encoding; UID, version and
 whole-spec preconditions remain intact.
 
-Before the first patch, protected composition must verify all ten retained
-identities and durably commit an irreversible release decision derived from an
-actual safe handoff outcome. Acquisition must refuse that decision even before
-the first policy changes. Release completion also requires readback and admission
-propagation checks for every scope. Partial acquisitions do not qualify for this
-release path. Retained objects must not be pruned by GitOps, later operations or
+The internal `retire_cnpg_input_fence` executor repeats combined restoration
+observation and durable publication, verifies all ten retained identities, and
+flushes an irreversible retirement decision before its first patch. The decision
+binds the restoration digest and complete original request, CREATE nonces and UID
+inventory. Acquisition refuses that decision even before the first policy changes.
+Each patch is bracketed by the original retained guard check. Ambiguous replies
+propagate; resume accepts exact active or retired endpoints and never reactivates
+them. Completion requires complete readback and successful fixed server dry runs
+in every policy scope, including saved Pooler scale endpoints. Partial acquisitions
+do not qualify. The disposable Kubernetes test runs this executor through actual
+kubectl with lost patch replies; its database/process/workload observations are
+controlled fixtures, so it is not full installed handoff evidence.
+Retained objects must not be pruned by GitOps, later operations or
 cleanup; eventual garbage collection still needs outstanding-request retirement
 and separate authority. The approach eliminates this operation's delayed-CREATE
 reactivation hazard, not the preceding external policy-writer exclusion or CNPG

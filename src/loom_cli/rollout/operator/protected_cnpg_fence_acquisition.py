@@ -55,6 +55,8 @@ def acquire_cnpg_input_fence(
     request = journal.read_application_cnpg_fence(plan)
     if request is None:
         raise RuntimeError("CNPG fence acquisition requires a durable request")
+    if journal.read_active_application_recovery_view(plan).fences_retiring:
+        raise RuntimeError("CNPG fence acquisition cannot restart irreversible retirement")
     receipts = []
     for ordinal, document in enumerate(request.documents()):
         known = journal.read_application_cnpg_fence_object(plan, ordinal=ordinal)

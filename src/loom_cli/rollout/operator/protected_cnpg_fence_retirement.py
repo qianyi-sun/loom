@@ -1,21 +1,118 @@
-"""Prepare one irreversible retained-name retirement patch, never execute it.
+"""Retire handoff policies monotonically after durable observed restoration.
 
 The protected caller must durably admit a safe database/workload outcome before
 sending this patch. No boolean, timestamp or matching snapshot supplies that
 authority. Retaining ALL policy and binding names prevents this operation's
 delayed CREATE requests from restoring an active fence; deletion/garbage collection
 still requires request retirement and separate authority. External policy writers
-must remain excluded. This module neither performs release nor authorizes handoff.
+must remain excluded. This phase does not release the database guard or authorize
+the enclosing handoff.
 """
 
 from __future__ import annotations
 
-from .protected_cnpg_fence_acquisition import _bytes, _decode_fence_object, _inspect, _mapping
+from typing import TYPE_CHECKING, Protocol
+
+from .final_gate_plan import FinalGatePlan
+from .protected_application_restoration import ApplicationRestorationRunner
+from .protected_application_workload_runtime import _live_guard
+from .protected_cnpg_fence_acquisition import (
+    _RESOURCES,
+    CNPGFenceAcquisitionRunner,
+    _bytes,
+    _decode_fence_object,
+    _inspect,
+    _mapping,
+    _read,
+)
 from .protected_cnpg_fence_recovery import (
     CNPGFenceCreateIntent,
     CNPGFenceObjectReceipt,
     CNPGFenceRequest,
 )
+from .protected_cnpg_input_fence import cnpg_input_fence_probe_commands
+
+if TYPE_CHECKING:
+    from .protected_apply_journal import ProtectedApplyJournal
+    from .staging_mutation_guard import MutationGuardEvidence
+
+
+class CNPGFenceRetirementRunner(ApplicationRestorationRunner, CNPGFenceAcquisitionRunner, Protocol):
+    pass
+
+
+def retire_cnpg_input_fence(
+    plan: FinalGatePlan, *, journal: ProtectedApplyJournal, runner: CNPGFenceRetirementRunner,
+    guard: MutationGuardEvidence,
+) -> tuple[CNPGFenceObjectReceipt, ...]:
+    """Disable policy matching while retaining ALL original names and UIDs.
+
+    The admitted enclosing component excludes external policy/process/SQL writers
+    continuously. Every entry repeats actual restoration observation and durable
+    publication. Ambiguous PATCH replies propagate; a retry reconciles the exact
+    active or retired endpoints, never deleting, recreating or reactivating them.
+    This phase does not release the database guard or publish a component terminal.
+    """
+    _live_guard(plan, journal, runner, guard)
+    journal.observe_and_record_application_restoration(plan, runner=runner, guard=guard)
+    request = journal.read_application_cnpg_fence(plan)
+    if request is None:
+        raise RuntimeError("CNPG fence retirement requires its original durable request")
+    records = []
+    for ordinal, document in enumerate(request.documents()):
+        pending = journal.read_application_cnpg_fence_create(plan, ordinal=ordinal)
+        receipt = journal.read_application_cnpg_fence_object(plan, ordinal=ordinal)
+        if pending is None or receipt is None:
+            raise RuntimeError("CNPG fence retirement lacks original create and object receipts")
+        records.append((document, pending, receipt))
+
+    def inspect_all(*, require_retired: bool) -> None:
+        # Validate the entire inventory before the first patch and after the last.
+        for document, pending, receipt in records:
+            payload = _read(runner, document)
+            if document["kind"] == "ValidatingAdmissionPolicy":
+                patch = prepare_cnpg_fence_retirement_patch(request=request, pending=pending,
+                                                           receipt=receipt, observed=payload)
+                if require_retired and patch is not None:
+                    raise RuntimeError("CNPG fence policy is not at its exact retired endpoint")
+            else:
+                _inspect(request, pending, payload, expected_uid=receipt.uid)
+
+    inspect_all(require_retired=False)
+    journal.begin_application_cnpg_fence_retirement(plan, guard=guard)
+    for document, pending, receipt in records:
+        if document["kind"] != "ValidatingAdmissionPolicy":
+            continue
+        _live_guard(plan, journal, runner, guard)
+        patch = prepare_cnpg_fence_retirement_patch(request=request, pending=pending,
+                                                   receipt=receipt, observed=_read(runner, document))
+        if patch is not None:
+            name = _mapping(document["metadata"])["name"]
+            assert isinstance(name, str)
+            runner.capture_stdout_with_input(
+                ("kubectl", "patch", _RESOURCES["ValidatingAdmissionPolicy"], name,
+                 "--type=json", "--patch-file=/dev/stdin", "--field-manager=loom-cnpg-fence",
+                 "--show-managed-fields=true", "--output=json", "--request-timeout=30s"),
+                env=runner.environment, input_payload=patch, timeout_seconds=30,
+            )
+        if prepare_cnpg_fence_retirement_patch(request=request, pending=pending,
+                                              receipt=receipt, observed=_read(runner, document)) is not None:
+            raise RuntimeError("CNPG fence retirement patch did not converge")
+        _live_guard(plan, journal, runner, guard)
+    inspect_all(require_retired=True)
+    # All five policy scopes (and each saved Pooler scale) must actually accept
+    # their fixed server dry run. An old admission-cache denial is retryable only
+    # through the original journal; a patch response alone is insufficient.
+    for _, argv, payload in cnpg_input_fence_probe_commands(
+        intent_digest=request.intent_digest, target_pooler_names=request.target_pooler_names,
+    ):
+        if payload is None:
+            runner.capture_stdout(argv, env=runner.environment, timeout_seconds=30)
+        else:
+            runner.capture_stdout_with_input(argv, env=runner.environment, input_payload=payload, timeout_seconds=30)
+    inspect_all(require_retired=True)
+    _live_guard(plan, journal, runner, guard)
+    return tuple(receipt for _, _, receipt in records)
 
 
 def prepare_cnpg_fence_retirement_patch(

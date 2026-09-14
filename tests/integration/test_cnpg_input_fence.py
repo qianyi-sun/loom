@@ -93,14 +93,27 @@ def test_cnpg_input_fence_enforces_on_disposable_kubernetes(existing_pooler, tmp
         from loom_cli.rollout.operator.protected_apply_executor import (
             SubprocessProtectedApplyCommandRunner,
         )
+        from loom_cli.rollout.operator.protected_apply_journal import ProtectedApplyJournal
         from loom_cli.rollout.operator.protected_cnpg_fence_acquisition import (
             acquire_cnpg_input_fence,
         )
         from tests.loom_cli.rollout.operator.test_application_admission_recovery import _component
-        from tests.loom_cli.rollout.operator.test_application_credential_recovery import _sources
-        from tests.loom_cli.rollout.operator.test_protected_apply_journal import _journal
+        from tests.loom_cli.rollout.operator.test_application_restoration import _inputs
+        from tests.loom_cli.rollout.operator.test_application_restoration_journal import _seed
+        from tests.loom_cli.rollout.operator.test_application_workload_runtime import (
+            Runner as WorkloadRunner,
+        )
 
-        runner = SubprocessProtectedApplyCommandRunner()
+        # Kubernetes transport, journal durability and retirement are real here.
+        # SQL/process/workload restoration observations are controlled fixtures;
+        # the separate PostgreSQL suite exercises those boundaries independently.
+        plan, restoration_view, guard, _, _, _ = _inputs(tmp_path)
+        journal = ProtectedApplyJournal(tmp_path / "state", request_id=plan.request_id, attempt_number=plan.attempt_number)
+        peer = WorkloadRunner(guard, restoration_view.admission.coordination_guard)
+        class Runner(SubprocessProtectedApplyCommandRunner):
+            def open_staging_peer_maintenance_database(self):
+                return peer.open_staging_peer_maintenance_database()
+        runner = Runner()
         kubectl = shutil.which("kubectl")
         assert kubectl is not None, "kubectl required for admission probe conformance"
         config_result = container.exec(["cat", "/etc/rancher/k3s/k3s.yaml"])
@@ -113,6 +126,8 @@ def test_cnpg_input_fence_enforces_on_disposable_kubernetes(existing_pooler, tmp
         subprocess_run = subprocess.run
         probe_diagnostics = []
         lose_create_reply = [True]
+        lose_patch_reply = [True]
+        stale_patches = {}
         intent_digest = "a" * 64
 
         def isolated_run(argv, **kwargs):
@@ -126,6 +141,11 @@ def test_cnpg_input_fence_enforces_on_disposable_kubernetes(existing_pooler, tmp
             if argv[1] == "create" and "--dry-run=server" not in argv and result.returncode == 0 and lose_create_reply[0]:
                 lose_create_reply[0] = False
                 raise subprocess.TimeoutExpired("disposable create reply lost", 30)
+            if argv[1] == "patch" and "--dry-run=server" not in argv and result.returncode == 0:
+                stale_patches[argv[3]] = kwargs["input"]
+                if lose_patch_reply[0]:
+                    lose_patch_reply[0] = False
+                    raise subprocess.TimeoutExpired("disposable retirement reply lost", 30)
             return result
 
         def enforced():
@@ -142,13 +162,13 @@ def test_cnpg_input_fence_enforces_on_disposable_kubernetes(existing_pooler, tmp
         assert enforced() is False
         before = custom.get_namespaced_custom_object("postgresql.cnpg.io", "v1", "loom-staging", "clusters", "loom-postgres")
         assert "loom.dev/cnpg-fence-probe" not in before["metadata"].get("annotations", {})
-        plan, _ = _sources(tmp_path)
-        journal = _journal(tmp_path)
         acquisitions = []
         documents = ()
 
         def acquire(_):
             nonlocal documents, intent_digest
+            if journal.read_application_admission_recovery() is None:
+                _seed(plan, journal, restoration_view, guard)
             request = journal.prepare_application_cnpg_fence(
                 plan,
                 target_pooler_names=("existing-target",) if existing_pooler else (),
@@ -303,46 +323,56 @@ def test_cnpg_input_fence_enforces_on_disposable_kubernetes(existing_pooler, tmp
                 "The request is invalid:", "Error from server (Conflict):",
             ))
 
+        from loom_cli.rollout.operator import protected_application_restoration as restoration
+        from loom_cli.rollout.operator.protected_cnpg_fence_retirement import (
+            retire_cnpg_input_fence,
+        )
+
         def retire(_):
-            request = journal.read_application_cnpg_fence(plan)
-            assert request is not None
-            for receipt in acquisitions[0]:
-                pending = journal.read_application_cnpg_fence_create(plan, ordinal=receipt.ordinal)
-                document = pending.document(request)
-                pending_documents.append(document)
-                if document["kind"] != "ValidatingAdmissionPolicy":
-                    continue
-                name = document["metadata"]["name"]
-                deadline = time.monotonic() + 30
-                while True:
-                    observed = api.sanitize_for_serialization(admission.read_validating_admission_policy(name))
-                    patch = prepare_cnpg_fence_retirement_patch(
-                        request=request, pending=pending, receipt=receipt, observed=json.dumps(observed).encode())
-                    assert patch is not None
-                    try:
-                        patch_policy(name, patch)
-                        break
-                    except RuntimeError:
-                        if not patch_conflict():
-                            raise
-                        latest = api.sanitize_for_serialization(admission.read_validating_admission_policy(name))
-                        if latest["metadata"]["resourceVersion"] == observed["metadata"]["resourceVersion"]:
-                            pytest.fail(f"Retirement rejected without resourceVersion conflict: {probe_diagnostics[-1]!r}")
-                    assert time.monotonic() < deadline, "retirement resourceVersion never stabilized"
-                # A lost patch reply recovers by exact retained readback; repeating
-                # the stale request cannot pass its original resourceVersion test.
-                observed = api.sanitize_for_serialization(admission.read_validating_admission_policy(name))
-                assert observed["metadata"]["uid"] == receipt.uid
-                assert prepare_cnpg_fence_retirement_patch(
-                    request=request, pending=pending, receipt=receipt, observed=json.dumps(observed).encode()) is None
-                with pytest.raises(RuntimeError):
-                    patch_policy(name, patch)
-                assert patch_conflict(), probe_diagnostics[-1]
-                retired_policies.append(observed)
+            retire_cnpg_input_fence(plan, journal=journal, runner=runner, guard=guard)
             raise RuntimeError("stop after retirement mechanism")
 
-        with pytest.raises(RuntimeError, match="retirement mechanism"):
-            journal.execute(plan, [_component(retire)])
+        with monkeypatch.context() as transport:
+            transport.setattr("loom_cli.rollout.operator.protected_apply_executor.subprocess.run", isolated_run)
+            transport.setattr(restoration, "observe_application_restoration",
+                              lambda _, *, view, **kwargs: restoration._bound_evidence(view))
+            with pytest.raises(subprocess.TimeoutExpired, match="retirement reply lost"):
+                journal.execute(plan, [_component(retire)])
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    journal.execute(plan, [_component(retire)])
+                except RuntimeError as exc:
+                    if str(exc) == "stop after retirement mechanism":
+                        break
+                    # Retry only an observed API resourceVersion conflict or
+                    # admission-cache denial, preserving the original journal.
+                    if not patch_conflict() and not (probe_diagnostics[-1][1] == 1
+                            and "loom-cnpg-fence" in probe_diagnostics[-1][2]):
+                        raise
+                assert time.monotonic() < deadline, "retirement never converged"
+                time.sleep(0.1)
+
+            def inspect_retired(_):
+                request = journal.read_application_cnpg_fence(plan)
+                assert journal.read_active_application_recovery_view(plan).fences_retiring
+                for receipt in acquisitions[0]:
+                    pending = journal.read_application_cnpg_fence_create(plan, ordinal=receipt.ordinal)
+                    document = pending.document(request)
+                    pending_documents.append(document)
+                    if document["kind"] != "ValidatingAdmissionPolicy":
+                        continue
+                    name = document["metadata"]["name"]
+                    observed = api.sanitize_for_serialization(admission.read_validating_admission_policy(name))
+                    assert prepare_cnpg_fence_retirement_patch(request=request, pending=pending, receipt=receipt,
+                        observed=json.dumps(observed).encode()) is None
+                    with pytest.raises(RuntimeError):
+                        patch_policy(name, stale_patches[name])
+                    assert patch_conflict(), probe_diagnostics[-1]
+                    retired_policies.append(observed)
+                raise RuntimeError("retirement inspected")
+            with pytest.raises(RuntimeError, match="retirement inspected"):
+                journal.execute(plan, [_component(inspect_retired)])
         assert len(retired_policies) == 5
         for document in pending_documents:
             with pytest.raises(ApiException) as late:
@@ -385,7 +415,7 @@ def test_cnpg_input_fence_enforces_on_disposable_kubernetes(existing_pooler, tmp
             transport.setattr("loom_cli.rollout.operator.protected_apply_executor.subprocess.run", isolated_run)
             def reacquire(_):
                 acquire_cnpg_input_fence(plan, journal=journal, runner=runner)
-            with pytest.raises(ValueError, match="CNPG"):
+            with pytest.raises(RuntimeError, match="retirement"):
                 journal.execute(plan, [_component(reacquire)])
     finally:
         try:
