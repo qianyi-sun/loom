@@ -36,6 +36,11 @@ from loom_capacity_agent.build_admission import (
     BuildOutcomeRequestV1,
     BuildSourceContextV1,
 )
+from loom_capacity_agent.native_recovery_publication import (
+    NativeRecoveryHistoryV1,
+    NativeRecoveryPublicationV1,
+    NativeRecoveryReceiptV1,
+)
 from loom_capacity_build_guard.installation_store import (
     BuildGuardInstallationV1,
     RetainedBuildInstallation,
@@ -295,6 +300,49 @@ class BuildGuardExecutionStore:
                 or receipt.claim_digest != digest):
                 raise ValueError("native source receipt changed")
             return receipt
+
+    async def publish_recovery(self, request: NativeRecoveryPublicationV1, *, worker_credential: str) -> NativeRecoveryReceiptV1:
+        """Publish one phase; the HTTP caller must commit before acknowledgment."""
+        if not self._session.in_transaction():
+            raise ValueError("native recovery requires an outer transaction")
+        request = NativeRecoveryPublicationV1.model_validate_json(request.model_dump_json())
+        async with self._session.begin_nested():
+            returned = await self._recovery_call("publish_recovery", request, worker_credential)
+            receipt = NativeRecoveryReceiptV1.model_validate_json(returned)
+            if canonical_bytes(receipt).decode("ascii") != returned or receipt.request != request:
+                raise ValueError("native recovery publication response changed")
+            return receipt
+
+    async def read_recovery(self, claim: BuildClaimRequestV1, *, worker_credential: str) -> NativeRecoveryHistoryV1:
+        """Read authenticated committed history independently of live execution."""
+        if not self._session.in_transaction():
+            raise ValueError("native recovery requires an outer transaction")
+        claim = BuildClaimRequestV1.model_validate_json(claim.model_dump_json())
+        async with self._session.begin_nested():
+            returned = await self._recovery_call("read_recovery", claim, worker_credential)
+            history = NativeRecoveryHistoryV1.model_validate_json(returned)
+            if (canonical_bytes(history).decode("ascii") != returned
+                or any(receipt.request.claim != claim for receipt in (history.preparation, history.finalization) if receipt is not None)):
+                raise ValueError("native recovery history response changed")
+            return history
+
+    async def _recovery_call(self, method: str, request: NativeRecoveryPublicationV1 | BuildClaimRequestV1,
+        worker_credential: str,
+    ) -> str:
+        if not self._session.in_transaction() or method not in {"publish_recovery", "read_recovery"}:
+            raise ValueError("native recovery requires an outer transaction and fixed procedure")
+        if not isinstance(worker_credential, str) or re.fullmatch(r"[A-Za-z0-9_-]{43,512}", worker_credential) is None:
+            raise ValueError("native recovery credential is invalid")
+        wire = canonical_bytes(request)
+        if len(wire) > 131072:
+            raise ValueError("native recovery publication exceeds byte bound")
+        returned = await self._session.scalar(text(f"""SELECT loom_capacity_build_guard.{method}(
+            :installation,CAST(:payload AS jsonb),:wire,:digest,:credential)"""),
+            {"installation": self._installation.id, "payload": wire.decode("ascii"), "wire": wire,
+                "digest": sha256(wire).hexdigest(), "credential": sha256(worker_credential.encode("ascii")).hexdigest()})
+        if not isinstance(returned, str):
+            raise ValueError("native recovery response absent")
+        return returned
 
     async def authorize_execution(self, request: BuildExecutionRequestV1, *, worker_credential: str) -> BuildExecutionPermitV1:
         """Issue fresh bounded permission; caller must commit before replying."""

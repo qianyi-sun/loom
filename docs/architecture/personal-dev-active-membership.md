@@ -2240,10 +2240,33 @@ is supplied separately by protected authority to avoid a self-referential config
 hash. Host PID/proc namespace and worker-account isolation remain installer requirements.
 Read-only kernel coverage checks the actual cgroup2 mount and rejects an ordinary
 scratch directory; this is not installed Slurm containment evidence.
-The installed worker still writes only its unchanged V1 locator. Capture is not
-yet connected to protected publication or launch-profile admission and supplies
-no terminal/deletion authority. No mapped material may be created through the
-future recovery-capable route before protected preparation/finalization commits.
+Revision `build_guard_0032` retains recovery history through the existing pool-
+authenticated build-admission route, additionally requiring the exact committed
+claim and allocated worker credential. Owner-only static recovery profiles bind
+the installation/pool, launch profile, worker config and release manifest;
+initial admission must precede scoped execution. Host identities are separately
+append-only so reboot does not rewrite historical recovery authority. A changed
+static profile requires a new installation generation. The installer remains
+responsible for verifying recovery-capable code and account isolation; retaining
+hashes does not perform that verification. Agents have no table-write permission.
+
+Preparation requires admitted profile/host facts and the exact committed physical
+event's canonical bytes. Finalization requires a prior-transaction preparation
+and complete strict maps. Conflicting replay fails; current source/lease and
+terminal fences are checked before and after publication. HTTP acknowledgment
+follows transaction commit. Historical reads require the exact committed claim
+and worker credential, but deliberately do not require a still-live source lease.
+Reads reject same-transaction records. Neither receipt releases a capacity hold,
+proves execution/quiescence, nor permits deletion. Legacy V1 execution permits
+are denied for the whole recovery-required installation/pool, even before its
+first publication; this prevents bypass through an unpublished claim.
+
+The installed worker still writes only its unchanged V1 locator. Capture and
+mapped finalization are not yet composed with these publication calls, and the
+explicit finalized-digest-bound V2 execution permit remains to implement. No
+mapped material may be created through that future route before committed
+preparation/finalization acknowledgment. Intake remains disabled; these database
+and HTTP checks are not installed Slurm or multi-owner acceptance evidence.
 
 The versioned client policy is
 `deploy/personal-dev-builder/client-seccomp-v1.json`. It permits ordinary

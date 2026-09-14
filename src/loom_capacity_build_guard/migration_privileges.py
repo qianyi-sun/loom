@@ -14,8 +14,14 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
     """
     version_table = connection.scalar(text("SELECT to_regclass('loom_capacity_build_guard.alembic_version')"))
     revision = connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) if version_table else None
-    callables = []
-    additional_helpers = []
+    callables: list[str] = []
+    additional_helpers: list[str] = []
+    if revision == "build_guard_0032":
+        callables.extend((f"{SCHEMA}.publish_recovery(uuid,jsonb,bytea,text,text)",
+            f"{SCHEMA}.read_recovery(uuid,jsonb,bytea,text,text)"))
+        additional_helpers.extend(("assert_recovery_shape(jsonb,text[])", "assert_recovery_record(jsonb)",
+            "recovery_authenticated_claim(uuid,jsonb,bytea,text,text)"))
+        revision = "build_guard_0031"
     if revision == "build_guard_0031":
         callables.append(f"{SCHEMA}.authorize_execution(uuid,jsonb,bytea,text,text)")
         revision = "build_guard_0030"

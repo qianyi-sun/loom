@@ -14,11 +14,12 @@ from contextlib import ExitStack
 from pathlib import Path, PurePosixPath
 from uuid import UUID
 
-from pydantic import Field
-
 from loom_capacity_agent.native_recovery import (
     NativeInstalledAttemptV1,
     NativeRecoveryPreparationV1,
+)
+from loom_capacity_agent.native_recovery_publication import (
+    NativeRecoveryHostIdentityV1 as NativeRecoveryHostIdentityV1,
 )
 from loom_capacity_executor.native_installed_release import (
     _Observation,
@@ -28,8 +29,6 @@ from loom_capacity_executor.native_installed_release import (
 from loom_capacity_executor.native_mapped_scratch import _mount_id
 from loom_capacity_executor.native_oci_material import _open_directory
 from loom_capacity_manager.contracts import (
-    Identifier,
-    StrictV1Model,
     canonical_bytes,
     canonical_digest,
 )
@@ -38,22 +37,6 @@ from loom_control_plane.slurm_job_cgroup import _slurm_job_scope
 _CGROUP_ROOT = Path("/sys/fs/cgroup")
 _PROCESS = Path("/proc/self/cgroup")
 _BOOT = Path("/proc/sys/kernel/random/boot_id")
-
-
-class NativeRecoveryHostIdentityV1(StrictV1Model):
-    """Boot-specific identity retained by a protected installer in host namespaces.
-
-    The installer must archive old canonical records by digest for historical
-    recovery. Reboot requires a fresh record and protected admission; the worker
-    cannot refresh this authority by copying its current kernel observations.
-    """
-
-    node_id: Identifier
-    boot_id: UUID
-    original_uid: int = Field(gt=0, lt=2**32 - 1)
-    original_gid: int = Field(gt=0, lt=2**32 - 1)
-    cgroup_namespace_device: int = Field(ge=0)
-    cgroup_namespace_inode: int = Field(gt=0)
 
 
 def read_native_recovery_host_identity(path: Path, *, expected_sha256: str) -> NativeRecoveryHostIdentityV1:

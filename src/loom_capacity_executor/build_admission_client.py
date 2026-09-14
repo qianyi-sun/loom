@@ -57,6 +57,12 @@ from loom_capacity_agent.client import (
     canonical_manager_origin,
     read_owner_only_bearer_token,
 )
+from loom_capacity_agent.native_recovery_publication import (
+    NativeRecoveryExchangeV1,
+    NativeRecoveryHistoryV1,
+    NativeRecoveryPublicationV1,
+    NativeRecoveryReceiptV1,
+)
 from loom_capacity_executor.pinned_admission_transport import (
     PinnedBuildAdmissionConnectionV1,
     load_pinned_admission_credentials,
@@ -205,6 +211,24 @@ class BuildAdmissionClient:
             or len(receipt.data) != min(request.length, receipt.archive_size_bytes - request.offset)):
             raise BuildAdmissionTransportError("native source response binding changed")
         return receipt
+
+    async def publish_recovery(self, request: NativeRecoveryPublicationV1, *, worker_credential: str) -> NativeRecoveryReceiptV1:
+        envelope = NativeRecoveryExchangeV1.model_validate_json(NativeRecoveryExchangeV1(
+            request=request, worker_credential=worker_credential).model_dump_json())
+        receipt = await self._post(envelope.request.claim.binding, "recovery-publish", canonical_bytes(envelope),
+            NativeRecoveryReceiptV1, max_response_bytes=132096)
+        if receipt.request != envelope.request:
+            raise BuildAdmissionTransportError("native recovery publication response binding changed")
+        return receipt
+
+    async def read_recovery(self, claim: BuildClaimRequestV1, *, worker_credential: str) -> NativeRecoveryHistoryV1:
+        envelope = BuildClaimExchangeV1.model_validate_json(BuildClaimExchangeV1(
+            claim=claim, worker_credential=worker_credential).model_dump_json())
+        history = await self._post(envelope.claim.binding, "recovery-read", canonical_bytes(envelope),
+            NativeRecoveryHistoryV1, max_response_bytes=264192)
+        if any(receipt.request.claim != envelope.claim for receipt in (history.preparation, history.finalization) if receipt is not None):
+            raise BuildAdmissionTransportError("native recovery history response binding changed")
+        return history
 
     async def authorize_execution(self, request: BuildExecutionRequestV1, *, worker_credential: str) -> BuildExecutionPermitV1:
         envelope = BuildExecutionExchangeV1.model_validate_json(BuildExecutionExchangeV1(
