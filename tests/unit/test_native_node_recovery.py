@@ -40,3 +40,28 @@ def test_quiescence_requires_whole_subtree_unpopulated(fault):
     else:
         with pytest.raises(ValueError):
             module._require_unpopulated(wire)
+
+
+@pytest.mark.parametrize("fault", ["oversized", "deadline", "invalid-json"])
+def test_request_reader_is_bounded_without_logging_untrusted_input(monkeypatch, fault):
+    import os
+
+    module = import_module("loom_capacity_executor.native_node_recovery")
+    read_fd, write_fd = os.pipe()
+    try:
+        monkeypatch.setattr(module.sys, "stdin", SimpleNamespace(fileno=lambda: read_fd))
+        if fault == "deadline":
+            monkeypatch.setattr(module.select, "select", lambda *args: ([], [], []))
+        elif fault == "oversized":
+            monkeypatch.setattr(module, "_MAX_REQUEST", 8)
+            os.write(write_fd, b"012345678")
+        else:
+            os.write(write_fd, b"{}\n")
+        os.close(write_fd)
+        write_fd = None
+        with pytest.raises(ValueError):
+            module._read_request()
+    finally:
+        os.close(read_fd)
+        if write_fd is not None:
+            os.close(write_fd)

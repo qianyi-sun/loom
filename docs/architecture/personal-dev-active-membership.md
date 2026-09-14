@@ -2353,6 +2353,19 @@ The journal remains an internal primitive: its caller must authenticate history
 and establish stable no-writer exclusion. It is not yet an installed node helper
 or capacity-release authority.
 
+Protected management target inventory and node recovery policy now have bounded
+canonical root-owned loaders. Node binding selects the exact retained
+installation/profile/host, original scratch path/device and ID maps. The worker's
+on-disk locator remains V1 even after V2 mapping publication; journal byte checks
+use that original locator while protected V2 history supplies mapping authority.
+The prelaunch host observer now refuses delegated cgroup ancestors and job
+descendants, including writable `cgroup.procs`/`cgroup.threads`, ACLs and mount
+drift. A real disposable cgroup2 test verifies non-root migration denial.
+These checks are prerequisites, not a proof that the installed lifecycle
+preserves nondelegation or excludes every future writer. Fixed SSH/sudo helper
+installation, local terminal/quiescence composition and installed Slurm acceptance
+remain incomplete; no cleanup endpoint or intake is activated here.
+
 The versioned client policy is
 `deploy/personal-dev-builder/client-seccomp-v1.json`. It permits ordinary
 Python/buildctl file IO, read-only extended-attribute inspection, constrained

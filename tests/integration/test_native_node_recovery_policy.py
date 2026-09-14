@@ -77,3 +77,80 @@ async def test_node_policy_binds_retained_history_without_accepting_caller_paths
         assert bound.identity.gid_ranges == ((history.host.original_gid, 1),)
     else:
         assert bound.identity.uid_ranges == tuple((item.outside, item.count) for item in final.request.record.uid_map)
+
+
+@pytest.mark.parametrize("boundary", ["exact", "no-quiescence", "journal", "lost-final-observation"])
+async def test_fixed_node_helper_composes_actual_history_with_fenced_journal(
+    prepared_input, owner_sessions, monkeypatch, tmp_path, boundary,
+):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    module = import_module("loom_capacity_executor.native_node_recovery")
+    policy_module = import_module("loom_capacity_executor.native_node_recovery_policy")
+    claim, profile, _prepared, _final, terminal = await retained_attempt(prepared_input, owner_sessions, monkeypatch)
+    factory, _engine, installation, *_ = prepared_input
+
+    class Manager:
+        async def get_build_terminal_inventory_evidence(self, intent_id):
+            assert intent_id == claim.binding.intent_id
+            return terminal
+
+    await BuildTerminalRecoveryCoordinator(session_factory=factory, installation=installation, manager=Manager()).reconcile()
+    async with factory.begin() as session:
+        history = await NativeTerminalRecoveryStore(session, installation=installation).read(claim.operation_id)
+    scope = policy_module.NativeNodeRecoveryScopeV1(**(scope_values() | dict(installation_id=installation.id,
+        pool_id=profile.pool_id, profile_sha256=canonical_digest(profile), host=history.host, scratch_root="/scratch")))
+    policy = policy_module.NativeNodeRecoveryPolicyV1(management_uid=25000, scopes=(scope,))
+    request = NativeNodeRecoveryRequestV1(invocation_id=uuid4(), history=history)
+    expected = policy_module.bind_native_node_recovery(policy, request)
+    calls = []
+
+    @contextmanager
+    def quiescence(bound, prepared):
+        assert bound == expected and prepared == history.preparation.request.record
+        calls.append("observe")
+        if boundary == "no-quiescence":
+            raise ValueError("not-empty")
+        yield
+        calls.append("recheck")
+        if boundary == "lost-final-observation":
+            raise ValueError("unavailable")
+
+    class Journal:
+        def __init__(self, directory, **kwargs):
+            assert str(directory) == scope.quarantine_root
+            assert kwargs == dict(key=expected.key, source=expected.source, identity=expected.identity,
+                locator_wire=expected.locator_wire)
+
+        def __enter__(self):
+            calls.append("lock")
+            return self
+
+        def reconcile(self):
+            calls.append("prune")
+            if boundary == "journal":
+                raise ValueError("journal-retained")
+            return "completed"
+
+        def __exit__(self, *args):
+            calls.append("unlock")
+
+    monkeypatch.setattr(module, "_require_initial_root", lambda: None)
+    monkeypatch.setattr(module.sys, "argv", ["/protected/recovery"])
+    monkeypatch.setenv("SUDO_UID", "25000")
+    monkeypatch.setenv("SUDO_USER", "loom-native-recovery")
+    monkeypatch.delenv("SSH_ORIGINAL_COMMAND", raising=False)
+    monkeypatch.setattr(module.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=25000))
+    monkeypatch.setattr(module, "read_native_node_recovery_policy", lambda *args, **kwargs: policy)
+    monkeypatch.setattr(module, "_quiescent_scope", quiescence)
+    monkeypatch.setattr(module, "NativeQuarantineJournal", Journal)
+    request_file = tmp_path / "request.json"
+    request_file.write_bytes(canonical_bytes(request))
+    with request_file.open("rb") as input_stream:
+        monkeypatch.setattr(module.sys, "stdin", input_stream)
+        result = module.run_native_recovery_helper(policy_path="/etc/loom/recovery.json", policy_sha256="a" * 64)
+    assert result.request_sha256 == canonical_digest(request)
+    assert (result.state == "completed") == (boundary == "exact")
+    assert calls == (["observe"] if boundary == "no-quiescence" else
+        ["observe", "lock", "prune", "unlock"] + ([] if boundary == "journal" else ["recheck"]))
