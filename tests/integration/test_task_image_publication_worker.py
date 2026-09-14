@@ -651,6 +651,15 @@ async def test_blocked_renewal_closes_stream_at_lease_expiry_not_database_timeou
         return job
 
     monkeypatch.setattr(module, "claim_publication_job", delayed_claim)
+    admitted_at = None
+    initial_time = values[4]()
+
+    def admitted_clock():
+        elapsed = 0 if admitted_at is None else time.monotonic() - admitted_at
+        return initial_time + timedelta(seconds=elapsed)
+
+    values = (*values[:4], admitted_clock)
+    values[2].clock = admitted_clock
     next(
         response for path, response in tls_registry.routes.items() if "/manifests/" in path
     ).wait_for_peer_close_before_response = True
@@ -662,12 +671,26 @@ async def test_blocked_renewal_closes_stream_at_lease_expiry_not_database_timeou
         renewal_interval_seconds=0.08,
         database_timeout_seconds=5,
     )
+    begin_renewal = asyncio.Event()
+    real_renew = worker._renew
+
+    async def admitted_renewal(job, owner):
+        await begin_renewal.wait()
+        return await real_renew(job, owner)
+
+    monkeypatch.setattr(worker, "_renew", admitted_renewal)
     task = asyncio.create_task(worker.run(UUID(values[0].operation_id)))
     try:
         await asyncio.wait_for(tls_registry.request_received.wait(), 5)
         async with registry_authority_session() as blocker:
             await blocker.scalar(select(TaskImagePublicationJob).with_for_update())
             pid = await blocker.scalar(text("SELECT pg_backend_pid()"))
+            assert not tls_registry.peer_closed.is_set()
+            # Setup is now complete. Run the original renewal implementation
+            # against a real row lock with its original .5s monotonic deadline.
+            # Other tests above retain real-time startup expiry coverage.
+            admitted_at = time.monotonic()
+            begin_renewal.set()
             await _wait_blocked_pids(blocker, pid)
             # The lease is .5 s, not the 5 s DB timeout. Wait for actual socket closure.
             await asyncio.wait_for(tls_registry.peer_closed.wait(), 1.5)
