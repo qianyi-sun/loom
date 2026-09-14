@@ -32,7 +32,6 @@ from loom_capacity_manager.contracts import (
     canonical_bytes,
     canonical_digest,
 )
-from loom_capacity_manager.executable_contracts import canonical_executable_bytes
 
 
 class NativeNodeRecoveryScopeV1(StrictV1Model):
@@ -136,17 +135,18 @@ def bind_native_node_recovery(policy: NativeNodeRecoveryPolicyV1,
     if str(source) != prepared.locator.directory or scope.scratch_device != prepared.locator.device:
         raise ValueError("recovery attempt differs from protected local scratch scope")
     identity = scope.quarantine_identity(inode=prepared.locator.inode)
+    # The worker's fixed on-disk locator remains V1. V2 actual-map evidence is
+    # separately committed through protected publication, never rewritten here.
+    wire = canonical_bytes(prepared.locator)
     final = history.finalization.request.record if history.finalization is not None else None
     if final is None:
         # No mapped execution facts were committed. Do not infer or adopt maps
         # from the nearby locator or remove any subordinate-owned residue.
         identity = replace(identity, uid_ranges=((scope.host.original_uid, 1),),
             gid_ranges=((scope.host.original_gid, 1),))
-        wire = canonical_bytes(prepared.locator)
     else:
         if not isinstance(final, NativeInstalledAttemptV2) or (final.uid_map, final.gid_map) != (scope.uid_map, scope.gid_map):
             raise ValueError("recovery mapping differs from retained installed policy")
-        wire = canonical_executable_bytes(final)
     identity.validate()
     return BoundNativeNodeRecovery(scope=scope, key=canonical_digest(history), source=source,
         identity=identity, locator_wire=wire)
