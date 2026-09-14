@@ -107,14 +107,19 @@ def _identity(identity: ApplicationOwnerSuccessor, target: ApplicationDatabaseAd
 
 def _sealed(connection: ApplicationDatabaseConnection, target: ApplicationDatabaseAdmissionTarget,
             identity: ApplicationOwnerSuccessor) -> None:
+    _require_roles(connection, target, identity, allow_migrator_login=False)
+
+
+def _require_roles(connection: ApplicationDatabaseConnection, target: ApplicationDatabaseAdmissionTarget,
+                   identity: ApplicationOwnerSuccessor, *, allow_migrator_login: bool) -> None:
     assert identity.guard_owner is not None
     for role, oid, inherit in ((identity.role_name, identity.role_oid, True),
                               (identity.guard_owner.role_name, identity.guard_owner.role_oid, False)):
         if connection.execute(application_sql(
-            "SELECT oid={} AND rolinherit={} AND NOT (rolcanlogin OR rolsuper OR rolcreatedb OR rolcreaterole "
-            "OR rolreplication OR rolbypassrls) AND rolpassword IS NULL AND NOT EXISTS "
+            "SELECT oid={} AND rolinherit={} AND ({} OR NOT rolcanlogin AND rolpassword IS NULL) "
+            "AND NOT (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls) AND NOT EXISTS "
             "(SELECT 1 FROM pg_catalog.pg_db_role_setting WHERE setrole=pg_authid.oid) "
-            "FROM pg_catalog.pg_authid WHERE rolname={}", oid, inherit, role,
+            "FROM pg_catalog.pg_authid WHERE rolname={}", oid, inherit, allow_migrator_login and role == identity.role_name, role,
         )).fetchone() != (True,):
             raise RuntimeError("application guard migrator role is not the exact sealed identity")
     if connection.execute(application_sql(
