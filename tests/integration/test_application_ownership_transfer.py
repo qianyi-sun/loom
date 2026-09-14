@@ -61,7 +61,11 @@ async def transfer_database(
     await PsycopgSharedFixtureSqlExecutor(transfer_postgres_url).apply_role_and_database(
         identity,
         role_sql=render_role_convergence_sql(identity, password),
-        create_database_sql=render_create_database_sql(identity),
+        create_database_sql=(
+            psycopg.sql.SQL("CREATE DATABASE {} OWNER {} TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'").format(
+                psycopg.sql.Identifier(identity.database), psycopg.sql.Identifier(identity.db_role),
+            ).as_string() if getattr(request, "param", None) in {"cnpg", "baseline"} else render_create_database_sql(identity)
+        ),
     )
     root = Path(__file__).resolve().parents[2]
     config = Config(str(root / "migrations/alembic.ini"))

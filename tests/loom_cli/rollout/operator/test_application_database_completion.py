@@ -28,14 +28,15 @@ from tests.loom_cli.rollout.operator.test_cnpg_manager_replacement import _manag
 from tests.loom_cli.rollout.operator.test_protected_apply_journal import _journal
 
 
+@pytest.mark.parametrize("schema_revision", ["0142/guard_0033", "0134/guard_0030"])
 @pytest.mark.parametrize("missing", [None, "successor", "ack", "manager-receipt", "guard-identity", "pending-peer"])
-def test_database_completion_requires_original_journal_authority(tmp_path, monkeypatch, missing):
+def test_database_completion_requires_original_journal_authority(tmp_path, monkeypatch, missing, schema_revision):
     from loom_cli.rollout.operator import protected_application_database_completion as module
     from loom_cli.rollout.operator.protected_application_database_completion import (
         complete_protected_application_database,
     )
 
-    plan, live = _sources(tmp_path)
+    plan, live = _sources(tmp_path, schema_revision=schema_revision)
     journal, runner = _journal(tmp_path), _Runner(live)
     guard = _guard(plan)
     for path in (tmp_path / "state", tmp_path / "state/requests", journal.attempt_root.parent.parent, journal.attempt_root.parent):
@@ -61,7 +62,8 @@ def test_database_completion_requires_original_journal_authority(tmp_path, monke
         assert kwargs["password"] == _PASSWORD
         assert kwargs["handoff_backend"] == expected_backend
         assert kwargs["coordination_guard"] == database_guard
-        assert kwargs["schema_acl_profile"] == "staging-readonly"
+        assert kwargs["schema_acl_profile"] == "cnpg-staging"
+        assert kwargs["schema_revision"] == schema_revision
         calls.append("sql-complete")
         return "database-result-only"
     monkeypatch.setattr(module, "complete_application_handoff_database", complete)
