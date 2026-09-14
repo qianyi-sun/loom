@@ -9,10 +9,18 @@ import pytest
 
 from loom.application_database_admission import ApplicationDatabaseCoordinationGuard
 from loom.staging_mutation_coordination import rollout_guard_application_name
-from loom_cli.rollout.operator.protected_application_admission_recovery import ApplicationAdmissionRecoveryRecord
-from loom_cli.rollout.operator.protected_application_guard_retention import application_guard_is_retained
+from loom_cli.rollout.operator.protected_application_admission_recovery import (
+    ApplicationAdmissionRecoveryRecord,
+)
+from loom_cli.rollout.operator.protected_application_guard_retention import (
+    application_guard_is_retained,
+)
 from loom_cli.rollout.operator.protected_apply_journal import ComponentIntent
-from tests.loom_cli.rollout.operator.test_application_admission_recovery import _component, _handoff, _target
+from tests.loom_cli.rollout.operator.test_application_admission_recovery import (
+    _component,
+    _handoff,
+    _target,
+)
 from tests.loom_cli.rollout.operator.test_application_guard_retention import _guard, _setup
 
 
@@ -34,7 +42,9 @@ def _generation(ordinal=1):
 
 @pytest.mark.parametrize("stop", ["role", "job", "retirement", "role-retired", "complete"])
 def test_migration_journal_recovers_only_the_original_ordered_prefix(tmp_path, stop):
-    from loom_cli.rollout.operator.protected_application_migration_journal import ApplicationMigrationJournal
+    from loom_cli.rollout.operator.protected_application_migration_journal import (
+        ApplicationMigrationJournal,
+    )
 
     plan, journal = _setup(tmp_path)
     guard = _guard(plan)
@@ -77,7 +87,9 @@ def test_migration_journal_recovers_only_the_original_ordered_prefix(tmp_path, s
 
 @pytest.mark.parametrize("phase", ["secret-dispatch", "reopen", "generation"])
 def test_migration_journal_cannot_skip_retirement_or_rearm_pending_generation(tmp_path, phase):
-    from loom_cli.rollout.operator.protected_application_migration_journal import ApplicationMigrationJournal
+    from loom_cli.rollout.operator.protected_application_migration_journal import (
+        ApplicationMigrationJournal,
+    )
 
     plan, journal = _setup(tmp_path)
     guard = _guard(plan)
@@ -96,3 +108,20 @@ def test_migration_journal_cannot_skip_retirement_or_rearm_pending_generation(tm
     component = replace(_component(apply), component_id="database-migration")
     with pytest.raises(RuntimeError, match="end test"):
         journal.execute(plan, [component])
+
+
+@pytest.mark.parametrize("field,value", [("phase", []), ("phase", {}), ("sequence", True), ("sequence", "0")])
+def test_migration_event_rejects_malformed_fields_without_type_errors(field, value):
+    from loom_cli.rollout.operator.protected_application_admission_recovery import (
+        admission_record_digest,
+    )
+    from loom_cli.rollout.operator.protected_application_migration_journal import (
+        ApplicationMigrationEvent,
+    )
+
+    record = {"schema_version": 1, "sequence": 0, "phase": "authority", "payload": {},
+        "intent_digest": "a" * 64, "guard_digest": "b" * 64, "previous_digest": "c" * 64}
+    record[field] = value
+    record["event_digest"] = admission_record_digest(record)
+    with pytest.raises(ValueError, match="migration event"):
+        ApplicationMigrationEvent.from_dict(record)
