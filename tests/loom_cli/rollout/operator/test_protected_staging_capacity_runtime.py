@@ -1887,6 +1887,22 @@ def _database_component(
     return plan, runner, runtime.components(plan, epoch_guard=lambda _plan: epoch)[1]
 
 
+def test_capacity_database_observer_selects_separated_owner_grantor(tmp_path):
+    from loom_cli.rollout.operator.protected_staging_capacity_database_component import _DatabaseState
+
+    plan, runner, _ = _database_component(tmp_path, database_state="exact")
+    for role in ("loom_cap_staging_agent", "loom_cap_staging_observer", "loom_cap_staging_runtime"):
+        runner.protected_database_privileges[role]["acl"][0]["grantor"] = "loom_app_staging_owner"
+    base = KubernetesProtectedStagingCapacityDatabaseComponent(runner, "registry.example.test/loom", lambda: runner.seed,
+        application_owner_role="loom_app_staging_owner")
+    assert base._database_state(plan, runner.seed) is _DatabaseState.EXACT
+    legacy = replace(base, application_owner_role="")
+    assert legacy._database_state(plan, runner.seed) is not _DatabaseState.EXACT
+    protected = replace(base, runner=_NoCommandRunner(), seed_reader=lambda: pytest.fail("legacy seed read"))
+    with pytest.raises(RuntimeError, match="retained lifecycle"):
+        protected.apply(plan)
+
+
 def test_database_component_rejects_seed_authority_foreign_to_plan(tmp_path: Path) -> None:
     """Break caught: a downstream component trusting a seed changed after credential apply."""
     seed_runtime = _runtime(tmp_path)
