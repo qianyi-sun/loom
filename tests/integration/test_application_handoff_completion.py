@@ -291,3 +291,19 @@ async def test_guarded_closure_rolls_back_on_original_guard_loss(transfer_databa
                 close_guarded_application_database_admission(LoseGuard(), **kwargs)
             assert peer.execute("SELECT datallowconn FROM pg_database WHERE datname=%s", (target.database,)).fetchone() == (False,)
             assert changed == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transfer_database", ["cnpg", "baseline"], indirect=True)
+@pytest.mark.parametrize("marker", ["public.alembic_version", "loom_capacity_guard.capacity_guard_alembic_version"])
+async def test_revision_marker_drift_refuses_before_ownership_change(transfer_database, marker, request):  # noqa: F811
+    from loom.application_handoff_completion import complete_application_handoff_database
+
+    with _closed(transfer_database) as (peer, maintenance, _guard, arguments):
+        arguments.update(schema_acl_profile="cnpg-staging", schema_revision=(
+            "0134/guard_0030" if request.node.callspec.params["transfer_database"] == "baseline" else "0142/guard_0033"))
+        peer.execute("UPDATE " + marker + " SET version_num='unexpected'")
+        with pytest.raises(RuntimeError, match="revision"):
+            complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
+        target = arguments["target"]
+        assert peer.execute("SELECT datdba,datallowconn FROM pg_database WHERE oid=%s", (target.database_oid,)).fetchone() == (target.owner_oid, False)
