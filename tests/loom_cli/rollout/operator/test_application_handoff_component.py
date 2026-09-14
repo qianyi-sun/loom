@@ -12,7 +12,9 @@ from uuid import uuid4
 
 import pytest
 
-from loom_cli.rollout.operator.protected_application_guard_retention import application_guard_is_retained
+from loom_cli.rollout.operator.protected_application_guard_retention import (
+    application_guard_is_retained,
+)
 from loom_cli.rollout.operator.protected_apply_journal import (
     ComponentObservation,
     ComponentState,
@@ -22,7 +24,7 @@ from loom_cli.rollout.operator.protected_apply_journal import (
 from tests.loom_cli.rollout.operator.test_application_restoration import _inputs
 
 
-@pytest.mark.parametrize('interrupt', [None, 'prepare', 'drain', 'dispatch', 'restore', 'retire'])
+@pytest.mark.parametrize('interrupt', [None, 'prepare', 'drain', 'dispatch', 'database-complete', 'restore', 'retire'])
 def test_handoff_component_resumes_original_phases_without_resealing_or_redispatch(tmp_path, monkeypatch, interrupt):
     from loom_cli.rollout.operator import protected_application_handoff_component as module
     from loom_cli.rollout.operator import protected_application_restoration as restoration
@@ -38,7 +40,9 @@ def test_handoff_component_resumes_original_phases_without_resealing_or_redispat
             failure[0] = None
             raise RuntimeError('lost ' + name + ' acknowledgement')
     class Runner:
-        environment = {}
+        @property
+        def environment(self):
+            return {}
         def capture_stdout(self, *args, **kwargs):
             return json.dumps({'status': {'currentPrimary': baseline.cnpg_runtime.manager.pod_name}}).encode()
         def open_staging_peer_database(self):
@@ -87,6 +91,7 @@ def test_handoff_component_resumes_original_phases_without_resealing_or_redispat
     def restore(candidate, *, journal, **kwargs):
         assert journal.read_application_manager_replacement()[2] is not None
         journal.begin_application_workload_restoration(candidate)
+        event('database-complete')
         event('restore')
     monkeypatch.setattr(module, 'restore_application_workloads', restore)
     monkeypatch.setattr(restoration, 'observe_application_restoration',
