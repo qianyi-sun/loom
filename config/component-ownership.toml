@@ -252,6 +252,7 @@ source_paths = [
   "scripts/ops/capacity_executor_release.py",
   "scripts/ops/global_fleet_pool_executor_once.py",
   "scripts/ops/install_capacity_executor.py",
+  "src/loom_capacity_build_guard/**",
   "src/loom_control_plane/__init__.py",
   "src/loom_control_plane/slurm_job_cgroup.py",
   "src/loom/**",
@@ -751,6 +752,17 @@ kind = "runtime-payload-image"
 dockerfile = "tests/support/native_kvm/Dockerfile.rootless"
 build_context = "tests/support/native_kvm"
 source_paths = ["tests/support/native_kvm/**"]
+smoke_owner = "task-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "native-recovery-ssh-fixture"
+kind = "runtime-payload-image"
+dockerfile = "tests/support/native_kvm/Dockerfile.recovery-ssh"
+build_context = "tests/support/native_kvm"
+source_paths = ["tests/support/native_kvm/Dockerfile.recovery-ssh"]
 smoke_owner = "task-fixture-conformance"
 scan_owner = "runtime-payload-scan"
 attestation_owner = "runtime-payload-provenance"

@@ -1,4 +1,4 @@
-"""Real kernel/filesystem recovery composition; SSH/sudo is separately verified."""
+"""Real kernel/filesystem recovery, including a restricted loopback SSH endpoint."""
 
 from uuid import uuid4
 
@@ -22,17 +22,37 @@ from tests.integration.test_native_terminal_recovery_readback import (
     sessions as sessions,
 )
 
+pytestmark = [pytest.mark.docker, pytest.mark.timeout(600)]
+
+
+@pytest.fixture(scope="module")
+def native_recovery_ssh_image():
+    import subprocess
+
+    from tests.integration.test_native_oci_kvm import ROOT
+
+    tag = "loom-native-recovery-ssh-fixture:" + uuid4().hex
+    try:
+        result = subprocess.run(["docker", "build", "--file", str(ROOT / "tests/support/native_kvm/Dockerfile.recovery-ssh"),
+            "--build-context", "trusted-src=" + str(ROOT / "src"), "--tag", tag,
+            str(ROOT / "tests/support/native_kvm")], capture_output=True, timeout=300)
+        assert result.returncode == 0, result.stderr[-6000:].decode()
+        yield tag
+    finally:
+        subprocess.run(["docker", "image", "rm", tag], capture_output=True, timeout=30, check=False)
+
 
 @pytest.mark.docker
-@pytest.mark.parametrize("boundary", ["exact", "locator", "delegated", "populated", "missing", "inode", "boot"])
+@pytest.mark.parametrize("boundary", ["exact", "locator", "delegated", "populated", "missing", "inode", "boot", "ssh"])
 async def test_fixed_node_recovery_uses_real_private_cgroups_and_journal(
-    prepared_input, owner_sessions, monkeypatch, boundary,
+    prepared_input, owner_sessions, monkeypatch, boundary, request,
 ):
     import asyncio
     import subprocess
 
     from tests.integration.test_native_oci_kvm import EXECUTOR, ROOT
 
+    image = request.getfixturevalue("native_recovery_ssh_image") if boundary == "ssh" else EXECUTOR
     claim, _profile, _prepared, _final, terminal = await retained_attempt(prepared_input, owner_sessions, monkeypatch)
     factory, _engine, installation, *_ = prepared_input
 
@@ -53,7 +73,9 @@ async def test_fixed_node_recovery_uses_real_private_cgroups_and_journal(
         "--tmpfs=/run:rw,nodev,size=16m,mode=0755", "--env=PYTHONPATH=/trusted-src", "--env=FIXTURE_MODE=" + boundary,
         "--mount", f"type=bind,src={ROOT / 'tests/support/native_kvm'},dst=/test-support,readonly",
         "--mount", f"type=bind,src={ROOT / 'src'},dst=/trusted-src,readonly",
-        EXECUTOR, "python3", "/test-support/node_recovery.py"]
+        image, "python3", "/test-support/node_recovery.py"]
+    if boundary == "ssh":
+        argv[argv.index("--cap-add=FOWNER"):argv.index("--cap-add=FOWNER")] = ["--cap-add=SETUID", "--cap-add=SETGID", "--cap-add=SYS_CHROOT"]
     try:
         result = await asyncio.to_thread(subprocess.run, argv, input=canonical_bytes(request),
             capture_output=True, timeout=60, check=False)

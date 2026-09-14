@@ -40,3 +40,30 @@ def test_endpoint_rejects_injection_and_shared_ssh_port(changes):
     module = import_module("loom_capacity_executor.native_recovery_installation")
     with pytest.raises(ValueError):
         spec(module, **changes)
+
+
+def test_generated_assets_parse_with_installed_shell_sudo_and_sshd(tmp_path):
+    import shutil
+    import subprocess
+
+    paths = [shutil.which(name) for name in ("sshd", "ssh-keygen", "visudo")]
+    if any(path is None for path in paths):
+        pytest.skip("OS SSH/sudo syntax tools unavailable; real endpoint remains an installation check")
+    sshd, keygen, visudo = paths
+    module = import_module("loom_capacity_executor.native_recovery_installation")
+    host_key = tmp_path / "host_key"
+    subprocess.run([keygen, "-q", "-t", "ed25519", "-N", "", "-f", str(host_key)], check=True, timeout=5)
+    assets = module.render_native_recovery_endpoint(spec(module, host_key=str(host_key)))
+    config, gate, sudoers = tmp_path / "sshd_config", tmp_path / "entry", tmp_path / "sudoers"
+    config.write_bytes(assets.sshd_config)
+    gate.write_bytes(assets.ssh_entry)
+    sudoers.write_bytes(assets.sudoers)
+    subprocess.run(["/bin/sh", "-n", str(gate)], check=True, timeout=5, capture_output=True)
+    result = subprocess.run([visudo, "-cf", str(sudoers)], timeout=5, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    result = subprocess.run([sshd, "-T", "-f", str(config)], timeout=5, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    effective = result.stdout.splitlines()
+    for expected in ("permitrootlogin no", "permituserenvironment no", "disableforwarding yes", "permittty no",
+        "passwordauthentication no", "kbdinteractiveauthentication no", "authenticationmethods publickey"):
+        assert expected in effective

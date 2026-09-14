@@ -2361,10 +2361,23 @@ use that original locator while protected V2 history supplies mapping authority.
 The prelaunch host observer now refuses delegated cgroup ancestors and job
 descendants, including writable `cgroup.procs`/`cgroup.threads`, ACLs and mount
 drift. A real disposable cgroup2 test verifies non-root migration denial.
-These checks are prerequisites, not a proof that the installed lifecycle
-preserves nondelegation or excludes every future writer. Fixed SSH/sudo helper
-installation, local terminal/quiescence composition and installed Slurm acceptance
-remain incomplete; no cleanup endpoint or intake is activated here.
+The fixed node helper now composes authenticated-history binding, exact extant
+historical cgroup identity, whole-subtree emptiness and the durable journal. It
+rechecks quiescence after cleanup; missing/reused cgroups and older boots retain
+data. Disposable private-cgroup tests cover populated descendants even when the
+parent's `cgroup.procs` is empty. These checks do not prove that the installed
+lifecycle preserves nondelegation or excludes every future writer.
+
+The endpoint renderer supplies a separate key-only SSH daemon, a forced
+no-command gate, an exact no-argument sudo rule and a pinned isolated Python
+helper. The dedicated management account cannot run other commands or forward
+connections. A disposable loopback-only SSH/sudo test exercises these generated
+assets through the actual helper and journal. The executor image must import
+both installed worker and helper without a source bind mount; its packaged
+dependencies include the shared cgroup utility and retained-history contracts.
+Protected immutable publication/bootstrap, retained policy/key/account isolation
+and installed Slurm lifecycle acceptance still gate activation. No live cleanup
+endpoint or intake is activated by these component tests.
 
 The versioned client policy is
 `deploy/personal-dev-builder/client-seccomp-v1.json`. It permits ordinary
