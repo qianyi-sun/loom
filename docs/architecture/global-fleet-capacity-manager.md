@@ -550,6 +550,14 @@ completion cannot supply this evidence. The enclosing handoff must still preserv
 the original supervised guard and exclude other privileged writers; this observer
 does not publish an outcome or retire a policy.
 
+Inside the original active handoff, the journal invokes that observer and flushes
+an immutable restoration record only after checking the original guard's retained
+acknowledgement before and after observation. Resume repeats live observation even
+when the record exists; a lost fsync acknowledgement never supplies durability.
+Read-only classification validates the record against all original phase bindings
+without writing or flushing it. This historical record alone is not release
+authority; the enclosing component still needs the live checks and fence phase.
+
 The internal `retire_application_migrator` cleanup requires the saved transient
 role name/OID, original database/postmaster and coordination guard, committed
 NOLOGIN/PASSWORD NULL, and closed database admission. Revoking SET membership

@@ -28,6 +28,10 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
+    from .protected_application_restoration import (
+        ApplicationRestorationEvidence,
+        ApplicationRestorationRunner,
+    )
     from .staging_mutation_guard import MutationGuardEvidence
 
 from loom.application_database_admission import (
@@ -906,6 +910,7 @@ class ApplicationRecoveryView:
     cnpg_runtime: CNPGPrimaryRuntime | None = None
     credential_binding: ApplicationCredentialRecoveryBinding | None = None
     cnpg_configuration: CNPGWriterConfigurationBinding | None = None
+    restoration: ApplicationRestorationEvidence | None = None
 
 
 class ProtectedApplyJournal:
@@ -1015,6 +1020,19 @@ class ProtectedApplyJournal:
             raise ProtectedApplyJournalError("application recovery view intent is invalid") from None
         if observed != expected:
             raise ProtectedApplyJournalError("application recovery view intent changed")
+        return self._read_application_recovery_view(plan, root, expected, durable=False)
+
+    def read_active_application_recovery_view(self, plan: FinalGatePlan) -> ApplicationRecoveryView:
+        """Read and flush original phase records inside the owning component apply."""
+        self.require_application_credential_context(plan)
+        root, intent = self._application_admission_context()
+        if intent.component_id != "application-ownership-handoff":
+            raise ProtectedApplyJournalError("application recovery requires the original handoff component")
+        return self._read_application_recovery_view(plan, root, intent, durable=True)
+
+    def _read_application_recovery_view(
+        self, plan: FinalGatePlan, root: Path, expected: ComponentIntent, *, durable: bool,
+    ) -> ApplicationRecoveryView:
         names = {path.name for path in root.iterdir() if path.name.startswith("application-")}
         admission = self._read_application_admission(root, expected, durable=False)
         if admission is None and any(
@@ -1055,7 +1073,56 @@ class ProtectedApplyJournal:
             raise ProtectedApplyJournalError("application recovery CNPG Cluster changed")
         if names != {path.name for path in root.iterdir() if path.name.startswith("application-")}:
             raise ProtectedApplyJournalError("application recovery view changed during source read")
-        return ApplicationRecoveryView(expected, admission, recoveries, manager, workloads, restoring, owners, runtime, binding, cnpg)
+        view = ApplicationRecoveryView(expected, admission, recoveries, manager, workloads, restoring, owners, runtime, binding, cnpg)
+        try:
+            record = self._read(root / "application-restoration.json")
+        except FileNotFoundError:
+            record = None
+        if record is not None:
+            from .protected_application_restoration import (
+                ApplicationRestorationEvidence,
+                _bound_evidence,
+            )
+
+            try:
+                restoration = ApplicationRestorationEvidence.from_dict(record)
+                if restoration != _bound_evidence(view):
+                    raise ValueError("restoration binding changed")
+            except (ValueError, RuntimeError):
+                raise ProtectedApplyJournalError("application restoration record binding changed") from None
+            view = replace(view, restoration=restoration)
+        if names != {path.name for path in root.iterdir() if path.name.startswith("application-")}:
+            raise ProtectedApplyJournalError("application recovery view changed during outcome read")
+        if durable:
+            for name in sorted(names):
+                self._sync_application_recovery(root, name)
+        return view
+
+    def observe_and_record_application_restoration(
+        self, plan: FinalGatePlan, *, runner: ApplicationRestorationRunner, guard: MutationGuardEvidence,
+    ) -> ApplicationRestorationEvidence:
+        """Publish only actual combined restoration under the original retained guard.
+
+        Every retry repeats the fixed observer, including after a lost fsync reply.
+        This is historical evidence, not a terminal or standalone release permit.
+        The enclosing admitted operation preserves continuous writer exclusion.
+        """
+        from .protected_application_restoration import observe_application_restoration
+
+        self.require_application_guard_retained(plan, guard=guard)
+        view = self.read_active_application_recovery_view(plan)
+        evidence = observe_application_restoration(plan, view=view, runner=runner, guard=guard,
+                                                   service_uid=self.service_uid)
+        self.require_application_guard_retained(plan, guard=guard)
+        if self.read_active_application_recovery_view(plan) != view:
+            raise ProtectedApplyJournalError("application restoration records changed during observation")
+        root, _ = self._application_admission_context()
+        self._publish_or_match(root / "application-restoration.json", evidence.to_dict())
+        observed = self.read_active_application_recovery_view(plan).restoration
+        if observed != evidence:
+            raise ProtectedApplyJournalError("application restoration durable readback changed")
+        return evidence
+
 
     def _read_application_source_binding(
         self, root: Path, intent: ComponentIntent, filename: str,

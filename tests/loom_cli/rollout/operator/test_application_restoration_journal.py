@@ -6,10 +6,12 @@ import os
 import pytest
 
 from loom_cli.rollout.operator import protected_application_restoration as restoration
-from loom_cli.rollout.operator.protected_application_guard_retention import application_guard_is_retained
+from loom_cli.rollout.operator.protected_application_guard_retention import (
+    application_guard_is_retained,
+)
+from loom_cli.rollout.operator.protected_apply_journal import ProtectedApplyJournal
 from tests.loom_cli.rollout.operator.test_application_admission_recovery import _component
 from tests.loom_cli.rollout.operator.test_application_restoration import _inputs
-from loom_cli.rollout.operator.protected_apply_journal import ProtectedApplyJournal
 
 
 def _seed(plan, journal, view, guard, *, acknowledge=True):
@@ -54,7 +56,8 @@ def test_restoration_publication_requires_observation_retention_and_durable_read
     monkeypatch.setattr(journal, '_sync_application_recovery', sync)
     result = []
     def apply(_):
-        _seed(plan, journal, view, guard, acknowledge=failure != 'unacknowledged')
+        if journal.read_application_admission_recovery() is None:
+            _seed(plan, journal, view, guard, acknowledge=failure != 'unacknowledged')
         result.append(journal.observe_and_record_application_restoration(plan, runner=runner, guard=guard))
         assert journal.read_active_application_recovery_view(plan).restoration == result[0]
         raise RuntimeError('after restoration')
@@ -65,7 +68,19 @@ def test_restoration_publication_requires_observation_retention_and_durable_read
     assert bool(observed) == (failure != 'unacknowledged')
     path = journal.root / '00-application-ownership-handoff/application-restoration.json'
     assert path.exists() == (failure in {None, 'fsync'})
+    if failure == 'fsync':
+        previous = path.read_bytes()
+        failure = None
+        with pytest.raises(RuntimeError, match='after restoration'):
+            journal.execute(plan, [component])
+        assert len(observed) == 2 and len(result) == 1
+        assert path.read_bytes() == previous
     if failure is None:
+        # A durable old outcome cannot skip a new live observation on resume.
+        failure = 'observation'
+        with pytest.raises(RuntimeError, match='live restoration drift'):
+            journal.execute(plan, [component])
+        assert len(result) == 1
         monkeypatch.setattr(journal, '_sync_application_recovery', lambda *_: pytest.fail('classification fsync'))
         recovered = journal.read_application_recovery_view(plan, component, ordinal=0)
         assert recovered.restoration == result[0]
