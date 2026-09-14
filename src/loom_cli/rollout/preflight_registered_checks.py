@@ -2167,6 +2167,7 @@ def build_migration_manifest_check(
     namespace: str,
     container_registry: str = "",
     artifact_sink: Callable[[MigrationManifestArtifact], None] | None = None,
+    application_owner_role: str = "",
 ) -> RegisteredCheck:
     """Render and server-validate the exact migration Job once in Tier 1."""
 
@@ -2192,6 +2193,7 @@ def build_migration_manifest_check(
                 registry_digest=(
                     images.registry_digests["loom-control-plane"] if container_registry else ""
                 ),
+                application_owner_role=application_owner_role,
             )
         except (OSError, RuntimeError, ValueError):
             return _empty_migration_manifest_probe()
@@ -2231,7 +2233,7 @@ def build_migration_manifest_check(
             remediation="restore exact image, migration graph and readonly schema validation",
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v2",
+        implementation_version="v3" if application_owner_role else "v2",
         operations={CheckOperation.PROBE: probe},
     )
 

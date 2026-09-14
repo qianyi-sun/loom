@@ -498,7 +498,7 @@ def test_sources_build_complete_registry_and_checkpoint_manifest_probe(
     )
 
     runtime = sources.build(mutation_epoch=9)
-    assert migration_owner_modes == ["loom_app_staging_owner"]
+    assert migration_owner_modes and set(migration_owner_modes) == {"loom_app_staging_owner"}
     plan = runtime.prebackup_plan(candidate)
 
     assert plan.registry.through_tier == 3

@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
+from loom_cli.rollout.application_migration_contract import APPLICATION_OWNER_ROLE
 from loom_cli.rollout.browser_runtime_readiness import (
     CommandRunner as BrowserCommandRunner,
 )
@@ -637,6 +638,7 @@ class PreflightRuntimeSources:
                 namespace=self.config.namespace,
                 container_registry=self.container_registry,
                 artifact_sink=capture_migration_manifest,
+                application_owner_role=(APPLICATION_OWNER_ROLE if self.config.environment == "staging" else ""),
             ),
             build_browser_runtime_check(
                 self.browser_run,
