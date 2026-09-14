@@ -20,6 +20,7 @@ from loom_control_plane.service_execution import (
     claim_execution_commands,
     defer_execution_command,
     finalize_committed_service_execution,
+    finalize_failed_service_execution,
     mark_execution_output_unavailable,
     record_kubernetes_observation,
     refresh_execution_target_health,
@@ -183,11 +184,18 @@ class ExecutionActuator:
                     session, lease_id=lease.id, generation=lease.generation, observed_at=now
                 )
             if observation.normalized_state in _COMMITTED_RESULT_TERMINAL_STATES:
-                await finalize_committed_service_execution(
+                committed = await finalize_committed_service_execution(
                     session,
                     lease_id=lease.id,
                     observed_at=now,
                 )
+                if not committed:
+                    await finalize_failed_service_execution(
+                        session,
+                        lease_id=lease.id,
+                        generation=lease.generation,
+                        observed_at=now,
+                    )
             await session.commit()
 
     async def _close_output_before_delete(
