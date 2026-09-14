@@ -53,7 +53,10 @@ async def test_management_readback_survives_lost_worker_and_retired_hold(
 ):
     module = import_module("loom_capacity_build_guard.native_terminal_recovery")
     from loom_capacity_build_guard.terminal_recovery import BuildTerminalRecoveryCoordinator
-    from tests.integration.test_personal_dev_build_guard_hold_retirement import release_witness, retirement
+    from tests.integration.test_personal_dev_build_guard_hold_retirement import (
+        release_witness,
+        retirement,
+    )
     from tests.integration.test_personal_dev_build_guard_release_outbox import outbox
 
     claim, profile, prepared, final, terminal = await retained_attempt(
@@ -93,3 +96,53 @@ async def test_management_readback_survives_lost_worker_and_retired_hold(
     assert CREDENTIAL not in result.model_dump_json()
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.worker_releases")) == 1
+
+
+@pytest.mark.parametrize("boundary", ["uncommitted-terminal", "uncommitted-release", "missing-claim", "foreign-installation"])
+async def test_terminal_readback_requires_committed_exact_scope(prepared_input, owner_sessions, monkeypatch, boundary):
+    from dataclasses import replace
+    from uuid import uuid4
+
+    from sqlalchemy.exc import DBAPIError
+
+    from loom_capacity_agent.admission import ExecutableDrainRequestV2, ExecutableReleaseRequestV2
+    from loom_capacity_build_guard.native_terminal_recovery import NativeTerminalRecoveryStore
+    from loom_capacity_manager.contracts import canonical_bytes
+    from tests.integration.test_personal_dev_build_guard_outcomes import outcome_request
+    from tests.integration.test_personal_dev_build_guard_terminal import terminal_store
+
+    claim, _profile, _prepared, _final, terminal = await retained_attempt(prepared_input, owner_sessions, monkeypatch)
+    factory, _engine, installation, *_ = prepared_input
+    async with factory.begin() as session:
+        await store(session, installation).record_outcome(outcome_request(claim, result="failed"), worker_credential=CREDENTIAL)
+    async with factory.begin() as session:
+        await store(session, installation).begin_drain(ExecutableDrainRequestV2(binding=claim.binding,
+            operation_id=uuid4(), worker_id=claim.worker_id, worker_incarnation=claim.worker_incarnation,
+            expected_claim_high_water=1, drain_epoch=3))
+    release = ExecutableReleaseRequestV2(binding=claim.binding, operation_id=uuid4(),
+        reporter_incarnation=installation.document.reporter_incarnation, bootstrap_registration_epoch=1,
+        protected_registration_epoch=2, expected_claim_high_water=1, release_epoch=4)
+    if boundary != "uncommitted-release":
+        async with factory.begin() as session:
+            await store(session, installation).acknowledge_release(release, current_worker_credential=CREDENTIAL)
+    if boundary != "uncommitted-terminal":
+        async with factory.begin() as session:
+            await terminal_store(session, installation).import_evidence(terminal)
+    async with factory.begin() as session:
+        if boundary == "uncommitted-release":
+            await store(session, installation).acknowledge_release(release, current_worker_credential=CREDENTIAL)
+        if boundary == "uncommitted-terminal":
+            await terminal_store(session, installation).import_evidence(terminal)
+        selected = installation
+        if boundary == "foreign-installation":
+            document = installation.document.model_copy(update={"owner_user_id": uuid4()})
+            selected = replace(installation, document=document, wire_payload=canonical_bytes(document))
+        reader = NativeTerminalRecoveryStore(session, installation=selected)
+        if boundary == "missing-claim":
+            assert await reader.read(uuid4()) is None
+        else:
+            with pytest.raises(DBAPIError, match=r"committed|installation binding"):
+                await reader.read(claim.operation_id)
+    # The failure did not roll back the caller's unrelated terminal/release work.
+    async with factory.begin() as session:
+        assert await NativeTerminalRecoveryStore(session, installation=installation).read(claim.operation_id) is not None
