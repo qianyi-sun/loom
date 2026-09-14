@@ -164,6 +164,15 @@ async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_ru
                     assert runtime.read_revision() == "exact"
                     assert runtime.role_exists(generation, identity.role_oid)
                     assert db_guard.execute("SELECT 1").fetchone() == (1,)
+                    if not bootstrap:
+                        peer.execute("ALTER ROLE loom_cap_staging_executor RENAME TO saved_capacity_executor")
+                        try:
+                            peer.execute("CREATE ROLE loom_cap_staging_executor NOLOGIN NOINHERIT")
+                            with pytest.raises(RuntimeError, match="saved runtime role identity"):
+                                runtime.read_revision()
+                        finally:
+                            peer.execute("DROP ROLE loom_cap_staging_executor")
+                            peer.execute("ALTER ROLE saved_capacity_executor RENAME TO loom_cap_staging_executor")
         finally:
             with psycopg.connect(url, dbname="postgres", autocommit=True) as cleanup:
                 cleanup.execute(sql.SQL("ALTER ROLE loom_app_staging_owner RENAME TO {}").format(sql.Identifier(previous_owner)))
