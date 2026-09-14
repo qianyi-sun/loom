@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import event, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session
 
@@ -24,7 +24,11 @@ from loom_control_plane.task_image_build_grants import (
 )
 from loom_control_plane.task_image_build_submission import (
     TaskImageBuildSubmissionCoordinator,
-    TaskImageBuildSubmissionUncertain,
+    TaskImageBuildSubmissionUncertainError,
+)
+from loom_task_image_authority.contracts import (
+    TaskImageBuildGrantAuthorityV1,
+    canonical_authority_sha256,
 )
 from tests.integration.test_task_image_build_grant_store import (
     _NOW,
@@ -94,11 +98,13 @@ async def test_submission_commits_before_dispatch_and_receipt_never_binds(
             )
             assert row is not None and row.state == "submitting"
             assert row.invocation_started_at == _NOW
-            events = list(await observer.scalars(
-                select(TaskImageBuildGrantEvent.event_type)
-                .where(TaskImageBuildGrantEvent.grant_id == grant.grant_id)
-                .order_by(TaskImageBuildGrantEvent.sequence)
-            ))
+            events = list(
+                await observer.scalars(
+                    select(TaskImageBuildGrantEvent.event_type)
+                    .where(TaskImageBuildGrantEvent.grant_id == grant.grant_id)
+                    .order_by(TaskImageBuildGrantEvent.sequence)
+                )
+            )
             assert events == ["issued", "submission_started"]
         return "123"
 
@@ -130,9 +136,10 @@ async def test_concurrent_controllers_cannot_repeat_inflight_submission(
     first = asyncio.create_task(_coordinator(grant_session, runner).submit_once(grant.grant_id))
     try:
         await asyncio.wait_for(entered.wait(), timeout=5)
-        results = await asyncio.gather(*(
-            _coordinator(grant_session, runner).submit_once(grant.grant_id) for _ in range(4)
-        ), return_exceptions=True)
+        results = await asyncio.gather(
+            *(_coordinator(grant_session, runner).submit_once(grant.grant_id) for _ in range(4)),
+            return_exceptions=True,
+        )
         assert all(isinstance(item, TaskImageBuildGrantConflictError) for item in results)
         assert len(runner.requests) == 1
     finally:
@@ -140,9 +147,12 @@ async def test_concurrent_controllers_cannot_repeat_inflight_submission(
         await first
 
 
-@pytest.mark.parametrize("receipt", ["", "0", "01", "123;gb10", "123\n", "-1", "１２３", "4294967295"])
+@pytest.mark.parametrize(
+    "receipt", ["", "0", "01", "123;gb10", "123\n", "-1", "１２３", "4294967295"]
+)
 async def test_invalid_receipt_stays_uncertain_without_retry(
-    grant_session: async_sessionmaker[AsyncSession], receipt: str,  # noqa: F811
+    grant_session: async_sessionmaker[AsyncSession],  # noqa: F811
+    receipt: str,
 ) -> None:
     grant = await _issue(grant_session)
 
@@ -150,7 +160,7 @@ async def test_invalid_receipt_stays_uncertain_without_retry(
         return receipt
 
     runner = _Runner(submit)
-    with pytest.raises(TaskImageBuildSubmissionUncertain):
+    with pytest.raises(TaskImageBuildSubmissionUncertainError):
         await _coordinator(grant_session, runner).submit_once(grant.grant_id)
     with pytest.raises(TaskImageBuildGrantConflictError):
         await _coordinator(grant_session, runner).submit_once(grant.grant_id)
@@ -166,7 +176,7 @@ async def test_timeout_preserves_consumption_and_does_not_disclose_command_outpu
         raise TimeoutError("untrusted remote output")
 
     runner = _Runner(timeout)
-    with pytest.raises(TaskImageBuildSubmissionUncertain) as error:
+    with pytest.raises(TaskImageBuildSubmissionUncertainError) as error:
         await _coordinator(grant_session, runner).submit_once(grant.grant_id)
     assert "untrusted remote output" not in str(error.value)
     assert error.value.__suppress_context__
@@ -201,7 +211,8 @@ async def test_cancellation_does_not_restore_submission_authority(
 
 @pytest.mark.parametrize("boundary", ["disabled", "environment", "expired", "policy"])
 async def test_admission_failure_does_not_consume_or_dispatch(
-    grant_session: async_sessionmaker[AsyncSession], boundary: str,  # noqa: F811
+    grant_session: async_sessionmaker[AsyncSession],  # noqa: F811
+    boundary: str,
 ) -> None:
     grant = await _issue(grant_session)
 
@@ -210,17 +221,22 @@ async def test_admission_failure_does_not_consume_or_dispatch(
 
     runner = _Runner(forbidden)
     coordinator = _coordinator(
-        grant_session, runner,
+        grant_session,
+        runner,
         enabled=boundary != "disabled",
         environment="production" if boundary == "environment" else "staging",
     )
     if boundary == "expired":
         coordinator.clock = lambda: _NOW + timedelta(hours=3)
     if boundary == "policy":
-        coordinator.provider.policy = coordinator.provider.policy.model_copy(update={
-            "resources": coordinator.provider.policy.resources.model_copy(update={"cpus": 9})
-        })
-    with pytest.raises((BuildEnvironmentDisabledError, TaskImageBuildGrantConflictError, ValueError)):
+        coordinator.provider.policy = coordinator.provider.policy.model_copy(
+            update={
+                "resources": coordinator.provider.policy.resources.model_copy(update={"cpus": 9})
+            }
+        )
+    with pytest.raises(
+        (BuildEnvironmentDisabledError, TaskImageBuildGrantConflictError, ValueError)
+    ):
         await coordinator.submit_once(grant.grant_id)
     assert runner.requests == []
     async with grant_session() as observer:
@@ -270,3 +286,131 @@ async def test_restart_after_commit_without_send_cannot_dispatch_again(
     with pytest.raises(TaskImageBuildGrantConflictError):
         await _coordinator(grant_session, runner).submit_once(grant.grant_id)
     assert runner.requests == []
+
+
+async def test_lost_commit_acknowledgement_cannot_dispatch_or_restore_authority(
+    grant_session: async_sessionmaker[AsyncSession],  # noqa: F811
+) -> None:
+    grant = await _issue(grant_session)
+
+    class LostCommitAck(Session):
+        pass
+
+    @event.listens_for(LostCommitAck, "after_commit")
+    def lose_ack(session: Session) -> None:
+        raise RuntimeError("injected lost commit acknowledgement")
+
+    uncertain_factory = async_sessionmaker(
+        grant_session.kw["bind"], sync_session_class=LostCommitAck, expire_on_commit=False
+    )
+
+    async def forbidden() -> str:
+        raise AssertionError("unknown commit outcome cannot dispatch")
+
+    runner = _Runner(forbidden)
+    checked_out_before = grant_session.kw["bind"].pool.checkedout()
+    with pytest.raises(RuntimeError, match="injected lost commit acknowledgement"):
+        await _coordinator(uncertain_factory, runner).submit_once(grant.grant_id)
+    assert grant_session.kw["bind"].pool.checkedout() == checked_out_before
+    with pytest.raises(TaskImageBuildGrantConflictError):
+        await _coordinator(grant_session, runner).submit_once(grant.grant_id)
+    assert runner.requests == []
+    async with grant_session() as observer:
+        row = await observer.get(TaskImageBuildGrant, grant.grant_id)
+        assert row is not None and row.state == "submitting" and row.journal_sequence == 2
+
+
+async def test_contending_issued_transactions_have_exactly_one_winner(
+    grant_session: async_sessionmaker[AsyncSession],  # noqa: F811
+) -> None:
+    grant = await _issue(grant_session)
+
+    async def submitted() -> str:
+        return "123"
+
+    runner = _Runner(submitted)
+    tasks = []
+    try:
+        async with grant_session.begin() as holder:
+            await holder.scalar(
+                select(TaskImageBuildGrant)
+                .where(TaskImageBuildGrant.id == grant.grant_id)
+                .with_for_update()
+            )
+            tasks = [
+                asyncio.create_task(_coordinator(grant_session, runner).submit_once(grant.grant_id))
+                for _ in range(4)
+            ]
+            # Verify actual PostgreSQL lock contention, not just concurrent
+            # coroutine creation or duplicates after the first commit.
+            async with asyncio.timeout(5):
+                while True:
+                    count = await holder.scalar(
+                        text(
+                            "SELECT count(*) FROM pg_stat_activity "
+                            "WHERE datname = current_database() AND wait_event_type = 'Lock' "
+                            "AND query LIKE '%task_image_build_grants%'"
+                        )
+                    )
+                    if count == 4:
+                        break
+                    await holder.execute(text("SELECT pg_stat_clear_snapshot()"))
+                    await asyncio.sleep(0.01)
+            assert runner.requests == []
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        assert sum(isinstance(item, TaskImageBuildGrantConflictError) for item in results) == 3
+        assert sum(getattr(item, "reported_job_id", None) == "123" for item in results) == 1
+        assert len(runner.requests) == 1
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_stored_legacy_v1_authority_cannot_be_submitted(
+    grant_session: async_sessionmaker[AsyncSession],  # noqa: F811
+) -> None:
+    grant = await _issue(grant_session)
+    payload = grant.authority.model_dump(mode="python")
+    payload["schema_version"] = 1
+    del payload["supervisor_executable_sha256"]
+    authority = TaskImageBuildGrantAuthorityV1.model_validate(payload)
+    async with grant_session.begin() as session:
+        row = await session.get(TaskImageBuildGrant, grant.grant_id)
+        assert row is not None
+        row.authority_spec = authority.model_dump(mode="json")
+        row.authority_sha256 = canonical_authority_sha256(authority)
+
+    async def forbidden() -> str:
+        raise AssertionError("legacy authority cannot dispatch")
+
+    runner = _Runner(forbidden)
+    with pytest.raises(TaskImageBuildGrantConflictError, match="requires V2"):
+        await _coordinator(grant_session, runner).submit_once(grant.grant_id)
+    assert runner.requests == []
+    async with grant_session() as observer:
+        row = await observer.get(TaskImageBuildGrant, grant.grant_id)
+        assert row is not None and row.state == "issued" and row.journal_sequence == 1
+
+
+async def test_expiry_during_commit_preserves_consumption_without_dispatch(
+    grant_session: async_sessionmaker[AsyncSession],  # noqa: F811
+) -> None:
+    grant = await _issue(grant_session)
+
+    async def forbidden() -> str:
+        raise AssertionError("expired authority cannot dispatch")
+
+    runner = _Runner(forbidden)
+    coordinator = _coordinator(grant_session, runner)
+    times = iter([_NOW, grant.authority.expires_at])
+    coordinator.clock = lambda: next(times)
+    with pytest.raises(TaskImageBuildGrantConflictError, match="expired after invocation commit"):
+        await coordinator.submit_once(grant.grant_id)
+    with pytest.raises(TaskImageBuildGrantConflictError):
+        await _coordinator(grant_session, runner).submit_once(grant.grant_id)
+    assert runner.requests == []
+    async with grant_session() as observer:
+        row = await observer.get(TaskImageBuildGrant, grant.grant_id)
+        assert row is not None and row.state == "submitting" and row.journal_sequence == 2
