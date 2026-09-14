@@ -24,6 +24,7 @@ from loom_task_image_builder_guard.slurm import (
 GRANT = UUID("11111111-1111-4111-8111-111111111111")
 COMMENT = f"loom-task-builder-v1:grant={GRANT}"
 DIGEST = "a" * 64
+SUBMITTED = "2026-09-14T17:00:00"
 
 
 def _identity(path: Path) -> CommandIdentity:
@@ -245,6 +246,7 @@ def _scontrol(**changes: str) -> str:
         "Comment": COMMENT,
         "Requeue": "0",
         "Restarts": "0",
+        "SubmitTime": SUBMITTED,
     }
     values.update(changes)
     return " ".join(f"{key}={value}" for key, value in values.items()) + "\n"
@@ -264,10 +266,15 @@ def _sacct(**changes: str) -> str:
         "memory": "32768M",
         "tres": "cpu=8,mem=32G,node=1,billing=8",
         "nodes": "trt-eai-oldlab-3",
-        "comment": COMMENT,
+        "submit": SUBMITTED,
+        # Slurm 23.11 sends the comment on completion, not job start. Its
+        # presence also depends on AccountingStoreFlags=job_comment.
+        "comment": "",
     }
     values.update(changes)
-    return "|".join(values.values()) + "|\n"
+    # --parsable2 has no EXTRA delimiter after the last column. An empty
+    # comment still leaves the separator introducing that final empty field.
+    return "|".join(values.values()) + "\n"
 
 
 class _Runner:
@@ -330,6 +337,43 @@ def test_observe_requires_matching_live_controller_and_accounting_facts() -> Non
     assert facts.cpus == 8
     assert facts.memory_mib == 32768
     assert [path.name for path, _argv in runner.calls] == ["scontrol", "sacct"]
+    assert "--duplicates" in runner.calls[1][1]
+    assert runner.calls[1][1][-1].endswith("NodeList,Submit,Comment")
+
+
+@pytest.mark.parametrize("comment", ["", COMMENT])
+@pytest.mark.parametrize("state", ["RUNNING", "COMPLETED"])
+def test_accounting_comment_is_optional_but_controller_grant_and_submit_are_exact(
+    comment: str, state: str,
+) -> None:
+    inspector = _inspector(_Runner(_scontrol(JobState=state), _sacct(state=state, comment=comment)))
+    if state == "RUNNING":
+        facts = inspector.observe(job_id="123", grant_id=GRANT)
+        assert facts.comment == COMMENT
+    else:
+        proof = inspector.observe_terminal(job_id="123", grant_id=GRANT)
+        assert proof.comment == COMMENT
+        assert proof.controller_state == proof.accounting_state == "COMPLETED"
+
+
+@pytest.mark.parametrize("submit", ["", "Unknown", "2026-09-14T16:00:00"])
+def test_accounting_cannot_substitute_a_different_submission_incarnation(submit: str) -> None:
+    with pytest.raises(GuardError, match="slurm_accounting_invalid"):
+        _inspector(_Runner(_scontrol(), _sacct(submit=submit))).observe(job_id="123", grant_id=GRANT)
+
+
+@pytest.mark.parametrize("submit", ["Unknown", "2026-09-14T99:00:00", "2026-9-14T17:00:00"])
+def test_matching_invalid_submission_times_do_not_establish_identity(submit: str) -> None:
+    with pytest.raises(GuardError, match="slurm_controller_invalid"):
+        _inspector(_Runner(_scontrol(SubmitTime=submit), _sacct(submit=submit))).observe(
+            job_id="123", grant_id=GRANT,
+        )
+
+
+def test_accounting_rejects_extra_parsable_delimiter_and_changed_nonempty_comment() -> None:
+    for accounting in (_sacct(comment=COMMENT).rstrip("\n") + "|\n", _sacct(comment="foreign")):
+        with pytest.raises(GuardError, match="slurm_accounting_invalid"):
+            _inspector(_Runner(_scontrol(), accounting)).observe(job_id="123", grant_id=GRANT)
 
 
 @pytest.mark.parametrize(
