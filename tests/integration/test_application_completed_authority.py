@@ -42,7 +42,7 @@ async def test_completed_authority_survives_new_owner_objects_and_refuses_pendin
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("drift", ["database-owner", "table-owner", "superuser", "inherit", "schema-create", "database-create", "trigger", "definer", "credential", "closed"])
+@pytest.mark.parametrize("drift", ["database-owner", "table-owner", "superuser", "inherit", "schema-create", "database-create", "trigger", "definer", "hidden-definer", "definer-body", "credential", "closed"])
 async def test_completed_authority_refuses_runtime_privilege_or_identity_regression(transfer_database, drift):  # noqa: F811
     from loom.application_completed_authority import observe_completed_application_authority
 
@@ -58,6 +58,8 @@ async def test_completed_authority_refuses_runtime_privilege_or_identity_regress
             "database-create": sql.SQL("GRANT CREATE ON DATABASE {} TO {}").format(sql.Identifier(target.database), sql.Identifier(target.owner_role)),
             "trigger": sql.SQL("GRANT TRIGGER ON public.trials TO {}").format(sql.Identifier(target.owner_role)),
             "definer": sql.SQL("CREATE FUNCTION public.unsafe_completed_definer() RETURNS void LANGUAGE sql SECURITY DEFINER AS 'SELECT'; ALTER FUNCTION public.unsafe_completed_definer() OWNER TO {}").format(sql.Identifier(target.successor_role)),
+            "hidden-definer": sql.SQL("CREATE FUNCTION public.hidden_completed_definer() RETURNS void LANGUAGE sql SECURITY DEFINER AS 'SELECT'; REVOKE ALL ON FUNCTION public.hidden_completed_definer() FROM PUBLIC; ALTER FUNCTION public.hidden_completed_definer() OWNER TO {}").format(sql.Identifier(target.successor_role)),
+            "definer-body": sql.SQL("CREATE OR REPLACE FUNCTION public.loom_close_protected_runtime_trial_claim() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 'BEGIN RETURN NULL; END'"),
             "credential": sql.SQL("ALTER ROLE {} PASSWORD 'unrelated'").format(sql.Identifier(target.owner_role)),
             "closed": sql.SQL("ALTER DATABASE {} ALLOW_CONNECTIONS false").format(sql.Identifier(target.database)),
         }
