@@ -711,3 +711,45 @@ def test_early_handoff_failure_preserves_retention_and_original_retry(tmp_path, 
                                         service_uid=os.getuid(), guard=guard)
     exact = replace(component, classify=lambda _: ComponentObservation(ComponentState.EXACT, "3" * 64, 8))
     assert journal.recover_pending_application_handoff(plan, [epoch, exact], guard=guard).observed_epoch == 8
+
+
+@pytest.mark.parametrize("completed", [False, True])
+@pytest.mark.parametrize("drift", [None, "candidate", "epoch", "request"])
+def test_completed_retention_allows_only_the_bound_successor_guard(tmp_path, completed, drift):
+    plan, journal = _setup(tmp_path)
+    original = _guard(plan)
+    done = False
+
+    def apply(_):
+        nonlocal done
+        journal.retain_application_guard(plan, guard=original)
+        assert application_guard_is_retained(tmp_path / "state", request_id=plan.request_id,
+            service_uid=os.getuid(), guard=original, acknowledge=True)
+        if not completed:
+            raise RuntimeError("pending")
+        done = True
+
+    component = replace(_component(apply), classify=lambda _: ComponentObservation(
+        ComponentState.EXACT if done else ComponentState.READY, "3" * 64,
+        plan.starting_mutation_epoch + 1))
+    if completed:
+        journal.execute(plan, [component])
+    else:
+        with pytest.raises(RuntimeError, match="pending"):
+            journal.execute(plan, [component])
+    payload = {k: v for k, v in original.to_dict().items() if k not in {"schema_version", "evidence_digest"}}
+    payload.update(generation="d" * 32, database_backend_pid=4322, mutation_epoch=original.mutation_epoch + 1)
+    if drift == "candidate":
+        payload["candidate_sha"] = "e" * 40
+    if drift == "epoch":
+        payload["mutation_epoch"] += 1
+    if drift == "request":
+        payload["request_id"] = "req-unrelated"
+    successor = MutationGuardEvidence.build(**payload)
+    if not completed or drift:
+        with pytest.raises(RuntimeError, match="identity changed"):
+            application_guard_is_retained(tmp_path / "state", request_id=plan.request_id,
+                service_uid=os.getuid(), guard=successor)
+    else:
+        assert not application_guard_is_retained(tmp_path / "state", request_id=plan.request_id,
+            service_uid=os.getuid(), guard=successor)
