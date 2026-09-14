@@ -241,3 +241,35 @@ async def test_initial_database_phase_recovers_each_commit_without_recapturing_c
         finally:
             maintenance.execute("ALTER DATABASE loom ALLOW_CONNECTIONS true")
             peer.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(APPLICATION_OWNER_ROLE)))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transfer_postgres", [17], indirect=True)
+@pytest.mark.parametrize("transfer_database", ["protected-staging"], indirect=True)
+async def test_completed_sql_profile_uses_separated_database_owner(transfer_database, tmp_path, monkeypatch):  # noqa: F811
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from loom_cli.rollout.operator import protected_application_handoff_component as module
+
+    plan, _ = _setup(tmp_path)
+    evidence = _guard(plan)
+    request = dict(request_id=plan.request_id, candidate_sha=plan.candidate_sha,
+        candidate_tree=plan.candidate_tree, generation=evidence.generation)
+    with _closed(transfer_database, request=request) as (peer, maintenance, db_guard, _args):
+        evidence = MutationGuardEvidence.build(**{key: value for key, value in evidence.to_dict().items()
+            if key not in {"schema_version", "evidence_digest", "database_backend_pid"}}, database_backend_pid=db_guard.info.backend_pid)
+        runner = SimpleNamespace(open_staging_peer_maintenance_database=lambda: nullcontext(maintenance),
+            open_staging_peer_template_database=lambda: nullcontext(object()))
+        seen = []
+        monkeypatch.setattr(module, "require_cnpg_effective_sql_profile", lambda *args, **kwargs: seen.append(kwargs["database"]))
+        peer.execute("CREATE ROLE loom_app_staging_owner NOLOGIN NOINHERIT")
+        try:
+            maintenance.execute("ALTER DATABASE loom OWNER TO loom_app_staging_owner")
+            with pytest.raises(RuntimeError, match="database authority"):
+                module._admit_sql_profiles(runner, peer, evidence)
+            module._admit_sql_profiles(runner, peer, evidence, separated_owner=True)
+            assert seen == ["loom", "postgres", "template1"]
+        finally:
+            maintenance.execute("ALTER DATABASE loom OWNER TO loom")
+            peer.execute("DROP ROLE loom_app_staging_owner")
