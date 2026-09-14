@@ -1888,7 +1888,9 @@ def _database_component(
 
 
 def test_capacity_database_observer_selects_separated_owner_grantor(tmp_path):
-    from loom_cli.rollout.operator.protected_staging_capacity_database_component import _DatabaseState
+    from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
+        _DatabaseState,
+    )
 
     plan, runner, _ = _database_component(tmp_path, database_state="exact")
     for role in ("loom_cap_staging_agent", "loom_cap_staging_observer", "loom_cap_staging_runtime"):

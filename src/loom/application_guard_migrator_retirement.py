@@ -59,6 +59,9 @@ def retire_application_guard_migrator(
                 sql.Identifier(identity.guard_owner.role_name), sql.Identifier(identity.role_name)))
         connection.execute(sql.SQL("REVOKE ALL PRIVILEGES ON DATABASE {} FROM {}").format(
             sql.Identifier(target.database), sql.Identifier(identity.role_name)))
+        # Restore the permanent role profile only after its password, sessions
+        # and owner memberships are gone. No credential survives this change.
+        connection.execute(sql.SQL("ALTER ROLE {} VALID UNTIL 'infinity'").format(sql.Identifier(identity.role_name)))
         _sealed(connection, target, identity)
         if _memberships(connection, target, identity):
             raise RuntimeError("application guard migrator memberships did not retire")
