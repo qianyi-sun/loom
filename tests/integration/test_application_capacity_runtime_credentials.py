@@ -9,7 +9,10 @@ from psycopg import sql
 
 from loom.application_handoff_completion import complete_application_handoff_database
 from tests.integration.test_application_handoff_completion import _closed
-from tests.integration.test_application_migrator_admission import LoseCommit, LostAdmissionReplyError
+from tests.integration.test_application_migrator_admission import (
+    LoseCommit,
+    LostAdmissionReplyError,
+)
 from tests.integration.test_application_ownership_transfer import (
     transfer_database,  # noqa: F401
     transfer_postgres,  # noqa: F401
@@ -52,14 +55,14 @@ async def test_capacity_runtime_credentials_arm_and_finalize_saved_roles(transfe
         rows = peer.execute("SELECT oid,rolpassword,rolvaliduntil FROM pg_authid WHERE oid=ANY(%s) ORDER BY oid", (list(roles.values()),)).fetchall()
         arm_application_capacity_runtime_credentials(maintenance, **authority, expires_at=expiry)
         assert peer.execute("SELECT oid,rolpassword,rolvaliduntil FROM pg_authid WHERE oid=ANY(%s) ORDER BY oid", (list(roles.values()),)).fetchall() == rows
-        changed_passwords = {**passwords, "loom_cap_staging_agent": "wrong-original-password"}
+        changed_passwords = {**passwords, "loom_cap_staging_agent": "wrong-original-password" * 2}
         with pytest.raises(RuntimeError, match="credential"):
             arm_application_capacity_runtime_credentials(maintenance, **{**authority, "passwords": changed_passwords}, expires_at=expiry)
         with pytest.raises(RuntimeError, match="identity"):
             finalize_application_capacity_runtime_credentials(maintenance, **{**authority, "role_oids": {**roles, "loom_cap_staging_runtime": roles["loom_cap_staging_runtime"] + 100}})
         with psycopg.connect(transfer_database[0], user="loom_cap_staging_agent", password=passwords["loom_cap_staging_agent"], autocommit=True) as agent:
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
-                agent.execute("CREATE TABLE must_not_gain_owner_access(id integer)")
+                agent.execute("CREATE TABLE public.must_not_gain_owner_access(id integer)")
         invoke(finalize_application_capacity_runtime_credentials)
         assert peer.execute("SELECT bool_and(rolvaliduntil='infinity'::timestamptz) FROM pg_authid WHERE rolname=ANY(%s)", (list(passwords),)).fetchone() == (True,)
         # A later bootstrap cannot shorten an already-durable runtime credential.
