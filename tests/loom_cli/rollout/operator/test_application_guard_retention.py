@@ -109,7 +109,7 @@ def test_completed_handoff_cannot_hide_deleted_pending_migration_retention(tmp_p
     root = journal.attempt_root.parent.parent
     (root / "application-migration-guard-retention.json").unlink()
     (root / "application-migration-guard-retention-ack.json").unlink()
-    with pytest.raises(RuntimeError, match="retention.*disappeared"):
+    with pytest.raises(RuntimeError, match=r"retention.*disappeared"):
         retained()
 
 

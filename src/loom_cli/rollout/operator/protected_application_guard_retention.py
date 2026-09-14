@@ -20,6 +20,15 @@ if TYPE_CHECKING:
 _REQUEST = "application-guard-retention.json"
 _ACK = "application-guard-retention-ack.json"
 _COMPONENT = "application-ownership-handoff"
+_MIGRATION_COMPONENT = "database-migration"
+
+
+def _retention_names(component_id: str) -> tuple[str, str]:
+    if component_id == _COMPONENT:
+        return _REQUEST, _ACK
+    if component_id == _MIGRATION_COMPONENT:
+        return "application-migration-guard-retention.json", "application-migration-guard-retention-ack.json"
+    raise ValueError("application guard retention component is invalid")
 
 
 def _request_root(state_root: Path, request_id: str) -> Path:
@@ -54,10 +63,11 @@ def _journal_context(
     starting_epoch: int,
 ) -> tuple[Path, dict[str, object]]:
     if (
-        intent.component_id != _COMPONENT
+        intent.component_id not in {_COMPONENT, _MIGRATION_COMPONENT}
         or guard.state != "ready"
         or guard.request_id != intent.request_id
-        or guard.mutation_epoch != starting_epoch
+        or guard.mutation_epoch not in ({starting_epoch} if intent.component_id == _COMPONENT
+                                       else {starting_epoch, starting_epoch + 1})
     ):
         raise RuntimeError("application guard retention binding is invalid")
     root = journal.attempt_root.parent.parent
@@ -85,6 +95,8 @@ def application_guard_is_retained(
     guard: MutationGuardEvidence | None = None,
     acknowledge: bool = False,
     require_record: bool = False,
+    observed_components: set[str] | None = None,
+    component_id: str | None = None,
 ) -> bool:
     return (
         _read_pending_retention(
@@ -94,6 +106,8 @@ def application_guard_is_retained(
             guard=guard,
             acknowledge=acknowledge,
             require_record=require_record,
+            observed_components=observed_components,
+            component_id=component_id,
         )
         is not None
     )
@@ -104,6 +118,63 @@ def _read_pending_retention(
     *,
     request_id: str,
     service_uid: int,
+    guard: MutationGuardEvidence | None = None,
+    acknowledge: bool = False,
+    require_record: bool = False,
+    observed_components: set[str] | None = None,
+    component_id: str | None = None,
+) -> _PendingRetention | None:
+    """Observe both operation records before acknowledging a single pending owner.
+
+    The supervised guard remembers every observed component, so deleting a later
+    migration's request and ACK cannot be hidden by an earlier completed handoff.
+    Component-specific readers require only their own completion record.
+    """
+    selected = (_COMPONENT, _MIGRATION_COMPONENT) if component_id is None else (component_id,)
+    if observed_components is not None and not observed_components <= {_COMPONENT, _MIGRATION_COMPONENT}:
+        raise ValueError("application guard retention history is invalid")
+    root = _request_root(state_root, request_id)
+    pending = []
+    found = False
+    for name in selected:
+        request_name, _ = _retention_names(name)
+        present = os.path.lexists(root / request_name)
+        item = _read_component_retention(state_root, request_id=request_id, service_uid=service_uid,
+            guard=guard, component_id=name,
+            require_record=((component_id is not None and require_record)
+                            or (observed_components is not None and name in observed_components)))
+        if os.path.lexists(root / request_name) != present:
+            raise RuntimeError("application guard retention history changed during observation")
+        if present:
+            found = True
+            if observed_components is not None:
+                observed_components.add(name)
+        if item is not None:
+            pending.append(item)
+    if require_record and not found:
+        raise RuntimeError("application guard acknowledged retention disappeared")
+    if len(pending) > 1:
+        raise RuntimeError("application guard has overlapping pending operations")
+    if not pending:
+        return None
+    item = pending[0]
+    if acknowledge:
+        acknowledged = _read_component_retention(state_root, request_id=request_id, service_uid=service_uid,
+            guard=guard, component_id=item.intent.component_id, acknowledge=True, require_record=True)
+        if acknowledged is None:
+            return None
+        if acknowledged.intent != item.intent or acknowledged.guard != item.guard:
+            raise RuntimeError("application guard pending operation changed during acknowledgement")
+        return acknowledged
+    return item
+
+
+def _read_component_retention(
+    state_root: Path,
+    *,
+    request_id: str,
+    service_uid: int,
+    component_id: str,
     guard: MutationGuardEvidence | None = None,
     acknowledge: bool = False,
     require_record: bool = False,
@@ -125,6 +196,7 @@ def _read_pending_retention(
     )
     from .staging_mutation_guard import MutationGuardEvidence
 
+    request_name, ack_name = _retention_names(component_id)
     root = _request_root(state_root, request_id)
     try:
         _require_directory(root, uid=service_uid)
@@ -133,9 +205,9 @@ def _read_pending_retention(
             raise RuntimeError("application guard retention request disappeared") from None
         return None
     try:
-        record = _read(root / _REQUEST, service_uid)
+        record = _read(root / request_name, service_uid)
     except FileNotFoundError:
-        if require_record or os.path.lexists(root / _ACK):
+        if require_record or os.path.lexists(root / ack_name):
             raise RuntimeError("application guard acknowledged retention disappeared") from None
         return None
     for directory in (state_root, state_root / "requests"):
@@ -152,11 +224,12 @@ def _read_pending_retention(
     intent = ComponentIntent.from_dict(record["intent"])
     original = MutationGuardEvidence.from_dict(record["guard"])
     if (
-        intent.component_id != _COMPONENT
+        intent.component_id != component_id
         or intent.request_id != request_id
         or original.request_id != request_id
         or original.state != "ready"
-        or record["terminal_epoch"] != original.mutation_epoch + 1
+        or record["terminal_epoch"] not in ({original.mutation_epoch + 1} if component_id == _COMPONENT
+                                           else {original.mutation_epoch, original.mutation_epoch + 1})
     ):
         raise RuntimeError("application guard original identity changed")
     journal = ProtectedApplyJournal(
@@ -165,7 +238,7 @@ def _read_pending_retention(
         attempt_number=intent.attempt_number,
         service_uid=service_uid,
     )
-    component_root = journal.root / f"{intent.ordinal:02d}-{_COMPONENT}"
+    component_root = journal.root / f"{intent.ordinal:02d}-{component_id}"
     for directory in (
         journal.attempt_root.parent,
         journal.attempt_root,
@@ -181,7 +254,7 @@ def _read_pending_retention(
         "guard_evidence_digest": original.evidence_digest,
     }
     try:
-        ack = _read(root / _ACK, service_uid)
+        ack = _read(root / ack_name, service_uid)
     except FileNotFoundError:
         ack = None
     try:
@@ -194,7 +267,7 @@ def _read_pending_retention(
         if (
             ack is None
             or terminal.intent_digest != intent.intent_digest
-            or terminal.component_id != _COMPONENT
+            or terminal.component_id != component_id
             or terminal.observed_epoch != record["terminal_epoch"]
         ):
             raise RuntimeError("application guard terminal binding is invalid")
@@ -202,7 +275,7 @@ def _read_pending_retention(
             guard.request_id != original.request_id
             or guard.candidate_sha != original.candidate_sha
             or guard.candidate_tree != original.candidate_tree
-            or guard.mutation_epoch != original.mutation_epoch + 1
+            or guard.mutation_epoch != record["terminal_epoch"]
             or guard.state != "ready"
         ):
             raise RuntimeError("application guard successor identity changed")
@@ -214,11 +287,11 @@ def _read_pending_retention(
         if guard != original or original.guard_pid != os.getpid():
             raise RuntimeError("only the original guard may acknowledge retention")
         # Flush the producer's request before committing the guard's promise.
-        _sync(root / _REQUEST)
-        journal._publish_or_match(root / _ACK, expected_ack)
-        if _read(root / _ACK, service_uid) != expected_ack:
+        _sync(root / request_name)
+        journal._publish_or_match(root / ack_name, expected_ack)
+        if _read(root / ack_name, service_uid) != expected_ack:
             raise RuntimeError("application guard acknowledgement readback changed")
-        _sync(root / _ACK)
+        _sync(root / ack_name)
     return _PendingRetention(intent, original, acknowledge or ack is not None)
 
 
@@ -270,7 +343,8 @@ def retained_application_guard_for_resume(
         or plan.starting_mutation_epoch != starting_mutation_epoch
         or original.candidate_sha != candidate_sha
         or original.candidate_tree != candidate_tree
-        or original.mutation_epoch != starting_mutation_epoch
+        or original.mutation_epoch not in ({starting_mutation_epoch} if pending.intent.component_id == _COMPONENT
+                                           else {starting_mutation_epoch, starting_mutation_epoch + 1})
         or not ProtectedApplyJournal(
             state_root,
             request_id=request_id,

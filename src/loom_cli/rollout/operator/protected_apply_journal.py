@@ -1055,7 +1055,7 @@ class ProtectedApplyJournal:
             raise ProtectedApplyJournalError("completed application handoff evidence changed")
         from .protected_application_guard_retention import _read_pending_retention
         if _read_pending_retention(self.attempt_root.parents[3], request_id=plan.request_id,
-                service_uid=self.service_uid, require_record=True) is not None:
+                service_uid=self.service_uid, require_record=True, component_id=component.component_id) is not None:
             raise ProtectedApplyJournalError("completed application handoff retention is still pending")
         if self.read_application_recovery_view(plan, component, ordinal=ordinal) != view:
             raise ProtectedApplyJournalError("completed application handoff records changed")
@@ -1550,7 +1550,7 @@ class ProtectedApplyJournal:
 
     def retain_application_guard(self, plan: FinalGatePlan, *, guard: MutationGuardEvidence) -> None:
         """Publish retention before sealing; acknowledgement is separately required."""
-        from .protected_application_guard_retention import _REQUEST, _journal_context, _sync
+        from .protected_application_guard_retention import _journal_context, _retention_names, _sync
         from .staging_mutation_guard import MutationGuardEvidence
 
         self.require_application_credential_context(plan)
@@ -1561,14 +1561,15 @@ class ProtectedApplyJournal:
         root, record = _journal_context(self, intent=intent, guard=guard,
                                         starting_epoch=plan.starting_mutation_epoch)
         _require_directory(root, uid=self.service_uid)
-        self._publish_or_match(root / _REQUEST, record)
-        _sync(root / _REQUEST)
+        request_name, _ = _retention_names(intent.component_id)
+        self._publish_or_match(root / request_name, record)
+        _sync(root / request_name)
 
     def require_application_guard_retained(self, plan: FinalGatePlan, *, guard: MutationGuardEvidence) -> None:
         """Refuse SQL mutation until the same supervised guard durably promises retention."""
         from .protected_application_guard_retention import (
-            _ACK,
             _journal_context,
+            _retention_names,
             _sync,
             application_guard_is_retained,
         )
@@ -1583,17 +1584,19 @@ class ProtectedApplyJournal:
                                    starting_epoch=plan.starting_mutation_epoch)
         state_root = self.attempt_root.parents[3]
         if not application_guard_is_retained(state_root, request_id=self.request_id,
-                                             service_uid=self.service_uid, guard=guard):
+                                             service_uid=self.service_uid, guard=guard,
+                                             component_id=intent.component_id):
             raise ProtectedApplyJournalError("application guard retention is not pending")
         expected = {"schema_version": 1, "intent_digest": intent.intent_digest,
                     "guard_evidence_digest": guard.evidence_digest}
+        _, ack_name = _retention_names(intent.component_id)
         try:
-            ack = self._read(root / _ACK)
+            ack = self._read(root / ack_name)
         except FileNotFoundError:
             raise ProtectedApplyJournalError("application guard acknowledgement is absent") from None
         if ack != expected:
             raise ProtectedApplyJournalError("application guard acknowledgement changed")
-        _sync(root / _ACK)
+        _sync(root / ack_name)
 
     def record_application_cnpg_configuration(
         self, plan: FinalGatePlan, *, binding: CNPGWriterConfigurationBinding
