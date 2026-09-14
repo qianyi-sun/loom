@@ -10,13 +10,21 @@ from sqlalchemy.exc import DBAPIError
 
 from loom_capacity_agent.admission import PhysicalJobBindingV2
 from loom_capacity_agent.build_admission import BuildOutcomeRequestV1
-from loom_capacity_agent.native_recovery import NativeInstalledAttemptV1, NativeInstalledAttemptV2, NativeRecoveryPreparationV1
+from loom_capacity_agent.native_recovery import (
+    NativeInstalledAttemptV1,
+    NativeInstalledAttemptV2,
+    NativeRecoveryPreparationV1,
+)
 from loom_capacity_executor.native_recovery_observation import NativeRecoveryHostIdentityV1
 from loom_capacity_manager.contracts import canonical_digest
 from tests.integration.test_personal_dev_build_guard_claims import claim_input
 from tests.integration.test_personal_dev_build_guard_execution import store
-from tests.integration.test_personal_dev_build_guard_installations import owner_sessions as owner_sessions
-from tests.integration.test_personal_dev_build_guard_migrations import build_guard_database as build_guard_database
+from tests.integration.test_personal_dev_build_guard_installations import (
+    owner_sessions as owner_sessions,
+)
+from tests.integration.test_personal_dev_build_guard_migrations import (
+    build_guard_database as build_guard_database,
+)
 from tests.integration.test_personal_dev_build_guard_prepare import prepared_input as prepared_input
 from tests.integration.test_personal_dev_build_guard_registration import CREDENTIAL
 from tests.integration.test_personal_dev_native_builder_store import sessions as sessions
@@ -83,6 +91,8 @@ async def test_recovery_publication_requires_admitted_exact_committed_preparatio
         return
     async with factory.begin() as session:
         first = await store(session, installation).publish_recovery(request, worker_credential=CREDENTIAL)
+        with pytest.raises((ValueError, DBAPIError), match="committed"):
+            await store(session, installation).read_recovery(claim, worker_credential=CREDENTIAL)
         if boundary == "uncommitted":
             with pytest.raises((ValueError, DBAPIError)):
                 await store(session, installation).publish_recovery(
@@ -154,6 +164,7 @@ async def test_recovery_http_acknowledges_only_committed_history(prepared_input,
     responses = []
 
     async def observe(response):
+        await response.aread()
         responses.append(response)
         if response.status_code == 200 and response.request.url.path.endswith("/recovery-publish"):
             # A distinct connection can see the commit before HTTP acknowledgment.
@@ -213,3 +224,74 @@ async def test_recovery_profile_admission_is_pre_execution_and_hosts_append_only
     if boundary == "reboot":
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.native_recovery_hosts")) == 2
+
+
+@pytest.mark.parametrize("boundary", ["physical-float", "cgroup-suffix", "mapping-float", "mapping-overlap", "unknown", "path"])
+async def test_recovery_raw_sql_rejects_records_strict_readers_cannot_recover(prepared_input, owner_sessions, monkeypatch, boundary):
+    import hashlib
+    import json
+
+    contracts, claim, _profile, prepared, final = await recovery_input(prepared_input, owner_sessions, monkeypatch)
+    factory, engine, installation, *_ = prepared_input
+    if boundary.startswith("mapping"):
+        async with factory.begin() as session:
+            await store(session, installation).publish_recovery(contracts.NativeRecoveryPublicationV1(claim=claim, record=prepared), worker_credential=CREDENTIAL)
+    payload = contracts.NativeRecoveryPublicationV1(claim=claim, record=final if boundary.startswith("mapping") else prepared).model_dump(mode="json")
+    record = payload["record"]
+    if boundary == "physical-float":
+        record["locator"]["physical"]["schema_version"] = 2.0
+    elif boundary == "cgroup-suffix":
+        record["cgroup_path"] = f"/system.slice/xslurmstepd.scope/job_{prepared.locator.physical.slurm_job_id}"
+    elif boundary == "mapping-float":
+        record["uid_map"][1]["count"] = 65536.0
+    elif boundary == "mapping-overlap":
+        record["uid_map"][1]["outside"] = prepared.original_uid
+    elif boundary == "unknown":
+        record["cleanup_permitted"] = True
+    else:
+        record["locator"]["directory"] = "/scratch/../foreign"
+    wire = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    async with factory.begin() as session:
+        with pytest.raises(DBAPIError):
+            await session.scalar(text("""SELECT loom_capacity_build_guard.publish_recovery(
+                :installation,CAST(:payload AS jsonb),:wire,:digest,:credential)"""),
+                {"installation": installation.id, "payload": wire.decode("ascii"), "wire": wire,
+                    "digest": hashlib.sha256(wire).hexdigest(), "credential": hashlib.sha256(CREDENTIAL.encode("ascii")).hexdigest()})
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.native_recovery_records")) == int(boundary.startswith("mapping"))
+
+
+@pytest.mark.parametrize("boundary", ["execute", "public", "search-path"])
+def test_recovery_publication_acl_drift_fails_migration_readback(build_guard_database, boundary):
+    from alembic import command
+
+    config, engine, _owner, agent, _url = build_guard_database
+    command.upgrade(config, "head")
+    signature = "loom_capacity_build_guard.publish_recovery(uuid,jsonb,bytea,text,text)"
+    statement = {
+        "execute": f"REVOKE EXECUTE ON FUNCTION {signature} FROM {engine.dialect.identifier_preparer.quote(agent)}",
+        "public": f"GRANT EXECUTE ON FUNCTION {signature} TO PUBLIC",
+        "search-path": f"ALTER FUNCTION {signature} SET search_path=public",
+    }[boundary]
+    with engine.begin() as connection:
+        connection.execute(text(statement))
+    with pytest.raises(RuntimeError, match=r"privilege|surface"):
+        command.upgrade(config, "head")
+
+
+async def test_recovery_invalid_receipt_rolls_back_even_if_caller_catches_error(prepared_input, owner_sessions, monkeypatch):
+    contracts, claim, _profile, prepared, _final = await recovery_input(prepared_input, owner_sessions, monkeypatch)
+    factory, engine, installation, *_ = prepared_input
+    async with factory.begin() as session:
+        execution = store(session, installation)
+        original = execution._recovery_call
+
+        async def changed_reply(*args):
+            await original(*args)
+            return "{}"
+
+        monkeypatch.setattr(execution, "_recovery_call", changed_reply)
+        with pytest.raises(ValueError):
+            await execution.publish_recovery(contracts.NativeRecoveryPublicationV1(claim=claim, record=prepared), worker_credential=CREDENTIAL)
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.native_recovery_records")) == 0
