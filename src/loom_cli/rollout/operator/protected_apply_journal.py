@@ -911,6 +911,7 @@ class ApplicationRecoveryView:
     credential_binding: ApplicationCredentialRecoveryBinding | None = None
     cnpg_configuration: CNPGWriterConfigurationBinding | None = None
     restoration: ApplicationRestorationEvidence | None = None
+    fences_retiring: bool = False
 
 
 class ProtectedApplyJournal:
@@ -1091,6 +1092,15 @@ class ProtectedApplyJournal:
             except (ValueError, RuntimeError):
                 raise ProtectedApplyJournalError("application restoration record binding changed") from None
             view = replace(view, restoration=restoration)
+        try:
+            retirement = self._read(root / "application-cnpg-fence-retirement.json")
+        except FileNotFoundError:
+            retirement = None
+        if retirement is not None:
+            if (type(retirement.get("schema_version")) is not int
+                    or retirement != self._application_fence_retirement_record(root, view)):
+                raise ProtectedApplyJournalError("application fence retirement binding changed")
+            view = replace(view, fences_retiring=True)
         if names != {path.name for path in root.iterdir() if path.name.startswith("application-")}:
             raise ProtectedApplyJournalError("application recovery view changed during outcome read")
         if durable:
@@ -1122,6 +1132,49 @@ class ProtectedApplyJournal:
         if observed != evidence:
             raise ProtectedApplyJournalError("application restoration durable readback changed")
         return evidence
+
+    def _application_fence_retirement_record(
+        self, root: Path, view: ApplicationRecoveryView,
+    ) -> dict[str, object]:
+        if view.restoration is None:
+            raise ProtectedApplyJournalError("application fence retirement lacks observed restoration")
+        try:
+            request = CNPGFenceRequest.from_dict(self._read(root / "application-cnpg-fence-request.json"))
+            if request.intent_digest != view.intent.intent_digest:
+                raise ValueError("fence intent changed")
+            objects = []
+            for ordinal, _ in enumerate(request.documents()):
+                pending = CNPGFenceCreateIntent.from_dict(self._read(root / f"application-cnpg-fence-{ordinal:02d}-create.json"))
+                receipt = CNPGFenceObjectReceipt.from_dict(self._read(root / f"application-cnpg-fence-{ordinal:02d}-object.json"))
+                pending.document(request)
+                if (pending.ordinal != ordinal or receipt.ordinal != ordinal
+                        or receipt.intent_digest != request.intent_digest
+                        or receipt.document_sha256 != request.document_sha256(ordinal)):
+                    raise ValueError("fence object binding changed")
+                objects.append({"create": pending.to_dict(), "object": receipt.to_dict()})
+        except (FileNotFoundError, ValueError):
+            raise ProtectedApplyJournalError("application fence retirement original inventory changed") from None
+        return {"schema_version": 1, "intent_digest": view.intent.intent_digest,
+                "restoration_sha256": view.restoration.digest,
+                "request_sha256": admission_record_digest(request.to_dict()),
+                "inventory_sha256": _hash_json({"objects": objects})}
+
+    def begin_application_cnpg_fence_retirement(
+        self, plan: FinalGatePlan, *, guard: MutationGuardEvidence,
+    ) -> None:
+        """Flush monotonic retirement direction after live inventory/restoration checks.
+
+        The fixed retirement executor performs those checks immediately before
+        this marker. The record binds all original CREATE nonces and object UIDs;
+        it never accepts a caller-supplied success boolean or replacement evidence.
+        """
+        self.require_application_guard_retained(plan, guard=guard)
+        view = self.read_active_application_recovery_view(plan)
+        root, _ = self._application_admission_context()
+        record = self._application_fence_retirement_record(root, view)
+        self._publish_or_match(root / "application-cnpg-fence-retirement.json", record)
+        if not self.read_active_application_recovery_view(plan).fences_retiring:
+            raise ProtectedApplyJournalError("application fence retirement durable readback changed")
 
 
     def _read_application_source_binding(
