@@ -598,6 +598,17 @@ effects. Pending handoffs retain strict original-guard and original-schema
 recovery. The real successor lifecycle and installed executor wiring remain
 required before this completed replay path can be used in a rollout.
 
+The SQL migrator provisioner creates only a new sealed role, publishes its OID
+through the protected journal callback before committing creation, and rechecks
+the original coordination guard before commit. An interrupted creation cannot
+adopt an ambient same-name role. Arming uses one saved credential and a fixed
+expiry within one hour, with only non-inheriting SET membership in the application
+owner and CONNECT on the target database. Lost acknowledgement verifies the
+same credential and expiry without extending it. Sealing disables login and
+removes the password; the separate closed-admission retirement step must still
+terminate surviving owner sessions and remove the role. These SQL phases do not
+deliver a Secret, run a migration Job or publish lifecycle completion.
+
 The read-only CNPG operator observer admits the fixed 1.25.1 command, environment,
 security context, volume projections and absent configuration overrides. It brackets
 a host-process observation with unchanged Kubernetes inputs. The host reader binds
