@@ -11,7 +11,7 @@ import json
 import re
 from dataclasses import dataclass
 from hashlib import sha256
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import UUID
 
 from pydantic import TypeAdapter, field_validator, model_validator
 from sqlalchemy import text
@@ -23,12 +23,12 @@ from loom.personal_dev_build_platform_requests import (
     runtime_installation_digest,
 )
 from loom.personal_dev_build_runtime_installation import PersonalBuildRuntimeInstallation
+from loom_capacity_agent.build_admission import build_installation_id
 from loom_capacity_manager.build_value_contracts import PersonalBuildMemberV1
 from loom_capacity_manager.contracts import Digest, PositiveQuantity, StrictV1Model, canonical_bytes
 
 
-def _identity(subject: UUID, incarnation: UUID, deployment: int) -> UUID:
-    return uuid5(NAMESPACE_URL, f"loom:personal-build-installation:{subject}:{incarnation}:{deployment}")
+_identity = build_installation_id  # Preserve the existing owner-store import surface.
 
 
 class BuildGuardInstallationV1(StrictV1Model):

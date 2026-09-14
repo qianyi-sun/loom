@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
-from loom_capacity_agent.build_admission import BuildClaimRequestV1
+from loom_capacity_agent.build_admission import BuildClaimRequestV1, build_installation_id
 from loom_capacity_agent.native_recovery import (
     NativeInstalledAttemptV2,
     NativeRecoveryPreparationV1,
@@ -53,7 +53,9 @@ class NativeRecoveryAdmissionV1(StrictV1Model):
 
     @model_validator(mode="after")
     def _binding(self) -> Self:
-        if (self.profile.pool_id != self.request.claim.binding.pool_id
+        binding = self.request.claim.binding
+        if (self.profile.installation_id != build_installation_id(binding.subject_id, binding.subject_incarnation, binding.deployment_generation)
+            or self.profile.pool_id != binding.pool_id
             or self.host.node_id != self.request.node_id or self.host.boot_id != self.request.boot_id):
             raise ValueError("native recovery admission binding changed")
         return self

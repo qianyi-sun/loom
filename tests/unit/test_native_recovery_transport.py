@@ -60,13 +60,13 @@ async def test_recovery_route_binds_exact_claim_and_closes_transport(tmp_path, p
 @pytest.mark.parametrize("purpose", ["personal-build-worker", "application-worker"])
 @pytest.mark.parametrize("boundary", ["exact", "changed", "invalid", "foreign-installation"])
 async def test_recovery_admission_routes_exact_request_without_application_authority(tmp_path, purpose, boundary):
-    from loom_capacity_build_guard.installation_store import _identity
     from loom_capacity_agent.native_recovery_publication import (
         NativeRecoveryAdmissionRequestV1,
         NativeRecoveryAdmissionV1,
         NativeRecoveryHostIdentityV1,
         NativeRecoveryProfileV1,
     )
+    from loom_capacity_build_guard.installation_store import _identity
 
     module, binding, document, path, digest = configured(tmp_path, "oldlab", purpose)
     claim = BuildClaimRequestV1(binding=binding.binding, operation_id=uuid4(), request_id=uuid4(),
