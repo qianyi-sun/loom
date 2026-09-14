@@ -20,6 +20,29 @@ from tests.unit.test_native_worker_handoff import packet_for, prepared_worker
 from tests.unit.test_personal_dev_builder import _registration
 
 
+@pytest.fixture
+def protected_helper_host(monkeypatch):
+    """Model an installed host, not GitHub's intentionally runner-owned helpers.
+
+    Keep real descriptor/path traversal and production permission checks. Each
+    negative case overrides the specific metadata it intends to reject.
+    """
+    import stat
+
+    original = os.fstat
+
+    def metadata(fd):
+        value = original(fd)
+        if not stat.S_ISDIR(value.st_mode):
+            return value
+        fields = {name: getattr(value, name) for name in dir(value) if name.startswith("st_")}
+        fields["st_uid"] = fields["st_gid"] = 0
+        fields["st_mode"] &= ~0o7022
+        return SimpleNamespace(**fields)
+
+    monkeypatch.setattr(os, "fstat", metadata)
+
+
 @pytest.mark.parametrize("boundary", ["exact", "config", "release", "binding", "scope", "claim", "runtime", "cancel", "replay"])
 async def test_installed_worker_closes_handoff_before_checks_and_retains_recovery_identity(tmp_path, monkeypatch, boundary):
     module = import_module("loom_capacity_executor.native_installed_worker")
@@ -144,7 +167,7 @@ async def test_installed_worker_closes_handoff_before_checks_and_retains_recover
 
 
 @pytest.mark.parametrize("fault", ["exact", "not-isolated", "interpreter", "rootlesskit", "import-tree", "traversal-import", "unlisted-module"])
-def test_running_process_must_match_verified_installation(monkeypatch, fault):
+def test_running_process_must_match_verified_installation(monkeypatch, protected_helper_host, fault):
     module = import_module("loom_capacity_executor.native_installed_worker")
     manifest = SimpleNamespace(python="/protected/python/bin/python3", rootlesskit="/usr/bin/rootlesskit",
         python_root="/protected/python", files=[SimpleNamespace(path=module.__file__)], platform="linux/amd64")
@@ -214,7 +237,8 @@ async def test_invalid_cli_still_consumes_inherited_handoff(tmp_path, monkeypatc
         assert module.NATIVE_WORKER_HANDOFF_ENV not in os.environ
 
 
-def test_fixed_helper_search_rejects_owner_writable_directory(monkeypatch):
+@pytest.mark.parametrize("field,value", [("st_uid", 1000), ("st_gid", 1000), ("st_mode", 0o040777)])
+def test_fixed_helper_search_rejects_owner_writable_directory(monkeypatch, protected_helper_host, field, value):
     module = import_module("loom_capacity_executor.native_installed_worker")
     real = os.fstat
 
@@ -223,7 +247,7 @@ def test_fixed_helper_search_rejects_owner_writable_directory(monkeypatch):
         if os.readlink(f"/proc/self/fd/{fd}") != "/usr/local/bin":
             return original
         fields = {name: getattr(original, name) for name in dir(original) if name.startswith("st_")}
-        fields["st_uid"] = 1000
+        fields[field] = value
         return SimpleNamespace(**fields)
 
     monkeypatch.setattr(module.os, "fstat", writable)
@@ -233,7 +257,7 @@ def test_fixed_helper_search_rejects_owner_writable_directory(monkeypatch):
 
 @pytest.mark.parametrize("alias", ["/bin", "/sbin"])
 @pytest.mark.parametrize("fault", ["exact", "target", "owner", "replaced"])
-def test_fixed_helper_alias_must_remain_protected(monkeypatch, alias, fault):
+def test_fixed_helper_alias_must_remain_protected(monkeypatch, protected_helper_host, alias, fault):
     import stat
 
     module = import_module("loom_capacity_executor.native_installed_worker")

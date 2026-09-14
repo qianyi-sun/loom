@@ -17,6 +17,22 @@ from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 from tests.unit.test_native_rootless_runtime import spec_file
 
 
+async def _await_phase(event, operation, *, timeout=30):
+    """Observe readiness or the actual failure; this is not a startup benchmark."""
+    ready = asyncio.create_task(event.wait())
+    try:
+        done, _ = await asyncio.wait((ready, operation), timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+        if ready in done:
+            return
+        if operation in done:
+            await operation  # Surface an early production error, not a misleading event timeout.
+            raise AssertionError("outer operation settled before the required test phase")
+        raise TimeoutError("outer operation did not reach the required test phase")
+    finally:
+        ready.cancel()
+        await asyncio.gather(ready, return_exceptions=True)
+
+
 @pytest.mark.parametrize("mode,startup_delay", [(mode, 0) for mode in ["success", "failed", "oversize", "stdout-flood", "wrong-claim", "malformed", "artifact-mismatch",
     "uncertain", "upload-error", "early-upload-reply", "outcome-error", "cancel", "authority-cleanup-cancel",
     "upload-cleanup-cancel", "outcome-cleanup-cancel"]] + [pytest.param(mode, 4,
@@ -118,11 +134,11 @@ async def test_outer_io_matches_stream_and_result_before_upload_or_outcome(tmp_p
         async with scoped_native_allocated_io(claim=spec.claim, source=NativeStagedBuildSource(context, source_path),
             client=Client(), worker_credential="w" * 43) as owner:
             task = asyncio.create_task(module.run_native_outer_build(owner, spec_path=spec_path,
-                expected_sha256=hashlib.sha256(wire).hexdigest(), artifact_workspace=spool, timeout_seconds=5))
+                expected_sha256=hashlib.sha256(wire).hexdigest(), artifact_workspace=spool, timeout_seconds=60))
             if mode in {"upload-cleanup-cancel", "outcome-cleanup-cancel"}:
-                await asyncio.wait_for(write_started.wait(), 3)
+                await _await_phase(write_started, task)
                 task.cancel()
-                await asyncio.wait_for(write_cleanup.wait(), 3)
+                await _await_phase(write_cleanup, task)
                 task.cancel()
                 await asyncio.sleep(0)
                 allow_write_cleanup.set()
@@ -130,7 +146,7 @@ async def test_outer_io_matches_stream_and_result_before_upload_or_outcome(tmp_p
                     await task
                 assert write_settled == [True], "repeated cancellation interrupted write cleanup"
             elif mode == "authority-cleanup-cancel":
-                await asyncio.wait_for(authority_cleanup.wait(), 3)
+                await _await_phase(authority_cleanup, task)
                 task.cancel()
                 await asyncio.sleep(0)  # Let cancellation reach the await boundary, not an elapsed-time guess.
                 task.cancel()
@@ -139,7 +155,7 @@ async def test_outer_io_matches_stream_and_result_before_upload_or_outcome(tmp_p
                     await task
                 assert authority_settled == [True], "repeated cancellation interrupted IO cleanup"
             elif mode == "cancel":
-                await asyncio.wait_for(started.wait(), 2)
+                await _await_phase(started, task)
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await task
@@ -168,6 +184,38 @@ async def test_outer_io_matches_stream_and_result_before_upload_or_outcome(tmp_p
                 while await process.stdout.read(65536):
                     pass
             await process.wait()
+
+
+@pytest.mark.parametrize("mode", ["ready", "failed", "early-success", "timeout", "cancelled"])
+async def test_phase_wait_exposes_early_failure_without_cancelling_owned_operation(mode):
+    event, blocked = asyncio.Event(), asyncio.Event()
+
+    async def operation():
+        if mode == "ready":
+            event.set()
+        elif mode == "failed":
+            raise ValueError("original failure")
+        elif mode == "early-success":
+            return
+        elif mode == "cancelled":
+            raise asyncio.CancelledError
+        await blocked.wait()
+
+    task = asyncio.create_task(operation())
+    try:
+        if mode == "ready":
+            await _await_phase(event, task)
+            assert not task.done()
+        else:
+            expected = {"failed": ValueError, "early-success": AssertionError,
+                "timeout": TimeoutError, "cancelled": asyncio.CancelledError}[mode]
+            with pytest.raises(expected):
+                await _await_phase(event, task, timeout=0.1)
+            if mode == "timeout":
+                assert not task.done(), "only the operation's owner may cancel it"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.parametrize("creation_fails", [False, True])
