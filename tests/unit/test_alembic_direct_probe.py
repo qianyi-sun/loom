@@ -92,3 +92,49 @@ def test_probe_error_message_mentions_fix() -> None:
     msg = str(excinfo.value).lower()
     assert "loom-postgres" in msg or "direct" in msg
     assert "pgbouncer" in msg
+
+
+@pytest.mark.parametrize("source", ["environment", "alembic_config"])
+def test_tls_database_url_reaches_engine_without_interpolation(
+    monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    import runpy
+    from pathlib import Path
+
+    import sqlalchemy
+    from alembic import context
+    from alembic.config import Config
+    from sqlalchemy.engine import URL
+
+    # Both the credential and verify-full CA path legitimately contain percent
+    # escapes. Alembic's INI boundary must preserve the original URL exactly.
+    url = URL.create(
+        "postgresql+psycopg",
+        username="loom_test",
+        password="test%password@with/slash",
+        host="loom-postgres.loom-nebius-platform.svc",
+        database="loom",
+        query={"sslmode": "verify-full", "sslrootcert": "/var/run/loom-db/ca.crt"},
+    ).render_as_string(hide_password=False)
+    config = Config()
+    if source == "environment":
+        monkeypatch.setenv("LOOM_DB_URL", url)
+    else:
+        config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
+    monkeypatch.setattr(context, "config", config, raising=False)
+    monkeypatch.setattr(context, "is_offline_mode", lambda: False)
+
+    class ReachedEngineError(Exception):
+        pass
+
+    def engine_from_config(settings: dict, **kwargs: object) -> None:
+        assert settings["sqlalchemy.url"] == url
+        restored = sqlalchemy.make_url(settings["sqlalchemy.url"])
+        assert restored.password == "test%password@with/slash"
+        assert restored.query["sslmode"] == "verify-full"
+        assert restored.query["sslrootcert"] == "/var/run/loom-db/ca.crt"
+        raise ReachedEngineError
+
+    monkeypatch.setattr(sqlalchemy, "engine_from_config", engine_from_config)
+    with pytest.raises(ReachedEngineError):
+        runpy.run_path(str(Path(__file__).resolve().parents[2] / "migrations/env.py"))

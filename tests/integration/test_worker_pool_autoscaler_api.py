@@ -446,9 +446,7 @@ def test_execution_finance_admin_round_trip_keeps_bill_overhead_explicit(
             json={},
         )
         assert collector_token.status_code == 201, collector_token.text
-        collector_token_hash = hashlib.sha256(
-            collector_token.json()["token"].encode()
-        ).digest()
+        collector_token_hash = hashlib.sha256(collector_token.json()["token"].encode()).digest()
         with sessionmaker(engine)() as session:
             persisted_collector_token = session.get(Token, collector_token_hash)
             assert persisted_collector_token is not None
@@ -572,7 +570,7 @@ def test_execution_finance_admin_round_trip_keeps_bill_overhead_explicit(
         assert capacity_target["observation"]["allocatable_cpu_millis_free"] == 42_000
         assert capacity_target["command_backlog"] == 0
         assert capacity_target["recent_authorizations"] == []
-        assert capacity_target["blockers"] == []
+        assert capacity_target["blockers"] == ["execution_capacity_placement_unavailable"]
 
         over_quota = client.post(
             "/admin/execution-capacity-observations",

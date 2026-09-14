@@ -834,6 +834,38 @@ def test_seed_wrong_getsecret_identity_never_writes_source(
     assert "wrong-private-secret" not in str(caught.value) and source.puts == []
 
 
+@pytest.mark.parametrize("missing_agent", [False, True])
+def test_seed_accepts_signed_catalog_images_but_requires_agent_coverage(
+    source: FakeKube, seed_config: dict, monkeypatch: pytest.MonkeyPatch, missing_agent: bool
+) -> None:
+    path = Path(seed_config["runtime_profile_file"])
+    profile = json.loads(path.read_text())
+    agent = "registry.example/worker@sha256:" + "4" * 64
+    task = "registry.example/tb90@sha256:" + "5" * 64
+    profile["agent_image_ref"] = agent
+    images = [profile["task_image_ref"], profile["runtime_image_ref"], task]
+    if not missing_agent:
+        images.append(agent)
+    profile["image_admission"] = signed_image_admission_bundle(tuple(images)).model_dump(
+        mode="json"
+    )
+    path.write_text(json.dumps(profile))
+    monkeypatch.setattr(
+        credentials,
+        "run",
+        lambda argv: json.dumps(
+            {"aws_access_key_id": "spool-access-key", "secret": "secret"}
+        ).encode(),
+    )
+    if missing_agent:
+        with pytest.raises(credentials.ReconcileError, match="admission is incomplete"):
+            credentials.seed_inputs(source, seed_config, attachment())
+        assert not source.puts
+    else:
+        credentials.seed_inputs(source, seed_config, attachment())
+        assert "loom-nebius-staging-runtime" in source.puts
+
+
 def test_configure_kubeconfig_normalizes_generated_auth_and_cleans_temporary_files(
     auth_config: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:

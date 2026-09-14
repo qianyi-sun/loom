@@ -67,6 +67,11 @@ run "development_private_payg_plan" {
   }
 
   assert {
+    condition     = nebius_vpc_v1_subnet.target.ipv4_public_pools.use_network_pools == false
+    error_message = "Public service allocations must remain disabled by default."
+  }
+
+  assert {
     condition     = yamldecode(nebius_compute_v1_instance.deployment_access.cloud_init_user_data).users[0].sudo == ["ALL=(ALL) NOPASSWD:ALL"]
     error_message = "The deployment gateway operator needs a reproducible guest administration path."
   }
@@ -276,4 +281,19 @@ run "shared_cluster_rejects_missing_environment_binding" {
   }
 
   expect_failures = [var.environment_bindings]
+}
+
+run "public_service_allocations_opt_in" {
+  command = plan
+  providers = {
+    nebius                   = nebius
+    nebius.no_default_labels = nebius.no_default_labels
+  }
+  variables {
+    enable_public_service_allocations = true
+  }
+  assert {
+    condition     = nebius_vpc_v1_subnet.target.ipv4_public_pools.use_network_pools == true
+    error_message = "Explicit service opt-in must permit allocations from the existing network public pools."
+  }
 }

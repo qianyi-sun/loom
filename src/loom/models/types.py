@@ -5,9 +5,11 @@ Spec §2.3 (Capabilities), §4.1 (Task), §4.2 (Supporting types), §4.5 (TrialS
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+AgentVersion = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")]
 
 # Scalar fields that match Postgres claim-query semantics exactly.
 OS = Literal["linux", "windows"]

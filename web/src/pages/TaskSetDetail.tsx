@@ -46,10 +46,19 @@ function capabilityLabel(ts: TaskSetDetailResponse): string {
 }
 
 export default function TaskSetDetail(): JSX.Element {
-  const { id = "" } = useParams<{ id: string }>();
+  // Retain path IDs for old in-app links; newly generated links use the query.
+  const { id: legacyId } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
+  const id = legacyId ?? searchParams.get("id") ?? "";
+  const validId =
+    !!id.trim() &&
+    (legacyId !== undefined || searchParams.getAll("id").length === 1) &&
+    !Array.from(id).some((char) =>
+      char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127 || char === "\\",
+    ) &&
+    !id.split("/").some((part) => !part || part === "." || part === "..");
   const tab = parseTab(searchParams.get("tab"));
   const [deleteOpen, setDeleteOpen] = useState(false);
 
@@ -62,7 +71,7 @@ export default function TaskSetDetail(): JSX.Element {
   const query = useQuery({
     queryKey: ["taskSets", id],
     queryFn: () => api.getTaskSet(id),
-    enabled: !!id,
+    enabled: validId,
     refetchInterval: (q) => {
       const data = q.state.data as TaskSetDetailResponse | undefined;
       if (!data || !ACTIVE_STATUSES.has(data.status)) return false;
@@ -102,6 +111,12 @@ export default function TaskSetDetail(): JSX.Element {
     setSearchParams(next);
   };
 
+  if (!validId) {
+    return <Card><Card.Body>
+      <p role="alert">Invalid task set link. Open the task sets list and select a task set.</p>
+      <Link to="/task-sets">All task sets</Link>
+    </Card.Body></Card>;
+  }
   if (query.isLoading) return <LoadingState />;
   if (query.error) {
     const status =
@@ -110,11 +125,12 @@ export default function TaskSetDetail(): JSX.Element {
       "status" in query.error
         ? (query.error as { status: number }).status
         : 0;
-    if (status === 404) {
+    if (status === 400 || status === 404 || status === 403 || status === 422) {
       return (
         <Card>
           <Card.Body>
-            <p className="text-slate-700">Task set not found.</p>
+            <p role="alert" className="text-slate-700">Task set not found or unavailable to your team. Check the link and selected team.</p>
+            <Link to="/task-sets">All task sets</Link>
           </Card.Body>
         </Card>
       );

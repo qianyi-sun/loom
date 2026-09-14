@@ -37,6 +37,7 @@ METADATA = (
     b"Requires-Dist: litellm==1.81.10\n"
     b"Requires-Dist: importlib-metadata==7.2.1\n"
     b"Requires-Dist: gitpython==3.1.46\n"
+    b'Requires-Dist: gitpython==3.1.46; extra == "browser"\n'
     b"Requires-Dist: requests==2.32.3\n\n"
 )
 WHEEL = (
@@ -48,7 +49,7 @@ WHEEL = (
 RECORD = (
     b"aider/__init__.py,sha256=p2w1lOZCsNixTcC4CwTkeqA-kqhIGKq5OE-mIQKipaY,23\n"
     b"aider_chat-0.86.2.dist-info/METADATA,"
-    b"sha256=5BNcqIQ30bbh5XLYQI5QdLmFOg0lvM5ULpTFfrNUr20,211\n"
+    b"sha256=j_ebo_kDdcb62_wa_jx3zZBgMM_vMdWiAV-Dqz1-EVI,264\n"
     b"aider_chat-0.86.2.dist-info/RECORD,,\n"
     b"aider_chat-0.86.2.dist-info/WHEEL,"
     b"sha256=2_IrOF1jR2xNXEM3zpoG00Cl9D_z2vSqNSI6jX8JKVo,79\n"
@@ -169,7 +170,7 @@ def test_rebuilds_only_distribution_metadata_and_generates_a_valid_record(
         assert "litellm==1.84.1" in metadata.get_all("Requires-Dist")
         assert "importlib-metadata==8.9.0" in metadata.get_all("Requires-Dist")
         assert "gitpython==3.1.59" in metadata.get_all("Requires-Dist")
-        assert "gitpython==3.1.46" not in metadata.get_all("Requires-Dist")
+        assert 'gitpython==3.1.59; extra == "browser"' in metadata.get_all("Requires-Dist")
         assert "requests==2.32.3" in metadata.get_all("Requires-Dist")
         assert archive.read("aider/__init__.py") == APPLICATION
         assert f"{DIST_INFO}/METADATA" not in archive.namelist()

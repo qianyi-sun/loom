@@ -11,6 +11,7 @@ from pydantic import TypeAdapter
 
 from loom.agent.terminus2.checkpoint_bridge import HarborCheckpointBridge
 from loom.agent.terminus2.gateway_ledger import CheckpointBridgeError
+from loom.agent.terminus2.provenance import HARBOR_RUNTIME_VERSION
 from loom.models.trajectory import EventKind, TrajectoryEvent
 from loom.models.types import ModelSpec
 from loom.trajectory.storage import FakeObjectStore
@@ -113,6 +114,8 @@ async def test_bridge_syncs_agent_steps(tmp_path: Path) -> None:
     for line in local.read_text().strip().splitlines():
         event = _adapter.validate_json(line)
         kinds.append(event.kind)
+        if event.kind == EventKind.TERMINUS2_RUNTIME_PROVENANCE:
+            assert event.harbor_version == HARBOR_RUNTIME_VERSION
 
     assert EventKind.TERMINUS2_RUNTIME_PROVENANCE in kinds
     assert EventKind.TERMINUS2_USER_PROMPT in kinds
@@ -377,4 +380,3 @@ async def test_bridge_poll_skips_agent_step_until_episode_row_exists(
         client._rows = [_correlated_row(gw_id="ep1", episode=1)]
         synced = await bridge.sync_trajectory_file(traj, allow_incomplete=True)
         assert synced == 1
-

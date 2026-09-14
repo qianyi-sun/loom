@@ -185,12 +185,14 @@ def _transform_metadata(payload: bytes) -> bytes:
         f"Requires-Dist: {NEW_IMPORTLIB_METADATA_REQUIREMENT}".encode(),
         "target requirement for importlib-metadata",
     )
-    transformed = _replace_exact_line(
-        transformed,
-        f"Requires-Dist: {OLD_GITPYTHON_REQUIREMENT}".encode(),
-        f"Requires-Dist: {NEW_GITPYTHON_REQUIREMENT}".encode(),
-        "target requirement for GitPython",
-    )
+    # Aider pins this dependency both normally and in its browser extra.
+    for suffix in ("", '; extra == "browser"'):
+        transformed = _replace_exact_line(
+            transformed,
+            f"Requires-Dist: {OLD_GITPYTHON_REQUIREMENT}{suffix}".encode(),
+            f"Requires-Dist: {NEW_GITPYTHON_REQUIREMENT}{suffix}".encode(),
+            "target requirement for GitPython" + suffix,
+        )
     try:
         metadata = BytesParser().parsebytes(transformed)
     except (TypeError, ValueError) as error:

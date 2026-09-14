@@ -72,6 +72,19 @@ def test_runtime_plan_is_immutable_bounded_and_digest_pinned() -> None:
         )
 
 
+@pytest.mark.parametrize("directory", ["/app", "/workspace", "/workspace/task"])
+def test_phase_accepts_trusted_controller_or_task_workspace(directory: str) -> None:
+    ProcessPhaseV1.model_validate({**_phase("agent").model_dump(), "working_directory": directory})
+
+
+@pytest.mark.parametrize("directory", [
+    "/app/task", "/appevil", "/workspaceevil", "/tmp", "/app/.", "/workspace/../app",
+])
+def test_phase_rejects_other_working_directories(directory: str) -> None:
+    with pytest.raises(ValidationError):
+        ProcessPhaseV1.model_validate({**_phase("agent").model_dump(), "working_directory": directory})
+
+
 def test_sidecar_order_and_probes_are_explicit() -> None:
     first = SidecarContainerV1(
         role_name="database",

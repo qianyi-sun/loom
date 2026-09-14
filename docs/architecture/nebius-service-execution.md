@@ -1,5 +1,10 @@
 # Nebius service execution contract
 
+> **Target revision, 2026-09-14:** on `dev`, the
+> [full Nebius platform contract](nebius-primary-platform.md) supersedes the
+> permanent hybrid target below. Existing implementation details describe the
+> migration baseline; OLDLAB/GB10 are to be retired after pure Nebius acceptance.
+
 Status: accepted hybrid target architecture for issue #1548. The
 provider-neutral durable control plane, namespace-scoped Kubernetes Job
 adapter, read-only capacity collector, and evidence-gated resource forecast
@@ -269,6 +274,20 @@ capacity is insufficient or unknown, or when the autoscaler is stalled or
 unknown. Existing fresh allocatable capacity does not require theoretical
 provider scale headroom.
 
+At zero nodes, admission can reuse measured allocatable capacity and resident
+DaemonSet overhead from a historical observation of the same node group, raw
+resource shape, node template, and DaemonSet revisions, requests and scheduling.
+Adding custom node-template labels does not invalidate that sample when every
+old label retains its value and none of the added keys appears anywhere in the
+observed DaemonSet scheduling data. This includes selector keys, affinity label
+references, and topology keys. The scan deliberately treats any exact occurrence
+in scheduling data as relevant; it does not attempt to prove equivalent selector
+expressions. Label deletion or value changes, malformed labels, other template
+changes (including OS, Kubernetes version, Pod slots and taints), or DaemonSet
+changes still require a matching observed sample. Without one, admission waits
+with `execution_capacity_node_allocatable_unknown`. This rule reuses measured
+capacity; it does not invent a bootstrap capacity estimate.
+
 Each successful decision is an immutable, lease-bound
 `execution_provisioning_authorizations` row. Database transitions retain
 whether it is authorized, Pending, Unschedulable, image-pull blocked, running,
@@ -392,11 +411,23 @@ topology for the `nebius-cpu` adapter:
 
 Development, staging, and production cannot share a logical target identity,
 namespace, health observation, service identity, policy, or evidence prefix.
-They deliberately share one physical cluster/failure domain. Every binding is
+The default catalog shares one physical cluster/failure domain. Every binding is
 probed independently; a binding becomes ineligible when its observation is
 older than its declared stale threshold. Placement remains environment-local
 and health-first. Queued work does not cross environments or leave EU residency
-to recover capacity, and there is no implicit secondary-region fallback.
+to recover capacity. Regional expansion requires explicit secondary targets; the
+scheduler does not discover or provision arbitrary regions.
+
+The pure-Nebius integration renderer supports additional execution-only EU
+clusters while keeping the platform, database and canonical storage in the
+primary region. A topology has one primary per environment, unique target/health
+identities and isolated namespaces within each physical cluster. The scheduler
+tries fresh compatible targets in primary-first order, using native quota and
+per-node fit inside a savepoint for each admission. A rejected region leaves no
+attempt increment, budget reservation or route behind. Exhaustion leaves queued
+work under the existing bounded retry backoff. See the regional section of
+[the platform runbook](../runbooks/nebius-platform.md) for source configuration
+and separately authorized activation.
 
 These target records are desired logical bindings, not evidence that any
 Nebius project, cluster, node group, runtime class, or capacity exists.
@@ -407,7 +438,7 @@ Migrations `0113` through `0120` persist the complete provider-neutral
 desired/observed state without making a Nebius or Kubernetes call:
 
 - immutable `execution_classes` and environment-local `execution_targets`
-  bound to one shared physical cluster scope;
+  bound to explicit physical cluster scopes;
 - one canonical routing decision and monotonically increasing routing
   generation on each Trial, with the selected pool/reason/digest frozen into
   every Kubernetes lease and its history;
@@ -468,6 +499,24 @@ class. The create outbox and history projection retain the same immutable
 identity; an actuator refuses legacy or malformed leases that have no valid
 runtime plan.
 
+Regional broker authentication uses an explicit native cluster connection and a
+rotating Pod-bound service-account token projected only into the execution
+container. The runtime rereads this token for broker/input/output requests;
+model requests retain the existing step JWT. Gateway uses the lease's target to
+select TokenReview, checks audience, namespace, service account and Pod UID,
+then authorizes the current lease in a fresh database transaction. It holds no
+DB connection while waiting on regional IAM/API calls, and never trusts
+X-Forwarded-For as workload identity. Primary-cluster direct Pod-IP mode remains
+compatible; a secondary target cannot fall back to it. No additional Loom token
+issuer, public database or runtime cloud writer is introduced. Gateway and
+actuator images use the same pinned Nebius SDK as the development lock.
+
+For prepared task images, Gateway resolves input from the frozen snapshot bound
+to the authorized lease, even after the current Task changes or the image enters
+retirement. Database bootstrap grants `loom_gateway` only `SELECT` on
+`task_image_materializations` and `trial_task_image_materializations`; it cannot
+create, change, or remove image preparation state or Trial associations.
+
 `0115` adds the observed Pod IP and one generation-bound service-execution
 Artifact commit ledger. Gateway maps the direct peer to the immutable Pod UID,
 resource generation, role, target health, and frozen runtime identity before it
@@ -518,6 +567,25 @@ Run Library batch detail lists owner/admin-accessible complete bundles without
 loading full legacy Trial payloads. Integrity failure keeps the bundle
 unavailable and returns a sanitized error; it never falls back to a partial
 answer file.
+
+For Terminus-2, Harbor's accepted turns are distinct from Gateway requests:
+a length-truncated response or an internal retry can consume tokens without
+producing a Harbor step. Canonical materialization reads the Gateway ledger by
+team, Trial, agent step, lease and committed output generation. It reconciles
+native call identities and token counts, retains every request as an accounting
+LLM event, and leaves the original Harbor turns, commands and observations intact.
+`files/accounting/usage.json`, `files/accounting/gateway-calls.json` and the ATIF
+top-level `accounting` field cover all those requests. ATIF per-step metrics cover
+only the linked native steps; summing them is not total request usage. The ledger
+export contains safe accounting metadata, never raw provider logs or headers.
+USD values remain recorded pricing snapshots, not evidence of settled billing.
+
+The original runtime trace and usage remain available under
+`source/trajectory/events.jsonl` and `source/accounting/usage.json`, alongside
+the unchanged source manifests. Already-published affected Trials can be corrected
+with the bounded operator command described in
+[the accounting repair runbook](../ops/nebius-accounting-repair.md), without
+rerunning the workload or overwriting its original objects.
 
 Event and command payloads are database-bounded at 64 KiB. An execution lease
 accepts at most 10,000 event ordinals and 20,000 projected history transitions;
@@ -589,6 +657,23 @@ running, succeeded, failed, OOM-killed, evicted, node-lost, active-deadline,
 terminating, missing, and deleted states have explicit mappings. A stuck Job
 remains visible as observed failure/debt; the actuator never fabricates a Loom
 success or changes retry policy outside the fenced control-plane transition.
+
+Execution start means the `execution` container's actual running/terminated
+start timestamp, not kubelet acknowledgement (`Pod.status.startTime`) or a
+task/verifier init-container start. Missing container evidence remains unknown.
+The authoritative current attempt observation also moves its Trial from claimed
+to running, so ordinary detail, list, batch and monitor views share the durable
+state. Replayed observations, previous attempts, verifier leases and cancelled
+or finished Trials cannot restart that Trial. Older native results with a missing
+Trial start expose the recorded runtime start on read without rewriting history.
+
+Trial detail exposes `task_environment_preparation` separately from execution
+and canonical output. It describes the current shared image preparation, with
+bounded phase states, exit codes and actionable messages. It is not a historical
+build-attempt binding for the Trial. Raw build logs and source/registry locations
+are excluded because arbitrary Dockerfiles can print secrets. A pre-execution
+build failure or cancellation can have diagnostics without a canonical Trial
+bundle; such a bundle remains unavailable rather than pretending to be complete.
 
 The #1550 renderer consumes only the lease-frozen
 `loom.execution-runtime-plan.v1`. For the supported `init_payload` composition

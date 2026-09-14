@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import sessionmaker
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.network import Network
-from testcontainers.core.wait_strategies import LogMessageWaitStrategy
+from testcontainers.core.wait_strategies import HttpWaitStrategy, LogMessageWaitStrategy
 from testcontainers.minio import MinioContainer
 from testcontainers.postgres import PostgresContainer
 
@@ -784,7 +784,7 @@ def shared_minio() -> Iterator[MinioContainer]:
     """Module-scoped MinIO so we don't pay container-start cost per
     test. Routes that exercise the boto3 path (trajectory, atif)
     share this."""
-    with MinioContainer(image=MINIO_TEST_IMAGE) as m:
+    with MinioContainer(MINIO_TEST_IMAGE).waiting_for(HttpWaitStrategy(9000, "/minio/health/cluster")) as m:
         yield m
 
 

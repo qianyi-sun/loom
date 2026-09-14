@@ -256,10 +256,31 @@ function renderBatchDetail(): void {
 }
 
 describe("BatchDetail run plan", () => {
+  it.each([
+    ["all_failed", { cancelled: 1 }, "All trials cancelled"],
+    ["all_failed", { cancelled: 1, failed: 1 }, "Failed and cancelled"],
+    ["partial_failed", { succeeded: 1, cancelled: 1 }, "Succeeded and cancelled"],
+    ["partial_failed", { succeeded: 1, failed: 1, cancelled: 1 }, "Succeeded, failed and cancelled"],
+  ])("distinguishes cancellation in %s outcomes", async (result, summary, label) => {
+    mockBatch({ ...BATCH_BODY, state: "finished", result_status: result, trial_summary: summary });
+    renderBatchDetail();
+    expect(await screen.findByText(label as string)).toBeInTheDocument();
+    expect(screen.queryByText(result as string)).not.toBeInTheDocument();
+  });
+
   beforeEach(() => {
     window.localStorage.clear();
     window.localStorage.setItem("loom_token", "test-token");
     vi.restoreAllMocks();
+  });
+
+  it("distinguishes combinations using different Harbor versions of the same model", async () => {
+    mockBatch({ ...BATCH_BODY, backend: "nebius", combinations: ["harbor-v1", "harbor-v2"].map((agent_version) => ({
+      agent_name: "terminus-2", agent_version, agent_model: { provider: "openai", name: "glm-5.2" }, n_per_task: 1,
+    })) });
+    renderBatchDetail();
+    expect((await screen.findAllByText(/terminus-2@harbor-v1/)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/terminus-2@harbor-v2/)).length).toBeGreaterThan(0);
   });
 
   it("shows a human-readable run plan instead of raw payload fields", async () => {

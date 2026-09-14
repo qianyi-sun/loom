@@ -25,7 +25,7 @@ from loom.db.schema import (
     ServiceExecutionTarget,
     Trial,
 )
-from loom.execution_runtime_contract import ExecutionRuntimePlanV1
+from loom.execution_runtime_contract import ExecutionRuntimePlanV1, runtime_pod_resources
 from loom.pipeline.keys import canonical_digest
 
 _FINANCE_POLICY_LOCK = text(
@@ -106,20 +106,11 @@ def estimate_execution_cost(
         (runtime_plan.max_artifact_bytes + 2 * runtime_plan.max_log_bytes_per_stream + 1_048_575)
         // 1_048_576,
     )
-    cpu_millis = (
-        50
-        + runtime_plan.task_resources.cpu_millis
-        + sum(sidecar.resources.cpu_millis for sidecar in runtime_plan.sidecars)
-    )
-    memory_mib = (
-        64
-        + runtime_plan.task_resources.memory_mib
-        + sum(sidecar.resources.memory_mib for sidecar in runtime_plan.sidecars)
-    )
+    pod_resources = runtime_pod_resources(runtime_plan)
+    cpu_millis = pod_resources.cpu_millis
+    memory_mib = pod_resources.memory_mib
     storage_mib = (
-        32
-        + runtime_plan.task_resources.ephemeral_storage_mib
-        + sum(sidecar.resources.ephemeral_storage_mib for sidecar in runtime_plan.sidecars)
+        pod_resources.ephemeral_storage_mib
         + runtime_plan.workspace_mib
         + runtime_plan.runtime_volume_mib
         + output_mib

@@ -20,6 +20,7 @@ import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
 import { StatusPill } from "../components/StatusPill";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
+import { agentLabel } from "../lib/agentLabel";
 import { formatLocalDateTime } from "../lib/dateTime";
 import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
 import { humanizeTrialConfig } from "../lib/humanizeTrialConfig";
@@ -27,7 +28,7 @@ import { modelLabel } from "../lib/modelLabel";
 import { ownershipLabel } from "../lib/ownership";
 import { provenanceLabel } from "../lib/provenanceLabel";
 import { batchInspectionCommands } from "../lib/quickstartSnippets";
-import { batchStateVariant, trialStateVariant } from "../lib/statusVariant";
+import { batchResultPresentation, batchStateVariant, trialStateVariant } from "../lib/statusVariant";
 import { formatTokenUsage } from "../lib/tokenUsage";
 import {
   formatUsageCost,
@@ -35,34 +36,20 @@ import {
   usageEstimateConfidence,
 } from "../lib/usageCost";
 
-function resultStatusVariant(s: string): "success" | "warning" | "failed" | "cancelled" | "neutral" {
-  switch (s) {
-    case "succeeded":
-      return "success";
-    case "partial_failed":
-      return "warning";
-    case "all_failed":
-      return "failed";
-    case "cancelled":
-      return "cancelled";
-    default:
-      return "neutral";
-  }
-}
-
 const ACTIVE_STATES = new Set(["submitted", "running"]);
 
 function comboSummary(
   combo: {
     label?: string | null;
     agent_name: string;
+    agent_version?: string | null;
     agent_model: unknown;
     n_per_task: number;
   },
   index: number,
 ): string {
   const label = combo.label || `combo${index + 1}`;
-  return `${label} / ${combo.agent_name} / ${modelLabel(combo.agent_model)} / n=${combo.n_per_task}`;
+  return `${label} / ${agentLabel(combo.agent_name, combo.agent_version)} / ${modelLabel(combo.agent_model)} / n=${combo.n_per_task}`;
 }
 
 function scoreText(value: number | null): string {
@@ -244,6 +231,7 @@ export default function BatchDetail(): JSX.Element {
     ),
   );
   const deliveryExport = createDeliveryExport.data ?? deliveryQuery.data;
+  const resultPresentation = c.result_status ? batchResultPresentation(c.result_status, c.trial_summary) : null;
   const deliveryStatus = deliveryExport?.status === "ready" ? "ready" : "not ready";
   const deliveryObjects = deliveryObjectText(deliveryExport);
 
@@ -275,9 +263,9 @@ export default function BatchDetail(): JSX.Element {
               <StatusPill variant={batchStateVariant(c.state)}>
                 {c.state}
               </StatusPill>
-              {c.result_status ? (
-                <StatusPill variant={resultStatusVariant(c.result_status)}>
-                  {c.result_status}
+              {resultPresentation ? (
+                <StatusPill variant={resultPresentation.variant}>
+                  {resultPresentation.label}
                 </StatusPill>
               ) : null}
               {c.backend ? (
@@ -302,7 +290,7 @@ export default function BatchDetail(): JSX.Element {
                   >
                     <span className="font-semibold">{lbl}</span>
                     <span className="text-slate-500">
-                      {combo.agent_name} · {modelTxt} · n={combo.n_per_task}
+                      {agentLabel(combo.agent_name, combo.agent_version)} · {modelTxt} · n={combo.n_per_task}
                     </span>
                   </span>
                 );

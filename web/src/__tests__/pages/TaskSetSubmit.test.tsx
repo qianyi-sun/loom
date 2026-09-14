@@ -1,11 +1,16 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import TaskSetSubmit from "../../pages/TaskSetSubmit";
 import { jsonResponse } from "../../test-utils/fetchMock";
+
+function DetailLocation(): JSX.Element {
+  const location = useLocation();
+  return <p>Task set detail <span data-testid="detail-url">{location.pathname}{location.search}</span></p>;
+}
 
 function renderPage(): void {
   const queryClient = new QueryClient({
@@ -19,7 +24,7 @@ function renderPage(): void {
       >
         <Routes>
           <Route path="/task-sets/new" element={<TaskSetSubmit />} />
-          <Route path="/task-sets/:id" element={<p>Task set detail</p>} />
+          <Route path="/task-sets/detail" element={<DetailLocation />} />
           <Route path="/task-sets" element={<p>Task set list</p>} />
         </Routes>
       </MemoryRouter>
@@ -60,11 +65,40 @@ describe("TaskSetSubmit", () => {
     await user.click(screen.getByRole("button", { name: "Submit Task Set" }));
 
     expect(await screen.findByText("Task set detail")).toBeInTheDocument();
+    expect(screen.getByTestId("detail-url")).toHaveTextContent("/task-sets/detail?id=uploaded%2Fset");
     const body = fetchMock.mock.calls[0]?.[1]?.body;
     expect(body).toBeInstanceOf(FormData);
     expect((body as FormData).get("manifest")).toBeInstanceOf(File);
     expect((body as FormData).get("verifier")).toBeInstanceOf(File);
     expect((body as FormData).get("transform")).toBeInstanceOf(File);
+    expect((body as FormData).has("bundle")).toBe(false);
+  });
+
+  it("uploads an evaluation task bundle without separate scripts", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({ task_set_id: "uploaded/bundle", status: "materializing" }, 202),
+    );
+    renderPage();
+    const manifest = new File(
+      ["source:\n  type: bundle-upload\n  locator: bundle.tar.gz\nintents: [evaluation]"],
+      "manifest.yaml", { type: "application/x-yaml" },
+    );
+    const bundle = new File(["task archive"], "bundle.tar.gz", { type: "application/gzip" });
+    await user.upload(screen.getByLabelText("Manifest (required)"), manifest);
+    await user.upload(screen.getByLabelText("Task bundle (optional)"), bundle);
+    await user.click(screen.getByRole("button", { name: "Submit Task Set" }));
+
+    expect(await screen.findByText("Task set detail")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, request] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("/api/v1/tasksets");
+    expect(request?.method).toBe("POST");
+    const body = request?.body as FormData;
+    expect(body.get("manifest")).toBe(manifest);
+    expect(body.get("bundle")).toBe(bundle);
+    expect(body.has("verifier")).toBe(false);
+    expect(body.has("transform")).toBe(false);
   });
 
   it("shows API details and the generic fallback", async () => {

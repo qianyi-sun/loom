@@ -1,5 +1,11 @@
 # Loom
 
+> **Nebius support:** `dev` includes native Nebius platform and workload support
+> under [#1536](https://github.com/qianyi-sun/loom/issues/1536). All development
+> PRs target `dev`; `main` remains reserved for validated release promotion.
+> See the [platform and migration contract](docs/architecture/nebius-primary-platform.md)
+> for deployment requirements and remaining workload qualification.
+
 Loom is a team platform for running model and agent evaluations. It lets
 researchers submit batches, monitor trials, inspect failures, download
 trajectories and artifacts, and audit provider usage without operating the

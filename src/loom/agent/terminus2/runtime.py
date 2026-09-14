@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
@@ -44,7 +44,9 @@ from loom.models.trial import MultiModelSwitchSpec
 from loom.models.types import OS, ModelSpec
 from loom.request_params import sanitize_request_extras
 from loom.trajectory.attempt_guard import AttemptTrajectoryFencedError
-from loom.trajectory.writer import TrajectoryWriter
+
+if TYPE_CHECKING:
+    from loom.trajectory.writer import TrajectoryWriter
 
 
 def _require_attempt_mutation_active(
@@ -64,7 +66,7 @@ def _import_terminus2() -> tuple[type, type]:
         from harbor.models.agent.context import AgentContext
     except ImportError as exc:
         raise AgentError(
-            "terminus-2 requires harbor@527d50d preinstalled in the worker image",
+            f"terminus-2 requires harbor@{HARBOR_COMPAT_SHA} preinstalled in the controller image",
         ) from exc
     return Terminus2, AgentContext
 
@@ -586,7 +588,7 @@ class LoomTerminus2Runtime:
             session_id=str(self.trial_id),
             record_terminal_session=True,
             enable_summarize=False,
-            llm_kwargs={"api_key": step_token},
+            llm_kwargs={**sanitize_request_extras(self.request_params), "api_key": step_token},
         )
         # Student LiteLLM already received the step JWT via constructor kwargs.
         # Multi-model invariant (all policies): never redact agent._llm_kwargs

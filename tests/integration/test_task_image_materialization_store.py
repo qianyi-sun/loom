@@ -13,8 +13,14 @@ from loom.db.schema import (
     TaskImageMaterialization,
     TaskImageMaterializationAttempt,
     TaskImagePublicationEvidence,
+    Team,
+    Trial,
+    TrialTaskImageMaterialization,
 )
-from loom.task_image_materialization import ensure_task_image_materializations
+from loom.task_image_materialization import (
+    ensure_task_image_materializations,
+    get_trial_task_image_execution_grant,
+)
 from loom_control_plane.task_image_materializations import (
     TaskImageLeaseConflictError,
     claim_task_image_materialization,
@@ -315,3 +321,114 @@ async def test_ensure_requeues_retired_images_and_marks_retiring_images_referenc
         assert rows[1].claimed_by == "registry-gc-active"
         assert rows[1].unreferenced_at is None
         assert rows[1].last_referenced_at > old_reference
+
+
+async def test_same_checksum_cannot_rebind_frozen_task_snapshot(
+    materialization_session: async_sessionmaker[AsyncSession],
+) -> None:
+    task_id = f"materialization/{uuid4()}"
+    async with materialization_session() as session:
+        await session.execute(insert(Task).values(**_task_values(task_id=task_id, checksum="5" * 64)))
+        task = (await session.execute(select(Task).where(Task.id == task_id))).scalar_one()
+        rows = await ensure_task_image_materializations(session, task_row=task)
+        await session.commit()
+        original_source = rows[0].task_source
+        task.config = {**task.config, "agent": {"name": "different-agent"}}
+        with pytest.raises(RuntimeError, match="snapshot conflicts"):
+            await ensure_task_image_materializations(session, task_row=task)
+        await session.rollback()
+        stored = await session.scalar(select(TaskImageMaterialization).where(
+            TaskImageMaterialization.task_id == task_id,
+        ))
+        assert stored is not None and stored.task_source == original_source
+
+
+async def test_execution_grant_rejects_cross_task_link_and_keeps_original_revision(
+    materialization_session: async_sessionmaker[AsyncSession],
+) -> None:
+    task_id = f"materialization/{uuid4()}"
+    other_task_id = f"materialization/{uuid4()}"
+    team_id, trial_id = uuid4(), uuid4()
+    async with materialization_session() as session:
+        try:
+            await session.execute(insert(Team).values(id=team_id, name=f"image-grant-{team_id}"))
+            for current_id in (task_id, other_task_id):
+                await session.execute(insert(Task).values(**_task_values(
+                    task_id=current_id, checksum="6" * 64,
+                )))
+            task = (await session.execute(select(Task).where(Task.id == task_id))).scalar_one()
+            rows = await ensure_task_image_materializations(session, task_row=task)
+            ready = next(row for row in rows if row.cpu_arch == "x86_64")
+            ready.state = "ready"
+            ready.registry_images = {"task": "registry.example/task@sha256:" + "7" * 64}
+            await session.execute(insert(Trial).values(
+                id=trial_id, team_id=team_id, task_id=other_task_id, config={}, requires_caps={},
+                state="queued",
+            ))
+            await session.execute(insert(TrialTaskImageMaterialization).values(
+                trial_id=trial_id, materialization_id=ready.id,
+            ))
+            await session.commit()
+            with pytest.raises(RuntimeError, match="no longer has a ready"):
+                await get_trial_task_image_execution_grant(
+                    session, trial_id=trial_id, cpu_arches=["x86_64"],
+                )
+            await session.execute(update(Trial).where(Trial.id == trial_id).values(task_id=task_id))
+            await session.execute(update(Task).where(Task.id == task_id).values(
+                checksum="8" * 64, source="s3://loom-tasks/new-version",
+            ))
+            grant = await get_trial_task_image_execution_grant(
+                session, trial_id=trial_id, cpu_arches=["x86_64"],
+            )
+            assert grant is not None
+            assert grant.materialization_id == ready.id
+            assert grant.task_checksum == "6" * 64
+            assert grant.task_source != "s3://loom-tasks/new-version"
+        finally:
+            await session.rollback()
+            await session.execute(delete(Trial).where(Trial.id == trial_id))
+            await session.execute(delete(Team).where(Team.id == team_id))
+            await session.commit()
+
+
+async def test_same_checksum_new_generation_reuses_frozen_source(
+    materialization_session: async_sessionmaker[AsyncSession],
+) -> None:
+    task_id = f"materialization/{uuid4()}"
+    async with materialization_session() as session:
+        await session.execute(insert(Task).values(**_task_values(task_id=task_id, checksum="9" * 64)))
+        task = (await session.execute(select(Task).where(Task.id == task_id))).scalar_one()
+        original = await ensure_task_image_materializations(session, task_row=task)
+        original_ids = {row.id for row in original}
+        original_source = original[0].task_source
+        original_provenance = original[0].task_source_provenance
+        await session.commit()
+        task.source = "s3://loom-tasks/new-generation/tasks/unchanged/"
+        task.source_provenance = {**task.source_provenance, "import_generation": "replacement"}
+        reused = await ensure_task_image_materializations(session, task_row=task)
+        await session.commit()
+        assert {row.id for row in reused} == original_ids
+        assert all(row.task_source == original_source for row in reused)
+        assert all(row.task_source_provenance == original_provenance for row in reused)
+
+
+async def test_retired_same_checksum_rebuild_relocates_collected_source(
+    materialization_session: async_sessionmaker[AsyncSession],
+) -> None:
+    task_id = f"materialization/{uuid4()}"
+    async with materialization_session() as session:
+        await session.execute(insert(Task).values(**_task_values(task_id=task_id, checksum="a" * 64)))
+        task = (await session.execute(select(Task).where(Task.id == task_id))).scalar_one()
+        rows = await ensure_task_image_materializations(session, task_row=task)
+        old_ids = {row.id for row in rows}
+        for row in rows:
+            row.state = "retired"
+        task.source = "s3://loom-tasks/reuploaded/tasks/same-content/"
+        task.source_provenance = {**task.source_provenance, "generation": "reuploaded"}
+        await session.commit()
+        requeued = await ensure_task_image_materializations(session, task_row=task)
+        await session.commit()
+        assert {row.id for row in requeued} == old_ids
+        assert all(row.state == "queued" for row in requeued)
+        assert all(row.task_source == task.source for row in requeued)
+        assert all(row.task_source_provenance == task.source_provenance for row in requeued)

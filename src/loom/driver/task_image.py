@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import logging
 import os
 import platform
@@ -165,6 +166,15 @@ def task_image_tag(
             build_context_text,
         ]
     )
+    if task_config.environment.docker_build_args or task_config.environment.docker_build_target:
+        material += "\n" + json.dumps(
+            {
+                "build_args": task_config.environment.docker_build_args,
+                "target": task_config.environment.docker_build_target,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
     return f"loom-task:{digest}"
 
@@ -564,6 +574,8 @@ def _ensure_dockerfile_image(
             forcerm=True,
             pull=False,
             platform=_docker_platform(cpu_arch),
+            buildargs=task_config.environment.docker_build_args,
+            target=task_config.environment.docker_build_target,
             labels={
                 "loom.task-image": "true",
                 "loom.task_id": task_config.task.id,

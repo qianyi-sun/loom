@@ -8,10 +8,16 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom.db.schema import ServiceExecutionLease, ServiceExecutionTarget
+from loom.db.schema import (
+    ServiceExecutionLease,
+    ServiceExecutionTarget,
+    TaskImageMaterialization,
+    Trial,
+    TrialTaskImageMaterialization,
+)
 from loom.execution_contract import ExecutionRoutingReason, workload_requirements_from_task
 from loom.execution_image_admission import ImageAdmissionKeyring
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1
@@ -22,6 +28,11 @@ from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
     compile_service_execution_plan,
 )
+from loom.task_image_materialization import (
+    get_trial_task_image_execution_grant,
+    resolve_prepared_task,
+)
+from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
 from loom_control_plane.service_execution import reserve_trial_execution
 
 _LOG = logging.getLogger(__name__)
@@ -40,6 +51,7 @@ SELECT t.id,
   JOIN tasks task_definition ON task_definition.id = t.task_id
   JOIN team_quotas q ON q.team_id = t.team_id
  WHERE t.state = 'queued'
+   AND t.cancellation_requested_at IS NULL
    AND t.attempt_count < q.max_attempts_ceiling
    AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= :now)
    AND t.family_key IS NULL
@@ -53,7 +65,7 @@ SELECT t.id,
          SELECT 1 FROM execution_leases lease
           WHERE lease.trial_id = t.id
             AND lease.execution_role = 'attempt'
-            AND lease.revoked_at IS NULL
+            AND (lease.revoked_at IS NULL OR lease.cleanup_state != 'complete')
        )
  ORDER BY (q.in_flight_count::double precision / q.fair_share_weight) ASC,
           t.submit_priority DESC,
@@ -88,14 +100,14 @@ def _deadline(
     return now + timedelta(seconds=requested_seconds)
 
 
-async def _ready_target(
+async def _ready_targets(
     session: AsyncSession,
     *,
     environment: str,
     pool_id: str,
     execution_class_id: str,
     now: datetime,
-) -> ServiceExecutionTarget | None:
+) -> list[ServiceExecutionTarget]:
     targets = (
         (
             await session.execute(
@@ -114,13 +126,14 @@ async def _ready_target(
         .scalars()
         .all()
     )
+    ready = []
     for target in targets:
         if target.health_observed_at is None:
             continue
         stale_after = int(target.spec_json["health_stale_after_seconds"])
         if target.health_observed_at + timedelta(seconds=stale_after) > now:
-            return target
-    return None
+            ready.append(target)
+    return sorted(ready, key=lambda target: target.spec_json.get("health_role") != "primary")
 
 
 async def reserve_next_service_execution(
@@ -135,15 +148,84 @@ async def reserve_next_service_execution(
     """Reserve one normally queued, explicitly converted service task."""
 
     current_time = (now or datetime.now(UTC)).astimezone(UTC)
-    row = (
-        (await session.execute(_NEXT_SERVICE_TRIAL, {"now": current_time, "pool_id": pool_id}))
-        .mappings()
-        .one_or_none()
-    )
-    if row is None:
-        return None
-    task = TaskConfig.model_validate(row["task_config"])
-    task_revision = _task_revision(row["task_checksum"])
+    # Inspect a bounded number in the existing fair-share order. A failed
+    # savepoint releases admission/budget writes but preserves the Trial row lock.
+    for _ in range(32):
+        row = (
+            (await session.execute(_NEXT_SERVICE_TRIAL, {"now": current_time, "pool_id": pool_id}))
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            return None
+        try:
+            async with session.begin_nested():
+                return await _reserve_service_candidate(
+                    session,
+                    row=row,
+                    environment=environment,
+                    pool_id=pool_id,
+                    image_admission_keyring=image_admission_keyring,
+                    maximum_deadline_seconds=maximum_deadline_seconds,
+                    current_time=current_time,
+                )
+        except ExecutionProvisioningBlockedError as exc:
+            delay = max(1, min(300, exc.retry_after_seconds))
+            await session.execute(
+                update(Trial)
+                .where(Trial.id == row["id"], Trial.state == "queued")
+                .values(next_attempt_at=current_time + timedelta(seconds=delay))
+            )
+            _LOG.info("service_execution_capacity_wait", extra={"reason": exc.reason})
+    return None
+
+
+async def _reserve_service_candidate(
+    session: AsyncSession,
+    *,
+    row: Any,
+    environment: str,
+    pool_id: str,
+    image_admission_keyring: ImageAdmissionKeyring,
+    maximum_deadline_seconds: int,
+    current_time: datetime,
+) -> ServiceExecutionLease | None:
+    # Architecture records are alternatives. Nebius's current execution class
+    # uses x86_64; an unused arm64 build must not hold up admission.
+    prerequisites = list((await session.execute(
+        select(TaskImageMaterialization)
+        .join(TrialTaskImageMaterialization,
+              TrialTaskImageMaterialization.materialization_id == TaskImageMaterialization.id)
+        .join(Trial, Trial.id == TrialTaskImageMaterialization.trial_id)
+        .where(Trial.id == row["id"], TaskImageMaterialization.task_id == Trial.task_id,
+               TaskImageMaterialization.cpu_arch == "x86_64")
+        .with_for_update(of=TaskImageMaterialization)
+    )).scalars())
+    if prerequisites and not any(item.state == "ready" for item in prerequisites):
+        if all(item.state == "failed" for item in prerequisites):
+            # Nothing was admitted: no attempt, lease, quota or model accounting
+            # exists to release. Use the same queued terminal transition as the
+            # retry-exhaustion sweeper; batch status derives from Trial state.
+            await session.execute(update(Trial).where(
+                Trial.id == row["id"], Trial.state == "queued",
+                Trial.cancellation_requested_at.is_(None),
+            ).values(state="failed", failure_reason="task_image_build_failed",
+                     failure_message="Task image preparation failed; inspect the build result.",
+                     finished_at=current_time, next_attempt_at=None))
+            return None
+        raise ExecutionProvisioningBlockedError("task_image_preparation_pending", retry_after_seconds=15)
+    try:
+        grant = await get_trial_task_image_execution_grant(
+            session, trial_id=row["id"], cpu_arches=["x86_64"],
+        )
+    except RuntimeError as exc:
+        raise ExecutionProvisioningBlockedError(
+            "task_image_preparation_pending", retry_after_seconds=15,
+        ) from exc
+    task = TaskConfig.model_validate(grant.task_config if grant else row["task_config"])
+    task_revision = _task_revision(grant.task_checksum if grant else row["task_checksum"])
+    source_provenance = (grant.task_source_provenance if grant
+                         else dict(row["task_source_provenance"] or {}))
     binding = task.service_execution
     if binding is not None:
         if binding.logical_pool_id != pool_id:
@@ -163,46 +245,61 @@ async def reserve_next_service_execution(
             task=task,
             trial=TrialConfig.model_validate(row["trial_config"]),
             task_revision_sha256=task_revision,
-            source_provenance=dict(row["task_source_provenance"] or {}),
+            source_provenance=source_provenance,
+            task_image_grant=grant,
             profile=runtime_profile,
         )
-    target = await _ready_target(
+    targets = await _ready_targets(
         session,
         environment=environment,
         pool_id=pool_id,
         execution_class_id=runtime_plan.execution_class_id,
         now=current_time,
     )
-    if target is None:
-        return None
-    request_id = canonical_uuid5(
-        _RESERVATION_REQUEST_NAMESPACE,
-        {
-            "schema_version": "loom.service-execution-reservation-request.v1",
-            "trial_id": str(row["id"]),
-            "attempt": int(row["attempt_count"]) + 1,
-            "target_id": target.id,
-            "task_revision_sha256": task_revision,
-            "runtime_contract_sha256": canonical_digest(runtime_plan.canonical_payload()),
-        },
-    )
-    return await reserve_trial_execution(
-        session,
-        request_id=request_id,
-        trial_id=row["id"],
-        execution_class_id=runtime_plan.execution_class_id,
-        target_id=target.id,
-        requirements=workload_requirements_from_task(task),
-        runtime_contract=runtime_plan,
-        image_admission_keyring=image_admission_keyring,
-        routing_reason=ExecutionRoutingReason.PREEXISTING_ASSIGNMENT,
-        deadline_at=_deadline(
-            runtime_plan,
-            now=current_time,
-            maximum_seconds=maximum_deadline_seconds,
-        ),
-        now=current_time,
-    )
+    requirements = workload_requirements_from_task(resolve_prepared_task(task, grant) if grant else task)
+    blocked: ExecutionProvisioningBlockedError | None = None
+    for target in targets:
+        if requirements.data_residency and target.data_residency != requirements.data_residency:
+            continue
+        # A target's failed admission must not keep a route, cost reservation or
+        # attempt increment when the next eligible region is tried.
+        target_id = target.id
+        try:
+            async with session.begin_nested():
+                return await reserve_trial_execution(
+                    session,
+                    request_id=canonical_uuid5(
+                        _RESERVATION_REQUEST_NAMESPACE,
+                        {
+                            "schema_version": "loom.service-execution-reservation-request.v1",
+                            "trial_id": str(row["id"]),
+                            "attempt": int(row["attempt_count"]) + 1,
+                            "target_id": target_id,
+                            "task_revision_sha256": task_revision,
+                            "runtime_contract_sha256": canonical_digest(
+                                runtime_plan.canonical_payload()
+                            ),
+                        },
+                    ),
+                    trial_id=row["id"],
+                    execution_class_id=runtime_plan.execution_class_id,
+                    target_id=target_id,
+                    requirements=requirements,
+                    runtime_contract=runtime_plan,
+                    image_admission_keyring=image_admission_keyring,
+                    routing_reason=ExecutionRoutingReason.PREEXISTING_ASSIGNMENT,
+                    deadline_at=_deadline(
+                        runtime_plan,
+                        now=current_time,
+                        maximum_seconds=maximum_deadline_seconds,
+                    ),
+                    now=current_time,
+                )
+        except ExecutionProvisioningBlockedError as exc:
+            blocked = exc
+    if blocked is not None:
+        raise blocked
+    raise ExecutionProvisioningBlockedError("execution_target_unavailable", retry_after_seconds=15)
 
 
 async def run_service_execution_scheduler_loop(

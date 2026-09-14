@@ -251,6 +251,8 @@ jobs:
           uv pip check --python .venv/bin/python
 
       - name: Verify manifest-owned k3s and rollout candidate contracts
+        env:
+          LOOM_RUN_DISPOSABLE_K3S: "1"
         shell: bash
         run: |
           set -euo pipefail

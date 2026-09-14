@@ -19,7 +19,7 @@ services:
       retries: 20
 
   minio:
-    image: minio/minio
+    image: quay.io/minio/minio:RELEASE.2022-12-02T19-19-22Z
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: loomtest

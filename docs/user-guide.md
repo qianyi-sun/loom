@@ -459,6 +459,16 @@ the parent batch is **not** marked `cancelled`. Cancelled (like failed) counts
 as a terminal trial for **batch lifecycle** completion, so a hung last-in-flight
 trial can unblock the batch becoming `finished`.
 
+Cancelled trials keep the **cancelled** lifecycle even when cancellation happens
+before any runtime output is produced. Output availability is reported separately;
+an absent bundle in this case does not mean the cancellation failed. Genuine
+output failures on non-cancelled trials remain visible as `output_unavailable`.
+
+For API compatibility, batch `result_status` still groups unsuccessful child
+trials under `all_failed` or `partial_failed`, including cancellations. The batch
+display and debug evidence distinguish cancelled children from failed children
+using the trial summary, including batches where every child was cancelled.
+
 Delivery export is stricter: selection requires a **succeeded** trial per main
 coordinate. Cancelling a hang does not make that coordinate exportable. After
 the batch finishes, use `loom eval batch rerun-plan <batch-id>`, submit a
@@ -641,6 +651,18 @@ under an explicit operator workflow. `supplemental_task_ids` stays unique for
 copy/paste task-list launches; `supplemental_coordinates` preserves every
 `task_id`/`sample_idx`/`combination_idx` row when multiple samples or
 combinations for the same task need rerun.
+
+Submit the selected failures as a linked child Batch with
+`loom eval batch rerun-failed <batch-id> --task-id <task-id>`. The same
+`--include-operator-approval` option includes those rows from the rerun plan.
+By default, the child replays the parent's frozen runtime. After a native
+Terminus platform repair, add `--use-current-runtime` to select the current
+deployed runtime and Harbor controller. This opt-in preserves the original
+model, provider, task/sample/combination coordinates, deadlines and retry policy;
+it clears the child's old explicit agent version and freezes the deployed
+controller image instead. It leaves the parent unchanged. Missing or incompatible
+current runtimes are rejected before a child is created. The opt-in supports
+automatic native Nebius Terminus tasks, not pre-bound execution templates.
 
 ## Quickstart: Submit from the Web App
 
@@ -1103,8 +1125,13 @@ represented team/user on the batch for product ownership, but usage and billing
 are attributed to the real acting admin/user. The represented user/team sees
 the run in monitor views and can use normal owner actions such as detail,
 debug, rerun, cancel, and artifact download. Admin usage views can request
-per-batch drilldown; token-only or self-deployed calls show token totals with
-`cost_status=not_applicable` instead of a fabricated dollar amount. Failed
+per-batch drilldown; explicitly token-only calls show token totals with
+`cost_status=not_applicable` instead of a fabricated dollar amount. Calls recorded
+without a price card, including historical `local-server-no-card` calls, show
+`pricing_mode=price-unknown`, no estimated dollar amount, and unavailable pricing
+confidence. Their recorded calls and tokens remain visible; a stored zero cost
+does not establish that the provider was free. A real price card with zero rates
+still counts as priced. Failed
 upstream provider attempts show as `pricing_mode=failed-upstream` and
 `cost_status=failed_upstream`, so they remain inspectable without being counted
 as priced provider usage. Usage views also show `usage_estimate_confidence`:

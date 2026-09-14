@@ -1,11 +1,79 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 from loom.service_execution_task import run_direct_completion
+
+
+def test_direct_completion_waits_for_slow_loopback_model_response(tmp_path, monkeypatch):
+    payload = {
+        "choices": [
+            {"message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}
+        ],
+        "loom": {
+            "input_tokens": 4,
+            "cached_input_tokens": 0,
+            "cache_write_tokens": 0,
+            "output_tokens": 1,
+            "thinking_tokens": 0,
+            "provider_extras": {},
+            "cost_usd": 0.01,
+            "rate_card_hash": "rate-card-1",
+            "finish_reason": "stop",
+            "duration_sec": 0.08,
+            "streamed": False,
+            "time_to_first_token_sec": None,
+            "gateway_request_id": "request-1",
+            "attempt": 1,
+        },
+    }
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            time.sleep(0.08)
+            self.send_response(200)
+            self.end_headers()
+            try:
+                self.wfile.write(json.dumps(payload).encode())
+            except BrokenPipeError:
+                pass
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    original_urlopen = urllib.request.urlopen
+
+    def scaled_urlopen(request, *, timeout):
+        # Exercise the real HTTP boundary without waiting 120 seconds for RED.
+        return original_urlopen(request, timeout=0.02 if timeout is not None else None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", scaled_urlopen)
+    monkeypatch.setenv("LOOM_GATEWAY_URL", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("LOOM_TASK_INSTRUCTION_FILE", "instruction.md")
+    monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", '["answer.txt"]')
+    monkeypatch.setenv("LOOM_TASK_REQUEST_PARAMS_JSON", "{}")
+    monkeypatch.setenv("LOOM_TASK_MODEL", "openai/gpt-5")
+    (tmp_path / "instruction.md").write_text("Return a greeting")
+    try:
+        run_direct_completion(workspace=tmp_path)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert (tmp_path / "answer.txt").read_text() == "hello"
+    usage = json.loads((tmp_path / ".loom/agent/usage.json").read_text())
+    assert usage["call_count"] == 1
+    assert usage["totals"]["output_tokens"] == 1
 
 
 class _Response:
@@ -34,9 +102,9 @@ def test_direct_completion_uses_provider_native_model_and_writes_artifact(
     monkeypatch.setenv("LOOM_GATEWAY_URL", "http://gateway-proxy")
     requests: list[urllib.request.Request] = []
 
-    def _urlopen(request: urllib.request.Request, *, timeout: int) -> _Response:
+    def _urlopen(request: urllib.request.Request, *, timeout: None) -> _Response:
         requests.append(request)
-        assert timeout == 120
+        assert timeout is None
         return _Response(
             {
                 "choices": [
@@ -96,8 +164,8 @@ def test_direct_completion_writes_every_declared_artifact(
     monkeypatch.setenv("LOOM_TASK_MODEL", "openai/gpt-5")
     monkeypatch.setenv("LOOM_GATEWAY_URL", "http://gateway-proxy")
 
-    def _urlopen(_request: urllib.request.Request, *, timeout: int) -> _Response:
-        assert timeout == 120
+    def _urlopen(_request: urllib.request.Request, *, timeout: None) -> _Response:
+        assert timeout is None
         return _Response(
             {
                 "choices": [

@@ -1,0 +1,17 @@
+{
+  "regional_execution_targets": {
+    "eu-west1": {
+      "target_id": "nebius-eu-west1-integration",
+      "cluster_scope_id": "nebius-eu-west1-execution",
+      "project_id": "project-REPLACE-EU-WEST1",
+      "subnet_id": "vpcsubnet-REPLACE-EU-WEST1",
+      "region": "eu-west1",
+      "kubernetes_version": "1.33",
+      "service_cidr": "172.27.0.0/16",
+      "public_control_plane_cidrs": [],
+      "node_registry_pull_service_account_id": "serviceaccount-REPLACE-PULL",
+      "execution_max_nodes": 100,
+      "node_platform": "cpu-d3"
+    }
+  }
+}

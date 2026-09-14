@@ -139,6 +139,7 @@ def test_gate_enforces_both_selected_build_results(
         "REQUIRED": "true" if images else "false",
         "STANDARD_IMAGES": json.dumps([{"image": image} for image in images]),
         "BUILD_RESULT": "failure" if fault == "ordinary" else ordinary,
+        "HARNESS_BUILD_RESULT": "failure" if fault == "ordinary" else ordinary,
         "SCANNER_BUILD_RESULT": "failure" if fault == "scanner" else scanner,
         "PUBLISH_RESULT": "failure" if fault == "publish" else publish_result,
         "MANIFEST_RESULT": publish_result,
@@ -167,7 +168,7 @@ def test_parallel_builds_keep_native_scan_and_untrusted_permissions(job: str) ->
     assert "--push" not in scripts
 
 
-@pytest.mark.parametrize("result_name", ["BUILD_RESULT", "SCANNER_BUILD_RESULT"])
+@pytest.mark.parametrize("result_name", ["BUILD_RESULT", "SCANNER_BUILD_RESULT", "HARNESS_BUILD_RESULT"])
 @pytest.mark.parametrize("result", ["failure", "cancelled", "skipped"])
 def test_gate_rejects_missing_selected_matrix_after_dependency_failure(
     result_name: str, result: str
@@ -181,6 +182,7 @@ def test_gate_rejects_missing_selected_matrix_after_dependency_failure(
         "REQUIRED": "true",
         "STANDARD_IMAGES": '[{"image":"service"},{"image":"personal-dev-scanner-cache"}]',
         "BUILD_RESULT": "success",
+        "HARNESS_BUILD_RESULT": "success",
         "SCANNER_BUILD_RESULT": "success",
         "PUBLISH_RESULT": "skipped",
         "MANIFEST_RESULT": "skipped",

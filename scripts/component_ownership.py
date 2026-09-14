@@ -22,6 +22,18 @@ class ManifestError(ValueError):
     """The component authority is malformed or unsafe to consume."""
 
 
+# Candidate keys and published names; build inputs remain manifest-owned.
+NEBIUS_PLATFORM_IMAGES = {
+    "service": "loom-service",
+    "control_plane": "loom-control-plane",
+    "web": "loom-web",
+    "gateway": "loom-llm-gateway",
+    "execution_runtime": "loom-execution-runtime",
+    "execution_actuator": "loom-execution-actuator",
+    "harbor_runtime": "loom-harbor-runtime",
+}
+
+
 _RELEASE_COMPANIONS: dict[str, tuple[str, ...]] = {
     # A Nebius runtime profile binds the service task image and an exact-candidate
     # execution runtime image. A service-only release therefore still needs a
@@ -990,7 +1002,24 @@ def validate_release_image_ownership(
     return errors
 
 
-def release_image_matrix(manifest: Manifest) -> tuple[dict[str, str], ...]:
+def _release_components_for_set(manifest: Manifest, image_set: str) -> tuple[Component, ...]:
+    if image_set == "legacy":
+        return manifest.release_components()
+    if image_set != "nebius":
+        raise ManifestError(f"unsupported release image set: {image_set}")
+    names = set(NEBIUS_PLATFORM_IMAGES.values())
+    components = tuple(
+        component for component in manifest.components
+        if component.kind == "release-image" and component.release_digest in names
+    )
+    if len(components) != len(names) or {item.release_digest for item in components} != names:
+        raise ManifestError("Nebius platform images must each have one manifest owner")
+    return components
+
+
+def release_image_matrix(
+    manifest: Manifest, *, image_set: str = "legacy",
+) -> tuple[dict[str, str], ...]:
     """Render the image workflow matrix from the component authority."""
 
     return tuple(
@@ -1000,7 +1029,7 @@ def release_image_matrix(manifest: Manifest) -> tuple[dict[str, str], ...]:
             "dockerfile": component.dockerfile,
             "context": component.build_context,
         }
-        for component in manifest.release_components()
+        for component in _release_components_for_set(manifest, image_set)
     )
 
 
@@ -1062,18 +1091,26 @@ def select_release_image_matrix(
     changed_paths: tuple[str, ...],
     force_all: bool,
     fallback_all: bool = False,
+    image_set: str = "legacy",
 ) -> tuple[dict[str, str], ...]:
     """Select release images whose manifest-owned inputs changed."""
 
-    release_components = manifest.release_components()
+    release_components = _release_components_for_set(manifest, image_set)
+    eligible_ids = {component.id for component in release_components}
+    all_images = release_image_matrix(manifest, image_set=image_set)
     if force_all or not changed_paths:
         selected_ids = {component.id for component in release_components}
     else:
+        changed_paths = tuple(path for path in changed_paths if not manifest.ci_ignores_path(path))
+        if not changed_paths:
+            # Ignore retired inputs by default, but preserve an explicit caller
+            # request (for example ci:images) for the active image set.
+            return all_images if fallback_all else ()
         selected_ids = {
             component.id
             for path in changed_paths
             for component in manifest.component_owners_for_path(path)
-            if component.kind == "release-image" and component.ci_enabled
+            if component.id in eligible_ids
         }
         if any(
             path
@@ -1081,6 +1118,7 @@ def select_release_image_matrix(
                 ".github/workflows/images.yml",
                 "config/component-ownership.toml",
                 "scripts/component_ownership.py",
+                "scripts/validate_trivy_release_report.py",
             }
             for path in changed_paths
         ):
@@ -1088,10 +1126,10 @@ def select_release_image_matrix(
     for selected_id in tuple(selected_ids):
         selected_ids.update(_RELEASE_COMPANIONS.get(selected_id, ()))
     matrix = tuple(
-        entry for entry in release_image_matrix(manifest) if entry["image"] in selected_ids
+        entry for entry in all_images if entry["image"] in selected_ids
     )
     if fallback_all and not matrix:
-        return release_image_matrix(manifest)
+        return all_images
     return matrix
 
 
@@ -1102,10 +1140,14 @@ def validate_release_image_pair(
     image_name: str,
     dockerfile: str,
     build_context: str,
+    image_set: str = "legacy",
 ) -> list[str]:
     """Validate an untrusted workflow matrix row against the authority."""
 
-    matches = [component for component in manifest.release_components() if component.id == image]
+    matches = [
+        component for component in _release_components_for_set(manifest, image_set)
+        if component.id == image
+    ]
     if len(matches) != 1:
         return [f"release image id must have exactly one owner: {image}"]
     component = matches[0]
@@ -1137,6 +1179,7 @@ def test_paths_for_lane(
         path
         for path in sorted(tracked_paths)
         if _is_runnable_test_path(path)
+        and not manifest.ci_ignores_path(path)
         and len(owners := manifest.test_owners_for_path(path)) == 1
         and owners[0].ci_enabled
         and owners[0].lane == lane
@@ -1157,7 +1200,9 @@ def test_paths_for_policy(
         path
         for path in sorted(tracked_paths)
         if _is_runnable_test_path(path)
+        and not manifest.ci_ignores_path(path)
         and len(owners := manifest.test_owners_for_path(path)) == 1
+        and owners[0].ci_enabled
         and owners[0].execution_policy == policy
     )
 
@@ -1280,6 +1325,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("validate", help="Validate all tracked Dockerfiles and tests.")
+    subparsers.add_parser("python-paths", help="Print active Python lint paths, excluding retired CI scope.")
     query = subparsers.add_parser("query", help="Print the owners for one repository path.")
     query.add_argument("path")
     plan_images = subparsers.add_parser(
@@ -1290,6 +1336,7 @@ def _parser() -> argparse.ArgumentParser:
     plan_images.add_argument("--github-output", type=Path, required=True)
     plan_images.add_argument("--force-all", action="store_true")
     plan_images.add_argument("--fallback-all", action="store_true")
+    plan_images.add_argument("--image-set", choices=("legacy", "nebius"), default="legacy")
     validate_image = subparsers.add_parser(
         "validate-image",
         help="Validate one untrusted image workflow matrix row.",
@@ -1298,6 +1345,7 @@ def _parser() -> argparse.ArgumentParser:
     validate_image.add_argument("--image-name", required=True)
     validate_image.add_argument("--dockerfile", required=True)
     validate_image.add_argument("--build-context", required=True)
+    validate_image.add_argument("--image-set", choices=("legacy", "nebius"), default="legacy")
     test_paths = subparsers.add_parser(
         "test-paths",
         help="Print every tracked test path assigned to one CI lane.",
@@ -1363,6 +1411,15 @@ def main(argv: list[str] | None = None) -> int:
             for error in errors:
                 print(f"- {error}", file=sys.stderr)
             return 1
+        if args.command == "python-paths":
+            for path in tracked_paths:
+                if (
+                    path.endswith(".py")
+                    and path.startswith(("src/", "tests/", "packages/", "migrations/"))
+                    and not manifest.ci_ignores_path(path)
+                ):
+                    print(path)
+            return 0
         if args.command == "query":
             print(json.dumps(_query_payload(manifest, args.path), sort_keys=True))
             return 0
@@ -1377,6 +1434,7 @@ def main(argv: list[str] | None = None) -> int:
                 changed_paths=changed_paths,
                 force_all=args.force_all,
                 fallback_all=args.fallback_all,
+                image_set=args.image_set,
             )
             payload = json.dumps(matrix, separators=(",", ":"))
             native_payload = json.dumps(
@@ -1396,6 +1454,7 @@ def main(argv: list[str] | None = None) -> int:
                 image_name=args.image_name,
                 dockerfile=args.dockerfile,
                 build_context=args.build_context,
+                image_set=args.image_set,
             )
             if errors:
                 print("FAIL: component ownership validation failed:", file=sys.stderr)

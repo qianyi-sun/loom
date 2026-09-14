@@ -172,7 +172,7 @@ def test_kubernetes_status_normalization_is_exhaustive(
     assert observation.resource_version == "42"
 
 
-def test_unschedulable_transition_is_not_reported_as_scheduled() -> None:
+def test_unschedulable_job_start_is_not_reported_as_pod_scheduled_or_started() -> None:
     job_started = datetime(2026, 9, 3, 5, 16, tzinfo=UTC)
     job = _job()
     job.status.start_time = job_started
@@ -193,11 +193,13 @@ def test_unschedulable_transition_is_not_reported_as_scheduled() -> None:
 
     assert observation.normalized_state is NormalizedJobState.UNSCHEDULABLE
     assert observation.scheduled_at is None
-    assert observation.started_at == job_started
+    assert observation.started_at is None
 
 
-def test_scheduled_transition_is_clamped_to_pod_start_time() -> None:
-    pod_started = datetime(2026, 9, 3, 5, 16, tzinfo=UTC)
+def test_scheduled_transition_and_execution_start_preserve_actual_timestamps() -> None:
+    kubelet_acknowledged = datetime(2026, 9, 3, 5, 16, tzinfo=UTC)
+    scheduled_at = kubelet_acknowledged + timedelta(seconds=1)
+    execution_started = kubelet_acknowledged + timedelta(seconds=30)
     pod = _pod(
         phase="Running",
         scheduled=_ns(
@@ -205,15 +207,65 @@ def test_scheduled_transition_is_clamped_to_pod_start_time() -> None:
             status="True",
             reason=None,
             message=None,
-            last_transition_time=pod_started + timedelta(seconds=1),
+            last_transition_time=scheduled_at,
         ),
     )
-    pod.status.start_time = pod_started
+    pod.status.start_time = kubelet_acknowledged
+    pod.status.container_statuses = [
+        _ns(name="execution", state=_ns(running=_ns(started_at=execution_started)))
+    ]
 
     observation = _normalize(_job(), [pod])
 
-    assert observation.scheduled_at == pod_started
-    assert observation.started_at == pod_started
+    assert observation.scheduled_at == scheduled_at
+    assert observation.started_at == execution_started
+
+
+@pytest.mark.parametrize("waiting_reason", ["PodInitializing", "ImagePullBackOff"])
+def test_preparation_does_not_count_as_execution_start(waiting_reason: str) -> None:
+    pod = _pod(waiting_reason=waiting_reason)
+    preparation_started = datetime(2026, 9, 3, 5, 16, tzinfo=UTC)
+    pod.status.start_time = preparation_started
+    pod.status.init_container_statuses = [
+        _ns(
+            name="runtime-materializer",
+            state=_ns(terminated=_ns(started_at=preparation_started)),
+        ),
+        _ns(name="task", state=_ns(running=_ns(started_at=preparation_started))),
+        _ns(name="verifier", state=_ns(running=_ns(started_at=preparation_started))),
+    ]
+
+    observation = _normalize(_job(), [pod])
+
+    assert observation.started_at is None
+    assert observation.normalized_state is (
+        NormalizedJobState.IMAGE_PULL_BACKOFF
+        if waiting_reason == "ImagePullBackOff"
+        else NormalizedJobState.PENDING
+    )
+
+
+def test_completed_execution_preserves_start_when_running_observation_was_missed() -> None:
+    pod = _pod(phase="Succeeded")
+    execution_started = datetime(2026, 9, 3, 5, 16, tzinfo=UTC)
+    pod.status.start_time = execution_started - timedelta(seconds=30)
+    pod.status.container_statuses[0].state.terminated.started_at = execution_started
+
+    observation = _normalize(_job(), [pod])
+
+    assert observation.normalized_state is NormalizedJobState.SUCCEEDED
+    assert observation.started_at == execution_started
+
+
+def test_other_container_start_does_not_substitute_for_missing_execution_status() -> None:
+    pod = _pod()
+    started_at = datetime(2026, 9, 3, 5, 16, tzinfo=UTC)
+    pod.status.start_time = started_at
+    pod.status.container_statuses = [
+        _ns(name="helper", state=_ns(running=_ns(started_at=started_at)))
+    ]
+
+    assert _normalize(_job(), [pod]).started_at is None
 
 
 def test_termination_summary_is_identity_bound_and_retained() -> None:

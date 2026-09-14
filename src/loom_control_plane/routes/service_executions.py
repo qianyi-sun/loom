@@ -25,6 +25,7 @@ from loom.execution_contract import (
 )
 from loom.execution_image_admission import ImageAdmissionError, ImageAdmissionKeyring
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1
+from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
 from loom_control_plane.service_execution import (
     ServiceExecutionConflict,
     ServiceExecutionFenceError,
@@ -76,6 +77,7 @@ class TransitionBody(_StrictBody):
 
 
 class CommandClaimBody(_StrictBody):
+    target_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     consumer_id: str = Field(min_length=1, max_length=120)
     limit: int = Field(default=20, ge=1, le=100)
     lease_seconds: int = Field(default=60, ge=5, le=300)
@@ -215,6 +217,13 @@ async def create_execution_reservation(
             )
             await session.commit()
             await session.refresh(lease)
+        except ExecutionProvisioningBlockedError as exc:
+            await session.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail=exc.reason,
+                headers={"Retry-After": str(exc.retry_after_seconds)},
+            ) from exc
         except ServiceExecutionConflict as exc:
             await session.rollback()
             raise _conflict(exc) from exc
@@ -264,6 +273,7 @@ async def claim_commands(
             commands = await claim_execution_commands(
                 session,
                 consumer_id=body.consumer_id,
+                target_id=body.target_id,
                 limit=body.limit,
                 lease_seconds=body.lease_seconds,
             )

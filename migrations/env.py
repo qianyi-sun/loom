@@ -47,6 +47,21 @@ def _assert_direct_postgres_connection(connectable: Any) -> None:
             f"not loom-pgbouncer:6432."
         )
 
+
+def _assert_compatible_migration_lineage(connection: Any) -> None:
+    """Fail before DDL when a historical Nebius revision aliases dev history."""
+    if connection.exec_driver_sql("SELECT to_regclass('public.alembic_version')").scalar() is None:
+        return
+    revisions = set(connection.exec_driver_sql("SELECT version_num FROM public.alembic_version").scalars())
+    if revisions.intersection({"0133", "0134", "0135"}) and connection.exec_driver_sql(
+        "SELECT to_regclass('public.gateway_dispatch_receipts')"
+    ).scalar() is None:
+        raise RuntimeError(
+            "isolated Nebius migration lineage cannot upgrade through dev history; "
+            "prepare and verify the documented lineage conversion before deployment"
+        )
+
+
 target_metadata = Base.metadata
 
 # The block below only executes when Alembic drives this file directly.
@@ -66,7 +81,9 @@ if hasattr(context, "config"):
         raise RuntimeError(
             "sqlalchemy.url or LOOM_DB_URL must be set to run migrations",
         )
-    config.set_main_option("sqlalchemy.url", db_url)
+    # ConfigParser consumes percent escapes; escape only at this INI boundary
+    # so the engine receives the original URL (including credentials and TLS).
+    config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
 
     def run_migrations_offline() -> None:
         context.configure(
@@ -88,6 +105,7 @@ if hasattr(context, "config"):
         with connectable.connect() as connection:
             context.configure(connection=connection, target_metadata=target_metadata)
             with context.begin_transaction():
+                _assert_compatible_migration_lineage(connection)
                 context.run_migrations()
 
     if context.is_offline_mode():

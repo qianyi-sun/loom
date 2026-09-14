@@ -29,12 +29,13 @@ type workloadIdentity struct {
 }
 
 type workloadBroker struct {
-	root     *url.URL
-	identity workloadIdentity
-	client   *http.Client
-	mu       sync.Mutex
-	token    string
-	expires  time.Time
+	podTokenFile string
+	root         *url.URL
+	identity     workloadIdentity
+	client       *http.Client
+	mu           sync.Mutex
+	token        string
+	expires      time.Time
 }
 
 type tokenRequest struct {
@@ -99,21 +100,44 @@ func workloadBrokerFromEnvironment() (*workloadBroker, error) {
 	if err != nil || generation <= 0 || (role != "attempt" && role != "verifier") || len(leaseID) != 36 {
 		return nil, fmt.Errorf("invalid execution broker identity")
 	}
+	podTokenFile := os.Getenv("LOOM_EXECUTION_POD_TOKEN_FILE")
 	for _, name := range []string{
 		"LOOM_EXECUTION_BROKER_URL",
 		"LOOM_EXECUTION_GENERATION",
 		"LOOM_EXECUTION_LEASE_ID",
 		"LOOM_EXECUTION_ROLE",
+		"LOOM_EXECUTION_POD_TOKEN_FILE",
 	} {
 		if err := os.Unsetenv(name); err != nil {
 			return nil, fmt.Errorf("clear execution broker identity: %w", err)
 		}
 	}
 	return &workloadBroker{
-		root:     root,
-		identity: workloadIdentity{LeaseID: leaseID, Generation: generation, ExecutionRole: role},
-		client:   &http.Client{Timeout: 120 * time.Second},
+		podTokenFile: podTokenFile,
+		root:         root,
+		identity:     workloadIdentity{LeaseID: leaseID, Generation: generation, ExecutionRole: role},
+		client:       &http.Client{Timeout: 120 * time.Second},
 	}, nil
+}
+
+// The kubelet rotates this projected file. Never cache its credential across
+// requests or include file contents in an error returned to the agent.
+func (b *workloadBroker) authorizePodRequest(request *http.Request) error {
+	if b.podTokenFile == "" {
+		return nil
+	}
+	file, err := os.Open(b.podTokenFile)
+	if err != nil {
+		return fmt.Errorf("execution Pod identity token is unavailable")
+	}
+	defer file.Close()
+	payload, err := io.ReadAll(io.LimitReader(file, 16385))
+	token := strings.TrimSpace(string(payload))
+	if err != nil || len(payload) > 16384 || token == "" || strings.IndexFunc(token, func(r rune) bool { return r <= 0x20 || r >= 0x7f }) >= 0 {
+		return fmt.Errorf("execution Pod identity token is invalid")
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	return nil
 }
 
 func (b *workloadBroker) endpoint(path string) string {
@@ -142,6 +166,9 @@ func (b *workloadBroker) doJSON(ctx context.Context, method, endpoint string, re
 	req.Header.Set("Content-Type", "application/json")
 	for name, value := range headers {
 		req.Header.Set(name, value)
+	}
+	if err := b.authorizePodRequest(req); err != nil {
+		return err
 	}
 	result, err := b.client.Do(req)
 	if err != nil {
@@ -188,6 +215,10 @@ func (b *workloadBroker) currentToken(ctx context.Context) (string, error) {
 }
 
 func (b *workloadBroker) startProxy(ctx context.Context) (string, func() error, error) {
+	// Model calls follow the caller's phase lifetime and the Gateway's deadline.
+	// Keep the transport's connect/TLS bounds and the finite broker-operation client.
+	gatewayClient := *b.client
+	gatewayClient.Timeout = 0
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", nil, err
@@ -195,6 +226,10 @@ func (b *workloadBroker) startProxy(ctx context.Context) (string, func() error, 
 	server := &http.Server{
 		ReadHeaderTimeout: 10 * time.Second,
 		Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			if request.URL.Path == "/internal/loom/llm-calls" {
+				b.serveCallLedger(writer, request)
+				return
+			}
 			if !allowedGatewayRequest(request.Method, request.URL.Path) {
 				http.Error(writer, "gateway route unavailable", http.StatusForbidden)
 				return
@@ -215,7 +250,7 @@ func (b *workloadBroker) startProxy(ctx context.Context) (string, func() error, 
 			upstream.Header = request.Header.Clone()
 			upstream.Header.Set("Authorization", "Bearer "+token)
 			upstream.Header.Del("Connection")
-			response, requestErr := b.client.Do(upstream)
+			response, requestErr := gatewayClient.Do(upstream)
 			if requestErr != nil {
 				http.Error(writer, "gateway unavailable", http.StatusBadGateway)
 				return
@@ -245,6 +280,32 @@ func (b *workloadBroker) startProxy(ctx context.Context) (string, func() error, 
 		defer cancel()
 		return server.Shutdown(shutdown)
 	}, nil
+}
+
+// The local caller cannot select a trial, lease, token, or upstream URL. The
+// broker presents its current Pod identity, never a model-call step credential.
+func (b *workloadBroker) serveCallLedger(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet || request.URL.RawQuery != "" || b.identity.ExecutionRole != "attempt" {
+		http.Error(writer, "ledger route unavailable", http.StatusForbidden)
+		return
+	}
+	response, err := b.getInput(request.Context(), b.endpoint("/llm-calls"))
+	if err != nil {
+		// Avoid reflecting credential-bearing upstream bodies or transport URLs.
+		http.Error(writer, "workload ledger unavailable", http.StatusBadGateway)
+		return
+	}
+	defer response.Body.Close()
+	const maximum = 16 * 1024 * 1024
+	body, err := io.ReadAll(io.LimitReader(response.Body, maximum+1))
+	if err != nil || len(body) > maximum || !json.Valid(body) {
+		http.Error(writer, "workload ledger invalid", http.StatusBadGateway)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(body)
 }
 
 func allowedGatewayRequest(method, path string) bool {
@@ -382,6 +443,9 @@ func (b *workloadBroker) putPart(ctx context.Context, grant uploadGrant, fileInd
 	req.Header.Set("X-Loom-Execution-Role", b.identity.ExecutionRole)
 	req.Header.Set("X-Loom-Upload-Token", grant.UploadToken)
 	req.Header.Set("X-Loom-Content-SHA256", sha)
+	if err := b.authorizePodRequest(req); err != nil {
+		return partReceipt{}, err
+	}
 	response, err := b.client.Do(req)
 	if err != nil {
 		return partReceipt{}, err

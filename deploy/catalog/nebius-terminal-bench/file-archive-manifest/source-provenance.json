@@ -1,0 +1,23 @@
+{
+  "benchmark_id": "terminal-bench-2-harbor-90",
+  "task_id": "terminal-bench-2-harbor-90/file-archive-manifest",
+  "task_checksum": "c684a4e76762a7d73328bf5fa3e1137a56162c2956b766c9460eae59dbc55b9e",
+  "source": "s3://loom-benchmarks/terminal-bench-2-harbor-90/file-archive-manifest/",
+  "license": "Apache-2.0",
+  "registered_at": "2026-07-22T18:47:13.602393+00:00",
+  "source_read_at": "2026-09-10",
+  "original_cpu_arch": "arm64",
+  "original_verifier_user": "root",
+  "source_object_metadata": {
+    "environment/Dockerfile": {},
+    "instruction.md": {},
+    "solution/solve.sh": {},
+    "task.toml": {},
+    "tests/test.sh": {},
+    "tests/test_outputs.py": {},
+    "verifier/run.sh": {}
+  },
+  "observed_bundle_checksum": "33ef7d2a986117d3e91f8eddd70a1704fa06254e2b6f099fbba5f55cfaf7b770",
+  "observed_checksum_algorithm": "loom_bundle_checksum.sha256_of_dir (current canonical NUL-delimited paths and bytes)",
+  "checksum_note": "task_checksum is the historical registered value. The observed checksum identifies the seven objects retrieved on source_read_at; historical checksum normalization has not been established, so the difference is not evidence of corruption."
+}

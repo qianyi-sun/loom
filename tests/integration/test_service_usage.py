@@ -14,7 +14,7 @@ import httpx
 import pytest
 from botocore.config import Config
 from fastapi import FastAPI
-from sqlalchemy import create_engine, delete, insert
+from sqlalchemy import create_engine, delete, insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -24,6 +24,7 @@ from loom.db.schema import (
     Benchmark,
     LlmCall,
     ProviderConnection,
+    RateCard,
     Task,
     Team,
     TeamQuota,
@@ -31,6 +32,7 @@ from loom.db.schema import (
     Trial,
     User,
 )
+from loom_llm_gateway.rate_card import RateCardTable, hash_table
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -207,6 +209,193 @@ async def test_usage_groups_by_day(
     assert day2["trial_count"] == 1
     assert day2["trials_currently_succeeded"] == 1
     assert day2["trials_currently_failed"] == 0
+
+
+async def test_local_no_card_usage_is_unknown_across_read_apis(
+    usage_setup: tuple[FastAPI, str, str, str, str],
+    postgres_url: str,
+) -> None:
+    app, raw, _admin_raw, team_str, task_id = usage_setup
+    team_id, batch_id = UUID(team_str), uuid4()
+    trial_ids = [uuid4() for _ in range(3)]
+    ts = datetime(2026, 6, 3, 12, tzinfo=UTC)
+    card = RateCardTable.model_validate(
+        {
+            "id": "zero-price-" + uuid4().hex,
+            "captured_at": ts,
+            "entries": [
+                {
+                    "provider": "openai",
+                    "model": "zero-price",
+                    "input_per_mtok": 0,
+                    "output_per_mtok": 0,
+                    "cache_read_per_mtok": 0,
+                    "cache_write_per_mtok": 0,
+                }
+            ],
+        }
+    )
+    card_hash = hash_table(card)
+    engine = create_engine(postgres_url)
+    with engine.begin() as db:
+        db.execute(
+            insert(RateCard).values(id=card.id, captured_at=ts, table=card.model_dump(mode="json"))
+        )
+        db.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="mixed local pricing",
+                task_filter={"task_ids": [task_id], "subset_kind": "explicit"},
+                trial_config={},
+                state="finished",
+                created_by_token_prefix="pricing",
+                expected_trial_count=3,
+                combinations=[
+                    {
+                        "agent_name": "direct-completion",
+                        "agent_model": {"provider": "local", "name": "test"},
+                        "n_per_task": 3,
+                    }
+                ],
+            )
+        )
+        for index, (trial_id, rate_hash, cost, extras) in enumerate(
+            zip(
+                trial_ids,
+                ("local-server-no-card", card_hash, "ordinary-paid-card"),
+                (Decimal("0"), Decimal("0"), Decimal("0.01")),
+                (
+                    {},
+                    {"_loom_cost_source": "rate-card", "_loom_cost_confidence": "configured"},
+                    {"_loom_cost_source": "rate-card", "_loom_cost_confidence": "configured"},
+                ),
+                strict=True,
+            )
+        ):
+            db.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    task_id=task_id,
+                    team_id=team_id,
+                    batch_id=batch_id,
+                    state="succeeded",
+                    config={},
+                    requires_caps={},
+                    submitted_at=ts,
+                    finished_at=ts,
+                    combination_idx=0,
+                    sample_idx=index,
+                    result={"aggregate_reward": 1.0},
+                )
+            )
+            db.execute(
+                insert(LlmCall).values(
+                    id=uuid4(),
+                    trial_id=trial_id,
+                    team_id=team_id,
+                    step_id="main",
+                    model="local/test" if index == 0 else "openai/zero-price",
+                    dialect="openai_chat",
+                    input_tokens=55,
+                    output_tokens=4,
+                    provider_extras=extras,
+                    cost_usd=cost,
+                    rate_card_hash=rate_hash,
+                    captured_at=ts,
+                )
+            )
+
+    def unknown(value: dict) -> None:
+        assert value["pricing_modes"] == ["price-unknown"]
+        assert value["cost_status"] == "price_unknown"
+        assert value["estimated_cost_usd"] is None
+        assert value["cost_currency"] is None
+        assert value["cost_estimate_source"] == "unpriced"
+        assert value["cost_estimate_confidence"] == "unavailable"
+        assert value["priced_llm_calls_count"] == 0
+        assert value["price_unknown_llm_calls_count"] == 1
+
+    def mixed(value: dict) -> None:
+        assert value["cost_status"] == "mixed"
+        assert set(value["pricing_modes"]) == {"price-unknown", "priced"}
+        assert value["priced_llm_calls_count"] == 2
+        assert value["price_unknown_llm_calls_count"] == 1
+        assert value["estimated_cost_usd"] == pytest.approx(0.01)
+        assert value["cost_estimate_source"] == "mixed"
+        assert value["cost_estimate_confidence"] == "mixed"
+
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://svc"
+        ) as client:
+            headers = {"Authorization": "Bearer " + raw}
+            missing = await client.get(f"/api/v1/trials/{trial_ids[0]}", headers=headers)
+            assert missing.status_code == 200, missing.text
+            unknown(missing.json())
+            assert missing.json()["total_tokens"] == 59
+            assert missing.json()["price_snapshots"] == []
+
+            zero = await client.get(f"/api/v1/trials/{trial_ids[1]}", headers=headers)
+            assert zero.status_code == 200, zero.text
+            assert zero.json()["pricing_modes"] == ["priced"]
+            assert zero.json()["cost_status"] == "estimated"
+            assert zero.json()["estimated_cost_usd"] == 0
+            assert zero.json()["price_snapshots"][0]["rate_card_id"] == card.id
+
+            batch = await client.get(f"/api/v1/batches/{batch_id}", headers=headers)
+            assert batch.status_code == 200, batch.text
+            mixed(batch.json())
+            mixed(batch.json()["combination_summary"][0])
+            assert batch.json()["effective_price_unknown_llm_calls_count"] == 1
+            assert all(
+                row["rate_card_hash"] != "local-server-no-card"
+                for row in batch.json()["price_snapshots"]
+            )
+
+            params = {
+                "team_id": team_str,
+                "start": "2026-06-03",
+                "end": "2026-06-03",
+                "include_batches": "true",
+            }
+            for include_cloud in ("false", "true"):
+                response = await client.get(
+                    "/api/v1/usage",
+                    headers=headers,
+                    params={**params, "include_cloud": include_cloud},
+                )
+                assert response.status_code == 200, response.text
+                bucket = response.json()["buckets"][0]
+                mixed(bucket)
+                mixed(bucket["batches"][0])
+                assert bucket["llm_input_tokens"] == 165
+                assert bucket["llm_output_tokens"] == 12
+            filtered = await client.get(
+                "/api/v1/usage", headers=headers, params={**params, "pricing_mode": "price-unknown"}
+            )
+            assert filtered.status_code == 200, filtered.text
+            unknown(filtered.json()["buckets"][0])
+            unknown(filtered.json()["buckets"][0]["batches"][0])
+            breakdown = await client.get(
+                "/api/v1/usage", headers=headers, params={**params, "breakdown_by": "pricing_mode"}
+            )
+            assert breakdown.status_code == 200, breakdown.text
+            groups = {row["breakdown_key"]: row for row in breakdown.json()["buckets"]}
+            unknown(groups["price-unknown"])
+            assert groups["priced"]["priced_llm_calls_count"] == 2
+        # Reading projections does not rewrite historical rows.
+        with engine.connect() as db:
+            row = db.execute(
+                select(LlmCall.rate_card_hash, LlmCall.provider_extras).where(
+                    LlmCall.trial_id == trial_ids[0]
+                )
+            ).one()
+            assert tuple(row) == ("local-server-no-card", {})
+    finally:
+        with engine.begin() as db:
+            db.execute(delete(RateCard).where(RateCard.id == card.id))
+        engine.dispose()
 
 
 async def test_usage_include_batches_distinguishes_token_only_cost(

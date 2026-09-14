@@ -10,14 +10,20 @@ Scenarios covered:
 4. Idempotency: running the sweep twice produces no additional changes.
 """
 
+import asyncio
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, insert, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import Task, Team, TeamQuota, Trial
 from loom_control_plane.retry_exhausted_sweeper import sweep_retry_exhausted
+from loom_control_plane.trial_cancellation import (
+    _REQUEST_CANCEL_SQL,
+    cancel_trial_under_authority,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -215,4 +221,105 @@ async def test_sweep_is_idempotent(postgres_url: str) -> None:
             assert row.failure_reason == "retry_exhausted"
             assert row.finished_at is not None
     finally:
+        await engine.dispose()
+
+
+async def test_exhaustion_preserves_requested_cancel_for_normal_replay(
+    postgres_url: str,
+) -> None:
+    factory, engine = await _make_session_factory(postgres_url)
+    requested_at = datetime.now(UTC) - timedelta(minutes=10)
+    cancelled_id, retry_id = uuid4(), uuid4()
+    try:
+        team_id, task_id = await _seed_baseline(factory, max_attempts_ceiling=1)
+        async with factory() as session:
+            for trial_id, cancellation in ((cancelled_id, requested_at), (retry_id, None)):
+                await session.execute(
+                    insert(Trial).values(
+                        id=trial_id,
+                        team_id=team_id,
+                        task_id=task_id,
+                        config={},
+                        requires_caps={},
+                        state="queued",
+                        attempt_count=1,
+                        cancellation_requested_at=cancellation,
+                    )
+                )
+            await session.commit()
+        async with factory() as session:
+            swept = await sweep_retry_exhausted(session)
+            await session.commit()
+        assert swept == [retry_id]
+        result = await cancel_trial_under_authority(
+            session_factory=factory,
+            protected_store=None,
+            trial_id=cancelled_id,
+            team_id=team_id,
+        )
+        assert result is not None and result["state"] == "cancelled"
+        async with factory() as session:
+            cancelled = await session.get(Trial, cancelled_id)
+            retry = await session.get(Trial, retry_id)
+            assert cancelled is not None and retry is not None
+            assert cancelled.cancellation_requested_at == requested_at
+            assert cancelled.cancellation_observed_at is not None
+            assert cancelled.finished_at is not None
+            assert cancelled.failure_reason is None
+            assert retry.state == "failed" and retry.failure_reason == "retry_exhausted"
+            assert retry.finished_at is not None
+    finally:
+        await engine.dispose()
+
+
+async def test_exhaustion_rechecks_cancellation_after_waiting_for_row_lock(
+    postgres_url: str,
+) -> None:
+    factory, engine = await _make_session_factory(postgres_url)
+    sweep_task = None
+    try:
+        team_id, task_id = await _seed_baseline(factory, max_attempts_ceiling=1)
+        trial_id = uuid4()
+        async with factory() as session:
+            await session.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_id,
+                    task_id=task_id,
+                    config={},
+                    requires_caps={},
+                    state="queued",
+                    attempt_count=1,
+                )
+            )
+            await session.commit()
+        async with factory() as cancellation, factory() as sweeper:
+            await cancellation.execute(
+                _REQUEST_CANCEL_SQL, {"trial_id": trial_id, "team_id": team_id}
+            )
+            sweep_pid = await sweeper.scalar(text("SELECT pg_backend_pid()"))
+            sweep_task = asyncio.create_task(sweep_retry_exhausted(sweeper))
+            async with factory() as observer:
+                async with asyncio.timeout(5):
+                    while not await observer.scalar(
+                        text(
+                            "SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = :pid"
+                        ),
+                        {"pid": sweep_pid},
+                    ):
+                        await observer.rollback()
+                        await asyncio.sleep(0.01)
+            await cancellation.commit()
+            assert await sweep_task == []
+            await sweeper.commit()
+        async with factory() as session:
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None and trial.state == "cancelled"
+            assert trial.cancellation_requested_at is not None
+            assert trial.cancellation_observed_at is not None
+            assert trial.failure_reason is None
+    finally:
+        if sweep_task is not None and not sweep_task.done():
+            sweep_task.cancel()
+            await asyncio.gather(sweep_task, return_exceptions=True)
         await engine.dispose()

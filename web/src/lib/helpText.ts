@@ -1,14 +1,14 @@
 export const STATUS_HELP_TEXT: Record<string, string> = {
   active: "This token can currently authorize API requests.",
   admin: "Admin token with development administration privileges.",
-  all_failed: "Every trial in this batch reached a failed terminal state.",
+  all_failed: "No trials succeeded; trials failed or were cancelled.",
   cancelled: "Stopped before normal completion and will not run further.",
   claimed: "A worker has reserved this item and should start it shortly.",
   failed: "Finished with an error; open the detail view for logs and failure reason.",
   failed_terminal:
     "Finished with an error after retries were exhausted or the failure became terminal.",
   finished: "All expected trials reached a terminal state.",
-  partial_failed: "Some trials failed while at least one trial completed successfully.",
+  partial_failed: "Some trials failed or were cancelled while at least one trial completed successfully.",
   queued: "Waiting for a worker to claim and start this item.",
   revoked: "This token was revoked and can no longer authorize API requests.",
   running: "A worker is actively running this item.",

@@ -35,14 +35,12 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch):
         # transient timeout cycles plus one reclaim sweep before losing claims.
         (5 + 5) * 4 + s.worker_reclaim_sweep_interval_sec
     )
-    assert s.slurm_worker_controller_enabled is False
-    assert s.slurm_worker_controller_pool_name == "oldlab"
-    assert s.slurm_worker_controller_requested_concurrency == 6
     assert s.task_image_builder_lease_seconds == 300.0
     assert s.task_image_registry_grace_hours == 168
     assert s.minio_access_key.get_secret_value() == "ak"
 
 
+@pytest.mark.legacy_pool
 def test_elastic_slurm_controller_settings(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("LOOM_CP_DB_URL", "postgresql+psycopg://u:p@h/db")
     monkeypatch.setenv("LOOM_CP_MINIO_ENDPOINT", "http://minio:9000")
@@ -80,3 +78,17 @@ def test_admin_secret_file_env_var(monkeypatch: pytest.MonkeyPatch):
     s = ControlPlaneSettings(_env_file=None)
 
     assert s.admin_secret_file == Path("/var/run/loom/secrets/admin/secrets.toml")
+
+
+@pytest.mark.legacy_pool
+def test_legacy_worker_controller_defaults(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LOOM_CP_DB_URL", "postgresql+psycopg://u:p@h/db")
+    monkeypatch.setenv("LOOM_CP_MINIO_ENDPOINT", "http://minio:9000")
+    monkeypatch.setenv("LOOM_CP_MINIO_ACCESS_KEY", "ak")
+    monkeypatch.setenv("LOOM_CP_MINIO_SECRET_KEY", "sk")
+    monkeypatch.setenv("LOOM_CP_LLM_GATEWAY_URL", "http://gateway:9100")
+    monkeypatch.setenv("LOOM_CP_BIND_PORT", "8080")
+    s = ControlPlaneSettings(_env_file=None)
+    assert s.slurm_worker_controller_enabled is False
+    assert s.slurm_worker_controller_pool_name == "oldlab"
+    assert s.slurm_worker_controller_requested_concurrency == 6

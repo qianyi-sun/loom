@@ -552,6 +552,7 @@ jobs:
         shell: bash
         env:
           IMAGE_NAME: ${{ matrix.image }}
+          IMAGE_SET: ${{ matrix.image == 'harbor-runtime' && 'nebius' || 'legacy' }}
           IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
           DOCKERFILE: ${{ matrix.dockerfile }}
           BUILD_CONTEXT: ${{ matrix.context }}
@@ -566,6 +567,7 @@ jobs:
           set -euo pipefail
 
           python3 scripts/component_ownership.py validate-image \
+            --image-set "${IMAGE_SET:-legacy}" \
             --image "$IMAGE_NAME" \
             --image-name "$IMAGE_DIGEST_NAME" \
             --dockerfile "$DOCKERFILE" \
@@ -731,6 +733,30 @@ jobs:
             --architecture "$ARCHITECTURE" \
             --report "$REPORT" \
             --ignore-file /tmp/loom-trivy-release.ignore.yaml
+
+  nebius-harness-build:
+    name: Harbor runtime (linux/amd64)
+    needs: [plan, trivy-binary]
+    if: >-
+      github.event_name != 'push' &&
+      needs.plan.outputs.trusted_publish != 'true' &&
+      needs.plan.outputs.gate_mode == 'full' &&
+      needs.plan.outputs.required == 'true' &&
+      needs.plan.outputs.ordinary_builds != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - image: harbor-runtime
+            image_name: loom-harbor-runtime
+            dockerfile: deploy/Dockerfile.harbor-runtime
+            context: .
+            architecture: amd64
+            platform: linux/amd64
+    steps: *native-image-build-steps
 
   scanner-cache-build:
     name: ${{ matrix.image }} (${{ matrix.platform }})
@@ -2039,7 +2065,7 @@ jobs:
           'images-gate-filtered' }}
     runs-on: ubuntu-latest
     if: always() && needs.plan.outputs.gate_mode != 'filtered'
-    needs: [plan, build, scanner-cache-build, publish, publish-manifest, personal-dev-trusted-release]
+    needs: [plan, build, nebius-harness-build, scanner-cache-build, publish, publish-manifest, personal-dev-trusted-release]
     steps:
       - name: Enforce selected image result
         env:
@@ -2049,6 +2075,7 @@ jobs:
           GATE_MODE: ${{ needs.plan.outputs.gate_mode }}
           REQUIRED: ${{ needs.plan.outputs.required }}
           BUILD_RESULT: ${{ needs.build.result }}
+          HARNESS_BUILD_RESULT: ${{ needs.nebius-harness-build.result }}
           SCANNER_BUILD_RESULT: ${{ needs.scanner-cache-build.result }}
           PUBLISH_RESULT: ${{ needs.publish.result }}
           MANIFEST_RESULT: ${{ needs.publish-manifest.result }}
@@ -2066,6 +2093,7 @@ jobs:
           esac
           if [[ "$GATE_MODE" == "filtered" ]]; then
             [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
+            [[ "$HARNESS_BUILD_RESULT" == "skipped" ]] || exit 1
             [[ "$SCANNER_BUILD_RESULT" == "skipped" ]] || exit 1
             [[ "$PUBLISH_RESULT" == "skipped" ]] || exit 1
             [[ "$MANIFEST_RESULT" == "skipped" ]] || exit 1
@@ -2108,6 +2136,7 @@ jobs:
           if [[ "$REQUIRED" == "true" ]]; then
             if [[ "$EVENT_NAME" == "push" || "$TRUSTED_PUBLISH" == "true" ]]; then
               [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
+              [[ "$HARNESS_BUILD_RESULT" == "skipped" ]] || exit 1
               [[ "$SCANNER_BUILD_RESULT" == "skipped" ]] || exit 1
               if [[ "$STANDARD_IMAGES" == "[]" ]]; then
                 [[ "$PUBLISH_RESULT" == "skipped" ]] || exit 1
@@ -2119,8 +2148,10 @@ jobs:
             else
               if [[ "$ordinary_selected" == "true" ]]; then
                 [[ "$BUILD_RESULT" == "success" ]] || exit 1
+                [[ "$HARNESS_BUILD_RESULT" == "success" ]] || exit 1
               else
                 [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
+                [[ "$HARNESS_BUILD_RESULT" == "skipped" ]] || exit 1
               fi
               if [[ "$scanner_selected" == "true" ]]; then
                 [[ "$SCANNER_BUILD_RESULT" == "success" ]] || exit 1
@@ -2132,6 +2163,7 @@ jobs:
             fi
           else
             [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
+            [[ "$HARNESS_BUILD_RESULT" == "skipped" ]] || exit 1
             [[ "$SCANNER_BUILD_RESULT" == "skipped" ]] || exit 1
             [[ "$PUBLISH_RESULT" == "skipped" ]] || exit 1
             [[ "$MANIFEST_RESULT" == "skipped" ]] || exit 1

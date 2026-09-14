@@ -16,6 +16,9 @@ from loom_llm_gateway.rate_card import (
     COST_META_SOURCE_KEY,
 )
 from loom_service.usage_accounting import (
+    cost_meta_filter as _cost_meta_filter,
+)
+from loom_service.usage_accounting import (
     empty_usage_projection,
     summarize_usage_counts,
     usage_status_filter,
@@ -116,10 +119,6 @@ class _UsageAccumulator:
         return out
 
 
-def _cost_meta_filter(key: str, value: str) -> Any:
-    return func.coalesce(LlmCall.provider_extras.op("->>")(key), "") == value
-
-
 def _price_unknown_call_filter() -> Any:
     return LlmCall.rate_card_hash.like("facade:rate-card:missing%") | _cost_meta_filter(
         COST_META_SOURCE_KEY, "unpriced"
@@ -166,6 +165,8 @@ def _combination_label(combo: dict[str, Any]) -> str:
     if isinstance(label, str) and label.strip():
         return label
     agent_name = str(combo.get("agent_name") or "unknown agent")
+    if combo.get("agent_version"):
+        agent_name += "@" + str(combo["agent_version"])
     return f"{agent_name} / {_model_display(combo)}"
 
 
@@ -368,6 +369,7 @@ async def combination_summary_for_batch(
             "combination_idx": idx,
             "label": _combination_label(combo),
             "agent_name": combo.get("agent_name"),
+            "agent_version": combo.get("agent_version"),
             "agent_model": combo.get("agent_model"),
             "provider_connection_id": (
                 str(combo["provider_connection_id"])

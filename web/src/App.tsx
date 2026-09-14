@@ -53,6 +53,7 @@ export default function App(): JSX.Element {
         <Route path="benchmarks" element={<Benchmarks />} />
         <Route path="usage" element={<UsageDashboard />} />
         <Route path="task-sets/new" element={<TaskSetSubmit />} />
+        <Route path="task-sets/detail" element={<TaskSetDetail />} />
         <Route path="task-sets/:id" element={<TaskSetDetail />} />
         <Route path="task-sets" element={<TaskSetsList />} />
         <Route path="providers/new" element={<ProviderCreate />} />

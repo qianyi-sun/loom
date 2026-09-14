@@ -13,6 +13,7 @@ Routes:
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import and_, func, or_, select, update
 
+from loom.agent_runtime_registry import resolve_agent_runtimes
 from loom.auth import AuthContext
 from loom.data_lifecycle_registry import ensure_batch_lifecycle_authority
 from loom.db.schema import (
@@ -56,7 +58,9 @@ from loom.service_execution_backend import NEBIUS_BACKEND, NEBIUS_LOGICAL_POOL_I
 from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
     automatic_service_execution_rejections,
+    freeze_agent_runtime_releases,
     load_service_execution_runtime_profile,
+    runtime_profile_rejections,
 )
 from loom_llm_gateway.rate_card import (
     COST_META_CONFIDENCE_KEY,
@@ -116,6 +120,7 @@ from loom_service.task_config_validation import (
     split_valid_task_configs,
 )
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
+from loom_service.trial_timing import trial_started_at
 from loom_service.usage_accounting import (
     PreRunBudgetEstimate,
     empty_usage_projection,
@@ -125,6 +130,9 @@ from loom_service.usage_accounting import (
     summarize_llm_evidence_for_trials,
     summarize_usage_counts,
     usage_status_filter,
+)
+from loom_service.usage_accounting import (
+    cost_meta_filter as _cost_meta_filter,
 )
 from loom_service.worker_backends import (
     compatible_cold_start_pool_names,
@@ -255,6 +263,7 @@ class _AdminCreateBatchOnBehalf(_CreateBatch):
 class _RerunFailedBatch(BaseModel):
     task_ids: list[str] = Field(default_factory=list, max_length=5000)
     include_operator_approval: bool = False
+    use_current_runtime: bool = False
     model_switch_plan_mode: Literal["inherit", "resample"] = "inherit"
 
 
@@ -406,6 +415,8 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
     trial_config: dict[str, Any],
     combinations: Sequence[Combination | dict[str, Any]],
     runtime_profile_json: str,
+    resolve_versions: bool = True,
+    automatic_only: bool = False,
 ) -> ServiceExecutionRuntimeProfileV1 | None:
     """Require fresh execution capacity or a compatible cold-start policy.
 
@@ -413,6 +424,16 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
     remains distinct from a fresh worker and therefore never changes the
     backend catalog's ``available`` truth value.
     """
+    selection_configs = [
+        combo.model_dump(mode="json") if isinstance(combo, Combination) else combo
+        for combo in combinations
+    ] or [trial_config]
+    selections = [
+        (str(item.get("agent_name", "")), item.get("agent_version"))
+        for item in selection_configs
+    ]
+    if any(version is not None for _, version in selections) and backend != NEBIUS_BACKEND:
+        raise HTTPException(status_code=400, detail="agent_version requires the native Nebius backend")
     task_rows = (
         await session.execute(
             select(Task.id, Task.config, Task.source_provenance).where(Task.id.in_(list(task_ids))),
@@ -429,6 +450,12 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
         parsed_trials: tuple[TrialConfig, ...] | None = None
         parsed_trial_error = False
         profile = load_service_execution_runtime_profile(runtime_profile_json)
+        if profile is not None and resolve_versions:
+            try:
+                releases = await resolve_agent_runtimes(session, selections)
+                profile = freeze_agent_runtime_releases(profile, releases)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         incompatible_task_ids: list[str] = []
         rejection_reasons: dict[str, list[str]] = {}
         automatic_profile_used = False
@@ -438,6 +465,13 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
             provenance = task_entry[1] if task_entry is not None else {}
             binding = task_config.service_execution if task_config is not None else None
             reasons: tuple[str, ...] = ()
+            if binding is not None and automatic_only:
+                raise HTTPException(
+                    status_code=400,
+                    detail="current runtime rerun requires automatic native execution for every task",
+                )
+            if binding is not None and any(version is not None for _, version in selections):
+                raise HTTPException(status_code=400, detail="agent_version requires automatic native execution")
             if binding is None and task_config is not None:
                 automatic_profile_used = True
                 if parsed_trials is None:
@@ -448,6 +482,7 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
                                     {
                                         **trial_config,
                                         "agent_name": combination.agent_name,
+                                        "agent_version": combination.agent_version,
                                         "agent_model": (
                                             combination.agent_model.model_dump(mode="json")
                                             if combination.agent_model is not None
@@ -478,13 +513,20 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
                                 task_config,
                                 parsed_trial,
                                 source_provenance=provenance,
+                                allow_task_image_preparation=True,
                             )
                         )
                     )
                 if profile is None:
                     reasons = (*reasons, "runtime_profile_unavailable")
-                elif task_config.environment.docker_image != profile.task_image_ref:
-                    reasons = (*reasons, "task_image_not_in_runtime_profile")
+                elif parsed_trials:
+                    reasons = (*reasons, *(
+                        reason for parsed_trial in parsed_trials
+                        for reason in runtime_profile_rejections(
+                            task_config, parsed_trial, profile,
+                            allow_task_image_preparation=True,
+                        )
+                    ))
             if (
                 task_config is None
                 or (binding is not None and binding.logical_pool_id != NEBIUS_LOGICAL_POOL_ID)
@@ -959,7 +1001,7 @@ async def _create_batch_record(
         # Multi-combination batch. trial_config MUST NOT carry
         # agent_name / agent_model / n_per_task in this shape —
         # those live on each Combination.
-        for forbidden in ("agent_name", "agent_model"):
+        for forbidden in ("agent_name", "agent_model", "agent_version"):
             if forbidden in trial_config:
                 _reject_submission(
                     reason="invalid_input",
@@ -1568,9 +1610,10 @@ async def admin_create_batch_on_behalf(
 def _derive_combination_label(combo: Combination) -> str:
     """Default label `"{agent_name}"` or
     `"{agent_name}/{provider}/{name}"` when a model is set."""
+    name = combo.agent_name + (f"@{combo.agent_version}" if combo.agent_version else "")
     if combo.agent_model is None:
-        return combo.agent_name
-    return f"{combo.agent_name}/{combo.agent_model.provider}/{combo.agent_model.name}"
+        return name
+    return f"{name}/{combo.agent_model.provider}/{combo.agent_model.name}"
 
 
 @router.get("/batches")
@@ -1719,10 +1762,6 @@ def _price_unknown_call_filter() -> Any:
     return LlmCall.rate_card_hash.like("facade:rate-card:missing%") | _cost_meta_filter(
         COST_META_SOURCE_KEY, "unpriced"
     )
-
-
-def _cost_meta_filter(key: str, value: str) -> Any:
-    return func.coalesce(LlmCall.provider_extras.op("->>")(key), "") == value
 
 
 def _cost_source_counts(row: Any) -> dict[str, int]:
@@ -1929,7 +1968,7 @@ async def _trial_projections_for_batch_ids(
             result=row.result,
             claimed_at=row.claimed_at,
             pre_start_heartbeat_at=row.pre_start_heartbeat_at,
-            started_at=row.started_at,
+            started_at=trial_started_at(row.started_at, row.result),
             finished_at=row.finished_at,
             sample_idx=row.sample_idx,
             combination_idx=row.combination_idx,
@@ -2737,16 +2776,35 @@ async def rerun_failed_batch(
             status_code=400,
             detail=invalid_task_config_detail(invalid_rerun_tasks),
         )
+    rerun_trial_config = dict(b.trial_config)
+    combinations = [dict(item) for item in b.combinations or []]
+    runtime_profile_json = json.dumps(b.service_execution_runtime_profile or {})
+    if request_payload.use_current_runtime:
+        selections = combinations or [rerun_trial_config]
+        if b.backend != NEBIUS_BACKEND or any(
+            item.get("agent_name") != "terminus-2" for item in selections
+        ):
+            _reject_submission(
+                reason="invalid_input", status_code=400,
+                detail="current runtime rerun supports only native Nebius terminus-2",
+            )
+        # A missing explicit version selects the deployment-owned controller,
+        # exactly as an ordinary new submission does. Never mutate the parent.
+        rerun_trial_config.pop("agent_version", None)
+        for item in combinations:
+            item.pop("agent_version", None)
+        runtime_profile_json = request.app.state.settings.service_execution_runtime_profile_json
     service_execution_runtime_profile = await _reject_if_backend_cannot_execute_or_cold_start(
         s,
         backend=b.backend,
         task_ids=valid_rerun_task_ids,
-        trial_config=b.trial_config,
-        combinations=b.combinations or [],
-        runtime_profile_json=request.app.state.settings.service_execution_runtime_profile_json,
+        trial_config=rerun_trial_config,
+        combinations=combinations,
+        runtime_profile_json=runtime_profile_json,
+        resolve_versions=request_payload.use_current_runtime,
+        automatic_only=request_payload.use_current_runtime,
     )
     agent_task_pairs: list[tuple[str, str]] = []
-    combinations = list(b.combinations or [])
     for target in targets:
         task_id = str(target["task_id"])
         combination_idx = int(target["combination_idx"])
@@ -2800,7 +2858,7 @@ async def rerun_failed_batch(
         task_filter={"subset_kind": "explicit", "task_ids": task_ids},
         resolved_task_ids=list(rerun_task_result.task_ids),
         trial_config=apply_plan_mode(
-            dict(b.trial_config),
+            rerun_trial_config,
             mode=request_payload.model_switch_plan_mode,
         ),
         state="submitted",
@@ -2811,7 +2869,7 @@ async def rerun_failed_batch(
         expected_trial_count=len(targets),
         n_per_task=1,
         backend=b.backend,
-        combinations=list(b.combinations or []),
+        combinations=combinations,
         service_execution_runtime_profile=(
             service_execution_runtime_profile.model_dump(mode="json")
             if service_execution_runtime_profile is not None
@@ -2825,6 +2883,7 @@ async def rerun_failed_batch(
             {
                 "kind": "supplemental_rerun",
                 "source_batch_id": str(b.id),
+                **({"use_current_runtime": True} if request_payload.use_current_runtime else {}),
             },
             *rerun_task_result.benchmark_selection_provenance,
         ],
@@ -2877,12 +2936,16 @@ async def cancel_batch(
     # The Control Plane owns the trial cancellation transition for every
     # backend. In protected staging this is also the only path that can move a
     # live claim to cancel-pending without releasing its concurrency lease.
+    if ctx.auth_kind == "session":
+        # CP session revalidation must not wait on this request's auth-row lock.
+        await s.commit()
     for trial_id in active_trial_ids:
         response = await forward(
             request.app.state.http_client,
             method="POST",
             path=f"/trials/{trial_id}/cancel",
             authorization=authorization,
+            cancellation_request=request,
         )
         if response.status_code not in {200, 409}:
             return propagate(response)

@@ -15,16 +15,19 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import and_, delete, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.schema import (
     Task,
+    TaskImageMaterialization,
     TaskSet,
     TaskSetGenerationGcCursor,
     TaskSetManifest,
     TaskSetMaterializationJob,
+    Trial,
+    TrialTaskImageMaterialization,
 )
 from loom.taskset.storage_bytes import (
     generated_tasks_prefix,
@@ -319,6 +322,33 @@ def _source_protects_candidate(
     return bucket == artifacts_bucket and key.startswith(candidate.tasks_prefix)
 
 
+async def _protected_task_image_sources(
+    session: AsyncSession, *, source_prefixes: Sequence[str],
+) -> list[str]:
+    """Keep build inputs only while a cached image or durable consumer needs them."""
+    if not source_prefixes:
+        return []
+    current_version = exists().where(
+        Task.id == TaskImageMaterialization.task_id,
+        or_(Task.checksum == TaskImageMaterialization.task_checksum,
+            Task.checksum == func.concat("sha256:", TaskImageMaterialization.task_checksum)),
+    )
+    live_trial = exists().where(
+        TrialTaskImageMaterialization.materialization_id == TaskImageMaterialization.id,
+        Trial.id == TrialTaskImageMaterialization.trial_id,
+        Trial.state.not_in(("succeeded", "failed", "cancelled")),
+    )
+    sources = await session.scalars(select(TaskImageMaterialization.task_source).where(
+        or_(*(TaskImageMaterialization.task_source.startswith(prefix, autoescape=True)
+              for prefix in source_prefixes)),
+        or_(current_version, live_trial,
+            TaskImageMaterialization.state == "ready",
+            and_(TaskImageMaterialization.state.in_(("claimed", "running")),
+                 TaskImageMaterialization.lease_expires_at > func.now())),
+    ))
+    return [source for source in sources if source is not None]
+
+
 async def _candidate_is_protected_after_recheck(
     session: AsyncSession,
     *,
@@ -353,13 +383,16 @@ async def _candidate_is_protected_after_recheck(
         sources = (await session.execute(
             select(Task.source).where(Task.task_set_id == task_set.id),
         )).scalars().all()
+        image_sources = await _protected_task_image_sources(
+            session, source_prefixes=[f"s3://{artifacts_bucket}/{candidate.tasks_prefix}"],
+        )
         return any(
             _source_protects_candidate(
                 source,
                 artifacts_bucket=artifacts_bucket,
                 candidate=candidate,
             )
-            for source in sources
+            for source in [*sources, *image_sources]
         ), False
     except Exception:
         logger.warning(
@@ -395,6 +428,8 @@ async def purge_abandoned_materialization_generations(
     task_sets: dict[str, _LiveTaskSet] = {}
     job_rows: Sequence[Any] = ()
     source_rows: Sequence[Any] = ()
+    image_sources: list[str] = []
+    image_prefixes: dict[str, str] = {}
 
     try:
         live_task_set_filter = (
@@ -451,6 +486,15 @@ async def purge_abandoned_materialization_generations(
             source_rows = (await session.execute(
                 select(Task.task_set_id, Task.source).where(Task.task_set_id.in_(task_sets)),
             )).all()
+            image_prefixes = {
+                task_set.id: f"s3://{artifacts_bucket}/" + generation_root(
+                    team_id=task_set.owning_team_id, slug=task_set.slug,
+                )
+                for task_set in task_sets.values()
+            }
+            image_sources = await _protected_task_image_sources(
+                session, source_prefixes=list(image_prefixes.values()),
+            )
     finally:
         # Do not hold a DB transaction while traversing object storage.
         await session.rollback()
@@ -458,6 +502,10 @@ async def purge_abandoned_materialization_generations(
     sources_by_task_set: dict[str, list[str | None]] = defaultdict(list)
     for row in source_rows:
         sources_by_task_set[row.task_set_id].append(row.source)
+    for task_set_id, prefix in image_prefixes.items():
+        sources_by_task_set[task_set_id].extend(
+            source for source in image_sources if source.startswith(prefix)
+        )
 
     jobs = [
         _LiveJob(

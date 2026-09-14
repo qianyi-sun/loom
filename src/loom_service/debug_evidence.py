@@ -872,7 +872,7 @@ def _worker_pool_coverage(
     }
 
 
-def _failure_for_batch(batch: Batch) -> dict[str, Any]:
+def _failure_for_batch(batch: Batch, trial_summary: Mapping[str, int]) -> dict[str, Any]:
     if batch.failure_reason == "fanout_submit_failed":
         return {
             "reason_code": "batch.fanout_submit_failed",
@@ -880,6 +880,25 @@ def _failure_for_batch(batch: Batch) -> dict[str, Any]:
             "category": "submit",
             "attribution": "platform",
             "message": batch.failure_message,
+        }
+    if batch.result_status in {"all_failed", "partial_failed"} and trial_summary["cancelled"]:
+        if trial_summary["cancelled"] == batch.expected_trial_count:
+            return {
+                "reason_code": "batch.cancelled",
+                "reason": "cancelled",
+                "category": "cancelled",
+                "attribution": "user_or_platform",
+                "message": "All child trials were cancelled.",
+            }
+        return {
+            "reason_code": f"batch.{batch.result_status}",
+            "reason": batch.result_status,
+            "category": "aggregate",
+            "attribution": "mixed",
+            "message": (
+                f"Child trials: {trial_summary['succeeded']} succeeded, "
+                f"{trial_summary['failed']} failed, {trial_summary['cancelled']} cancelled."
+            ),
         }
     if batch.result_status == "all_failed":
         return {
@@ -1041,13 +1060,15 @@ def _failure_ledger(
     )
 
 
-def _next_actions_for_batch(batch: Batch) -> list[str]:
+def _next_actions_for_batch(batch: Batch, trial_summary: Mapping[str, int]) -> list[str]:
     if batch.failure_reason == "fanout_submit_failed":
         return [
             "Inspect batch fan-out errors.",
             "Update task filter, provider, backend, or team policy before rerun.",
         ]
     if batch.result_status in {"all_failed", "partial_failed"}:
+        if trial_summary["cancelled"] and not trial_summary["failed"]:
+            return ["Clone or recreate cancelled child trials if cancellation was accidental."]
         return [
             "Open failed child trials and inspect their debug evidence.",
             "Rerun transient gateway failures when available.",
@@ -1104,6 +1125,7 @@ def build_batch_debug_evidence(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     generated_at = now or datetime.now(UTC)
+    trial_summary = _summary_from_trials(trials)
     llm_call_counts = llm_call_counts_by_trial_id(llm_calls)
     llm_evidence = summarize_llm_evidence_for_trials(
         trials,
@@ -1164,7 +1186,7 @@ def build_batch_debug_evidence(
             ),
             "provider_model_id": batch.provider_model_id,
         },
-        "failure": _failure_for_batch(batch),
+        "failure": _failure_for_batch(batch, trial_summary),
         "task_selection": {
             "task_filter": batch.task_filter,
             "resolved_task_ids": getattr(batch, "resolved_task_ids", None),
@@ -1174,7 +1196,7 @@ def build_batch_debug_evidence(
             "fanout_errors": batch.fanout_errors,
         },
         "trials": {
-            "summary": _summary_from_trials(trials),
+            "summary": trial_summary,
             "worker_pools": _worker_pool_coverage(trials, worker_pool_names_by_id),
             "failed": failed_trials[:50],
             "failed_count": len(failed_trials),
@@ -1195,6 +1217,6 @@ def build_batch_debug_evidence(
             "aggregate_reward": (sum(rewards) / len(rewards) if rewards else None),
             "scored_trial_count": len(rewards),
         },
-        "next_actions": _next_actions_for_batch(batch),
+        "next_actions": _next_actions_for_batch(batch, trial_summary),
     }
     return cast(dict[str, Any], redact_mapping(evidence))

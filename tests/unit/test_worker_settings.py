@@ -77,11 +77,11 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     monkeypatch.setenv("LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT", "2")
     monkeypatch.setenv("LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC", "12.5")
     monkeypatch.setenv("LOOM_WORKER_MAX_CONCURRENT", "10")
-    monkeypatch.setenv("LOOM_WORKER_POOL_NAME", "gb10")
+    monkeypatch.setenv("LOOM_WORKER_POOL_NAME", "worker-pool")
     monkeypatch.setenv("LOOM_WORKER_BLOCKING_IO_MAX_WORKERS", "40")
     monkeypatch.setenv("LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS", "300")
     monkeypatch.setenv("LOOM_WORKER_TRAJECTORY_CACHE_DIR", str(tmp_path))
-    monkeypatch.setenv("LOOM_WORKER_HOSTNAME", "trt-gb10-7")
+    monkeypatch.setenv("LOOM_WORKER_HOSTNAME", "worker-node-7")
     monkeypatch.setenv("LOOM_WORKER_SETUP_HEALTH_GUARD_ENABLED", "true")
     monkeypatch.setenv("LOOM_WORKER_SETUP_HEALTH_IO_FULL_AVG10_MAX", "45.5")
     monkeypatch.setenv("LOOM_WORKER_SETUP_HEALTH_MIN_MEM_AVAILABLE_MB", "4096")
@@ -95,7 +95,7 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     )
     s = WorkerSettings(_env_file=None)
     assert s.max_concurrent == 10
-    assert s.pool_name == "gb10"
+    assert s.pool_name == "worker-pool"
     assert s.minio_max_pool_connections == 512
     assert s.minio_connect_timeout_sec == 7.5
     assert s.minio_read_timeout_sec == 180
@@ -110,7 +110,7 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     assert s.claim_poll_interval_sec == 1.0
     assert s.heartbeat_interval_sec == 5.0
     assert s.trajectory_cache_dir == tmp_path
-    assert s.hostname == "trt-gb10-7"
+    assert s.hostname == "worker-node-7"
     assert s.setup_health_guard_enabled is True
     assert s.setup_health_io_full_avg10_max == 45.5
     assert s.setup_health_min_mem_available_mb == 4096
@@ -196,6 +196,7 @@ def test_container_caps_default_unbounded(monkeypatch: pytest.MonkeyPatch) -> No
     assert s.container_pids == 0
 
 
+@pytest.mark.legacy_pool
 def test_slurm_runtime_identity_parses_from_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

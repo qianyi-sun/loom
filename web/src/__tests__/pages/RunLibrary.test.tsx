@@ -786,6 +786,22 @@ describe("RunLibraryBatchDetail", () => {
     vi.restoreAllMocks();
   });
 
+  it("shows selected Harbor versions in saved configuration and combination results", async () => {
+    const combinations = ["harbor-v1", "harbor-v2"].map((agent_version, combination_idx) => ({
+      agent_name: "terminus-2", agent_version,
+      agent_model: { provider: "openai", name: "glm-5.2" }, n_per_task: 1,
+      label: `combo${combination_idx + 1}`, combination_idx,
+      trial_count: 1, scored_trial_count: 1, succeeded_count: 1, failed_count: 0, aggregate_reward: 1,
+    }));
+    mockRunLibrary({ detailOverride: {
+      ...detailBatch, combinations, combination_summary: combinations,
+      effective_combination_summary: combinations,
+    } });
+    renderWithProviders(<Routes><Route path="/library/batches/:batchId" element={<RunLibraryBatchDetail />} /></Routes>, { route: "/library/batches/batch-alpha" });
+    expect((await screen.findAllByText(/terminus-2@harbor-v1/)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/terminus-2@harbor-v2/)).length).toBeGreaterThan(0);
+  });
+
   it("groups artifacts and exposes clone, download, and reuse actions", async () => {
     const fetchMock = mockRunLibrary();
     const createObjectURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:report");

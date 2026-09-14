@@ -1,7 +1,29 @@
+import pytest
+
 from loom.terminal_result_semantics import (
+    aggregate_reward_scalar,
     projected_result_conflicts,
     terminal_result_conflicts,
 )
+
+
+@pytest.mark.parametrize(
+    ("rewards", "expected"),
+    [
+        (None, None),
+        ({}, None),
+        ({"artifact_complete": 1.0}, 1.0),
+        ({"passed": 0.0}, 0.0),
+        ({"a": 0.0, "b": 1.0}, 0.5),
+    ],
+)
+def test_named_rewards_have_a_shared_scalar_projection(
+    rewards: dict[str, float] | None,
+    expected: float | None,
+) -> None:
+    original = None if rewards is None else dict(rewards)
+    assert aggregate_reward_scalar(rewards) == expected
+    assert rewards == original
 
 
 def test_projection_rejects_success_with_terminal_failure_reason() -> None:

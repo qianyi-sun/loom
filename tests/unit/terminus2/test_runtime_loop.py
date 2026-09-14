@@ -72,6 +72,7 @@ def _patch_harbor(
     monkeypatch,
     *,
     tokens_seen: list[str],
+    llm_kwargs_seen: list[dict[str, object]] | None = None,
     lifecycle: list[str] | None = None,
     deadline_clock: list[float] | None = None,
 ) -> None:
@@ -81,6 +82,8 @@ def _patch_harbor(
             llm_kwargs = kwargs.get("llm_kwargs")
             if isinstance(llm_kwargs, dict) and "api_key" in llm_kwargs:
                 tokens_seen.append(str(llm_kwargs["api_key"]))
+                if llm_kwargs_seen is not None:
+                    llm_kwargs_seen.append(dict(llm_kwargs))
 
         async def setup(self, env: object) -> None:
             if lifecycle is not None:
@@ -129,6 +132,40 @@ def _patch_harbor(
         "loom.agent.terminus2.runtime.LoomHarborEnvironment.create",
         staticmethod(lambda **kwargs: object()),
     )
+
+
+@pytest.mark.asyncio
+async def test_single_model_forwards_generation_params_without_reserved_overrides(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    kwargs_seen: list[dict[str, object]] = []
+    _patch_harbor(monkeypatch, tokens_seen=[], llm_kwargs_seen=kwargs_seen)
+    runtime = LoomTerminus2Runtime(
+        model=ModelSpec(provider="openai", name="glm-5.2"), team_id=str(uuid4()),
+        trial_id=uuid4(), cp_client=_TokenCP(), gateway_url="http://127.0.0.1:9000",
+    )
+    # Worker assigns after construction; run must sanitize again at dispatch.
+    runtime.request_params = {
+        "temperature": 0.2, "max_tokens": 4096, "api_key": "attacker",
+        "model": "foreign", "api_base": "http://foreign",
+        "messages": [{"role": "system", "content": "override"}],
+        "extra_body": {"top_k": 20, "authorization": "attacker"},
+    }
+    driver = FakeDriver()
+    await driver.start()
+    async with TrajectoryWriter(
+        local_path=tmp_path / "events.jsonl", store=FakeObjectStore(),
+        bucket="test", key="events.jsonl", min_part_bytes=0,
+    ) as trajectory:
+        await runtime.run(
+            instruction="task", env=driver, trajectory=trajectory,
+            mcp=[], skills_dir=None, step_id="agent",
+        )
+    assert kwargs_seen == [{
+        "temperature": 0.2, "max_tokens": 4096,
+        "extra_body": {"top_k": 20}, "api_key": "token-1",
+    }]
 
 
 @pytest.mark.asyncio
