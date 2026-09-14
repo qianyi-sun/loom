@@ -4252,3 +4252,19 @@ def test_database_component_rejects_immutable_database_identity_drift(
     assert component.classify(plan).state is ComponentState.DRIFTED
     with pytest.raises(RuntimeError, match="state changed"):
         component.apply(plan)
+
+
+def test_capacity_runtime_selects_installed_database_lifecycle_without_legacy_wrapper(tmp_path):
+    plan = _plan(tmp_path)
+    source = _runtime(tmp_path)
+    calls = []
+    selected = source.components(plan, epoch_guard=lambda _: None)[1]
+    selected = replace(selected, terminal_recovery_authority=None)
+    def database(bound):
+        assert bound == plan
+        calls.append(bound)
+        return selected
+    source = replace(source, database_component_factory=database)
+    components = source.components(plan, epoch_guard=lambda _: pytest.fail("ordinary epoch read during construction"))
+    assert components[1] is selected and calls == [plan]
+    assert components[1].terminal_recovery_authority is None
