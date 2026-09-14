@@ -1,13 +1,18 @@
 """Capacity runtime connects exact resources to real PostgreSQL owner retirement.
 
-Configuration observation is injected here; installed configuration/SQL profile
-admission and running the actual bootstrap image need separate composition proof.
+The real-bootstrap cases run the production entrypoint and configuration SQL.
+The initial empty-fixture admission and Kubernetes transport are injected; the
+installed authority chain and actual container image need separate proof.
 """
 
+
+import base64
+import json
 
 import psycopg
 import pytest
 from psycopg import sql
+from sqlalchemy.engine import make_url
 
 from loom.application_completed_authority import ApplicationGuardOwner, ApplicationOwnerSuccessor
 from loom.application_handoff_completion import complete_application_handoff_database
@@ -38,7 +43,8 @@ pytestmark = [pytest.mark.parametrize("transfer_postgres", [16, 17], indirect=Tr
 
 
 @pytest.mark.asyncio
-async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_runtime(transfer_database, tmp_path, monkeypatch):  # noqa: F811
+@pytest.mark.parametrize("bootstrap", [False, True])
+async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_runtime(transfer_database, tmp_path, monkeypatch, bootstrap):  # noqa: F811
     from loom_cli.rollout.operator.protected_capacity_bootstrap_runtime import (
         ProtectedCapacityBootstrapRuntime,
     )
@@ -67,6 +73,17 @@ async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_ru
                 configured = [False]
 
                 class Runner(ResourceRunner):
+                    def capture_stdout(self, argv, **kwargs):
+                        if argv[0] == "kubectl" and "exec" in argv:
+                            with psycopg.connect(url) as observer:
+                                cursor = observer.execute(argv[-1])
+                                while cursor.description is None:
+                                    assert cursor.nextset()
+                                row = cursor.fetchone()
+                                assert row is not None and len(row) == 1
+                                value = row[0]
+                                return (json.dumps(value) if isinstance(value, (dict, list)) else str(value)).encode()
+                        return super().capture_stdout(argv, **kwargs)
                     def open_staging_peer_database(self):
                         return psycopg.connect(url, autocommit=True)
                     def open_staging_peer_maintenance_database(self):
@@ -76,11 +93,14 @@ async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_ru
                 base = KubernetesProtectedStagingCapacityDatabaseComponent(runner, "registry.example.test/loom", lambda: source.seed,
                     application_owner_role="loom_app_staging_owner")
 
+                real_state = KubernetesProtectedStagingCapacityDatabaseComponent._database_state
                 def state(self, candidate, seed, *, durable_runtime_credentials=True):
                     assert candidate == plan and seed == source.seed
                     assert maintenance.execute("SELECT datallowconn FROM pg_database WHERE datname='loom'").fetchone() == (True,)
                     if not configured[0]:
                         return _DatabaseState.NEEDS_CONVERGENCE
+                    if bootstrap:
+                        return real_state(self, candidate, seed, durable_runtime_credentials=durable_runtime_credentials)
                     durable = peer.execute("SELECT bool_and(rolvaliduntil='infinity'::timestamptz) FROM pg_authid WHERE rolname=ANY(%s)",
                         ([n for n in runtime_oids if not n.endswith("executor")],)).fetchone()[0]
                     return _DatabaseState.EXACT if durable == durable_runtime_credentials else _DatabaseState.NEEDS_CONVERGENCE
@@ -100,6 +120,28 @@ async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_ru
                     resources = runtime.resources(generation)
                     secret = resources.ensure_secret(creation_dispatched=True)
                     job = resources.ensure_job(creation_dispatched=True, expected_secret_uid=secret.uid)
+                    if bootstrap:
+                        from loom.personal_dev_capacity_runtime import (
+                            PsycopgPersonalDevCapacityDatabase,
+                        )
+                        from loom.staging_capacity_database_bootstrap import (
+                            StagingCapacityDatabaseBootstrapSettings,
+                            bootstrap_staging_capacity_database,
+                        )
+                        data = resources.secret["data"]
+                        paths = {}
+                        for key in ("seed.json", "reporter-configuration.json", "admin-username", "admin-password", "ca.crt"):
+                            path = tmp_path / key
+                            path.write_bytes(base64.b64decode(data[key]))
+                            paths[key] = path
+                        settings = StagingCapacityDatabaseBootstrapSettings(credential_seed_path=paths["seed.json"],
+                            reporter_configuration_path=paths["reporter-configuration.json"], admin_username_path=paths["admin-username"],
+                            admin_password_path=paths["admin-password"], database_ca_path=paths["ca.crt"])
+                        def database_factory(admin_url, **kwargs):
+                            local = make_url(url)
+                            connection = make_url(admin_url).set(host=local.host, port=local.port, query={})
+                            return PsycopgPersonalDevCapacityDatabase(connection.render_as_string(hide_password=False), **kwargs)
+                        await bootstrap_staging_capacity_database(settings, database_factory=database_factory)
                     with psycopg.connect(url, user=identity.role_name, password=generation.payload["password"], autocommit=True) as session:
                         session.execute("SET ROLE loom_app_staging_owner")
                         configured[0] = True

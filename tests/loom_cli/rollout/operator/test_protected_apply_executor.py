@@ -777,7 +777,8 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
     assert all(not call.endswith("-apply") for call in convergence_calls)
 
 
-def test_separated_owner_apply_and_convergence_share_original_component_order(tmp_path):
+@pytest.mark.parametrize("installed_capacity", [False, True])
+def test_separated_owner_apply_and_convergence_share_original_component_order(tmp_path, monkeypatch, installed_capacity):
     from loom_cli.rollout.operator.protected_apply_journal import ProtectedApplyJournal
 
     state = tmp_path / "state"
@@ -822,12 +823,35 @@ def test_separated_owner_apply_and_convergence_share_original_component_order(tm
         external_supervisor_execution_host="gx10-01c7", external_supervisor_credential_transports=credentials,
         external_supervisor_credential_identities=_credential_identities(credentials),
         production_defaults_request=_defaults_request, application_factory=factory)
+    capacity_journals = []
+    if installed_capacity:
+        from dataclasses import replace
+
+        from tests.loom_cli.rollout.operator.test_protected_staging_capacity_runtime import _runtime
+        source = _runtime(tmp_path / "capacity")
+        fake = common["staging_capacity_runtime"]
+        def fake_component(candidate, name):
+            return next(c for c in fake.components(candidate, epoch_guard=lambda _: ComponentObservation(ComponentState.EXACT, "f" * 64, plan.starting_mutation_epoch + 1)) if c.component_id == name)
+        monkeypatch.setattr(type(source), "_classify", lambda self, name, candidate, epoch: fake_component(candidate, name).classify(candidate))
+        monkeypatch.setattr(type(source), "_apply", lambda self, name, candidate: fake_component(candidate, name).apply(candidate))
+        def database(candidate, active_journal):
+            capacity_journals.append(active_journal)
+            component = fake_component(candidate, "staging-capacity-database")
+            def apply(bound):
+                _, intent = active_journal._application_admission_context()
+                assert intent.component_id == "staging-capacity-database" and intent.ordinal == 5
+                assert {"application-ownership-handoff", "database-migration"} <= applied
+                component.apply(bound)
+            return replace(component, apply=apply, terminal_recovery_authority=None)
+        common["staging_capacity_runtime"] = replace(source, database_component_factory=database)
     executor = MigrationEpochProtectedApplyExecutor(state_root=state, **common)
     journal = factory.new_journal(plan)
     components = executor.build_components(plan, journal=journal)
     assert tuple(c.component_id for c in components)[1:4] == (
         "mutation-epoch-claim", "application-ownership-handoff", "database-migration")
     assert runner.calls == [] and bindings == [(journal, 2)]
+    if installed_capacity:
+        assert capacity_journals == [journal]
     assert executor("final.protected-apply", CheckOperation.APPLY, plan).ready
     assert runner.calls.index("epoch-apply") < runner.calls.index("application-ownership-handoff-owner-apply")
     assert runner.calls.index("application-ownership-handoff-owner-apply") < runner.calls.index("database-migration-owner-apply")
@@ -837,6 +861,8 @@ def test_separated_owner_apply_and_convergence_share_original_component_order(tm
     assert "database-migration-owner-read" in runner.calls[len(before):]
     assert "migration-read" not in runner.calls and "migration-apply" not in runner.calls
     assert all(j.root == journal.root and ordinal == 2 for j, ordinal in bindings)
+    if installed_capacity:
+        assert capacity_journals == [j for j, _ in bindings]
     assert all(not call.endswith("-apply") for call in runner.calls[len(before):])
 
 
