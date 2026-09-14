@@ -77,3 +77,39 @@ def test_installed_capacity_binds_original_chain_without_opening_database(tmp_pa
     assert not journal.root.exists()
     with pytest.raises(ValueError, match="ordinal"):
         factory.capacity(plan, journal=journal, ordinal=4, handoff_ordinal=2, base=base, seed_source=lambda: {})
+
+
+def test_installed_future_rollout_selects_historical_observer_and_same_origin_for_capacity(tmp_path, monkeypatch):
+    from loom_cli.rollout.operator import installed_application_migration as module
+    from loom_cli.rollout.operator.installed_application_handoff import (
+        InstalledApplicationHandoffFactory,
+    )
+    from loom_cli.rollout.operator.protected_apply_journal import ProtectedApplyJournal
+    from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
+        KubernetesProtectedStagingCapacityDatabaseComponent,
+    )
+    from tests.loom_cli.rollout.operator.test_application_handoff_history import _later
+
+    original, config = _plan(tmp_path), _config(tmp_path)
+    plan = _later(original)
+    runner = SimpleNamespace(environment={})
+    handoff = InstalledApplicationHandoffFactory(config=config, service_uid=os.getuid(), runner=runner, successor_source=lambda *args: None)
+    factory = module.InstalledApplicationMigrationFactory(handoff, "registry.example")
+    journal = ProtectedApplyJournal(config.state_root, request_id=plan.request_id, attempt_number=plan.attempt_number)
+    admitted = []
+    marker = (object(), object())
+    def history(candidate, *, journal, component):
+        admitted.append((candidate, journal, component))
+        return marker
+    origin = SimpleNamespace(plan=original, terminal=SimpleNamespace(terminal_digest="f" * 64), admitted_for=history)
+    monkeypatch.setattr(module, "select_completed_handoff", lambda *args, **kwargs: origin)
+    components = factory.components(plan, journal=journal, ordinal=2)
+    migration = components[1].apply.__self__
+    assert migration.handoff_plan_source() == original
+    assert migration.handoff_source() == marker
+    assert admitted[-1][0] == plan and admitted[-1][1] is journal
+    assert admitted[-1][2].input_fingerprint == components[0].input_fingerprint
+    capacity = factory.capacity(plan, journal=journal, ordinal=5, handoff_ordinal=2,
+        base=KubernetesProtectedStagingCapacityDatabaseComponent(runner, "registry.example", lambda: {}), seed_source=lambda: {})
+    assert capacity.apply.__self__.handoff_plan_source() == original
+    assert not journal.root.exists()

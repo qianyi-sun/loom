@@ -93,3 +93,31 @@ def test_history_rejects_unsafe_request_directory(tmp_path, monkeypatch):
     (root / "requests" / "unsafe-request").symlink_to(Path("/tmp"))
     with pytest.raises((ValueError, RuntimeError), match="historical handoff"):
         select_completed_handoff(current, state_root=root, service_uid=os.getuid(), build_component=lambda *args, **kwargs: component)
+
+
+def test_historical_origin_requires_its_new_observer_terminal_before_migration(tmp_path, monkeypatch):
+    from loom_cli.rollout.operator.protected_application_completed import historical_handoff_evidence
+    from loom_cli.rollout.operator.protected_application_handoff_history import (
+        HISTORICAL_HANDOFF_IMPLEMENTATION,
+        select_completed_handoff,
+    )
+
+    _, current, component, _, root, _ = _saved(tmp_path, monkeypatch)
+    origin = select_completed_handoff(current, state_root=root, service_uid=os.getuid(), build_component=lambda *args, **kwargs: component)
+    journal = ProtectedApplyJournal(root, request_id=current.request_id, attempt_number=current.attempt_number)
+    observer = replace(component, implementation_digest=HISTORICAL_HANDOFF_IMPLEMENTATION,
+        input_fingerprint=historical_handoff_evidence(current, origin.terminal))
+    with pytest.raises(RuntimeError, match="current.*terminal"):
+        origin.admitted_for(current, journal=journal, component=observer)
+    for directory in (journal.attempt_root.parent.parent, journal.attempt_root.parent, journal.attempt_root,
+                      journal.root, journal.root / "02-application-ownership-handoff"):
+        directory.mkdir(mode=0o700, exist_ok=True)
+    component_root = journal.root / "02-application-ownership-handoff"
+    intent = ComponentIntent.build(current, observer, 2)
+    terminal = ComponentTerminal.build(intent, ComponentObservation(ComponentState.EXACT,
+        historical_handoff_evidence(current, origin.terminal), current.starting_mutation_epoch + 1), applied=False)
+    journal._publish_or_match(component_root / "intent.json", intent.to_dict())
+    journal._publish_or_match(component_root / "terminal.json", terminal.to_dict())
+    assert origin.admitted_for(current, journal=journal, component=observer) == origin.read()
+    with pytest.raises(RuntimeError, match="current.*terminal"):
+        origin.admitted_for(current, journal=journal, component=replace(observer, input_fingerprint="0" * 64))
