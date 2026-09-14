@@ -128,7 +128,9 @@ def test_migration_event_rejects_malformed_fields_without_type_errors(field, val
 
 
 def test_migration_retirement_journals_replacement_peer_before_continuing(tmp_path):
-    from loom_cli.rollout.operator.protected_application_migration_journal import ApplicationMigrationJournal
+    from loom_cli.rollout.operator.protected_application_migration_journal import (
+        ApplicationMigrationJournal,
+    )
 
     plan, journal = _setup(tmp_path)
     guard = _guard(plan)

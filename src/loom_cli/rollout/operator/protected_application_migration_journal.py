@@ -76,7 +76,7 @@ class ApplicationMigrationEvent:
                 or type(value.get("schema_version")) is not int or value["schema_version"] != 1
                 or type(value.get("sequence")) is not int or not 0 <= _integer(value, "sequence") < _MAX_EVENTS
                 or not isinstance(value.get("phase"), str)
-                or value.get("phase") not in {"authority", "generation", "retirement", "abandoned", "noop", *_NEXT}
+                or value.get("phase") not in {"authority", "generation", "retirement", "maintenance-peer", "abandoned", "noop", *_NEXT}
                 or any(not _sha(value.get(key)) for key in ("intent_digest", "guard_digest", "previous_digest", "event_digest"))
                 or admission_record_digest({key: item for key, item in value.items() if key != "event_digest"}) != value["event_digest"]):
             raise ValueError("application migration event binding is invalid")
@@ -186,6 +186,7 @@ def _validate_history(plan: FinalGatePlan, events: Sequence[ApplicationMigration
     generations = 0
     phases: set[str] = set()
     successful = False
+    maintenance_peers: list[object] = []
     for event in events[1:]:
         phase, payload = event.phase, event.payload
         if event.guard_digest != guard.evidence_digest:
@@ -195,6 +196,7 @@ def _validate_history(plan: FinalGatePlan, events: Sequence[ApplicationMigration
                 raise ValueError("application migration cannot rearm before retirement")
             generations += 1
             phases = set()
+            maintenance_peers = []
             _fields(payload, {"ordinal", "nonce", "password", "expires_at", "creation_backend", "ca_certificate"})
             backend = _backend(payload["creation_backend"])
             expires = datetime.fromisoformat(_string(payload, "expires_at"))
@@ -223,6 +225,19 @@ def _validate_history(plan: FinalGatePlan, events: Sequence[ApplicationMigration
                     or backend.server_started_at != coordination.backend.server_started_at):
                 raise ValueError("application migration retirement authority changed")
             successful = bool(payload["successful"])
+            maintenance_peers.append(backend)
+        elif phase == "maintenance-peer":
+            _fields(payload, {"backend"})
+            backend = _backend(payload["backend"])
+            if ("retirement" not in phases or previous in {"complete", "abandoned"}
+                    or backend in maintenance_peers or len(maintenance_peers) >= 8
+                    or backend.system_identifier != admission.target.system_identifier
+                    or backend.database_oid == admission.target.database_oid
+                    or backend.pid == coordination.backend.pid
+                    or backend.server_started_at != coordination.backend.server_started_at):
+                raise ValueError("application migration replacement maintenance peer changed")
+            maintenance_peers.append(backend)
+            continue
         elif phase == "abandoned":
             if previous not in {"generation", "role", "retirement"} or "secret-dispatch" in phases:
                 raise ValueError("application migration cannot abandon delivered credentials")
