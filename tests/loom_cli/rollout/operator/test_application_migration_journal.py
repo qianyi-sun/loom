@@ -30,8 +30,15 @@ def _authority(plan, component, guard):
             candidate_tree=guard.candidate_tree, generation=guard.generation))
     admission = ApplicationAdmissionRecoveryRecord(ComponentIntent.build(plan, component, 0).intent_digest,
         replace(_target(), successor_role="loom_app_staging_owner"), _handoff(), coordination)
-    return {"admission": admission.to_dict(), "guard": guard.to_dict(), "handoff_digest": "a" * 64,
+    authority = {"admission": admission.to_dict(), "guard": guard.to_dict(), "handoff_digest": "a" * 64,
         "credential_digest": "b" * 64, "inputs_digest": "c" * 64}
+    if component.component_id == "staging-capacity-database":
+        authority.update(guard_owner={"role_name": "loom_cap_staging_owner", "role_oid": 90},
+            guard_migrator={"role_name": "loom_cap_staging_migrator", "role_oid": 91},
+            runtime_role_oids={"loom_cap_staging_agent": 92, "loom_cap_staging_executor": 93,
+                "loom_cap_staging_observer": 94, "loom_cap_staging_runtime": 95},
+            seed_digest="d" * 64, migration_digest="e" * 64)
+    return authority
 
 
 def _generation(ordinal=1):
@@ -41,7 +48,8 @@ def _generation(ordinal=1):
 
 
 @pytest.mark.parametrize("stop", ["role", "job", "retirement", "role-retired", "complete"])
-def test_migration_journal_recovers_only_the_original_ordered_prefix(tmp_path, stop):
+@pytest.mark.parametrize("component_id", ["database-migration", "staging-capacity-database"])
+def test_migration_journal_recovers_only_the_original_ordered_prefix(tmp_path, stop, component_id):
     from loom_cli.rollout.operator.protected_application_migration_journal import (
         ApplicationMigrationJournal,
     )
@@ -62,14 +70,15 @@ def test_migration_journal_recovers_only_the_original_ordered_prefix(tmp_path, s
             ("job", {"uid": "22222222-2222-4222-8222-222222222222"}),
             ("retirement", {"successful": True, "maintenance_backend": asdict(replace(_handoff(), pid=777, database_oid=5))}),
             ("job-stopped", {}), ("closed", {}), ("role-retire", {}), ("role-retired", {}),
-            ("secret-deleted", {}), ("reopen", {}), ("reopened", {}), ("complete", {"successful": True, "revision": plan.migration_target_revision}),
+            ("secret-deleted", {}), ("reopen", {}), ("reopened", {}),
+            ("complete", {"successful": True, "revision": "exact" if component_id == "staging-capacity-database" else plan.migration_target_revision}),
         ]:
             event = migration.append(phase, payload, guard=guard)
             assert migration.append(phase, payload, guard=guard) == event
             events.append(event)
             if phase == stop:
                 raise RuntimeError("interrupted migration prefix")
-    component = replace(_component(apply), component_id="database-migration")
+    component = replace(_component(apply), component_id=component_id)
     migration = ApplicationMigrationJournal(journal=journal, plan=plan, component=component, ordinal=0)
     with pytest.raises(RuntimeError, match="active component"):
         migration.append("generation", _generation(), guard=guard)
@@ -77,7 +86,7 @@ def test_migration_journal_recovers_only_the_original_ordered_prefix(tmp_path, s
         journal.execute(plan, [component])
     assert migration.read() == tuple(events)
     assert all("s" * 64 not in repr(event) for event in events)
-    path = journal.root / "00-database-migration" / "migration-event-0001.json"
+    path = journal.root / f"00-{component_id}" / "migration-event-0001.json"
     value = json.loads(path.read_text())
     value["payload"]["nonce"] = "e" * 32
     path.write_text(json.dumps(value))
