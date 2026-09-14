@@ -552,9 +552,10 @@ class PsycopgPersonalDevCapacityDatabase:
                     "SELECT rolname, rolcanlogin, rolinherit, rolsuper, rolcreatedb, "
                     "rolcreaterole, rolreplication, rolbypassrls, "
                     "rolvaliduntil IS NOT NULL AND rolvaliduntil > CURRENT_TIMESTAMP "
-                    "AND rolvaliduntil < 'infinity'::timestamptz "
+                    "AND (rolvaliduntil < 'infinity'::timestamptz "
+                    "OR (%s AND rolname = ANY(%s))) "
                     "FROM pg_roles WHERE rolname = ANY(%s)",
-                    (list(protected),),
+                    (self._application_owner_binding is not None, [agent, observer, runtime], list(protected)),
                 )
                 observed_roles = {row[0]: row[1:] for row in await roles_result.fetchall()}
                 expected_roles = {
