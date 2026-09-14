@@ -211,7 +211,7 @@ async def test_bootstrap_rejects_noncanonical_or_nil_authority(
     factory_called = False
 
     class Database:
-        def __init__(self, _admin_url: str, *, transient_role_admin: bool) -> None:
+        def __init__(self, _admin_url: str, *, transient_role_admin: bool, application_owner_binding=None) -> None:
             nonlocal factory_called
             factory_called = True
 
@@ -255,7 +255,7 @@ async def test_bootstrap_rejects_duplicate_authority_key(
     factory_called = False
 
     class Database:
-        def __init__(self, _admin_url: str, *, transient_role_admin: bool) -> None:
+        def __init__(self, _admin_url: str, *, transient_role_admin: bool, application_owner_binding=None) -> None:
             nonlocal factory_called
             factory_called = True
 
