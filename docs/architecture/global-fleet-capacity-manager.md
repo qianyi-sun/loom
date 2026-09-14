@@ -1056,6 +1056,12 @@ The PostgreSQL executable hash comes from the never-started pinned image. Pod
 specification, process start ticks and executable device/inode observations allow
 the enclosing handoff to detect changes without adopting a successor primary.
 Replicas are not execution targets for this probe.
+The component journal binds the original Cluster UID, Pod specification, manager
+and postmaster before application mutation. Recovery re-reads the same primary
+and accepts only its already-issued manager executable transition. A changed
+postmaster or input is refused before a receipt is published. An unchanged
+manager after dispatch remains pending. Read-only classification can inspect
+this original binding without publishing or flushing records.
 
 Effective SQL admission separately checks each supported connectable database
 (`loom`, `postgres`, `template1`) against the original PostgreSQL 17.4 server.

@@ -164,3 +164,41 @@ def test_manager_reconciliation_preserves_original_postmaster_and_inputs(tmp_pat
         raise RuntimeError('original identity preserved')
     with pytest.raises(RuntimeError, match='identity preserved'):
         journal.execute(plan, [_component(apply)])
+
+
+@pytest.mark.parametrize('change', ['version', 'pid', 'hash', 'unknown', 'cluster'])
+def test_runtime_recovery_record_refuses_malformed_identity(change):
+    from loom_cli.rollout.operator.protected_cnpg_runtime_admission import CNPGPrimaryRuntime
+
+    runtime = _runtime()
+    value = runtime.to_dict()
+    assert CNPGPrimaryRuntime.from_dict(value) == runtime
+    if change == 'version':
+        value['schema_version'] = True
+    elif change == 'pid':
+        value['postgres_pid'] = True
+    elif change == 'hash':
+        value['postgres_sha256'] = '0' * 64
+    elif change == 'unknown':
+        value['unknown'] = 'field'
+    else:
+        value['cluster_uid'] = 'foreign'
+    with pytest.raises(ValueError, match='CNPG'):
+        CNPGPrimaryRuntime.from_dict(value)
+
+
+def test_runtime_origin_cannot_be_captured_after_admission(tmp_path):
+    from tests.loom_cli.rollout.operator.test_application_admission_recovery import _component
+    from tests.loom_cli.rollout.operator.test_cnpg_manager_replacement import _admit
+    from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
+    from tests.loom_cli.rollout.operator.test_protected_apply_journal import _journal
+
+    plan, journal = _plan(tmp_path), _journal(tmp_path)
+    def apply(_):
+        _admit(journal)
+        with pytest.raises(RuntimeError, match='must precede'):
+            journal.record_application_cnpg_runtime(plan, runtime=_runtime())
+        assert journal.read_application_cnpg_runtime(plan) is None
+        raise RuntimeError('late origin refused')
+    with pytest.raises(RuntimeError, match='late origin refused'):
+        journal.execute(plan, [_component(apply)])

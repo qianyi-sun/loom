@@ -63,6 +63,7 @@ from .protected_cnpg_manager_replacement import (
     CNPGManagerReplacementIntent,
     CNPGManagerReplacementReceipt,
 )
+from .protected_cnpg_runtime_admission import CNPGPrimaryRuntime
 from .protected_cnpg_writer_configuration import CNPGWriterConfigurationBinding
 from .protected_external_supervisor_transport import (
     COMPENSATION_RECONCILIATION_FAILURE_CODES,
@@ -902,6 +903,7 @@ class ApplicationRecoveryView:
     workloads: tuple[ApplicationWorkload, ...] = ()
     workloads_restoring: bool = False
     owner_creations: tuple[tuple[ApplicationOwnerCreationIntent, int | None], ...] = ()
+    cnpg_runtime: CNPGPrimaryRuntime | None = None
 
 
 class ProtectedApplyJournal:
@@ -1035,7 +1037,10 @@ class ProtectedApplyJournal:
         owners = self._read_application_owner_creations(root, expected, durable=False)
         if names != {path.name for path in root.iterdir() if path.name.startswith("application-")}:
             raise ProtectedApplyJournalError("application recovery view changed during owner read")
-        return ApplicationRecoveryView(expected, admission, recoveries, manager, workloads, restoring, owners)
+        runtime = self._read_application_cnpg_runtime(root, expected, durable=False)
+        if names != {path.name for path in root.iterdir() if path.name.startswith("application-")}:
+            raise ProtectedApplyJournalError("application recovery view changed during runtime read")
+        return ApplicationRecoveryView(expected, admission, recoveries, manager, workloads, restoring, owners, runtime)
 
     def _sync_application_recovery(self, root: Path, filename: str) -> None:
         # A prior publisher can exit after making its link visible but BEFORE
@@ -1358,6 +1363,46 @@ class ProtectedApplyJournal:
         if json.dumps(observed, sort_keys=True) != json.dumps(record, sort_keys=True):
             raise ProtectedApplyJournalError("CNPG writer configuration readback changed")
         self._sync_application_recovery(root, path.name)
+
+    def record_application_cnpg_runtime(self, plan: FinalGatePlan, *, runtime: CNPGPrimaryRuntime) -> None:
+        """Bind original observations before any SQL mutation or manager dispatch."""
+        self.require_application_credential_context(plan)
+        root, intent = self._application_admission_context()
+        if type(runtime) is not CNPGPrimaryRuntime:
+            raise ProtectedApplyJournalError("CNPG runtime binding is invalid")
+        previous = self._read_application_cnpg_runtime(root, intent, durable=True)
+        if previous is None and (
+            self.read_application_admission_recovery() is not None or self.read_application_owner_creations(plan)
+            or self.read_application_manager_replacement() is not None
+        ):
+            raise ProtectedApplyJournalError("CNPG runtime binding must precede application mutation")
+        path = root / "application-cnpg-runtime.json"
+        self._publish_or_match(path, {"schema_version": 1, "intent_digest": intent.intent_digest,
+                                     "runtime": runtime.to_dict()})
+        if self._read_application_cnpg_runtime(root, intent, durable=True) != runtime:
+            raise ProtectedApplyJournalError("CNPG runtime binding readback changed")
+
+    def read_application_cnpg_runtime(self, plan: FinalGatePlan) -> CNPGPrimaryRuntime | None:
+        self.require_application_credential_context(plan)
+        root, intent = self._application_admission_context()
+        return self._read_application_cnpg_runtime(root, intent, durable=True)
+
+    def _read_application_cnpg_runtime(
+        self, root: Path, intent: ComponentIntent, *, durable: bool,
+    ) -> CNPGPrimaryRuntime | None:
+        path = root / "application-cnpg-runtime.json"
+        try:
+            record = self._read(path)
+        except FileNotFoundError:
+            return None
+        if (set(record) != {"schema_version", "intent_digest", "runtime"}
+                or type(record["schema_version"]) is not int or record["schema_version"] != 1
+                or record["intent_digest"] != intent.intent_digest or not isinstance(record["runtime"], dict)):
+            raise ProtectedApplyJournalError("CNPG runtime binding changed")
+        runtime = CNPGPrimaryRuntime.from_dict(record["runtime"])
+        if durable:
+            self._sync_application_recovery(root, path.name)
+        return runtime
 
     def read_application_owner_creations(
         self, plan: FinalGatePlan,

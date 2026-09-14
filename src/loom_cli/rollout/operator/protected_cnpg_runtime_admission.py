@@ -12,15 +12,21 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from typing import TYPE_CHECKING
 
 from .protected_application_credential_recovery import CredentialRecoveryRunner
 from .protected_cnpg_manager_replacement import (
     CNPG_MANAGER_IMAGE,
     CNPG_MANAGER_SHA256,
     CNPGManagerIdentity,
+    CNPGManagerReplacementReceipt,
 )
 from .protected_cnpg_writer_configuration import _json, _mapping
+
+if TYPE_CHECKING:
+    from .final_gate_plan import FinalGatePlan
+    from .protected_apply_journal import ProtectedApplyJournal
 
 CNPG_POSTGRES_IMAGE = 'ghcr.io/cloudnative-pg/postgresql@sha256:3c0ba08ea353c9705a755c113e4ae395be76553e0ed68076e5410cb09b9d17d9'
 # Independently extracted, without starting the pinned amd64 image, from
@@ -76,6 +82,36 @@ class CNPGPrimaryRuntime:
     postgres_started_ticks: int
     postgres_device: int
     postgres_inode: int
+    cluster_uid: str
+
+    def __post_init__(self) -> None:
+        if (type(self.manager) is not CNPGManagerIdentity
+                or not isinstance(self.pod_spec_sha256, str) or re.fullmatch(r'[0-9a-f]{64}', self.pod_spec_sha256) is None
+                or not isinstance(self.cluster_uid, str) or _UID.fullmatch(self.cluster_uid) is None
+                or any(type(value) is not int or not 0 < value < 2**64 for value in (
+                    self.postgres_pid, self.postgres_started_ticks, self.postgres_device, self.postgres_inode))
+                or not 1 < self.postgres_pid < 2**31):
+            raise ValueError('CNPG primary runtime identity is invalid')
+
+    def to_dict(self) -> dict[str, object]:
+        return {'schema_version': 1, **asdict(self), 'postgres_image': CNPG_POSTGRES_IMAGE,
+                'postgres_sha256': CNPG_POSTGRES_SHA256, 'manager_image': CNPG_MANAGER_IMAGE,
+                'manager_sha256': CNPG_MANAGER_SHA256}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> CNPGPrimaryRuntime:
+        numbers = ('postgres_pid', 'postgres_started_ticks', 'postgres_device', 'postgres_inode')
+        if (set(value) != {'schema_version', 'manager', 'pod_spec_sha256', 'cluster_uid',
+                          'postgres_image', 'postgres_sha256', 'manager_image', 'manager_sha256', *numbers}
+                or type(value['schema_version']) is not int or value['schema_version'] != 1
+                or any(type(value[key]) is not int for key in numbers)
+                or value['postgres_image'] != CNPG_POSTGRES_IMAGE or value['postgres_sha256'] != CNPG_POSTGRES_SHA256
+                or value['manager_image'] != CNPG_MANAGER_IMAGE or value['manager_sha256'] != CNPG_MANAGER_SHA256
+                or not isinstance(value['pod_spec_sha256'], str) or not isinstance(value['cluster_uid'], str)):
+            raise ValueError('CNPG primary runtime record changed')
+        return cls(CNPGManagerIdentity.from_dict(_mapping(value['manager'])), value['pod_spec_sha256'],
+                   int(str(value['postgres_pid'])), int(str(value['postgres_started_ticks'])),
+                   int(str(value['postgres_device'])), int(str(value['postgres_inode'])), value['cluster_uid'])
 
 
 def _one(value: object, name: str) -> dict[str, object]:
@@ -202,7 +238,7 @@ sha256sum /proc/"$pgpid"/exe /usr/lib/postgresql/17/bin/postgres
 '''
 
 
-def _process(payload: bytes, pod: CNPGPrimaryPodIdentity, digest: str) -> CNPGPrimaryRuntime:
+def _process(payload: bytes, pod: CNPGPrimaryPodIdentity, digest: str, *, cluster_uid: str) -> CNPGPrimaryRuntime:
     lines = payload.splitlines()
     if len(lines) != 12 or lines[0] != b'\0'.join(s.encode() for s in _COMMAND) + b'\0' or lines[6] != b'postgres\0-D\0/var/lib/postgresql/data/pgdata\0':
         raise ValueError('CNPG process command is unsupported')
@@ -230,7 +266,7 @@ def _process(payload: bytes, pod: CNPGPrimaryPodIdentity, digest: str) -> CNPGPr
         raise ValueError('CNPG executable profile is unsupported') from None
     manager = CNPGManagerIdentity(**asdict(pod), process_started_ticks=started,
                                   executable_device=device, executable_inode=inode)
-    return CNPGPrimaryRuntime(manager, digest, postgres_pid, postgres_started, pg_device, pg_inode)
+    return CNPGPrimaryRuntime(manager, digest, postgres_pid, postgres_started, pg_device, pg_inode, cluster_uid)
 
 
 def observe_cnpg_primary_runtime(runner: CredentialRecoveryRunner, *, cluster_uid: str,
@@ -256,7 +292,41 @@ def observe_cnpg_primary_runtime(runner: CredentialRecoveryRunner, *, cluster_ui
     before = read()
     result = _process(runner.capture_stdout(
         ('kubectl', '--namespace', _NAMESPACE, 'exec', 'pod/' + pod_name, '--container=postgres', '--', 'sh', '-ceu', _PROCESS),
-        env=runner.environment, timeout_seconds=30), *before)
+        env=runner.environment, timeout_seconds=30), *before, cluster_uid=cluster_uid)
     if read() != before:
         raise RuntimeError('CNPG primary inputs changed during process observation')
     return result
+
+
+def reconcile_cnpg_primary_runtime(
+    plan: FinalGatePlan, *, journal: ProtectedApplyJournal, runner: CredentialRecoveryRunner,
+) -> CNPGPrimaryRuntime:
+    """Freshly reconcile a single issued exec without changing original identities.
+
+    An unchanged manager after dispatch is still pending; this function never
+    issues the PUT. Only the exact executable transition can publish a receipt,
+    and SQL/guard/workload checks are still required before completion.
+    """
+    saved = journal.read_application_cnpg_runtime(plan)
+    if saved is None:
+        raise RuntimeError('CNPG original runtime binding is absent')
+    current = observe_cnpg_primary_runtime(runner, cluster_uid=saved.cluster_uid, pod_name=saved.manager.pod_name)
+    if replace(current, manager=saved.manager) != saved:
+        raise RuntimeError('CNPG original postmaster or inputs changed')
+    replacement = journal.read_application_manager_replacement()
+    if replacement is None:
+        if current != saved:
+            raise RuntimeError('CNPG original manager changed without an intent')
+        return current
+    intent, dispatched, receipt = replacement
+    if intent.identity != saved.manager:
+        raise RuntimeError('CNPG original manager intent changed')
+    if current.manager == saved.manager:
+        if receipt is not None:
+            raise RuntimeError('CNPG original manager returned after replacement')
+        return current
+    if not dispatched:
+        raise RuntimeError('CNPG original manager changed before dispatch')
+    CNPGManagerReplacementReceipt.validate(intent, current.manager)
+    journal.record_application_manager_replacement(identity=current.manager)
+    return current
