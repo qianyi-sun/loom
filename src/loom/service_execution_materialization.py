@@ -91,6 +91,13 @@ class ServiceExecutionInputBindingV1(_Strict):
     total_bytes: int = Field(ge=0, le=MAX_INPUT_BYTES)
 
 
+class ControllerComputeResourcesV1(_Strict):
+    """Trusted harness compute, independent of the task sandbox allocation."""
+
+    cpu_millis: int = Field(gt=0, le=128_000)
+    memory_mib: int = Field(gt=0, le=1_048_576)
+
+
 class ServiceExecutionRuntimeProfileV1(_Strict):
     """Deployment-owned immutable inputs for automatic plan compilation."""
 
@@ -103,6 +110,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     task_image_ref: str
     agent_image_ref: str | None = None
     agent_runtime_bindings: tuple[AgentRuntimeBindingV1, ...] = ()
+    controller_resources: ControllerComputeResourcesV1 | None = None
     runtime_image_ref: str
     runtime_binary_sha256: str = Field(pattern=_SHA256.pattern)
     image_admission: ExecutionImageAdmissionBundleV1
@@ -587,7 +595,13 @@ def _compile_terminus_plan(
         runtime_binary_sha256=profile.runtime_binary_sha256,
         image_admission=_plan_admissions(profile, published_refs),
         run_as_user=profile.run_as_user, run_as_group=profile.run_as_group, fs_group=profile.fs_group,
-        task_resources=resources, workspace_mib=env.storage_mb,
+        task_resources=resources,
+        controller_resources=(ContainerResourcesV1(
+            cpu_millis=profile.controller_resources.cpu_millis,
+            memory_mib=profile.controller_resources.memory_mib,
+            ephemeral_storage_mib=env.storage_mb,
+        ) if profile.controller_resources is not None else None),
+        workspace_mib=env.storage_mb,
         runtime_volume_mib=profile.runtime_volume_mib,
         termination_grace_seconds=profile.termination_grace_seconds,
         task_input=RuntimeTaskInputV1(
@@ -603,6 +617,7 @@ def _compile_terminus_plan(
 
 
 __all__ = [
+    "ControllerComputeResourcesV1",
     "MAX_INPUT_BYTES",
     "MAX_INPUT_FILES",
     "MAX_INPUT_MANIFEST_BYTES",

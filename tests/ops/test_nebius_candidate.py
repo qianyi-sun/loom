@@ -188,6 +188,9 @@ def test_profile_and_independent_signer_binding(tmp_path: Path) -> None:
 
     parsed = ServiceExecutionRuntimeProfileV1.model_validate(profile)
     assert parsed.candidate_sha == manifest["candidate_sha"]
+    assert parsed.controller_resources is not None
+    assert parsed.controller_resources.cpu_millis == 1000
+    assert parsed.controller_resources.memory_mib == 2048
     assert parsed.task_image_ref == manifest["images"]["service"]["image_ref"]
     assert parsed.runtime_image_ref == manifest["images"]["execution_runtime"]["image_ref"]
     assert parsed.agent_image_ref == manifest["images"]["harbor_runtime"]["image_ref"]
