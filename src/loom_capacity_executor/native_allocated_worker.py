@@ -25,7 +25,10 @@ from loom_capacity_executor.native_build_source import (
     NativeClaimBuildSource,
     NativeStagedBuildSource,
 )
-from loom_capacity_executor.native_worker_handoff import consume_native_worker_handoff
+from loom_capacity_executor.native_worker_handoff import (
+    NativeWorkerHandoffV1,
+    consume_native_worker_handoff,
+)
 from loom_capacity_executor.typed_admission import TypedAdmissionRouter
 from loom_capacity_manager.contracts import canonical_digest
 from loom_capacity_manager.executable_contracts import canonical_executable_digest
@@ -61,12 +64,32 @@ Retries are bounded and retain the same registered-worker operation identity.
 Terminal/lost workers remain the management recovery loop's responsibility.
 """
     packet = consume_native_worker_handoff(descriptor)
+    async with allocated_native_packet_io(packet, job_id=job_id, workspace=workspace,
+        max_archive_bytes=max_archive_bytes, admission_factory=admission_factory) as owner:
+        yield owner
+
+
+def validate_native_worker_scope(packet: NativeWorkerHandoffV1, *, job_id: str) -> None:
+    """Read the exact Slurm scope before local preparation or credential use."""
     if job_id != packet.physical.slurm_job_id:
         raise ValueError("native worker Slurm job identity changed")
     process = _unified_cgroup_path(Path("/proc/self/cgroup"))
     scope = _slurm_job_scope(process, job_id)
     if scope not in process.parents:
         raise ValueError("native worker is not below its Slurm job scope")
+
+
+@asynccontextmanager
+async def allocated_native_packet_io(
+    packet: NativeWorkerHandoffV1, *, job_id: str, workspace: Path, max_archive_bytes: int,
+    admission_factory: Callable[..., TypedAdmissionRouter] = TypedAdmissionRouter,
+) -> AsyncIterator[NativeAllocatedIO]:
+    """Already-consumed trusted packet; share the existing claim and IO lifetime.
+
+    Installed callers authenticate local material after consuming the inherited
+    handoff and before entering this context. Never pass feature-supplied packets.
+    """
+    validate_native_worker_scope(packet, job_id=job_id)
     router = admission_factory(Path(packet.admission.path),
         expected_sha256=packet.admission.sha256, executor=packet.executor)
     if router.purpose(packet.physical.binding) != "personal-build-worker":

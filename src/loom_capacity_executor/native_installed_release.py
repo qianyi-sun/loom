@@ -121,6 +121,7 @@ def _identity(metadata: os.stat_result) -> tuple[int, ...]:
 class _Observation:
     def __init__(self) -> None:
         self.directories: dict[Path, tuple[int, ...]] = {}
+        self.closed_directories: dict[Path, tuple[int, ...]] = {}
         self.files: dict[Path, tuple[int, ...]] = {}
 
     def directory(self, path: Path, stack: ExitStack) -> int:
@@ -137,7 +138,10 @@ class _Observation:
             if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_gid != 0
                 or metadata.st_mode & 0o7022):
                 raise ValueError("native release parent must be protected host-root directory")
-            identity = _identity(metadata)
+            # A protected ancestor may host unrelated concurrent installations.
+            # Its inode/authority must stay fixed, not its sibling-entry count or
+            # timestamps. Closed payload directories get stricter checks below.
+            identity = (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid, metadata.st_gid)
             previous = self.directories.setdefault(current, identity)
             if previous != identity:
                 raise ValueError("native release directory changed during verification")
@@ -181,6 +185,9 @@ class _Observation:
         for directory, names in expected.items():
             with ExitStack() as stack:
                 descriptor = self.directory(directory, stack)
+                identity = _identity(os.fstat(descriptor))
+                if self.closed_directories.setdefault(directory, identity) != identity:
+                    raise ValueError("native release closed runtime directory changed")
                 with os.scandir(descriptor) as entries:
                     observed = set()
                     for entry in entries:
@@ -202,7 +209,9 @@ class _Observation:
                     raise ValueError("native release file was replaced during verification")
         for path in tuple(self.directories):
             with ExitStack() as stack:
-                self.directory(path, stack)
+                descriptor = self.directory(path, stack)
+                if path in self.closed_directories and _identity(os.fstat(descriptor)) != self.closed_directories[path]:
+                    raise ValueError("native release closed runtime directory changed")
 
 
 def verify_native_installed_release(path: Path, *, expected_sha256: str,

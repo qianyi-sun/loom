@@ -229,3 +229,36 @@ def test_fixed_helper_search_rejects_owner_writable_directory(monkeypatch):
     monkeypatch.setattr(module.os, "fstat", writable)
     with pytest.raises(ValueError, match="protected"):
         module._verify_host_lookup_paths()
+
+
+@pytest.mark.parametrize("alias", ["/bin", "/sbin"])
+@pytest.mark.parametrize("fault", ["exact", "target", "owner", "replaced"])
+def test_fixed_helper_alias_must_remain_protected(monkeypatch, alias, fault):
+    import stat
+
+    module = import_module("loom_capacity_executor.native_installed_worker")
+    real_lstat, real_readlink = Path.lstat, os.readlink
+    observations = 0
+
+    def lstat(path, *args, **kwargs):
+        nonlocal observations
+        if str(path) != alias:
+            return real_lstat(path, *args, **kwargs)
+        observations += 1
+        return SimpleNamespace(st_mode=stat.S_IFLNK | 0o777,
+            st_uid=1000 if fault == "owner" else 0, st_gid=0, st_dev=1,
+            st_ino=2 if fault == "replaced" and observations > 1 else 1)
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == alias:
+            return "/owner/bin" if fault == "target" else "usr" + alias
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(module.os, "readlink", readlink)
+    if fault == "exact":
+        module._verify_host_lookup_paths()
+        assert observations == 2
+    else:
+        with pytest.raises(ValueError, match="alias"):
+            module._verify_host_lookup_paths()

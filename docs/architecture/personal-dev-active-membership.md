@@ -2140,7 +2140,7 @@ on expiry. This establishes offline runtime behavior, not Slurm death-chain or
 multi-owner installed acceptance.
 
 `verify_native_installed_release` provides the original-UID, read-only material
-check for the forthcoming installed entrypoint. A protected manifest digest binds
+check for the installed entrypoint. A protected manifest digest binds
 source/platform, rootfs/profile bytes, the complete published runsc payload,
 closed Python/runtime trees, and explicitly inventoried system dependencies.
 Every path is reopened through root-owned, non-group/world-writable ancestors;
@@ -2154,7 +2154,26 @@ The protected launcher must authenticate the verifier before importing it, and
 the publisher must enumerate the complete imports/system dependencies; this is
 not automatic dependency discovery. The observation does not retain a release,
 install tooling, claim work, or enable intake. Fixed-entrypoint binding to the
-actual interpreter/RootlessKit and immutable release retention remain required.
+actual interpreter/RootlessKit is enforced by the entrypoint described below;
+immutable release retention remains a protected-installer responsibility.
+
+`native_installed_worker` consumes and closes its sealed handoff before argument,
+configuration, cgroup or network processing. A root-owned canonical configuration
+binds the tooling release, exact fleet-release identity, allocated platform,
+private scratch root and source/artifact/rootfs/tmpfs/time bounds. Original-UID
+verification precedes credential use, and the executing isolated Python, import
+tree, fixed RootlessKit path and helper search directories must match the trusted
+installation. It reuses the existing assigned-claim/IO context, constructs and
+reads back a canonical V2 spec, and calls `run_native_outer_build`; it neither
+creates another capacity authority nor retries ambiguous upload/outcome writes.
+Before mapped scratch exists, a fresh attempt directory retains an fsynced,
+credential-free `recovery.json` with physical worker/config/release and directory
+inode identity. Replays cannot reuse that directory. Errors, cancellation and
+successful outcomes retain the locator and scratch for allocation recovery;
+the original UID cannot safely recursively remove subordinate-owned private
+output. The executable is not wired into fleet intake yet. Actual immutable
+release publication/retention, scratch recovery after process death, restricted
+networking and installed Slurm/concurrent-owner acceptance still gate activation.
 
 The versioned client policy is
 `deploy/personal-dev-builder/client-seccomp-v1.json`. It permits ordinary
