@@ -19,7 +19,7 @@ from uuid import UUID
 
 import httpx
 
-from loom.driver.service_sandbox import ServiceSandboxDriver
+from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
 from loom.errors import AgentError, DriverError
 from loom.models.capabilities import Capabilities
 from loom.models.task import TaskConfig, normalize_steps
@@ -114,13 +114,17 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                 trial_id=trial_id, team_id=team_id, instruction=instruction, gateway_url=gateway,
             )
         finally:
-            # tmux can outlive Harbor. Quiesce only this sandbox PID namespace
-            # before reading files; it cannot reach the controller or verifier.
-            await driver.stop_processes()
-            trace = output / "trajectory.jsonl"
-            if trace.exists():
-                events = parse_terminus_events(trace.read_bytes(), trial=trial, trial_id=trial_id)
-                _write_json_atomic(output / "usage.json", terminus_usage(events, trial))
+            # Accounting uses the trusted local trajectory, so retain it even
+            # if the later sandbox cleanup or workspace snapshot fails.
+            try:
+                trace = output / "trajectory.jsonl"
+                if trace.exists():
+                    events = parse_terminus_events(trace.read_bytes(), trial=trial, trial_id=trial_id)
+                    _write_json_atomic(output / "usage.json", terminus_usage(events, trial))
+            finally:
+                # Quiesce even if local accounting fails. A failed quiescence
+                # still prevents workspace export and verifier handoff.
+                await driver.stop_processes()
             archive = workspace / ".loom/workspace.tar"
             await _export_workspace_archive(driver, task.environment.workdir, archive)
             await asyncio.to_thread(_strip_private_entries, archive, _POLICY)
@@ -205,7 +209,9 @@ if __name__ == "__main__":
     except Exception as exc:
         # HTTP exceptions can embed response/request details; never persist them.
         message = f"isolated execution failed ({type(exc).__name__})"
-        if isinstance(exc, AgentError) and exc.args == (TASK_IMAGE_TOOLS_REQUIRED,):
+        if isinstance(exc, SandboxRPCError):
+            message += f": {exc}"
+        elif isinstance(exc, AgentError) and exc.args == (TASK_IMAGE_TOOLS_REQUIRED,):
             message += f": {TASK_IMAGE_TOOLS_REQUIRED}"
         print(message, file=sys.stderr)
         raise SystemExit(1) from None

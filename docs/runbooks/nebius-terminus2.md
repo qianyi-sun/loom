@@ -222,3 +222,19 @@ model. Then verify the real Trial's usage, cost, trajectory and original reward
 assertions. A single-attempt acceptance request should retain
 `retry={"max_attempts":1,"retry_on":[]}` through the ordinary Batch API; the
 current `loom eval batch create` command does not expose retry configuration.
+
+## Sandbox completion diagnostics
+
+The trusted agent writes trajectory-derived usage before asking its task sandbox
+to stop descendants. A cleanup failure keeps this accounting and fails the
+phase; it does not export an unstable workspace or start the verifier. Cleanup
+still runs if local usage parsing fails.
+
+Native phase stderr reports a fixed sandbox operation, HTTP status and one of
+`pid_namespace_invalid`, `process_owner_mismatch`, `process_inspection_failed`,
+`cleanup_timeout`, `cleanup_cancelled` or `cleanup_failed` when that server
+boundary fails. Unknown response reasons become `http_error`; connection and
+timeout failures use fixed transport categories. Request bodies, commands,
+environments, response bodies and endpoint URLs are excluded. These codes
+identify the failed boundary; a completed model conversation alone does not
+prove workspace handoff or verifier success.

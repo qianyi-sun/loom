@@ -53,3 +53,28 @@ def test_unknown_agent_error_does_not_expose_its_message() -> None:
     assert result.returncode == 1
     assert result.stderr == "isolated execution failed (AgentError)\n"
     assert result.stdout == ""
+
+
+def test_safe_sandbox_rpc_error_survives_native_entrypoint() -> None:
+    result = subprocess.run(
+        [sys.executable, "-B", "-c",
+         "import runpy,httpx; from unittest.mock import patch; "
+         "from loom.driver.service_sandbox import SandboxRPCError; "
+         "request=httpx.Request('POST','http://private-endpoint-fixture', "
+         "content='private-command-fixture'); "
+         "response=httpx.Response(409,request=request, "
+         "headers={'X-Loom-Sandbox-Error':'process_owner_mismatch'}, "
+         "text='private-response-fixture'); "
+         "error=SandboxRPCError('/stop-processes',httpx.HTTPStatusError("
+         "'private-exception-fixture',request=request,response=response)); "
+         "patcher=patch('argparse.ArgumentParser.parse_args',side_effect=error); "
+         "patcher.start(); "
+         "runpy.run_module('loom.service_execution_sandbox_task',run_name='__main__')"],
+        text=True, capture_output=True,
+    )
+    assert result.returncode == 1
+    assert result.stderr == (
+        "isolated execution failed (SandboxRPCError): "
+        "sandbox stop_processes failed (HTTP 409; process_owner_mismatch)\n"
+    )
+    assert result.stdout == ""

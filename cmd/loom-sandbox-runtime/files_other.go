@@ -10,7 +10,7 @@ import (
 )
 
 func stopProcesses(context.Context) error {
-	return errors.New("sandbox process cleanup requires Linux PID 1")
+	return errCleanupPIDNamespace
 }
 
 func readFile(string) (*os.File, error) {
