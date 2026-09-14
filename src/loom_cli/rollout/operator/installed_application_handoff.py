@@ -25,6 +25,7 @@ from .protected_application_handoff_component import (
     ProtectedApplicationAuthorityHandoffComponent,
     _admit_sql_profiles,
 )
+from .protected_application_migration_resources import ApplicationMigrationResourceRunner
 from .protected_apply_journal import (
     ApplicationRecoveryView,
     ComponentObservation,
@@ -40,7 +41,7 @@ from .staging_mutation_guard import MutationGuardEvidence, MutationGuardManager
 from .systemd import SystemdUserManager
 
 
-class InstalledApplicationHandoffRunner(ApplicationHandoffRunner, CNPGExternalRunner, Protocol):
+class InstalledApplicationHandoffRunner(ApplicationHandoffRunner, CNPGExternalRunner, ApplicationMigrationResourceRunner, Protocol):
     pass
 
 
@@ -112,9 +113,9 @@ class InstalledApplicationHandoffFactory:
             raise ValueError('completed application handoff current epoch or guard changed')
         return observed.observed_epoch
 
-    def __call__(
+    def build(
         self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal, ordinal: int,
-    ) -> ProtectedApplyComponent:
+    ) -> ProtectedApplicationAuthorityHandoffComponent:
         if (journal.request_id != plan.request_id or journal.attempt_number != plan.attempt_number
                 or journal.service_uid != self.service_uid
                 or journal.attempt_root != self.config.state_root / 'requests' / plan.request_id / 'attempts' / str(plan.attempt_number)):
@@ -134,4 +135,10 @@ class InstalledApplicationHandoffFactory:
             guard_source=self.guard, epoch_source=self.epoch, observe_completed_effect=completed,
             observe_external_authority=lambda candidate, runtime: observe_cnpg_external_inputs(
                 candidate, runtime, runner=self.runner))
-        return handoff.component(plan)
+        handoff.component(plan)
+        return handoff
+
+    def __call__(
+        self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal, ordinal: int,
+    ) -> ProtectedApplyComponent:
+        return self.build(plan, journal=journal, ordinal=ordinal).component(plan)

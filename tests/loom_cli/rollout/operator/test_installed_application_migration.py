@@ -13,8 +13,14 @@ from tests.loom_cli.rollout.operator.test_staging_mutation_guard import _config
 @pytest.mark.parametrize("acknowledged", [False, True])
 def test_installed_migration_selects_retained_epoch_without_ordinary_sql(tmp_path, monkeypatch, acknowledged):
     from loom_cli.rollout.operator import installed_application_migration as module
-    from loom_cli.rollout.operator.installed_application_handoff import InstalledApplicationHandoffFactory
-    from loom_cli.rollout.operator.protected_apply_journal import ComponentObservation, ComponentState, ProtectedApplyJournal
+    from loom_cli.rollout.operator.installed_application_handoff import (
+        InstalledApplicationHandoffFactory,
+    )
+    from loom_cli.rollout.operator.protected_apply_journal import (
+        ComponentObservation,
+        ComponentState,
+        ProtectedApplyJournal,
+    )
 
     plan, config = _plan(tmp_path), _config(tmp_path)
     original = _guard(plan)
