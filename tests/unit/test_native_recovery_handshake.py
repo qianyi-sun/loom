@@ -219,3 +219,72 @@ async def test_allocated_io_requires_own_committed_preparation_before_finalizati
     finally:
         outer.close()
         mapped.close()
+
+
+@pytest.mark.parametrize("boundary", ["exact", "uncommitted", "final-fails"])
+async def test_outer_v3_serializes_finalization_before_authority(tmp_path, monkeypatch, boundary):
+    from types import SimpleNamespace
+
+    from loom_capacity_agent.build_admission import BuildOutcomeReceiptV1
+
+    module = import_module("loom_capacity_executor.native_outer_build")
+    _runtime, spec, path, digest = recovery_spec(tmp_path)
+    events = []
+
+    class Owner:
+        claim = spec.claim
+        source = SimpleNamespace(context=spec.context)
+
+        def require_recovery_preparation(self, preparation):
+            assert preparation == spec.recovery_preparation
+            events.append("preparation")
+            if boundary == "uncommitted":
+                raise ValueError("uncommitted")
+
+        async def finalize_recovery(self, channel, **kwargs):
+            assert events == ["preparation", "input", "spawn"]
+            assert kwargs == {"preparation": spec.recovery_preparation, "runtime_spec_sha256": digest}
+            events.append("final")
+            if boundary == "final-fails":
+                raise ValueError("final failed")
+            return "e" * 64
+
+        async def serve_authority(self, channel, **kwargs):
+            assert "final" in events and kwargs == {"recovery_finalization_sha256": "e" * 64}
+            events.append("authority")
+            await asyncio.Future()
+
+        async def record_outcome(self, request):
+            assert "authority" in events
+            return BuildOutcomeReceiptV1(request=request, request_digest=canonical_digest(request))
+
+    async def prepare(*args, **kwargs):
+        events.append("input")
+
+    async def spawn(*args):
+        events.append("spawn")
+        return object()
+
+    async def result(*args):
+        return SimpleNamespace(broker_reaped=True, cleanup_confirmed=True, client_succeeded=False, artifact=None)
+
+    async def receive(*args):
+        return None
+
+    async def stop(*args):
+        events.append("stop")
+
+    monkeypatch.setattr(module, "prepare_native_runtime_input", prepare)
+    monkeypatch.setattr(module, "_spawn", spawn)
+    monkeypatch.setattr(module, "_result", result)
+    monkeypatch.setattr(module, "_receive", receive)
+    monkeypatch.setattr(module, "_stop_process", stop)
+    if boundary == "exact":
+        await module.run_native_outer_build(Owner(), spec_path=path, expected_sha256=digest,
+            artifact_workspace=tmp_path / "artifacts", timeout_seconds=3)
+        assert events == ["preparation", "input", "spawn", "final", "authority", "stop"]
+    else:
+        with pytest.raises(ValueError):
+            await module.run_native_outer_build(Owner(), spec_path=path, expected_sha256=digest,
+                artifact_workspace=tmp_path / "artifacts", timeout_seconds=3)
+        assert events == (["preparation"] if boundary == "uncommitted" else ["preparation", "input", "spawn", "final", "stop"])
