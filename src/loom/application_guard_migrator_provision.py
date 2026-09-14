@@ -75,6 +75,9 @@ def arm_application_guard_migrator(
             identity.role_oid, target.database, identity.role_name,
         )).fetchone() != (False,):
             raise RuntimeError("application guard migrator previous sessions have not retired")
+        # The independently saved guard owner is NOLOGIN with no password.
+        # Normalize only its permanent validity profile, never a credential.
+        connection.execute(sql.SQL("ALTER ROLE {} VALID UNTIL 'infinity'").format(sql.Identifier(identity.guard_owner.role_name)))
         connection.execute(sql.SQL("GRANT {},{} TO {} WITH ADMIN FALSE, INHERIT TRUE, SET TRUE").format(
             sql.Identifier(target.successor_role), sql.Identifier(identity.guard_owner.role_name), sql.Identifier(identity.role_name)))
         connection.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
