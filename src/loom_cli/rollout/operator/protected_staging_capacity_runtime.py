@@ -28,6 +28,7 @@ from .protected_apply_journal import (
     ComponentTerminal,
     ComponentTerminalRecoveryAuthority,
     ProtectedApplyComponent,
+    ProtectedApplyJournal,
 )
 from .protected_capacity_execution_preparation_component import (
     ExecutionPreparationDependencyGuard,
@@ -224,6 +225,7 @@ class KubernetesProtectedStagingCapacityRuntime:
         default_factory=dict
     )
     execution_preparation_dependency_guard: ExecutionPreparationDependencyGuard | None = None
+    database_component_factory: Callable[[FinalGatePlan, ProtectedApplyJournal], ProtectedApplyComponent] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -290,11 +292,19 @@ class KubernetesProtectedStagingCapacityRuntime:
         plan: FinalGatePlan,
         *,
         epoch_guard: Callable[[FinalGatePlan], ComponentObservation],
+        journal: ProtectedApplyJournal | None = None,
     ) -> tuple[ProtectedApplyComponent, ...]:
         if not callable(epoch_guard):
             raise ValueError("protected staging capacity epoch authority is invalid")
 
         def build(component_id: str) -> ProtectedApplyComponent:
+            if component_id == "staging-capacity-database" and self.database_component_factory is not None:
+                if journal is None:
+                    raise ValueError("protected staging capacity original journal is absent")
+                component = self.database_component_factory(plan, journal)
+                if component.component_id != component_id or component.terminal_recovery_authority is not None:
+                    raise ValueError("protected staging retained database component changed")
+                return component
             def classify(bound_plan: FinalGatePlan) -> ComponentObservation:
                 epoch = epoch_guard(bound_plan)
                 if epoch.state is not ComponentState.EXACT:
