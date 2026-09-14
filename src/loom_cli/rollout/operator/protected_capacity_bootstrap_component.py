@@ -41,6 +41,7 @@ from .protected_cnpg_writer_configuration import _mapping
 from .protected_staging_capacity_database_component import (
     KubernetesProtectedStagingCapacityDatabaseComponent,
     _DatabaseState,
+    _ResourceState,
     _seed_credential,
 )
 from .staging_mutation_guard import MutationGuardEvidence
@@ -99,9 +100,15 @@ class ProtectedCapacityBootstrapComponent(ProtectedApplicationMigrationComponent
         assert view.admission is not None
         if not events:
             # This is initial admission only. Recovery never runs these queries.
+            resources, _ = self.base._resource_state(self.plan, template)
+            if resources != _ResourceState.ABSENT:
+                raise RuntimeError("application capacity legacy bootstrap resources have not retired")
             state = self.base._database_state(self.plan, seed)
-            if state not in {_DatabaseState.EXACT, _DatabaseState.NEEDS_CONVERGENCE}:
+            if state not in {_DatabaseState.EXACT, _DatabaseState.NEEDS_CONVERGENCE,
+                    _DatabaseState.AUTHORITY_REBIND_REQUIRED, _DatabaseState.AUTHORITY_REBIND_RECOVERY_REQUIRED}:
                 raise RuntimeError("application capacity initial configuration is not admitted")
+            rebind_sha256 = (hashlib.sha256(self.base._legacy_authority_rebind_payload(self.plan, seed)).hexdigest()
+                if state == _DatabaseState.AUTHORITY_REBIND_REQUIRED else None)
             with self.runner.open_staging_peer_database() as peer:
                 _admit_sql_profiles(self.runner, peer, guard, separated_owner=True)
                 observe_completed_application_authority(peer, target=view.admission.target,
@@ -131,7 +138,8 @@ class ProtectedCapacityBootstrapComponent(ProtectedApplicationMigrationComponent
                     "inputs_digest": inputs.digest(), "guard_owner": asdict(owner),
                     "guard_migrator": {"role_name": identity.role_name, "role_oid": identity.role_oid},
                     "runtime_role_oids": roles, "seed_digest": admission_record_digest(seed),
-                    "migration_digest": migration_terminal.terminal_digest}, guard=guard)
+                    "migration_digest": migration_terminal.terminal_digest, "initial_database_state": state.value,
+                    "rebind_sha256": rebind_sha256}, guard=guard)
             events = journal.read()
         authority = events[0].payload
         original = ApplicationAdmissionRecoveryRecord.from_dict(_mapping(authority["admission"]))
@@ -150,7 +158,8 @@ class ProtectedCapacityBootstrapComponent(ProtectedApplicationMigrationComponent
                 ca_certificate=inputs.ca.certificate, runtime_password=inputs.credential.credential.password,
                 container_registry=self.container_registry, assert_guard=self._guard, assert_inputs=checkpoint,
                 intent_digest=journal.intent.intent_digest, base=self.base, seed=seed, identity=identity,
-                runtime_role_oids=runtime_oids) as runtime:
+                runtime_role_oids=runtime_oids, initial_database_state=_DatabaseState(str(authority["initial_database_state"])),
+                rebind_sha256=None if authority["rebind_sha256"] is None else str(authority["rebind_sha256"])) as runtime:
             ApplicationMigrationLifecycle(journal, guard, runtime).run()
 
     def _observe_completed(self, events: Sequence[ApplicationMigrationEvent], guard: MutationGuardEvidence,

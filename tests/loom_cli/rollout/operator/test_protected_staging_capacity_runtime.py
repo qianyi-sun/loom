@@ -4281,7 +4281,14 @@ def test_legacy_authority_rebind_can_be_rendered_before_journaled_peer_dispatch(
     payload = direct._legacy_authority_rebind_payload(plan, runner.seed)
     assert payload.startswith(b"BEGIN;") and payload.endswith(b"COMMIT;\n")
     assert b"ACCESS EXCLUSIVE MODE NOWAIT" in payload
-    assert runner.registration_overrides and not any(call.endswith("-apply") for call in runner.calls[len(before):])
+    from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
+        _AUTHORITY_REBIND_AUDIT_HISTORY_SQL,
+        _AUTHORITY_REBIND_TRIGGER_SQL,
+    )
+    assert runner.registration_overrides
+    assert [call[-1] for call in runner.calls[len(before):]] == [
+        _AUTHORITY_REBIND_TRIGGER_SQL, _AUTHORITY_REBIND_AUDIT_HISTORY_SQL,
+    ]
     # Legacy dispatch and retained dispatch must consume the same certified SQL.
     observed = []
     from unittest.mock import patch

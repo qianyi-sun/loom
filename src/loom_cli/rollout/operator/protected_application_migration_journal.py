@@ -181,7 +181,7 @@ def _validate_history(plan: FinalGatePlan, events: Sequence[ApplicationMigration
     if first.phase != "authority":
         raise ValueError("application migration requires original authority first")
     _fields(first.payload, {"admission", "guard", "handoff_digest", "credential_digest", "inputs_digest"}
-        | ({"guard_owner", "guard_migrator", "runtime_role_oids", "seed_digest", "migration_digest"} if capacity else set()))
+        | ({"guard_owner", "guard_migrator", "runtime_role_oids", "seed_digest", "migration_digest", "initial_database_state", "rebind_sha256"} if capacity else set()))
     admission = ApplicationAdmissionRecoveryRecord.from_dict(_mapping(first.payload["admission"]))
     guard = MutationGuardEvidence.from_dict(_mapping(first.payload["guard"]))
     coordination = admission.coordination_guard
@@ -312,4 +312,8 @@ def _capacity_authority(event: ApplicationMigrationEvent, admission: Application
             or len(set(oids)) != 9
             or any(not _sha(event.payload[key]) for key in ("seed_digest", "migration_digest"))):
         raise ValueError("application capacity original role authority changed")
+    state = event.payload["initial_database_state"]
+    if (state not in ("needs-convergence", "exact", "authority-rebind-required", "authority-rebind-recovery-required")
+            or (_sha(event.payload["rebind_sha256"]) if state == "authority-rebind-required" else event.payload["rebind_sha256"] is None) is not True):
+        raise ValueError("application capacity initial configuration authority changed")
     return _integer(migrator, "role_oid")
