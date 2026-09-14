@@ -33,6 +33,8 @@ def main():
     subprocess.run(["mount", "-t", "cgroup2", "none", str(root)], check=True, timeout=5)
     job = root / prepared.cgroup_path.lstrip("/")
     job.mkdir(parents=True)
+    child = None
+    step = None
     try:
         scratch, quarantine = Path("/run/scratch"), Path("/run/quarantine")
         scratch.mkdir(mode=0o700)
@@ -46,12 +48,14 @@ def main():
         namespace = os.stat("/proc/self/ns/cgroup")
         host = history.host.model_copy(update={"boot_id": read_native_recovery_boot_id(),
             "cgroup_namespace_device": namespace.st_dev, "cgroup_namespace_inode": namespace.st_ino})
+        if mode == "boot":
+            host = host.model_copy(update={"boot_id": uuid4()})
         job_fd = os.open(job, os.O_RDONLY | os.O_DIRECTORY)
         scratch_fd = os.open(scratch, os.O_RDONLY | os.O_DIRECTORY)
         try:
             prepared = prepared.model_copy(update={"locator": locator, "boot_id": host.boot_id,
                 "node_configuration_sha256": canonical_digest(host), "cgroup_device": job.stat().st_dev,
-                "cgroup_inode": job.stat().st_ino, "cgroup_mount_id": _mount_id(job_fd)})
+                "cgroup_inode": job.stat().st_ino + int(mode == "inode"), "cgroup_mount_id": _mount_id(job_fd)})
             scope = NativeNodeRecoveryScopeV1(installation_id=history.profile.installation_id,
                 pool_id=history.profile.pool_id, profile_sha256=canonical_digest(history.profile), host=host,
                 scratch_root=str(scratch), quarantine_root=str(quarantine), scratch_device=locator.device,
@@ -88,6 +92,15 @@ def main():
             locator_path.chmod(0o600)
         elif mode == "delegated":
             os.chown(job / "cgroup.procs", prepared.original_uid, prepared.original_gid)
+        elif mode == "populated":
+            step = job / "step_batch"
+            step.mkdir()
+            child = subprocess.Popen(["/bin/sleep", "60"])
+            (step / "cgroup.procs").write_text(str(child.pid))
+            assert (job / "cgroup.procs").read_text() == ""
+            assert "populated 1" in (job / "cgroup.events").read_text()
+        elif mode == "missing":
+            job.rmdir()
         for _ in range(2):
             request_path = Path("/run/request.json")
             request_path.write_bytes(canonical_bytes(request))
@@ -105,7 +118,13 @@ def main():
             request = request.model_copy(update={"invocation_id": uuid4()})
         print("native-node-recovery-" + mode + "-verified", flush=True)
     finally:
-        job.rmdir()
+        if child is not None:
+            child.terminate()
+            child.wait(timeout=5)
+        if step is not None:
+            step.rmdir()
+        if job.exists():
+            job.rmdir()
         for ancestor in job.parents:
             if ancestor == root:
                 break

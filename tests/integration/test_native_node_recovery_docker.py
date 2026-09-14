@@ -24,7 +24,7 @@ from tests.integration.test_native_terminal_recovery_readback import (
 
 
 @pytest.mark.docker
-@pytest.mark.parametrize("boundary", ["exact", "locator", "delegated"])
+@pytest.mark.parametrize("boundary", ["exact", "locator", "delegated", "populated", "missing", "inode", "boot"])
 async def test_fixed_node_recovery_uses_real_private_cgroups_and_journal(
     prepared_input, owner_sessions, monkeypatch, boundary,
 ):
