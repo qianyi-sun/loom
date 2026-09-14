@@ -205,6 +205,15 @@ counter and retain the released ledger row. The reservation is therefore both
 the concurrency seat and the audit evidence, not a cache derived from worker
 heartbeats.
 
+A pre-start legacy `node_setup_health` refund releases the old attempt's slot
+before decrementing the refundable attempt counter. Only that explicitly marked
+released legacy reservation permits a new reservation with the same logical
+attempt/role; the old row stays immutable. Other release reasons, NULL reasons
+and nonlegacy owners retain their historical uniqueness fence. Every replacement
+legacy claim has its own persisted UUID, independently of that refundable count.
+See [claim identity and migration order](2026-09-10-task-image-execution-trust.md#refundable-legacy-claims-and-migration-order)
+for protected-caller compatibility and the prospective-only repair boundary.
+
 Paid Nebius execution adds a second, independent finance admission boundary.
 An immutable `execution_price_snapshots` row records provider, region, SKU,
 USD rates, source URI/version, effective and observation timestamps, the full

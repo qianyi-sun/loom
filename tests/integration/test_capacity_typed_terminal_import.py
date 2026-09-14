@@ -185,7 +185,7 @@ def test_typed_terminal_import_refuses_downgrade_with_retained_evidence(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0032"
+                == "guard_0033"
             )
             assert (
                 connection.execute(

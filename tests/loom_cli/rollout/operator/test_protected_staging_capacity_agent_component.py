@@ -1239,7 +1239,7 @@ def test_agent_runtime_configuration_seals_the_exact_database_admission_digest(
         configuration_map["data"]["reporter-configuration.json"]
     )
 
-    assert capacity_guard_schema_head() == ("guard_0032", 32)
+    assert capacity_guard_schema_head() == ("guard_0033", 33)
     assert configuration.protected_admission_sha256 == (
         "572588101f8d8caccfd5c40819690ded6e07c7e867627c827a94a786d5c705ca"
     )
