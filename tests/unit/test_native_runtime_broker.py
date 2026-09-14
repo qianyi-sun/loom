@@ -33,7 +33,9 @@ if operation == 'run':
             descriptors.append(os.readlink(fd))
         except FileNotFoundError:
             pass
-    (root / identity).write_text(json.dumps({'id':identity,'status':'running','pid':os.getpid(),'fds':descriptors}))
+    staged = root / (identity + '.pending')
+    staged.write_text(json.dumps({'id':identity,'status':'running','pid':os.getpid(),'fds':descriptors}))
+    staged.replace(root / identity)
     if identity.startswith('loom-native-client-'):
         raise SystemExit(0)
     signal.pause()
@@ -161,7 +163,13 @@ def test_broker_lifetime_and_descriptor_isolation_with_real_exec(tmp_path, bound
             channel.send(canonical_bytes(NativeBrokerStart(role=role,
                 deadline_boottime_ns=time.clock_gettime_ns(time.CLOCK_BOOTTIME) + 5_000_000_000)))
             event = NativeBrokerEvent.model_validate_json(channel.recv(65536))
-            assert event.kind == {"pause": "pause-ready", "buildkit": "buildkit-ready", "client": "client-succeeded"}[role]
+            expected = {"pause": "pause-ready", "buildkit": "buildkit-ready", "client": "client-succeeded"}[role]
+            if event.kind != expected:
+                if broker.poll() is None:
+                    broker.kill()
+                broker.wait(timeout=5)
+                diagnostic = broker.stderr.read(4096).decode(errors="replace") if broker.stderr is not None else ""
+                pytest.fail(f"fixture broker {role}: expected {expected}, got {event.kind}; stderr: {diagnostic}")
             observed = json.loads((state / layout.identity(role)).read_text())
             assert not any(target.startswith("socket:") for target in observed["fds"]), "broker control writer survived exec"
             if role != "client":
