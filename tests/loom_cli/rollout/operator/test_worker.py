@@ -1727,13 +1727,18 @@ def test_final_admission_recovers_component_journal_without_outer_apply(
 
 
 @pytest.mark.parametrize("outcome", ["run", "successor", "epoch", "missing-epoch-reader"])
-def test_attempt_uses_original_retained_guard_at_live_advanced_epoch(tmp_path, monkeypatch, outcome):
+@pytest.mark.parametrize("advanced_guard", [False, True])
+def test_attempt_uses_original_retained_guard_at_live_advanced_epoch(tmp_path, monkeypatch, outcome, advanced_guard):
     from tests.loom_cli.rollout.operator.test_application_guard_retention import _guard
     from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
 
     bundle, envelope = advanced_epoch_resume_fakes()
     guard = FakeMutationGuard(bundle.order)
     original = _guard(_plan(tmp_path))
+    if advanced_guard:
+        original = type(original).build(**{
+            k: v for k, v in original.to_dict().items() if k not in {"schema_version", "evidence_digest", "mutation_epoch"}
+        }, mutation_epoch=original.mutation_epoch + 1)
     guard.assert_ready = lambda _: (
         type(original).build(
                 **{k: v for k, v in original.to_dict().items()
