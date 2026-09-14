@@ -183,15 +183,19 @@ async def persist_native_usage(
             ).all()
             for prior in older:
                 prior.finalized_at = max(now, prior.last_observed_at)
-                prior.terminal_reason = "container_restarted"
-                prior.diagnostic_code = "container_incarnation_changed"
-                prior.completeness = (
-                    "partial"
-                    if any(
-                        getattr(prior, field) is not None for field in ResourceCounters.model_fields
-                    )
-                    else "unavailable"
+                prior_has_counters = any(
+                    getattr(prior, field) is not None for field in ResourceCounters.model_fields
                 )
+                first_observation = prior.container_started_at is None and not prior_has_counters
+                prior.terminal_reason = (
+                    "first_container_observation" if first_observation else "container_restarted"
+                )
+                prior.diagnostic_code = (
+                    "prestart_sample_unavailable"
+                    if first_observation
+                    else "container_incarnation_changed"
+                )
+                prior.completeness = "partial" if prior_has_counters else "unavailable"
             report = TrialResourceUsageReport(
                 trial_id=current.trial_id,
                 attempt_count=current.attempt,

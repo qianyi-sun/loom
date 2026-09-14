@@ -304,6 +304,15 @@ async def test_native_container_restart_retains_separate_cumulative_counters(pos
             )
             measured = [row for row in rows if row.cpu_usage_usec is not None]
             assert len(measured) == 2
+            placeholder = next(row for row in rows if row.container_started_at is None)
+            assert placeholder.completeness == "unavailable"
+            assert placeholder.terminal_reason == "first_container_observation"
+            assert placeholder.diagnostic_code == "prestart_sample_unavailable"
+            restarted = next(
+                row for row in measured if row.container_started_at == now + timedelta(seconds=1)
+            )
+            assert restarted.terminal_reason == "container_restarted"
+            assert restarted.diagnostic_code == "container_incarnation_changed"
             assert {row.container_started_at for row in measured} == {
                 now + timedelta(seconds=1),
                 now + timedelta(seconds=2),
