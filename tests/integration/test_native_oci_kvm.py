@@ -197,7 +197,8 @@ def test_installed_release_requires_original_uid_and_real_root_ownership(mode):
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
 
 
-@pytest.mark.parametrize("mode", ["clean", "mounted", "foreign", "unprivileged"])
+@pytest.mark.parametrize("mode", ["clean", "mounted", "foreign", "unprivileged", "journal-complete",
+    "journal-quarantining", "journal-quarantined", "journal-pruned", "journal-removing", "journal-completed"])
 def test_quarantine_pruner_preserves_real_ownership_and_mount_fences(mode):
     if platform.machine() != "x86_64":
         pytest.skip("quarantine fixture currently has AMD64-only dependencies")
@@ -208,7 +209,8 @@ def test_quarantine_pruner_preserves_real_ownership_and_mount_fences(mode):
             "--cap-drop=ALL", "--cap-add=DAC_OVERRIDE", "--cap-add=CHOWN", "--cap-add=FOWNER",
             "--cap-add=SETUID", "--cap-add=SETGID", "--cap-add=SYS_ADMIN",
             "--security-opt=apparmor=unconfined", "--security-opt=seccomp=unconfined", "--read-only",
-            "--tmpfs=/tmp:rw,nodev,size=16m,mode=1777", "--env=PYTHONPATH=/trusted-src",
+            "--tmpfs=/tmp:rw,nodev,size=16m,mode=1777", "--tmpfs=/run:rw,nodev,size=16m,mode=0755",
+            "--env=PYTHONPATH=/trusted-src",
             "--mount", f"type=bind,src={ROOT / 'tests/support/native_kvm'},dst=/test-support,readonly",
             "--mount", f"type=bind,src={ROOT / 'src'},dst=/trusted-src,readonly",
             EXECUTOR, "python3", "/test-support/quarantine_prune.py", mode,
