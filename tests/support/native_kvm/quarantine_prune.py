@@ -101,10 +101,10 @@ def journal_main(interruption):
         from dataclasses import replace
 
         expected_identity = replace(identity, inode=identity.inode + 1) if interruption == "identity" else identity
-        with journal_module.NativeQuarantineJournal(ledger, key=key, source=attempt, identity=expected_identity) as journal:
+        with journal_module.NativeQuarantineJournal(ledger, key=key, source=attempt, identity=expected_identity, locator_wire=b"locator") as journal:
             if interruption == "lock":
                 try:
-                    with journal_module.NativeQuarantineJournal(ledger, key=key, source=attempt, identity=identity):
+                    with journal_module.NativeQuarantineJournal(ledger, key=key, source=attempt, identity=identity, locator_wire=b"locator"):
                         raise AssertionError("same-attempt lock did not exclude a second invocation")
                 except BlockingIOError:
                     pass
@@ -150,7 +150,7 @@ def journal_main(interruption):
     if interruption not in {"complete", "retired"}:
         journal_module.NativeQuarantineJournal._save = interrupted_save
         try:
-            with journal_module.NativeQuarantineJournal(ledger, key=key, source=attempt, identity=identity) as journal:
+            with journal_module.NativeQuarantineJournal(ledger, key=key, source=attempt, identity=identity, locator_wire=b"locator") as journal:
                 journal.reconcile()
         except InterruptedError:
             assert fired
@@ -159,12 +159,12 @@ def journal_main(interruption):
         finally:
             journal_module.NativeQuarantineJournal._save = original_save
     for _ in range(2):
-        with journal_module.NativeQuarantineJournal(ledger, key=key, source=attempt, identity=identity) as journal:
+        with journal_module.NativeQuarantineJournal(ledger, key=key, source=attempt, identity=identity, locator_wire=b"locator") as journal:
             assert journal.reconcile() == "completed"
         assert not attempt.exists() and not (ledger / key / "attempt").exists()
     if interruption == "retired":
         scratch.rmdir()
-        with journal_module.NativeQuarantineJournal(ledger, key=key, source=attempt, identity=identity) as journal:
+        with journal_module.NativeQuarantineJournal(ledger, key=key, source=attempt, identity=identity, locator_wire=b"locator") as journal:
             assert journal.reconcile() == "completed"
     print("quarantine-prune-journal-" + interruption + "-verified", flush=True)
 

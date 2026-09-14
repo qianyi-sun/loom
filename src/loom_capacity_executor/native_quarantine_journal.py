@@ -41,6 +41,7 @@ class NativeQuarantineProgressV1(StrictV1Model):
     key: Digest
     source: str
     identity_sha256: Digest
+    locator_sha256: Digest
     phase: Phase
 
 
@@ -63,16 +64,21 @@ def _rename_exclusive(source_parent: int, source_name: str, destination_parent: 
 
 
 class NativeQuarantineJournal:
-    def __init__(self, directory: Path, *, key: str, source: Path, identity: NativeQuarantineIdentity) -> None:
+    def __init__(self, directory: Path, *, key: str, source: Path, identity: NativeQuarantineIdentity,
+        locator_wire: bytes,
+    ) -> None:
         _path(str(directory))
         _path(str(source))
         identity.validate()
-        if (re.fullmatch(r"[0-9a-f]{64}", key) is None
+        if (not isinstance(locator_wire, bytes) or not 1 <= len(locator_wire) <= 128 * 1024
+            or re.fullmatch(r"[0-9a-f]{64}", key) is None
             or re.fullmatch(r"attempt-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", source.name) is None
             or directory == source or directory in source.parents or source in directory.parents
             or identity.uid_ranges[0][1] != 1 or identity.gid_ranges[0][1] != 1):
             raise ValueError("quarantine journal scope changed")
         self._directory, self._key, self._source, self._identity = directory, key, source, identity
+        self._locator_wire = locator_wire
+        self._locator_digest = hashlib.sha256(locator_wire).hexdigest()
         self._identity_digest = hashlib.sha256(json.dumps(asdict(identity), sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest()
         self._stack: ExitStack | None = None
         self._fd: int | None = None
@@ -134,7 +140,7 @@ class NativeQuarantineJournal:
                 raise ValueError("quarantine journal changed during read")
             result = NativeQuarantineProgressV1.model_validate_json(bytes(wire))
             if (canonical_bytes(result) != wire or result.key != self._key or result.source != str(self._source)
-                or result.identity_sha256 != self._identity_digest):
+                or result.identity_sha256 != self._identity_digest or result.locator_sha256 != self._locator_digest):
                 raise ValueError("quarantine journal historical identity changed")
             return result
         finally:
@@ -142,7 +148,7 @@ class NativeQuarantineJournal:
 
     def _save(self, phase: Phase) -> None:
         progress = NativeQuarantineProgressV1(key=self._key, source=str(self._source),
-            identity_sha256=self._identity_digest, phase=phase)
+            identity_sha256=self._identity_digest, locator_sha256=self._locator_digest, phase=phase)
         wire = canonical_bytes(progress)
         if len(wire) > 4096:
             raise ValueError("quarantine journal exceeds byte bound")
@@ -173,6 +179,28 @@ class NativeQuarantineJournal:
             raise ValueError("quarantine attempt identity changed")
         return fd
 
+    def _check_locator(self, parent: int) -> None:
+        """Only the bounded locator is read; other scratch stays metadata-only."""
+        fd = os.open("recovery.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=parent)
+        try:
+            before = os.fstat(fd)
+            if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or stat.S_IMODE(before.st_mode) != 0o400 or before.st_size != len(self._locator_wire)
+                or before.st_dev != self._identity.device or _mount_id(fd) != self._identity.mount_id
+                or (before.st_uid, before.st_gid) != (self._identity.uid_ranges[0][0], self._identity.gid_ranges[0][0])):
+                raise ValueError("quarantine locator metadata differs from retained history")
+            wire = bytearray()
+            while part := os.read(fd, len(self._locator_wire) + 1 - len(wire)):
+                wire.extend(part)
+                if len(wire) > len(self._locator_wire):
+                    raise ValueError("quarantine locator exceeds retained byte bound")
+            after = os.fstat(fd)
+            if (wire != self._locator_wire or (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+                raise ValueError("quarantine locator bytes differ from retained history")
+        finally:
+            os.close(fd)
+
     def reconcile(self) -> Literal["completed"]:
         """Finish only this already terminal-fenced, no-writer-excluded attempt."""
         _require_initial_root()
@@ -198,6 +226,8 @@ class NativeQuarantineJournal:
                 source = self._attempt(source_parent, self._source.name, stack)
             else:
                 source = None
+            if source is not None:
+                self._check_locator(source)  # Refuse changed authority before even quarantining.
             if self._progress is None:
                 if source is None or quarantined is not None:
                     raise ValueError("quarantine has no retained transition explaining its location")
@@ -221,6 +251,11 @@ class NativeQuarantineJournal:
                     raise ValueError("quarantine absence lacks a durable removal transition")
                 self._save("completed")
                 return "completed"
+            try:
+                self._check_locator(quarantined)
+            except FileNotFoundError:
+                if self._progress.phase != "removing":
+                    raise ValueError("quarantine locator absence lacks a durable removal transition") from None
             if self._progress.phase == "quarantined":
                 prune_native_quarantine(quarantined, identity=self._identity)
                 self._save("pruned")
