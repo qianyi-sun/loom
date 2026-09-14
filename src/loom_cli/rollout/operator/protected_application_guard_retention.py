@@ -113,6 +113,9 @@ def _read_pending_retention(
     Missing retention means normal guard semantics. Missing/malformed records
     after acknowledgement refuse release. A component terminal is the existing
     protected journal's completion authority, not a caller-selected ready flag.
+    After that terminal, a ready successor guard for the same request/candidate
+    at the advanced epoch is no longer constrained by this finished retention.
+    Pending handoffs still require the exact original guard.
     """
     from .protected_apply_journal import (
         ComponentIntent,
@@ -154,7 +157,6 @@ def _read_pending_retention(
         or original.request_id != request_id
         or original.state != "ready"
         or record["terminal_epoch"] != original.mutation_epoch + 1
-        or (guard is not None and guard != original)
     ):
         raise RuntimeError("application guard original identity changed")
     journal = ProtectedApplyJournal(
@@ -196,8 +198,18 @@ def _read_pending_retention(
             or terminal.observed_epoch != record["terminal_epoch"]
         ):
             raise RuntimeError("application guard terminal binding is invalid")
+        if guard is not None and guard != original and (
+            guard.request_id != original.request_id
+            or guard.candidate_sha != original.candidate_sha
+            or guard.candidate_tree != original.candidate_tree
+            or guard.mutation_epoch != original.mutation_epoch + 1
+            or guard.state != "ready"
+        ):
+            raise RuntimeError("application guard successor identity changed")
         _sync(component_root / "terminal.json")
         return None
+    if guard is not None and guard != original:
+        raise RuntimeError("application guard original identity changed")
     if acknowledge:
         if guard != original or original.guard_pid != os.getpid():
             raise RuntimeError("only the original guard may acknowledge retention")
