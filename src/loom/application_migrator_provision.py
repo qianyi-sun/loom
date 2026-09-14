@@ -116,7 +116,7 @@ def seal_application_migrator(
 ) -> None:
     """Stop new logins for the saved role without claiming session retirement."""
     _validate_identity(identity, target, provisioner_role)
-    with _transaction(connection, target, coordination_guard, provisioner_role):
+    with _transaction(connection, target, coordination_guard, provisioner_role, allow_closed=True):
         _require_role(connection, target, identity)
         connection.execute(sql.SQL("ALTER ROLE {} NOLOGIN PASSWORD NULL").format(sql.Identifier(identity.role_name)))
 
@@ -134,7 +134,7 @@ def _validate_identity(
 @contextmanager
 def _transaction(
     connection: ApplicationDatabaseConnection, target: ApplicationDatabaseAdmissionTarget,
-    guard: ApplicationDatabaseCoordinationGuard, provisioner_role: str,
+    guard: ApplicationDatabaseCoordinationGuard, provisioner_role: str, *, allow_closed: bool = False,
 ) -> Iterator[None]:
     if (connection.info.transaction_status != TransactionStatus.IDLE
             or connection.info.server_version // 10000 not in {16, 17}):
@@ -150,23 +150,23 @@ def _transaction(
             provisioner_role, target.database,
         )).fetchone() != (True,):
             raise RuntimeError("application migrator requires protected application peer")
-        _require_authority(connection, target, guard)
+        _require_authority(connection, target, guard, allow_closed=allow_closed)
         yield
-        _require_authority(connection, target, guard)
+        _require_authority(connection, target, guard, allow_closed=allow_closed)
 
 
 def _require_authority(
     connection: ApplicationDatabaseConnection, target: ApplicationDatabaseAdmissionTarget,
-    guard: ApplicationDatabaseCoordinationGuard,
+    guard: ApplicationDatabaseCoordinationGuard, *, allow_closed: bool,
 ) -> None:
     if connection.execute(application_sql(
-        "SELECT d.datname={} AND d.datdba={} AND s.system_identifier::text={} "
+        "SELECT d.datname={} AND d.datdba={} AND s.system_identifier::text={} AND ({} OR d.datallowconn) "
         "AND r.rolname={} AND NOT (r.rolcanlogin OR r.rolinherit OR r.rolsuper OR r.rolcreatedb "
         "OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls) AND r.rolpassword IS NULL "
         "AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_db_role_setting WHERE setrole=r.oid) "
         "FROM pg_catalog.pg_database d CROSS JOIN pg_catalog.pg_control_system() s "
         "JOIN pg_catalog.pg_authid r ON r.oid=d.datdba WHERE d.oid={}",
-        target.database, target.successor_oid, target.system_identifier, target.successor_role, target.database_oid,
+        target.database, target.successor_oid, target.system_identifier, allow_closed, target.successor_role, target.database_oid,
     )).fetchone() != (True,):
         raise RuntimeError("application migrator database or owner identity changed")
     _require_coordination_guard(connection, target, guard)
