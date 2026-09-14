@@ -193,7 +193,7 @@ async def test_restored_replay_preserves_unknown_password_and_rejects_schema_dri
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("loss", [None, "before", "after-alter", "wrong-peer"])
+@pytest.mark.parametrize("loss", [None, "before", "after-alter", "wrong-peer", "wrong-password"])
 async def test_guarded_seal_preserves_original_login_when_guard_or_peer_changes(transfer_database, loss):  # noqa: F811
     from dataclasses import replace
 
@@ -227,9 +227,10 @@ async def test_guarded_seal_preserves_original_login_when_guard_or_peer_changes(
             backend = replace(backend, pid=backend.pid + 1)
         kwargs = dict(database=target.database, role=target.owner_role,
                       provisioner_role=next(role for role, alias in arguments["role_bindings"].items() if alias == "provisioner"),
-                      handoff_backend=backend, coordination_guard=arguments["coordination_guard"])
+                      handoff_backend=backend, coordination_guard=arguments["coordination_guard"],
+                      runtime_password="unrelated-password" if loss == "wrong-password" else arguments["password"])
         if loss:
-            with pytest.raises(RuntimeError, match=r"guard|peer"):
+            with pytest.raises(RuntimeError, match=r"guard|peer|password"):
                 seal_guarded_application_login(LoseGuard(), **kwargs)
             assert peer.execute("SELECT oid,rolcanlogin,rolinherit,rolpassword FROM pg_authid WHERE rolname=%s",
                                 (target.owner_role,)).fetchone() == before
