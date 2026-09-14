@@ -21,8 +21,9 @@ class ProcessLost(BaseException):
     pass
 
 
-@pytest.mark.parametrize("interrupt", [None, "create", "arm", "seal", "close", "retire", "reopen"])
-def test_migration_lifecycle_recovers_and_retires_before_delivering_fresh_credentials(tmp_path, interrupt):
+@pytest.mark.parametrize("interrupt", [None, "generation", "create", "arm", "seal", "close", "retire", "reopen"])
+@pytest.mark.parametrize("capacity", [False, True])
+def test_migration_lifecycle_recovers_and_retires_before_delivering_fresh_credentials(tmp_path, monkeypatch, interrupt, capacity):
     from loom_cli.rollout.operator.protected_application_migration_journal import (
         ApplicationMigrationJournal,
     )
@@ -34,9 +35,11 @@ def test_migration_lifecycle_recovers_and_retires_before_delivering_fresh_creden
     guard = _guard(plan)
     effects = []
     failure = [interrupt]
-    role = [None]
+    role = [91 if capacity else None]
+    armed = [False]
     closed = [False]
-    revision = [plan.schema_revision]
+    revision = ["pending" if capacity else plan.schema_revision]
+    target_revision = "exact" if capacity else plan.migration_target_revision
     last_resources = [None]
     maintenance = [777]
     def done(name):
@@ -44,19 +47,27 @@ def test_migration_lifecycle_recovers_and_retires_before_delivering_fresh_creden
         if failure[0] == name:
             failure[0] = None
             raise ProcessLost(name)
+    original_append = ApplicationMigrationJournal.append
+    def append(self, phase, payload, **kwargs):
+        event = original_append(self, phase, payload, **kwargs)
+        if phase == "generation":
+            done("generation")
+        return event
+    monkeypatch.setattr(ApplicationMigrationJournal, "append", append)
     class Runtime:
         def checkpoint(self):
             pass
         def prepare_generation(self, ordinal):
-            assert role[0] is None and not closed[0]
+            assert role[0] == (91 if capacity else None) and not closed[0]
             return _generation(ordinal)
         def create(self, generation, persist):
-            assert role[0] is None
-            persist(90 + generation.payload["ordinal"])
-            role[0] = 90 + generation.payload["ordinal"]
+            assert role[0] == (91 if capacity else None)
+            role[0] = 91 if capacity else 90 + generation.payload["ordinal"]
+            persist(role[0])
             done("create")
         def arm(self, generation, oid):
             assert role[0] == oid and not closed[0]
+            armed[0] = True
             done("arm")
         def resources(self, generation):
             if last_resources[0] is None or last_resources[0][0] != generation.event_digest:
@@ -67,7 +78,7 @@ def test_migration_lifecycle_recovers_and_retires_before_delivering_fresh_creden
                     original(argv, **kwargs)
                     if "create" in argv and "Job" in runner.objects:
                         runner.objects["Job"]["status"] = {"conditions": [{"type": "Complete", "status": "True"}], "succeeded": 1}
-                        revision[0] = plan.migration_target_revision
+                        revision[0] = target_revision
                 runner.run_checked = run
                 last_resources[0] = generation.event_digest, resources
             return last_resources[0][1]
@@ -79,6 +90,8 @@ def test_migration_lifecycle_recovers_and_retires_before_delivering_fresh_creden
         def role_exists(self, generation, oid):
             assert role[0] is None or role[0] == oid
             return role[0] is not None
+        def require_role_retired(self, generation, oid):
+            assert role[0] == (91 if capacity else None) and not armed[0]
         def seal(self, generation, oid):
             assert role[0] == oid
             done("seal")
@@ -88,10 +101,11 @@ def test_migration_lifecycle_recovers_and_retires_before_delivering_fresh_creden
             done("close")
         def retire(self, generation, oid):
             assert closed[0]
-            role[0] = None
+            role[0] = 91 if capacity else None
+            armed[0] = False
             done("retire")
         def reopen(self, generation, oid):
-            assert role[0] is None
+            assert role[0] == (91 if capacity else None) and not armed[0]
             last_resources[0][1].require_retired()
             closed[0] = False
             done("reopen")
@@ -108,7 +122,7 @@ def test_migration_lifecycle_recovers_and_retires_before_delivering_fresh_creden
             migration.append("authority", _authority(plan, component, guard), guard=guard)
         ApplicationMigrationLifecycle(migration=migration, guard=guard, runtime=runtime).run()
         raise RuntimeError("end test")
-    component = replace(_component(apply), component_id="database-migration")
+    component = replace(_component(apply), component_id="staging-capacity-database" if capacity else "database-migration")
     if interrupt is not None:
         with pytest.raises(ProcessLost, match=interrupt):
             journal.execute(plan, [component])
@@ -116,7 +130,7 @@ def test_migration_lifecycle_recovers_and_retires_before_delivering_fresh_creden
         journal.execute(plan, [component])
     migration = ApplicationMigrationJournal(journal=journal, plan=plan, component=component, ordinal=0)
     assert migration.read()[-1].phase in {"noop", "complete"}
-    assert revision[0] == plan.migration_target_revision and role[0] is None and not closed[0]
+    assert revision[0] == target_revision and role[0] == (91 if capacity else None) and not closed[0] and not armed[0]
     last_resources[0][1].require_retired()
     assert effects.count("create") <= 2
     if effects.count("create") == 2:
