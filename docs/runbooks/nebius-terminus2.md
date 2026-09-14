@@ -115,6 +115,30 @@ Benchmark sources without an input-manifest binding retain the sidecar path.
 A missing or corrupt bound manifest fails preparation; it does not fall back to
 unbound modes or a different source revision.
 
+Native Terminus execution keeps a declared dedicated Docker build-context
+directory and its Dockerfile in the controller's frozen inputs. They are used
+for image construction and are not uploaded again into the agent workspace.
+This prevents setup scripts removed by the Dockerfile, and duplicate private
+tests under the build context, from reappearing during evaluation. Files baked
+into the image, including task data and Git history, are preserved; the private
+verifier still receives its original `tests/` and `verifier/` inputs.
+
+For a root (`.`) or unspecified build context, only the declared Dockerfile is
+excluded in addition to the existing private paths. Other root runtime assets
+remain available because their purpose cannot be inferred from context alone.
+This does not guarantee isolation of arbitrary setup sources or nested tests in
+an ambiguous root context; use a dedicated context directory for build-only
+inputs. Image-only tasks retain their normal runtime inputs, without guessing
+that a directory named `environment/` must be private. The native entrypoint
+reads the original frozen `task.toml`, even though admission resolves the built
+image separately. No shared legacy workspace policy is changed.
+
+A task-image build failure or timeout happens before model execution. Public
+diagnosis keeps that preparation failure and treats zero model calls as expected;
+it does not recommend retrying the model to fix a Dockerfile. Cancellation before
+execution has the same expected zero-call treatment. A genuine agent failure
+without calls still retains the missing-usage diagnostic.
+
 ## What changes from old staging
 
 The original instruction and `tests/test_outputs.py` are copied byte for byte.
