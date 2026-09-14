@@ -41,6 +41,8 @@ async def test_guard_migrator_retires_both_owner_sessions_without_dropping_guard
         owner_oid = peer.execute("SELECT oid FROM pg_roles WHERE rolname=%s", (owner,)).fetchone()[0]
         migrator_oid = peer.execute("SELECT oid FROM pg_roles WHERE rolname=%s", (migrator,)).fetchone()[0]
         identity = ApplicationOwnerSuccessor(migrator, migrator_oid, ApplicationGuardOwner(owner, owner_oid))
+        peer.execute(sql.SQL("GRANT CREATE ON DATABASE {} TO {}").format(
+            sql.Identifier(target.database), sql.Identifier(owner)))
         password = uuid4().hex
         peer.execute(sql.SQL("GRANT {} TO {} WITH ADMIN FALSE, INHERIT TRUE, SET TRUE").format(
             sql.Identifier(target.successor_role), sql.Identifier(migrator)))
@@ -75,6 +77,7 @@ async def test_guard_migrator_retires_both_owner_sessions_without_dropping_guard
                 reopen_application_guard_migrator_admission(maintenance, **authority, runtime_password=args["password"])
             assert peer.execute("SELECT oid,rolcanlogin,rolpassword,rolinherit,rolvaliduntil='infinity'::timestamptz FROM pg_authid WHERE rolname=%s", (migrator,)).fetchone() == (migrator_oid, False, None, True, True)
             assert peer.execute("SELECT nspowner FROM pg_namespace WHERE nspname='loom_capacity_guard'").fetchone() == (owner_oid,)
+            assert peer.execute("SELECT has_database_privilege(%s,%s,'CREATE')", (owner, target.database)).fetchone() == (False,)
             assert active_guard.execute("SELECT 1").fetchone() == (1,)
         finally:
             peer.execute(sql.SQL("REVOKE {},{} FROM {}; ALTER ROLE {} NOLOGIN PASSWORD NULL").format(
