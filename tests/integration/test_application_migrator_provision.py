@@ -62,6 +62,51 @@ async def test_application_migrator_journals_oid_before_login_and_retires_surviv
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("drift", ["closed", "expired", "long-lease", "oid", "credential", "expiry", "membership", "role-setting"])
+async def test_migrator_arming_refuses_changed_admission_or_saved_authority(transfer_database, drift):  # noqa: F811
+    from dataclasses import replace
+
+    from loom.application_migrator_provision import (
+        arm_application_migrator,
+        create_application_migrator,
+    )
+
+    with _closed(transfer_database) as (peer, maintenance, _guard, args):
+        complete_application_handoff_database(peer, maintenance=maintenance, **args)
+        target = args["target"]
+        name, password = "app_migrator_" + uuid4().hex, uuid4().hex
+        authority = dict(target=target, coordination_guard=args["coordination_guard"],
+            provisioner_role=next(n for n, a in args["role_bindings"].items() if a == "provisioner"))
+        identity = create_application_migrator(peer, **authority, migrator_role=name, persist_identity=lambda _: None)
+        expiry = datetime.now(UTC) + timedelta(minutes=45)
+        try:
+            if drift in {"credential", "expiry"}:
+                arm_application_migrator(peer, **authority, identity=identity, password=password, expires_at=expiry)
+            if drift == "closed":
+                maintenance.execute(sql.SQL("ALTER DATABASE {} ALLOW_CONNECTIONS false").format(sql.Identifier(target.database)))
+            elif drift == "expired":
+                expiry = datetime.now(UTC) - timedelta(seconds=1)
+            elif drift == "long-lease":
+                expiry = datetime.now(UTC) + timedelta(hours=2)
+            elif drift == "oid":
+                identity = replace(identity, role_oid=identity.role_oid + 1)
+            elif drift == "credential":
+                password += "changed"
+            elif drift == "expiry":
+                expiry += timedelta(seconds=1)
+            elif drift == "membership":
+                peer.execute(sql.SQL("GRANT pg_read_all_data TO {}").format(sql.Identifier(name)))
+            elif drift == "role-setting":
+                peer.execute(sql.SQL("ALTER ROLE {} SET role TO {}").format(sql.Identifier(name), sql.Identifier(target.successor_role)))
+            with pytest.raises(RuntimeError):
+                arm_application_migrator(peer, **authority, identity=identity, password=password, expires_at=expiry)
+            assert peer.execute("SELECT rolcanlogin FROM pg_roles WHERE rolname=%s", (name,)).fetchone() == (drift in {"credential", "expiry"},)
+        finally:
+            peer.execute(sql.SQL("REVOKE ALL ON DATABASE {} FROM {}; DROP ROLE {}").format(
+                sql.Identifier(target.database), sql.Identifier(name), sql.Identifier(name)))
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["journal", "guard", "collision"])
 async def test_migrator_creation_never_adopts_ambient_role_or_outlives_failed_journal(transfer_database, failure):  # noqa: F811
     from loom.application_migrator_provision import create_application_migrator
