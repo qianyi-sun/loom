@@ -147,7 +147,8 @@ def test_registry_migration_artifact_uses_exact_pull_prefix() -> None:
     ) == artifact
 
 
-def test_registered_check_exposes_single_tier_one_manifest_predicate() -> None:
+@pytest.mark.parametrize("owner_role", ["", "loom_app_staging_owner"])
+def test_registered_check_exposes_single_tier_one_manifest_predicate(owner_role) -> None:
     captured = []
     check = build_migration_manifest_check(
         lambda _manifest: Result(0),
@@ -158,6 +159,7 @@ def test_registered_check_exposes_single_tier_one_manifest_predicate() -> None:
         image_tag="staging-aaaaaaa",
         namespace="loom-staging",
         artifact_sink=captured.append,
+        application_owner_role=owner_role,
     )
 
     outcome = check.operations[CheckOperation.PROBE](
@@ -172,3 +174,4 @@ def test_registered_check_exposes_single_tier_one_manifest_predicate() -> None:
         "kubernetes.client",
     )
     assert outcome.evidence["artifact-digest"] == captured[0].artifact_digest
+    assert captured[0].application_owner_role == owner_role
