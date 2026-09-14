@@ -614,3 +614,72 @@ def test_epoch_probe_refuses_unknown_messages_and_lost_lock(tmp_path, change):
             monotonic=lambda: clock[0],
         )
     assert queries == []
+
+
+def test_early_handoff_recovery_preserves_original_ordinal_and_skips_other_components(tmp_path):
+    from tests.loom_cli.rollout.operator.test_protected_apply_journal import _Backend
+
+    plan, journal, guard = _pending_resume(tmp_path)
+    root = journal.root / "01-application-ownership-handoff"
+    original = (root / "intent.json").read_bytes()
+    epoch_bytes = {p.name: p.read_bytes() for p in (journal.root / "00-mutation-epoch-claim").iterdir()}
+    completed = []
+    def forbidden(_):
+        pytest.fail("ordinary component ran before closed-admission recovery")
+    def recover(_):
+        journal.require_application_guard_retained(plan, guard=guard)
+        completed.append(True)
+    component = replace(_component(recover), classify=lambda _: ComponentObservation(
+        ComponentState.EXACT if completed else ComponentState.READY, "3" * 64,
+        plan.starting_mutation_epoch + 1,
+    ))
+    before = replace(_Backend().component("mutation-epoch-claim", 0), classify=forbidden, apply=forbidden)
+    after = replace(_Backend().component("later-manifests", 2), classify=forbidden, apply=forbidden)
+    result = journal.recover_pending_application_handoff(plan, [before, component, after], guard=guard)
+    assert completed == [True] and result.component_id == component.component_id
+    assert (root / "intent.json").read_bytes() == original
+    assert not (journal.root / "00-application-ownership-handoff").exists()
+    assert not (journal.root / "02-later-manifests").exists()
+    assert {p.name: p.read_bytes() for p in (journal.root / "00-mutation-epoch-claim").iterdir()} == epoch_bytes
+    assert journal.recover_pending_application_handoff(plan, [before, component, after], guard=guard) is None
+    assert completed == [True]
+
+
+@pytest.mark.parametrize("change", ["no-ack", "no-epoch", "moved", "implementation", "input", "guard", "missing-lock", "prefix-intent"])
+def test_early_handoff_recovery_refuses_changed_authority_without_applying(tmp_path, change):
+    from tests.loom_cli.rollout.operator.test_protected_apply_journal import _Backend
+
+    plan, journal, guard = _pending_resume(tmp_path, acknowledge=change != "no-ack", claim_epoch=change != "no-epoch")
+    def forbidden(_):
+        pytest.fail("changed recovery authority reached component code")
+    component = replace(_component(forbidden), classify=forbidden)
+    before = replace(_Backend().component("mutation-epoch-claim", 0), classify=forbidden, apply=forbidden)
+    components = [before, component] if change != "no-epoch" else [component]
+    if change == "moved":
+        components.reverse()
+    elif change == "implementation":
+        components[1] = replace(component, implementation_digest="e" * 64)
+    elif change == "input":
+        components[1] = replace(component, input_fingerprint="e" * 64)
+    elif change == "guard":
+        guard = guard_module.MutationGuardEvidence.build(**{
+            key: value for key, value in guard.to_dict().items()
+            if key not in {"schema_version", "evidence_digest", "database_backend_pid"}
+        }, database_backend_pid=guard.database_backend_pid + 1)
+    elif change == "missing-lock":
+        journal.lock_path.unlink()
+    elif change == "prefix-intent":
+        components[0] = replace(before, input_fingerprint="e" * 64)
+    with pytest.raises((RuntimeError, ValueError, FileNotFoundError)):
+        journal.recover_pending_application_handoff(plan, components, guard=guard)
+    assert not list(journal.root.glob("*-application-ownership-handoff/terminal.json"))
+
+
+def test_early_handoff_recovery_without_retention_never_creates_an_operation(tmp_path):
+    from loom_cli.rollout.operator.protected_apply_journal import ProtectedApplyJournal
+
+    plan, _ = _setup(tmp_path)
+    journal = ProtectedApplyJournal(tmp_path / "absent", request_id=plan.request_id, attempt_number=plan.attempt_number)
+    assert journal.recover_pending_application_handoff(plan, [_component(lambda _: pytest.fail("new operation"))],
+                                                      guard=_guard(plan)) is None
+    assert not (tmp_path / "absent").exists()
