@@ -1048,6 +1048,28 @@ or protect itself against an administrator changing admission authority. The
 Docker integration lane tests real enforcement in a disposable Kubernetes API,
 not live CNPG process retirement or full fleet activation.
 
+The fixed staging primary admission reads Pod ownership, node, container and
+bootstrap image digests before executing its read-only process probe. It refuses
+extra containers, environment entries, executable hooks, unreviewed probes and
+volume sources, then checks both running/stored manager and PostgreSQL bytes.
+The PostgreSQL executable hash comes from the never-started pinned image. Pod
+specification, process start ticks and executable device/inode observations allow
+the enclosing handoff to detect changes without adopting a successor primary.
+Replicas are not execution targets for this probe.
+
+Effective SQL admission separately checks each supported connectable database
+(`loom`, `postgres`, `template1`) against the original PostgreSQL 17.4 server.
+It checks active and pending executable settings, role settings, extensions,
+publications/subscriptions, privileged roles and native C definitions. Native
+function references come from the pinned image's initialization files; the
+PL/pgSQL and Snowball scripts contribute their exact signatures while their
+assigned OIDs are normalized. The maintenance databases must have no user
+relations or functions. CNPG's inert configuration checksum and its reviewed
+archive/restore commands are supported. These read-only observations do not
+establish administrator exclusion, retire cached controller or server requests,
+or supply full handoff completion. The enclosing component must retain those
+boundaries and the original guard through actual SQL and workload recovery.
+
 Pinned CNPG 1.25.1 also supports an in-place instance-manager executable replacement
 that adopts the existing postmaster. The disposable Docker integration test uses
 the exact upstream release manifest checksum and immutable operator/PostgreSQL
