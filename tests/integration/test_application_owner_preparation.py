@@ -127,9 +127,16 @@ async def test_initial_database_phase_recovers_each_commit_without_recapturing_c
 ):
     from contextlib import nullcontext
 
-    from loom_cli.rollout.operator.protected_application_database_preparation import prepare_protected_application_database
-    from loom_cli.rollout.operator.protected_application_owner_preparation import APPLICATION_OWNER_ROLE
-    from tests.loom_cli.rollout.operator.test_application_credential_recovery import _Runner, _sources
+    from loom_cli.rollout.operator.protected_application_database_preparation import (
+        prepare_protected_application_database,
+    )
+    from loom_cli.rollout.operator.protected_application_owner_preparation import (
+        APPLICATION_OWNER_ROLE,
+    )
+    from tests.loom_cli.rollout.operator.test_application_credential_recovery import (
+        _Runner,
+        _sources,
+    )
 
     _, journal = _setup(tmp_path)
     password = "the-original-runtime-password"
@@ -170,7 +177,7 @@ async def test_initial_database_phase_recovers_each_commit_without_recapturing_c
                 with self.connection.transaction():
                     yield
                 phase, self.armed = self.armed, None
-                if phase == interruption and not interrupted:
+                if phase is not None and phase == interruption and not interrupted:
                     interrupted.append(phase)
                     raise RuntimeError("phase acknowledgement lost")
 
