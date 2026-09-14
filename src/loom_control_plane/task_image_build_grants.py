@@ -43,6 +43,21 @@ def _observation_matches_grant(
     )
 
 
+def _inventory_has_foreign_jobs(
+    grant: SlurmBuildGrantV1 | SlurmBuildGrantV2,
+    inventory: SlurmBuildInventoryV1,
+) -> bool:
+    # Ownership is narrower than discovery, and separate from request equality.
+    # An owned job with changed resources must be retired; a foreign job must
+    # never become a cancellation target just because it appeared in inventory.
+    return any(
+        job.comment != grant.comment
+        or job.submitting_identity != grant.request.submitting_identity
+        or job.request.slurm_cluster_id != grant.request.slurm_cluster_id
+        for job in inventory.jobs
+    )
+
+
 def classify_task_image_build_inventory(
     grant: SlurmBuildGrantV1 | SlurmBuildGrantV2,
     inventory: SlurmBuildInventoryV1,
@@ -52,6 +67,8 @@ def classify_task_image_build_inventory(
     now: datetime,
 ) -> TaskImageBuildInventoryDecision:
     """Classify complete controller/accounting evidence without side effects."""
+    if _inventory_has_foreign_jobs(grant, inventory):
+        return TaskImageBuildInventoryDecision(action="wait", reason="inventory_ownership_mismatch")
     if not inventory.controller_authoritative or not inventory.accounting_authoritative:
         return TaskImageBuildInventoryDecision(
             action="wait",
@@ -117,11 +134,14 @@ def classify_task_image_build_inventory(
 
 
 def _classify_revoked_grant_inventory(
+    grant: SlurmBuildGrantV1 | SlurmBuildGrantV2,
     inventory: SlurmBuildInventoryV1,
     *,
     revoked_at: datetime,
     now: datetime,
 ) -> TaskImageBuildInventoryDecision:
+    if _inventory_has_foreign_jobs(grant, inventory):
+        return TaskImageBuildInventoryDecision(action="wait", reason="inventory_ownership_mismatch")
     if not inventory.controller_authoritative or not inventory.accounting_authoritative:
         return TaskImageBuildInventoryDecision(
             action="wait",
@@ -367,6 +387,7 @@ async def reconcile_task_image_build_submission(
                 f"task-image build grant {grant_id} lacks revocation timing evidence"
             )
         decision = _classify_revoked_grant_inventory(
+            grant,
             inventory,
             revoked_at=row.revoked_at,
             now=now,
@@ -409,19 +430,34 @@ async def reconcile_task_image_build_submission(
             payload={"reason": decision.reason},
             now=now,
         )
-    elif decision.action == "cancel_then_reconcile" and not await _has_cancellation_event(
-        session,
-        grant_id=grant_id,
-        job_ids=decision.cancel_job_ids,
-    ):
-        _append_event(
+    elif decision.action == "cancel_then_reconcile":
+        if not was_revoked:
+            # Retirement and cancellation intent commit together before the
+            # caller acts. A shrinking inventory must never restore binding.
+            row.state = "revoked"
+            row.revoke_reason = decision.reason
+            row.revoked_at = now
+            row.updated_at = now
+            _append_event(
+                session,
+                row=row,
+                event_type="revoked",
+                payload={"reason": decision.reason},
+                now=now,
+            )
+        if not await _has_cancellation_event(
             session,
-            row=row,
-            event_type="cancellation_requested",
-            payload={"job_ids": list(decision.cancel_job_ids)},
-            now=now,
-        )
-        row.updated_at = now
+            grant_id=grant_id,
+            job_ids=decision.cancel_job_ids,
+        ):
+            _append_event(
+                session,
+                row=row,
+                event_type="cancellation_requested",
+                payload={"job_ids": list(decision.cancel_job_ids)},
+                now=now,
+            )
+            row.updated_at = now
     elif decision.action == "wait":
         _append_event(
             session,
@@ -463,12 +499,74 @@ async def record_task_image_build_release(
     return row
 
 
+async def reconcile_task_image_build_cleanup(
+    session: AsyncSession,
+    *,
+    grant_id: UUID,
+    inventory: SlurmBuildInventoryV1,
+    now: datetime,
+) -> TaskImageBuildInventoryDecision:
+    """Retire expired authority and journal ownership-checked cleanup only.
+
+    The caller must commit before acting, just as with submission reconciliation.
+    Empty/terminal inventory is not proof of guard cleanup or that a delayed
+    submission cannot arrive later; this method does not erase that obligation.
+    """
+    row = await _locked_grant(session, grant_id=grant_id)
+    grant = _stored_grant(row)
+    if row.state != "revoked":
+        if row.state not in {"submitting", "bound", "released"} or now < grant.authority.expires_at:
+            raise TaskImageBuildGrantConflictError("task-image build grant is not cleanup-only")
+        # Preserve the original binding/release history. Expiry retires future
+        # projection/renewal before any cleanup command can leave this process.
+        row.state = "revoked"
+        row.revoke_reason = "grant_authority_expired"
+        row.revoked_at = now
+        row.updated_at = now
+        _append_event(
+            session, row=row, event_type="revoked", payload={"reason": row.revoke_reason}, now=now
+        )
+    if row.revoked_at is None:
+        raise TaskImageBuildGrantConflictError("task-image build grant lacks revocation evidence")
+    decision = _classify_revoked_grant_inventory(
+        grant,
+        inventory,
+        revoked_at=row.revoked_at,
+        now=now,
+    )
+    if decision.action == "cancel_then_reconcile" and not await _has_cancellation_event(
+        session,
+        grant_id=grant_id,
+        job_ids=decision.cancel_job_ids,
+    ):
+        _append_event(
+            session,
+            row=row,
+            event_type="cancellation_requested",
+            payload={"job_ids": list(decision.cancel_job_ids)},
+            now=now,
+        )
+        row.updated_at = now
+    elif decision.action == "wait":
+        _append_event(
+            session,
+            row=row,
+            event_type="reconciliation_wait",
+            payload={"reason": decision.reason},
+            now=now,
+        )
+        row.updated_at = now
+    await session.flush()
+    return decision
+
+
 __all__ = [
     "TaskImageBuildGrantConflictError",
     "TaskImageBuildInventoryDecision",
     "begin_task_image_build_submission",
     "classify_task_image_build_inventory",
     "issue_task_image_build_grant",
+    "reconcile_task_image_build_cleanup",
     "reconcile_task_image_build_submission",
     "record_task_image_build_release",
 ]
