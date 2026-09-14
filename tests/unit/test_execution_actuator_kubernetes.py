@@ -717,21 +717,32 @@ def test_existing_evicted_status_keeps_specific_diagnosis_during_delete() -> Non
     assert observation.message == pod.status.message
 
 
-async def test_resource_summary_reads_json_before_sdk_string_coercion(monkeypatch):
+@pytest.mark.parametrize("malformed", [False, True])
+async def test_resource_summary_reads_json_before_sdk_string_coercion(monkeypatch, malformed):
     from kubernetes import client
     from urllib3.response import HTTPResponse
 
     api_client = client.ApiClient()
     responses = []
+    released = []
 
     def request(*args, **kwargs):
         assert args[0] == "GET"
         assert "/nodes/node-1/proxy/stats%2Fsummary" in args[1]
         response = HTTPResponse(
-            body=b'{"pods":[{"podRef":{"uid":"pod-1","namespace":"ns"}}]}',
+            body=b'{"pods":'
+            if malformed
+            else b'{"pods":[{"podRef":{"uid":"pod-1","namespace":"ns"}}]}',
             status=200,
             preload_content=False,
         )
+        original_release = response.release_conn
+
+        def release():
+            released.append(response)
+            original_release()
+
+        monkeypatch.setattr(response, "release_conn", release)
         responses.append(response)
         return response
 
@@ -744,8 +755,16 @@ async def test_resource_summary_reads_json_before_sdk_string_coercion(monkeypatc
     try:
         # Exercise the real generated Core API and ApiClient deserializer. Its
         # declared response_type='str' turns a parsed dict into Python repr.
-        result = await api.resource_summary(node_name="node-1")
-        assert result == {"pods": [{"podRef": {"uid": "pod-1", "namespace": "ns"}}]}
+        if malformed:
+            from loom_execution_actuator.contracts import KubernetesApiError
+
+            with pytest.raises(KubernetesApiError) as error:
+                await api.resource_summary(node_name="node-1")
+            assert isinstance(error.value.__cause__, json.JSONDecodeError)
+        else:
+            result = await api.resource_summary(node_name="node-1")
+            assert result == {"pods": [{"podRef": {"uid": "pod-1", "namespace": "ns"}}]}
         assert len(responses) == 1
+        assert released == responses
     finally:
         api_client.close()
