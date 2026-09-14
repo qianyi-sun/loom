@@ -37,6 +37,24 @@ from tests.integration.test_task_bundle_source_journal import (
 INSTANT = NOW + timedelta(days=2)
 
 
+class _RetirementClock(datetime):
+    instant = NOW
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.instant.replace(tzinfo=None) if tz is None else cls.instant.astimezone(tz)
+
+
+@pytest.fixture(autouse=True)
+def _materialization_clock(monkeypatch):
+    # Explicit retirement observations and implicit materialization writes must
+    # share one scenario clock. Mixing September's fixed NOW with the wall clock
+    # makes the real backward-time fence reject every later calendar run.
+    monkeypatch.setattr(_RetirementClock, "instant", NOW)
+    for name in ("loom.task_image_materialization", "loom_control_plane.task_image_materializations"):
+        monkeypatch.setattr(importlib.import_module(name), "datetime", _RetirementClock)
+
+
 async def _image(journal, tmp_path):
     spec = _spec(tmp_path)
     ticket = await _upload(journal, spec)
@@ -44,12 +62,16 @@ async def _image(journal, tmp_path):
     await _publish(journal, ticket)
     async with journal.begin() as session:
         image = (await ensure_task_image_materializations(session, task_row=_task(spec)))[0]
+        assert image.updated_at == _RetirementClock.instant
         image_id = image.id
     return spec, image_id
 
 
 async def _observe(journal, image_id, now=INSTANT):
     module = importlib.import_module("loom_control_plane.task_image_materializations")
+    # A deliberately stale observation must still fail; it does not rewind the
+    # scenario clock used by subsequent reference, publication and GC writes.
+    _RetirementClock.instant = max(_RetirementClock.instant, now)
     return await module.observe_unpublished_task_image_retirement(
         journal.kw["bind"], materialization_id=image_id, now=now,
         grace=timedelta(hours=24),
@@ -325,7 +347,7 @@ async def test_contradictory_expired_owner_requires_reconciliation_before_retire
     async with journal.begin() as session:
         image = await session.get(TaskImageMaterialization, image_id)
         image.claimed_by = "unreconciled-owner"
-        image.lease_expires_at = datetime.now(UTC) - timedelta(hours=1)
+        image.lease_expires_at = _RetirementClock.now(UTC) - timedelta(hours=1)
         image.unreferenced_at = NOW
     assert await _observe(journal, image_id) == "ineligible"
     async with journal() as session:
