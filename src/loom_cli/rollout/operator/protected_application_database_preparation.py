@@ -14,13 +14,21 @@ from loom.application_database_admission import (
     capture_application_database_admission,
     close_guarded_application_database_admission,
 )
-from loom.application_database_connection import ApplicationDatabaseConnection
+from loom.application_database_connection import ApplicationDatabaseConnection, application_sql
 from loom.application_login_sealing import seal_guarded_application_login
+from loom.application_schema_inventory import read_application_schema_inventory
+from loom.application_schema_reference import (
+    application_schema_profile,
+    require_application_schema_reference,
+)
 
 from .final_gate_plan import FinalGatePlan
 from .protected_application_admission_recovery import ApplicationAdmissionRecoveryRecord
 from .protected_application_credential_recovery import recover_application_runtime_credential
-from .protected_application_database_completion import ApplicationCompletionRunner
+from .protected_application_database_completion import (
+    _STAGING_ROLE_BINDINGS,
+    ApplicationCompletionRunner,
+)
 from .protected_application_owner_preparation import (
     APPLICATION_OWNER_ROLE,
     _observe,
@@ -49,6 +57,18 @@ def prepare_protected_application_database(
             or (saved is not None and journal.read_application_handoff_recoveries())):
         raise RuntimeError("application database preparation cannot restart a later handoff phase")
     credential = recover_application_runtime_credential(plan, journal=journal, runner=runner)
+    _observe(connection, guard)
+    with connection.transaction():
+        connection.execute("SET TRANSACTION READ ONLY")
+        for name, value, limit in (("lock_timeout", "1s", 1000), ("statement_timeout", "30s", 30000)):
+            connection.execute(application_sql(
+                "SELECT pg_catalog.set_config({},{},true) FROM pg_catalog.pg_settings "
+                "WHERE name={} AND (setting::integer=0 OR setting::integer>{})", name, value, name, limit,
+            ))
+        require_application_schema_reference(
+            read_application_schema_inventory(connection, role_bindings=_STAGING_ROLE_BINDINGS),
+            profile=application_schema_profile(ownership="legacy-owner", acl_profile="staging-readonly"),
+        )
     if saved is None:
         owner_oid = prepare_application_owner(plan, journal=journal, connection=connection, guard=guard)
         backend, coordination = _observe(connection, guard)

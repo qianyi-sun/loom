@@ -787,7 +787,9 @@ workload and input-fence outcome; retention itself supplies none of that evidenc
 
 The initial database phase composes original backup credential recovery, journaled
 owner creation, guarded login sealing, immutable admission capture and guarded
-closure. Login sealing compares the current SCRAM credential with the recovered
+closure through the fixed runner's retained peer transport. A bounded read-only
+comparison with the trusted legacy `staging-readonly` schema profile precedes any
+owner creation or login change. Login sealing compares the current SCRAM credential with the recovered
 original before altering the role. Both sealing and closure check the exact
 original peer and coordination guard inside their SQL transactions, including
 after mutation; detected authority loss rolls that transaction back. Closure
