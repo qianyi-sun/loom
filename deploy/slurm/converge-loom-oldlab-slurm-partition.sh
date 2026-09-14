@@ -18,25 +18,35 @@ PARTITION="loom-staging"
 PARTITION_LINE="PartitionName=$PARTITION Nodes=trt-eai-oldlab-[3-5] Default=NO MaxTime=2-00:00:00 State=UP PriorityTier=100 AllowGroups=loom-rollout OverSubscribe=NO"
 EXPECTED_NODES=$'trt-eai-oldlab-3\ntrt-eai-oldlab-4\ntrt-eai-oldlab-5'
 
+loom_oldlab_validate_authority_parent() {
+  local parent
+  local parent_mode
+  parent="$(dirname "$CONFIG")"
+  parent_mode="$(stat -c '%a' "$parent")"
+  if [ -L "$parent" ] \
+    || [ "$(stat -c '%U:%G:%F' "$parent")" != "$CONFIG_OWNER:$CONFIG_GROUP:directory" ] \
+    || (( (8#$parent_mode & 0022) != 0 )); then
+    echo "error: Slurm authority parent metadata is unsafe" >&2
+    exit 1
+  fi
+}
+
 loom_oldlab_harden_authority() {
   local snapshot="$STATE_ROOT/slurm.conf.before-root-authority"
   local temporary=""
   local identity
   local metadata
   local parent
-  local parent_mode
 
+  loom_oldlab_validate_authority_parent
   metadata="$(stat -c '%U:%G:%a:%F:%h' "$CONFIG")"
   if [ ! -L "$CONFIG" ] \
     && [ "$metadata" = "$CONFIG_OWNER:$CONFIG_GROUP:644:regular file:1" ]; then
     return
   fi
   parent="$(dirname "$CONFIG")"
-  parent_mode="$(stat -c '%a' "$parent")"
-  if [ -L "$CONFIG" ] || [ -L "$parent" ] \
-    || [ "$metadata" != "$LEGACY_CONFIG_OWNER:$LEGACY_CONFIG_GROUP:664:regular file:1" ] \
-    || [ "$(stat -c '%U:%G:%F' "$parent")" != "$CONFIG_OWNER:$CONFIG_GROUP:directory" ] \
-    || (( (8#$parent_mode & 0022) != 0 )); then
+  if [ -L "$CONFIG" ] \
+    || [ "$metadata" != "$LEGACY_CONFIG_OWNER:$LEGACY_CONFIG_GROUP:664:regular file:1" ]; then
     echo "error: Slurm authority migration metadata is unsafe" >&2
     exit 1
   fi
@@ -156,6 +166,7 @@ loom_oldlab_converge_partition() {
   local input_group="$CONFIG_GROUP"
   local input_mode=0644
   local metadata
+  loom_oldlab_validate_authority_parent
   if ! scontrol show config | grep -E \
     "^ClusterName[[:space:]]*=[[:space:]]*$CLUSTER$" >/dev/null; then
     echo "error: local Slurm cluster does not match OLDLAB" >&2
