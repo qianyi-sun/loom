@@ -168,7 +168,13 @@ def test_broker_lifetime_and_descriptor_isolation_with_real_exec(tmp_path, bound
                 if broker.poll() is None:
                     broker.kill()
                 broker.wait(timeout=5)
-                diagnostic = broker.stderr.read(4096).decode(errors="replace") if broker.stderr is not None else ""
+                diagnostic = ""
+                if broker.stderr is not None:
+                    os.set_blocking(broker.stderr.fileno(), False)
+                    try:
+                        diagnostic = os.read(broker.stderr.fileno(), 4096).decode(errors="replace")
+                    except BlockingIOError:
+                        diagnostic = "no diagnostic bytes available"
                 pytest.fail(f"fixture broker {role}: expected {expected}, got {event.kind}; stderr: {diagnostic}")
             observed = json.loads((state / layout.identity(role)).read_text())
             assert not any(target.startswith("socket:") for target in observed["fds"]), "broker control writer survived exec"

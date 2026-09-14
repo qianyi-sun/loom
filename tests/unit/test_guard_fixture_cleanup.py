@@ -95,5 +95,5 @@ def test_container_cleanup_is_bounded_and_exact(monkeypatch, result):
             _remove_fixture_container("loom-phase2c-test-exact")
     else:
         _remove_fixture_container("loom-phase2c-test-exact")
-    assert observed[0][0] == ["docker", "rm", "-f", "loom-phase2c-test-exact"]
+    assert observed[0][0] == ["docker", "rm", "--force", "loom-phase2c-test-exact"]
     assert observed[0][1]["timeout"] == 10

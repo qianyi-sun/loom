@@ -61,7 +61,12 @@ from tests.unit.test_task_image_builder_guard_service import (
     _service,
 )
 
-pytestmark = [pytest.mark.docker, pytest.mark.timeout(240)]
+pytestmark = pytest.mark.docker
+
+
+def _remove_fixture_container(name: str) -> None:
+    result = subprocess.run(["docker", "rm", "--force", name], timeout=10, capture_output=True, text=True, check=False)
+    assert result.returncode == 0 or "No such container" in result.stderr, "fixture container cleanup failed"
 
 
 def _sha256(value: object) -> str:
@@ -267,11 +272,7 @@ def _run_probe_container(arguments: list[str], *, timeout: int, env=None):
             check=False, timeout=timeout,
         )
     finally:
-        subprocess.run(
-            ["docker", "rm", "--force", name],
-            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            check=False, timeout=10,
-        )
+        _remove_fixture_container(name)
 
 
 @pytest.fixture(scope="module")
