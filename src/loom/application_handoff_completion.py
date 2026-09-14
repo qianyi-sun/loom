@@ -29,7 +29,10 @@ from loom.application_database_admission import (
     require_application_database_drained,
 )
 from loom.application_database_connection import ApplicationDatabaseConnection, application_sql
-from loom.application_ownership_transfer import transfer_application_ownership
+from loom.application_ownership_transfer import (
+    ApplicationOwnershipTransferError,
+    transfer_application_ownership,
+)
 from loom.application_runtime_login import (
     ApplicationRuntimeLoginState,
     observe_application_runtime_login,
@@ -156,9 +159,10 @@ def complete_application_handoff_database(
                         coordination_guard=coordination_guard, schema_acl_profile=schema_acl_profile, schema_revision=schema_revision,
                     )
                 break
-            except (ApplicationDatabaseAdmissionError, ObjectNotInPrerequisiteState) as exc:
+            except (ApplicationDatabaseAdmissionError, ApplicationOwnershipTransferError, ObjectNotInPrerequisiteState) as exc:
                 message = exc.diag.message_primary if isinstance(exc, ObjectNotInPrerequisiteState) else str(exc)
                 if (message not in {"application database sessions are not drained",
+                        "application ownership requires reconciled sessions",
                         "application trigger handoff requires quiescent legacy authority"}
                         or time.monotonic() >= deadline
                         or not _autovacuum_active(maintenance, target=target, handoff_backend=handoff_backend,
