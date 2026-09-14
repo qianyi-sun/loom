@@ -212,6 +212,22 @@ started workloads do not enter this recovery path. The Pod's native
 work from voluntary autoscaler eviction; terminal cleanup still removes the Pod.
 It does not prevent forced deletion or hardware failure.
 
+A native terminal failure before the runtime commits output must also converge.
+The actuator preserves the existing five-minute output window from the first
+durable terminal observation; repeated observations do not extend it. A real
+result committed within that window keeps its normal finalization path. After
+the window, absent output is explicitly unavailable, the current Trial fails,
+and the existing UID-scoped cleanup releases its reservations. This path never
+fabricates a runtime result, verifier reward or successful artifact bundle.
+
+When the same identified Pod reports `DisruptionTarget=True` with
+`DeletionByTaintManager`, preserve the specific eviction observation through
+termination and later generic Job backoff failure. A name-only Kubernetes Event
+can help diagnose a deleted Pod, but cannot authorize retries or reconstruct a
+missing historical Pod condition. Keep ordinary deletion distinct. Do not add
+broad startup-taint tolerations or infer that a higher node ceiling repairs an
+initialization-time eviction.
+
 This implementation is the single-region slice of #1884. Cross-region target
 selection, connectivity and provider-fault acceptance remain subsequent work.
 #1538 must use fresh quota and a separately bounded resource/Trial plan to verify
