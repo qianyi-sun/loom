@@ -617,10 +617,10 @@ def _compile_terminus_plan(
 
 
 __all__ = [
-    "ControllerComputeResourcesV1",
     "MAX_INPUT_BYTES",
     "MAX_INPUT_FILES",
     "MAX_INPUT_MANIFEST_BYTES",
+    "ControllerComputeResourcesV1",
     "RuntimeTaskInputV1",
     "ServiceExecutionInputBindingV1",
     "ServiceExecutionInputFileV1",

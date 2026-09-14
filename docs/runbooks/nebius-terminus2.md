@@ -62,7 +62,11 @@ verifier requests the same task resources. Newly published Nebius profiles set
 Harbor controller, independently of the task's compute. This example therefore
 requests 5 vCPU and 10 GiB across the complete Pod. Controller storage remains
 task-derived (8 GiB here), as do the task/verifier allocations, workspace and
-output bounds; conservative storage accounting remains about 33 GiB. The current
+output bounds. The Pod requests 24 GiB of temporary storage. The workspace,
+runtime and output emptyDir limits bound usage within that Pod budget; admission
+and cost reservation use the same request as native scheduling and observation,
+without adding those limits again. Existing reservations and historical cost
+records are not rewritten. The current
 16-vCPU/64-GiB node template can fit this Trial. CPU/RAM savings alone do not
 establish better packing when storage is the limiting resource. This is an
 initial allocation, not a promise for all 90 tasks; placement accounts for all

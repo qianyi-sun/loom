@@ -4238,7 +4238,7 @@ async def test_private_terminus_sandboxes_reserve_full_pod_resources(
             for reserved in (cost, capacity):
                 assert reserved.requested_cpu_millis == (5_000 if independent_controller else 6_000)
                 assert reserved.requested_memory_mib == (10_240 if independent_controller else 12_288)
-            assert cost.requested_ephemeral_storage_mib == 8_244
+            assert cost.requested_ephemeral_storage_mib == 6_144
             assert capacity.requested_storage_mib == cost.requested_ephemeral_storage_mib
             trial = await session.get(Trial, trial_id)
             assert trial is not None and (trial.state, trial.attempt_count) == ("claimed", 1)
