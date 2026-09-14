@@ -635,10 +635,22 @@ async def test_completion_wins_over_late_renewal_only_with_exact_receipt(
             await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.parametrize("startup_delay_seconds", [0, 0.65])
 async def test_blocked_renewal_closes_stream_at_lease_expiry_not_database_timeout(
-    registry_authority_session, tls_registry, token_key
+    registry_authority_session, tls_registry, token_key, monkeypatch, startup_delay_seconds
 ):
     values = await _prepared(registry_authority_session, tls_registry, token_key)
+    module = worker_module()
+    real_claim = module.claim_publication_job
+
+    async def delayed_claim(*args, **kwargs):
+        job = await real_claim(*args, **kwargs)
+        # Deliberately exceed the .5s lease during setup to reproduce busy-CI
+        # admission latency; this is not the blocked-renewal interval under test.
+        await asyncio.sleep(startup_delay_seconds)
+        return job
+
+    monkeypatch.setattr(module, "claim_publication_job", delayed_claim)
     next(
         response for path, response in tls_registry.routes.items() if "/manifests/" in path
     ).wait_for_peer_close_before_response = True
