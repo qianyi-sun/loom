@@ -1133,9 +1133,9 @@ class ProtectedApplyJournal:
             raise ProtectedApplyJournalError("application restoration durable readback changed")
         return evidence
 
-    def _application_fence_retirement_record(
+    def _application_fence_retirement_inputs(
         self, root: Path, view: ApplicationRecoveryView,
-    ) -> dict[str, object]:
+    ) -> tuple[CNPGFenceRequest, tuple[tuple[CNPGFenceCreateIntent, CNPGFenceObjectReceipt], ...]]:
         if view.restoration is None:
             raise ProtectedApplyJournalError("application fence retirement lacks observed restoration")
         try:
@@ -1151,13 +1151,35 @@ class ProtectedApplyJournal:
                         or receipt.intent_digest != request.intent_digest
                         or receipt.document_sha256 != request.document_sha256(ordinal)):
                     raise ValueError("fence object binding changed")
-                objects.append({"create": pending.to_dict(), "object": receipt.to_dict()})
+                objects.append((pending, receipt))
         except (FileNotFoundError, ValueError):
             raise ProtectedApplyJournalError("application fence retirement original inventory changed") from None
+        return request, tuple(objects)
+
+    def _application_fence_retirement_record(
+        self, root: Path, view: ApplicationRecoveryView,
+    ) -> dict[str, object]:
+        request, inventory = self._application_fence_retirement_inputs(root, view)
+        assert view.restoration is not None
+        objects = [{"create": pending.to_dict(), "object": receipt.to_dict()} for pending, receipt in inventory]
         return {"schema_version": 1, "intent_digest": view.intent.intent_digest,
                 "restoration_sha256": view.restoration.digest,
                 "request_sha256": admission_record_digest(request.to_dict()),
                 "inventory_sha256": _hash_json({"objects": objects})}
+
+    def read_application_cnpg_fence_retirement_view(
+        self, plan: FinalGatePlan, component: ProtectedApplyComponent, *, ordinal: int,
+    ) -> tuple[CNPGFenceRequest, tuple[tuple[CNPGFenceCreateIntent, CNPGFenceObjectReceipt], ...], str] | None:
+        """Read original retirement inputs for classification, without writes/fsync."""
+        view = self.read_application_recovery_view(plan, component, ordinal=ordinal)
+        if view is None or not view.fences_retiring:
+            return None
+        root = self.root / f"{ordinal:02d}-{component.component_id}"
+        request, inventory = self._application_fence_retirement_inputs(root, view)
+        digest = _hash_json(self._application_fence_retirement_record(root, view))
+        if self.read_application_recovery_view(plan, component, ordinal=ordinal) != view:
+            raise ProtectedApplyJournalError("application fence retirement changed during classification")
+        return request, inventory, digest
 
     def begin_application_cnpg_fence_retirement(
         self, plan: FinalGatePlan, *, guard: MutationGuardEvidence,

@@ -33,12 +33,59 @@ from .protected_cnpg_fence_recovery import (
 from .protected_cnpg_input_fence import cnpg_input_fence_probe_commands
 
 if TYPE_CHECKING:
-    from .protected_apply_journal import ProtectedApplyJournal
+    from .protected_apply_journal import ProtectedApplyComponent, ProtectedApplyJournal
     from .staging_mutation_guard import MutationGuardEvidence
 
 
 class CNPGFenceRetirementRunner(ApplicationRestorationRunner, CNPGFenceAcquisitionRunner, Protocol):
     pass
+
+
+def observe_application_cnpg_fence_retirement(
+    plan: FinalGatePlan, *, journal: ProtectedApplyJournal, component: ProtectedApplyComponent,
+    ordinal: int, runner: CNPGFenceAcquisitionRunner,
+) -> str:
+    """Read original retired objects and actual admission propagation, without writes.
+
+    This is the fence portion of classification only. The complete component
+    independently observes current database/credential/workload restoration and
+    continuous original guard/writer authority before deriving its terminal.
+    """
+    saved = journal.read_application_cnpg_fence_retirement_view(plan, component, ordinal=ordinal)
+    if saved is None:
+        raise RuntimeError("CNPG fence retirement decision is absent")
+    request, inventory, digest = saved
+    _observe_retired_inventory(request, inventory, runner)
+    if journal.read_application_cnpg_fence_retirement_view(plan, component, ordinal=ordinal) != saved:
+        raise RuntimeError("CNPG fence retirement records changed during observation")
+    return digest
+
+
+def _observe_retired_inventory(
+    request: CNPGFenceRequest, inventory: tuple[tuple[CNPGFenceCreateIntent, CNPGFenceObjectReceipt], ...],
+    runner: CNPGFenceAcquisitionRunner,
+) -> None:
+    def inspect() -> None:
+        if tuple(receipt.ordinal for _, receipt in inventory) != tuple(range(len(request.documents()))):
+            raise RuntimeError("CNPG fence retired inventory is incomplete")
+        for pending, receipt in inventory:
+            document = pending.document(request)
+            observed = _read(runner, document)
+            if document["kind"] == "ValidatingAdmissionPolicy":
+                if prepare_cnpg_fence_retirement_patch(request=request, pending=pending,
+                        receipt=receipt, observed=observed) is not None:
+                    raise RuntimeError("CNPG fence policy is not at its exact retired endpoint")
+            else:
+                _inspect(request, pending, observed, expected_uid=receipt.uid)
+    inspect()
+    for _, argv, payload in cnpg_input_fence_probe_commands(
+        intent_digest=request.intent_digest, target_pooler_names=request.target_pooler_names,
+    ):
+        if payload is None:
+            runner.capture_stdout(argv, env=runner.environment, timeout_seconds=30)
+        else:
+            runner.capture_stdout_with_input(argv, env=runner.environment, input_payload=payload, timeout_seconds=30)
+    inspect()
 
 
 def retire_cnpg_input_fence(
@@ -66,19 +113,17 @@ def retire_cnpg_input_fence(
             raise RuntimeError("CNPG fence retirement lacks original create and object receipts")
         records.append((document, pending, receipt))
 
-    def inspect_all(*, require_retired: bool) -> None:
-        # Validate the entire inventory before the first patch and after the last.
+    def inspect_all() -> None:
+        # Validate the entire inventory before the first patch.
         for document, pending, receipt in records:
             payload = _read(runner, document)
             if document["kind"] == "ValidatingAdmissionPolicy":
-                patch = prepare_cnpg_fence_retirement_patch(request=request, pending=pending,
-                                                           receipt=receipt, observed=payload)
-                if require_retired and patch is not None:
-                    raise RuntimeError("CNPG fence policy is not at its exact retired endpoint")
+                prepare_cnpg_fence_retirement_patch(request=request, pending=pending,
+                                                    receipt=receipt, observed=payload)
             else:
                 _inspect(request, pending, payload, expected_uid=receipt.uid)
 
-    inspect_all(require_retired=False)
+    inspect_all()
     journal.begin_application_cnpg_fence_retirement(plan, guard=guard)
     for document, pending, receipt in records:
         if document["kind"] != "ValidatingAdmissionPolicy":
@@ -99,18 +144,7 @@ def retire_cnpg_input_fence(
                                               receipt=receipt, observed=_read(runner, document)) is not None:
             raise RuntimeError("CNPG fence retirement patch did not converge")
         _live_guard(plan, journal, runner, guard)
-    inspect_all(require_retired=True)
-    # All five policy scopes (and each saved Pooler scale) must actually accept
-    # their fixed server dry run. An old admission-cache denial is retryable only
-    # through the original journal; a patch response alone is insufficient.
-    for _, argv, payload in cnpg_input_fence_probe_commands(
-        intent_digest=request.intent_digest, target_pooler_names=request.target_pooler_names,
-    ):
-        if payload is None:
-            runner.capture_stdout(argv, env=runner.environment, timeout_seconds=30)
-        else:
-            runner.capture_stdout_with_input(argv, env=runner.environment, input_payload=payload, timeout_seconds=30)
-    inspect_all(require_retired=True)
+    _observe_retired_inventory(request, tuple((pending, receipt) for _, pending, receipt in records), runner)
     _live_guard(plan, journal, runner, guard)
     return tuple(receipt for _, _, receipt in records)
 
