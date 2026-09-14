@@ -31,6 +31,16 @@ loom_oldlab_validate_authority_parent() {
   fi
 }
 
+loom_oldlab_validate_state_root() {
+  if [ -e "$STATE_ROOT" ] || [ -L "$STATE_ROOT" ]; then
+    if [ -L "$STATE_ROOT" ] \
+      || [ "$(stat -c '%U:%G:%a:%F' "$STATE_ROOT")" != "$STATE_OWNER:$STATE_GROUP:755:directory" ]; then
+      echo "error: OLDLAB authority snapshot directory is unsafe" >&2
+      exit 1
+    fi
+  fi
+}
+
 loom_oldlab_harden_authority() {
   local snapshot="$STATE_ROOT/slurm.conf.before-root-authority"
   local temporary=""
@@ -51,13 +61,8 @@ loom_oldlab_harden_authority() {
     exit 1
   fi
   identity="$(stat -c '%d:%i:%u:%g:%a:%h:%s:%y:%z' "$CONFIG")"
-  if [ -e "$STATE_ROOT" ] || [ -L "$STATE_ROOT" ]; then
-    if [ -L "$STATE_ROOT" ] \
-      || [ "$(stat -c '%U:%G:%a:%F' "$STATE_ROOT")" != "$STATE_OWNER:$STATE_GROUP:755:directory" ]; then
-      echo "error: OLDLAB authority snapshot directory is unsafe" >&2
-      exit 1
-    fi
-  else
+  loom_oldlab_validate_state_root
+  if [ ! -e "$STATE_ROOT" ]; then
     install -d -o "$STATE_OWNER" -g "$STATE_GROUP" -m 0755 "$STATE_ROOT"
   fi
   if [ -e "$snapshot" ] || [ -L "$snapshot" ]; then
@@ -167,6 +172,7 @@ loom_oldlab_converge_partition() {
   local input_mode=0644
   local metadata
   loom_oldlab_validate_authority_parent
+  loom_oldlab_validate_state_root
   if ! scontrol show config | grep -E \
     "^ClusterName[[:space:]]*=[[:space:]]*$CLUSTER$" >/dev/null; then
     echo "error: local Slurm cluster does not match OLDLAB" >&2
