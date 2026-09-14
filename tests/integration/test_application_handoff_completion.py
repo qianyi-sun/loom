@@ -73,6 +73,32 @@ class LostAcknowledgementError(RuntimeError):
     pass
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("autovacuum", [False, True])
+async def test_handoff_retries_rolled_back_quiescence_only_for_autovacuum(transfer_database, monkeypatch, autovacuum):
+    from loom import application_handoff_completion as module
+
+    transfer = module.transfer_application_ownership
+    calls = []
+    def interrupted(connection, **kwargs):
+        transfer(connection, **kwargs)
+        calls.append(1)
+        if len(calls) == 1:
+            connection.execute("DO $$ BEGIN RAISE EXCEPTION 'application trigger handoff requires quiescent legacy authority' "
+                "USING ERRCODE='55000'; END $$")
+    monkeypatch.setattr(module, "transfer_application_ownership", interrupted)
+    monkeypatch.setattr(module, "_autovacuum_active", lambda *args, **kwargs: autovacuum, raising=False)
+    with _closed(transfer_database) as (peer, maintenance, _guard_peer, arguments):
+        if autovacuum:
+            module.complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
+            assert len(calls) == 2
+        else:
+            with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
+                module.complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
+            assert len(calls) == 1
+            assert peer.execute("SELECT datdba FROM pg_database WHERE datname=current_database()").fetchone() == (arguments["target"].owner_oid,)
+
+
 class InterruptCommit:
     """Lose the client acknowledgement of exactly one actual committed phase."""
 
