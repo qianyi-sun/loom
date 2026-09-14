@@ -84,7 +84,7 @@ def test_installed_handoff_requires_exact_epoch_claim_identity(tmp_path, monkeyp
     guard = _guard(plan)
     monkeypatch.setattr(module, 'MutationGuardManager', lambda **kwargs: SimpleNamespace(assert_ready=lambda *args, **kw: guard))
     monkeypatch.setattr(module, '_read_pending_retention', lambda *args, **kwargs: None)
-    monkeypatch.setattr(module, 'KubernetesProtectedEpochComponent', lambda **kwargs: SimpleNamespace(classify=lambda _: 
+    monkeypatch.setattr(module, 'KubernetesProtectedEpochComponent', lambda **kwargs: SimpleNamespace(classify=lambda _:
         ComponentObservation(ComponentState.DRIFTED, 'f' * 64, plan.starting_mutation_epoch + 1)))
     factory = module.InstalledApplicationHandoffFactory(config=config, service_uid=os.getuid(), successor_source=lambda *args: None,
         runner=SimpleNamespace(environment={'KUBECONFIG': '/fixture'}))
