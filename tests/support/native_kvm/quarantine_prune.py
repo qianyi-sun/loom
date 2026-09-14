@@ -107,7 +107,7 @@ def journal_main(interruption):
             raise InterruptedError("simulated process death before progress publication")
         return original_save(self, phase)
 
-    if interruption != "complete":
+    if interruption not in {"complete", "retired"}:
         journal_module.NativeQuarantineJournal._save = interrupted_save
         try:
             with journal_module.NativeQuarantineJournal(ledger, key=key, source=attempt, identity=identity) as journal:
@@ -122,6 +122,10 @@ def journal_main(interruption):
         with journal_module.NativeQuarantineJournal(ledger, key=key, source=attempt, identity=identity) as journal:
             assert journal.reconcile() == "completed"
         assert not attempt.exists() and not (ledger / key / "attempt").exists()
+    if interruption == "retired":
+        scratch.rmdir()
+        with journal_module.NativeQuarantineJournal(ledger, key=key, source=attempt, identity=identity) as journal:
+            assert journal.reconcile() == "completed"
     print("quarantine-prune-journal-" + interruption + "-verified", flush=True)
 
 

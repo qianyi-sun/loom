@@ -198,7 +198,7 @@ def test_installed_release_requires_original_uid_and_real_root_ownership(mode):
 
 
 @pytest.mark.parametrize("mode", ["clean", "mounted", "foreign", "unprivileged", "journal-complete",
-    "journal-quarantining", "journal-quarantined", "journal-pruned", "journal-removing", "journal-completed"])
+    "journal-quarantining", "journal-quarantined", "journal-pruned", "journal-removing", "journal-completed", "journal-retired"])
 def test_quarantine_pruner_preserves_real_ownership_and_mount_fences(mode):
     if platform.machine() != "x86_64":
         pytest.skip("quarantine fixture currently has AMD64-only dependencies")
