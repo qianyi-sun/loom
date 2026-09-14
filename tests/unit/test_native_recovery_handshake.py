@@ -39,7 +39,7 @@ def recovery_spec(tmp_path):
     return runtime, spec, path, hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-@pytest.mark.parametrize("boundary", ["exact", "publication-fails", "changed-receipt", "directory", "mapping"])
+@pytest.mark.parametrize("boundary", ["exact", "publication-fails", "changed-receipt", "directory", "mapping", "directory-after", "cancel"])
 async def test_mapped_handshake_waits_for_commit_without_credentials(tmp_path, monkeypatch, boundary):
     module = import_module("loom_capacity_executor.native_recovery_handshake")
     runtime, spec, path, digest = recovery_spec(tmp_path)
@@ -77,13 +77,25 @@ async def test_mapped_handshake_waits_for_commit_without_credentials(tmp_path, m
             preparation=prepared, runtime_spec_sha256=digest, publish=publish))
         await asyncio.wait_for(reached.wait(), 3)
         assert not mapping_task.done(), "mapped runtime advanced before commit acknowledgment"
+        if boundary == "directory-after":
+            from pathlib import Path
+
+            attempt = Path(prepared.locator.directory)
+            attempt.rename(attempt.with_name(attempt.name + "-retained"))
+            attempt.mkdir(mode=0o700)
+        if boundary == "cancel":
+            publication_task.cancel()
         release.set()
-        if boundary == "exact":
+        if boundary in {"exact", "directory-after"}:
             result = await asyncio.wait_for(publication_task, 3)
-            assert await asyncio.wait_for(mapping_task, 3) == result == canonical_digest(requests[0])
+            if boundary == "directory-after":
+                with pytest.raises(ValueError, match="changed during publication"):
+                    await asyncio.wait_for(mapping_task, 3)
+            else:
+                assert await asyncio.wait_for(mapping_task, 3) == result == canonical_digest(requests[0])
             assert isinstance(requests[0], NativeRecoveryPublicationV1)
         else:
-            with pytest.raises((ValueError, OSError)):
+            with pytest.raises((ValueError, OSError, asyncio.CancelledError)):
                 await asyncio.wait_for(publication_task, 3)
             outer.close()
             with pytest.raises((ValueError, RuntimeError)):
@@ -92,6 +104,45 @@ async def test_mapped_handshake_waits_for_commit_without_credentials(tmp_path, m
         release.set()
         outer.close()
         mapped.close()
+
+
+@pytest.mark.parametrize("phase", ["preparation", "finalization"])
+async def test_recovery_write_ambiguity_never_reopens_scoped_attempt(tmp_path, monkeypatch, phase):
+    from loom_capacity_executor.native_allocated_io import scoped_native_allocated_io
+    from loom_capacity_executor.native_build_source import NativeStagedBuildSource
+
+    module = import_module("loom_capacity_executor.native_allocated_io")
+    _runtime, spec, _path, digest = recovery_spec(tmp_path)
+    calls = []
+
+    class Client:
+        async def publish_recovery(self, request, **kwargs):
+            calls.append("preparation")
+            if phase == "preparation":
+                raise OSError("lost reply")
+            return NativeRecoveryReceiptV1(request=request, request_digest=canonical_digest(request))
+
+    async def finalize(*args, **kwargs):
+        calls.append("finalization")
+        raise OSError("lost reply")
+
+    monkeypatch.setattr(module, "commit_mapped_recovery", finalize)
+    async with scoped_native_allocated_io(claim=spec.claim, source=NativeStagedBuildSource(spec.context, tmp_path / "source"),
+        client=Client(), worker_credential="w" * 43) as owner:
+        if phase == "finalization":
+            await owner.prepare_recovery(spec.recovery_preparation)
+
+        async def invoke():
+            if phase == "preparation":
+                await owner.prepare_recovery(spec.recovery_preparation)
+            else:
+                await owner.finalize_recovery(object(), preparation=spec.recovery_preparation, runtime_spec_sha256=digest)
+
+        with pytest.raises(OSError):
+            await invoke()
+        with pytest.raises(ValueError):
+            await invoke()
+        assert calls.count(phase) == 1
 
 
 @pytest.mark.parametrize("failed", [False, True])
