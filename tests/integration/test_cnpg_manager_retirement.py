@@ -374,7 +374,8 @@ def test_cnpg_exec_reconciles_credentials_without_reopening_application_login(cn
 
 
 @pytest.mark.timeout(900)
-def test_replaced_cnpg_reaches_client_retirement_with_original_readonly_guard(cnpg_probe):
+@pytest.mark.parametrize("cnpg_probe", ["staging-profile"], indirect=True)
+def test_replaced_cnpg_reaches_client_retirement_with_original_readonly_guard(cnpg_probe, tmp_path):
     """Real manager pools drain between safe probes; no permanent SQL silence required."""
     from loom.application_database_admission import (
         ApplicationDatabaseAdmissionTarget,
@@ -382,8 +383,18 @@ def test_replaced_cnpg_reaches_client_retirement_with_original_readonly_guard(cn
     )
     from loom.application_handoff_completion import _require_retired_client_work
     from loom.staging_mutation_coordination import rollout_guard_application_name
+    from loom_cli.rollout.operator.protected_apply_executor import (
+        SubprocessProtectedApplyCommandRunner,
+    )
+    from loom_cli.rollout.operator.protected_cnpg_runtime_admission import (
+        observe_cnpg_primary_runtime,
+        reconcile_cnpg_primary_runtime,
+    )
     from loom_cli.rollout.operator.protected_peer_database_connection import PeerDatabaseConnection
     from tests.integration.test_application_database_admission import _handoff
+    from tests.loom_cli.rollout.operator.test_application_admission_recovery import _component
+    from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
+    from tests.loom_cli.rollout.operator.test_protected_apply_journal import _journal
 
     argv, kube, pod, expected_manager = cnpg_probe
 
@@ -393,6 +404,14 @@ def test_replaced_cnpg_reaches_client_retirement_with_original_readonly_guard(cn
                  "psql", "-XAtq", "-v", "ON_ERROR_STOP=0", "-U", "postgres", "-d", database),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
         ), query_timeout_seconds=10)
+
+    class Runner(SubprocessProtectedApplyCommandRunner):
+        def capture_stdout(self, args, *, env, timeout_seconds):
+            return subprocess.run(argv(*args[1:]), env=env, check=True, capture_output=True,
+                                  timeout=timeout_seconds).stdout
+    plan, journal = _plan(tmp_path), _journal(tmp_path)
+    cluster = json.loads(kube("get", "cluster/loom-postgres", "-o", "json"))
+    runtime = observe_cnpg_primary_runtime(Runner(), cluster_uid=cluster["metadata"]["uid"], pod_name=pod)
 
     with peer("loom") as handoff, peer("postgres") as maintenance:
         with handoff.transaction():
@@ -416,7 +435,23 @@ def test_replaced_cnpg_reaches_client_retirement_with_original_readonly_guard(cn
                 handoff.execute("ALTER ROLE loom NOLOGIN PASSWORD NULL")
             with maintenance.transaction():
                 maintenance.execute("ALTER DATABASE loom ALLOW_CONNECTIONS false")
-            _replace_manager(argv, kube, pod, expected_manager=expected_manager)
+            def replace_and_lose_reply(_):
+                journal.record_application_cnpg_runtime(plan, runtime=runtime)
+                journal.record_application_admission_recovery(target=target, handoff_backend=backend, coordination_guard=saved)
+                journal.prepare_application_manager_replacement(identity=runtime.manager)
+                assert journal.begin_application_manager_replacement()
+                _replace_manager(argv, kube, pod, expected_manager=expected_manager)
+                raise RuntimeError("lost caller after actual exec")
+            with pytest.raises(RuntimeError, match="lost caller"):
+                journal.execute(plan, [_component(replace_and_lose_reply)])
+            def reconcile(_):
+                current = reconcile_cnpg_primary_runtime(plan, journal=journal, runner=Runner())
+                assert current.manager.executable_inode != runtime.manager.executable_inode
+                assert journal.read_application_manager_replacement()[2].identity == current.manager
+                assert journal.read_application_cnpg_runtime(plan) == runtime
+                raise RuntimeError("same original recovery verified")
+            with pytest.raises(RuntimeError, match="same original recovery"):
+                journal.execute(plan, [_component(reconcile)])
             def retired():
                 try:
                     _require_retired_client_work(maintenance, target=target, handoff_backend=backend,
