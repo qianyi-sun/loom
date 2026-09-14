@@ -197,6 +197,29 @@ def test_installed_release_requires_original_uid_and_real_root_ownership(mode):
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
 
 
+@pytest.mark.parametrize("mode", ["clean", "mounted", "foreign", "unprivileged"])
+def test_quarantine_pruner_preserves_real_ownership_and_mount_fences(mode):
+    if platform.machine() != "x86_64":
+        pytest.skip("quarantine fixture currently has AMD64-only dependencies")
+    name = "loom-quarantine-prune-" + uuid4().hex
+    try:
+        result = checked("docker", "run", "--rm", "--init", "--name", name,
+            "--network=none", "--cpus=1", "--memory=256m", "--pids-limit=64", "--user=0:0",
+            "--cap-drop=ALL", "--cap-add=DAC_OVERRIDE", "--cap-add=CHOWN", "--cap-add=FOWNER",
+            "--cap-add=SETUID", "--cap-add=SETGID", "--cap-add=SYS_ADMIN",
+            "--security-opt=apparmor=unconfined", "--security-opt=seccomp=unconfined", "--read-only",
+            "--tmpfs=/tmp:rw,nodev,size=16m,mode=1777", "--env=PYTHONPATH=/trusted-src",
+            "--mount", f"type=bind,src={ROOT / 'tests/support/native_kvm'},dst=/test-support,readonly",
+            "--mount", f"type=bind,src={ROOT / 'src'},dst=/trusted-src,readonly",
+            EXECUTOR, "python3", "/test-support/quarantine_prune.py", mode,
+            capture_output=True, text=True)
+        assert f"quarantine-prune-{mode}-verified" in result.stdout
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(f"quarantine pruning fixture failed:\n{exc.stdout}\n{exc.stderr}")
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
+
+
 def test_unprivileged_rootlesskit_launches_fixed_native_kvm_runtime(tmp_path):
     """Rootless outer runtime prerequisite, not complete native build acceptance.
 

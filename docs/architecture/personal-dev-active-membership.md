@@ -2320,7 +2320,24 @@ exact read before constructing a node operation. Neither procedure is exposed
 through pool-worker HTTP, and neither returned models nor terminal/release
 receipts alone authorize deletion. The fixed authenticated node sender/helper,
 local quiescence/exclusion, protected cleanup journal, quarantine and interrupted
-pruning still require implementation and installed acceptance. Unknown early
+pruning still require composition and installed acceptance. The management sender
+now owns the exact database read and selects a unique installation/profile/host
+from protected target inventory. Its dedicated no-command SSH transport disables
+ambient config, forwarding, interactive authentication, agent and implicit
+certificate use. Sealed, verified private-key/host-key snapshots remain available
+until SSH settles, including cancellation; rotation cannot substitute new bytes
+after validation. Unknown/lost replies are not cleanup success and writes are not
+automatically replayed. This sender is not yet installed or exposed to workers.
+
+The node-side pruning primitive uses host-root, FD-relative metadata-only
+traversal inside an already fenced, journaled quarantine. Retained UID/GID ranges
+are an ownership allowlist; every entry must remain on the same mount. It never
+reads file content, follows links, executes feature files or changes ownership or
+modes, and leaves the locator and top directory for journaled finalization.
+This avoids creating another mapped execution lifecycle for cleanup. Root/helper
+authentication, exact-inode quarantine, stable no-writer exclusion and the durable
+completion journal remain mandatory composition prerequisites, not assertions
+that this primitive or a terminal receipt can supply. Unknown early
 orphans without committed preparation remain retained, not adopted from their
 adjacent local locator. This history extension does not enable intake or add
 another capacity ledger.
