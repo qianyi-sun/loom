@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import stat
@@ -28,20 +29,15 @@ TRIVY_SCANNER_NAME = "Trivy"
 TRIVY_VERSION = "v0.74.0"
 _PERL_PURLS = (
     "pkg:deb/debian/libperl5.36",
-    "pkg:deb/debian/libperl5.40",
     "pkg:deb/debian/perl",
     "pkg:deb/debian/perl-base",
     "pkg:deb/debian/perl-modules-5.36",
-    "pkg:deb/debian/perl-modules-5.40",
 )
 _PERL_EXCEPTION_STATEMENT = (
-    "No fixed Debian package was available on 2026-08-12; these Perl packages are "
-    "required by Debian base runtimes, the agent toolchain, and the staging-compatible "
-    "PostgreSQL 17.4 rehearsal image."
+    "Reviewed 2026-09-14: no fixed Bookworm Perl package; temporary risk acceptance for pinned PostgreSQL 17.4 and Python pipeline compatibility fixtures. Trixie runtimes must use fixed Perl."
 )
 _POSTGRES_EXCEPTION_STATEMENT = (
-    "No fixed Debian package was available on 2026-08-12; this package is a required "
-    "dependency of the staging-compatible PostgreSQL 17.4 rehearsal image."
+    "Reviewed 2026-09-14: no fixed Bookworm package; temporary risk acceptance for pinned PostgreSQL 17.4 and Python pipeline compatibility dependencies."
 )
 TRIVY_CONFIG_BYTES = (
     b"exit-code: 1\n"
@@ -62,50 +58,47 @@ TRIVY_EXCEPTIONS = (
     TrivyException(
         "CVE-2023-45853",
         ("pkg:deb/debian/zlib1g",),
-        date(2026, 9, 12),
+        date(2026, 10, 14),
         (
-            "Debian marked this finding will-not-fix on 2026-08-12; zlib1g is a "
-            "required dependency of the staging-compatible PostgreSQL 17.4 rehearsal "
-            "image."
+            "Reviewed 2026-09-14: Debian Bookworm does not build the affected MiniZip code in zlib1g; temporary exception for pinned PostgreSQL 17.4 and Python pipeline compatibility fixtures."
         ),
     ),
     TrivyException(
         "CVE-2025-7458",
         ("pkg:deb/debian/libsqlite3-0",),
-        date(2026, 9, 12),
+        date(2026, 10, 14),
         _POSTGRES_EXCEPTION_STATEMENT,
     ),
     TrivyException(
         "CVE-2026-13221",
         _PERL_PURLS,
-        date(2026, 9, 12),
+        date(2026, 10, 14),
         _PERL_EXCEPTION_STATEMENT,
     ),
     TrivyException(
         "CVE-2026-42496",
         _PERL_PURLS,
-        date(2026, 9, 12),
+        date(2026, 10, 14),
         _PERL_EXCEPTION_STATEMENT,
     ),
     TrivyException(
         "CVE-2026-43185",
         ("pkg:deb/debian/linux-libc-dev",),
-        date(2026, 9, 12),
+        date(2026, 10, 14),
         (
-            "No fixed Debian package was available on 2026-08-12; linux-libc-dev is "
-            "required by the agent sandbox compiler toolchain."
+            "Reviewed 2026-09-14: stable Debian has no fixed source package; agent compiler needs linux-libc-dev headers, not the affected ksmbd kernel runtime. Temporary exception does not attest host kernel safety."
         ),
     ),
     TrivyException(
         "CVE-2026-6653",
         ("pkg:deb/debian/libxml2",),
-        date(2026, 9, 12),
+        date(2026, 10, 14),
         _POSTGRES_EXCEPTION_STATEMENT,
     ),
     TrivyException(
         "CVE-2026-8376",
         _PERL_PURLS,
-        date(2026, 9, 12),
+        date(2026, 10, 14),
         _PERL_EXCEPTION_STATEMENT,
     ),
 )
@@ -120,7 +113,7 @@ def _render_ignore_bytes(exceptions: tuple[TrivyException, ...]) -> bytes:
                 "    purls:",
                 *(f'      - "{purl}"' for purl in exception.purls),
                 f"    expired_at: {exception.expires_at.isoformat()}",
-                f"    statement: {exception.statement}",
+                f"    statement: {json.dumps(exception.statement, ensure_ascii=True)}",
             )
         )
     return ("\n".join(rendered_lines) + "\n").encode("ascii")
@@ -128,7 +121,7 @@ def _render_ignore_bytes(exceptions: tuple[TrivyException, ...]) -> bytes:
 
 TRIVY_IGNORE_BYTES = _render_ignore_bytes(TRIVY_EXCEPTIONS)
 TRIVY_CONFIG_SHA256 = "bd8896276b5d8d00d8bb3c3d7a51d359b4931ea2811c21cb8ed692766a7eb8cf"
-TRIVY_IGNORE_SHA256 = "11f957c7a63686da04c9f38e39aa2ca1eeef743b36c75810054afc84571ed2f7"
+TRIVY_IGNORE_SHA256 = "2fe828560a3df13427bff6634f08509ec6be55ca75de9fb7e3fd095805a28c12"
 
 
 class TrivyPolicyError(RuntimeError):

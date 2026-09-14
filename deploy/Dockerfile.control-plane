@@ -1,4 +1,7 @@
 FROM python:3.11-slim
+RUN apt-get update -qq && \
+    apt-get install -y --only-upgrade --no-install-recommends perl-base=5.40.1-6+deb13u1 && \
+    rm -rf /var/lib/apt/lists/*
 # Retry transient package-index timeouts during image builds.
 ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
 WORKDIR /app

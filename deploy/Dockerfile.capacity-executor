@@ -110,6 +110,9 @@ RUN install -d -m 0555 /opt/loom-capacity-executor-release/payload && \
       --architecture "$TARGETARCH"
 
 FROM python:3.12-slim
+RUN apt-get update -qq && \
+    apt-get install -y --only-upgrade --no-install-recommends perl-base=5.40.1-6+deb13u1 && \
+    rm -rf /var/lib/apt/lists/*
 
 ARG LOOM_BUILD_SHA=unknown
 LABEL org.opencontainers.image.revision="${LOOM_BUILD_SHA}"

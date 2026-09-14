@@ -33,19 +33,13 @@ _PERL_CVES = (
     "CVE-2026-42496",
     "CVE-2026-8376",
 )
-_AGENT_PERL_PACKAGES = (
-    "libperl5.40",
-    "perl",
-    "perl-base",
-    "perl-modules-5.40",
-)
 _POSTGRES_PERL_PACKAGES = (
     "libperl5.36",
     "perl",
     "perl-base",
     "perl-modules-5.36",
 )
-_PERL_BASE_COMPONENTS = (
+_REMEDIATED_COMPONENTS = (
     "capacity-executor",
     "capacity-manager",
     "control-plane",
@@ -71,12 +65,7 @@ _PERL_BASE_FINDINGS = frozenset(
     (vulnerability_id, "pkg:deb/debian/perl-base") for vulnerability_id in _PERL_CVES
 )
 _EXPECTED_FINDINGS: dict[str, frozenset[tuple[str, str]]] = {
-    "agent-sandbox": frozenset(
-        (vulnerability_id, f"pkg:deb/debian/{package}")
-        for vulnerability_id in _PERL_CVES
-        for package in _AGENT_PERL_PACKAGES
-    )
-    | {("CVE-2026-43185", "pkg:deb/debian/linux-libc-dev")},
+    "agent-sandbox": frozenset({("CVE-2026-43185", "pkg:deb/debian/linux-libc-dev")}),
     "rehearsal-postgres": frozenset(
         (vulnerability_id, f"pkg:deb/debian/{package}")
         for vulnerability_id in _PERL_CVES
@@ -92,7 +81,7 @@ _EXPECTED_FINDINGS: dict[str, frozenset[tuple[str, str]]] = {
         ("CVE-2023-45853", "pkg:deb/debian/zlib1g"),
         ("CVE-2025-7458", "pkg:deb/debian/libsqlite3-0"),
     },
-    **{component: _PERL_BASE_FINDINGS for component in _PERL_BASE_COMPONENTS},
+    **{component: frozenset() for component in _REMEDIATED_COMPONENTS},
     **{component: frozenset() for component in _EMPTY_COMPONENTS},
 }
 _PURL = re.compile(
