@@ -574,6 +574,18 @@ endpoint and the enclosing administrator/storage writer exclusion remain
 required; this observer does not provision access, create a privileged inspection
 workload or establish that exclusion.
 
+The root-only node installer `scripts/ops/staging_cnpg_observer_install.py`
+accepts the exact protected-release observer source/digest and the dedicated
+controller public key. It refuses foreign accounts/files, journals its selected
+UID before account creation, and preserves pending installation identity across
+lost account/publication acknowledgements. The dedicated account has a root-owned
+home and a single restricted forced-command key; its sudo rule permits only the
+fixed observer wrapper without arguments. That wrapper runs an immutable,
+content-addressed source file with isolated Python. Every successful replay
+rechecks installed bytes and permissions. Source candidates and transition
+records remain available for rollback. This installer does not provision the
+controller key/host trust or grant authority to deploy unmerged code.
+
 The read-only restoration observer combines the exact replacement runtime,
 original credential/configuration bindings, PostgreSQL's restored login/schema
 state and the complete saved workload inventory at its original ready endpoints.
