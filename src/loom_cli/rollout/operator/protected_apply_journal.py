@@ -20,7 +20,7 @@ import re
 import stat
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -1760,6 +1760,83 @@ class ProtectedApplyJournal:
         if self.read_application_admission_recovery() != record:
             raise ProtectedApplyJournalError("application admission recovery readback changed")
         return record
+
+    def recover_pending_application_handoff(
+        self, plan: FinalGatePlan, components: Sequence[ProtectedApplyComponent], *, guard: MutationGuardEvidence,
+    ) -> ComponentTerminal | None:
+        """Resume only the saved handoff, before ordinary database preflight reads.
+
+        The installed caller must first verify the original supervised guard's
+        liveness, fresh +1 epoch and enclosing writer/process authority. This
+        entrypoint supplies journal ordering only. It never creates a new intent,
+        moves the handoff to ordinal zero, or runs other component callbacks.
+        Normal preflight and the full component chain must still run afterward.
+        """
+        from .protected_application_guard_retention import retained_application_guard_for_resume
+
+        if self._active_apply is not None:
+            raise ProtectedApplyJournalError("application early recovery cannot nest active apply")
+        if plan.request_id != self.request_id or plan.attempt_number != self.attempt_number:
+            raise ProtectedApplyJournalError("application early recovery plan changed")
+
+        def require_retention() -> bool:
+            original = retained_application_guard_for_resume(
+                self.attempt_root.parents[3], request_id=self.request_id, service_uid=self.service_uid,
+                recovery_attempt=self.attempt_number, candidate_sha=plan.candidate_sha,
+                candidate_tree=plan.candidate_tree, attestation_digest=plan.attestation_digest,
+                starting_mutation_epoch=plan.starting_mutation_epoch,
+            )
+            if original is None:
+                return False
+            if original != guard:
+                raise ProtectedApplyJournalError("application early recovery original guard changed")
+            return True
+
+        if not require_retention():
+            return None
+        if (not components or len(components) > 32
+                or len({component.component_id for component in components}) != len(components)):
+            raise ProtectedApplyJournalError("application early recovery chain is invalid")
+        selected = [(ordinal, component) for ordinal, component in enumerate(components)
+                    if component.component_id == "application-ownership-handoff"]
+        epochs = [ordinal for ordinal, component in enumerate(components)
+                  if component.component_id == "mutation-epoch-claim"]
+        if (len(selected) != 1 or len(epochs) != 1 or epochs[0] >= selected[0][0]
+                or selected[0][1].preapply_group is not None
+                or selected[0][1].terminal_recovery_authority is not None):
+            raise ProtectedApplyJournalError("application early recovery original ordering changed")
+        ordinal, component = selected[0]
+        # Deliberately no _ensure, O_CREAT, directory creation or new lock name.
+        lock_fd = os.open(self.lock_path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            _require_regular(lock_fd, uid=self.service_uid)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            if not require_retention():
+                return None
+            self._validate_chain_layout(components)
+            for index, item in enumerate(components):
+                root = self.root / f"{index:02d}-{item.component_id}"
+                try:
+                    _require_directory(root, uid=self.service_uid)
+                except FileNotFoundError:
+                    continue
+                if ComponentIntent.from_dict(self._read(root / "intent.json")) != ComponentIntent.build(plan, item, index):
+                    raise ProtectedApplyJournalError("application early recovery chain intent changed")
+            if self.read_application_recovery_view(plan, component, ordinal=ordinal) is None:
+                raise ProtectedApplyJournalError("application early recovery original intent disappeared")
+
+            def classify(bound: FinalGatePlan) -> ComponentObservation:
+                observed = component.classify(bound)
+                if observed.observed_epoch != plan.starting_mutation_epoch + 1:
+                    raise ProtectedApplyJournalError("application early recovery observed epoch changed")
+                return observed
+
+            return self._execute_one(plan, replace(component, classify=classify), ordinal)
+        finally:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
 
     def execute(
         self,

@@ -683,3 +683,31 @@ def test_early_handoff_recovery_without_retention_never_creates_an_operation(tmp
     assert journal.recover_pending_application_handoff(plan, [_component(lambda _: pytest.fail("new operation"))],
                                                       guard=_guard(plan)) is None
     assert not (tmp_path / "absent").exists()
+
+
+@pytest.mark.parametrize("failure", ["apply", "epoch", "not-exact"])
+def test_early_handoff_failure_preserves_retention_and_original_retry(tmp_path, failure):
+    from tests.loom_cli.rollout.operator.test_protected_apply_journal import _Backend
+
+    plan, journal, guard = _pending_resume(tmp_path)
+    applied = []
+    def apply(_):
+        journal.require_application_guard_retained(plan, guard=guard)
+        applied.append(True)
+        if failure == "apply":
+            raise RuntimeError("injected recovery interruption")
+    def classify(_):
+        return ComponentObservation(
+            ComponentState.EXACT if applied and failure != "not-exact" else ComponentState.READY,
+            "3" * 64, plan.starting_mutation_epoch + (0 if applied and failure == "epoch" else 1),
+        )
+    component = replace(_component(apply), classify=classify)
+    epoch = _Backend().component("mutation-epoch-claim", 0)
+    with pytest.raises(RuntimeError):
+        journal.recover_pending_application_handoff(plan, [epoch, component], guard=guard)
+    assert applied == [True]
+    assert not list(journal.root.glob("*-application-ownership-handoff/terminal.json"))
+    assert application_guard_is_retained(tmp_path / "state", request_id=plan.request_id,
+                                        service_uid=os.getuid(), guard=guard)
+    exact = replace(component, classify=lambda _: ComponentObservation(ComponentState.EXACT, "3" * 64, 8))
+    assert journal.recover_pending_application_handoff(plan, [epoch, exact], guard=guard).observed_epoch == 8

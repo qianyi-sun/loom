@@ -819,6 +819,16 @@ semantics. The installed composition still needs admission recovery before any
 fresh database connection when the application database is closed; guard selection
 alone does not provide that recovery or complete the ownership handoff.
 
+The journal has a separate pending-handoff recovery entrypoint that accepts the
+original complete chain and executes only its existing handoff ordinal. It
+requires the acknowledged original guard, stored plan, advanced epoch terminal,
+unchanged component intents and existing execution lock. It never creates a
+missing operation or calls surrounding component classifiers while admission is
+closed. Failure, an unexpected observed epoch or incomplete convergence preserves
+retention without a terminal. Installed preflight still needs the complete
+handoff component and live authority checks before using this entrypoint; the
+journal method itself cannot restore database access or authorize a cutover.
+
 The manager and systemd stop transport both refuse pending retention, including
 cleanup of a failed launch. Orphan reconciliation retains the lifecycle CronJob
 freeze even if the guard has died. Lost locks, deadline expiry and missing or
