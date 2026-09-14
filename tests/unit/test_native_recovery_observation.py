@@ -8,7 +8,8 @@ from uuid import uuid4
 
 import pytest
 
-from loom_capacity_manager.contracts import canonical_digest
+from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
+from tests.unit.test_native_installed_release import release as release
 from tests.unit.test_native_recovery_contracts import observation
 
 
@@ -169,7 +170,7 @@ def test_kernel_reads_are_bounded_nofollow_and_nonblocking(tmp_path, fault):
 
 
 @pytest.mark.parametrize("changed", [False, True])
-def test_cgroup_namespace_must_match_host_proc_init(monkeypatch, changed):
+def test_cgroup_namespace_must_match_protected_installer_identity(monkeypatch, changed):
     from types import SimpleNamespace
 
     module = import_module("loom_capacity_executor.native_recovery_observation")
@@ -203,3 +204,35 @@ def test_capture_rejects_stale_or_foreign_installer_identity(host, field):
         kwargs["node_configuration_sha256"] = canonical_digest(kwargs["host_identity"])
     with pytest.raises(ValueError):
         module.capture_native_recovery_preparation(locator, **kwargs)
+
+
+@pytest.mark.parametrize("fault", ["exact", "digest", "writable", "symlink", "noncanonical", "extra"])
+def test_host_identity_reader_requires_exact_protected_installer_file(release, monkeypatch, fault):
+    import hashlib
+    import json
+
+    module = import_module("loom_capacity_executor.native_recovery_observation")
+    _, root, _ = release
+    monkeypatch.setattr(module, "_require_original_identity", lambda: None)
+    identity = module.NativeRecoveryHostIdentityV1(node_id="node-a", boot_id=uuid4(),
+        original_uid=1000, original_gid=1000, cgroup_namespace_device=4, cgroup_namespace_inode=100)
+    wire = canonical_bytes(identity)
+    if fault == "noncanonical":
+        wire += b"\n"
+    elif fault == "extra":
+        document = json.loads(wire)
+        document["approved"] = True
+        wire = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+    path = root / "node-identity.json"
+    path.write_bytes(wire)
+    path.chmod(0o644 if fault == "writable" else 0o444)
+    if fault == "symlink":
+        original = path.with_name("original.json")
+        path.rename(original)
+        path.symlink_to(original)
+    digest = "f" * 64 if fault == "digest" else hashlib.sha256(wire).hexdigest()
+    if fault == "exact":
+        assert module.read_native_recovery_host_identity(path, expected_sha256=digest) == identity
+    else:
+        with pytest.raises((ValueError, OSError)):
+            module.read_native_recovery_host_identity(path, expected_sha256=digest)

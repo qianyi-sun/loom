@@ -1,7 +1,7 @@
 """Read-only Linux kernel evidence; not live Slurm or installed acceptance."""
 
-from contextlib import ExitStack
 import os
+from contextlib import ExitStack
 from pathlib import Path
 from uuid import UUID
 

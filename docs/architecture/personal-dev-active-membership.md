@@ -2220,9 +2220,30 @@ launch-profile/node-configuration digests, allocated node, boot, original UID/GI
 and exact job-cgroup identity. Finalization additionally binds the runtime spec
 and complete UID/GID maps. The strict final reader requires externally retained
 preparation and digest; its legacy reader keeps V1 inspection compatibility but
-V1 cannot satisfy finalized recovery. The installed worker still writes only its
-unchanged V1 locator. These contracts do not yet capture or publish host facts,
-admit a recovery-capable launch profile, or supply terminal/deletion authority.
+V1 cannot satisfy finalized recovery. `capture_native_recovery_preparation`
+observes original host UID/GID, canonical boot identity and the exact Slurm job
+cgroup rather than its batch step. It requires the original host identity maps,
+the host cgroup namespace and full cgroup2 mount, rejects foreign/nested jobs and
+cross-mount paths, and pins directories through a final path/kernel readback.
+The attempt must match its locator's device/inode and remain private. Node and
+profile/configuration identities must come from protected installed authority;
+the observer does not authenticate caller-supplied digests or kernel hostnames.
+The node identity is a canonical root-owned readonly installer record, loaded
+against an externally pinned digest. It binds node, boot, worker UID/GID and host
+cgroup-namespace device/inode. The unprivileged worker compares only its own proc
+namespace link; inspecting root PID1 namespace links would require privileges it
+must not have. Boot/account/namespace mismatches fail closed and are rechecked
+before returning facts. The installer must genuinely occupy host namespaces and
+retain old records by digest; reboot requires fresh protected installation and
+admission, not worker-side replacement of expected facts. The launch-profile hash
+is supplied separately by protected authority to avoid a self-referential config
+hash. Host PID/proc namespace and worker-account isolation remain installer requirements.
+Read-only kernel coverage checks the actual cgroup2 mount and rejects an ordinary
+scratch directory; this is not installed Slurm containment evidence.
+The installed worker still writes only its unchanged V1 locator. Capture is not
+yet connected to protected publication or launch-profile admission and supplies
+no terminal/deletion authority. No mapped material may be created through the
+future recovery-capable route before protected preparation/finalization commits.
 
 The versioned client policy is
 `deploy/personal-dev-builder/client-seccomp-v1.json`. It permits ordinary
