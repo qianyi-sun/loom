@@ -134,6 +134,9 @@ async def test_nonterminal_and_terminal_execution_pins_require_positive_cleanup(
         values = await _signed_job(session, registry_issuer)
         receipt = await _complete(session, values)
         trial_id, target = await _seed_ready_trial(session, now=NOW)
+        # Admit the execution before attaching a historical image from a
+        # different task revision; it is a retirement pin, not a prerequisite.
+        lease = await _reserve(session, trial_id=trial_id, target=target, now=NOW)
         session.add(
             TrialTaskImageMaterialization(
                 trial_id=trial_id,
@@ -143,9 +146,10 @@ async def test_nonterminal_and_terminal_execution_pins_require_positive_cleanup(
         await session.commit()
     attempt_id = UUID(receipt.attempt_id)
     instant = NOW + timedelta(days=1)
-    assert (await _observe_positive_semantics(factory, attempt_id, instant)).pins == ("nonterminal_trial",)
+    assert (await _observe_positive_semantics(factory, attempt_id, instant)).pins == (
+        "nonterminal_trial", "execution_lease",
+    )
     async with factory() as session:
-        lease = await _reserve(session, trial_id=trial_id, target=target, now=NOW)
         trial = await session.get(Trial, trial_id)
         trial.state = "succeeded"
         trial.result = {"reward": 1.0}
@@ -433,12 +437,6 @@ async def test_terminal_verifier_pins_after_parent_execution_is_cleaned(
     async with factory() as session:
         receipt = await _complete(session, await _signed_job(session, registry_issuer))
         trial_id, target = await _seed_ready_trial(session, now=NOW)
-        session.add(
-            TrialTaskImageMaterialization(
-                trial_id=trial_id,
-                materialization_id=UUID(receipt.materialization_id),
-            )
-        )
         parent = await _reserve(
             session,
             trial_id=trial_id,
@@ -470,6 +468,13 @@ async def test_terminal_verifier_pins_after_parent_execution_is_cleaned(
                 execution_role="verifier", verifier_execution="skipped", now=NOW
             ),
             parent_lease_id=parent.id,
+        )
+        # Attach historical image evidence after both execution admissions.
+        session.add(
+            TrialTaskImageMaterialization(
+                trial_id=trial_id,
+                materialization_id=UUID(receipt.materialization_id),
+            )
         )
         await session.commit()
     for lease in (parent, verifier):
