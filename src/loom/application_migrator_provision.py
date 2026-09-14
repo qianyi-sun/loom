@@ -146,7 +146,7 @@ def _transaction(
         if connection.execute(application_sql(
             "SELECT current_user=session_user AND current_user={} AND rolsuper "
             "AND current_setting('transaction_isolation')='read committed' "
-            "AND current_database()={} FROM pg_catalog.pg_roles WHERE rolname=current_user",
+            "AND current_database() IN ('postgres',{}) FROM pg_catalog.pg_roles WHERE rolname=current_user",
             provisioner_role, target.database,
         )).fetchone() != (True,):
             raise RuntimeError("application migrator requires protected application peer")
