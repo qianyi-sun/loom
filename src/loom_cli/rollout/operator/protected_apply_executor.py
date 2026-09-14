@@ -24,6 +24,7 @@ from loom.application_database_admission import (
     reopen_application_database_for_handoff_recovery,
     require_application_database_drained,
 )
+from loom.application_database_connection import ApplicationDatabaseConnection
 from loom.application_handoff_completion import ApplicationHandoffDatabaseOutcome
 from loom_cli.rollout.external_supervisor_controller import (
     parse_external_supervisor_controller_bindings,
@@ -36,6 +37,7 @@ from loom_cli.rollout.final_gate_readiness import FinalGateResult
 from loom_cli.rollout.preflight_contract import CheckOperation
 
 from .final_gate_plan import FinalGatePlan
+from .protected_application_admission_recovery import ApplicationAdmissionRecoveryRecord
 from .protected_apply_journal import (
     ComponentObservation,
     ComponentState,
@@ -235,6 +237,24 @@ class SubprocessProtectedApplyCommandRunner:
         identity for recovery. Local process retirement never proves rollback.
         """
         return self._open_staging_peer(maintenance=False)
+
+    def prepare_staging_application_database(
+        self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal,
+        connection: ApplicationDatabaseConnection, guard: MutationGuardEvidence,
+    ) -> ApplicationAdmissionRecoveryRecord:
+        """Prepare and close the initial SQL phase inside the admitted handoff.
+
+        The caller retains the original peer and guard and supplies enclosing
+        process/input/writer admission. This is not a standalone deployment or a
+        component terminal; later phases still retire clients and restore service.
+        """
+        from .protected_application_database_preparation import (
+            prepare_protected_application_database,
+        )
+
+        return prepare_protected_application_database(
+            plan, journal=journal, runner=self, connection=connection, guard=guard,
+        )
 
     def complete_staging_application_database(
         self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal,
