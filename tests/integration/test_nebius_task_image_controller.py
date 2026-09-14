@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import delete, select
 
 from loom.db.schema import (
+    ServiceExecutionClass,
     ServiceExecutionTarget,
     TaskImageMaterialization,
     TaskImageMaterializationAttempt,
@@ -84,6 +85,7 @@ async def controller_setup(claim_setup, monkeypatch):  # noqa: F811
     sessions, team_id = claim_setup
     target = _target(uuid4().hex[:12])
     async with sessions() as session, session.begin():
+        created_class = await session.get(ServiceExecutionClass, NEBIUS_CPU_EXECUTION_CLASS_V1.class_id) is None
         await persist_execution_catalog(session, execution_class=NEBIUS_CPU_EXECUTION_CLASS_V1, targets=(target,))
         await set_execution_target_health(session, target_id=target.target_id, desired_state="active", observed_state="ready",
                                           health_status="healthy", observed_at=datetime.now(UTC))
@@ -112,6 +114,10 @@ async def controller_setup(claim_setup, monkeypatch):  # noqa: F811
             image_ids = select(TaskImageMaterialization.id).where(TaskImageMaterialization.task_id.startswith(f"nebius-image-claims/{team_id}/"))
             await session.execute(delete(TaskImagePublicationEvidence).where(TaskImagePublicationEvidence.materialization_id.in_(image_ids)))
             await session.execute(delete(ServiceExecutionTarget).where(ServiceExecutionTarget.id == target.target_id))
+            if created_class:
+                await session.execute(delete(ServiceExecutionClass).where(
+                    ServiceExecutionClass.id == NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+                ))
 
 
 async def seed_image(sessions, team_id, *, unsupported=False):
