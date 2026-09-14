@@ -88,6 +88,7 @@ from .protected_production_defaults_component import (
     KubernetesProtectedProductionDefaultsComponent,
     ProductionDefaultsTransport,
 )
+from .protected_staging_capacity_runtime import KubernetesProtectedStagingCapacityRuntime
 from .staging_mutation_guard import MutationGuardEvidence
 
 PROTECTED_KUBECONFIG_PATH = Path("/var/lib/loom-staging-rollout/kubeconfig")
@@ -789,7 +790,7 @@ class MigrationEpochProtectedApplyExecutor:
         ).component(plan)
         application = _application_components(plan, runner=self.runner, service_uid=self.service_uid,
             container_registry=self.container_registry, factory=self.application_factory, journal=journal)
-        staging_capacity = self._staging_capacity_components(plan, epoch.classify)
+        staging_capacity = self._staging_capacity_components(plan, epoch.classify, journal=journal)
         manifests = KubernetesProtectedManifestComponent(
             runner=self.runner,
             environment=environment,
@@ -873,11 +874,12 @@ class MigrationEpochProtectedApplyExecutor:
         self,
         plan: FinalGatePlan,
         epoch_guard: Callable[[FinalGatePlan], ComponentObservation],
+        *, journal: ProtectedApplyJournal | None = None,
     ) -> tuple[ProtectedApplyComponent, ...]:
-        components = self.staging_capacity_runtime.components(
-            plan,
-            epoch_guard=epoch_guard,
-        )
+        if isinstance(self.staging_capacity_runtime, KubernetesProtectedStagingCapacityRuntime):
+            components = self.staging_capacity_runtime.components(plan, epoch_guard=epoch_guard, journal=journal)
+        else:
+            components = self.staging_capacity_runtime.components(plan, epoch_guard=epoch_guard)
         if tuple(component.component_id for component in components) != (
             _staging_capacity_component_order(plan)
         ):
@@ -974,10 +976,11 @@ class KubernetesProtectedConvergenceExecutor:
             environment=environment,
             epoch_guard=epoch.classify,
         )
-        staging_capacity = self._staging_capacity_components(plan, epoch.classify)
+        journal = None if self.application_factory is None else self.application_factory.new_journal(plan)
+        staging_capacity = self._staging_capacity_components(plan, epoch.classify, journal=journal)
         application = _application_components(plan, runner=self.runner, service_uid=self.service_uid,
             container_registry=self.container_registry, factory=self.application_factory,
-            journal=None if self.application_factory is None else self.application_factory.new_journal(plan))
+            journal=journal)
         observations = {
             **{component.component_id: component.classify(plan) for component in application},
             "mutation-epoch-claim": epoch.classify(plan),
@@ -1068,11 +1071,12 @@ class KubernetesProtectedConvergenceExecutor:
         self,
         plan: FinalGatePlan,
         epoch_guard: Callable[[FinalGatePlan], ComponentObservation],
+        *, journal: ProtectedApplyJournal | None = None,
     ) -> tuple[ProtectedApplyComponent, ...]:
-        components = self.staging_capacity_runtime.components(
-            plan,
-            epoch_guard=epoch_guard,
-        )
+        if isinstance(self.staging_capacity_runtime, KubernetesProtectedStagingCapacityRuntime):
+            components = self.staging_capacity_runtime.components(plan, epoch_guard=epoch_guard, journal=journal)
+        else:
+            components = self.staging_capacity_runtime.components(plan, epoch_guard=epoch_guard)
         if tuple(component.component_id for component in components) != (
             _staging_capacity_component_order(plan)
         ):

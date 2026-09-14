@@ -49,8 +49,12 @@ def test_installed_migration_selects_retained_epoch_without_ordinary_sql(tmp_pat
 
 
 def test_installed_capacity_binds_original_chain_without_opening_database(tmp_path):
-    from loom_cli.rollout.operator.installed_application_handoff import InstalledApplicationHandoffFactory
-    from loom_cli.rollout.operator.installed_application_migration import InstalledApplicationMigrationFactory
+    from loom_cli.rollout.operator.installed_application_handoff import (
+        InstalledApplicationHandoffFactory,
+    )
+    from loom_cli.rollout.operator.installed_application_migration import (
+        InstalledApplicationMigrationFactory,
+    )
     from loom_cli.rollout.operator.protected_apply_journal import ProtectedApplyJournal
     from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
         KubernetesProtectedStagingCapacityDatabaseComponent,

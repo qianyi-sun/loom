@@ -42,7 +42,11 @@ from .protected_apply_executor import (
     MigrationEpochProtectedApplyExecutor,
     SubprocessProtectedApplyCommandRunner,
 )
-from .protected_apply_journal import ComponentTerminal
+from .protected_apply_journal import (
+    ComponentTerminal,
+    ProtectedApplyComponent,
+    ProtectedApplyJournal,
+)
 from .protected_capacity_execution_preparation_component import (
     PreparedControllerTransport,
 )
@@ -473,6 +477,11 @@ class InstalledFinalGateExecutor:
             cp_url=effective_config.cp_url,
             service_uid=self.service_uid,
         )
+        application_factory = self._application_factory(effective_config, protected_runner, container_registry)
+        def capacity_database(candidate: FinalGatePlan, journal: ProtectedApplyJournal) -> ProtectedApplyComponent:
+            return application_factory.capacity(candidate, journal=journal,
+                ordinal=5, handoff_ordinal=2, base=staging_capacity._database_component(candidate),
+                seed_source=lambda: staging_capacity._credential_seed_for_plan(candidate))
         staging_capacity = KubernetesProtectedStagingCapacityRuntime(
             runner=protected_runner,
             state_root=effective_config.state_root,
@@ -484,6 +493,7 @@ class InstalledFinalGateExecutor:
             pool_credential_transports=pool_credential_transports,
             prepared_controller_transports=prepared_controller_transports,
             execution_preparation_dependency_guard=(execution_preparation_dependency_guard),
+            database_component_factory=capacity_database,
         )
         return MigrationEpochProtectedApplyExecutor(
             state_root=effective_config.state_root,
@@ -497,7 +507,7 @@ class InstalledFinalGateExecutor:
             external_supervisor_credential_transports=external_supervisor_credentials,
             external_supervisor_credential_identities=external_supervisor_credential_identities,
             container_registry=container_registry,
-            application_factory=self._application_factory(effective_config, protected_runner, container_registry),
+            application_factory=application_factory,
         )
 
     def _application_factory(

@@ -4260,11 +4260,14 @@ def test_capacity_runtime_selects_installed_database_lifecycle_without_legacy_wr
     calls = []
     selected = source.components(plan, epoch_guard=lambda _: None)[1]
     selected = replace(selected, terminal_recovery_authority=None)
-    def database(bound):
+    from loom_cli.rollout.operator.protected_apply_journal import ProtectedApplyJournal
+    journal = ProtectedApplyJournal(source.state_root, request_id=plan.request_id, attempt_number=plan.attempt_number)
+    def database(bound, active_journal):
+        assert active_journal is journal
         assert bound == plan
         calls.append(bound)
         return selected
     source = replace(source, database_component_factory=database)
-    components = source.components(plan, epoch_guard=lambda _: pytest.fail("ordinary epoch read during construction"))
+    components = source.components(plan, epoch_guard=lambda _: pytest.fail("ordinary epoch read during construction"), journal=journal)
     assert components[1] is selected and calls == [plan]
     assert components[1].terminal_recovery_authority is None
