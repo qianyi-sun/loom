@@ -612,3 +612,105 @@ def test_platform_network_policies_support_kube_dns_and_coredns_labels() -> None
                 },
             }
         ]
+
+
+def _native_disruption_objects(
+    *,
+    reason: str | None = "DeletionByTaintManager",
+    condition_status: str = "True",
+    deleting: bool = True,
+    pod_phase: str = "Pending",
+    pod_uid: str | None = "pod-uid",
+    job_failed: bool = False,
+) -> tuple[Any, Any]:
+    from kubernetes import client
+
+    job = client.V1Job(
+        metadata=client.V1ObjectMeta(**vars(_job().metadata)),
+        status=client.V1JobStatus(
+            conditions=[
+                client.V1JobCondition(
+                    type="Failed",
+                    status="True",
+                    reason="BackoffLimitExceeded",
+                    message="Job has reached the specified backoff limit",
+                )
+            ]
+            if job_failed
+            else []
+        ),
+    )
+    pod = client.V1Pod(
+        metadata=client.V1ObjectMeta(
+            uid=pod_uid,
+            creation_timestamp=datetime.now(UTC),
+            deletion_timestamp=datetime.now(UTC) if deleting else None,
+        ),
+        spec=client.V1PodSpec(containers=[], node_name="node-a"),
+        status=client.V1PodStatus(
+            phase=pod_phase,
+            conditions=[
+                client.V1PodCondition(
+                    type="DisruptionTarget",
+                    status=condition_status,
+                    reason=reason,
+                    message="Taint manager: deleting due to NoExecute taint",
+                )
+            ]
+            if reason is not None
+            else [],
+        ),
+    )
+    return job, pod
+
+
+@pytest.mark.parametrize("pod_phase", ["Pending", "Running", "Failed"])
+@pytest.mark.parametrize("job_failed", [False, True])
+def test_taint_eviction_condition_survives_deleting_pod_and_job_backoff(
+    pod_phase: str,
+    job_failed: bool,
+) -> None:
+    job, pod = _native_disruption_objects(pod_phase=pod_phase, job_failed=job_failed)
+    observation = _normalize(job, [pod])
+    assert observation.normalized_state is NormalizedJobState.EVICTED
+    assert observation.reason == "DeletionByTaintManager"
+    assert observation.pod_uid == pod.metadata.uid
+    assert observation.message == "Taint manager: deleting due to NoExecute taint"
+    assert observation.started_at is None
+
+
+@pytest.mark.parametrize(
+    "reason,status,uid",
+    [
+        (None, "True", "pod-uid"),
+        ("DeletionByTaintManager", "False", "pod-uid"),
+        ("DeletionByTaintManager", "Unknown", "pod-uid"),
+        ("DeletionByTaintManager", "True", None),
+        ("EvictionByEvictionAPI", "True", "pod-uid"),
+        ("PreemptionByScheduler", "True", "pod-uid"),
+    ],
+)
+def test_only_uid_bound_true_taint_disruption_is_eviction(
+    reason: str | None,
+    status: str,
+    uid: str | None,
+) -> None:
+    job, pod = _native_disruption_objects(
+        reason=reason,
+        condition_status=status,
+        pod_uid=uid,
+        pod_phase="Running",
+    )
+    observation = _normalize(job, [pod])
+    assert observation.normalized_state is NormalizedJobState.TERMINATING
+    assert observation.reason != "DeletionByTaintManager"
+
+
+def test_existing_evicted_status_keeps_specific_diagnosis_during_delete() -> None:
+    job, pod = _native_disruption_objects(reason=None, pod_phase="Failed")
+    pod.status.reason = "Evicted"
+    pod.status.message = "The node was low on resource: ephemeral-storage"
+    observation = _normalize(job, [pod])
+    assert observation.normalized_state is NormalizedJobState.EVICTED
+    assert observation.reason == "Evicted"
+    assert observation.message == pod.status.message
