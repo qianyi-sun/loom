@@ -96,3 +96,71 @@ def test_primary_rejects_executable_or_volume_injection(pod, change):
         container['volumeDevices'] = [{'name': 'pgdata', 'devicePath': '/dev/foreign'}]
     with pytest.raises((ValueError, RuntimeError), match='CNPG'):
         admit_cnpg_primary_pod(pod, cluster_uid='11111111-1111-4111-8111-111111111111')
+
+
+def _runtime():
+    from loom_cli.rollout.operator.protected_cnpg_runtime_admission import CNPGPrimaryRuntime
+    from tests.loom_cli.rollout.operator.test_cnpg_manager_replacement import _manager
+
+    return CNPGPrimaryRuntime(_manager(), 'b' * 64, 39, 23456, 32, 101,
+                              '11111111-1111-4111-8111-111111111111')
+
+
+def test_runtime_binding_is_immutable_and_recovery_view_is_readonly(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from tests.loom_cli.rollout.operator.test_application_admission_recovery import _component
+    from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
+    from tests.loom_cli.rollout.operator.test_protected_apply_journal import _journal
+
+    plan, journal = _plan(tmp_path), _journal(tmp_path)
+    runtime = _runtime()
+    def apply(_):
+        journal.record_application_cnpg_runtime(plan, runtime=runtime)
+        assert journal.read_application_cnpg_runtime(plan) == runtime
+        journal.record_application_cnpg_runtime(plan, runtime=runtime)
+        with pytest.raises(RuntimeError, match='cannot be replaced'):
+            journal.record_application_cnpg_runtime(plan, runtime=replace(runtime, postgres_started_ticks=34567))
+        raise RuntimeError('runtime saved before admission')
+    component = _component(apply)
+    with pytest.raises(RuntimeError, match='runtime saved'):
+        journal.execute(plan, [component])
+    def forbid(*args, **kwargs):
+        pytest.fail('classification must remain read-only')
+    monkeypatch.setattr(journal, '_sync_application_recovery', forbid)
+    monkeypatch.setattr(journal, '_publish_or_match', forbid)
+    view = journal.read_application_recovery_view(plan, component, ordinal=0)
+    assert view.admission is None and view.cnpg_runtime == runtime
+
+
+@pytest.mark.parametrize('change', ['postgres_started_ticks', 'postgres_inode', 'postgres_pid', 'pod_spec_sha256', 'cluster_uid'])
+def test_manager_reconciliation_preserves_original_postmaster_and_inputs(tmp_path, monkeypatch, change):
+    from dataclasses import replace
+
+    import loom_cli.rollout.operator.protected_cnpg_runtime_admission as admission
+    from tests.loom_cli.rollout.operator.test_application_admission_recovery import _component
+    from tests.loom_cli.rollout.operator.test_cnpg_manager_replacement import _admit
+    from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
+    from tests.loom_cli.rollout.operator.test_protected_apply_journal import _journal
+
+    plan, journal = _plan(tmp_path), _journal(tmp_path)
+    original = _runtime()
+    changed = replace(original, manager=replace(original.manager, executable_inode=999))
+    value = {'pod_spec_sha256': 'c' * 64, 'cluster_uid': '33333333-3333-4333-8333-333333333333'}.get(change, 98765)
+    observed = [replace(changed, **{change: value})]
+    monkeypatch.setattr(admission, 'observe_cnpg_primary_runtime', lambda *args, **kwargs: observed[0])
+    def apply(_):
+        journal.record_application_cnpg_runtime(plan, runtime=original)
+        _admit(journal)
+        journal.prepare_application_manager_replacement(identity=original.manager)
+        journal.begin_application_manager_replacement()
+        with pytest.raises(RuntimeError, match='CNPG original'):
+            admission.reconcile_cnpg_primary_runtime(plan, journal=journal, runner=object())
+        assert journal.read_application_manager_replacement()[2] is None
+        observed[0] = changed
+        assert admission.reconcile_cnpg_primary_runtime(plan, journal=journal, runner=object()) == changed
+        assert journal.read_application_manager_replacement()[2].identity == changed.manager
+        assert journal.read_application_cnpg_runtime(plan) == original
+        raise RuntimeError('original identity preserved')
+    with pytest.raises(RuntimeError, match='identity preserved'):
+        journal.execute(plan, [_component(apply)])
