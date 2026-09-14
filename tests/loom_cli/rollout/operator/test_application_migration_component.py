@@ -72,3 +72,31 @@ def test_pending_migration_classifies_without_application_database_reads(tmp_pat
             component.classify(plan)
     else:
         assert component.classify(plan).state is ComponentState.READY
+
+
+def test_migration_uses_explicit_prior_handoff_plan_for_original_identity(tmp_path):
+    from loom_cli.rollout.operator.protected_application_migration_component import (
+        ProtectedApplicationMigrationComponent,
+    )
+    from loom_cli.rollout.operator.protected_application_restoration import _bound_evidence
+    from loom_cli.rollout.operator.protected_apply_journal import (
+        ComponentObservation,
+        ComponentTerminal,
+        ProtectedApplyJournal,
+    )
+    from tests.loom_cli.rollout.operator.test_application_handoff_history import _later
+    from tests.loom_cli.rollout.operator.test_application_restoration import _inputs
+
+    original, view, *_ = _inputs(tmp_path)
+    current = _later(original)
+    view = replace(view, restoration=_bound_evidence(view), fences_retiring=True)
+    terminal = ComponentTerminal.build(view.intent, ComponentObservation(ComponentState.EXACT, "a" * 64,
+        original.starting_mutation_epoch + 1), applied=True)
+    journal = ProtectedApplyJournal(tmp_path / "state", request_id=current.request_id, attempt_number=current.attempt_number)
+    owner = ProtectedApplicationMigrationComponent(plan=current, journal=journal, runner=None, ordinal=5,
+        guard_source=lambda: None, epoch_source=lambda: None, inputs_source=lambda: None,
+        handoff_source=lambda: (view, terminal), successor_source=lambda: None, container_registry="registry.example",
+        handoff_plan_source=lambda: original)
+    assert owner._handoff() == (view, terminal)
+    with pytest.raises(RuntimeError, match="handoff"):
+        replace(owner, handoff_plan_source=None)._handoff()
