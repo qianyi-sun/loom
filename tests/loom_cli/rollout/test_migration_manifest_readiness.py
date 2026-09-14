@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+import yaml
 
 from loom_cli.rollout.migration_manifest_readiness import (
     build_migration_manifest_artifact,
@@ -20,6 +21,41 @@ from tests.loom_cli.rollout.test_preflight_artifact_store import _images
 @dataclass(frozen=True)
 class Result:
     returncode: int
+
+
+@pytest.mark.parametrize("drift", [None, "runtime-secret", "owner", "token", "extra-env", "expiry"])
+def test_separated_owner_migration_artifact_binds_its_dedicated_credential(drift):
+    options = dict(candidate_sha="a" * 40, candidate_tree="b" * 40,
+        image_tag="staging-aaaaaaa", image_id="sha256:" + "1" * 64,
+        namespace="loom-staging", migration_plan_sha256="2" * 64,
+        migration_target_revision="0142", application_owner_role="loom_app_staging_owner")
+    artifact = build_migration_manifest_artifact(lambda _: Result(0), **options)
+    job = yaml.safe_load(artifact.rendered_yaml)
+    spec = job["spec"]["template"]["spec"]
+    container = spec["containers"][0]
+    env = {e["name"]: e for e in container["env"]}
+    assert env["LOOM_DB_OWNER_ROLE"]["value"] == "loom_app_staging_owner"
+    assert env["LOOM_DB_URL"]["valueFrom"]["secretKeyRef"]["name"].startswith("loom-app-migration-")
+    assert spec["automountServiceAccountToken"] is False
+    assert "ttlSecondsAfterFinished" not in job["spec"]
+    if drift == "runtime-secret":
+        env["LOOM_DB_URL"]["valueFrom"]["secretKeyRef"] = {"name": "loom-secrets", "key": "cp-db-url"}
+    elif drift == "owner":
+        env["LOOM_DB_OWNER_ROLE"]["value"] = "loom"
+    elif drift == "token":
+        spec["automountServiceAccountToken"] = True
+    elif drift == "extra-env":
+        container["env"].append({"name": "PGOPTIONS", "value": "-c role=postgres"})
+    elif drift == "expiry":
+        job["spec"]["ttlSecondsAfterFinished"] = 1
+    if drift:
+        with pytest.raises(ValueError, match="migration"):
+            inspect_migration_manifest_artifact(yaml.safe_dump(job), **options)
+    else:
+        assert inspect_migration_manifest_artifact(artifact.rendered_yaml, **options) == artifact
+        with pytest.raises(ValueError, match="migration"):
+            inspect_migration_manifest_artifact(artifact.rendered_yaml,
+                **{k: v for k, v in options.items() if k != "application_owner_role"})
 
 
 def test_all_migration_sources_compile_without_syntax_warnings() -> None:
