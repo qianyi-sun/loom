@@ -13,7 +13,8 @@ down_revision = "build_guard_0031"
 branch_labels = None
 depends_on = None
 SCHEMA = "loom_capacity_build_guard"
-FUNCTIONS = ("publish_recovery(uuid,jsonb,bytea,text,text)", "read_recovery(uuid,jsonb,bytea,text,text)")
+FUNCTIONS = ("publish_recovery(uuid,jsonb,bytea,text,text)", "read_recovery(uuid,jsonb,bytea,text,text)",
+    "authorize_recovery_execution(uuid,jsonb,bytea,text,text)")
 HELPERS = ("assert_recovery_shape(jsonb,text[])", "assert_recovery_record(jsonb)",
     "recovery_authenticated_claim(uuid,jsonb,bytea,text,text)")
 
@@ -253,6 +254,53 @@ def upgrade():
         END $function$;
     """)
     _fence(True)
+    op.execute(f"""
+        CREATE FUNCTION {SCHEMA}.authorize_recovery_execution(p_installation uuid,p jsonb,wire bytea,digest text,credential_hash text)
+        RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $function$
+        DECLARE claim_wire bytea; access jsonb; final {SCHEMA}.native_recovery_records%ROWTYPE;
+            issued timestamptz; deadline timestamptz;
+        BEGIN
+            PERFORM {SCHEMA}.assert_recovery_shape(p,ARRAY['schema_version','claim','challenge',
+                'source_binding_sha256','recovery_finalization_sha256']);
+            IF p->'schema_version' IS DISTINCT FROM '2'::jsonb OR p->>'schema_version'<>'2'
+                OR jsonb_typeof(p->'challenge') IS DISTINCT FROM 'string'
+                OR (p->>'challenge')::uuid::text IS DISTINCT FROM p->>'challenge'
+                OR jsonb_typeof(p->'source_binding_sha256') IS DISTINCT FROM 'string'
+                OR p->>'source_binding_sha256' !~ '^[0-9a-f]{{64}}$'
+                OR jsonb_typeof(p->'recovery_finalization_sha256') IS DISTINCT FROM 'string'
+                OR p->>'recovery_finalization_sha256' !~ '^[0-9a-f]{{64}}$'
+                OR wire IS NULL OR octet_length(wire) NOT BETWEEN 2 AND 131072
+                OR wire IS DISTINCT FROM convert_to({SCHEMA}.canonical_plan_json(p),'UTF8')
+                OR digest IS DISTINCT FROM encode(sha256(wire),'hex') THEN
+                RAISE EXCEPTION 'native recovery execution canonical request changed'; END IF;
+            claim_wire := convert_to({SCHEMA}.canonical_plan_json(p->'claim'),'UTF8');
+            access := {SCHEMA}.authorize_source(p_installation,p->'claim',claim_wire,
+                encode(sha256(claim_wire),'hex'),credential_hash)::jsonb;
+            IF access->>'source_binding_sha256' IS DISTINCT FROM p->>'source_binding_sha256' THEN
+                RAISE EXCEPTION 'native recovery execution source binding changed'; END IF;
+            SELECT * INTO final FROM {SCHEMA}.native_recovery_records
+                WHERE claim_id=(p->'claim'->>'operation_id')::uuid AND phase='finalization';
+            IF NOT FOUND OR final.installation_id IS DISTINCT FROM p_installation
+                OR final.retention_xid=pg_current_xact_id()
+                OR final.payload_sha256 IS DISTINCT FROM p->>'recovery_finalization_sha256'
+                OR final.payload->'claim' IS DISTINCT FROM p->'claim'
+                OR NOT EXISTS (SELECT 1 FROM {SCHEMA}.native_recovery_profiles
+                    WHERE installation_id=p_installation AND pool_id=p->'claim'->'binding'->>'pool_id'
+                        AND retention_xid<>pg_current_xact_id()) THEN
+                RAISE EXCEPTION 'native recovery execution requires committed exact finalization'; END IF;
+            issued := clock_timestamp();
+            deadline := (access->>'lease_not_after')::timestamptz;
+            IF deadline IS NULL OR deadline<=issued THEN
+                RAISE EXCEPTION 'native recovery execution lease expired'; END IF;
+            deadline := LEAST(deadline,issued+interval '10 seconds');
+            RETURN {SCHEMA}.canonical_plan_json(jsonb_build_object('schema_version',2,'request',p,
+                'request_digest',digest,'executable',true,
+                'issued_at',to_char(issued AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS')
+                    || CASE WHEN to_char(issued,'US')='000000' THEN '' ELSE '.' || to_char(issued,'US') END || 'Z',
+                'not_after',to_char(deadline AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS')
+                    || CASE WHEN to_char(deadline,'US')='000000' THEN '' ELSE '.' || to_char(deadline,'US') END || 'Z'));
+        END $function$;
+    """)
     agent = op.get_context().config.attributes["build_guard_agent_role"]
     quote = op.get_bind().dialect.identifier_preparer.quote
     for signature in (*HELPERS, *FUNCTIONS):

@@ -2261,12 +2261,23 @@ proves execution/quiescence, nor permits deletion. Legacy V1 execution permits
 are denied for the whole recovery-required installation/pool, even before its
 first publication; this prevents bypass through an unpublished claim.
 
+The same revision exposes a separate `recovery-execution` operation using explicit
+`BuildExecutionRequestV2`/`BuildExecutionPermitV2`. Its finalization digest names
+the canonical retained final publication, including the claim and mapped runtime
+specification. Both initial permission and renewal require that exact committed
+record and the existing current source/claim/terminal fence; lifetime is at most
+ten seconds and never extends the source lease. The local deadline monitor keeps
+the digest immutable across fresh challenges, includes transport/validation and
+suspend time, and rejects downgrade or foreign finalization. The outer authority
+bridge forwards only the selected version and exact digest; credentials do not
+enter monitor packets. Production `native-execution` activation remains rejected.
+
 The installed worker still writes only its unchanged V1 locator. Capture and
-mapped finalization are not yet composed with these publication calls, and the
-explicit finalized-digest-bound V2 execution permit remains to implement. No
-mapped material may be created through that future route before committed
-preparation/finalization acknowledgment. Intake remains disabled; these database
-and HTTP checks are not installed Slurm or multi-owner acceptance evidence.
+mapped finalization are not yet composed with publication and the digest-bound
+monitor/authority interfaces. No mapped material may be created through that
+future route before committed preparation/finalization acknowledgment. Intake
+remains disabled; these database, HTTP and monitor checks are not installed Slurm
+or multi-owner acceptance evidence.
 
 The versioned client policy is
 `deploy/personal-dev-builder/client-seccomp-v1.json`. It permits ordinary

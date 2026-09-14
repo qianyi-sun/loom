@@ -5,9 +5,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from loom_capacity_agent.build_admission import BuildExecutionPermitV1
-from loom_capacity_agent.native_recovery_execution import BuildExecutionPermitV2, BuildExecutionRequestV2
-from loom_capacity_manager.executable_contracts import canonical_executable_digest
+from loom_capacity_agent.native_recovery_execution import (
+    BuildExecutionPermitV2,
+    BuildExecutionRequestV2,
+)
 from loom_capacity_manager.contracts import canonical_digest
+from loom_capacity_manager.executable_contracts import canonical_executable_digest
 from tests.unit.test_native_execution_permit import execution_request
 
 

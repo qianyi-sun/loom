@@ -36,6 +36,7 @@ from loom_capacity_agent.build_artifact_stream import (
     BuildArtifactUploadReceiptV1,
     decode_artifact_stream,
 )
+from loom_capacity_agent.native_recovery_execution import BuildExecutionExchangeV2
 from loom_capacity_agent.native_recovery_publication import NativeRecoveryExchangeV1
 from loom_capacity_build_guard.artifact_writer import BuildArtifactWriter
 from loom_capacity_build_guard.execution_store import BuildGuardExecutionStore
@@ -56,7 +57,7 @@ async def _admit(
     *,
     pool_id: str,
     intent_id: UUID,
-    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap", "withdraw", "register", "claim", "drain", "outcome", "release", "source", "context", "claim-assigned", "execution", "recovery-publish", "recovery-read"],
+    operation_name: Literal["prepare", "bind", "observe", "revoke-bootstrap", "withdraw", "register", "claim", "drain", "outcome", "release", "source", "context", "claim-assigned", "execution", "recovery-publish", "recovery-read", "recovery-execution"],
 ) -> Response:
     sessions = getattr(request.app.state, "personal_dev_build_admission_sessions", None)
     verifier = getattr(request.app.state, "personal_dev_build_admission_verifier", None)
@@ -66,7 +67,7 @@ async def _admit(
         raise HTTPException(503, "build admission unavailable")
     # Production configuration deliberately cannot select this mode until an
     # installed runtime composition can validate all execution prerequisites.
-    if operation_name == "execution" and getattr(request.app.state, "personal_dev_build_admission_mode", None) != "native-execution":
+    if operation_name in {"execution", "recovery-execution"} and getattr(request.app.state, "personal_dev_build_admission_mode", None) != "native-execution":
         raise HTTPException(503, "native execution unavailable")
     if operation_name in {"recovery-publish", "recovery-read"} and getattr(
         request.app.state, "personal_dev_build_admission_mode", None
@@ -108,6 +109,8 @@ async def _admit(
             try:
                 recovery = (NativeRecoveryExchangeV1.model_validate_json(bytes(body))
                     if operation_name == "recovery-publish" else None)
+                recovery_execution = (BuildExecutionExchangeV2.model_validate_json(bytes(body))
+                    if operation_name == "recovery-execution" else None)
                 execution_request = (
                     BuildExecutionExchangeV1.model_validate_json(bytes(body))
                     if operation_name == "execution" else None
@@ -142,6 +145,9 @@ async def _admit(
                     else None
                 )
                 operation = (
+                    recovery_execution.request.claim
+                    if recovery_execution is not None
+                    else
                     recovery.request.claim
                     if recovery is not None
                     else
@@ -201,7 +207,10 @@ async def _admit(
                 await session.execute(text("SET LOCAL statement_timeout='10000ms'"))
                 await session.execute(text("SET LOCAL lock_timeout='5000ms'"))
                 store = BuildGuardExecutionStore(session, binding=binding)
-                if recovery is not None:
+                if recovery_execution is not None:
+                    wire = canonical_executable_bytes(await store.authorize_recovery_execution(
+                        recovery_execution.request, worker_credential=recovery_execution.worker_credential))
+                elif recovery is not None:
                     wire = canonical_bytes(await store.publish_recovery(
                         recovery.request, worker_credential=recovery.worker_credential))
                 elif claim is not None and operation_name == "recovery-read":
@@ -251,7 +260,7 @@ async def _admit(
             # Context exit commits. Never send a preparation receipt from an
             # uncommitted transaction that could be followed by scheduler submit.
             return Response(wire, media_type="application/json",
-                headers={"Cache-Control": "no-store"} if operation_name in {"context", "claim-assigned", "execution", "recovery-publish", "recovery-read"} else None)
+                headers={"Cache-Control": "no-store"} if operation_name in {"context", "claim-assigned", "execution", "recovery-publish", "recovery-read", "recovery-execution"} else None)
     except (DBAPIError, ValueError):
         raise HTTPException(409, "build admission evidence unavailable or changed") from None
     except (TimeoutError, PoolTimeoutError, BotoCoreError, ClientError):
@@ -271,6 +280,11 @@ async def publish_recovery(request: Request, pool_id: str, intent_id: UUID) -> R
 @router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/recovery-read")
 async def read_recovery(request: Request, pool_id: str, intent_id: UUID) -> Response:
     return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="recovery-read")
+
+
+@router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/recovery-execution")
+async def authorize_recovery_execution(request: Request, pool_id: str, intent_id: UUID) -> Response:
+    return await _admit(request, pool_id=pool_id, intent_id=intent_id, operation_name="recovery-execution")
 
 
 @router.post("/capacity-build/pools/{pool_id}/intents/{intent_id}/artifact")

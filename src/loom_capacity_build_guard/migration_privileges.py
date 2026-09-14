@@ -18,7 +18,8 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
     additional_helpers: list[str] = []
     if revision == "build_guard_0032":
         callables.extend((f"{SCHEMA}.publish_recovery(uuid,jsonb,bytea,text,text)",
-            f"{SCHEMA}.read_recovery(uuid,jsonb,bytea,text,text)"))
+            f"{SCHEMA}.read_recovery(uuid,jsonb,bytea,text,text)",
+            f"{SCHEMA}.authorize_recovery_execution(uuid,jsonb,bytea,text,text)"))
         additional_helpers.extend(("assert_recovery_shape(jsonb,text[])", "assert_recovery_record(jsonb)",
             "recovery_authenticated_claim(uuid,jsonb,bytea,text,text)"))
         revision = "build_guard_0031"

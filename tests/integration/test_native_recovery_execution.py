@@ -8,8 +8,12 @@ from sqlalchemy.exc import DBAPIError
 
 from tests.integration.test_native_recovery_publication import recovery_input
 from tests.integration.test_personal_dev_build_guard_execution import store
-from tests.integration.test_personal_dev_build_guard_installations import owner_sessions as owner_sessions
-from tests.integration.test_personal_dev_build_guard_migrations import build_guard_database as build_guard_database
+from tests.integration.test_personal_dev_build_guard_installations import (
+    owner_sessions as owner_sessions,
+)
+from tests.integration.test_personal_dev_build_guard_migrations import (
+    build_guard_database as build_guard_database,
+)
 from tests.integration.test_personal_dev_build_guard_prepare import prepared_input as prepared_input
 from tests.integration.test_personal_dev_build_guard_registration import CREDENTIAL
 from tests.integration.test_personal_dev_native_builder_store import sessions as sessions
@@ -68,5 +72,7 @@ async def test_recovery_permission_round_trips_authenticated_http(prepared_input
     request = execution.BuildExecutionRequestV2(claim=claim, challenge=uuid4(),
         source_binding_sha256=platform.source_binding_sha256, recovery_finalization_sha256=canonical_digest(final_request))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as http:
-        permit = await client_for(http, claim).authorize_recovery_execution(request, worker_credential=CREDENTIAL)
+        client = client_for(http, claim)
+        client._token = "executor-secret"
+        permit = await client.authorize_recovery_execution(request, worker_credential=CREDENTIAL)
         assert permit.request == request

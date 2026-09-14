@@ -38,6 +38,10 @@ from loom_capacity_agent.build_admission import (
 from loom_capacity_agent.build_artifact_stream import BuildArtifactUploadReceiptV1
 from loom_capacity_agent.claim_guard import ExecutableClaimProposalV2
 from loom_capacity_agent.client import read_owner_only_bytes
+from loom_capacity_agent.native_recovery_execution import (
+    BuildExecutionPermitV2,
+    BuildExecutionRequestV2,
+)
 from loom_capacity_agent.native_recovery_publication import (
     NativeRecoveryHistoryV1,
     NativeRecoveryPublicationV1,
@@ -111,6 +115,7 @@ _BUILD_CONSUMERS = frozenset({
     "withdraw_unregistered_worker", "register_worker", "claim_platform", "begin_drain", "record_outcome", "acknowledge_release",
     "read_source", "read_source_context", "claim_assigned_platform", "upload_artifact", "authorize_execution",
     "publish_recovery", "read_recovery",
+    "authorize_recovery_execution",
 })
 
 
@@ -245,6 +250,18 @@ class TypedAdmissionRouter:
         if not isinstance(receipt, BuildSourceReadReceiptV1):
             raise ValueError("native source route returned an invalid receipt")
         return receipt
+
+    async def authorize_recovery_execution(self, request: BuildExecutionRequestV2, *, worker_credential: str) -> BuildExecutionPermitV2:
+        request = BuildExecutionRequestV2.model_validate_json(request.model_dump_json())
+        if self.purpose(request.claim.binding) != "personal-build-worker":
+            raise ValueError("native recovery execution requires a build-purpose route")
+        permit = await self._call(request.claim.binding, "authorize_recovery_execution", request, worker_credential=worker_credential)
+        if not isinstance(permit, BuildExecutionPermitV2):
+            raise ValueError("native recovery execution route returned an invalid permit")
+        permit = BuildExecutionPermitV2.model_validate_json(permit.model_dump_json())
+        if permit.request != request:
+            raise ValueError("native recovery execution route returned changed permission")
+        return permit
 
     async def publish_recovery(self, request: NativeRecoveryPublicationV1, *, worker_credential: str) -> NativeRecoveryReceiptV1:
         request = NativeRecoveryPublicationV1.model_validate_json(request.model_dump_json())

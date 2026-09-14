@@ -36,6 +36,10 @@ from loom_capacity_agent.build_admission import (
     BuildOutcomeRequestV1,
     BuildSourceContextV1,
 )
+from loom_capacity_agent.native_recovery_execution import (
+    BuildExecutionPermitV2,
+    BuildExecutionRequestV2,
+)
 from loom_capacity_agent.native_recovery_publication import (
     NativeRecoveryHistoryV1,
     NativeRecoveryPublicationV1,
@@ -326,14 +330,26 @@ class BuildGuardExecutionStore:
                 raise ValueError("native recovery history response changed")
             return history
 
-    async def _recovery_call(self, method: str, request: NativeRecoveryPublicationV1 | BuildClaimRequestV1,
+    async def authorize_recovery_execution(self, request: BuildExecutionRequestV2, *, worker_credential: str) -> BuildExecutionPermitV2:
+        """Fresh current-claim fence additionally bound to committed final facts."""
+        if not self._session.in_transaction():
+            raise ValueError("native recovery execution requires an outer transaction")
+        request = BuildExecutionRequestV2.model_validate_json(request.model_dump_json())
+        async with self._session.begin_nested():
+            returned = await self._recovery_call("authorize_recovery_execution", request, worker_credential)
+            permit = BuildExecutionPermitV2.model_validate_json(returned)
+            if canonical_executable_bytes(permit).decode("ascii") != returned or permit.request != request:
+                raise ValueError("native recovery execution response changed")
+            return permit
+
+    async def _recovery_call(self, method: str, request: NativeRecoveryPublicationV1 | BuildClaimRequestV1 | BuildExecutionRequestV2,
         worker_credential: str,
     ) -> str:
-        if not self._session.in_transaction() or method not in {"publish_recovery", "read_recovery"}:
+        if not self._session.in_transaction() or method not in {"publish_recovery", "read_recovery", "authorize_recovery_execution"}:
             raise ValueError("native recovery requires an outer transaction and fixed procedure")
         if not isinstance(worker_credential, str) or re.fullmatch(r"[A-Za-z0-9_-]{43,512}", worker_credential) is None:
             raise ValueError("native recovery credential is invalid")
-        wire = canonical_bytes(request)
+        wire = canonical_executable_bytes(request) if isinstance(request, BuildExecutionRequestV2) else canonical_bytes(request)
         if len(wire) > 131072:
             raise ValueError("native recovery publication exceeds byte bound")
         returned = await self._session.scalar(text(f"""SELECT loom_capacity_build_guard.{method}(
