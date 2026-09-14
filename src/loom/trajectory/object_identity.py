@@ -131,11 +131,11 @@ def resolve_trajectory_object_key(
     expected_team = _path_segment(team_id, name="team_id")
     expected_trial = _path_segment(trial_id, name="trial_id")
     if (
-        len(parts) != 5
+        len(parts) not in {5, 7}
         or parts[0] != expected_team
         or parts[1] != expected_trial
         or parts[2] != "attempts"
-        or parts[4] != filename
+        or parts[-1] != filename
     ):
         raise ValueError("trajectory object URI is outside the expected trial identity")
     raw_attempt = parts[3]
@@ -145,4 +145,11 @@ def resolve_trajectory_object_key(
         raise ValueError("trajectory object URI has a noncanonical attempt") from exc
     if attempt_count <= 0 or str(attempt_count) != raw_attempt:
         raise ValueError("trajectory object URI has a noncanonical attempt")
+    if len(parts) == 7:
+        try:
+            correction_id = UUID(parts[5])
+        except ValueError as exc:
+            raise ValueError("trajectory object URI has a noncanonical correction") from exc
+        if parts[4] != "accounting-v2" or str(correction_id) != parts[5]:
+            raise ValueError("trajectory object URI has a noncanonical correction")
     return key

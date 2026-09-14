@@ -3,10 +3,14 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/loom-execution-runtime ./cmd/loom-execution-runtime
+COPY cmd/loom-sandbox-runtime ./cmd/loom-sandbox-runtime
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
     -o /out/loom-execution-runtime ./cmd/loom-execution-runtime
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+    -o /out/loom-sandbox-runtime ./cmd/loom-sandbox-runtime
 
 FROM scratch
 COPY --from=build /out/loom-execution-runtime /loom-execution-runtime
+COPY --from=build /out/loom-sandbox-runtime /loom-sandbox-runtime
 USER 65532:65532
 ENTRYPOINT ["/loom-execution-runtime"]

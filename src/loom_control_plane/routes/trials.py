@@ -20,19 +20,21 @@ from loom.db.schema import (
     Batch,
     LlmCall,
     ProviderConnection,
+    Team,
     TeamQuota,
     TrialTaskImageMaterialization,
 )
 from loom.db.schema import Task as TaskRow
 from loom.db.schema import Trial as TrialRow
 from loom.db.task_set_visibility import visible_tasks
+from loom.llm_call_ledger import serialize_llm_call
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
-from loom.request_params import coerce_request_params
 from loom.service_execution_backend import NEBIUS_BACKEND, NEBIUS_LOGICAL_POOL_ID
 from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
     automatic_service_execution_rejections,
+    runtime_profile_rejections,
 )
 from loom.submission_identity import require_submitting_user
 from loom.task_image_materialization import ensure_task_image_materializations
@@ -50,6 +52,12 @@ from loom_control_plane.protected_worker_session import (
 )
 from loom_control_plane.scheduler.requires_caps import derive_requires_caps
 from loom_control_plane.trial_cancellation import cancel_trial_under_authority
+from loom_service.auth_guards import require_human_or_admin, require_scope
+from loom_service.session_auth import (
+    is_staging_admin_browser_session,
+    verify_csrf,
+    verify_session_cookie,
+)
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 
 router = APIRouter()
@@ -100,6 +108,18 @@ async def _ensure_trial_task_image_links(
     trial_id: UUID,
     task_row: TaskRow,
 ) -> None:
+    # The prerequisite set is the submitted revision. Serialize first publication
+    # and replays on the Trial so a later TaskSet rebuild cannot append a newer
+    # revision to an existing Trial's frozen image links.
+    await session.execute(
+        select(TrialRow.id).where(TrialRow.id == trial_id).with_for_update()
+    )
+    if await session.scalar(
+        select(TrialTaskImageMaterialization.materialization_id)
+        .where(TrialTaskImageMaterialization.trial_id == trial_id)
+        .limit(1)
+    ) is not None:
+        return
     materializations = await ensure_task_image_materializations(
         session,
         task_row=task_row,
@@ -351,6 +371,10 @@ async def submit_trial(
             task_ids=[task_id],
             trial_config=trial_config.model_dump(mode="json"),
         )
+    if trial_config.agent_version is not None and (
+        batch_backend != NEBIUS_BACKEND or task_config.service_execution is not None
+    ):
+        raise HTTPException(status_code=400, detail="agent_version requires automatic native Nebius execution")
     requires_caps = derive_requires_caps(task_config)
     requires_caps_json = requires_caps.model_dump(mode="json")
     requires_caps_json["backend"] = batch_backend
@@ -367,11 +391,14 @@ async def submit_trial(
         )
         automatic_compatible = (
             profile is not None
-            and task_config.environment.docker_image == profile.task_image_ref
+            and not runtime_profile_rejections(
+                task_config, trial_config, profile, allow_task_image_preparation=True,
+            )
             and not automatic_service_execution_rejections(
                 task_config,
                 trial_config,
                 source_provenance=dict(task_row.source_provenance or {}),
+                allow_task_image_preparation=True,
             )
         )
     required_worker_pool = _resolve_required_worker_pool_for_backend(
@@ -728,6 +755,20 @@ async def cancel_trial(
             admin_verifier=getattr(request.app.state, "admin_secret_verifier", None),
             allow_family_orchestrator=True,
         )
+        if not authorization:
+            cookie = request.cookies.get("loom_session")
+            if is_staging_admin_browser_session(cookie):
+                raise HTTPException(status_code=403, detail="validation-only browser session")
+            ctx = require_human_or_admin(await verify_session_cookie(session, cookie))
+            verify_csrf(ctx, request.headers.get("X-Loom-CSRF"))
+            require_scope(ctx, "submit")
+            if ctx.team_id is not None and not is_admin(ctx):
+                disabled_at = (await session.execute(
+                    select(Team.disabled_at).where(Team.id == ctx.team_id),
+                )).scalar_one_or_none()
+                if disabled_at is not None:
+                    raise HTTPException(status_code=403, detail="team is disabled")
+            await session.commit()
     if ctx is None:
         raise HTTPException(status_code=401, detail="not authorized")
     caller_is_admin = is_admin(ctx)
@@ -877,35 +918,7 @@ async def get_trial_llm_calls(
             .scalars()
             .all()
         )
-    return {
-        "items": [
-            {
-                "id": str(r.id),
-                "trial_id": str(r.trial_id),
-                "step_id": r.step_id,
-                "dialect": r.dialect,
-                "model": r.model,
-                "input_tokens": r.input_tokens,
-                "output_tokens": r.output_tokens,
-                "provider_extras": r.provider_extras,
-                "request_params": coerce_request_params(r.request_params),
-                "cost_usd": float(r.cost_usd),
-                "rate_card_hash": r.rate_card_hash,
-                "captured_at": r.captured_at.isoformat(),
-                # #298 Slice B: gateway-internal retry attempt that
-                # produced this row. Defaults to 1 for pre-#298 rows.
-                "attempt": r.attempt,
-                "client_call_id": str(r.client_call_id) if r.client_call_id else None,
-                "episode": r.episode,
-                "call_ordinal": r.call_ordinal,
-                "requested_model": r.requested_model,
-                "response_model": r.response_model,
-                "role": r.role,
-                "correlation_status": r.correlation_status,
-            }
-            for r in rows
-        ],
-    }
+    return {"items": [serialize_llm_call(row) for row in rows]}
 
 
 class _TerminusReclaimBody(BaseModel):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from testcontainers.core.wait_strategies import HttpWaitStrategy
 from testcontainers.minio import MinioContainer
 
 from loom.pipeline.artifact_commit import ArtifactCommitService
@@ -12,7 +13,9 @@ pytestmark = pytest.mark.docker
 
 
 async def test_real_minio_multipart_commit_and_readback() -> None:
-    with MinioContainer(image=MINIO_TEST_IMAGE) as container:
+    with MinioContainer(MINIO_TEST_IMAGE).waiting_for(
+        HttpWaitStrategy(9000, "/minio/health/cluster")
+    ) as container:
         config = container.get_config()
         store = MinioObjectStore(
             endpoint_url="http://" + config["endpoint"],

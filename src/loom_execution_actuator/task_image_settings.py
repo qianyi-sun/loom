@@ -1,0 +1,48 @@
+"""Native builder configuration shared by offline rendering and the actuator.
+
+Keep service/database imports out of this module: deployment preflight only
+needs to validate settings, not instantiate a running controller.
+"""
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from loom_execution_actuator.task_image_renderer import TaskImageJobConfig
+
+
+class NativeTaskImageSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    namespace: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$")
+    pool_id: str = "nebius-cpu"
+    service_image: str
+    source_secret_name: str = "loom-task-build-source"
+    cache_secret_name: str | None = None
+    registry_secret_name: str = "loom-task-build-registry"
+    registry_auth_kind: Literal["docker-config", "nebius"] = "nebius"
+    storage_endpoint: str
+    storage_region: str
+    source_bucket: str
+    cache_bucket: str | None = None
+    registry_repository: str
+    cpu_millis: int = Field(default=1000, ge=100, le=64000)
+    memory_mib: int = Field(default=2048, ge=512, le=262144)
+    ephemeral_storage_mib: int = Field(default=16384, ge=16384, le=524288)
+    max_processes: int = Field(default=512, ge=64, le=4096)
+    active_deadline_seconds: int = Field(default=1800, ge=60, le=7200)
+    max_concurrent: int = Field(default=1, ge=1, le=8)
+
+    def job_config(self) -> TaskImageJobConfig:
+        from loom_execution_actuator.task_image_renderer import TaskImageJobConfig
+
+        return TaskImageJobConfig(**{key: getattr(self, key) for key in (
+            "service_image", "source_secret_name", "cache_secret_name", "registry_secret_name", "registry_auth_kind",
+            "cpu_millis", "memory_mib", "ephemeral_storage_mib", "max_processes", "active_deadline_seconds",
+        )})
+
+    def runtime_configuration(self) -> dict[str, Any]:
+        return {key: getattr(self, key) for key in (
+            "storage_endpoint", "storage_region", "source_bucket", "cache_bucket", "registry_repository",
+        )}

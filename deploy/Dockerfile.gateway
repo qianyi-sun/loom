@@ -4,6 +4,9 @@ RUN apt-get update -qq && \
     rm -rf /var/lib/apt/lists/*
 # Retry transient package-index timeouts during image builds.
 ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
+RUN apt-get update -qq && \
+    apt-get install -y --only-upgrade --no-install-recommends perl-base && \
+    rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
@@ -11,6 +14,6 @@ COPY packages/loom-bundle-checksum ./packages/loom-bundle-checksum
 COPY migrations ./migrations
 RUN chmod -R a+rX ./src ./migrations ./packages/loom-bundle-checksum && \
     pip install --no-cache-dir -e ./packages/loom-bundle-checksum && \
-    pip install --no-cache-dir -e .
+    pip install --no-cache-dir -e ".[nebius-gateway]"
 EXPOSE 9100
 CMD ["python", "-m", "loom_llm_gateway"]

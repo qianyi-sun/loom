@@ -194,6 +194,10 @@ def _materialize_trial_config(
     import copy as _copy
     out: dict[str, Any] = _copy.deepcopy(shared)
     out["agent_name"] = combination["agent_name"]
+    if combination.get("agent_version") is not None:
+        out["agent_version"] = combination["agent_version"]
+    else:
+        out.pop("agent_version", None)
     out["agent_model"] = combination.get("agent_model")
     return apply_plan_mode(out, mode=out.get("model_switch_plan_mode"))
 

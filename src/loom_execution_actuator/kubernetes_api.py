@@ -5,6 +5,11 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
+from loom.nebius_kubernetes import (
+    NebiusKubernetesConnection,
+    NebiusKubernetesCredentials,
+    create_api_client,
+)
 from loom_execution_actuator.contracts import (
     ExecutionTerminationSummaryV1,
     KubernetesApiError,
@@ -60,7 +65,7 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
     message: str | None = None
     termination_summary: ExecutionTerminationSummaryV1 | None = None
     scheduled_at = None
-    started_at = getattr(job.status, "start_time", None)
+    started_at = None
     terminated_at = getattr(job.status, "completion_time", None)
     node_name = None
     pod_uid = None
@@ -86,17 +91,19 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
         scheduled = _condition(getattr(pod.status, "conditions", None), "PodScheduled")
         if getattr(scheduled, "status", None) == "True":
             scheduled_at = getattr(scheduled, "last_transition_time", None)
-        started_at = getattr(pod.status, "start_time", None) or started_at
-        # kubelet can publish ``status.startTime`` before the PodScheduled
-        # condition controller publishes its transition timestamp. The latter
-        # is therefore only an upper-bound observation, not proof that the Pod
-        # started before it was scheduled.
-        if (
-            scheduled_at is not None
-            and started_at is not None
-            and scheduled_at > started_at
-        ):
-            scheduled_at = started_at
+        statuses = list(getattr(pod.status, "container_statuses", None) or [])
+        execution_status = next(
+            (status for status in statuses if getattr(status, "name", None) == "execution"),
+            None,
+        )
+        execution_state = getattr(execution_status, "state", None)
+        execution_terminated = getattr(execution_state, "terminated", None)
+        # Pod startTime acknowledges the kubelet, before image pulls and init
+        # containers. Only the execution container starts the workload; task
+        # and verifier init sidecars merely prepare its private sandboxes.
+        started_at = getattr(
+            getattr(execution_state, "running", None), "started_at", None
+        ) or getattr(execution_terminated, "started_at", None)
         if pod.metadata.deletion_timestamp is not None:
             state = NormalizedJobState.TERMINATING
         pod_reason = getattr(pod.status, "reason", None)
@@ -106,7 +113,6 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
         elif pod_reason in {"NodeLost", "Shutdown"}:
             state, reason, message = NormalizedJobState.NODE_LOST, pod_reason, pod_message
         else:
-            statuses = list(getattr(pod.status, "container_statuses", None) or [])
             terminated = [
                 status.state.terminated
                 for status in statuses
@@ -117,13 +123,6 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
                 for status in statuses
                 if getattr(getattr(status, "state", None), "waiting", None) is not None
             ]
-            execution_status = next(
-                (status for status in statuses if getattr(status, "name", None) == "execution"),
-                None,
-            )
-            execution_terminated = getattr(
-                getattr(execution_status, "state", None), "terminated", None
-            )
             raw_summary = getattr(execution_terminated, "message", None)
             if raw_summary:
                 try:
@@ -233,25 +232,45 @@ class InClusterKubernetesJobApi:
     def __init__(
         self,
         *,
+        connection: NebiusKubernetesConnection | None = None,
         client_module: Any | None = None,
         batch_api: Any | None = None,
         core_api: Any | None = None,
     ) -> None:
+        self._api_client: Any | None = None
+        self._credentials: NebiusKubernetesCredentials | None = None
         try:
             from kubernetes import client, config
         except ModuleNotFoundError as exc:
             raise RuntimeError("install Loom with the cluster extra") from exc
+        if connection is not None and any(
+            value is not None for value in (client_module, batch_api, core_api)
+        ):
+            raise ValueError("remote connection cannot be combined with injected clients")
         if any(value is not None for value in (client_module, batch_api, core_api)):
             if client_module is None or batch_api is None or core_api is None:
                 raise ValueError("client_module, batch_api, and core_api must be provided together")
             self._client = client_module
             self._batch = batch_api
             self._core = core_api
+        elif connection is not None:
+            self._api_client, self._credentials = create_api_client(connection)
+            self._client = client
+            self._batch = client.BatchV1Api(self._api_client)
+            self._core = client.CoreV1Api(self._api_client)
         else:
             config.load_incluster_config()
             self._client = client
             self._batch = client.BatchV1Api()
             self._core = client.CoreV1Api()
+
+    async def close(self) -> None:
+        try:
+            if self._api_client is not None:
+                await asyncio.to_thread(self._api_client.close)
+        finally:
+            if self._credentials is not None:
+                await self._credentials.close()
 
     def _pods_for_job(self, namespace: str, job_name: str) -> list[Any]:
         return list(

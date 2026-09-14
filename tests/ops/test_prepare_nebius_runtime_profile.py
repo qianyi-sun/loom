@@ -196,3 +196,34 @@ def test_prepare_requires_exact_execution_runtime_release(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="must match the profile candidate"):
         prepare.prepare(args)
+
+
+def test_prepare_optional_worker_preserves_admitted_agent_image(tmp_path: Path) -> None:
+    args = _inputs(tmp_path)
+    source = "ghcr.io/qianyi-sun/loom-worker@sha256:" + "9" * 64
+    target = REGISTRY + "/loom-worker@sha256:" + "9" * 64
+    mirror = json.loads(args.mirror_record.read_text())
+    mirror["images"]["worker"] = {"source_ref": source, "target_ref": target}
+    _write_json(args.mirror_record, mirror)
+    evidence = json.loads(args.evidence_summary.read_text())
+    evidence["images"]["worker"] = {
+        **evidence["images"]["service"],
+        "image_ref": target,
+    }
+    _write_json(args.evidence_summary, evidence)
+    worker = json.loads(args.service_release_record.read_text())
+    worker["image"]["component"] = "worker"
+    worker["subject"] = {
+        "name": "ghcr.io/qianyi-sun/loom-worker",
+        "digest": "sha256:" + "9" * 64,
+    }
+    args.worker_release_record = tmp_path / "worker-release.json"
+    _write_json(args.worker_release_record, worker)
+    prepare.prepare(args)
+    profile = ServiceExecutionRuntimeProfileV1.model_validate_json(args.output_profile.read_text())
+    assert profile.agent_image_ref == target
+    verify_execution_image_admission(
+        profile.image_admission,
+        required_image_refs=(profile.task_image_ref, profile.runtime_image_ref, target),
+        keyring=ImageAdmissionKeyring.from_json(args.output_keyring.read_text()),
+    )

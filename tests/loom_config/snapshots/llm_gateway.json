@@ -129,6 +129,11 @@
     "default": "300",
     "required": false
   },
+  "service_execution_kubernetes_config_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
   "service_execution_source_access_key": {
     "annotation": "pydantic.types.SecretStr | None",
     "default": "None",

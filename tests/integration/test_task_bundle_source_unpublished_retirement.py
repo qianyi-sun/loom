@@ -163,12 +163,14 @@ async def test_trial_or_unreleased_execution_pins_unpublished_source(journal, tm
         # A historical image link is authoritative independently of the current
         # catalog's config/source (the seed inserts a different current revision).
         trial_id, target = await _seed_ready_trial(session, now=NOW, task_id=spec.catalog_task_id)
-        session.add(TrialTaskImageMaterialization(trial_id=trial_id, materialization_id=image_id))
         if terminal:
             await _reserve(session, trial_id=trial_id, target=target, now=NOW)
             trial = await session.get(Trial, trial_id)
             trial.state = "succeeded"
             trial.result = {"reward": 1.0}
+        # Seed the historical link after admission: an unpublished image cannot
+        # satisfy the native preparation check for a new execution.
+        session.add(TrialTaskImageMaterialization(trial_id=trial_id, materialization_id=image_id))
     assert await _observe(journal, image_id) == "pinned"
     assert await _observe(journal, image_id, INSTANT + timedelta(days=2)) == "pinned"
 

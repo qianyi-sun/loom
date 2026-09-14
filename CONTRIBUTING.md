@@ -101,7 +101,8 @@ the project artifact and must never be committed.
 - `fix/<short-name>` for defects
 - `research/<short-name>` for exploratory prototypes
 
-Feature branches cut from `dev`. PRs target `dev`. `main` is reserved
+Feature branches, including Nebius work, cut from `dev`. PRs target `dev`.
+`codex/nebius-main` records the earlier isolated integration series. `main` is reserved
 for release promotion PRs from `dev`.
 
 Deployment environments are separated from branch workflow: `development`

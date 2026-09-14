@@ -21,8 +21,10 @@ import EventTimeline from "../components/EventTimeline";
 import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
 import { StatusPill } from "../components/StatusPill";
+import { TaskImagePreparationCard } from "../components/TaskImagePreparationCard";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import { useTrialEventStream } from "../hooks/useTrialEventStream";
+import { agentLabel } from "../lib/agentLabel";
 import { formatLocalDateTime } from "../lib/dateTime";
 import { humanizeFailureReason } from "../lib/humanizeFailureReason";
 import { modelLabel } from "../lib/modelLabel";
@@ -315,7 +317,7 @@ function TrialHeader({
             label="Visibility"
             value={`${trial.visibility ?? "team"} / ${trial.share_status ?? "pending_scan"}`}
           />
-          <StatCard label="Agent" value={trial.agent_name ?? "—"} />
+          <StatCard label="Agent" value={agentLabel(trial.agent_name, trial.agent_version)} />
           <StatCard label="Model" value={modelLabel(trial.model)} />
           {"model_switch_plan" in trial && trial.model_switch_plan != null ? (
             <StatCard
@@ -645,6 +647,7 @@ export default function TrialDetail(): JSX.Element {
         </Link>
       </div>
       <TrialHeader trial={trial.data} />
+      <TaskImagePreparationCard preparations={trial.data.task_environment_preparation} />
       <MaterializationCard trial={trial.data} />
       <DiagnosisCard diagnosis={trial.data.diagnosis} />
       <DebugEvidenceCard evidence={trial.data.debug_evidence} />

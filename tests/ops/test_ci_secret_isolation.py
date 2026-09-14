@@ -288,6 +288,7 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         "trivy-binary",
         "personal-dev-scanner-cache-assets",
         "build",
+        "nebius-harness-build",
         "scanner-cache-build",
         "publish",
         "publish-manifest",
@@ -298,6 +299,7 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         "plan",
         "trivy-binary",
         "build",
+        "nebius-harness-build",
         "scanner-cache-build",
         "images-gate",
     ):

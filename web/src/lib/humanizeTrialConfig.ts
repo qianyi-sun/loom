@@ -1,3 +1,4 @@
+import { agentLabel } from "./agentLabel";
 import { modelLabel } from "./modelLabel";
 
 export interface TrialConfigSummary {
@@ -9,6 +10,7 @@ export interface TrialConfigSummary {
 const KNOWN_TRIAL_CONFIG_KEYS = new Set([
   "agent_model",
   "agent_name",
+  "agent_version",
   "agent_timeout_multiplier",
   "baseline_network_policy_override",
   "delete_env",
@@ -38,7 +40,7 @@ export function humanizeTrialConfig(
   const diagnostics = diagnosticsFromUnknownKeys(c);
 
   if (typeof c.agent_name === "string" && c.agent_name) {
-    items.push(`Agent: ${c.agent_name}`);
+    items.push(`Agent: ${agentLabel(c.agent_name, c.agent_version)}`);
   }
   if ("agent_model" in c) {
     items.push(`Model: ${modelLabel(c.agent_model)}`);

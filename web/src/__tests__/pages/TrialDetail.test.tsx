@@ -189,6 +189,14 @@ describe("TrialDetail trajectory section", () => {
     vi.restoreAllMocks();
   });
 
+  it("shows the exact Harbor version returned for a Trial", async () => {
+    fetchSpy({ ok: true, body: { events: [], next_cursor: null } }, {
+      ...TRIAL_BODY, agent_name: "terminus-2", agent_version: "harbor-v2",
+    });
+    renderWithProviders(<Routes><Route path="/trials/:trialId" element={<TrialDetail />} /></Routes>, { route: `/trials/${TRIAL_ID}` });
+    expect(await screen.findByText("terminus-2@harbor-v2")).toBeInTheDocument();
+  });
+
   it("hides Load more when the trajectory is empty", async () => {
     fetchSpy({ ok: true, body: { events: [], next_cursor: null } });
     renderWithProviders(

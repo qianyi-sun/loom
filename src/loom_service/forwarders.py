@@ -3,7 +3,8 @@
 The service layer doesn't reimplement trial submit / cancel — it
 authenticates the caller, runs the local scope/team checks, then
 proxies the request to the Control Plane with the caller's bearer
-token intact. The CP applies its own auth as a defense-in-depth layer.
+token intact. Cancellation also forwards the browser session and CSRF token;
+the CP independently authenticates the caller and enforces its team scope.
 
 `propagate` returns a `JSONResponse` so we can carry through the
 upstream's status_code AND a small allowlist of response headers
@@ -16,7 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
 # Headers the service forwards verbatim from the upstream response.
@@ -39,10 +40,22 @@ async def forward(
     path: str,
     authorization: str | None,
     json_body: Any | None = None,
+    cancellation_request: Request | None = None,
 ) -> httpx.Response:
     headers: dict[str, str] = {}
     if authorization:
         headers["Authorization"] = authorization
+    elif cancellation_request is not None:
+        # Only cancellation forwards browser credentials. Normalize configurable
+        # public names to the existing cookie/CSRF contract on the internal hop;
+        # the CP independently verifies both and applies the caller's team scope.
+        settings = cancellation_request.app.state.settings
+        cookie = cancellation_request.cookies.get(settings.auth_session_cookie_name)
+        csrf = cancellation_request.headers.get(settings.auth_csrf_header_name)
+        if cookie:
+            headers["Cookie"] = f"loom_session={cookie}"
+        if csrf:
+            headers["X-Loom-CSRF"] = csrf
     try:
         resp = await client.request(
             method, path, headers=headers, json=json_body,

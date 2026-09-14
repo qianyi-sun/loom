@@ -88,13 +88,13 @@ def _bundle(
     return raw.getvalue()
 
 
-def _policy(tmp_path: Path, *, accepted: int = 56) -> dict[str, Any]:
+def _policy(tmp_path: Path, *, accepted: int = 56, target_id: str | None = None) -> dict[str, Any]:
     path = tmp_path / "policy.json"
     path.write_text(
         json.dumps(
             {
                 "schema_version": "loom.nebius-development-capacity.v1",
-                "target_id": "nebius-eu-north1-development",
+                "target_id": target_id or "nebius-eu-north1-development",
                 "accepted_concurrency": accepted,
                 "target_concurrency": 200,
                 "admission_policies": [
@@ -118,7 +118,13 @@ def _policy(tmp_path: Path, *, accepted: int = 56) -> dict[str, Any]:
     return load_capacity_policy(path)
 
 
-def _monitor(*, nodes: int, slots: int, occupied: int = 0) -> dict[str, Any]:
+def _monitor(
+    *,
+    nodes: int,
+    slots: int,
+    occupied: int = 0,
+    target_id: str = "nebius-eu-north1-development",
+) -> dict[str, Any]:
     return {
         "resources": {"pools": []},
         "service_execution": {
@@ -126,6 +132,7 @@ def _monitor(*, nodes: int, slots: int, occupied: int = 0) -> dict[str, Any]:
             "targets": [
                 {
                     "provider": "nebius",
+                    "target_id": target_id,
                     "pool_id": "nebius-cpu",
                     "environment": "development",
                     "health_status": "healthy",
@@ -257,12 +264,16 @@ def test_validate_trial_bundle_checks_manifest_and_every_member() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "target_id", [None, "nebius-eu-north1-integration", "nebius-eu-west1-integration"]
+)
 @pytest.mark.parametrize("cleanup_state", ["complete", "retained", "running"])
 @pytest.mark.parametrize("connection", [{"id": _CONNECTION_ID}, None])
 @pytest.mark.parametrize("observed_running", [0, 1, 2])
 def test_run_acceptance_uses_public_api_and_persists_complete_evidence(
     tmp_path: Path,
     cleanup_state: str,
+    target_id: str | None,
     connection: dict[str, Any] | None,
     observed_running: int,
     monkeypatch: pytest.MonkeyPatch,
@@ -270,6 +281,16 @@ def test_run_acceptance_uses_public_api_and_persists_complete_evidence(
     payload = _bundle()
     calls: list[tuple[str, str]] = []
     batch_reads = 0
+
+    def _target_monitor(**kwargs: int) -> dict[str, Any]:
+        monitor = _monitor(**kwargs, target_id=target_id or "nebius-eu-north1-development")
+        if target_id == "nebius-eu-west1-integration":
+            monitor["service_execution"]["targets"].extend(
+                _monitor(nodes=0, slots=0, target_id="nebius-eu-north1-integration")[
+                    "service_execution"
+                ]["targets"]
+            )
+        return monitor
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal batch_reads
@@ -279,11 +300,11 @@ def test_run_acceptance_uses_public_api_and_persists_complete_evidence(
         if request.method == "GET" and request.url.path == "/api/v1/monitor/summary":
             if request.url.params.get("batch_id"):
                 return httpx.Response(
-                    200, json=_monitor(nodes=1, slots=1, occupied=observed_running)
+                    200, json=_target_monitor(nodes=1, slots=1, occupied=observed_running)
                 )
             if any(path.endswith("/bundle/download") for _, path in calls):
-                return httpx.Response(200, json=_monitor(nodes=0, slots=0))
-            return httpx.Response(200, json=_monitor(nodes=0, slots=0))
+                return httpx.Response(200, json=_target_monitor(nodes=0, slots=0))
+            return httpx.Response(200, json=_target_monitor(nodes=0, slots=0))
         if request.method == "POST" and request.url.path == "/api/v1/batches":
             submitted = json.loads(request.content)
             assert submitted["backend"] == "nebius"
@@ -372,7 +393,7 @@ def test_run_acceptance_uses_public_api_and_persists_complete_evidence(
         evidence = run_acceptance(
             client=client,
             output_dir=tmp_path / "evidence",
-            capacity_policy=_policy(tmp_path),
+            capacity_policy=_policy(tmp_path, target_id=target_id),
             task_set_id="ts/test",
             task_count=1,
             provider_connection=connection,
@@ -381,6 +402,7 @@ def test_run_acceptance_uses_public_api_and_persists_complete_evidence(
             agent_provider="openai",
             candidate_sha=_CANDIDATE,
             environment="development",
+            target_id=target_id,
             pool_id="nebius-cpu",
             stages=[1],
             poll_seconds=0,
@@ -395,6 +417,7 @@ def test_run_acceptance_uses_public_api_and_persists_complete_evidence(
         return
 
     output = tmp_path / "evidence"
+    assert evidence["target_id"] == target_id
     assert evidence["accepted"] is True
     assert evidence["source_gc_complete"] is (cleanup_state == "complete")
     assert evidence["maximum_proven_concurrency"] == 1
@@ -430,7 +453,10 @@ def test_run_acceptance_uses_public_api_and_persists_complete_evidence(
         )
     assert cleanup["accepted"] is True
 
-    for corruption in ("stale", "candidate", "canonical", "not_ready", "failed", "archive"):
+    corruptions = ["stale", "candidate", "canonical", "not_ready", "failed", "archive"]
+    if target_id:
+        corruptions.append("target")
+    for corruption in corruptions:
 
         def invalid_handler(request: httpx.Request, corruption: str = corruption) -> httpx.Response:
             response = handler(request)
@@ -439,6 +465,8 @@ def test_run_acceptance_uses_public_api_and_persists_complete_evidence(
             if request.url.path.endswith("/bundle/download"):
                 return response
             body = response.json()
+            if corruption == "target" and request.url.path.endswith("/monitor/summary"):
+                body["service_execution"]["targets"][0]["target_id"] = "wrong-target"
             if corruption == "stale" and request.url.path.endswith("/monitor/summary"):
                 body["service_execution"]["targets"][0]["observation"]["is_fresh"] = False
             if corruption == "candidate" and request.url.path == f"/api/v1/batches/{_BATCH_ID}":
@@ -468,6 +496,7 @@ def test_run_acceptance_uses_public_api_and_persists_complete_evidence(
         args = parser.parse_args(
             [
                 "nebius-acceptance",
+                *(["--target-id", target_id] if target_id else []),
                 "--task-set",
                 "ts/test",
                 "--model",
@@ -692,3 +721,70 @@ def test_cli_reports_local_taskset_error_before_login(
 
     assert run_cli(args) == 1
     assert "manifest.yaml not found" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("actual_target", ["nebius-eu-north1-development", None])
+def test_explicit_integration_target_rejects_wrong_or_absent_monitor_identity(
+    actual_target: str | None,
+) -> None:
+    monitor = _monitor(nodes=0, slots=0)
+    monitor["service_execution"]["targets"][0]["target_id"] = actual_target
+    with pytest.raises(NebiusAcceptanceError, match="target identity"):
+        _capacity_sample(
+            monitor,
+            pool_id="nebius-cpu",
+            environment="development",
+            target_id="nebius-eu-north1-integration",
+        )
+
+
+@pytest.mark.parametrize("target_id", [None, "nebius-eu-west1-integration"])
+def test_monitor_rejects_ambiguous_target_identity(target_id: str | None) -> None:
+    monitor = _monitor(nodes=0, slots=0, target_id="nebius-eu-west1-integration")
+    monitor["service_execution"]["targets"] *= 2
+    with pytest.raises(NebiusAcceptanceError, match="exactly one"):
+        _capacity_sample(
+            monitor,
+            pool_id="nebius-cpu",
+            environment="development",
+            target_id=target_id,
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value", [("pool_id", "other"), ("environment", "production"), ("provider", "other")]
+)
+def test_explicit_target_still_requires_matching_scope(field: str, value: str) -> None:
+    monitor = _monitor(nodes=0, slots=0, target_id="nebius-eu-west1-integration")
+    monitor["service_execution"]["targets"][0][field] = value
+    with pytest.raises(NebiusAcceptanceError):
+        _capacity_sample(
+            monitor,
+            pool_id="nebius-cpu",
+            environment="development",
+            target_id="nebius-eu-west1-integration",
+        )
+
+
+@pytest.mark.parametrize(
+    "policies",
+    [
+        [],
+        [{"scope_kind": "global", "scope_key": "*", "enabled": False, "max_concurrent": 4}],
+        [{"scope_kind": "pool", "scope_key": "nebius-cpu", "enabled": True, "max_concurrent": 100}],
+    ],
+)
+def test_capacity_policy_separates_run_budget_from_live_admission(
+    tmp_path: Path,
+    policies: list[dict[str, Any]],
+) -> None:
+    _policy(tmp_path, accepted=1)
+    path = tmp_path / "policy.json"
+    body = json.loads(path.read_text())
+    body["admission_policies"] = policies
+    path.write_text(json.dumps(body))
+    loaded = load_capacity_policy(path)
+    assert acceptance_stages(loaded["accepted_concurrency"], [1]) == [1]
+    assert loaded["admission_policies"] == policies
+    with pytest.raises(NebiusAcceptanceError, match="exceeds persisted"):
+        acceptance_stages(loaded["accepted_concurrency"], [2])

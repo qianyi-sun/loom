@@ -10,13 +10,15 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 
 from loom.db.schema import LlmCall, ProviderConnection, RateCard
 from loom.models.types import ModelSpec
 from loom_llm_gateway.dialect import USAGE_STATUS_KEY
 from loom_llm_gateway.errors import RateCardNotFoundError
 from loom_llm_gateway.rate_card import (
+    COST_META_CONFIDENCE_KEY,
+    COST_META_SOURCE_KEY,
     RateCardTable,
     compute_cost_usd,
     hash_table,
@@ -654,8 +656,29 @@ def _step_error_messages(result: Any) -> list[str]:
     return messages
 
 
+_EXPECTED_NO_CALL_MESSAGES = {
+    "task_image_build_failed": "Task image preparation failed before model execution.",
+    "task_image_build_timeout": "Task image preparation timed out before model execution.",
+    "cancelled": "Trial was cancelled before execution started; no model calls were expected.",
+}
+
+
 def no_call_evidence_reason(trial: Any) -> NoCallEvidenceReason:
     """Classify why a terminal model-backed trial has no LLM-call evidence."""
+
+    state = getattr(trial, "state", None)
+    reason = getattr(trial, "failure_reason", None)
+    if state == "failed" and reason in {
+        "task_image_build_failed",
+        "task_image_build_timeout",
+    }:
+        return NoCallEvidenceReason(reason, _EXPECTED_NO_CALL_MESSAGES[reason], False)
+    if (
+        state == "cancelled"
+        and getattr(trial, "started_at", None) is None
+        and getattr(trial, "result", None) is None
+    ):
+        return NoCallEvidenceReason("cancelled", _EXPECTED_NO_CALL_MESSAGES["cancelled"], False)
 
     candidates = [
         item
@@ -706,7 +729,11 @@ def project_trial_llm_evidence(
     if calls == 0:
         reason = no_call_evidence_reason(trial)
         return {
-            "llm_evidence_status": "no_calls_invalid",
+            "llm_evidence_status": (
+                "not_applicable"
+                if reason.reason in _EXPECTED_NO_CALL_MESSAGES
+                else "no_calls_invalid"
+            ),
             "no_call": True,
             "no_call_reason": reason.reason,
             "no_call_message": reason.message,
@@ -775,6 +802,7 @@ def summarize_llm_evidence_for_trials(
 ) -> dict[str, Any]:
     terminal_model_backed = 0
     no_call = 0
+    unexpected_no_call = 0
     no_call_reason_counts: dict[str, int] = {}
     for trial in trials:
         if str(getattr(trial, "state", "")) not in _TERMINAL_TRIAL_STATES:
@@ -786,6 +814,8 @@ def summarize_llm_evidence_for_trials(
         if calls == 0:
             no_call += 1
             reason = no_call_evidence_reason(trial).reason
+            if reason not in _EXPECTED_NO_CALL_MESSAGES:
+                unexpected_no_call += 1
             no_call_reason_counts[reason] = no_call_reason_counts.get(reason, 0) + 1
 
     total_calls = sum(max(int(value or 0), 0) for value in llm_call_counts.values())
@@ -793,6 +823,8 @@ def summarize_llm_evidence_for_trials(
         status = "not_applicable"
     elif no_call == 0:
         status = "calls_observed" if total_calls > 0 else "pending"
+    elif unexpected_no_call == 0:
+        status = "calls_observed" if total_calls > 0 else "not_applicable"
     elif total_calls == 0:
         status = "no_calls_invalid"
     else:
@@ -808,6 +840,19 @@ def summarize_llm_evidence_for_trials(
 
 def usage_status_filter(status: str) -> Any:
     return LlmCall.provider_extras.op("->>")(USAGE_STATUS_KEY) == status
+
+
+def cost_meta_filter(key: str, value: str) -> Any:
+    """Interpret legacy local calls without inventing a configured price."""
+    local_value = {
+        COST_META_SOURCE_KEY: "unpriced",
+        COST_META_CONFIDENCE_KEY: "unavailable",
+    }[key]
+    effective = case(
+        (LlmCall.rate_card_hash == "local-server-no-card", local_value),
+        else_=func.coalesce(LlmCall.provider_extras.op("->>")(key), ""),
+    )
+    return effective == value
 
 
 def _is_facade_rate_card_hash(value: str) -> bool:
@@ -851,7 +896,10 @@ async def price_snapshots_for_hashes(
         {
             str(value)
             for value in hashes
-            if isinstance(value, str) and value and not _is_facade_rate_card_hash(value)
+            if isinstance(value, str)
+            and value
+            and value != "local-server-no-card"
+            and not _is_facade_rate_card_hash(value)
         }
     )
     if not wanted:

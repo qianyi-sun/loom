@@ -24,6 +24,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from loom.db.schema import (
     Task,
     TaskImageMaterialization,
+    Trial,
     TrialTaskImageMaterialization,
 )
 from loom.models.task import TaskConfig
@@ -94,6 +95,16 @@ def task_bundle_content_manifest_digest(provenance: Mapping[str, Any]) -> str:
     if type(digest) is not str or _CHECKSUM_RE.fullmatch(digest) is None:
         raise ValueError("bundle_content_manifest_sha256 must be a bare SHA-256 digest")
     return digest
+
+def resolve_prepared_task(task: TaskConfig, grant: TaskImageExecutionGrantV1) -> TaskConfig:
+    """Use the ready image for resource admission without changing its frozen source."""
+    payload = task.model_dump(mode="json")
+    payload["environment"].update(
+        dockerfile=None, docker_build_context=None, docker_build_args={},
+        docker_build_target=None, docker_image=grant.registry_images["task"],
+        cpu_arch=grant.cpu_arch,
+    )
+    return TaskConfig.model_validate(payload)
 
 
 def canonical_task_checksum(task_checksum: str) -> str:
@@ -311,6 +322,14 @@ async def _lock_task_image_materializations(
         for row in rows
     ):
         raise ValueError("frozen content-manifest snapshot conflicts with existing materialization")
+    for row in rows:
+        if row.task_config != task_row.config:
+            raise RuntimeError("task image materialization snapshot conflicts with task checksum")
+        if row.state == "retired" and not manifest_digest:
+            # Legacy caches may need current upload objects after retention GC.
+            # Manifest-bearing sources retain the exact admitted journal identity.
+            row.task_source = task_row.source
+            row.task_source_provenance = task_row.source_provenance or {}
     return tuple(by_arch[cpu_arch] for cpu_arch in architectures)
 
 
@@ -411,8 +430,10 @@ async def get_trial_task_image_execution_grant(
                 TrialTaskImageMaterialization,
                 TrialTaskImageMaterialization.materialization_id == TaskImageMaterialization.id,
             )
+            .join(Trial, Trial.id == TrialTaskImageMaterialization.trial_id)
             .where(
-                TrialTaskImageMaterialization.trial_id == trial_id,
+                Trial.id == trial_id,
+                TaskImageMaterialization.task_id == Trial.task_id,
                 TaskImageMaterialization.cpu_arch.in_(cpu_arches),
                 TaskImageMaterialization.state == "ready",
                 # Native publications require the signed V2 reader and one-use
@@ -424,6 +445,7 @@ async def get_trial_task_image_execution_grant(
             .execution_options(populate_existing=True)
             .with_for_update()
         )
+
     if row is None:
         has_prerequisite = bool(
             await session.scalar(

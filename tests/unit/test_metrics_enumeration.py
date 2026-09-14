@@ -1,3 +1,5 @@
+import pytest
+
 from loom_capacity_manager.metrics import CapacityMetrics
 from loom_control_plane.metrics import (
     CLAIM_LATENCY_SEC,
@@ -45,6 +47,7 @@ def test_metrics_exist_unlabeled():
     assert WORKER_RECLAIM_TOTAL._labelnames == ()
 
 
+@pytest.mark.legacy_pool
 def test_slurm_worker_capacity_metrics_are_bounded_by_pool():
     expected = ("environment", "pool_name")
     assert SLURM_WORKER_DESIRED_SLOTS._labelnames == expected
@@ -71,6 +74,7 @@ def test_worker_pool_slot_metrics_are_bounded_by_pool_backend_and_arch():
     assert WORKER_POOL_DRAINING_WORKERS._labelnames == expected
 
 
+@pytest.mark.legacy_pool
 def test_worker_pool_autoscaler_metrics_have_bounded_labels():
     expected = ("pool_name", "backend", "cpu_arch", "action", "reason")
     assert WORKER_POOL_AUTOSCALER_DECISION._labelnames == expected
@@ -86,6 +90,7 @@ def test_worker_pool_autoscaler_metrics_have_bounded_labels():
     )
 
 
+@pytest.mark.legacy_pool
 def test_capacity_manager_metrics_never_label_subject_or_environment_identity():
     metrics = CapacityMetrics()
     assert metrics.ready._labelnames == ()

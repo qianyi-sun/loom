@@ -7,7 +7,7 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID, uuid4
 
 from loom.agent.terminus2.agent_message import parse_agent_message
@@ -17,6 +17,7 @@ from loom.agent.terminus2.gateway_ledger import (
 )
 from loom.agent.terminus2.provenance import (
     HARBOR_COMPAT_SHA,
+    HARBOR_RUNTIME_VERSION,
     LOOM_BRIDGE_REVISION,
     harbor_template_hashes,
 )
@@ -32,7 +33,9 @@ from loom.models.trajectory import (
 from loom.models.types import ModelSpec
 from loom.security.redaction import redact_text
 from loom.trajectory.llm_call_events import llm_call_row_to_event
-from loom.trajectory.writer import TrajectoryWriter
+
+if TYPE_CHECKING:
+    from loom.trajectory.writer import TrajectoryWriter
 
 
 class _CpClient(Protocol):
@@ -83,6 +86,7 @@ class HarborCheckpointBridge:
                 seq=self._next_seq(),
                 loom_runtime_revision=LOOM_BRIDGE_REVISION,
                 harbor_compat_sha=HARBOR_COMPAT_SHA,
+                harbor_version=HARBOR_RUNTIME_VERSION,
                 parser_name="json",
                 prompt_hash=harbor_template_hashes().get(
                     "terminus-json-plain.txt", "",

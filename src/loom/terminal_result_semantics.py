@@ -1,4 +1,4 @@
-"""Shared terminal-state consistency checks for persisted trial results.
+"""Shared reward projection and consistency checks for persisted trial results.
 
 The worker projects ``TrialResult`` before it reports the terminal row state.
 That split write is intentional, but neither write boundary may accept a
@@ -16,6 +16,16 @@ from typing import Any
 TERMINAL_TRIAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
 
 TerminalResultConflict = dict[str, Any]
+
+
+def aggregate_reward_scalar(reward: dict[str, float] | None) -> float | None:
+    """Project named rewards for Trial/Batch summaries without discarding them."""
+
+    if not reward:
+        return None
+    if len(reward) == 1:
+        return float(next(iter(reward.values())))
+    return sum(float(value) for value in reward.values()) / len(reward)
 
 
 def _conflict(*, field: str, expected: Any, actual: Any) -> TerminalResultConflict:

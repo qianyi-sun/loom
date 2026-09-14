@@ -133,6 +133,7 @@ def _public_execution_capacity(
         target_id = str(row.get("target_id"))
         profile = profile_by_target.get(target_id, {})
         public: dict[str, object] = {
+            "target_id": row.get("target_id"),
             "provider": "nebius",
             "pool_id": row.get("pool_id"),
             "environment": row.get("environment"),
@@ -147,8 +148,6 @@ def _public_execution_capacity(
             "blockers": list(row.get("blockers") or []),
             "resource_profile": _select_fields(profile, _RESOURCE_PROFILE_FIELDS),
         }
-        if admin:
-            public["target_id"] = row.get("target_id")
         out.append(public)
     return out
 

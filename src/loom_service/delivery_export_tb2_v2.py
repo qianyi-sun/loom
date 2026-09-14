@@ -509,12 +509,19 @@ def resolve_native_artifacts(
         *,
         archive_path: str,
         key_suffix: str,
+        canonical_path: str,
     ) -> None:
         candidates = [
             item
             for item in indexed
             if isinstance(item.get("key"), str)
-            and _artifact_key_matches(item["key"], suffix=key_suffix)
+            and (
+                _artifact_key_matches(item["key"], suffix=key_suffix)
+                or (
+                    item.get("relative_path") == canonical_path
+                    and item["key"].endswith("/files/" + canonical_path)
+                )
+            )
         ]
         if not candidates:
             raise Tb2V2ExportError(
@@ -559,12 +566,14 @@ def resolve_native_artifacts(
                 ref,
                 archive_path=NATIVE_HARBOR_TRAJECTORY,
                 key_suffix=".loom/agent/trajectory.json",
+                canonical_path="artifacts/harbor/trajectory.json",
             )
         elif ref.artifact_kind == "recording.cast":
             _resolve_ref(
                 ref,
                 archive_path=NATIVE_RECORDING_CAST,
                 key_suffix="recording.cast",
+                canonical_path="artifacts/harbor/recording.cast",
             )
 
     return resolved

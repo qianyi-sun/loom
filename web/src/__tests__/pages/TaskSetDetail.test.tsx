@@ -24,7 +24,7 @@ const TASK_SET = {
 };
 
 function renderPage(
-  initialPath = "/task-sets/task-set-1",
+  initialPath = "/task-sets/detail?id=task-set-1",
   fetchImpl?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
 ): void {
   vi.stubGlobal(
@@ -49,6 +49,7 @@ function renderPage(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={[initialPath]}>
         <Routes>
+          <Route path="/task-sets/detail" element={<TaskSetDetail />} />
           <Route path="/task-sets/:id" element={<TaskSetDetail />} />
           <Route path="/task-sets" element={<h1>Task sets</h1>} />
         </Routes>
@@ -164,5 +165,38 @@ describe("TaskSetDetail tabs", () => {
     expect(
       screen.getByLabelText("Type the TaskSet id to confirm"),
     ).toHaveValue("task-set-1");
+  });
+});
+
+
+describe("TaskSet detail links", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("preserves reserved characters at the API boundary and on tab changes", async () => {
+    const id = "ts/team/a & b?x=1#100%+雪";
+    const user = userEvent.setup();
+    renderPage(`/task-sets/detail?${new URLSearchParams({ id })}`);
+    await screen.findByRole("heading", { name: "task-set-1" });
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      `/api/v1/tasksets/${id.split("/").map(encodeURIComponent).join("/")}`,
+      expect.any(Object),
+    );
+    await user.click(screen.getByRole("tab", { name: "Errors (1)" }));
+    expect(screen.getByRole("tabpanel")).toHaveTextContent("Task is invalid");
+  });
+
+  it.each(["", "?id=", "?id=a&id=b", "?id=ts/../x", "?id=ts/%5Cx", "?id=%00"])(
+    "rejects an invalid link %s without requesting a task", async (query) => {
+      renderPage(`/task-sets/detail${query}`);
+      expect(screen.getByRole("alert")).toHaveTextContent("Invalid task set link");
+      expect(screen.getByRole("link", { name: "All task sets" })).toHaveAttribute("href", "/task-sets");
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([403, 404, 422])("shows an actionable error for unavailable IDs (%s)", async (status) => {
+    renderPage("/task-sets/detail?id=ts/other/private", async () => new Response("{}", { status }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Check the link and selected team");
+    expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
   });
 });

@@ -305,13 +305,14 @@ async def test_docker_driver_applies_exact_cgroup_parent(
     driver = DockerDriver(image="loom-agent-sandbox:dev")
     await driver.start(
         options=StartOptions(
-            cgroup_parent="/system.slice/slurmstepd.scope/job_123",
+            cgroup_parent="/loom/tasks/task-123",
         )
     )
 
-    assert create_kwargs["cgroup_parent"] == ("/system.slice/slurmstepd.scope/job_123")
+    assert create_kwargs["cgroup_parent"] == ("/loom/tasks/task-123")
 
 
+@pytest.mark.legacy_pool
 async def test_docker_driver_applies_guard_owned_systemd_slice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -390,8 +391,7 @@ async def test_docker_driver_rejects_unsafe_cgroup_parent(
 async def test_docker_driver_omits_container_caps_when_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # #896: default (0) caps leave the create call unbounded, so exclusive
-    # GB10 pools are byte-for-byte unchanged.
+    # Unset caps must omit resource-limit kwargs from the Docker create call.
     create_kwargs: dict[str, Any] = {}
     container = _FakeContainer()
 
@@ -431,6 +431,7 @@ async def test_docker_driver_omits_container_caps_when_unset(
     assert container.started is True
 
 
+@pytest.mark.legacy_pool
 async def test_docker_driver_rejects_gpu_request_above_slurm_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -455,6 +456,7 @@ async def test_docker_driver_rejects_gpu_request_above_slurm_allocation(
         )
 
 
+@pytest.mark.legacy_pool
 async def test_docker_driver_binds_only_slurm_allocated_gpu_devices(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

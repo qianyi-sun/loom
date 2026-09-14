@@ -375,9 +375,15 @@ def seed_inputs(source: Kubernetes, config: dict[str, Any], attachment: dict[str
     if profile is None:
         raise ReconcileError("runtime profile is empty")
     keyring = ImageAdmissionKeyring.from_json(json.dumps(admission))
+    admitted_images = {row.statement.image_ref for row in profile.image_admission.admissions}
+    required_images = {profile.task_image_ref, profile.runtime_image_ref}
+    if profile.agent_image_ref is not None:
+        required_images.add(profile.agent_image_ref)
+    if not required_images <= admitted_images:
+        raise ReconcileError("runtime profile image admission is incomplete")
     verify_execution_image_admission(
         profile.image_admission,
-        required_image_refs=[profile.task_image_ref, profile.runtime_image_ref],
+        required_image_refs=tuple(admitted_images),
         keyring=keyring,
     )
     observer = private_json(Path(config["observer_credentials_file"]))

@@ -2448,10 +2448,14 @@ async def test_post_accepts_explicit_nebius_backend_without_legacy_worker(
 
 
 @pytest.mark.parametrize("use_combinations", [False, True])
+@pytest.mark.parametrize("agent_name", ["direct-completion", "terminus-2"])
+@pytest.mark.parametrize("dockerfile", [False, True], ids=["prebuilt", "dockerfile"])
 async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
     use_combinations: bool,
+    agent_name: str,
+    dockerfile: bool,
 ) -> None:
     app, raw, _team_id = camp_setup
     suffix = "combinations" if use_combinations else "single"
@@ -2459,6 +2463,16 @@ async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
     target_id = f"nebius-automatic-backend-{suffix}"
     now = datetime.now(UTC)
     profile = _service_execution_runtime_profile()
+    if agent_name == "terminus-2":
+        controller_image = "registry.example/worker@sha256:" + "9" * 64
+        service_image = "registry.example/service@sha256:" + "8" * 64
+        profile = profile.model_copy(update={
+            "task_image_ref": service_image,
+            "agent_image_ref": controller_image,
+            "image_admission": signed_image_admission_bundle((
+                profile.task_image_ref, profile.runtime_image_ref, controller_image, service_image,
+            )),
+        })
     app.state.settings = app.state.settings.model_copy(
         update={
             "service_execution_runtime_profile_json": json.dumps(
@@ -2468,6 +2482,14 @@ async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
             )
         }
     )
+    task_config = _automatic_service_execution_task_config(task_id)
+    if dockerfile:
+        environment = task_config["environment"]
+        assert isinstance(environment, dict)
+        environment.pop("docker_image")
+        environment.update({
+            "dockerfile": "environment/Dockerfile", "cpu_arch": "any",
+        })
     execution_class_spec = NEBIUS_CPU_EXECUTION_CLASS_V1.model_dump(mode="json")
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -2505,7 +2527,7 @@ async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
             insert(Task).values(
                 id=task_id,
                 checksum="c" * 64,
-                config=_automatic_service_execution_task_config(task_id),
+                config=task_config,
                 source="s3://artifacts/task-inputs/task/",
                 source_provenance={
                     "service_execution_input": {
@@ -2542,14 +2564,14 @@ async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
             if use_combinations:
                 payload["combinations"] = [
                     {
-                        "agent_name": "direct-completion",
+                        "agent_name": agent_name,
                         "agent_model": model,
                         "n_per_task": 1,
                     }
                 ]
             else:
                 payload["trial_config"] = {
-                    "agent_name": "direct-completion",
+                    "agent_name": agent_name,
                     "agent_model": model,
                 }
             response = await ac.post(
@@ -2558,6 +2580,10 @@ async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
                 json=payload,
             )
 
+        if dockerfile and agent_name != "terminus-2":
+            assert response.status_code == 400, response.text
+            assert response.json()["detail"]["reason"] == "nebius_task_incompatible"
+            return
         assert response.status_code == 201, response.text
         assert response.json()["backend"] == "nebius"
         assert response.json()["expected_trial_count"] == 1
@@ -2670,6 +2696,7 @@ async def test_post_rejects_mixed_service_and_legacy_without_capacity(
     assert "no healthy autoscaled pool" in response.json()["detail"]
 
 
+@pytest.mark.legacy_pool
 async def test_post_admits_docker_when_healthy_pool_can_scale_from_zero(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
@@ -2787,6 +2814,7 @@ async def test_post_admits_docker_when_healthy_pool_can_scale_from_zero(
         sync_engine.dispose()
 
 
+@pytest.mark.legacy_pool
 @pytest.mark.parametrize(
     ("policy_values", "task_cpu_arch"),
     [

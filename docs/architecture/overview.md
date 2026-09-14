@@ -12,8 +12,11 @@ and download. Two execution modes share the same primitives:
   scheduling. SPA at `web/` for browsing trials. See
   [service-mode.md](service-mode.md).
 
-Both modes use the same `Trial.run()` orchestrator and emit
-bit-identical event-sourced JSONL trajectories.
+CLI and worker execution share `Trial.run()`. Native Nebius service execution
+uses durable leases, namespace-scoped Kubernetes Jobs and a reusable harness
+runtime, with canonical artifacts and Gateway accounting. `dev` includes this
+path alongside existing worker support; see the
+[Nebius platform contract](nebius-primary-platform.md).
 
 ## Component map
 
@@ -24,6 +27,7 @@ bit-identical event-sourced JSONL trajectories.
 | Cloud drivers | `src/loom_drivers/` | `Driver` Protocol implementations for Modal sandboxes |
 | Control Plane | `src/loom_control_plane/` | Trial state machine, DRF claim, trajectory index, signed-URL artifact upload |
 | LLM Gateway | `src/loom_llm_gateway/` | LiteLLM-backed provider proxy with rate-card cost compute + per-call attribution |
+| Native execution | `src/loom_execution_actuator/` + `cmd/loom-execution-runtime/` | Reconciles lease-bound Kubernetes Jobs; runs prepared task images and reusable harnesses |
 | Worker | `src/loom_worker/` | Polls Control Plane for trials, runs them locally, emits trajectory to MinIO, reports state via fenced PATCH |
 | Service (REST + SPA) | `src/loom_service/` + `web/` | External REST surface (`/api/v1/...`) and React SPA |
 | Operator CLI | `src/loom_benchmark_tool/` | `loom-benchmark list/import/verify` for cluster-side adapter management |
@@ -35,7 +39,7 @@ Gateway, Worker, Service are all stateless.
 
 ## Where Trial.run() lives
 
-`loom.trial.trial.Trial.run()` is the single orchestrator. It takes a
+For CLI and worker execution, `loom.trial.trial.Trial.run()` takes a
 `TrialContext` and walks the trial state machine. Both modes construct
 a `TrialContext` and hand it to `Trial.run()`; the only differences
 are the wiring of the four dependencies:

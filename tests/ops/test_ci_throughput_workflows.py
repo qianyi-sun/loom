@@ -1363,6 +1363,7 @@ def test_manual_and_filtered_contexts_have_distinct_event_specific_names() -> No
             {
                 "EVENT_NAME": "pull_request",
                 "BUILD_RESULT": "skipped",
+                "HARNESS_BUILD_RESULT": "skipped",
                 "SCANNER_BUILD_RESULT": "skipped",
                 "PUBLISH_RESULT": "skipped",
             },
@@ -1480,6 +1481,7 @@ def test_images_gate_separates_untrusted_build_from_trusted_publish(
             "GATE_MODE": "full",
             "REQUIRED": required,
             "BUILD_RESULT": build_result,
+            "HARNESS_BUILD_RESULT": build_result,
             "SCANNER_BUILD_RESULT": "skipped",
             "PUBLISH_RESULT": publish_result,
             "MANIFEST_RESULT": manifest_result,
@@ -1529,6 +1531,7 @@ def test_images_gate_requires_personal_release_only_for_protected_selected_publi
             "GATE_MODE": "full",
             "REQUIRED": required,
             "BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
+            "HARNESS_BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
             "SCANNER_BUILD_RESULT": "skipped"
             if protected_publish or required == "false"
             else "success",
@@ -1570,6 +1573,7 @@ def test_images_gate_rejects_cross_lane_or_ambiguous_results(
             "GATE_MODE": "full",
             "REQUIRED": required,
             "BUILD_RESULT": build_result,
+            "HARNESS_BUILD_RESULT": build_result,
             "SCANNER_BUILD_RESULT": "skipped",
             "PUBLISH_RESULT": publish_result,
         },
@@ -1761,6 +1765,7 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
             "images-gate",
             {
                 "build": "BUILD_RESULT",
+                "nebius-harness-build": "HARNESS_BUILD_RESULT",
                 "scanner-cache-build": "SCANNER_BUILD_RESULT",
                 "publish": "PUBLISH_RESULT",
                 "publish-manifest": "MANIFEST_RESULT",

@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from testcontainers.core.wait_strategies import HttpWaitStrategy
 from testcontainers.minio import MinioContainer
 
 from loom.models.trajectory import StepStartEvent
@@ -19,7 +20,7 @@ from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 
 @pytest.fixture(scope="module")
 def minio() -> Iterator[MinioContainer]:
-    with MinioContainer(image=MINIO_TEST_IMAGE) as m:
+    with MinioContainer(MINIO_TEST_IMAGE).waiting_for(HttpWaitStrategy(9000, "/minio/health/cluster")) as m:
         yield m
 
 

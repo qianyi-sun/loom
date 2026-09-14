@@ -383,6 +383,7 @@ def test_publish_local_explicit_flatten_override_is_visible_in_output(
     assert "compat_flattened_files=2" in out
 
 
+@pytest.mark.legacy_pool
 def test_gb10_smoke_catalog_fixture_is_publish_local_ready(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

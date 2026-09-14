@@ -35,6 +35,46 @@ def test_minimal_config_parses():
     assert cfg.steps == []
 
 
+def test_docker_build_inputs_round_trip_without_coercing_values() -> None:
+    environment = EnvironmentConfig.model_validate(
+        {
+            "os": "linux",
+            "dockerfile": "environment/Dockerfile",
+            "docker_build_args": {"PACKAGE_VERSION": "1.2", "EMPTY": ""},
+            "docker_build_target": "runtime",
+        }
+    )
+    assert EnvironmentConfig.model_validate_json(environment.model_dump_json()) == environment
+    assert environment.docker_build_args == {"PACKAGE_VERSION": "1.2", "EMPTY": ""}
+    assert environment.docker_build_target == "runtime"
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"docker_build_args": {"PACKAGE_VERSION": 12}},
+        {"docker_build_args": {"PACKAGE_VERSION": None}},
+        {"docker_build_args": {"BAD=NAME": "1"}},
+        {"docker_build_args": {"": "1"}},
+        {"docker_build_args": {"PACKAGE_VERSION": "bad\x00value"}},
+        {"docker_build_target": ""},
+        {"docker_build_target": "runtime --network=host"},
+    ],
+)
+def test_docker_build_inputs_reject_invalid_values(options: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        EnvironmentConfig.model_validate({"os": "linux", "dockerfile": "Dockerfile", **options})
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{"docker_build_args": {"PACKAGE_VERSION": "1"}}, {"docker_build_target": "runtime"}],
+)
+def test_docker_build_inputs_require_dockerfile(options: dict[str, object]) -> None:
+    with pytest.raises(ValidationError, match="require dockerfile"):
+        EnvironmentConfig.model_validate({"os": "linux", "docker_image": "alpine", **options})
+
+
 def test_task_config_round_trips_required_agent_capabilities() -> None:
     raw = _minimal_config().model_dump(mode="json")
     raw["required_agent_capabilities"] = ["workspace_exec"]

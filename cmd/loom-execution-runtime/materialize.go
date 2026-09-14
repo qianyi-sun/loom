@@ -15,6 +15,8 @@ func materialize(arguments []string) error {
 	encodedPlan := flags.String("encoded-plan", "", "base64-encoded immutable plan")
 	runtimeDestination := flags.String("runtime-dest", "/loom/runtime/loom-execution-runtime", "runtime binary destination")
 	planDestination := flags.String("plan-dest", "/loom/runtime/execution-plan.json", "plan destination")
+	sandboxSource := flags.String("sandbox-source", "/loom-sandbox-runtime", "bundled sandbox binary")
+	sandboxDestination := flags.String("sandbox-dest", "/loom/runtime/loom-sandbox-runtime", "sandbox binary destination")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
@@ -57,6 +59,34 @@ func materialize(arguments []string) error {
 		_ = os.Remove(*runtimeDestination)
 		return err
 	}
+	completed := false
+	defer func() {
+		if !completed {
+			_ = os.Remove(*runtimeDestination)
+			_ = os.Remove(*planDestination)
+		}
+	}()
+	for _, sidecar := range p.Sidecars {
+		if !sidecar.PrivateSandbox {
+			continue
+		}
+		if !filepath.IsAbs(*sandboxDestination) || filepath.Clean(*sandboxDestination) != *sandboxDestination {
+			return fmt.Errorf("sandbox destination must be a clean absolute path")
+		}
+		if err := secureDirectory(filepath.Dir(*sandboxDestination)); err != nil {
+			return err
+		}
+		// Both binaries arrive in the same already-admitted OCI image.
+		sandbox, err := os.ReadFile(*sandboxSource)
+		if err != nil {
+			return err
+		}
+		if err := writeExclusive(*sandboxDestination, sandbox, 0o555); err != nil {
+			return err
+		}
+		break
+	}
+	completed = true
 	return nil
 }
 

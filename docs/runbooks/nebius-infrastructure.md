@@ -5,7 +5,9 @@ with the three isolated environment bindings defined by
 `config/service-execution-topology.json`. It is intentionally separate from
 Kubernetes workload bootstrap: Terraform establishes the cloud foundation; a
 later, independently reviewed step installs environment-local Loom resources
-and exercises them.
+and exercises them. For the optional execution-only regional extension of the
+pure-Nebius integration environment, use [the platform runbook](nebius-platform.md);
+its primary platform remains centralized.
 
 ## Authority boundary
 
@@ -16,7 +18,7 @@ authorizes resource creation or spend.
 Before each mutable operation, record all of the following in the owning issue:
 
 1. exact cluster scope, environment bindings, tenant, project, region, profile,
-   and saved-plan hash;
+   and reviewed saved plan;
 2. resources created or changed and the maximum node count;
 3. current Nebius hourly and 730-hour monthly estimate, including disks,
    public IPs, object storage, egress, taxes, and any items the calculator omits;

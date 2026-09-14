@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -13,6 +14,33 @@ import pytest
 import loom_cli.environment_state as environment_state
 from loom_cli.__main__ import main
 from loom_cli.environment_state import StateDrift
+from tests.support.agent_runtime import release
+
+
+@pytest.mark.parametrize("status", [200, 409])
+def test_agent_runtime_register_preserves_release_and_redacts_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], status: int,
+) -> None:
+    item = release()
+    payload = item.model_dump(mode="json")
+    path = tmp_path / "release.json"
+    path.write_text(json.dumps(payload))
+    token = "loom_admin_test_runtime_registry_secret"
+    monkeypatch.setenv("RUNTIME_ADMIN_TOKEN", token)
+
+    def put(url, *, json, headers, timeout):
+        assert url == f"http://cp/admin/agents/terminus-2/versions/{item.agent_version}"
+        assert json == payload
+        assert headers == {"Authorization": f"Bearer {token}"}
+        return httpx.Response(status, json=item.public_metadata() if status == 200 else {"detail": token})
+
+    monkeypatch.setattr("loom_cli.admin_cmd.httpx.put", put)
+    assert main(["admin", "agent-runtime", "register", "--release", str(path),
+                 "--cp-url", "http://cp", "--admin-token", "env:RUNTIME_ADMIN_TOKEN"]) == (0 if status == 200 else 2)
+    output = capsys.readouterr()
+    assert token not in output.out + output.err
+    if status == 200:
+        assert json.loads(output.out) == item.public_metadata()
 
 
 class _StubResponse:
@@ -627,6 +655,7 @@ def test_rotate_json_mode_skips_checklist(
 # ──────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.legacy_pool
 def test_slurm_workers_status_gets_cp_capacity_without_printing_secrets(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -695,6 +724,7 @@ def test_slurm_workers_status_gets_cp_capacity_without_printing_secrets(
     assert "<redacted>" in out
 
 
+@pytest.mark.legacy_pool
 def test_slurm_workers_status_json_format_emits_raw_json(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -717,6 +747,7 @@ def test_slurm_workers_status_json_format_emits_raw_json(
 # ──────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.legacy_pool
 def test_gb10_workers_status_gets_cp_rollout_state_without_secrets(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -783,6 +814,7 @@ def test_gb10_workers_status_gets_cp_rollout_state_without_secrets(
     assert "loom_w_secret" not in out
 
 
+@pytest.mark.legacy_pool
 def test_gb10_workers_status_json_format_emits_raw_json(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -800,6 +832,7 @@ def test_gb10_workers_status_json_format_emits_raw_json(
     assert json.loads(capsys.readouterr().out) == payload
 
 
+@pytest.mark.legacy_pool
 def test_gb10_workers_status_fails_before_cp_when_admin_token_fingerprint_drifts(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -835,6 +868,7 @@ def test_gb10_workers_status_fails_before_cp_when_admin_token_fingerprint_drifts
     assert stale_admin_token not in err
 
 
+@pytest.mark.legacy_pool
 def test_gb10_workers_status_release_target_gate_fails_on_stale_nodes(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -903,6 +937,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_nodes(
     assert "env-old" in err
 
 
+@pytest.mark.legacy_pool
 def test_gb10_workers_status_release_target_gate_fails_on_missing_active_host(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -953,6 +988,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_missing_active_host(
     assert "missing active node report" in err
 
 
+@pytest.mark.legacy_pool
 def test_gb10_workers_status_release_target_gate_fails_on_unhealthy_active_node(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1013,6 +1049,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_unhealthy_active_node(
     assert "apply_state=unavailable" in err
 
 
+@pytest.mark.legacy_pool
 def test_gb10_workers_status_release_target_gate_fails_on_capacity_mismatch(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1073,6 +1110,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_capacity_mismatch(
     assert "max=4/10" in err
 
 
+@pytest.mark.legacy_pool
 def test_gb10_workers_status_release_target_gate_fails_on_stale_source_checkout(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1143,6 +1181,7 @@ def test_gb10_workers_status_release_target_gate_fails_on_stale_source_checkout(
     assert "loom-staging-b453057/deploy" in err
 
 
+@pytest.mark.legacy_pool
 def test_gb10_workers_status_release_target_gate_fails_without_source_provenance(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1213,6 +1252,7 @@ def test_gb10_workers_status_release_target_gate_fails_without_source_provenance
 # ──────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.legacy_pool
 def test_worker_pool_autoscaler_status_gets_cp_decisions(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1280,6 +1320,7 @@ def test_worker_pool_autoscaler_status_gets_cp_decisions(
     assert "decision=scale_up" in out
 
 
+@pytest.mark.legacy_pool
 def test_worker_pool_autoscaler_status_text_shows_no_safe_node_details(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1337,6 +1378,7 @@ def test_worker_pool_autoscaler_status_text_shows_no_safe_node_details(
     assert "details=oldlab-1:insufficient_memory,oldlab-2:cpu_load_high" in out
 
 
+@pytest.mark.legacy_pool
 def test_worker_pool_autoscaler_status_json_format_emits_raw_json(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1646,7 +1688,7 @@ def test_execution_resource_profile_calibrate_and_bind_use_admin_surfaces(
             "--target-id",
             "nebius-eu",
             "--source-pool-id",
-            "oldlab",
+            "calibration-source",
             "--source-architecture",
             "x86_64",
             "--resource-profile",
@@ -1745,6 +1787,7 @@ def _environment_state_unit_without_rollout_guard(
     )
 
 
+@pytest.mark.legacy_pool
 def test_environment_state_apply_puts_profile_resources(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1792,6 +1835,7 @@ def test_environment_state_apply_puts_profile_resources(
     assert "Applied environment state staging" in capsys.readouterr().out
 
 
+@pytest.mark.legacy_pool
 def test_environment_state_check_fails_with_actionable_drift(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1875,6 +1919,7 @@ def test_environment_state_check_fails_with_actionable_drift(
     assert "gb10_worker_pool_desired_states[staging/gb10].image_tag" in err
 
 
+@pytest.mark.legacy_pool
 def test_environment_state_check_json_reports_autoscaler_blockers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1997,6 +2042,7 @@ def test_environment_state_check_json_reports_autoscaler_blockers(
     ]
 
 
+@pytest.mark.legacy_pool
 def test_environment_state_check_fetches_slurm_jobs_and_reports_external_prereq_drift(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2099,6 +2145,7 @@ def test_environment_state_check_fetches_slurm_jobs_and_reports_external_prereq_
     assert "external_slurm_runner_prerequisites[production/oldlab].env_file" in err
 
 
+@pytest.mark.legacy_pool
 def test_environment_state_check_fails_before_cp_when_admin_token_fingerprint_drifts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2146,6 +2193,7 @@ def test_environment_state_check_fails_before_cp_when_admin_token_fingerprint_dr
     assert stale_admin_token not in err
 
 
+@pytest.mark.legacy_pool
 def test_environment_state_check_passes_worker_token_without_leaking_secret(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2260,7 +2308,6 @@ def test_environment_state_check_passes_worker_token_without_leaking_secret(
 # ──────────────────────────────────────────────────────────────────────
 
 
-from pathlib import Path  # noqa: E402
 
 _TEAM_ID = "00000000-0000-0000-0000-000000000aaa"
 

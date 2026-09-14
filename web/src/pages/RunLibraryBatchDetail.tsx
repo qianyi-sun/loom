@@ -19,6 +19,7 @@ import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
 import { StatusPill } from "../components/StatusPill";
+import { agentLabel } from "../lib/agentLabel";
 import { formatLocalDateTime } from "../lib/dateTime";
 import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
 import { humanizeTrialConfig } from "../lib/humanizeTrialConfig";
@@ -26,7 +27,7 @@ import { modelLabel } from "../lib/modelLabel";
 import { ownershipLabel } from "../lib/ownership";
 import { provenanceLabel } from "../lib/provenanceLabel";
 import { trialDownloadCommands } from "../lib/quickstartSnippets";
-import { batchStateVariant } from "../lib/statusVariant";
+import { batchResultPresentation, batchStateVariant } from "../lib/statusVariant";
 
 const GROUP_LABELS: Record<ArtifactGroup, string> = {
   reports: "Reports",
@@ -104,11 +105,11 @@ function artifactActionsAllowed(artifact: RunLibraryArtifact): boolean {
 function comboText(batch: RunLibraryBatchDetail): string {
   if (batch.combinations.length > 0) {
     return batch.combinations
-      .map((combo) => `${combo.agent_name} / ${modelLabel(combo.agent_model)}`)
+      .map((combo) => `${agentLabel(combo.agent_name, combo.agent_version)} / ${modelLabel(combo.agent_model)}`)
       .join(", ");
   }
-  const agent = batch.trial_config.agent_name;
-  return `${typeof agent === "string" ? agent : "default"} / ${modelLabel(
+  const agent = agentLabel(batch.trial_config.agent_name ?? "default", batch.trial_config.agent_version);
+  return `${agent} / ${modelLabel(
     batch.trial_config.agent_model,
   )}`;
 }
@@ -279,7 +280,7 @@ function CombinationSummarySection({
                       {combo.label}
                     </div>
                     <div className="mt-1 text-xs text-slate-500">
-                      #{combo.combination_idx}
+                      {agentLabel(combo.agent_name, combo.agent_version)} · #{combo.combination_idx}
                       {combo.provider_model_id
                         ? ` · ${combo.provider_model_id}`
                         : ""}
@@ -372,6 +373,7 @@ export default function RunLibraryBatchDetail(): JSX.Element {
     effectiveCombinationSummary.length > 0
       ? effectiveCombinationSummary
       : (batch.combination_summary ?? []);
+  const result = batch.result_status ? batchResultPresentation(batch.result_status, batch.trial_summary) : null;
   const rewardZeroPlatformSuccess =
     batch.aggregate_reward === 0 &&
     (batch.trial_summary.failed ?? 0) === 0 &&
@@ -396,8 +398,8 @@ export default function RunLibraryBatchDetail(): JSX.Element {
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <StatusPill variant={batchStateVariant(batch.state)}>
-                {batch.result_status ?? batch.state}
+              <StatusPill variant={result?.variant ?? batchStateVariant(batch.state)}>
+                {result?.label ?? batch.state}
               </StatusPill>
               <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-medium text-slate-700">
                 {batch.backend}

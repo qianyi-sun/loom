@@ -298,6 +298,7 @@ async def openai_chat_facade(
                 response_headers=dict(upstream_response.headers),
                 response_body=body,
                 api_key=api_key,
+                auth_context=ctx,
             ),
             response_model=body.get("model") if isinstance(body.get("model"), str) else None,
             **{

@@ -54,6 +54,7 @@ import {
   agentReadinessMessage,
   agentServiceModeReady,
 } from "../lib/agentReadiness";
+import { agentLabel } from "../lib/agentLabel";
 import { EMPTY_BENCHMARK_HELP } from "../lib/helpText";
 import { parseTaskIds } from "../lib/parseTaskIds";
 import {
@@ -274,6 +275,8 @@ function buildAdvancedConfig(
         jitter: jitter,
       },
     };
+  } else {
+    out.retry = { max_attempts: 1, retry_on: [] };
   }
 
   const prio = numOrErr(s.submitPriority, "Submit priority", { min: 0, max: 1000 });
@@ -800,7 +803,7 @@ function identityCombinationPart(rows: ComboRow[]): { name: string; description:
   const names: string[] = [];
   const descriptions: string[] = [];
   for (const row of rows) {
-    const agent = row.picker.agentName || DEFAULT_AGENT_NAME;
+    const agent = agentLabel(row.picker.agentName || DEFAULT_AGENT_NAME, row.picker.agentVersion);
     const samples = Number.parseInt(row.nPerTask, 10);
     const sampleText = Number.isFinite(samples) && samples > 0 ? samples : 1;
     const label = row.label.trim();
@@ -1157,6 +1160,12 @@ export default function NewBatch(): JSX.Element {
           error: `Combination ${i + 1}: ${agentReadinessMessage(selectedAgent)}`,
         };
       }
+      if (r.picker.agentVersion && (
+        backend !== "nebius" || selectedAgent.name !== "terminus-2" ||
+        !selectedAgent.versions?.some((v) => v.agent_version === r.picker.agentVersion)
+      )) {
+        return { ok: false, error: `Combination ${i + 1}: choose an available agent version for Nebius Terminus-2, or use Deployment default.` };
+      }
       const agentModel = buildAgentModel(r.picker, selectedAgent.needs_model);
       if (selectedAgent.needs_model && agentModel === null) {
         return {
@@ -1180,6 +1189,7 @@ export default function NewBatch(): JSX.Element {
       }
       const combo: Combination = {
         agent_name: selectedAgent.name,
+        ...(r.picker.agentVersion ? { agent_version: r.picker.agentVersion } : {}),
         agent_model: agentModel,
         n_per_task: n,
       };
@@ -2276,6 +2286,7 @@ export default function NewBatch(): JSX.Element {
                     specificAgentToggle
                     defaultAgentName={DEFAULT_AGENT_NAME}
                     teamId={currentTeamId}
+                    backend={backend}
                   />
                   <div className="grid grid-cols-2 gap-3">
                     <label className="block">
@@ -2449,7 +2460,7 @@ export default function NewBatch(): JSX.Element {
                 >
                   <span className="font-semibold">{lbl}</span>
                   <span className="text-slate-500">
-                    {sel?.name ?? "?"} · {modelTxt} · n={r.nPerTask}
+                    {agentLabel(sel?.name, r.picker.agentVersion)} · {modelTxt} · n={r.nPerTask}
                   </span>
                 </span>
               );

@@ -277,7 +277,7 @@ async def test_sidecar_runtime_builds_and_starts_in_dependency_order(
         runtime_identity_labels=(
             ("loom.sandbox", "dev-a"),
             ("loom.candidate_sha", "a" * 40),
-            ("loom.slurm_job_id", "12345"),
+            ("loom.execution_id", "12345"),
         ),
     )
 
@@ -300,7 +300,7 @@ async def test_sidecar_runtime_builds_and_starts_in_dependency_order(
     assert api_call["labels"] == {
         "loom.sandbox": "dev-a",
         "loom.candidate_sha": "a" * 40,
-        "loom.slurm_job_id": "12345",
+        "loom.execution_id": "12345",
         "loom.setup-container": "true",
         "loom.task-sidecar": "true",
         "loom.task_id": "tb2/api-task",
@@ -638,7 +638,7 @@ async def test_sidecar_runtime_applies_exact_cgroup_parent(
         task_checksum="abc123",
         trial_id=uuid4(),
         health_poll_interval_sec=0,
-        container_cgroup_parent="/system.slice/slurmstepd.scope/job_123",
+        container_cgroup_parent="/loom/tasks/task-123",
     )
 
     await runtime.start(network_name="loom-task-net")
@@ -646,7 +646,7 @@ async def test_sidecar_runtime_applies_exact_cgroup_parent(
 
     assert fake_client.containers.create_calls
     for call in fake_client.containers.create_calls:
-        assert call["cgroup_parent"] == ("/system.slice/slurmstepd.scope/job_123")
+        assert call["cgroup_parent"] == ("/loom/tasks/task-123")
 
 
 async def test_sidecar_runtime_omits_container_caps_when_unset(

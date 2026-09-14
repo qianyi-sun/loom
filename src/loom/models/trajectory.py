@@ -362,6 +362,7 @@ class Terminus2RuntimeProvenanceEvent(_EventBase):
     kind: Literal[EventKind.TERMINUS2_RUNTIME_PROVENANCE] = EventKind.TERMINUS2_RUNTIME_PROVENANCE
     loom_runtime_revision: str
     harbor_compat_sha: str
+    harbor_version: str | None = None
     parser_name: Literal["json", "xml"]
     prompt_hash: str
     template_hashes: dict[str, str]

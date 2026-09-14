@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate exact suppressed-vulnerability evidence from Trivy v0.74.0."""
+"""Validate suppressed-vulnerability scope and active findings from Trivy v0.74.0."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from scripts.component_ownership import load_manifest
 from scripts.write_trivy_release_policy import (
     TRIVY_EXCEPTIONS,
     TRIVY_IGNORE_BYTES,
+    TRIVY_NO_EXCEPTIONS_BYTES,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +41,7 @@ _POSTGRES_PERL_PACKAGES = (
     "perl-modules-5.36",
 )
 _REMEDIATED_COMPONENTS = (
+    "harbor-runtime",
     "capacity-executor",
     "capacity-manager",
     "control-plane",
@@ -55,6 +57,7 @@ _REMEDIATED_COMPONENTS = (
 )
 _EMPTY_COMPONENTS = (
     "execution-runtime",
+    "nebius-terminal-bench",
     "llm-gateway-sandbox",
     "personal-dev-builder",
     "service",
@@ -94,7 +97,7 @@ _PURL = re.compile(
 
 
 class TrivyReportError(RuntimeError):
-    """The report does not prove the exact controlled exception inventory."""
+    """The report does not satisfy the controlled vulnerability policy."""
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -171,7 +174,14 @@ def _policy_statements() -> dict[str, str]:
 
 def _validate_release_component(component: str) -> None:
     manifest = load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    matches = tuple(item for item in manifest.release_components() if item.id == component)
+    owners = manifest.release_components()
+    if component == "harbor-runtime":
+        # The independent Nebius publisher owns this disabled legacy-CI image.
+        owners = tuple(item for item in manifest.components if item.kind == "release-image")
+    elif component == "nebius-terminal-bench":
+        # Fixed workload published only by Nebius, with a runtime-payload owner.
+        owners = tuple(item for item in manifest.components if item.kind == "runtime-payload-image")
+    matches = tuple(item for item in owners if item.id == component)
     if len(matches) != 1:
         raise TrivyReportError("release component authority is not unique")
 
@@ -184,6 +194,7 @@ def _validate_artifact_identity(
     expected_artifacts = {
         f"/tmp/{component}-{architecture}.docker.tar",
         f"/tmp/{component}-{architecture}.release.docker.tar",
+        f"/tmp/{component}-{architecture}.release.oci",
     }
     if artifact_name not in expected_artifacts:
         raise TrivyReportError("report artifact is inconsistent")
@@ -250,6 +261,11 @@ def _validate_wrapper(
     vulnerability_id = _required_string(finding, "VulnerabilityID")
     if wrapper["Statement"] != statements.get(vulnerability_id):
         raise TrivyReportError("modified-finding statement is uncontrolled")
+    exception = next(
+        (item for item in TRIVY_EXCEPTIONS if item.vulnerability_id == vulnerability_id), None,
+    )
+    if exception is None or datetime.now(UTC).date() >= exception.expires_at:
+        raise TrivyReportError("suppressed finding has no unexpired controlled exception")
     if finding.get("Severity") != "CRITICAL":
         raise TrivyReportError("suppressed vulnerability is not critical")
     if "FixedVersion" in finding and finding["FixedVersion"] != "":
@@ -269,16 +285,21 @@ def validate_trivy_release_report(
     architecture: str,
     report: Path,
     ignore_file: Path,
+    *,
+    use_exceptions: bool = True,
 ) -> None:
-    """Reject any report that does not exactly prove the controlled inventory."""
+    """Reject active vulnerabilities and any suppression outside its reviewed scope."""
 
     expected = _EXPECTED_FINDINGS.get(component)
     if expected is None or architecture not in {"amd64", "arm64"}:
         raise TrivyReportError("unknown component or architecture")
     _validate_release_component(component)
-    if _read_regular_file(ignore_file, len(TRIVY_IGNORE_BYTES)) != TRIVY_IGNORE_BYTES:
+    ignore_bytes = TRIVY_IGNORE_BYTES if use_exceptions else TRIVY_NO_EXCEPTIONS_BYTES
+    if _read_regular_file(ignore_file, len(ignore_bytes)) != ignore_bytes:
         raise TrivyReportError("controlled ignore file is invalid")
-    statements = _policy_statements()
+    statements = _policy_statements() if use_exceptions else {}
+    if not use_exceptions:
+        expected = frozenset()
 
     payload = _object(
         json.loads(
@@ -349,6 +370,10 @@ def main() -> None:
     parser.add_argument("--architecture", required=True)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--ignore-file", type=Path, required=True)
+    parser.add_argument(
+        "--no-exceptions", action="store_true",
+        help="Require an empty ignore file and reject every suppressed finding.",
+    )
     arguments = parser.parse_args()
     try:
         validate_trivy_release_report(
@@ -356,6 +381,7 @@ def main() -> None:
             arguments.architecture,
             arguments.report,
             arguments.ignore_file,
+            use_exceptions=not arguments.no_exceptions,
         )
     except (OSError, RecursionError, UnicodeError, ValueError, TrivyReportError):
         sys.stderr.write("error: Trivy release report validation failed\n")

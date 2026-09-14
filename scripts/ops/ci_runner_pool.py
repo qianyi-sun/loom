@@ -87,6 +87,7 @@ GUEST_BASE_IMAGES = (
     "golang:1.23-alpine",
     "golang:1.25.7-alpine",
     "golang:1.26-alpine3.23",
+    "golang:1.26.8-alpine",
     "minio/minio:RELEASE.2022-12-02T19-19-22Z",
     "minio/minio:latest",
     "moby/buildkit:buildx-stable-1",

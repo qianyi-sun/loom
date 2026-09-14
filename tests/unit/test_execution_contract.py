@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 from copy import deepcopy
 from datetime import UTC, datetime
 
@@ -65,6 +69,22 @@ def test_nebius_class_is_provider_neutral_and_admits_exact_cpu_contract() -> Non
     assert "provider" not in WorkloadRequirementsV1.model_fields
 
 
+def test_execution_class_json_is_stable_across_python_hash_seeds() -> None:
+    script = (
+        "from loom.execution_contract import NEBIUS_CPU_EXECUTION_CLASS_V1 as value; "
+        "print(value.model_dump_json())"
+    )
+    documents = [
+        subprocess.check_output(
+            [sys.executable, "-c", script], env={**os.environ, "PYTHONHASHSEED": seed}, text=True
+        )
+        for seed in ("0", "5", "8")
+    ]
+    assert len(set(documents)) == 1
+    network_access = json.loads(documents[0])["network_access"]
+    assert network_access == sorted(network_access)
+
+
 def test_provider_binding_lives_on_regional_execution_target() -> None:
     target = ExecutionTargetV1(
         target_id="nebius-eu-north1-production",
@@ -124,7 +144,7 @@ def test_pool_capacity_contract_keeps_stale_observations_non_executable() -> Non
         )
 
 
-def test_topology_requires_three_environment_bindings_on_one_cluster() -> None:
+def test_topology_accepts_deployed_environment_subset_on_one_cluster() -> None:
     base = {
         "schema_version": "loom.execution-target.v1",
         "logical_pool_id": "nebius-cpu",
@@ -164,10 +184,16 @@ def test_topology_requires_three_environment_bindings_on_one_cluster() -> None:
     )
     assert len(topology.targets) == 3
     assert {target.cluster_scope_id for target in topology.targets} == {"nebius-eu-north1-shared"}
+    standalone = topology.model_dump()
+    standalone["targets"] = standalone["targets"][:1]
+    assert len(ExecutionTopologyV1.model_validate(standalone).targets) == 1
+    standalone["targets"] = []
+    with pytest.raises(ValidationError, match="at least 1"):
+        ExecutionTopologyV1.model_validate(standalone)
 
     invalid = topology.model_dump()
-    invalid["targets"][2]["cluster_scope_id"] = "nebius-eu-west1-secondary"
-    with pytest.raises(ValidationError, match="same physical cluster scope"):
+    invalid["targets"][2]["region"] = "eu-west1"
+    with pytest.raises(ValidationError, match="one region and failure domain"):
         ExecutionTopologyV1.model_validate(invalid)
 
 
@@ -364,3 +390,47 @@ def test_routing_decision_binds_one_canonical_candidate_and_capacity_reason() ->
                 "reason": "operator_pin",
             }
         )
+
+
+def test_explicit_regional_topology_preserves_environment_and_identity() -> None:
+    from copy import deepcopy
+
+    base = {
+        "logical_pool_id": "nebius-cpu",
+        "execution_class_id": "linux-amd64-cpu-pod-v1",
+        "environment": "staging",
+        "provider": "nebius",
+        "data_residency": "eu",
+        "namespace_name": "execution",
+        "health_check_interval_seconds": 10,
+        "health_stale_after_seconds": 60,
+        "pod_identity_audience": "loom-execution",
+    }
+    values = {
+        "logical_pool_id": "nebius-cpu",
+        "execution_class_id": "linux-amd64-cpu-pod-v1",
+        "placement_policy": "environment-local-health-first",
+        "targets": [
+            {
+                **base,
+                "target_id": region,
+                "region": region,
+                "failure_domain": region,
+                "cluster_scope_id": region,
+                "health_role": role,
+                "health_check_id": region,
+            }
+            for region, role in (("eu-north1", "primary"), ("eu-west1", "secondary"))
+        ],
+    }
+    assert len(ExecutionTopologyV1.model_validate(values).targets) == 2
+    for field, value, reason in (
+        ("pod_identity_audience", None, "native Pod identity"),
+        ("health_role", "primary", "exactly one primary"),
+        ("logical_pool_id", "foreign", "declared logical pool"),
+        ("cluster_scope_id", None, "explicit physical cluster"),
+    ):
+        invalid = deepcopy(values)
+        invalid["targets"][1][field] = value
+        with pytest.raises(ValidationError, match=reason):
+            ExecutionTopologyV1.model_validate(invalid)

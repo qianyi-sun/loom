@@ -85,10 +85,10 @@ resource "nebius_vpc_v1_subnet" "target" {
     use_network_pools = true
   }
 
-  # Explicitly deny allocations from public pools. Nodes still use the
-  # provider's shared dynamic egress gateway for outbound public traffic.
+  # Public Services may opt into the network pools. This only permits
+  # allocations; node interfaces still omit public_ip_address.
   ipv4_public_pools = {
-    use_network_pools = false
+    use_network_pools = var.enable_public_service_allocations
   }
 }
 

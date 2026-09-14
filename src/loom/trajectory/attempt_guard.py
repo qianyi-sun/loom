@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from loom.models.trajectory import TrajectoryEvent
-from loom.trajectory.writer import TrajectoryWriter
+
+if TYPE_CHECKING:
+    from loom.trajectory.writer import TrajectoryWriter
 
 
 class AttemptTrajectoryFencedError(RuntimeError):

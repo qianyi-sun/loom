@@ -84,18 +84,21 @@ def load_capacity_policy(path: Path) -> dict[str, Any]:
     policies = value.get("admission_policies")
     if not isinstance(policies, list):
         raise NebiusAcceptanceError("capacity policy is missing admission_policies")
-    limits = {
-        (row.get("scope_kind"), row.get("scope_key")): row.get("max_concurrent")
-        for row in policies
-        if isinstance(row, dict) and row.get("enabled") is True
-    }
-    if (
-        limits.get(("global", "*")) != accepted
-        or limits.get(("pool", _DEFAULT_POOL_ID)) != accepted
-    ):
-        raise NebiusAcceptanceError(
-            "enabled global and nebius-cpu admission limits must equal accepted_concurrency"
-        )
+    # The operator's run budget is independent of quota-following deployment
+    # policy. Missing/disabled limits impose no concurrency ceiling; enabled
+    # global/pool limits from the administrative readback still bound the run.
+    for row in policies:
+        if not isinstance(row, dict) or not isinstance(row.get("enabled"), bool):
+            raise NebiusAcceptanceError("admission policies must contain an explicit enabled flag")
+        if row["enabled"] and (row.get("scope_kind"), row.get("scope_key")) in {
+            ("global", "*"),
+            ("pool", _DEFAULT_POOL_ID),
+        }:
+            limit = _positive_int(row.get("max_concurrent"), field="max_concurrent")
+            if accepted > limit:
+                raise NebiusAcceptanceError(
+                    "enabled global and nebius-cpu admission limits must cover accepted_concurrency"
+                )
     value["_sha256"] = _sha256(raw)
     return cast(dict[str, Any], value)
 
@@ -236,7 +239,13 @@ def validate_trial_bundle(
     return cast(dict[str, Any], manifest), _sha256(files["bundle.json"])
 
 
-def _target_snapshot(summary: dict[str, Any], *, pool_id: str, environment: str) -> dict[str, Any]:
+def _target_snapshot(
+    summary: dict[str, Any],
+    *,
+    pool_id: str,
+    environment: str,
+    target_id: str | None = None,
+) -> dict[str, Any]:
     service_execution = summary.get("service_execution")
     targets = service_execution.get("targets") if isinstance(service_execution, dict) else None
     matches = [
@@ -247,7 +256,13 @@ def _target_snapshot(summary: dict[str, Any], *, pool_id: str, environment: str)
         and row.get("environment") == environment
         and row.get("provider") == "nebius"
     ]
-    if len(matches) != 1:
+    if target_id is not None:
+        matches = [row for row in matches if row.get("target_id") == target_id]
+        if len(matches) != 1:
+            raise NebiusAcceptanceError(
+                "monitor target identity must match exactly one explicit acceptance target"
+            )
+    elif len(matches) != 1:
         raise NebiusAcceptanceError(
             f"monitor must expose exactly one Nebius {environment!r} target for {pool_id!r}"
         )
@@ -255,7 +270,12 @@ def _target_snapshot(summary: dict[str, Any], *, pool_id: str, environment: str)
 
 
 def _read_monitor(
-    client: httpx.Client, *, pool_id: str, environment: str, batch_id: str | None = None
+    client: httpx.Client,
+    *,
+    pool_id: str,
+    environment: str,
+    batch_id: str | None = None,
+    target_id: str | None = None,
 ) -> dict[str, Any]:
     params: dict[str, str] = {"view": "trials"}
     if batch_id:
@@ -263,12 +283,20 @@ def _read_monitor(
     body = assert_2xx(
         client.get("/api/v1/monitor/summary", params=params), action="read Nebius monitor"
     )
-    _target_snapshot(body, pool_id=pool_id, environment=environment)
+    _target_snapshot(body, pool_id=pool_id, environment=environment, target_id=target_id)
     return body
 
 
-def _capacity_sample(summary: dict[str, Any], *, pool_id: str, environment: str) -> dict[str, Any]:
-    target = _target_snapshot(summary, pool_id=pool_id, environment=environment)
+def _capacity_sample(
+    summary: dict[str, Any],
+    *,
+    pool_id: str,
+    environment: str,
+    target_id: str | None = None,
+) -> dict[str, Any]:
+    target = _target_snapshot(
+        summary, pool_id=pool_id, environment=environment, target_id=target_id
+    )
     observation = target.get("observation")
     if not isinstance(observation, dict) or observation.get("is_fresh") is not True:
         raise NebiusAcceptanceError("Nebius capacity observation is absent or stale")
@@ -480,15 +508,16 @@ def run_acceptance(
     stage_timeout_seconds: float,
     scale_down_timeout_seconds: float,
     sleeper: Callable[[float], None] = time.sleep,
+    target_id: str | None = None,
 ) -> dict[str, Any]:
     if _CANDIDATE_SHA.fullmatch(candidate_sha) is None:
         raise NebiusAcceptanceError("candidate SHA must be a full 40-character lowercase Git SHA")
     if pool_id != _DEFAULT_POOL_ID:
         raise NebiusAcceptanceError(f"Nebius acceptance requires pool {_DEFAULT_POOL_ID!r}")
-    expected_target_id = f"nebius-eu-north1-{environment}"
+    expected_target_id = target_id if target_id is not None else f"nebius-eu-north1-{environment}"
     if capacity_policy.get("target_id") != expected_target_id:
         raise NebiusAcceptanceError(
-            "capacity policy target does not match the acceptance environment"
+            "capacity policy target does not match the acceptance target/environment"
         )
     if capacity_policy.get("schema_version") != f"loom.nebius-{environment}-capacity.v1":
         raise NebiusAcceptanceError(
@@ -507,8 +536,12 @@ def run_acceptance(
             raise NebiusAcceptanceError(f"acceptance output directory is not empty: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    initial_summary = _read_monitor(client, pool_id=pool_id, environment=environment)
-    initial = _capacity_sample(initial_summary, pool_id=pool_id, environment=environment)
+    initial_summary = _read_monitor(
+        client, pool_id=pool_id, environment=environment, target_id=target_id
+    )
+    initial = _capacity_sample(
+        initial_summary, pool_id=pool_id, environment=environment, target_id=target_id
+    )
     if not _pool_is_idle(initial):
         raise NebiusAcceptanceError(
             "acceptance requires a fully idle 0-node Nebius execution pool baseline"
@@ -521,6 +554,7 @@ def run_acceptance(
         "schema_version": "loom.nebius-acceptance-progress.v1",
         "candidate_sha": candidate_sha,
         "environment": environment,
+        "target_id": target_id,
         "pool_id": pool_id,
         "capacity_policy_sha256": capacity_policy["_sha256"],
         "requested_stages": stages,
@@ -601,8 +635,11 @@ def run_acceptance(
                 pool_id=pool_id,
                 environment=environment,
                 batch_id=current_batch_id,
+                target_id=target_id,
             )
-            sample = _capacity_sample(monitor, pool_id=pool_id, environment=environment)
+            sample = _capacity_sample(
+                monitor, pool_id=pool_id, environment=environment, target_id=target_id
+            )
             summary = batch.get("trial_summary")
             if not isinstance(summary, dict):
                 raise NebiusAcceptanceError("batch response is missing trial_summary")
@@ -721,9 +758,12 @@ def run_acceptance(
 
         final_sample = _wait_for(
             lambda: _capacity_sample(
-                _read_monitor(client, pool_id=pool_id, environment=environment),
+                _read_monitor(
+                    client, pool_id=pool_id, environment=environment, target_id=target_id
+                ),
                 pool_id=pool_id,
                 environment=environment,
+                target_id=target_id,
             ),
             lambda sample: (
                 _pool_is_idle(sample)
@@ -760,6 +800,7 @@ def run_acceptance(
         "generated_at": datetime.now(UTC).isoformat(),
         "candidate_sha": candidate_sha,
         "environment": environment,
+        "target_id": target_id,
         "pool_id": pool_id,
         "capacity_policy_sha256": capacity_policy["_sha256"],
         "accepted_concurrency": capacity_policy["accepted_concurrency"],
@@ -805,10 +846,14 @@ def resume_cleanup(*, client: httpx.Client, evidence_dir: Path, output_dir: Path
         raise NebiusAcceptanceError("cleanup output must be a new or empty directory")
     output_dir.mkdir(parents=True, exist_ok=True)
     pool_id, environment = evidence["pool_id"], evidence["environment"]
+    target_id = evidence.get("target_id")
+    if target_id is not None and (not isinstance(target_id, str) or not target_id):
+        raise NebiusAcceptanceError("prior evidence target identity is invalid")
     sample = _capacity_sample(
-        _read_monitor(client, pool_id=pool_id, environment=environment),
+        _read_monitor(client, pool_id=pool_id, environment=environment, target_id=target_id),
         pool_id=pool_id,
         environment=environment,
+        target_id=target_id,
     )
     if not _pool_is_idle(sample) or sample["health_status"] != "healthy" or sample["blockers"]:
         raise NebiusAcceptanceError("cleanup verification requires a healthy idle 0-node pool")
@@ -818,6 +863,7 @@ def resume_cleanup(*, client: httpx.Client, evidence_dir: Path, output_dir: Path
         "generated_at": datetime.now(UTC).isoformat(),
         "candidate_sha": evidence["candidate_sha"],
         "prior_acceptance_sha256": _sha256(raw),
+        "target_id": target_id,
         "initial_capacity": sample,
         "trials": rows,
         "accepted": False,
@@ -891,9 +937,10 @@ def resume_cleanup(*, client: httpx.Client, evidence_dir: Path, output_dir: Path
             )
             _checkpoint(output_dir, report)
     final = _capacity_sample(
-        _read_monitor(client, pool_id=pool_id, environment=environment),
+        _read_monitor(client, pool_id=pool_id, environment=environment, target_id=target_id),
         pool_id=pool_id,
         environment=environment,
+        target_id=target_id,
     )
     if not _pool_is_idle(final) or final["health_status"] != "healthy" or final["blockers"]:
         raise NebiusAcceptanceError(
@@ -964,6 +1011,7 @@ def run_cli(args: argparse.Namespace) -> int:
                 agent_provider=args.agent_provider,
                 candidate_sha=args.candidate_sha,
                 environment=args.environment,
+                target_id=args.target_id,
                 pool_id=args.pool_id,
                 stages=stages,
                 poll_seconds=args.poll_seconds,
@@ -1020,12 +1068,17 @@ def configure_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -
     parser.add_argument(
         "--capacity-policy",
         default="deploy/k8s/nebius-development-capacity-policy.json",
-        help="Persisted admission/capacity policy JSON.",
+        help="Operator stage budget and current administrative admission-policy readback JSON.",
     )
     parser.add_argument(
         "--environment",
         choices=("development", "staging", "production"),
         default="development",
+    )
+    parser.add_argument(
+        "--target-id",
+        help="Explicit logical execution target; must match policy and every live monitor sample. "
+        "Omit for the existing environment-derived target.",
     )
     parser.add_argument("--pool-id", default=_DEFAULT_POOL_ID)
     parser.add_argument(

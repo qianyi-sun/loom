@@ -329,6 +329,14 @@ def _component(
     )
 
 
+def derive_task_image_build_components(
+    task_config: dict[str, Any],
+) -> tuple[TaskImageBuildComponentV1, ...]:
+    """Resolve Dockerfile/context paths without a provider-specific build session."""
+    task = TaskConfig.model_validate(task_config)
+    return _derived_components(task, task_config.get("environment", {}))
+
+
 def _derived_components(
     task: TaskConfig,
     raw_environment: dict[str, Any],
@@ -432,6 +440,11 @@ def derive_task_image_build_plan(
 
     raw_environment = _raw_environment(row.task_config)
     task = TaskConfig.model_validate(row.task_config)
+    if task.environment.docker_build_args or task.environment.docker_build_target:
+        raise ValueError(
+            "rootless task-image build plan v1 does not support "
+            "docker_build_args or docker_build_target; use a builder that supports these inputs"
+        )
     if task.environment.os != "linux":
         raise ValueError("task-image build plan requires a Linux task environment")
     if task.task.id != row.task_id:
@@ -495,6 +508,7 @@ __all__ = [
     "TaskImageBuildPlan",
     "TaskImageBuildPlanV1",
     "TaskImageBuildPlanV2",
+    "derive_task_image_build_components",
     "derive_task_image_build_plan",
     "parse_task_image_build_plan",
 ]

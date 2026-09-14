@@ -52,6 +52,9 @@ func (b *workloadBroker) getInputOnce(ctx context.Context, endpoint string) (*ht
 		return nil, err
 	}
 	b.identityHeaders(request)
+	if err := b.authorizePodRequest(request); err != nil {
+		return nil, err
+	}
 	response, err := b.client.Do(request)
 	if err != nil {
 		return nil, err
@@ -67,7 +70,7 @@ func (b *workloadBroker) getInputOnce(ctx context.Context, endpoint string) (*ht
 	return response, nil
 }
 
-func workloadIdentityNotObserved(err error) bool {
+func workloadIdentityTemporarilyUnavailable(err error) bool {
 	var brokerErr *brokerHTTPError
 	if !errors.As(err, &brokerErr) || brokerErr.statusCode != http.StatusServiceUnavailable {
 		return false
@@ -75,8 +78,15 @@ func workloadIdentityNotObserved(err error) bool {
 	var payload struct {
 		Detail string `json:"detail"`
 	}
-	return json.Unmarshal([]byte(brokerErr.body), &payload) == nil &&
-		payload.Detail == "workload_identity_not_observed"
+	if json.Unmarshal([]byte(brokerErr.body), &payload) != nil {
+		return false
+	}
+	switch payload.Detail {
+	case "workload_identity_not_observed", "execution_pod_review_unavailable", "execution_target_unavailable":
+		return true
+	default:
+		return false
+	}
 }
 
 func (b *workloadBroker) getInput(ctx context.Context, endpoint string) (*http.Response, error) {
@@ -85,7 +95,7 @@ func (b *workloadBroker) getInput(ctx context.Context, endpoint string) (*http.R
 		var err error
 		response, err = b.getInputOnce(ctx, endpoint)
 		return err
-	}, workloadIdentityNotObserved)
+	}, workloadIdentityTemporarilyUnavailable)
 	return response, err
 }
 

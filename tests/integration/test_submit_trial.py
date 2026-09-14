@@ -158,23 +158,52 @@ def test_submit_creates_trial(app, seed_team):  # type: ignore[no-untyped-def]
         assert "submitted_at" in body
 
 
+@pytest.mark.parametrize(
+    ("agent_name", "separate_task_image", "admit_task_image", "has_controller", "expected_status"),
+    [
+        ("direct-completion", False, True, False, 201),
+        ("terminus-2", True, True, True, 201),
+        ("terminus-2", True, False, True, 400),
+        ("terminus-2", True, True, False, 400),
+        ("direct-completion", True, True, True, 400),
+    ],
+)
+@pytest.mark.parametrize("dockerfile", [False, True], ids=["prebuilt", "dockerfile"])
 def test_submit_ordinary_task_into_nebius_batch_uses_automatic_pool_binding(
     app,
     seed_team: tuple[UUID, str],
     postgres_url: str,
+    agent_name: str,
+    separate_task_image: bool,
+    admit_task_image: bool,
+    has_controller: bool,
+    expected_status: int,
+    dockerfile: bool,
 ) -> None:
     team_id, raw = seed_team
+    if dockerfile:
+        expected_status = 201 if agent_name == "terminus-2" and has_controller else 400
     task_id = "automatic-nebius-submit"
     batch_id = uuid4()
     task_image = "registry.example/task@sha256:" + "a" * 64
     runtime_image = "registry.example/runtime@sha256:" + "b" * 64
+    default_task_image = task_image
+    controller_image = "registry.example/worker@sha256:" + "9" * 64
+    if separate_task_image:
+        task_image = "registry.example/terminal-bench@sha256:" + "f" * 64
+    admitted_images = [default_task_image, runtime_image]
+    if admit_task_image and separate_task_image:
+        admitted_images.append(task_image)
+    if has_controller:
+        admitted_images.append(controller_image)
     profile = ServiceExecutionRuntimeProfileV1(
         candidate_sha="1" * 40,
         execution_class_id="linux-amd64-cpu-pod-v1",
-        task_image_ref=task_image,
+        task_image_ref=default_task_image,
+        agent_image_ref=controller_image if has_controller else None,
         runtime_image_ref=runtime_image,
         runtime_binary_sha256="sha256:" + "e" * 64,
-        image_admission=signed_image_admission_bundle((task_image, runtime_image)),
+        image_admission=signed_image_admission_bundle(tuple(admitted_images)),
     )
     profile_json = json.dumps(
         profile.model_dump(mode="json"),
@@ -204,16 +233,18 @@ def test_submit_ordinary_task_into_nebius_batch_uses_automatic_pool_binding(
                         "task": {"id": task_id, "name": task_id},
                         "environment": {
                             "os": "linux",
-                            "cpu_arch": "x86_64",
+                            "cpu_arch": "any" if dockerfile else "x86_64",
                             "gpu_vendor": "none",
-                            "docker_image": task_image,
+                            **({"dockerfile": "environment/Dockerfile"} if dockerfile else {
+                                "docker_image": task_image,
+                            }),
                             "cpus": 1,
                             "memory_mb": 1024,
                             "storage_mb": 2048,
                             "baseline_network_policy": {"kind": "gateway-only"},
                             "network_policies_supported": ["gateway-only"],
                         },
-                        "agent": {"name": "direct-completion"},
+                        "agent": {"name": agent_name},
                         "verifier": {
                             "name": "script",
                             "args": {"script_path": "verifier/check.sh"},
@@ -255,7 +286,7 @@ def test_submit_ordinary_task_into_nebius_batch_uses_automatic_pool_binding(
                     "task_id": task_id,
                     "batch_id": str(batch_id),
                     "config": {
-                        "agent_name": "direct-completion",
+                        "agent_name": agent_name,
                         "agent_model": {
                             "provider": "openai",
                             "name": "gpt-5",
@@ -265,16 +296,35 @@ def test_submit_ordinary_task_into_nebius_batch_uses_automatic_pool_binding(
                 },
             )
 
-        assert response.status_code == 201, response.text
+        assert response.status_code == expected_status, response.text
+        if expected_status != 201:
+            with sessions() as session:
+                assert session.scalar(
+                    select(func.count()).select_from(Trial).where(Trial.batch_id == batch_id)
+                ) == 0
+            return
         with sessions() as session:
             trial = session.get(Trial, UUID(response.json()["trial_id"]))
             assert trial is not None
             assert trial.requires_caps["backend"] == "nebius"
             assert trial.requires_caps["worker_pool"] == "nebius-cpu"
+            assert trial.attempt_count == 0
+            assert trial.state == "queued"
+            if dockerfile:
+                prerequisites = session.scalars(
+                    select(TaskImageMaterialization).join(TrialTaskImageMaterialization).where(
+                        TrialTaskImageMaterialization.trial_id == trial.id,
+                    )
+                ).all()
+                assert {row.cpu_arch for row in prerequisites} == {"x86_64", "arm64"}
+                assert all(row.state == "queued" for row in prerequisites)
     finally:
         with sessions() as session:
             session.execute(delete(Trial).where(Trial.batch_id == batch_id))
             session.execute(delete(Batch).where(Batch.id == batch_id))
+            session.execute(delete(TaskImageMaterialization).where(
+                TaskImageMaterialization.task_id == task_id,
+            ))
             session.execute(delete(Task).where(Task.id == task_id))
             session.commit()
         engine.dispose()
@@ -864,3 +914,51 @@ def test_submit_preserves_explicit_retry_below_ceiling(
         cfg = _fetch_trial_config(postgres_url, r.json()["trial_id"])
     assert cfg["retry"]["max_attempts"] == 2
     assert cfg["retry"]["retry_on"] == ["agent_timeout"]
+
+
+def test_idempotent_resubmission_preserves_original_task_image_revision(
+    app,
+    seed_team: tuple[UUID, str],
+    postgres_url: str,
+) -> None:
+    _, raw = seed_team
+    payload = {
+        "task_id": "dockerfile-any",
+        "idempotency_key": f"frozen-task-image-{uuid4()}",
+        "config": {"agent_name": "oracle", "agent_model": None},
+    }
+    headers = {"Authorization": f"Bearer {raw}"}
+    engine = create_engine(postgres_url)
+    try:
+        with TestClient(app) as client:
+            first = client.post("/trials", headers=headers, json=payload)
+            assert first.status_code == 201, first.text
+            trial_id = UUID(first.json()["trial_id"])
+            with sessionmaker(engine)() as session:
+                original_ids = set(session.scalars(
+                    select(TrialTaskImageMaterialization.materialization_id).where(
+                        TrialTaskImageMaterialization.trial_id == trial_id,
+                    )
+                ))
+                assert len(original_ids) == 2
+                session.execute(update(Task).where(Task.id == "dockerfile-any").values(
+                    checksum="3" * 64, source="s3://loom-tasks/rebuilt-dockerfile-any",
+                ))
+                session.commit()
+            second = client.post("/trials", headers=headers, json=payload)
+            assert second.status_code == 201, second.text
+            assert second.json()["trial_id"] == str(trial_id)
+        with sessionmaker(engine)() as session:
+            rows = session.scalars(
+                select(TaskImageMaterialization).join(TrialTaskImageMaterialization).where(
+                    TrialTaskImageMaterialization.trial_id == trial_id,
+                )
+            ).all()
+            assert {row.id for row in rows} == original_ids
+            assert {row.task_checksum for row in rows} == {"2" * 64}
+            assert {row.task_source for row in rows} == {"s3://loom-tasks/dockerfile-any"}
+            assert session.scalar(select(func.count()).select_from(TaskImageMaterialization).where(
+                TaskImageMaterialization.task_id == "dockerfile-any",
+            )) == 2
+    finally:
+        engine.dispose()

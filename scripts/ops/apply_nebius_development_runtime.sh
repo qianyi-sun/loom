@@ -97,6 +97,7 @@ if (
     or not re.fullmatch(r"[0-9a-f]{40}", str(payload["candidate_sha"]))
     or not digest_image.fullmatch(str(payload["task_image_ref"]))
     or not digest_image.fullmatch(str(payload["runtime_image_ref"]))
+    or (payload.get("agent_image_ref") is not None and not digest_image.fullmatch(str(payload["agent_image_ref"])))
     or not sha256.fullmatch(str(payload["runtime_binary_sha256"]))
 ):
     raise SystemExit("service execution runtime profile schema is invalid")
@@ -104,11 +105,14 @@ admission = payload["image_admission"]
 if not isinstance(admission, dict) or admission.get("schema_version") != "loom.execution-image-admission.v1":
     raise SystemExit("service execution runtime profile admission is invalid")
 rows = admission.get("admissions")
-if not isinstance(rows, list) or {
+required_images = {payload["task_image_ref"], payload["runtime_image_ref"]}
+if payload.get("agent_image_ref") is not None:
+    required_images.add(payload["agent_image_ref"])
+if not isinstance(rows, list) or not required_images <= {
     row.get("statement", {}).get("image_ref")
     for row in rows
     if isinstance(row, dict) and isinstance(row.get("statement"), dict)
-} != {payload["task_image_ref"], payload["runtime_image_ref"]}:
+}:
     raise SystemExit("service execution runtime profile image coverage is invalid")
 PY
 

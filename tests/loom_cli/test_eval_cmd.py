@@ -1468,6 +1468,23 @@ def test_batch_create_forwards_optional_fields(
     assert body["backend"] == "fake"
 
 
+@pytest.mark.parametrize("agent_version", [None, "harbor-0.18.0-abc123"])
+def test_batch_create_serializes_selected_agent_version(mock_server, agent_version):
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201, json={"batch_id": _BATCH_ID, "expected_trial_count": 1, "state": "submitted"},
+    )
+    argv = ["eval", "batch", "create", "--provider", "openai-prod", "--model", "gpt-4o",
+            "--agent", "terminus-2", "--benchmark", "terminal-bench", "--backend", "nebius"]
+    if agent_version is not None:
+        argv += ["--agent-version", agent_version]
+    assert main(argv) == 0
+    payload = json.loads(next(r.content for r in mock_server.requests if r.method == "POST"))
+    assert payload["trial_config"].get("agent_version") == agent_version
+    if agent_version is None:
+        assert "agent_version" not in payload["trial_config"]
+
+
 def test_batch_create_has_no_required_worker_pool_flag(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -3229,3 +3246,24 @@ def test_eval_batch_list_not_logged_in(
     rc = main(["eval", "batch", "list"])
     assert rc == 2
     assert "not logged in" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("current", [False, True])
+def test_batch_rerun_failed_submits_linked_selection(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str], current: bool,
+) -> None:
+    path = f"/api/v1/batches/{_BATCH_ID}/rerun-failed"
+    mock_server.canned[("POST", path)] = httpx.Response(201, json={
+        "batch_id": "new-supplemental-batch", "expected_trial_count": 1,
+        "rerun_of_batch_id": _BATCH_ID,
+    })
+    args = ["eval", "batch", "rerun-failed", _BATCH_ID,
+            "--task-id", "task/failed", "--include-operator-approval", "--format", "json"]
+    if current:
+        args.append("--use-current-runtime")
+    assert main(args) == 0
+    assert json.loads(mock_server[0].content) == {
+        "task_ids": ["task/failed"], "include_operator_approval": True,
+        "use_current_runtime": current,
+    }
+    assert json.loads(capsys.readouterr().out)["rerun_of_batch_id"] == _BATCH_ID

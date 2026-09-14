@@ -1,0 +1,32 @@
+schema_version = "1"
+
+[task]
+id = "file-archive-manifest"
+name = "file-archive-manifest"
+labels = [ "archive", "manifest", "checksum", "sha256", "file-tree", ]
+
+[environment]
+os = "linux"
+cpu_arch = "arm64"
+workdir = "/app"
+# Harbor Dockerfiles COPY sibling files (setup.sh, make.py, …) relative to
+# environment/; context must be that dir, not the task root.
+dockerfile = "environment/Dockerfile"
+docker_build_context = "environment"
+build_timeout_sec = 600.0
+
+[agent]
+name = "terminus-2"
+timeout_sec = 900.0
+
+[verifier]
+name = "script"
+timeout_sec = 900.0
+user = "root"
+
+[verifier.args]
+script_path = "/app/verifier/run.sh"
+
+[[steps]]
+name = "main"
+instruction_file = "instruction.md"

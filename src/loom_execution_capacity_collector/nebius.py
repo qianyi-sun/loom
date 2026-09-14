@@ -9,7 +9,10 @@ from typing import Any, Literal
 from loom_execution_capacity_collector.config import ExecutionCapacityCollectorSettings
 from loom_execution_capacity_collector.contracts import (
     CapacityPolicyBinding,
+    NodeGroupPlacement,
     ProviderCapacitySnapshot,
+    QuotaResource,
+    ResourceTotals,
 )
 from loom_execution_capacity_collector.control_plane import read_owner_only_secret
 
@@ -55,6 +58,23 @@ def _quota_value(value: int, *, kind: str, usage: bool) -> int:
     return int(scaled.to_integral_value(rounding=rounding))
 
 
+def _disk_mib(disk: Any) -> int:
+    """The SDK preserves whichever native size-unit oneof was supplied."""
+    values = [
+        _required_int(value, name="boot disk size", positive=True) * multiplier
+        for field, multiplier in (
+            ("size_bytes", 1),
+            ("size_kibibytes", 1024),
+            ("size_mebibytes", 1024**2),
+            ("size_gibibytes", 1024**3),
+        )
+        if (value := getattr(disk, field, None)) is not None
+    ]
+    if len(values) != 1:
+        raise NebiusObservationError("Nebius boot disk size is unavailable or ambiguous")
+    return (values[0] + 1024**2 - 1) // 1024**2
+
+
 class NebiusCapacityReader:
     """Capture quota allowances and one exact node group without mutating Nebius."""
 
@@ -65,6 +85,7 @@ class NebiusCapacityReader:
         sdk: Any | None = None,
         quota_client: Any | None = None,
         node_group_client: Any | None = None,
+        platform_client: Any | None = None,
     ) -> None:
         self._settings = settings
         self._owns_sdk = sdk is None
@@ -95,6 +116,11 @@ class NebiusCapacityReader:
             node_group_client = NodeGroupServiceClient(sdk)
         self._quotas = quota_client
         self._node_groups = node_group_client
+        if platform_client is None:
+            from nebius.api.nebius.compute.v1 import PlatformServiceClient
+
+            platform_client = PlatformServiceClient(sdk)
+        self._platforms = platform_client
 
     async def _list_quotas(self) -> list[Any]:
         from nebius.api.nebius.quotas.v1 import (
@@ -108,8 +134,7 @@ class NebiusCapacityReader:
             response = await self._quotas.list(
                 ListQuotaAllowancesRequest(
                     parent_id=(
-                        self._settings.nebius_quota_parent_id
-                        or self._settings.nebius_project_id
+                        self._settings.nebius_quota_parent_id or self._settings.nebius_project_id
                     ),
                     page_size=1000,
                     page_token=page_token,
@@ -152,7 +177,7 @@ class NebiusCapacityReader:
         unit = _required_string(status.unit, name=f"quota {binding.name} unit")
         if unit != binding.expected_unit:
             raise NebiusObservationError(f"Nebius quota {binding.name!r} unit does not match")
-        limit = _required_int(spec.limit, name=f"quota {binding.name} limit", positive=True)
+        limit = _required_int(spec.limit, name=f"quota {binding.name} limit")
         usage = _required_int(status.usage, name=f"quota {binding.name} usage")
         version = _required_int(
             metadata.resource_version,
@@ -165,6 +190,59 @@ class NebiusCapacityReader:
             str(version),
         )
 
+    async def _node_group_placement(self, node_group: Any) -> NodeGroupPlacement:
+        """Read billing shape from the provider, never from a workload policy."""
+        from nebius.api.nebius.common.v1 import GetByNameRequest
+
+        spec = node_group.spec
+        template = spec.template
+        platform_name = _required_string(template.resources.platform, name="node platform")
+        preset_name = _required_string(template.resources.preset, name="node preset")
+        platform = await self._platforms.get_by_name(
+            GetByNameRequest(parent_id=self._settings.nebius_project_id, name=platform_name),
+            timeout=self._settings.request_timeout_seconds,
+            per_retry_timeout=min(10.0, self._settings.request_timeout_seconds),
+        )
+        if platform.metadata.name != platform_name:
+            raise NebiusObservationError("Nebius platform identity does not match")
+        matches = [row for row in platform.spec.presets if row.name == preset_name]
+        if len(matches) != 1:
+            raise NebiusObservationError("Nebius node preset is missing or ambiguous")
+        resources = matches[0].resources
+        raw_node = ResourceTotals(
+            cpu_millis=1000 * _required_int(resources.vcpu_count, name="preset CPU", positive=True),
+            memory_mib=1024
+            * _required_int(resources.memory_gibibytes, name="preset memory", positive=True),
+            storage_mib=_disk_mib(template.boot_disk),
+        )
+        return NodeGroupPlacement(
+            id=self._settings.nebius_node_group_id,
+            max_nodes=_required_int(spec.autoscaling.max_node_count, name="node maximum"),
+            node_count=_required_int(node_group.status.node_count, name="node count"),
+            raw_node=raw_node,
+            template={
+                "platform": platform_name,
+                "preset": preset_name,
+                "kubernetes_version": str(spec.version or "").removeprefix("v").removesuffix(".x"),
+                "os": str(getattr(template, "os", None) or ""),
+                "labels": dict(getattr(getattr(template, "metadata", None), "labels", None) or {}),
+                "taints": [
+                    {
+                        "key": row.key,
+                        "value": row.value,
+                        "effect": _enum_name(row.effect) or str(row.effect),
+                    }
+                    for row in getattr(template, "taints", None) or []
+                ],
+                "boot_disk_type": _required_string(
+                    _enum_name(template.boot_disk.type) or template.boot_disk.type,
+                    name="boot disk type",
+                ),
+                "boot_disk_mib": raw_node.storage_mib,
+                "max_pods": _required_int(template.max_pods, name="node Pod slots", positive=True),
+            },
+        )
+
     async def capture(self, policy: CapacityPolicyBinding) -> ProviderCapacitySnapshot:
         if not policy.enabled:
             raise NebiusObservationError("capacity policy is disabled")
@@ -173,7 +251,7 @@ class NebiusCapacityReader:
         )
 
         quotas = await self._list_quotas()
-        bindings: dict[str, _QuotaBinding] = {
+        bindings: dict[Literal["nodes", "vcpu", "memory", "storage"], _QuotaBinding] = {
             "nodes": _QuotaBinding(
                 self._settings.quota_nodes_name,
                 self._settings.quota_nodes_unit,
@@ -208,6 +286,7 @@ class NebiusCapacityReader:
         metadata = node_group.metadata
         if metadata.id != self._settings.nebius_node_group_id:
             raise NebiusObservationError("Nebius node group identity does not match")
+        placement = await self._node_group_placement(node_group)
         status = node_group.status
         spec = node_group.spec
         node_count = _required_int(status.node_count, name="node group node count")
@@ -221,10 +300,7 @@ class NebiusCapacityReader:
         max_nodes = _required_int(
             autoscaling.max_node_count,
             name="node group autoscaling maximum",
-            positive=True,
         )
-        if max_nodes < policy.max_nodes:
-            raise NebiusObservationError("Nebius node group maximum is below capacity policy")
         error_codes = sorted(
             {
                 _required_string(event.last_occurrence.code, name="node group event code")
@@ -277,15 +353,29 @@ class NebiusCapacityReader:
             memory_source_version = values["memory"][2]
         else:
             # Nebius currently exposes no memory quota allowance for regular
-            # CPU instances. Memory is coupled to the immutable node preset,
-            # so the accepted policy ceiling and exact node-group count are
-            # the authoritative limit/usage fallback rather than a fabricated
-            # provider quota row.
-            quota_memory_mib = policy.max_nodes * policy.node_memory_mib
-            used_memory_mib = node_count * policy.node_memory_mib
-            memory_source_version = (
-                f"derived:policy-{policy.version}:node-group-{node_group_version}"
+            # CPU instances. Keep the legacy aggregate projection, derived from
+            # the native technical ceiling, but do not invent a shared quota.
+            quota_memory_mib = max_nodes * placement.raw_node.memory_mib
+            used_memory_mib = node_count * placement.raw_node.memory_mib
+            memory_source_version = f"derived:node-group-{node_group_version}"
+        native_usage = {
+            "nodes": node_count,
+            "vcpu": node_count * placement.raw_node.cpu_millis,
+            "memory": node_count * placement.raw_node.memory_mib,
+            "storage": node_count * placement.raw_node.storage_mib,
+        }
+        quota_resources = {
+            name: QuotaResource(
+                parent_id=self._settings.nebius_quota_parent_id or self._settings.nebius_project_id,
+                region=self._settings.nebius_region,
+                service=self._settings.quota_service,
+                name=binding.name,
+                unit=binding.expected_unit,
+                limit=values[name][0],
+                used=max(values[name][1], native_usage[name]),
             )
+            for name, binding in bindings.items()
+        }
         return ProviderCapacitySnapshot(
             source_versions={
                 "node_group": str(node_group_version),
@@ -307,6 +397,8 @@ class NebiusCapacityReader:
             node_count=node_count,
             target_node_count=target_count,
             ready_node_count=ready_count,
+            quota_resources=quota_resources,
+            node_group=placement,
         )
 
     async def close(self) -> None:

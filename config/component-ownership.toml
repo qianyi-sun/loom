@@ -11,6 +11,7 @@ ci_lanes = [
   "tests-root",
 ]
 ci_ignored_paths = [
+  "deploy/catalog/nebius-terminal-bench/file-archive-manifest/original/tests/test_outputs.py",
   "deploy/Dockerfile.behavior-stage1-sim",
   "deploy/behavior-stage1-sim/**",
   "migrations/versions/0094_pipeline_stage1_smoke_authority.py",
@@ -367,7 +368,9 @@ source_paths = [
   "migrations/**",
   "src/loom/__init__.py",
   "src/loom/db/**",
+  "src/loom/security/**",
   "src/loom/execution_contract.py",
+  "src/loom/execution_image_admission.py",
   "src/loom/execution_runtime_contract.py",
   "src/loom/models/__init__.py",
   "src/loom/models/healthcheck.py",
@@ -379,7 +382,17 @@ source_paths = [
   "src/loom/pipeline/__init__.py",
   "src/loom/pipeline/keys.py",
   "src/loom/startup_retry.py",
+  "src/loom/task_image_materialization.py",
+  "src/loom/task_image_build_plan.py",
+  "src/loom/terminal_result_semantics.py",
   "src/loom_control_plane/__init__.py",
+  "src/loom_control_plane/execution_admission.py",
+  "src/loom_control_plane/execution_capacity.py",
+  "src/loom_control_plane/execution_placement.py",
+  "src/loom_control_plane/task_image_materializations.py",
+  "src/loom_control_plane/task_image_capacity.py",
+  "src/loom/nebius_kubernetes.py",
+  "src/loom_control_plane/execution_finance.py",
   "src/loom_control_plane/metrics.py",
   "src/loom_control_plane/service_execution.py",
   "src/loom_execution_actuator/**",
@@ -400,6 +413,7 @@ build_context = "."
 source_paths = [
   ".dockerignore",
   "cmd/loom-execution-runtime/**",
+  "cmd/loom-sandbox-runtime/**",
   "deploy/Dockerfile.execution-runtime",
   "go.mod",
   "go.sum",
@@ -634,6 +648,21 @@ runtime_policy = "conformance"
 rollout_role = "auxiliary"
 
 [[components]]
+id = "harbor-runtime"
+# Nebius publishes this separately; do not add it to the legacy release matrix.
+ci_enabled = false
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.harbor-runtime"
+build_context = "."
+source_paths = [".dockerignore", "deploy/Dockerfile.harbor-runtime", "deploy/harbor-runtime-requirements.txt", "deploy/patches/**", "src/loom/**"]
+smoke_owner = "worker-runtime-conformance"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-harbor-runtime"
+runtime_policy = "start"
+rollout_role = "none"
+
+[[components]]
 id = "worker"
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.worker"
@@ -642,6 +671,7 @@ source_paths = [
   ".dockerignore",
   "README.md",
   "deploy/Dockerfile.worker",
+  "deploy/patches/**",
   "packages/**",
   "pyproject.toml",
   "src/**",
@@ -682,6 +712,28 @@ dockerfile = "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world
 build_context = "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world"
 source_paths = ["deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/**"]
 smoke_owner = "gb10-catalog-smoke"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "nebius-terminal-bench"
+kind = "runtime-payload-image"
+dockerfile = "deploy/catalog/nebius-terminal-bench/file-archive-manifest/Dockerfile"
+build_context = "deploy/catalog/nebius-terminal-bench/file-archive-manifest"
+source_paths = ["deploy/catalog/nebius-terminal-bench/file-archive-manifest/Dockerfile", "deploy/catalog/nebius-terminal-bench/file-archive-manifest/.dockerignore"]
+smoke_owner = "task-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "nebius-terminal-bench-original"
+kind = "runtime-payload-image"
+dockerfile = "deploy/catalog/nebius-terminal-bench/file-archive-manifest/original/environment/Dockerfile"
+build_context = "deploy/catalog/nebius-terminal-bench/file-archive-manifest/original"
+source_paths = ["deploy/catalog/nebius-terminal-bench/file-archive-manifest/original/**"]
+smoke_owner = "task-fixture-conformance"
 scan_owner = "runtime-payload-scan"
 attestation_owner = "runtime-payload-provenance"
 runtime_policy = "runtime-payload"
@@ -868,6 +920,7 @@ include_paths = [
   "tests/unit/**/*.py",
 ]
 exclude_paths = [
+  "tests/unit/test_nebius_runtime_render.py",
   "tests/unit/pipeline/test_behavior_input_import.py",
   "tests/unit/test_pipeline_stage1_*.py",
 ]
@@ -881,6 +934,8 @@ include_paths = [
   "tests/integrations/**/*.py",
 ]
 exclude_paths = [
+  "tests/integration/test_execution_actuator_k3s.py",
+  "tests/integration/test_nebius_platform_k3s.py",
   "tests/integration/test_behavior_pipeline_inputs.py",
   "tests/integration/test_capacity_executor_image_runtime.py",
   "tests/integration/test_oldlab_controller_stdin.py",
@@ -893,6 +948,9 @@ exclude_paths = [
   "tests/integration/test_docker_network_policy.py",
   "tests/integration/test_egress_xds_envoy.py",
   "tests/integration/test_gateway_with_litellm_agent.py",
+  "tests/integration/test_nebius_gateway_privileges.py",
+  "tests/integration/test_nebius_public_tls.py",
+  "tests/integration/test_nebius_restore.py",
   "tests/integration/test_pipeline_multipart_minio.py",
   "tests/integration/test_native_build_artifact_minio.py",
   "tests/integration/test_pipeline_core_fixture_image.py",
@@ -945,6 +1003,9 @@ include_paths = [
   "tests/integration/test_docker_network_policy.py",
   "tests/integration/test_egress_xds_envoy.py",
   "tests/integration/test_gateway_with_litellm_agent.py",
+  "tests/integration/test_nebius_gateway_privileges.py",
+  "tests/integration/test_nebius_public_tls.py",
+  "tests/integration/test_nebius_restore.py",
   "tests/integration/test_pipeline_multipart_minio.py",
   "tests/integration/test_native_build_artifact_minio.py",
   "tests/integration/test_pipeline_core_fixture_image.py",
@@ -970,7 +1031,7 @@ include_paths = [
 id = "python-cluster-smoke"
 language = "python"
 lane = "cluster-smoke"
-include_paths = ["tests/cluster/**/*.py"]
+include_paths = ["tests/cluster/**/*.py", "tests/integration/test_execution_actuator_k3s.py", "tests/integration/test_nebius_platform_k3s.py", "tests/unit/test_nebius_runtime_render.py"]
 
 [[test_suites]]
 id = "python-system-smoke"

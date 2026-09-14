@@ -31,6 +31,9 @@ def service_execution_lifecycle_stage(
     error_code: str | None,
     error_class: str | None,
 ) -> str:
+    # Cancellation can finish before any output exists; availability is a separate axis.
+    if trial_state == "cancelled":
+        return "cancelled"
     if output_commit_state == "unavailable" or materialization_state == "unavailable":
         return "output_unavailable"
     if materialization_state in {"pending", "running"}:
@@ -39,8 +42,6 @@ def service_execution_lifecycle_stage(
         return "succeeded"
     if trial_state == "failed":
         return "failed"
-    if trial_state == "cancelled":
-        return "cancelled"
     if error_code == "unschedulable" or error_class == "policy":
         return "admission_blocked"
     if output_commit_state == "uploading" or observed_state in {"finalizing", "finalized"}:
@@ -57,6 +58,7 @@ def service_execution_lifecycle_stage(
 def service_execution_lifecycle_case() -> Any:
     """SQL equivalent of :func:`service_execution_lifecycle_stage`."""
     return case(
+        (Trial.state == "cancelled", "cancelled"),
         (
             (ServiceExecutionLease.output_commit_state == "unavailable")
             | (ServiceExecutionLease.materialization_state == "unavailable"),
@@ -68,7 +70,6 @@ def service_execution_lifecycle_case() -> Any:
         ),
         (Trial.state == "succeeded", "succeeded"),
         (Trial.state == "failed", "failed"),
-        (Trial.state == "cancelled", "cancelled"),
         (
             (ServiceExecutionLease.error_code == "unschedulable")
             | (ServiceExecutionLease.error_class == "policy"),

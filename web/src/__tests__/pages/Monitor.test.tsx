@@ -58,11 +58,11 @@ const monitorSummaryPayload = {
     },
     pools: [
       {
-        pool_name: "gb10",
+        pool_name: "worker-pool-a",
         backend: "docker",
         cpu_arch: "arm64",
         autoscaler_environment: "production",
-        autoscaler_actuator: "slurm",
+        autoscaler_actuator: "kubernetes",
         autoscaler_enabled: true,
         autoscaler_idle_since_at: "2026-06-27T12:00:00+00:00",
         autoscaler_idle_seconds: 601,
@@ -92,7 +92,7 @@ const monitorSummaryPayload = {
         backend: "docker",
         cpu_arch: "x86_64",
         autoscaler_environment: "production",
-        autoscaler_actuator: "slurm",
+        autoscaler_actuator: "kubernetes",
         autoscaler_enabled: true,
         autoscaler_idle_since_at: null,
         autoscaler_idle_seconds: null,
@@ -560,11 +560,11 @@ describe("Monitor human-readable labels", () => {
     expect(
       screen.getByText("2 waiting for 9 free slots."),
     ).toBeInTheDocument();
-    expect(screen.getByText("gb10")).toBeInTheDocument();
+    expect(screen.getByText("worker-pool-a")).toBeInTheDocument();
     expect(screen.getByText("staging-x86")).toBeInTheDocument();
     expect(screen.getByText("Used / active slots")).toBeInTheDocument();
     expect(screen.getByText("Max")).toBeInTheDocument();
-    expect(screen.getAllByText("slurm").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("kubernetes").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("1/10")).toBeInTheDocument();
     expect(screen.getByText("2/2")).toBeInTheDocument();
     expect(screen.getByText("601s")).toBeInTheDocument();

@@ -1,0 +1,28 @@
+--- a/agents/terminus_2/tmux_session.py
++++ b/agents/terminus_2/tmux_session.py
+@@ -127 +127 @@
+-        tmux_result = await self.environment.exec(command="tmux -V", user="root")
++        tmux_result = await self.environment.exec(command="tmux -V")
+@@ -133 +133 @@
+-                command="asciinema --version", user="root"
++                command="asciinema --version"
+@@ -172 +172 @@
+-                            command="tmux -V", user="root"
++                            command="tmux -V"
+@@ -182 +182 @@
+-                            command="asciinema --version", user="root"
++                            command="asciinema --version"
+@@ -214 +213,0 @@
+-            user="root",
+@@ -218 +217 @@
+-        uname_result = await self.environment.exec(command="uname -s", user="root")
++        uname_result = await self.environment.exec(command="uname -s")
+@@ -234 +233 @@
+-                command=f"which {pm_name} >/dev/null 2>&1", user="root"
++                command=f"which {pm_name} >/dev/null 2>&1"
+@@ -335 +334 @@
+-                command="tmux -V || /usr/local/bin/tmux -V", user="root"
++                command="tmux -V || /usr/local/bin/tmux -V"
+@@ -380 +379 @@
+-                        command="asciinema --version", user="root"
++                        command="asciinema --version"

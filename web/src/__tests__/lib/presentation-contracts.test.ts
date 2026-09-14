@@ -2,11 +2,28 @@ import { describe, expect, it } from "vitest";
 
 import { agentReadinessMessage, agentServiceModeReady } from "../../lib/agentReadiness";
 import { helpForState, humanizeState } from "../../lib/helpText";
+import { batchResultPresentation } from "../../lib/statusVariant";
 import { modelLabel } from "../../lib/modelLabel";
 import { ownershipLabel, ownershipSearchText } from "../../lib/ownership";
 import { allowedModelsSummary, providerStatusSummary } from "../../lib/providerDisplay";
 
 describe("presentation contracts", () => {
+  it("keeps genuine failures and explicit batch cancellation distinct", () => {
+    expect(batchResultPresentation("all_failed", { failed: 2 }))
+      .toEqual({ label: "all_failed", variant: "failed" });
+    expect(batchResultPresentation("partial_failed", { succeeded: 1, failed: 1 }))
+      .toEqual({ label: "partial_failed", variant: "warning" });
+    expect(batchResultPresentation("cancelled", { succeeded: 1, cancelled: 1 }))
+      .toEqual({ label: "cancelled", variant: "cancelled" });
+    expect(batchResultPresentation("all_failed", {}))
+      .toEqual({ label: "all_failed", variant: "failed" });
+    expect(batchResultPresentation("partial_failed", { cancelled: 1, running: 1 }))
+      .toEqual({ label: "partial_failed", variant: "warning" });
+    expect(batchResultPresentation("all_failed", { cancelled: 2 }))
+      .toEqual({ label: "All trials cancelled", variant: "cancelled" });
+    expect(helpForState("all_failed")).toContain("or were cancelled");
+  });
+
   it("normalizes known states and provider-specific labels", () => {
     expect(helpForState(" Partial Failed ")).toContain("Some trials failed");
     expect(helpForState(123)).toBeUndefined();
