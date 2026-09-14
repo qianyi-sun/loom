@@ -97,7 +97,7 @@ def journal_main(interruption):
     finally:
         os.close(descriptor)
     key = "a" * 64
-    if interruption in {"lock", "identity", "unexplained", "pending-link"}:
+    if interruption in {"lock", "identity", "unexplained", "pending-link", "locator-digest", "locator-mode", "locator-oversized"}:
         from dataclasses import replace
 
         expected_identity = replace(identity, inode=identity.inode + 1) if interruption == "identity" else identity
@@ -117,6 +117,12 @@ def journal_main(interruption):
                     sentinel.write_bytes(b"never-truncate")
                     sentinel.chmod(0o600)
                     (ledger / key / ".pending").hardlink_to(sentinel)
+                elif interruption.startswith("locator-"):
+                    locator = attempt / "recovery.json"
+                    if interruption == "locator-mode":
+                        locator.chmod(0o600)
+                    else:
+                        locator.write_bytes(b"changed" if interruption == "locator-digest" else b"x" * (128 * 1024 + 1))
                 try:
                     journal.reconcile()
                 except ValueError:
