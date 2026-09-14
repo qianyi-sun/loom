@@ -61,7 +61,7 @@ async def test_completed_authority_refuses_runtime_privilege_or_identity_regress
             "credential": sql.SQL("ALTER ROLE {} PASSWORD 'unrelated'").format(sql.Identifier(target.owner_role)),
             "closed": sql.SQL("ALTER DATABASE {} ALLOW_CONNECTIONS false").format(sql.Identifier(target.database)),
         }
-        peer.execute(statements[drift])
+        (maintenance if drift == "closed" else peer).execute(statements[drift])
         with pytest.raises(RuntimeError, match="completed application"):
             observe_completed_application_authority(peer, target=target, runtime_password=args["password"])
         # Changes belong only to this disposable fixture; leave its role sealed
