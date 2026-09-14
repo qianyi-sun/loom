@@ -464,8 +464,8 @@ can satisfy its preconditions.
 
 These observations are not trusted reference artifacts or ownership-transfer
 receipts. The runtime package now bundles separate PostgreSQL-major-bound
-legacy-owner and sealed-owner references for application head `0142` and guard
-head `guard_0033`, including the publication/keyset, task-source, personal
+legacy-owner and sealed-owner references for the reviewed pairs
+`0134` / `guard_0030` and `0142` / `guard_0033`. The latter includes the publication/keyset, task-source, personal
 membership, incarnation-storage and build-platform objects introduced by
 application migrations `0135`–`0142`. The trial-writer migration follows the
 native-reader fence (`guard_0031`) and typed-terminal importer (`guard_0032`);
@@ -478,8 +478,11 @@ The existing protected
 source-tree/image admission binds this code and its reference; callers cannot
 supply an alternative expected digest. `scripts/build_application_schema_reference.py`
 rebuilds the reference from two independently created databases using actual
-application migrations and the real personal-development guard role/grant
-provisioner and migrations. It uses only disposable PostgreSQL containers at
+application migrations and the guard role/grant provisioner and migrations.
+The older pair uses the preserved provisioning recipe from protected release
+`7f8687e4a4a38ccf54e8c6b74821021da60879b7` in
+`scripts/application_schema_baseline.py`; newer helper/column grants must not
+leak into an older reference. It uses only disposable PostgreSQL containers at
 the bundled immutable reference image digests, binds their ports to loopback, and
 accepts no database address or output path. Inherited application database/owner
 settings cannot select the migration target. Both fresh inventories must agree;
@@ -487,10 +490,13 @@ CI compares their metadata with the bundled reference and verifies the actual
 migration heads and release image pin. Regeneration alone does not authorize
 updating the trusted reference to match live drift.
 
-Each ownership shape has two fixed ACL profiles: `application-only` represents
+Each ownership shape has three fixed environment profiles: `application-only` represents
 personal-development grants; `staging-readonly` additionally provisions
 the installer's exact `loom_rollout_readonly` CONNECT/public USAGE and 21-table
-SELECT grants. The generator executes the same readonly bootstrap SQL in each
+SELECT grants. `cnpg-staging` adds the same grants in a fresh UTF8 database
+with explicit `C` collation and character classification, matching the admitted
+CNPG initdb contract. Locale values remain part of the exact inventory.
+The generator executes the same readonly bootstrap SQL in each
 fresh database; it does not copy grants or hashes from a live installation. The
 readonly role name remains exact in the inventory, including grantors and grant
 options. Extra writes, missing reads, schema CREATE, or grant options change the
@@ -500,7 +506,14 @@ must not discover/select a profile from live grants or change it on replay.
 These pins do not replace separate role-attribute, membership, private-schema,
 process and uninterrupted coordination-guard admission.
 
-The generator emits all four profiles for each supported major. Schema compatibility
+The generator emits all six ownership/environment profiles for each supported
+revision pair and PostgreSQL major. Preparation, transfer, completion and login
+restoration select the same pair from the original protected checkpoint; an
+unknown pair is refused. The admitted catalog and the application/guard version
+rows are both checked before transfer and login restoration. The older handoff
+moves the two existing application bridges and requires absence of the later
+writer fence and retirement helper. The current handoff also admits the helper
+and requires its uninitialized writer fence. Schema compatibility
 alone does not admit PostgreSQL 17 protected startup: LOGIN event triggers can
 execute before the first administrator query. A catalog check after connecting
 is too late to prevent that execution. The catalog reader separately refuses

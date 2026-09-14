@@ -17,6 +17,7 @@ from loom.application_handoff_completion import (
     ApplicationHandoffDatabaseOutcome,
     complete_application_handoff_database,
 )
+from loom.application_schema_reference import application_schema_revision
 from loom.staging_mutation_coordination import rollout_guard_application_name
 
 from .final_gate_plan import FinalGatePlan
@@ -67,7 +68,8 @@ def complete_protected_application_database(
             connection, maintenance=maintenance, target=original.target,
             handoff_backend=backend, coordination_guard=original.coordination_guard,
             role_bindings=_STAGING_ROLE_BINDINGS, password=credential.password,
-            schema_acl_profile="staging-readonly",
+            schema_acl_profile="cnpg-staging",
+            schema_revision=application_schema_revision(public_revision=plan.public_schema_revision, guard_revision=plan.capacity_guard_schema_revision),
         )
     journal.require_application_guard_retained(plan, guard=guard)
     return outcome

@@ -30,8 +30,9 @@ from loom.application_runtime_grants import application_runtime_grants_ddl
 from loom.application_schema_inventory import read_application_schema_inventory
 from loom.application_schema_reference import (
     ApplicationSchemaAclProfile,
+    ApplicationSchemaRevision,
     application_schema_profile,
-    application_schema_reference,
+    require_application_migration_revisions,
     require_application_schema_reference,
 )
 from loom.trial_writer_trigger_authority import application_trigger_owner_handoff_ddl
@@ -62,6 +63,7 @@ def transfer_application_ownership(
     admission_target: ApplicationDatabaseAdmissionTarget | None = None,
     coordination_guard: ApplicationDatabaseCoordinationGuard | None = None,
     schema_acl_profile: ApplicationSchemaAclProfile = "application-only",
+    schema_revision: ApplicationSchemaRevision = "0142/guard_0033",
 ) -> None:
     """Transfer an admitted legacy database, or validate an exact sealed replay.
 
@@ -128,7 +130,7 @@ def transfer_application_ownership(
         active_bindings = sealed_bindings if replay else bindings
         require_application_schema_reference(
             read_application_schema_inventory(connection, role_bindings=active_bindings),
-            profile=profile,
+            profile=profile, revision=schema_revision,
         )
         if not replay and connection.execute(
             application_sql(
@@ -155,20 +157,11 @@ def transfer_application_ownership(
                 )
         require_application_schema_reference(
             read_application_schema_inventory(connection, role_bindings=active_bindings),
-            profile=profile,
+            profile=profile, revision=schema_revision,
         )
         # A replaced view/function must be rejected by catalog admission BEFORE
         # any data query. The table lock also excludes concurrent marker writers.
-        if connection.execute(
-            "SELECT version_num FROM public.alembic_version LIMIT 2"
-        ).fetchall() != [
-            (
-                application_schema_reference(
-                    postgres_major=connection.info.server_version // 10000
-                ).application_head,
-            )
-        ]:
-            raise ApplicationOwnershipTransferError("application migration revision changed")
+        require_application_migration_revisions(connection, revision=schema_revision)
         if not replay:
             _transfer(
                 connection,
@@ -176,7 +169,7 @@ def transfer_application_ownership(
                 previous=previous,
                 owner=owner_role,
                 guard=identities["guard-owner"],
-                coordination_guard=coordination_guard,
+                coordination_guard=coordination_guard, schema_revision=schema_revision,
             )
         else:
             connection.execute(
@@ -184,7 +177,7 @@ def transfer_application_ownership(
                     previous_owner=previous,
                     application_owner=owner_role,
                     guard_owner=identities["guard-owner"],
-                    coordination_guard=coordination_guard,
+                    coordination_guard=coordination_guard, schema_revision=schema_revision,
                 )
             )
         connection.execute(
@@ -196,7 +189,7 @@ def transfer_application_ownership(
         require_sealed_runtime_password(connection, role=previous, password=runtime_password)
         require_application_schema_reference(
             read_application_schema_inventory(connection, role_bindings=sealed_bindings),
-            profile=sealed_profile,
+            profile=sealed_profile, revision=schema_revision,
         )
         if admission_target is not None and coordination_guard is not None:
             _require_guarded_transfer(connection, admission_target, coordination_guard, runtime_password)
@@ -382,6 +375,7 @@ def _transfer(
     owner: str,
     guard: str,
     coordination_guard: ApplicationDatabaseCoordinationGuard | None,
+    schema_revision: ApplicationSchemaRevision,
 ) -> None:
     # Table ownership carries its row types, indexes, and owned sequences.
     for name, kind in relations:
@@ -401,7 +395,7 @@ def _transfer(
     connection.execute(
         application_trigger_owner_handoff_ddl(
             previous_owner=previous, application_owner=owner, guard_owner=guard,
-            coordination_guard=coordination_guard,
+            coordination_guard=coordination_guard, schema_revision=schema_revision,
         )
     )
     for name, kind in relations:

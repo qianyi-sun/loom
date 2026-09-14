@@ -29,7 +29,9 @@ from loom.application_password import application_scram_verifier, matches_applic
 from loom.application_schema_inventory import read_application_schema_inventory
 from loom.application_schema_reference import (
     ApplicationSchemaAclProfile,
+    ApplicationSchemaRevision,
     application_schema_profile,
+    require_application_migration_revisions,
     require_application_schema_reference,
 )
 
@@ -53,6 +55,7 @@ def observe_application_runtime_login(
     password: str,
     target: ApplicationDatabaseAdmissionTarget,
     schema_acl_profile: ApplicationSchemaAclProfile = "application-only",
+    schema_revision: ApplicationSchemaRevision = "0142/guard_0033",
     coordination_guard: ApplicationDatabaseCoordinationGuard | None = None,
 ) -> ApplicationRuntimeLoginState:
     """Classify a saved restoration without changing login, password or grants.
@@ -64,7 +67,7 @@ def observe_application_runtime_login(
     """
     return _application_runtime_login(
         connection, owner_role=owner_role, role_bindings=role_bindings,
-        password=password, target=target, schema_acl_profile=schema_acl_profile,
+        password=password, target=target, schema_acl_profile=schema_acl_profile, schema_revision=schema_revision,
         restore=False, coordination_guard=coordination_guard,
     )
 
@@ -77,6 +80,7 @@ def restore_application_runtime_login(
     password: str,
     target: ApplicationDatabaseAdmissionTarget,
     schema_acl_profile: ApplicationSchemaAclProfile = "application-only",
+    schema_revision: ApplicationSchemaRevision = "0142/guard_0033",
     coordination_guard: ApplicationDatabaseCoordinationGuard | None = None,
 ) -> None:
     """Commit login for the former owner only after exact sealed-profile admission.
@@ -92,7 +96,7 @@ def restore_application_runtime_login(
     """
     _application_runtime_login(
         connection, owner_role=owner_role, role_bindings=role_bindings,
-        password=password, target=target, schema_acl_profile=schema_acl_profile,
+        password=password, target=target, schema_acl_profile=schema_acl_profile, schema_revision=schema_revision,
         restore=True, coordination_guard=coordination_guard,
     )
 
@@ -105,6 +109,7 @@ def _application_runtime_login(
     password: str,
     target: ApplicationDatabaseAdmissionTarget,
     schema_acl_profile: ApplicationSchemaAclProfile,
+    schema_revision: ApplicationSchemaRevision,
     restore: bool,
     coordination_guard: ApplicationDatabaseCoordinationGuard | None,
 ) -> ApplicationRuntimeLoginState:
@@ -217,8 +222,9 @@ def _application_runtime_login(
                     owner_role: "application-owner",
                 },
             ),
-            profile=profile,
+            profile=profile, revision=schema_revision,
         )
+        require_application_migration_revisions(connection, revision=schema_revision)
         if coordination_guard is not None:
             _require_coordination_guard(connection, target, coordination_guard)
         state = connection.execute(

@@ -13,6 +13,10 @@ from loom.application_database_admission import (
     ApplicationDatabaseCoordinationGuard,
     coordination_guard_handoff_predicate,
 )
+from loom.application_schema_reference import (
+    ApplicationSchemaRevision,
+    application_schema_revisions,
+)
 
 _BODY = """
 BEGIN
@@ -49,9 +53,13 @@ END
 def application_trigger_owner_handoff_ddl(
     *, previous_owner: str, application_owner: str, guard_owner: str,
     coordination_guard: ApplicationDatabaseCoordinationGuard | None = None,
+    schema_revision: ApplicationSchemaRevision = "0142/guard_0033",
 ) -> sql.Composed:
-    """Move only three canonical definers within a protected ownership transaction.
+    """Move the revision-bound canonical definers in a protected ownership transaction.
 
+    The baseline has two application bridges; the current revision also has its
+    retirement helper and requires the uninitialized writer fence. Revision
+    selection comes from the original protected checkpoint, never live discovery.
     The caller must first transfer public.trials in the SAME transaction and
     complete the rest of application ownership/credential/session convergence.
     This substep neither seals the database/schema owner nor permits activation.
@@ -61,6 +69,8 @@ def application_trigger_owner_handoff_ddl(
     The optional durably captured rollout guard must hold its exact lock in the
     still-closed database; its process/role authority is admitted by the caller.
     """
+    application_schema_revisions(schema_revision)
+    baseline = schema_revision == "0134/guard_0030"
     roles = (previous_owner, application_owner, guard_owner)
     if len(set(roles)) != 3 or any(
         re.fullmatch(r"[a-z][a-z0-9_]{0,62}", role) is None for role in roles
@@ -70,7 +80,7 @@ def application_trigger_owner_handoff_ddl(
     # migration-to-handoff tests verify these pins; the installed wheel must
     # not import application migrations, which are deployment image payload.
     # Never adopt an arbitrary live SECURITY DEFINER body under a stronger owner.
-    definers = (
+    definers: tuple[tuple[str, str, str], ...] = (
         ("loom_drop_trial_writer_triggers", hashlib.sha256(_BODY.encode()).hexdigest(), "void"),
         (
             "loom_close_protected_runtime_trial_claim",
@@ -83,6 +93,8 @@ def application_trigger_owner_handoff_ddl(
             "trigger",
         ),
     )
+    if baseline:
+        definers = definers[1:]
     expected = sql.SQL(", ").join(
         sql.SQL("({}, {}, {})").format(*(sql.Literal(value) for value in item)) for item in definers
     )
@@ -91,6 +103,27 @@ def application_trigger_owner_handoff_ddl(
         "loom_capacity_guard.transform_protected_runtime_trial_requeue"
         "(uuid,text,uuid,integer,uuid,integer,text,text,timestamp with time zone)",
     )
+    fence_admission = sql.SQL("""
+          IF pg_catalog.to_regclass('loom_capacity_guard.trial_writer_fence') IS NOT NULL
+             OR pg_catalog.to_regprocedure('public.loom_drop_trial_writer_triggers()') IS NOT NULL
+             OR (SELECT array_agg(version_num::text ORDER BY version_num)
+                 FROM loom_capacity_guard.capacity_guard_alembic_version)
+                 IS DISTINCT FROM ARRAY['guard_0030']::text[] THEN
+            RAISE EXCEPTION 'application trigger baseline guard revision changed' USING ERRCODE='55000';
+          END IF;
+    """ if baseline else """
+          IF (SELECT relowner FROM pg_catalog.pg_class
+               WHERE oid = 'loom_capacity_guard.trial_writer_fence'::regclass)
+             IS DISTINCT FROM v_guard THEN
+            RAISE EXCEPTION 'application trigger guard owner changed' USING ERRCODE = '55000';
+          END IF;
+          PERFORM 1 FROM loom_capacity_guard.trial_writer_fence
+           WHERE singleton_id = 1 AND writer_incarnation IS NULL FOR UPDATE NOWAIT;
+          IF NOT FOUND THEN
+            RAISE EXCEPTION 'application trigger handoff requires an uninitialized writer'
+              USING ERRCODE = '55000';
+          END IF;
+    """)
     return sql.SQL(
         """
         DO $handoff$
@@ -142,17 +175,7 @@ def application_trigger_owner_handoff_ddl(
             RAISE EXCEPTION 'application trigger handoff requires quiescent legacy authority'
               USING ERRCODE='55000';
           END IF;
-          IF (SELECT relowner FROM pg_catalog.pg_class
-               WHERE oid = 'loom_capacity_guard.trial_writer_fence'::regclass)
-             IS DISTINCT FROM v_guard THEN
-            RAISE EXCEPTION 'application trigger guard owner changed' USING ERRCODE = '55000';
-          END IF;
-          PERFORM 1 FROM loom_capacity_guard.trial_writer_fence
-           WHERE singleton_id = 1 AND writer_incarnation IS NULL FOR UPDATE NOWAIT;
-          IF NOT FOUND THEN
-            RAISE EXCEPTION 'application trigger handoff requires an uninitialized writer'
-              USING ERRCODE = '55000';
-          END IF;
+          {fence_admission}
           LOCK TABLE ONLY public.trials IN ACCESS EXCLUSIVE MODE NOWAIT;
           IF (SELECT relowner FROM pg_catalog.pg_class WHERE oid = 'public.trials'::regclass)
                IS DISTINCT FROM v_target
@@ -164,7 +187,7 @@ def application_trigger_owner_handoff_ddl(
           END IF;
           IF (SELECT count(*) FROM pg_catalog.pg_proc AS p
               JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace
-              WHERE n.nspname = 'public' AND p.proname = ANY({names})) <> 3 THEN
+              WHERE n.nspname = 'public' AND p.proname = ANY({names})) <> {definer_count} THEN
             RAISE EXCEPTION 'application trigger definer set changed' USING ERRCODE = '55000';
           END IF;
           -- Retain catalog write locks before reading the definitions to adopt.
@@ -207,7 +230,7 @@ def application_trigger_owner_handoff_ddl(
             RAISE EXCEPTION 'application trigger attachment authority changed' USING ERRCODE='55000';
           END IF;
           SELECT proowner = v_target INTO STRICT v_replay FROM pg_catalog.pg_proc
-           WHERE oid = 'public.loom_drop_trial_writer_triggers()'::regprocedure;
+           WHERE oid = 'public.loom_close_protected_runtime_trial_claim()'::regprocedure;
           FOR v_function IN
             SELECT p.*, expected.body_sha256, expected.result_type
             FROM (VALUES {expected}) AS expected(name, body_sha256, result_type)
@@ -276,6 +299,8 @@ def application_trigger_owner_handoff_ddl(
         $handoff$;
         """
     ).format(
+        fence_admission=fence_admission,
+        definer_count=sql.Literal(len(definers)),
         previous=sql.Literal(previous_owner),
         target=sql.Literal(application_owner),
         guard=sql.Literal(guard_owner),

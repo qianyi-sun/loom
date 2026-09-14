@@ -32,7 +32,7 @@ from loom.application_runtime_login import (
     observe_application_runtime_login,
     restore_application_runtime_login,
 )
-from loom.application_schema_reference import ApplicationSchemaAclProfile
+from loom.application_schema_reference import ApplicationSchemaAclProfile, ApplicationSchemaRevision
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +97,7 @@ def complete_application_handoff_database(
     role_bindings: Mapping[str, str],
     password: str,
     schema_acl_profile: ApplicationSchemaAclProfile,
+    schema_revision: ApplicationSchemaRevision = "0142/guard_0033",
 ) -> ApplicationHandoffDatabaseOutcome:
     """Finish or reconcile transfer/reopen/login without creating another guard.
 
@@ -115,7 +116,7 @@ def complete_application_handoff_database(
             or target.successor_role in bindings
             or not isinstance(password, str) or not 1 <= len(password) <= 1024
             or any(not 0x21 <= ord(character) <= 0x7E for character in password)
-            or schema_acl_profile not in {"application-only", "staging-readonly"}):
+            or schema_acl_profile not in {"application-only", "staging-readonly", "cnpg-staging"}):
         raise ValueError("application handoff completion binding is invalid")
     if any(channel.info.transaction_status != TransactionStatus.IDLE for channel in (connection, maintenance)):
         raise RuntimeError("application handoff completion requires idle connections")
@@ -146,7 +147,7 @@ def complete_application_handoff_database(
             transfer_application_ownership(
                 connection, owner_role=target.successor_role, role_bindings=bindings,
                 runtime_password=password, admission_target=target,
-                coordination_guard=coordination_guard, schema_acl_profile=schema_acl_profile,
+                coordination_guard=coordination_guard, schema_acl_profile=schema_acl_profile, schema_revision=schema_revision,
             )
         reopen_application_database_after_handoff(
             maintenance, target=target, provisioner_role=provisioner,
@@ -155,12 +156,12 @@ def complete_application_handoff_database(
         )
         restore_application_runtime_login(
             connection, owner_role=target.successor_role, role_bindings=bindings,
-            password=password, target=target, schema_acl_profile=schema_acl_profile,
+            password=password, target=target, schema_acl_profile=schema_acl_profile, schema_revision=schema_revision,
             coordination_guard=coordination_guard,
         )
     if observe_application_runtime_login(
         connection, owner_role=target.successor_role, role_bindings=bindings,
-        password=password, target=target, schema_acl_profile=schema_acl_profile,
+        password=password, target=target, schema_acl_profile=schema_acl_profile, schema_revision=schema_revision,
         coordination_guard=coordination_guard,
     ) is not ApplicationRuntimeLoginState.RESTORED:
         raise RuntimeError("application handoff runtime login is not restored")
