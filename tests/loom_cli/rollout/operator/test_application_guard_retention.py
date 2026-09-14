@@ -53,7 +53,7 @@ def _setup(tmp_path):
     return plan, journal
 
 
-@pytest.mark.parametrize("component_id", ["application-ownership-handoff", "database-migration"])
+@pytest.mark.parametrize("component_id", ["application-ownership-handoff", "database-migration", "staging-capacity-database"])
 def test_no_database_mutation_authority_before_guard_acknowledges_retention(tmp_path, component_id):
     plan, journal = _setup(tmp_path)
     guard = _guard(plan)
@@ -682,10 +682,11 @@ def test_early_handoff_recovery_preserves_original_ordinal_and_skips_other_compo
 
 @pytest.mark.parametrize("advanced_guard", [False, True])
 @pytest.mark.parametrize("drift", [None, "moved", "guard", "intent"])
-def test_early_migration_recovery_uses_only_its_saved_operation(tmp_path, advanced_guard, drift):
+@pytest.mark.parametrize("component_id", ["database-migration", "staging-capacity-database"])
+def test_early_migration_recovery_uses_only_its_saved_operation(tmp_path, advanced_guard, drift, component_id):
     from tests.loom_cli.rollout.operator.test_protected_apply_journal import _Backend
 
-    plan, journal, guard = _pending_resume(tmp_path, component_id="database-migration", advanced_guard=advanced_guard)
+    plan, journal, guard = _pending_resume(tmp_path, component_id=component_id, advanced_guard=advanced_guard)
     assert _resume_guard(tmp_path, plan) == guard
     completed = []
     def forbidden(_):
@@ -693,7 +694,7 @@ def test_early_migration_recovery_uses_only_its_saved_operation(tmp_path, advanc
     def recover(_):
         journal.require_application_guard_retained(plan, guard=guard)
         completed.append(True)
-    component = replace(_component(recover), component_id="database-migration", classify=lambda _: ComponentObservation(
+    component = replace(_component(recover), component_id=component_id, classify=lambda _: ComponentObservation(
         ComponentState.EXACT if completed else ComponentState.READY, "3" * 64, plan.starting_mutation_epoch + 1))
     epoch = replace(_Backend().component("mutation-epoch-claim", 0), classify=forbidden, apply=forbidden)
     after = replace(_Backend().component("later-manifests", 2), classify=forbidden, apply=forbidden)
@@ -712,7 +713,7 @@ def test_early_migration_recovery_uses_only_its_saved_operation(tmp_path, advanc
         assert completed == []
     else:
         terminal = journal.recover_pending_application_operation(plan, components, guard=guard)
-        assert terminal.component_id == "database-migration" and completed == [True]
+        assert terminal.component_id == component_id and completed == [True]
         assert journal.recover_pending_application_operation(plan, components, guard=guard) is None
         assert not (journal.root / "02-later-manifests").exists()
 
