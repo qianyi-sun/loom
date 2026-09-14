@@ -68,21 +68,7 @@ def reopen_application_migrator_admission(
             "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE usesysid={})", identity.role_oid,
         )).fetchone() != (False,):
             raise RuntimeError("application migrator owner sessions have not retired")
-        row = connection.execute(application_sql(
-            "SELECT rolname={} AND rolcanlogin AND NOT (rolinherit OR rolsuper OR rolcreatedb "
-            "OR rolcreaterole OR rolreplication OR rolbypassrls) AND (rolvaliduntil IS NULL "
-            "OR rolvaliduntil='infinity'::timestamptz) AND NOT EXISTS "
-            "(SELECT 1 FROM pg_catalog.pg_db_role_setting WHERE setrole=pg_authid.oid),rolpassword "
-            "FROM pg_catalog.pg_authid WHERE oid={}", target.owner_role, target.owner_oid,
-        )).fetchone()
-        if (not isinstance(runtime_password, str) or not 1 <= len(runtime_password) <= 1024
-                or row is None or row[0] is not True or not matches_application_scram(runtime_password, row[1])):
-            raise RuntimeError("application migrator original runtime credential changed")
-        if connection.execute(application_sql(
-            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members WHERE member={} OR roleid={})",
-            target.owner_oid, target.owner_oid,
-        )).fetchone() != (False,):
-            raise RuntimeError("application migrator runtime memberships changed")
+        _require_runtime_credential(connection, target, runtime_password)
         if not _allowed(connection, target):
             connection.execute(sql.SQL("ALTER DATABASE {} ALLOW_CONNECTIONS true").format(sql.Identifier(target.database)))
         if not _allowed(connection, target):
@@ -103,3 +89,23 @@ def _allowed(connection: ApplicationDatabaseConnection, target: ApplicationDatab
     if row is None or type(row[0]) is not bool:
         raise RuntimeError("application migrator admission database disappeared")
     return row[0]
+
+
+def _require_runtime_credential(
+    connection: ApplicationDatabaseConnection, target: ApplicationDatabaseAdmissionTarget, runtime_password: str,
+) -> None:
+    row = connection.execute(application_sql(
+        "SELECT rolname={} AND rolcanlogin AND NOT (rolinherit OR rolsuper OR rolcreatedb "
+        "OR rolcreaterole OR rolreplication OR rolbypassrls) AND (rolvaliduntil IS NULL "
+        "OR rolvaliduntil='infinity'::timestamptz) AND NOT EXISTS "
+        "(SELECT 1 FROM pg_catalog.pg_db_role_setting WHERE setrole=pg_authid.oid),rolpassword "
+        "FROM pg_catalog.pg_authid WHERE oid={}", target.owner_role, target.owner_oid,
+    )).fetchone()
+    if (not isinstance(runtime_password, str) or not 1 <= len(runtime_password) <= 1024
+            or row is None or row[0] is not True or not matches_application_scram(runtime_password, row[1])):
+        raise RuntimeError("application migrator original runtime credential changed")
+    if connection.execute(application_sql(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members WHERE member={} OR roleid={})",
+        target.owner_oid, target.owner_oid,
+    )).fetchone() != (False,):
+        raise RuntimeError("application migrator runtime memberships changed")

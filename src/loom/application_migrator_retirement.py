@@ -87,41 +87,8 @@ def retire_application_migrator(
             "AND objid={} AND deptype='a'))", migrator_oid, target.database_oid,
         )).fetchone() != (False,):
             raise ApplicationMigratorRetirementError("application migrator has unexpected object authority")
-        if connection.execute(application_sql(
-            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_prepared_xacts "
-            "WHERE database={} OR owner={})", target.database, migrator_role,
-        )).fetchone() != (False,):
-            raise ApplicationMigratorRetirementError("application migrator has pending prepared work")
-        connection.execute("SELECT pg_catalog.pg_stat_clear_snapshot()")
-        if connection.execute(application_sql(
-            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity "
-            "WHERE usesysid={} AND (datid IS DISTINCT FROM {} "
-            "OR backend_type<>'client backend' OR usename IS DISTINCT FROM {}))",
-            migrator_oid, target.database_oid, migrator_role,
-        )).fetchone() != (False,):
-            raise ApplicationMigratorRetirementError("application migrator has foreign or unknown sessions")
-        sessions = connection.execute(application_sql(
-            "SELECT pid,backend_start::text FROM pg_catalog.pg_stat_activity "
-            "WHERE usesysid={} ORDER BY pid", migrator_oid,
-        )).fetchall()
-        _require_target(connection, target, coordination_guard)
-        for pid, started_at in sessions:
-            # The saved start time and role OID prevent signalling a reused PID.
-            result = connection.execute(application_sql(
-                "SELECT pg_catalog.pg_terminate_backend(pid,1000) "
-                "FROM pg_catalog.pg_stat_activity WHERE pid={} AND "
-                "backend_start={}::timestamptz AND usesysid={} AND datid={}",
-                pid, started_at, migrator_oid, target.database_oid,
-            )).fetchall()
-            if result not in ([], [(True,)]):
-                raise ApplicationMigratorRetirementError("application migrator session did not retire")
-        connection.execute("SELECT pg_catalog.pg_stat_clear_snapshot()")
-        if connection.execute(application_sql(
-            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE usesysid={})",
-            migrator_oid,
-        )).fetchone() != (False,):
-            raise ApplicationMigratorRetirementError("application migrator sessions remain")
-        _require_target(connection, target, coordination_guard)
+        _retire_sessions(connection, target=target, coordination_guard=coordination_guard,
+            migrator_role=migrator_role, migrator_oid=migrator_oid)
         if rows:
             memberships = _require_memberships(connection, target, migrator_oid)
             if memberships:
@@ -176,3 +143,45 @@ def _require_memberships(
     if memberships not in ([], [(target.successor_oid, migrator_oid, False, False, True)]):
         raise ApplicationMigratorRetirementError("application migrator owner memberships changed")
     return memberships
+
+
+def _retire_sessions(
+    connection: ApplicationDatabaseConnection, *, target: ApplicationDatabaseAdmissionTarget,
+    coordination_guard: ApplicationDatabaseCoordinationGuard, migrator_role: str, migrator_oid: int,
+) -> None:
+    _require_target(connection, target, coordination_guard)
+    if connection.execute(application_sql(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_prepared_xacts "
+        "WHERE database={} OR owner={})", target.database, migrator_role,
+    )).fetchone() != (False,):
+        raise ApplicationMigratorRetirementError("application migrator has pending prepared work")
+    connection.execute("SELECT pg_catalog.pg_stat_clear_snapshot()")
+    if connection.execute(application_sql(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity "
+        "WHERE usesysid={} AND (datid IS DISTINCT FROM {} "
+        "OR backend_type<>'client backend' OR usename IS DISTINCT FROM {}))",
+        migrator_oid, target.database_oid, migrator_role,
+    )).fetchone() != (False,):
+        raise ApplicationMigratorRetirementError("application migrator has foreign or unknown sessions")
+    sessions = connection.execute(application_sql(
+        "SELECT pid,backend_start::text FROM pg_catalog.pg_stat_activity "
+        "WHERE usesysid={} ORDER BY pid", migrator_oid,
+    )).fetchall()
+    _require_target(connection, target, coordination_guard)
+    for pid, started_at in sessions:
+        # The saved start time and role OID prevent signalling a reused PID.
+        result = connection.execute(application_sql(
+            "SELECT pg_catalog.pg_terminate_backend(pid,1000) "
+            "FROM pg_catalog.pg_stat_activity WHERE pid={} AND "
+            "backend_start={}::timestamptz AND usesysid={} AND datid={}",
+            pid, started_at, migrator_oid, target.database_oid,
+        )).fetchall()
+        if result not in ([], [(True,)]):
+            raise ApplicationMigratorRetirementError("application migrator session did not retire")
+    connection.execute("SELECT pg_catalog.pg_stat_clear_snapshot()")
+    if connection.execute(application_sql(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE usesysid={})",
+        migrator_oid,
+    )).fetchone() != (False,):
+        raise ApplicationMigratorRetirementError("application migrator sessions remain")
+    _require_target(connection, target, coordination_guard)

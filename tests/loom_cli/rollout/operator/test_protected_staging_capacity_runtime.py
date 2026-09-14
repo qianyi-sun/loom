@@ -2181,7 +2181,7 @@ async def test_database_manifest_runs_real_bootstrap_with_generation_reporter(
     observed: dict[str, object] = {}
 
     class Database:
-        def __init__(self, admin_url: str, *, transient_role_admin: bool) -> None:
+        def __init__(self, admin_url: str, *, transient_role_admin: bool, application_owner_binding=None) -> None:
             observed["admin_url"] = admin_url
             observed["transient_role_admin"] = transient_role_admin
 
