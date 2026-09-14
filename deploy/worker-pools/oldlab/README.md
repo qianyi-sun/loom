@@ -36,6 +36,17 @@ and five-minute idle drain bound that use. The controller-root
 It never cancels or preempts foreign jobs and fails closed on configuration
 drift.
 
+Successful convergence also makes `/etc/slurm/slurm.conf` root-owned mode
+`0644`, as required by protected executor discovery. The exact legacy
+`trt:sharedwork` mode `0664` is a migration input, not an acceptable final
+authority. Migration preserves every configuration byte in an independent
+root-owned inode and retains a private snapshot at
+`/var/lib/loom-oldlab-slurm-authority/slurm.conf.before-root-authority`.
+Already-open legacy writer descriptors cannot modify the replacement. Metadata
+migration alone does not reload Slurm. Coordinate conflicting administrator
+writes before running the reviewed, root-owned helper; later scheduler edits
+must use root-managed authority, not shared-group write access.
+
 ## Disabled Pipeline GPU admission surface
 
 Issue #1213 adds a separate repository-owned Pipeline contract in

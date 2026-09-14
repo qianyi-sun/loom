@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import textwrap
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -106,20 +107,28 @@ def _run_converger(
     backup_mode: int = 0o600,
     partition_unavailable_until_reconfigure: bool = False,
     partition_state_before_reconfigure: str = "",
+    config_mode: int = 0o664,
+    retained_writer: bool = False,
+    config_parent_mode: int = 0o755,
+    prepare_fixture: Callable[[Path, Path, Path], None] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
     fake_bin = tmp_path / "bin"
     _fake_scontrol(fake_bin)
     config = tmp_path / "etc" / "slurm.conf"
     config.parent.mkdir()
+    config.parent.chmod(config_parent_mode)
     config.write_text(config_text, encoding="utf-8")
-    config.chmod(0o664)
+    config.chmod(config_mode)
     authority = tmp_path / "authority"
     if backup_text is not None:
         authority.mkdir()
+        authority.chmod(0o755)
         backup = authority / "slurm.conf.before-loom-staging-partition"
         backup.write_text(backup_text, encoding="utf-8")
         backup.chmod(backup_mode)
     reconfigure_count = tmp_path / "reconfigure-count"
+    if prepare_fixture is not None:
+        prepare_fixture(config, authority, fake_bin)
     owner = pwd.getpwuid(os.getuid()).pw_name
     group = grp.getgrgid(os.getgid()).gr_name
     env = {
@@ -145,11 +154,15 @@ def _run_converger(
             BACKUP="$STATE_ROOT/slurm.conf.before-loom-staging-partition"
             CONFIG_OWNER="$4"
             CONFIG_GROUP="$5"
+            LEGACY_CONFIG_OWNER="$4"
+            LEGACY_CONFIG_GROUP="$5"
             STATE_OWNER="$4"
             STATE_GROUP="$5"
+            if [ "$7" = "1" ]; then exec 7>>"$CONFIG"; fi
             for ((run = 0; run < $6; run++)); do
               loom_oldlab_converge_partition
             done
+            if [ "$7" = "1" ]; then printf '# stale writer\n' >&7; fi
             """,
             "oldlab-converger-test",
             str(CONVERGER),
@@ -158,6 +171,7 @@ def _run_converger(
             owner,
             group,
             str(runs),
+            "1" if retained_writer else "0",
         ],
         capture_output=True,
         text=True,
@@ -165,6 +179,159 @@ def _run_converger(
         env=env,
     )
     return result, config, authority, reconfigure_count
+
+
+def test_canonical_legacy_configuration_gets_protected_metadata_without_reload(
+    tmp_path: Path,
+) -> None:
+    canonical = f"{INITIAL_CONFIG}{PARTITION_LINE}\n# foreign configuration retained\n"
+    result, config, authority, reload_count = _run_converger(tmp_path, config_text=canonical)
+
+    assert result.returncode == 0, result.stderr
+    assert config.read_text() == canonical
+    assert stat.S_IMODE(config.stat().st_mode) == 0o644
+    assert not reload_count.exists()
+    snapshot = authority / "slurm.conf.before-root-authority"
+    assert snapshot.read_text() == canonical
+    assert stat.S_IMODE(snapshot.stat().st_mode) == 0o600
+
+
+def test_retained_legacy_writer_cannot_modify_published_authority(tmp_path: Path) -> None:
+    canonical = f"{INITIAL_CONFIG}{PARTITION_LINE}\n"
+    result, config, _authority, reload_count = _run_converger(
+        tmp_path, config_text=canonical, retained_writer=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert config.read_text() == canonical
+    assert stat.S_IMODE(config.stat().st_mode) == 0o644
+    assert not reload_count.exists()
+
+
+def test_hardened_configuration_is_accepted_without_reload_or_new_snapshot(tmp_path: Path) -> None:
+    canonical = f"{INITIAL_CONFIG}{PARTITION_LINE}\n"
+    result, config, authority, reload_count = _run_converger(
+        tmp_path, config_text=canonical, config_mode=0o644, runs=2,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert config.read_text() == canonical
+    assert stat.S_IMODE(config.stat().st_mode) == 0o644
+    assert not authority.exists()
+    assert not reload_count.exists()
+
+
+@pytest.mark.parametrize("config_mode", [0o664, 0o644])
+def test_writable_authority_parent_is_refused_before_partition_mutation(
+    tmp_path: Path, config_mode: int,
+) -> None:
+    result, config, authority, reload_count = _run_converger(
+        tmp_path, config_mode=config_mode, config_parent_mode=0o775,
+    )
+    assert result.returncode == 1
+    assert config.read_text() == INITIAL_CONFIG
+    assert not authority.exists()
+    assert not reload_count.exists()
+
+
+def test_hardened_input_stays_hardened_on_reconfigure_rollback(tmp_path: Path) -> None:
+    result, config, authority, reload_count = _run_converger(
+        tmp_path, config_mode=0o644, reconfigure_fail_at="1",
+    )
+    assert result.returncode == 1
+    assert config.read_text() == INITIAL_CONFIG
+    assert stat.S_IMODE(config.stat().st_mode) == 0o644
+    assert (authority / "slurm.conf.before-loom-staging-partition").read_text() == INITIAL_CONFIG
+    assert reload_count.read_text() == "2\n"
+
+
+@pytest.mark.parametrize("kind", ["stale", "mode", "symlink", "hardlink"])
+@pytest.mark.parametrize("scenario", ["exact", "missing-partition", "drifted-live"])
+def test_authority_snapshot_refusals_preserve_live_configuration(
+    tmp_path: Path, kind: str, scenario: str,
+) -> None:
+    canonical = f"{INITIAL_CONFIG}{PARTITION_LINE}\n"
+    initial = INITIAL_CONFIG if scenario == "missing-partition" else canonical
+
+    def prepare(config: Path, authority: Path, _bin: Path) -> None:
+        authority.mkdir(mode=0o755)
+        snapshot = authority / "slurm.conf.before-root-authority"
+        if kind == "symlink":
+            snapshot.symlink_to(config)
+        elif kind == "hardlink":
+            snapshot.write_text(canonical)
+            snapshot.chmod(0o600)
+            os.link(snapshot, authority / "other-name")
+        else:
+            snapshot.write_text(canonical + ("# stale\n" if kind == "stale" else ""))
+            snapshot.chmod(0o664 if kind == "mode" else 0o600)
+
+    result, config, _authority, reload_count = _run_converger(
+        tmp_path, config_text=initial, prepare_fixture=prepare,
+        partition_state_before_reconfigure=(
+            LIVE_PARTITION.replace("PriorityTier=100", "PriorityTier=1")
+            if scenario == "drifted-live" else ""
+        ),
+    )
+    assert result.returncode == 1
+    assert "authority snapshot is unsafe or stale" in result.stderr
+    assert config.read_text() == initial
+    assert stat.S_IMODE(config.stat().st_mode) == 0o664
+    assert not reload_count.exists()
+
+
+def test_concurrent_configuration_change_is_not_overwritten(tmp_path: Path) -> None:
+    canonical = f"{INITIAL_CONFIG}{PARTITION_LINE}\n"
+
+    def prepare(config: Path, _authority: Path, fake_bin: Path) -> None:
+        _write_executable(fake_bin / "install", f"""
+            #!/usr/bin/env bash
+            set -euo pipefail
+            /usr/bin/install "$@"
+            case "${{@: -1}}" in
+              *.slurm.conf.authority.*) printf '# concurrent change\\n' >>'{config}' ;;
+            esac
+        """)
+
+    result, config, authority, reload_count = _run_converger(
+        tmp_path, config_text=canonical, prepare_fixture=prepare,
+    )
+    assert result.returncode == 1
+    assert "configuration changed during authority migration" in result.stderr
+    assert config.read_text() == canonical + "# concurrent change\n"
+    assert (authority / "slurm.conf.before-root-authority").read_text() == canonical
+    assert not list(config.parent.glob(".slurm.conf.authority.*"))
+    assert not reload_count.exists()
+
+
+def test_existing_snapshot_can_match_intended_post_partition_bytes(tmp_path: Path) -> None:
+    canonical = f"{INITIAL_CONFIG}{PARTITION_LINE}\n"
+
+    def prepare(_config: Path, authority: Path, _bin: Path) -> None:
+        authority.mkdir(mode=0o755)
+        snapshot = authority / "slurm.conf.before-root-authority"
+        snapshot.write_text(canonical)
+        snapshot.chmod(0o600)
+
+    result, config, authority, reload_count = _run_converger(tmp_path, prepare_fixture=prepare)
+    assert result.returncode == 0, result.stderr
+    assert config.read_text() == canonical
+    assert stat.S_IMODE(config.stat().st_mode) == 0o644
+    assert (authority / "slurm.conf.before-root-authority").read_text() == canonical
+    assert (authority / "slurm.conf.before-loom-staging-partition").read_text() == INITIAL_CONFIG
+    assert reload_count.read_text() == "1\n"
+
+
+def test_unsafe_snapshot_directory_is_not_adopted_before_partition_change(tmp_path: Path) -> None:
+    def prepare(_config: Path, authority: Path, _bin: Path) -> None:
+        authority.mkdir()
+        authority.chmod(0o777)
+
+    result, config, authority, reload_count = _run_converger(tmp_path, prepare_fixture=prepare)
+    assert result.returncode == 1
+    assert config.read_text() == INITIAL_CONFIG
+    assert stat.S_IMODE(authority.stat().st_mode) == 0o777
+    assert not reload_count.exists()
 
 
 def test_first_convergence_inserts_partition_and_preserves_exact_backup(
@@ -200,7 +367,8 @@ def test_canonical_durable_partition_reloads_missing_live_state(tmp_path: Path) 
 
     assert result.returncode == 0, result.stderr
     assert config.read_text(encoding="utf-8") == canonical_config
-    assert not authority.exists()
+    assert not (authority / "slurm.conf.before-loom-staging-partition").exists()
+    assert (authority / "slurm.conf.before-root-authority").read_text() == canonical_config
     assert reconfigure_count.read_text(encoding="utf-8") == "1\n"
 
 
@@ -215,7 +383,8 @@ def test_canonical_durable_partition_reloads_drifted_live_state(tmp_path: Path) 
 
     assert result.returncode == 0, result.stderr
     assert config.read_text(encoding="utf-8") == canonical_config
-    assert not authority.exists()
+    assert not (authority / "slurm.conf.before-loom-staging-partition").exists()
+    assert (authority / "slurm.conf.before-root-authority").read_text() == canonical_config
     assert reconfigure_count.read_text(encoding="utf-8") == "1\n"
 
 

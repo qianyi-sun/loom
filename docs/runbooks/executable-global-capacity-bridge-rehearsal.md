@@ -257,6 +257,26 @@ live controller profile.
 
 ## 4. Render and stage each prepared-only controller
 
+OLDLAB discovery requires root-owned, non-group-writable scheduler authority.
+The supported `deploy/slurm/converge-loom-oldlab-slurm-partition.sh` transition
+accepts either the exact legacy `trt:sharedwork` mode `0664` or the final
+`root:root` mode `0644`. Run it only from reviewed root-owned merged source on
+OLDLAB1, with conflicting configuration writers paused. It retains all foreign
+configuration and existing partition checks. After successful partition
+readback, it snapshots the exact bytes privately and publishes an independent
+root-owned `0644` inode. A permission change on the legacy inode alone would
+leave existing writable descriptors effective. Already-hardened inputs remain
+hardened during partition rollback; an exact hardened configuration is a no-op.
+
+Record the configuration digest, ownership/mode and live partition before and
+after migration. If the dedicated partition is already exact, configuration
+bytes must be unchanged and no Slurm reconfigure is issued. The snapshot is
+`/var/lib/loom-oldlab-slurm-authority/slurm.conf.before-root-authority`; a stale
+or unsafe snapshot, writable authority parent, or observed concurrent source
+change refuses migration. Retain refusal evidence and the snapshot for operator
+reconciliation; do not overwrite it or relax the discovery check. This transition
+does not activate executor units or provide the remaining fleet cutover evidence.
+
 Install the reviewed executor release before rendering controller-local inputs,
 so the new `loom_capacity_executor` UID is one of the observed values bound by
 the profile and inventory policy. Use the same digest-pinned helper on OLDLAB
