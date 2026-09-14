@@ -155,3 +155,67 @@ def test_mapped_scratch_accepts_exact_v3_and_revalidates_copies(tmp_path, monkey
     bad = spec.model_copy(update={"workspace": str(tmp_path / "elsewhere/work")})
     with pytest.raises(ValueError):
         module.capture_native_mapped_scratch(bad)
+
+
+@pytest.mark.parametrize("boundary", ["exact", "uncommitted", "receipt", "foreign", "failure"])
+async def test_allocated_io_requires_own_committed_preparation_before_finalization(tmp_path, monkeypatch, boundary):
+    from loom_capacity_executor.native_allocated_io import scoped_native_allocated_io
+    from loom_capacity_executor.native_build_source import NativeStagedBuildSource
+
+    _runtime, spec, _path, digest = recovery_spec(tmp_path)
+    calls = []
+    module = import_module("loom_capacity_executor.native_allocated_io")
+    handshake = import_module("loom_capacity_executor.native_recovery_handshake")
+    _contracts, final = observation()
+    final = final.model_copy(update={"preparation": spec.recovery_preparation, "runtime_spec_sha256": digest})
+    publication = NativeRecoveryPublicationV1(claim=spec.claim, record=final)
+
+    class Client:
+        async def publish_recovery(self, request, *, worker_credential):
+            assert worker_credential == "w" * 43
+            calls.append(request)
+            if boundary == "failure":
+                raise OSError("commit reply unavailable")
+            receipt = NativeRecoveryReceiptV1(request=request, request_digest=canonical_digest(request))
+            return receipt.model_copy(update={"request_digest": "f" * 64}) if boundary == "receipt" else receipt
+
+    async def serve(channel, **kwargs):
+        assert kwargs["recovery_finalization_sha256"] == canonical_digest(publication)
+        assert len(calls) == 2
+
+    monkeypatch.setattr(module, "serve_native_execution_authority", serve)
+    outer, mapped = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    try:
+        async with scoped_native_allocated_io(claim=spec.claim, source=NativeStagedBuildSource(spec.context, tmp_path / "source"),
+            client=Client(), worker_credential="w" * 43) as owner:
+            if boundary in {"receipt", "failure"}:
+                with pytest.raises((ValueError, OSError)):
+                    await owner.prepare_recovery(spec.recovery_preparation)
+                with pytest.raises(ValueError):
+                    owner.require_recovery_preparation(spec.recovery_preparation)
+                assert len(calls) == 1
+                return
+            if boundary != "uncommitted":
+                await owner.prepare_recovery(spec.recovery_preparation)
+            if boundary == "foreign":
+                preparation = spec.recovery_preparation.model_copy(update={"node_configuration_sha256": "f" * 64})
+            else:
+                preparation = spec.recovery_preparation
+            if boundary in {"uncommitted", "foreign"}:
+                with pytest.raises(ValueError):
+                    await owner.finalize_recovery(outer, preparation=preparation, runtime_spec_sha256=digest)
+                assert len(calls) == (1 if boundary == "foreign" else 0)
+                return
+            from loom_capacity_executor.native_supervisor import _send
+
+            _send(mapped, handshake.NativeRecoveryFinalize(request=publication))
+            result = await owner.finalize_recovery(outer, preparation=preparation, runtime_spec_sha256=digest)
+            assert result == canonical_digest(publication)
+            assert handshake.NativeRecoveryAcknowledgment.model_validate_json(mapped.recv(65536)).request_digest == result
+            await owner.serve_authority(outer, recovery_finalization_sha256=result)
+            assert calls[0].record == preparation and calls[1] == publication
+        with pytest.raises(RuntimeError, match="closed"):
+            await owner.prepare_recovery(preparation)
+    finally:
+        outer.close()
+        mapped.close()
