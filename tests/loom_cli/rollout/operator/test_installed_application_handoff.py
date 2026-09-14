@@ -11,8 +11,13 @@ from loom_cli.rollout.operator.protected_apply_journal import (
     ProtectedApplyJournal,
 )
 from tests.loom_cli.rollout.operator.test_application_guard_retention import _guard
-from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
+from tests.loom_cli.rollout.operator.test_application_credential_recovery import _sources
+from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan as _unsupported_plan
 from tests.loom_cli.rollout.operator.test_staging_mutation_guard import _config
+
+
+def _plan(tmp_path):
+    return _sources(tmp_path, schema_revision="0134/guard_0030")[0]
 
 
 @pytest.mark.parametrize('retention', ['absent', 'awaiting-ack', 'acknowledged'])
@@ -85,3 +90,14 @@ def test_installed_handoff_requires_exact_epoch_claim_identity(tmp_path, monkeyp
         runner=SimpleNamespace(environment={'KUBECONFIG': '/fixture'}))
     with pytest.raises(ValueError, match='epoch'):
         factory.epoch(plan)
+
+
+def test_installed_handoff_rejects_unsupported_checkpoint_before_observation(tmp_path, monkeypatch):
+    from loom_cli.rollout.operator import installed_application_handoff as module
+    plan, config = _unsupported_plan(tmp_path), _config(tmp_path)
+    factory = module.InstalledApplicationHandoffFactory(config=config, service_uid=os.getuid(),
+        runner=SimpleNamespace(environment={}))
+    journal = ProtectedApplyJournal(config.state_root, request_id=plan.request_id, attempt_number=plan.attempt_number)
+    with pytest.raises(RuntimeError, match="revision"):
+        factory(plan, journal=journal, ordinal=2)
+    assert not journal.root.exists()

@@ -29,7 +29,9 @@ from loom.application_schema_inventory import (
 from loom.application_schema_reference import (
     ApplicationSchemaProfile,
     ApplicationSchemaReference,
+    ApplicationSchemaRevision,
     application_reference_postgres_image,
+    application_schema_revisions,
 )
 from loom.dev_instance import DevInstanceIdentity, derive_identity
 from loom.dev_instance_provision import render_create_database_sql, render_role_convergence_sql
@@ -61,17 +63,26 @@ async def _observe_fresh_database(
     identity: DevInstanceIdentity,
     *,
     profile: ApplicationSchemaProfile = "legacy-owner",
+    revision: ApplicationSchemaRevision = "0142/guard_0033",
 ) -> ApplicationSchemaInventory:
     """Internal helper: admin_url belongs exclusively to our disposable container."""
-    sealed = profile in {"sealed-owner", "staging-readonly-sealed-owner"}
-    staging_readonly = profile in {"staging-readonly-legacy-owner", "staging-readonly-sealed-owner"}
+    from scripts.application_schema_baseline import BaselineReferenceDatabase
+
+    application_head, guard_head = application_schema_revisions(revision)
+    factory = BaselineReferenceDatabase if revision == "0134/guard_0030" else PsycopgPersonalDevCapacityDatabase
+    sealed = profile in {"sealed-owner", "staging-readonly-sealed-owner", "cnpg-staging-sealed-owner"}
+    staging_readonly = profile in {"staging-readonly-legacy-owner", "staging-readonly-sealed-owner", "cnpg-staging-legacy-owner", "cnpg-staging-sealed-owner"}
     password = uuid4().hex
     bootstrap = PsycopgSharedFixtureSqlExecutor(admin_url)
-    database = PsycopgPersonalDevCapacityDatabase(admin_url)
+    database = factory(admin_url)
     await bootstrap.apply_role_and_database(
         identity,
         role_sql=render_role_convergence_sql(identity, password),
-        create_database_sql=render_create_database_sql(identity),
+        create_database_sql=(
+            psycopg.sql.SQL("CREATE DATABASE {} OWNER {} TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'").format(
+                psycopg.sql.Identifier(identity.database), psycopg.sql.Identifier(identity.db_role),
+            ).as_string() if profile.startswith("cnpg-staging-") else render_create_database_sql(identity)
+        ),
     )
     application_owner = identity.db_role
     application_migrator = None
@@ -81,7 +92,7 @@ async def _observe_fresh_database(
             application_owner, application_migrator, application_url = await _prepare_sealed_owner(
                 admin_url, identity
             )
-            database = PsycopgPersonalDevCapacityDatabase(
+            database = factory(
                 admin_url,
                 application_owner_binding=ApplicationOwnerBinding(
                     database=identity.database,
@@ -101,7 +112,7 @@ async def _observe_fresh_database(
             "-c",
             str(_ROOT / "migrations/alembic.ini"),
             "upgrade",
-            "head",
+            application_head,
             cwd=_ROOT,
             env=environment,
             stdin=asyncio.subprocess.DEVNULL,
@@ -130,13 +141,9 @@ async def _observe_fresh_database(
             migrator_url,
             _,
         ) = await database._converge_roles(identity, _new_credentials())
-        await database._migrate(
-            migrator_url=migrator_url,
-            owner=owner,
-            agent=agent,
-            executor=executor,
-            observer=observer,
-            runtime=runtime,
+        await _migrate_reference_guard(
+            migrator_url=migrator_url, owner=owner, agent=agent, executor=executor,
+            observer=observer, runtime=runtime, guard_head=guard_head,
         )
         await database._seal_migrator(identity, owner=owner, migrator=migrator)
         bindings = {
@@ -179,6 +186,12 @@ async def _observe_fresh_database(
                 if not payload.startswith("\\set ON_ERROR_STOP on\n"):
                     raise RuntimeError("readonly bootstrap psql directive changed")
                 connection.execute(payload.removeprefix("\\set ON_ERROR_STOP on\n"))
+                # The protected staging capacity bootstrap closes PUBLIC database
+                # privileges when it seals its transient migrator. Personal-dev
+                # provisioning does not do this; both are explicit fixed recipes.
+                connection.execute(psycopg.sql.SQL(
+                    "REVOKE ALL PRIVILEGES ON DATABASE {} FROM PUBLIC"
+                ).format(psycopg.sql.Identifier(identity.database)))
             with connection.transaction():
                 connection.execute("SET TRANSACTION READ ONLY")
                 return read_application_schema_inventory(connection, role_bindings=bindings)
@@ -188,6 +201,35 @@ async def _observe_fresh_database(
                 admin_url, application_owner, application_migrator, database=identity.database
             )
         await database.destroy(identity)
+
+
+async def _migrate_reference_guard(
+    *, migrator_url: str, owner: str, agent: str, executor: str,
+    observer: str, runtime: str, guard_head: str,
+) -> None:
+    """The caller has just created this disposable database and its roles."""
+    environment = os.environ.copy()
+    environment.update({
+        "LOOM_CAPACITY_GUARD_DB_URL": migrator_url,
+        "LOOM_CAPACITY_GUARD_OWNER_ROLE": owner,
+        "LOOM_CAPACITY_GUARD_AGENT_ROLE": agent,
+        "LOOM_CAPACITY_GUARD_EXECUTOR_ROLE": executor,
+        "LOOM_CAPACITY_GUARD_OBSERVER_ROLE": observer,
+        "LOOM_CAPACITY_GUARD_RUNTIME_ROLE": runtime,
+    })
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "alembic", "-c",
+        str(_ROOT / "capacity_guard_migrations/alembic.ini"), "upgrade", guard_head,
+        cwd=_ROOT, env=environment, stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        if await asyncio.wait_for(process.wait(), timeout=180) != 0:
+            raise RuntimeError("isolated guard reference migration failed")
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
 
 
 async def _prepare_sealed_owner(
@@ -258,7 +300,8 @@ async def _retire_application_migrator(
 
 
 async def build_application_schema_reference(
-    *, profile: ApplicationSchemaProfile = "legacy-owner", postgres_major: int = 16
+    *, profile: ApplicationSchemaProfile = "legacy-owner", postgres_major: int = 16,
+    revision: ApplicationSchemaRevision = "0142/guard_0033",
 ) -> ApplicationSchemaReference:
     """Require two independent fresh installations to agree before emitting metadata."""
     if profile not in {
@@ -266,8 +309,13 @@ async def build_application_schema_reference(
         "sealed-owner",
         "staging-readonly-legacy-owner",
         "staging-readonly-sealed-owner",
+        "cnpg-staging-legacy-owner",
+        "cnpg-staging-sealed-owner",
     }:
         raise ValueError("application schema reference profile is invalid")
+    application_head, guard_head = application_schema_revisions(revision)
+    if revision == "0142/guard_0033" and (application_head, guard_head) != (_head("migrations"), _head("capacity_guard_migrations")):
+        raise RuntimeError("current application schema reference revisions require review")
     image = application_reference_postgres_image(postgres_major=postgres_major)
     with PostgresContainer(
         image,
@@ -277,12 +325,12 @@ async def build_application_schema_reference(
         first = await _observe_fresh_database(
             postgres.get_connection_url(),
             derive_identity(f"reference-{uuid4().hex[:8]}"),
-            profile=profile,
+            profile=profile, revision=revision,
         )
         second = await _observe_fresh_database(
             postgres.get_connection_url(),
             derive_identity(f"reference-{uuid4().hex[:8]}"),
-            profile=profile,
+            profile=profile, revision=revision,
         )
     if first != second:
         raise RuntimeError("independent application schema references disagree")
@@ -291,8 +339,8 @@ async def build_application_schema_reference(
     return ApplicationSchemaReference(
         format_version=1,
         profile=profile,
-        application_head=_head("migrations"),
-        guard_head=_head("capacity_guard_migrations"),
+        application_head=application_head,
+        guard_head=guard_head,
         postgres_image=image,
         postgres_major=first.postgres_major,
         object_count=len(first.objects),
@@ -318,16 +366,22 @@ async def _build_profiles() -> dict[str, object]:
         "sealed-owner",
         "staging-readonly-legacy-owner",
         "staging-readonly-sealed-owner",
+        "cnpg-staging-legacy-owner",
+        "cnpg-staging-sealed-owner",
     )
+    revisions: tuple[ApplicationSchemaRevision, ...] = ("0142/guard_0033", "0134/guard_0030")
     for major in (16, 17):
         result[str(major)] = {
-            profile: asdict(
-                await build_application_schema_reference(profile=profile, postgres_major=major)
-            )
-            for profile in profiles
+            revision: {
+                profile: asdict(await build_application_schema_reference(
+                    profile=profile, postgres_major=major, revision=revision,
+                )) for profile in profiles
+            } for revision in revisions
         }
     return result
 
 
 if __name__ == "__main__":
+    # Script-path invocation must resolve the companion trusted reference recipe.
+    sys.path.insert(0, str(_ROOT))
     raise SystemExit(main())

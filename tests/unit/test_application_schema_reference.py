@@ -33,6 +33,8 @@ def test_unknown_reference_profile_is_rejected() -> None:
         "sealed-owner",
         "staging-readonly-legacy-owner",
         "staging-readonly-sealed-owner",
+        "cnpg-staging-legacy-owner",
+        "cnpg-staging-sealed-owner",
     ],
 )
 def test_reference_is_bound_to_postgres_major(profile: str) -> None:
@@ -99,3 +101,21 @@ def test_supported_baseline_has_independent_revision_pins(major, profile):
 def test_unreviewed_revision_pair_is_not_reference_authority(revision):
     with pytest.raises(ApplicationSchemaReferenceError, match="revision"):
         application_schema_reference(revision=revision)
+
+
+@pytest.mark.parametrize("revision", ["0142/guard_0033", "0134/guard_0030"])
+@pytest.mark.parametrize("major", [16, 17])
+@pytest.mark.parametrize("ownership", ["legacy-owner", "sealed-owner"])
+def test_cnpg_locale_is_distinct_from_personal_development(revision, major, ownership):
+    profile = application_schema_profile(ownership=ownership, acl_profile="cnpg-staging")
+    cnpg = application_schema_reference(profile=profile, postgres_major=major, revision=revision)
+    readonly = application_schema_reference(profile="staging-readonly-" + ownership, postgres_major=major, revision=revision)
+    assert cnpg.object_count == readonly.object_count
+    assert cnpg.inventory_sha256 != readonly.inventory_sha256
+
+
+@pytest.mark.parametrize("pair", [(None, None), ("0134", "guard_0033"), ("0142", "guard_0030"), ("head", "head")])
+def test_checkpoint_selection_refuses_unreviewed_revision_pairs(pair):
+    from loom.application_schema_reference import application_schema_revision
+    with pytest.raises(ApplicationSchemaReferenceError, match="revision"):
+        application_schema_revision(public_revision=pair[0], guard_revision=pair[1])

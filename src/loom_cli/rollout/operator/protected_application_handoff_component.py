@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, replace
 from typing import Protocol
 
 from loom.application_database_connection import ApplicationDatabaseConnection
+from loom.application_schema_reference import application_schema_revision
 
 from .final_gate_plan import FinalGatePlan
 from .protected_application_admission_recovery import (
@@ -110,6 +111,7 @@ class ProtectedApplicationAuthorityHandoffComponent:
     def component(self, plan: FinalGatePlan) -> ProtectedApplyComponent:
         if plan.namespace != 'loom-staging' or plan.checkpoint_schema_version != 3:
             raise ValueError('application handoff requires its staging schema-3 checkpoint')
+        application_schema_revision(public_revision=plan.public_schema_revision, guard_revision=plan.capacity_guard_schema_revision)
         return ProtectedApplyComponent(_COMPONENT, _IMPLEMENTATION,
             admission_record_digest({'plan_digest': plan.plan_digest, 'ordinal': self.ordinal}),
             self.classify, self.apply)

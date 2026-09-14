@@ -18,6 +18,7 @@ from loom.application_runtime_login import (
     ApplicationRuntimeLoginState,
     observe_application_runtime_login,
 )
+from loom.application_schema_reference import application_schema_revision
 from loom.staging_mutation_coordination import rollout_guard_application_name
 
 from .final_gate_plan import FinalGatePlan
@@ -134,7 +135,8 @@ def observe_application_restoration(
             state = observe_application_runtime_login(
                 connection, owner_role=admission.target.successor_role, role_bindings=_STAGING_ROLE_BINDINGS,
                 password=credential.credential.password, target=admission.target,
-                schema_acl_profile='staging-readonly', coordination_guard=admission.coordination_guard,
+                schema_acl_profile='cnpg-staging',
+                schema_revision=application_schema_revision(public_revision=plan.public_schema_revision, guard_revision=plan.capacity_guard_schema_revision), coordination_guard=admission.coordination_guard,
             )
         if state is not ApplicationRuntimeLoginState.RESTORED:
             raise RuntimeError('application restoration original runtime login is not restored')

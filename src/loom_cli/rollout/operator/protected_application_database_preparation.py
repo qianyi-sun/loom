@@ -19,6 +19,8 @@ from loom.application_login_sealing import seal_guarded_application_login
 from loom.application_schema_inventory import read_application_schema_inventory
 from loom.application_schema_reference import (
     application_schema_profile,
+    application_schema_revision,
+    require_application_migration_revisions,
     require_application_schema_reference,
 )
 
@@ -67,8 +69,12 @@ def prepare_protected_application_database(
             ))
         require_application_schema_reference(
             read_application_schema_inventory(connection, role_bindings=_STAGING_ROLE_BINDINGS),
-            profile=application_schema_profile(ownership="legacy-owner", acl_profile="staging-readonly"),
+            profile=application_schema_profile(ownership="legacy-owner", acl_profile="cnpg-staging"),
+            revision=application_schema_revision(public_revision=plan.public_schema_revision, guard_revision=plan.capacity_guard_schema_revision),
         )
+        require_application_migration_revisions(connection, revision=application_schema_revision(
+            public_revision=plan.public_schema_revision, guard_revision=plan.capacity_guard_schema_revision,
+        ))
     if saved is None:
         owner_oid = prepare_application_owner(plan, journal=journal, connection=connection, guard=guard)
         backend, coordination = _observe(connection, guard)
