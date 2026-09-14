@@ -106,13 +106,15 @@ def _run_converger(
     backup_mode: int = 0o600,
     partition_unavailable_until_reconfigure: bool = False,
     partition_state_before_reconfigure: str = "",
+    config_mode: int = 0o664,
+    retained_writer: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
     fake_bin = tmp_path / "bin"
     _fake_scontrol(fake_bin)
     config = tmp_path / "etc" / "slurm.conf"
     config.parent.mkdir()
     config.write_text(config_text, encoding="utf-8")
-    config.chmod(0o664)
+    config.chmod(config_mode)
     authority = tmp_path / "authority"
     if backup_text is not None:
         authority.mkdir()
@@ -145,11 +147,15 @@ def _run_converger(
             BACKUP="$STATE_ROOT/slurm.conf.before-loom-staging-partition"
             CONFIG_OWNER="$4"
             CONFIG_GROUP="$5"
+            LEGACY_CONFIG_OWNER="$4"
+            LEGACY_CONFIG_GROUP="$5"
             STATE_OWNER="$4"
             STATE_GROUP="$5"
+            if [ "$7" = "1" ]; then exec 7>>"$CONFIG"; fi
             for ((run = 0; run < $6; run++)); do
               loom_oldlab_converge_partition
             done
+            if [ "$7" = "1" ]; then printf '# stale writer\n' >&7; fi
             """,
             "oldlab-converger-test",
             str(CONVERGER),
@@ -158,6 +164,7 @@ def _run_converger(
             owner,
             group,
             str(runs),
+            "1" if retained_writer else "0",
         ],
         capture_output=True,
         text=True,
@@ -165,6 +172,46 @@ def _run_converger(
         env=env,
     )
     return result, config, authority, reconfigure_count
+
+
+def test_canonical_legacy_configuration_gets_protected_metadata_without_reload(
+    tmp_path: Path,
+) -> None:
+    canonical = f"{INITIAL_CONFIG}{PARTITION_LINE}\n# foreign configuration retained\n"
+    result, config, authority, reload_count = _run_converger(tmp_path, config_text=canonical)
+
+    assert result.returncode == 0, result.stderr
+    assert config.read_text() == canonical
+    assert stat.S_IMODE(config.stat().st_mode) == 0o644
+    assert not reload_count.exists()
+    snapshot = authority / "slurm.conf.before-root-authority"
+    assert snapshot.read_text() == canonical
+    assert stat.S_IMODE(snapshot.stat().st_mode) == 0o600
+
+
+def test_retained_legacy_writer_cannot_modify_published_authority(tmp_path: Path) -> None:
+    canonical = f"{INITIAL_CONFIG}{PARTITION_LINE}\n"
+    result, config, _authority, reload_count = _run_converger(
+        tmp_path, config_text=canonical, retained_writer=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert config.read_text() == canonical
+    assert stat.S_IMODE(config.stat().st_mode) == 0o644
+    assert not reload_count.exists()
+
+
+def test_hardened_configuration_is_accepted_without_reload_or_new_snapshot(tmp_path: Path) -> None:
+    canonical = f"{INITIAL_CONFIG}{PARTITION_LINE}\n"
+    result, config, authority, reload_count = _run_converger(
+        tmp_path, config_text=canonical, config_mode=0o644, runs=2,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert config.read_text() == canonical
+    assert stat.S_IMODE(config.stat().st_mode) == 0o644
+    assert not authority.exists()
+    assert not reload_count.exists()
 
 
 def test_first_convergence_inserts_partition_and_preserves_exact_backup(
