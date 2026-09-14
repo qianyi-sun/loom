@@ -399,6 +399,43 @@ def close_application_database_admission(
                    runtime_password=runtime_password)
 
 
+def close_guarded_application_database_admission(
+    connection: ApplicationDatabaseConnection, *, target: ApplicationDatabaseAdmissionTarget,
+    provisioner_role: str, handoff_backend: ApplicationDatabaseHandoffBackend,
+    coordination_guard: ApplicationDatabaseCoordinationGuard, runtime_password: str,
+) -> None:
+    """Close under the original peer and guard, rolling back detected authority loss.
+
+    The enclosing component must persist the original target before this call.
+    Existing clients are deliberately left for its workload/retirement phases.
+    Neither a closed database nor successful replay certifies their retirement.
+    """
+    if (type(handoff_backend) is not ApplicationDatabaseHandoffBackend
+            or type(coordination_guard) is not ApplicationDatabaseCoordinationGuard
+            or handoff_backend.pid == coordination_guard.backend.pid):
+        raise ApplicationDatabaseAdmissionError("application closure guard or peer is invalid")
+
+    def require_original() -> None:
+        _require_handoff_identity(connection, target, handoff_backend)
+        _require_coordination_guard(connection, target, coordination_guard)
+        connection.execute("SELECT pg_catalog.pg_stat_clear_snapshot()")
+        if connection.execute(application_sql(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid={} "
+            "AND backend_start={}::pg_catalog.timestamptz AND datid={} AND usename={} "
+            "AND backend_type='client backend')",
+            handoff_backend.pid, handoff_backend.started_at, target.database_oid, provisioner_role,
+        )).fetchone() != (True,):
+            raise ApplicationDatabaseAdmissionError("application closure original peer changed")
+
+    with _maintenance_transaction(connection, database=target.database, provisioner_role=provisioner_role):
+        require_original()
+        if _checked_state(connection, target, runtime_password=runtime_password):
+            connection.execute(sql.SQL("ALTER DATABASE {} ALLOW_CONNECTIONS false").format(sql.Identifier(target.database)))
+        if _checked_state(connection, target, runtime_password=runtime_password):
+            raise ApplicationDatabaseAdmissionError("application guarded closure did not converge")
+        require_original()
+
+
 def reopen_application_database_admission(
     connection: ApplicationDatabaseConnection,
     *,
