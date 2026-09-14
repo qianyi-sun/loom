@@ -34,6 +34,7 @@ async def test_guard_bootstrap_arms_exact_separated_owners_and_retires(transfer_
     from loom.application_guard_migrator_retirement import (
         close_application_guard_migrator_admission,
         reopen_application_guard_migrator_admission,
+        require_application_guard_migrator_retired,
         retire_application_guard_migrator,
     )
 
@@ -67,6 +68,8 @@ async def test_guard_bootstrap_arms_exact_separated_owners_and_retires(transfer_
             memberships = peer.execute("SELECT roleid FROM pg_auth_members WHERE member=%s ORDER BY roleid", (identity.role_oid,)).fetchall()
             assert memberships == sorted([(target.successor_oid,), (identity.guard_owner.role_oid,)])
             assert (target.owner_oid,) not in memberships
+            with pytest.raises(RuntimeError):
+                require_application_guard_migrator_retired(peer, **authority)
             with psycopg.connect(transfer_database[0], user=role, password=password, autocommit=True) as job:
                 for selected in (target.successor_role, owner):
                     job.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(selected)))
@@ -75,9 +78,11 @@ async def test_guard_bootstrap_arms_exact_separated_owners_and_retires(transfer_
                     seal_application_guard_migrator(maintenance, **authority)
                 close_application_guard_migrator_admission(maintenance, **authority)
                 retire_application_guard_migrator(maintenance, **authority)
+                require_application_guard_migrator_retired(maintenance, **authority)
                 with pytest.raises(psycopg.OperationalError):
                     job.execute("SELECT 1")
             reopen_application_guard_migrator_admission(maintenance, **authority, runtime_password=args["password"])
+            require_application_guard_migrator_retired(peer, **authority)
             assert guard.execute("SELECT 1").fetchone() == (1,)
         finally:
             peer.execute(sql.SQL("REVOKE {},{} FROM {}; ALTER ROLE {} NOLOGIN PASSWORD NULL").format(
