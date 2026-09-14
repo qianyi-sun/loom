@@ -161,3 +161,41 @@ def test_retirement_requires_all_scope_propagation_and_retries_without_repatchin
     with pytest.raises(RuntimeError, match='retired'):
         journal.execute(plan, [_component(apply)])
     assert len(runner.patches) == 5 and len(runner.probes) == 7
+
+
+@pytest.mark.parametrize('drift', [None, 'policy', 'binding', 'propagation', 'record'])
+def test_retired_classification_observes_exact_inventory_without_active_apply(tmp_path, monkeypatch, drift):
+    from loom_cli.rollout.operator.protected_cnpg_fence_retirement import (
+        observe_application_cnpg_fence_retirement,
+        retire_cnpg_input_fence,
+    )
+    plan, journal, guard, runner = _case(tmp_path, monkeypatch)
+    def apply(_):
+        retire_cnpg_input_fence(plan, journal=journal, runner=runner, guard=guard)
+        raise RuntimeError('retired')
+    component = _component(apply)
+    with pytest.raises(RuntimeError, match='retired'):
+        journal.execute(plan, [component])
+    if drift == 'policy':
+        next(iter(runner.objects.values()))['spec']['matchConditions'][0]['expression'] = 'true'
+    elif drift == 'binding':
+        list(runner.objects.values())[1]['spec']['validationActions'] = ['Warn']
+    elif drift == 'propagation':
+        runner.propagated = False
+    elif drift == 'record':
+        path = journal.root / '00-application-ownership-handoff/application-cnpg-fence-retirement.json'
+        record = json.loads(path.read_text())
+        record['inventory_sha256'] = 'f' * 64
+        path.write_text(json.dumps(record))
+    def forbid(*args, **kwargs):
+        pytest.fail('retired classification attempted journal mutation or fsync')
+    monkeypatch.setattr(journal, '_publish_or_match', forbid)
+    monkeypatch.setattr(journal, '_sync_application_recovery', forbid)
+    if drift:
+        with pytest.raises((RuntimeError, ValueError)):
+            observe_application_cnpg_fence_retirement(plan, journal=journal, component=component, ordinal=0, runner=runner)
+    else:
+        result = observe_application_cnpg_fence_retirement(plan, journal=journal, component=component, ordinal=0, runner=runner)
+        assert len(result) == 64
+        assert result == observe_application_cnpg_fence_retirement(plan, journal=journal, component=component, ordinal=0, runner=runner)
+    assert len(runner.patches) == 5 and len(runner.creates) == 10
