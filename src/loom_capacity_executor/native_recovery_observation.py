@@ -21,6 +21,7 @@ from loom_capacity_agent.native_recovery import (
 from loom_capacity_agent.native_recovery_publication import (
     NativeRecoveryHostIdentityV1 as NativeRecoveryHostIdentityV1,
 )
+from loom_capacity_executor.native_cgroup_authority import require_native_cgroup_authority
 from loom_capacity_executor.native_installed_release import (
     _Observation,
     _path,
@@ -152,6 +153,7 @@ def capture_native_recovery_preparation(locator: NativeInstalledAttemptV1, *,
     with ExitStack() as stack:
         root = _open_directory(_CGROUP_ROOT, stack)
         mount = _require_cgroup_mount(root)
+        require_native_cgroup_authority(root, relative=Path(job.relative_to("/")))
         watched = {}
         for path, private in ((_CGROUP_ROOT, False), (_CGROUP_ROOT / job.relative_to("/"), False),
             (_CGROUP_ROOT / process.relative_to("/"), False), (attempt.parent, True), (attempt, True)):
@@ -180,4 +182,5 @@ def capture_native_recovery_preparation(locator: NativeInstalledAttemptV1, *,
         for path, (identity, private) in watched.items():
             if _directory_identity(_open_directory(path, stack), private=private) != identity:
                 raise ValueError("native recovery directory changed during observation")
+        require_native_cgroup_authority(root, relative=Path(job.relative_to("/")))
         return facts

@@ -79,10 +79,10 @@ def require_native_cgroup_authority(root_fd: int, *, relative: Path) -> None:
                     if count + len(names) > _MAX_NODES:
                         raise ValueError("native cgroup authority exceeds node bound")
         for name in names:
-            child = os.open(name, _DIRECTORY, dir_fd=fd)
+            child_fd = os.open(name, _DIRECTORY, dir_fd=fd)
             try:
-                identity = checked(child, directory=True)
-                walk(child, depth + 1)
+                identity = checked(child_fd, directory=True)
+                walk(child_fd, depth + 1)
                 current = os.open(name, _DIRECTORY, dir_fd=fd)
                 try:
                     if identity != checked(current, directory=True):
@@ -90,7 +90,7 @@ def require_native_cgroup_authority(root_fd: int, *, relative: Path) -> None:
                 finally:
                     os.close(current)
             finally:
-                os.close(child)
+                os.close(child_fd)
         checked(fd, directory=True)
 
     with ExitStack() as stack:
