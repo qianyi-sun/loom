@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from copy import deepcopy
 from datetime import timedelta
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, insert, select, text
@@ -43,12 +45,55 @@ async def _insert(session, values):
     await session.execute(insert(TaskImageRegistryCredentialGeneration).values(**values))
 
 
+@pytest.mark.parametrize("sqlstate,calls_expected", (("25P03", 2), ("55P03", 1), ("08006", 1), ("23505", 1)))
+async def test_retirement_setup_retry_is_bounded_and_only_for_server_abort(monkeypatch, sqlstate, calls_expected):
+    class ServerError(Exception):
+        pass
+
+    original_error = ServerError()
+    original_error.sqlstate = sqlstate
+    error = DBAPIError("fixture", None, original_error)
+    calls = []
+
+    async def fail(*args, **kwargs):
+        calls.append(1)
+        raise error
+
+    monkeypatch.setattr(sys.modules[__name__], "observe", fail)
+    with pytest.raises(DBAPIError) as raised:
+        await _retire(None, uuid4())
+    assert raised.value is error
+    assert len(calls) == calls_expected
+
+
+@pytest.mark.parametrize("expire_setup", (False, True))
 async def test_retired_attempt_rejects_direct_credential_insert(
-    registry_authority_session, registry_issuer,
+    registry_authority_session, registry_issuer, monkeypatch, expire_setup,
 ):
     factory = registry_authority_session
     attempt_id, values = await _prepared_insert(factory, registry_issuer)
+    module = store()
+    original = module.revalidate_retirement_inventory
+    expired_backends = []
+
+    async def expire_first_setup_transaction(session, *, prepared):
+        if expire_setup and not expired_backends:
+            backend = await session.scalar(text("SELECT pg_backend_pid()"))
+            assert await session.scalar(text("SHOW idle_in_transaction_session_timeout")) == "1s"
+            async with factory.kw["bind"].connect() as probe:
+                await probe.execution_options(isolation_level="AUTOCOMMIT")
+                async with asyncio.timeout(3):
+                    while await probe.scalar(
+                        text("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = :pid)"),
+                        {"pid": backend},
+                    ):
+                        await asyncio.sleep(0.02)
+            expired_backends.append(backend)
+        await original(session, prepared=prepared)
+
+    monkeypatch.setattr(module, "revalidate_retirement_inventory", expire_first_setup_transaction)
     await _retire(factory, attempt_id)
+    assert len(expired_backends) == int(expire_setup)
     async with factory() as session:
         with pytest.raises(IntegrityError) as error:
             await _insert(session, values)
