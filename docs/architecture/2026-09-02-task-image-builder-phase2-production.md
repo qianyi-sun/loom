@@ -201,6 +201,27 @@ the interpreter, guard file, BPF object, and loader as one pinned unit.
 
 ## Projection authority and durable state
 
+`TaskImageBuildSubmissionCoordinator` owns the short submission transaction. It
+accepts only a grant UUID, reconstructs stored V2 authority, checks the configured
+environment and exact provider policy, and commits the locked one-invocation
+transition before entering the provider. Concurrent callers, a lost commit
+acknowledgement, transport error, cancellation or restart never restore that
+invocation. A canonical returned job number is an advisory receipt only: the
+grant stays `submitting` until independent authoritative inventory binds it.
+Even a crash after commit but before send recovers through inventory, not a
+second submission. No transaction or grant lock is held across provider I/O.
+
+This coordinator is not a production Slurm command runner and is not wired into
+capacity reconciliation. The DB-bearing controller must remain separate from
+the dedicated allocation/submission UID. A protected fixed helper still needs
+pinned commands, scrubbed environment and descriptors, dispatch-time authority,
+exact inventory, and durable outstanding-command/replacement-issuance fencing.
+Coroutine cancellation or an empty inventory does not prove a remote command
+has settled. Binding, release authorization versus observed release, scoped
+cancellation and expired/revoked cleanup remain separate integration work. The
+checked-in provider stays disabled until those boundaries and native acceptance
+are complete.
+
 Submission state and credential state are deliberately separate. The existing
 `TaskImageBuildGrant` continues to record `issued -> submitting -> bound ->
 released|revoked`. A new immutable authority binding adds:
