@@ -18,12 +18,19 @@ from loom.application_completed_authority import ApplicationOwnerSuccessor
 from .config import OperatorConfig
 from .final_gate_plan import FinalGatePlan
 from .policy import sanitized_child_environment
-from .protected_application_completed import observe_completed_application_handoff
+from .protected_application_completed import (
+    historical_handoff_evidence,
+    observe_completed_application_handoff,
+)
 from .protected_application_guard_retention import _read_pending_retention
 from .protected_application_handoff_component import (
     ApplicationHandoffRunner,
     ProtectedApplicationAuthorityHandoffComponent,
     _admit_sql_profiles,
+)
+from .protected_application_handoff_history import (
+    HISTORICAL_HANDOFF_IMPLEMENTATION,
+    CompletedApplicationHandoffOrigin,
 )
 from .protected_application_migration_resources import ApplicationMigrationResourceRunner
 from .protected_apply_journal import (
@@ -137,6 +144,29 @@ class InstalledApplicationHandoffFactory:
                 candidate, runtime, runner=self.runner))
         handoff.component(plan)
         return handoff
+
+    def historical_component(
+        self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal, origin: CompletedApplicationHandoffOrigin,
+    ) -> ProtectedApplyComponent:
+        handoff = self.build(plan, journal=journal, ordinal=2)
+        def classify(candidate: FinalGatePlan) -> ComponentObservation:
+            if candidate != plan:
+                raise RuntimeError("historical handoff current observer plan changed")
+            view, terminal = origin.read()
+            observed = observe_completed_application_handoff(plan, historical_plan=origin.plan, view=view, terminal=terminal,
+                runner=self.runner, guard_source=lambda: self.completed_guard(plan),
+                epoch_source=lambda: self.completed_epoch(plan), observe_inputs=lambda: handoff._inputs(plan, None),
+                successor_source=lambda: self.successor_source(plan, journal),
+                admit_sql_profile=lambda peer, guard: _admit_sql_profiles(self.runner, peer, guard, separated_owner=True),
+                observe_retired_fences=lambda: observe_application_cnpg_fence_retirement(origin.plan,
+                    journal=origin.journal, component=origin.component, ordinal=2, runner=self.runner))
+            if origin.read() != (view, terminal):
+                raise RuntimeError("historical handoff source changed during current observation")
+            return observed
+        def apply(candidate: FinalGatePlan) -> None:
+            raise RuntimeError("historical handoff observer cannot repeat an ownership transfer")
+        return ProtectedApplyComponent("application-ownership-handoff", HISTORICAL_HANDOFF_IMPLEMENTATION,
+            historical_handoff_evidence(plan, origin.terminal), classify, apply)
 
     def __call__(
         self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal, ordinal: int,

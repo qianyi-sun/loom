@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import Protocol
 
 from loom.application_completed_authority import (
@@ -89,6 +89,7 @@ class ProtectedApplicationMigrationComponent:
     handoff_source: Callable[[], tuple[ApplicationRecoveryView, ComponentTerminal]]
     successor_source: Callable[[], ApplicationOwnerSuccessor | None]
     container_registry: str
+    handoff_plan_source: Callable[[], FinalGatePlan] | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if (self.plan.environment != "staging" or self.plan.namespace != "loom-staging"
@@ -117,10 +118,15 @@ class ProtectedApplicationMigrationComponent:
 
     def _handoff(self) -> tuple[ApplicationRecoveryView, ComponentTerminal]:
         view, terminal = self.handoff_source()
+        original = self.plan if self.handoff_plan_source is None else self.handoff_plan_source()
+        if (FinalGatePlan.from_dict(original.to_dict()) != original or original.environment != self.plan.environment
+                or original.namespace != self.plan.namespace or (original != self.plan and (
+                    original.request_id == self.plan.request_id or original.starting_mutation_epoch + 1 > self.plan.starting_mutation_epoch))):
+            raise RuntimeError("application migration original handoff plan changed")
         if (view.admission is None or view.credential_binding is None or view.restoration is None or not view.fences_retiring
                 or view.intent.component_id != "application-ownership-handoff" or view.intent.ordinal >= self.ordinal
-                or view.intent.plan_digest != self.plan.plan_digest or terminal.intent_digest != view.intent.intent_digest
-                or terminal.observed_epoch != self.plan.starting_mutation_epoch + 1):
+                or view.intent.plan_digest != original.plan_digest or terminal.intent_digest != view.intent.intent_digest
+                or terminal.observed_epoch != original.starting_mutation_epoch + 1):
             raise RuntimeError("application migration lacks completed original handoff")
         return view, terminal
 
