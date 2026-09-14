@@ -109,6 +109,21 @@ class ProtectedApplicationMigrationResources:
             raise RuntimeError("application migration observed resource drifted")
         return identity, document
 
+    def observe_secret(self, *, expected_uid: str | None = None) -> ApplicationMigrationResourceIdentity | None:
+        """Reconcile an uncertain dispatch during retirement without creating."""
+        observed = self._read("Secret", expected_uid=expected_uid, deleting=True)
+        return None if observed is None else observed[0]
+
+    def observe_job(self, *, expected_uid: str | None = None) -> ApplicationMigrationResourceIdentity | None:
+        """Read only the generation-bound Job, including pending deletion."""
+        observed = self._read("Job", expected_uid=expected_uid, deleting=True)
+        return None if observed is None else observed[0]
+
+    def require_retired(self) -> None:
+        if self.observe_job() is not None or self.observe_secret() is not None:
+            raise RuntimeError("application migration resources have not retired")
+        self._require_no_consumers()
+
     def ensure_secret(self, *, creation_dispatched: bool, expected_uid: str | None = None,
                       ) -> ApplicationMigrationResourceIdentity:
         return self._ensure("Secret", creation_dispatched=creation_dispatched, expected_uid=expected_uid)
