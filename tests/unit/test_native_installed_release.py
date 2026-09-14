@@ -187,3 +187,22 @@ def test_observation_rejects_ownership_and_inflight_replacements(release, monkey
         monkeypatch.setattr(module.os, "read", racing_read)
     with pytest.raises((ValueError, OSError)):
         check()
+
+
+def test_unrelated_sibling_activity_does_not_invalidate_protected_paths(release, monkeypatch):
+    module, root, check = release
+    original = module.os.read
+    changed = False
+
+    def read(fd, count):
+        nonlocal changed
+        result = original(fd, count)
+        if not changed and os.readlink(f"/proc/self/fd/{fd}") == str(root / "gvisor/runsc"):
+            changed = True
+            # Other installations may change a common protected ancestor's
+            # directory timestamps without replacing our tree or any material.
+            (root / "unrelated-sibling").mkdir(mode=0o755)
+        return result
+
+    monkeypatch.setattr(module.os, "read", read)
+    assert check().manifest.rootfs == str(root / "rootfs.tar")
