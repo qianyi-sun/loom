@@ -43,8 +43,8 @@ pytestmark = [pytest.mark.parametrize("transfer_postgres", [16, 17], indirect=Tr
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bootstrap", [False, True])
-async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_runtime(transfer_database, tmp_path, monkeypatch, bootstrap):  # noqa: F811
+@pytest.mark.parametrize("bootstrap,durable_agent", [(False, False), (True, False), (True, True)])
+async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_runtime(transfer_database, tmp_path, monkeypatch, bootstrap, durable_agent):  # noqa: F811
     from loom_cli.rollout.operator.protected_capacity_bootstrap_runtime import (
         ProtectedCapacityBootstrapRuntime,
     )
@@ -66,6 +66,9 @@ async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_ru
                 runtime_oids = {name: oid for name, oid in oids.items() if not name.endswith(("owner", "migrator"))}
                 for name in runtime_oids:
                     peer.execute(sql.SQL("ALTER ROLE {} NOLOGIN PASSWORD NULL").format(sql.Identifier(name)))
+                if durable_agent:
+                    peer.execute(sql.SQL("ALTER ROLE loom_cap_staging_agent LOGIN PASSWORD {} VALID UNTIL 'infinity'").format(
+                        sql.Literal(source.seed["agent_database_password"])))
                 identity = ApplicationOwnerSuccessor("loom_cap_staging_migrator", oids["loom_cap_staging_migrator"],
                     ApplicationGuardOwner("loom_cap_staging_owner", oids["loom_cap_staging_owner"]))
                 evidence = type(evidence).build(**{k: v for k, v in evidence.to_dict().items()
@@ -117,6 +120,8 @@ async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_ru
                     runtime.create(generation, recorded.append)
                     assert recorded == [identity.role_oid]
                     runtime.arm(generation, identity.role_oid)
+                    if durable_agent:
+                        assert peer.execute("SELECT rolvaliduntil='infinity'::timestamptz FROM pg_authid WHERE rolname='loom_cap_staging_agent'").fetchone() == (True,)
                     resources = runtime.resources(generation)
                     secret = resources.ensure_secret(creation_dispatched=True)
                     job = resources.ensure_job(creation_dispatched=True, expected_secret_uid=secret.uid)
