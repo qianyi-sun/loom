@@ -64,7 +64,7 @@ async def transfer_database(
         create_database_sql=(
             psycopg.sql.SQL("CREATE DATABASE {} OWNER {} TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'").format(
                 psycopg.sql.Identifier(identity.database), psycopg.sql.Identifier(identity.db_role),
-            ).as_string() if getattr(request, "param", None) in {"cnpg", "baseline"} else render_create_database_sql(identity)
+            ).as_string() if getattr(request, "param", None) in {"cnpg", "baseline", "protected-staging"} else render_create_database_sql(identity)
         ),
     )
     root = Path(__file__).resolve().parents[2]
