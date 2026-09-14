@@ -33,7 +33,7 @@ def _context(tmp_path, monkeypatch):
         monkeypatch.setattr(module, name, path)
     monkeypatch.setattr(module, "ROOT_UID", os.getuid())
     monkeypatch.setattr(module, "ROOT_GID", os.getgid())
-    monkeypatch.setattr(module, "_require_authority", lambda: (os.getuid(), os.getgid(), "a" * 40))
+    monkeypatch.setattr(module, "_require_authority", lambda path: (os.getuid(), os.getgid(), "a" * 40))
     nodes = []
     for number in (3, 4, 5):
         blob = b"\0\0\0\x0bssh-ed25519\0\0\0\x20" + bytes([number]) * 32
@@ -71,7 +71,8 @@ def test_prepare_real_key_is_stable_and_only_publishes_fixed_observer_trust(tmp_
 
 
 @pytest.mark.parametrize("change", ["missing", "oldlab2", "duplicate", "public_ip", "bool_port",
-                                   "bad_key", "extra_field", "wrong_digest"])
+                                   "bad_key", "extra_field", "wrong_digest", "scoped_ipv6",
+                                   "newline_ipv6"])
 def test_invalid_inventory_refuses_before_any_key_or_state_creation(tmp_path, monkeypatch, change):
     module, args = _context(tmp_path, monkeypatch)
     document = json.loads(args["inventory_file"].read_bytes())
@@ -83,6 +84,10 @@ def test_invalid_inventory_refuses_before_any_key_or_state_creation(tmp_path, mo
         document["nodes"][1] = document["nodes"][0]
     elif change == "public_ip":
         document["nodes"][0]["address"] = "8.8.8.8"
+    elif change == "scoped_ipv6":
+        document["nodes"][0]["address"] = "fc00::1%eth0"
+    elif change == "newline_ipv6":
+        document["nodes"][0]["address"] = "fc00::1%eth0\n  Unexpected setting"
     elif change == "bool_port":
         document["nodes"][0]["port"] = True
     elif change == "bad_key":
@@ -195,3 +200,35 @@ def test_pending_record_with_extra_authority_fields_is_rejected(tmp_path, monkey
     with pytest.raises(ValueError):
         module.prepare_controller(**args)
     assert not module.IDENTITY.exists()
+
+
+@pytest.mark.timeout(2)
+def test_fifo_destination_refuses_without_waiting_for_a_writer(tmp_path, monkeypatch):
+    module, args = _context(tmp_path, monkeypatch)
+    module.prepare_controller(**args)
+    module.IDENTITY.unlink()
+    os.mkfifo(module.IDENTITY, 0o600)
+    with pytest.raises(ValueError):
+        module.prepare_controller(**args)
+
+
+def test_original_key_and_directory_are_synced_before_publication(tmp_path, monkeypatch):
+    module, args = _context(tmp_path, monkeypatch)
+    synced = set()
+    sync, write = module.os.fsync, module._write
+
+    def record(fd):
+        metadata = os.fstat(fd)
+        synced.add((metadata.st_dev, metadata.st_ino))
+        sync(fd)
+
+    def verify(path, payload, **kwargs):
+        if path == module.IDENTITY:
+            for original in (module.STATE / "identity", module.STATE):
+                metadata = original.stat()
+                assert (metadata.st_dev, metadata.st_ino) in synced
+        write(path, payload, **kwargs)
+
+    monkeypatch.setattr(module.os, "fsync", record)
+    monkeypatch.setattr(module, "_write", verify)
+    module.prepare_controller(**args)
