@@ -53,7 +53,10 @@ async def test_real_workload_pause_and_sql_recovery_survive_lost_patch_ack(
     from kubernetes import client
 
     original_configuration = client.Configuration.get_default_copy()
-    container = _start_k3s()
+    # Nested kubelet sees the host's multi-terabyte filesystem. A proportional
+    # 10% reserve can evict these tiny Pods with hundreds of GiB still free.
+    # Preserve memory/inode safeguards and require an explicit 2 GiB disk floor.
+    container = _start_k3s(ephemeral_storage_floor="2Gi")
     try:
         _, core, batch = _load_client(container)
         apps = client.AppsV1Api()
@@ -82,7 +85,7 @@ async def test_real_workload_pause_and_sql_recovery_survive_lost_patch_ack(
         def pods():
             return core.list_namespaced_pod(_NAMESPACE).items
         _wait(lambda: len(pods()) == 8 and all(p.status.phase == "Running" for p in pods()),
-              lambda: [(p.metadata.name, p.status.to_dict()) for p in pods()])
+              lambda: [(p.metadata.name, p.status.phase, [(c.name, c.state.to_dict()) for c in (p.status.container_statuses or [])]) for p in pods()])
         original_pod_uids = {p.metadata.uid for p in pods()}
 
         kubectl = shutil.which("kubectl")
@@ -168,7 +171,7 @@ async def test_real_workload_pause_and_sql_recovery_survive_lost_patch_ack(
             assert all(item.original_value == 1 for item in original_inventory[0] if item.kind == "Deployment")
             assert batch.read_namespaced_cron_job(cron.metadata.name, _NAMESPACE).spec.suspend is True
             _wait(lambda: len(pods()) == 8 and all(p.status.phase == "Running" for p in pods()),
-                  lambda: [(p.metadata.name, p.status.to_dict()) for p in pods()])
+                  lambda: [(p.metadata.name, p.status.phase, [(c.name, c.state.to_dict()) for c in (p.status.container_statuses or [])]) for p in pods()])
             assert not original_pod_uids.intersection(p.metadata.uid for p in pods())
             assert db_guard.execute("SELECT pg_postmaster_start_time()").fetchone() == original_server
             from loom_cli.rollout.operator.staging_mutation_guard import _HEALTH_SQL

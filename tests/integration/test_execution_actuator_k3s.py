@@ -255,7 +255,7 @@ def _executable_lease(
     )
 
 
-def _start_k3s(*, node_name: str | None = None) -> object:
+def _start_k3s(*, node_name: str | None = None, ephemeral_storage_floor: str | None = None) -> object:
     from testcontainers.core.container import DockerContainer
 
     container = (
@@ -271,6 +271,10 @@ def _start_k3s(*, node_name: str | None = None) -> object:
                 "--tls-san=127.0.0.1",
                 "--write-kubeconfig-mode=644",
                 *([] if node_name is None else [f"--node-name={node_name}"]),
+                *([] if ephemeral_storage_floor is None else [
+                    "--kubelet-arg=eviction-hard=memory.available<100Mi,nodefs.inodesFree<5%,imagefs.inodesFree<5%,"
+                    f"nodefs.available<{ephemeral_storage_floor},imagefs.available<{ephemeral_storage_floor}",
+                ]),
             ]
         )
         .with_kwargs(privileged=True)
