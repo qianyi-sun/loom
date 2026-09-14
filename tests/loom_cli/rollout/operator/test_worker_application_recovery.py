@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from loom_cli.rollout.operator import worker
-from loom_cli.rollout.operator.protected_apply_journal import ComponentState
+from loom_cli.rollout.operator.protected_apply_journal import ComponentObservation, ComponentState
 from tests.loom_cli.rollout.operator.test_application_admission_recovery import _component
 from tests.loom_cli.rollout.operator.test_application_guard_retention import _pending_resume
 from tests.loom_cli.rollout.operator.test_protected_apply_journal import _Backend
@@ -17,22 +17,25 @@ from tests.loom_cli.rollout.operator.test_worker import valid_envelope
 @pytest.mark.parametrize("component_id", ["application-ownership-handoff", "database-migration", "staging-capacity-database"])
 @pytest.mark.parametrize("drift", [None, "no-ack", "candidate", "not-resume", "interrupted"])
 def test_worker_recovers_original_plan_before_any_new_attempt(tmp_path, component_id, drift):
-    plan, journal, guard = _pending_resume(tmp_path, component_id=component_id, acknowledge=drift != "no-ack")
-    envelope = replace(valid_envelope(), request_id=plan.request_id, attempt_number=plan.attempt_number + 1,
-        resume=drift != "not-resume", resolved_sha="d" * 40 if drift == "candidate" else plan.candidate_sha,
+    plan, journal, saved_guard = _pending_resume(tmp_path, component_id=component_id, acknowledge=drift != "no-ack")
+    candidate_sha = "d" * 40 if drift == "candidate" else plan.candidate_sha
+    envelope = replace(valid_envelope(), request_id=plan.request_id,
+        attempt_number=plan.attempt_number + (0 if drift == "not-resume" else 1),
+        resume=drift != "not-resume", resolved_sha=candidate_sha, image_tag=f"staging-{candidate_sha[:7]}",
         resolved_tree=plan.candidate_tree, preflight_attestation_sha256=plan.attestation_digest)
     attestation = SimpleNamespace(bindings=SimpleNamespace(staging_mutation_epoch=plan.starting_mutation_epoch))
     calls = []
 
     def recover(candidate, *, guard):
-        assert candidate == plan and guard.database_backend_pid == 4321
+        assert candidate == plan and guard == saved_guard
         calls.append(candidate.attempt_number)
         if drift == "interrupted":
             raise RuntimeError("cleanup interrupted")
         backend = _Backend()
         backend.states["mutation-epoch-claim"] = ComponentState.EXACT
         components = [backend.component("mutation-epoch-claim", 0),
-            replace(_component(lambda _: None, exact=True), component_id=component_id)]
+            replace(_component(lambda _: None, exact=True), component_id=component_id,
+                classify=lambda _: ComponentObservation(ComponentState.EXACT, "3" * 64, plan.starting_mutation_epoch + 1))]
         return journal.recover_pending_application_operation(candidate, components, guard=guard)
 
     def invoke():
