@@ -619,6 +619,15 @@ original guard or the exact successor at the already-claimed epoch. A completed
 handoff's historical reader checks its own retention independently while the
 migration keeps the current guard alive.
 
+The journal's early application recovery entrypoint selects that sole pending
+handoff or migration from its retained intent. It requires the saved plan,
+acknowledged live guard, advanced epoch terminal and original complete component
+ordering, then executes only the selected component at its original ordinal.
+Ordinary epoch, workload and other component callbacks do not run while database
+admission may be closed. The original handoff-only entrypoint remains restricted
+to handoff recovery. Installed worker dispatch must invoke the general entrypoint
+before its normal database admission reads.
+
 The read-only CNPG operator observer admits the fixed 1.25.1 command, environment,
 security context, volume projections and absent configuration overrides. It brackets
 a host-process observation with unchanged Kubernetes inputs. The host reader binds
