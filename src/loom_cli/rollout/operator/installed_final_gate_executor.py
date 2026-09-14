@@ -27,6 +27,8 @@ from .final_capacity_executor import FinalCapacityExecutor
 from .final_gate_plan import FinalGatePlan
 from .final_smoke_executor import FinalSmokeExecutor
 from .final_summary_executor import FinalSummaryExecutor
+from .installed_application_handoff import InstalledApplicationHandoffFactory
+from .installed_application_migration import InstalledApplicationMigrationFactory
 from .installed_execution_authority import (
     InstalledExecutionAuthorityReader,
     InstalledExecutionAuthoritySource,
@@ -423,6 +425,7 @@ class InstalledFinalGateExecutor:
                 external_supervisor_credential_transports=external_supervisor_credentials,
                 external_supervisor_credential_identities=external_supervisor_credential_identities,
                 container_registry=container_registry,
+                application_factory=self._application_factory(effective_config, protected_runner, container_registry),
             )(check_id, operation, plan)
         if check_id == "final.convergence":
             return KubernetesProtectedConvergenceExecutor(
@@ -436,6 +439,7 @@ class InstalledFinalGateExecutor:
                 external_supervisor_credential_transports=external_supervisor_credentials,
                 external_supervisor_credential_identities=external_supervisor_credential_identities,
                 container_registry=container_registry,
+                application_factory=self._application_factory(effective_config, protected_runner, container_registry),
             )(check_id, operation, plan)
         if check_id == "final.capacity":
             return FinalCapacityExecutor(
@@ -471,6 +475,17 @@ class InstalledFinalGateExecutor:
                 check_id, operation, plan
             )
         raise ValueError("installed final gate check has no fixed executor")
+
+    def _application_factory(
+        self, config: OperatorConfig, runner: SubprocessProtectedApplyCommandRunner, container_registry: str,
+    ) -> InstalledApplicationMigrationFactory:
+        # Normal prefix/convergence checks require all later owner authority to
+        # have retired. Pending operations recover directly from their original
+        # journal before those checks; live membership is never adopted here.
+        return InstalledApplicationMigrationFactory(
+            handoff=InstalledApplicationHandoffFactory(config=config, service_uid=self.service_uid,
+                runner=runner, successor_source=lambda _plan, _journal: None),
+            container_registry=container_registry)
 
     def _validate_plan(
         self,
