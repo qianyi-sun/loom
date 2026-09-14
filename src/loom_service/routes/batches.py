@@ -120,6 +120,7 @@ from loom_service.task_config_validation import (
     split_valid_task_configs,
 )
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
+from loom_service.trial_timing import trial_started_at
 from loom_service.usage_accounting import (
     PreRunBudgetEstimate,
     empty_usage_projection,
@@ -1960,7 +1961,7 @@ async def _trial_projections_for_batch_ids(
             result=row.result,
             claimed_at=row.claimed_at,
             pre_start_heartbeat_at=row.pre_start_heartbeat_at,
-            started_at=row.started_at,
+            started_at=trial_started_at(row.started_at, row.result),
             finished_at=row.finished_at,
             sample_idx=row.sample_idx,
             combination_idx=row.combination_idx,

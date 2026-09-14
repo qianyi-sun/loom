@@ -21,6 +21,7 @@ import EventTimeline from "../components/EventTimeline";
 import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
 import { StatusPill } from "../components/StatusPill";
+import { TaskImagePreparationCard } from "../components/TaskImagePreparationCard";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import { useTrialEventStream } from "../hooks/useTrialEventStream";
 import { agentLabel } from "../lib/agentLabel";
@@ -646,6 +647,7 @@ export default function TrialDetail(): JSX.Element {
         </Link>
       </div>
       <TrialHeader trial={trial.data} />
+      <TaskImagePreparationCard preparations={trial.data.task_environment_preparation} />
       <MaterializationCard trial={trial.data} />
       <DiagnosisCard diagnosis={trial.data.diagnosis} />
       <DebugEvidenceCard evidence={trial.data.debug_evidence} />
