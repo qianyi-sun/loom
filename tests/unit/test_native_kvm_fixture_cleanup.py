@@ -21,7 +21,7 @@ def test_fixture_cleanup_joins_root_before_deleting_child_state(monkeypatch, bou
 
         def wait(self, timeout):
             events.append("wait")
-            if boundary == "timeout":
+            if boundary == "timeout" and "kill" not in events:
                 raise subprocess.TimeoutExpired("root", timeout)
             return 0
 
@@ -39,7 +39,7 @@ def test_fixture_cleanup_joins_root_before_deleting_child_state(monkeypatch, bou
         with pytest.raises((subprocess.TimeoutExpired, AssertionError)):
             module.cleanup_fixture_runtime(["runsc"], ["root", "child"], Root())
         if boundary == "timeout":
-            assert events == ["kill", "wait"]
+            assert events == ["wait", "kill", "wait"]
     else:
         module.cleanup_fixture_runtime(["runsc"], ["root", "child"], Root())
-        assert events == (["kill"] if boundary == "stopping" else []) + ["wait", "child", "root", "list"]
+        assert events == ["wait", "child", "root", "list"]

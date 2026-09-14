@@ -19,6 +19,30 @@ def native_runtime_command():
         "--allow-suid=false", "--oci-seccomp=true"]
 
 
+def cleanup_fixture_runtime(runtime, started, root_launcher):
+    # The primitive test's attached root also destroys its own runsc state on
+    # exit. "stopped" from list is not proof that this process has finished.
+    # Join it before deleting child metadata, avoiding a control-socket race.
+    # This is fixture-only: no production reconciliation or write retry changes.
+    if root_launcher is not None:
+        try:
+            root_launcher.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            root_launcher.kill()
+            root_launcher.wait(timeout=5)
+            raise
+    cleanup_failures = []
+    for name in reversed(started):
+        result = subprocess.run([*runtime, "delete", "--force", name], timeout=15)
+        if result.returncode:
+            cleanup_failures.append(name)
+    remaining = subprocess.run([*runtime, "list", "--format=json"], check=True,
+        capture_output=True, text=True, timeout=10)
+    assert not cleanup_failures, (cleanup_failures, remaining.stdout)
+    assert json.loads(remaining.stdout) in (None, []), remaining.stdout
+    print("native-allocated-runtime-cleanup-ok", flush=True)
+
+
 def main():
     fixtures = Path("/fixtures")
     identity = json.loads((fixtures / "identity.json").read_text())
@@ -225,24 +249,13 @@ def main():
         assert pulse.read_bytes() == stopped_pulse
         print("native-root-stop-children-and-late-start-ok", flush=True)
     finally:
-        cleanup_failures = []
-        for name in reversed(started):
-            result = subprocess.run([*runtime, "delete", "--force", name], timeout=15)
-            if result.returncode:
-                cleanup_failures.append(name)
-        if root_launcher is not None:
-            if root_launcher.poll() is None:
-                root_launcher.kill()
-            root_launcher.wait(timeout=5)
-        for log in logs:
-            log.seek(0)
-            print(log.read()[-16000:], flush=True)
-            log.close()
-        assert not cleanup_failures, cleanup_failures
-        remaining = subprocess.run([*runtime, "list", "--format=json"], check=True,
-            capture_output=True, text=True, timeout=10)
-        assert json.loads(remaining.stdout) in (None, []), remaining.stdout
-        print("native-allocated-runtime-cleanup-ok", flush=True)
+        try:
+            cleanup_fixture_runtime(runtime, started, root_launcher)
+        finally:
+            for log in logs:
+                log.seek(0)
+                print(log.read()[-16000:], flush=True)
+                log.close()
 
 
 if __name__ == "__main__":
