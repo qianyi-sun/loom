@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from loom.application_database_admission import (
     ApplicationDatabaseHandoffBackend,
@@ -107,6 +107,10 @@ _STAGING_PEER_DATABASE_COMMAND = (
 _STAGING_PEER_MAINTENANCE_COMMAND = (
     *_STAGING_PEER_DATABASE_COMMAND[:-1],
     "PGOPTIONS='-c event_triggers=off' exec psql -U postgres -d postgres -qAtX -v ON_ERROR_STOP=1",
+)
+_STAGING_PEER_TEMPLATE_COMMAND = (
+    *_STAGING_PEER_DATABASE_COMMAND[:-1],
+    "PGOPTIONS='-c event_triggers=off' exec psql -U postgres -d template1 -qAtX -v ON_ERROR_STOP=1",
 )
 _EXTERNAL_SUPERVISOR_CONTROLLER_ORDER = (
     "gx10-01c7",
@@ -236,7 +240,7 @@ class SubprocessProtectedApplyCommandRunner:
         The returned context manager owns cleanup, and exposes exact backend
         identity for recovery. Local process retirement never proves rollback.
         """
-        return self._open_staging_peer(maintenance=False)
+        return self._open_staging_peer(database="loom")
 
     def prepare_staging_application_database(
         self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal,
@@ -371,12 +375,21 @@ class SubprocessProtectedApplyCommandRunner:
         peer. No caller-selected database, credential or command is accepted.
         The protected operation must supply its exact journaled application target.
         """
-        return self._open_staging_peer(maintenance=True)
+        return self._open_staging_peer(database="postgres")
 
-    def _open_staging_peer(self, *, maintenance: bool) -> PeerDatabaseConnection:
+    def open_staging_peer_template_database(self) -> PeerDatabaseConnection:
+        """Read the only other supported connectable database's executable profile."""
+        return self._open_staging_peer(database="template1")
+
+    def _open_staging_peer(self, *, database: Literal["loom", "postgres", "template1"]) -> PeerDatabaseConnection:
         environment = dict(self.environment)
+        commands = {"loom": _STAGING_PEER_DATABASE_COMMAND,
+                    "postgres": _STAGING_PEER_MAINTENANCE_COMMAND,
+                    "template1": _STAGING_PEER_TEMPLATE_COMMAND}
+        if database not in commands:
+            raise PeerDatabaseTransportError("protected peer database is unsupported")
         command = self._validate_invocation(
-            _STAGING_PEER_MAINTENANCE_COMMAND if maintenance else _STAGING_PEER_DATABASE_COMMAND,
+            commands[database],
             env=environment,
             input_payload=None,
             timeout_seconds=30,
@@ -396,7 +409,7 @@ class SubprocessProtectedApplyCommandRunner:
         identity = connection.backend_identity
         if (
             connection.info.server_version // 10000 != 17
-            or identity.database != ("postgres" if maintenance else "loom")
+            or identity.database != database
             or identity.session_user != "postgres"
         ):
             connection.close()
