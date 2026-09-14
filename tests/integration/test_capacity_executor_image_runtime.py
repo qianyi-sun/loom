@@ -32,9 +32,9 @@ class CapacityExecutorImageRuntimeTest(unittest.TestCase):
     # Pytest builds the real image below; unittest runs these cases inside it.
     __test__ = False
 
-    def test_installed_native_worker_imports_without_source_mount(self) -> None:
+    def test_installed_native_worker_and_recovery_import_without_source_mount(self) -> None:
         result = subprocess.run([sys.executable, "-I", "-B", "-c",
-            "import loom_capacity_executor.native_installed_worker"],
+            "import loom_capacity_executor.native_installed_worker; import loom_capacity_executor.native_node_recovery"],
             capture_output=True, text=True, check=False, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
 
