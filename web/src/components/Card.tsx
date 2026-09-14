@@ -23,7 +23,7 @@ const CardRoot = forwardRef<HTMLDivElement, CardProps>(function CardRoot(
   return (
     <div
       ref={ref}
-      className={cn("glass-card overflow-hidden", className)}
+      className={cn("glass-card", className)}
       {...rest}
     >
       {children}
