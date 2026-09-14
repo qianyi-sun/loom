@@ -39,7 +39,7 @@ def recovery_spec(tmp_path):
     return runtime, spec, path, hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-@pytest.mark.parametrize("boundary", ["exact", "publication-fails", "changed-receipt", "directory", "mapping", "directory-after", "cancel"])
+@pytest.mark.parametrize("boundary", ["exact", "publication-fails", "changed-receipt", "directory", "mapping", "directory-after", "cancel", "owner", "owner-after"])
 async def test_mapped_handshake_waits_for_commit_without_credentials(tmp_path, monkeypatch, boundary):
     module = import_module("loom_capacity_executor.native_recovery_handshake")
     runtime, spec, path, digest = recovery_spec(tmp_path)
@@ -50,6 +50,18 @@ async def test_mapped_handshake_waits_for_commit_without_credentials(tmp_path, m
     if boundary == "mapping":
         mappings = NativeMappedIdentity((NativeIdentityRange(0, prepared.original_uid + 1, 1),), mappings.gid_ranges)
     monkeypatch.setattr(module, "observe_native_mapped_identity", lambda: mappings)
+    real_fstat = os.fstat
+    ownership_changed = [boundary == "owner"]
+
+    def observed_fstat(descriptor):
+        metadata = real_fstat(descriptor)
+        if ownership_changed[0] and metadata.st_ino == prepared.locator.inode and metadata.st_dev == prepared.locator.device:
+            fields = list(metadata)
+            fields[4] = metadata.st_uid + 1
+            return os.stat_result(fields)
+        return metadata
+
+    monkeypatch.setattr(module.os, "fstat", observed_fstat)
     if boundary == "directory":
         spec = spec.model_copy(update={"recovery_preparation": prepared.model_copy(update={"locator": prepared.locator.model_copy(update={"inode": 1})})})
     reached, release = asyncio.Event(), asyncio.Event()
@@ -68,7 +80,7 @@ async def test_mapped_handshake_waits_for_commit_without_credentials(tmp_path, m
     outer, mapped = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     try:
         mapping_task = asyncio.create_task(asyncio.to_thread(module.acknowledge_mapped_recovery, mapped, spec=spec, runtime_spec_sha256=digest))
-        if boundary in {"directory", "mapping"}:
+        if boundary in {"directory", "mapping", "owner"}:
             with pytest.raises((ValueError, RuntimeError)):
                 await asyncio.wait_for(mapping_task, 3)
             assert requests == []
@@ -85,10 +97,12 @@ async def test_mapped_handshake_waits_for_commit_without_credentials(tmp_path, m
             attempt.mkdir(mode=0o700)
         if boundary == "cancel":
             publication_task.cancel()
+        if boundary == "owner-after":
+            ownership_changed[0] = True
         release.set()
-        if boundary in {"exact", "directory-after"}:
+        if boundary in {"exact", "directory-after", "owner-after"}:
             result = await asyncio.wait_for(publication_task, 3)
-            if boundary == "directory-after":
+            if boundary in {"directory-after", "owner-after"}:
                 with pytest.raises(ValueError, match="changed during publication"):
                     await asyncio.wait_for(mapping_task, 3)
             else:
