@@ -52,9 +52,10 @@ async def test_capacity_runtime_credentials_arm_and_finalize_saved_roles(transfe
             operation(maintenance, **authority, **kwargs)
 
         invoke(arm_application_capacity_runtime_credentials, expires_at=expiry)
-        rows = peer.execute("SELECT oid,rolpassword,rolvaliduntil FROM pg_authid WHERE oid=ANY(%s) ORDER BY oid", (list(roles.values()),)).fetchall()
+        # PostgreSQL's durable expiry is infinity, outside Python datetime's range.
+        rows = peer.execute("SELECT oid,rolpassword,rolvaliduntil::text FROM pg_authid WHERE oid=ANY(%s) ORDER BY oid", (list(roles.values()),)).fetchall()
         arm_application_capacity_runtime_credentials(maintenance, **authority, expires_at=expiry)
-        assert peer.execute("SELECT oid,rolpassword,rolvaliduntil FROM pg_authid WHERE oid=ANY(%s) ORDER BY oid", (list(roles.values()),)).fetchall() == rows
+        assert peer.execute("SELECT oid,rolpassword,rolvaliduntil::text FROM pg_authid WHERE oid=ANY(%s) ORDER BY oid", (list(roles.values()),)).fetchall() == rows
         changed_passwords = {**passwords, "loom_cap_staging_agent": "wrong-original-password" * 2}
         with pytest.raises(RuntimeError, match="credential"):
             arm_application_capacity_runtime_credentials(maintenance, **{**authority, "passwords": changed_passwords}, expires_at=expiry)
