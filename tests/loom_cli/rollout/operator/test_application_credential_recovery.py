@@ -27,7 +27,7 @@ def _json_bytes(value):
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
-def _sources(tmp_path, *, password=_PASSWORD, pools=True, change=None, schema=2):
+def _sources(tmp_path, *, password=_PASSWORD, pools=True, change=None, schema=2, schema_revision="0142/guard_0033"):
     manifest_path = _checkpoint(tmp_path, optional_protected_present=True, inventory_schema=schema)
     root = manifest_path.parent / "secrets"
     app_path = root / "loom-secrets.yaml"
@@ -61,6 +61,13 @@ def _sources(tmp_path, *, password=_PASSWORD, pools=True, change=None, schema=2)
                 record["sha256"] = hashlib.sha256(cnpg_path.read_bytes()).hexdigest()
         inventory_path.write_bytes(_json_bytes(inventory))
     manifest = json.loads(manifest_path.read_bytes())
+    from loom_cli.rollout.operator.checkpoint_database_authority import DatabaseAuthorityEvidence
+    authority_path = Path(manifest["components"]["database_authority"]["path"])
+    authority_data = json.loads(authority_path.read_bytes())
+    public_revision, guard_revision = schema_revision.split("/")
+    authority_data.update(public_schema_revision=public_revision, capacity_guard_schema_revision=guard_revision)
+    authority = DatabaseAuthorityEvidence.from_dict(authority_data)
+    authority_path.write_bytes(authority.payload)
     manifest = write_backup_manifest(
         environment="staging",
         namespace="loom-staging",
@@ -69,6 +76,8 @@ def _sources(tmp_path, *, password=_PASSWORD, pools=True, change=None, schema=2)
         schema_version=3,
     )
     payload = _plan(tmp_path).to_dict()
+    payload.update(schema_revision=public_revision, public_schema_revision=public_revision,
+                   capacity_guard_schema_revision=guard_revision, database_authority_digest=authority.digest)
     payload["backup_manifest_path"] = str(manifest_path)
     payload["backup_manifest_sha256"] = backup_manifest_sha256(
         manifest_path, expected_owner_uid=os.geteuid()
