@@ -586,6 +586,17 @@ rechecks installed bytes and permissions. Source candidates and transition
 records remain available for rollback. This installer does not provision the
 controller key/host trust or grant authority to deploy unmerged code.
 
+The primary-volume observer reads the actual claim, all persistent volumes,
+CSI attachments and Pods twice. It requires the original Cluster-owned Longhorn
+RWO/ext4 claim, its exact PV claim reference and a single attachment on the
+original node; it rejects alias PVs, inline Longhorn consumers and additional
+Pod consumers. The original primary Pod/container/spec must still match. It
+separately binds the observed privileged host-workload inventory. That inventory
+does not establish administrator or storage-writer exclusion. The external-input
+composer brackets these observations with the same admitted operator process
+and binds their digests to the original final plan; the issue-scoped coordinated
+maintenance window remains a separate enclosing operational requirement.
+
 The read-only restoration observer combines the exact replacement runtime,
 original credential/configuration bindings, PostgreSQL's restored login/schema
 state and the complete saved workload inventory at its original ready endpoints.
