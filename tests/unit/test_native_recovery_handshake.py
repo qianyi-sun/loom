@@ -124,7 +124,7 @@ def test_mapped_v3_acknowledges_before_material_and_binds_session(tmp_path, monk
 
     monkeypatch.setenv("LISTEN_PID", str(os.getpid()))
     monkeypatch.setenv("LISTEN_FDS", "2")
-    monkeypatch.setattr(module, "bind_native_rootless_parent", lambda **kwargs: events.append("parent") or 321)
+    monkeypatch.setattr(module, "bind_native_rootless_parent", lambda *args, **kwargs: events.append("parent") or 321)
     monkeypatch.setattr(module, "_activation_channels", lambda: (authority, artifact))
     monkeypatch.setattr(module, "acknowledge_mapped_recovery", acknowledge)
     monkeypatch.setattr(module, "prepare_native_rootless_material", prepare)

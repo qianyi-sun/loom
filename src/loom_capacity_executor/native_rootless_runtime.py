@@ -35,6 +35,7 @@ from loom_capacity_executor.native_mapped_scratch import (
     clean_native_mapped_scratch,
 )
 from loom_capacity_executor.native_parent_death import bind_native_parent_death
+from loom_capacity_executor.native_recovery_handshake import acknowledge_mapped_recovery
 from loom_capacity_executor.native_rootless_material import (
     NativeRootlessMaterialV1,
     prepare_native_rootless_material,
@@ -257,6 +258,9 @@ def run_native_mapped_runtime(spec_path: Path, *, expected_sha256: str,
     authority, artifact_channel = _activation_channels()
     with authority, artifact_channel:
         scratch = None
+        recovery_digest = None
+        if isinstance(spec, NativeRootlessSpecV3):
+            recovery_digest = acknowledge_mapped_recovery(authority, spec=spec, runtime_spec_sha256=expected_sha256)
         if isinstance(spec, NativeRootlessSpecV2):
             prepare_native_rootless_material(spec)
             # Fail on reused state before feature execution. This root retains
@@ -265,7 +269,8 @@ def run_native_mapped_runtime(spec_path: Path, *, expected_sha256: str,
             scratch = capture_native_mapped_scratch(spec)
         result = execute_native_build_session(claim=spec.claim, context=spec.context, layout=spec.layout(),
             workspace=Path(spec.workspace), authority=authority, expected_parent_pid=parent,
-            max_artifact_bytes=spec.max_artifact_bytes, max_image_archive_bytes=spec.max_image_archive_bytes)
+            max_artifact_bytes=spec.max_artifact_bytes, max_image_archive_bytes=spec.max_image_archive_bytes,
+            recovery_finalization_sha256=recovery_digest)
         artifact = None
         if result.artifact is not None:
             if not (result.supervision.client_succeeded and result.supervision.broker_reaped and result.cleanup.confirmed):

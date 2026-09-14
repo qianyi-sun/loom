@@ -80,6 +80,7 @@ def _broker_session(layout: NativeRunscLayout) -> Iterator[tuple[socket.socket, 
 def execute_native_build_session(*, claim: BuildClaimRequestV1, context: BuildSourceContextV1,
     layout: NativeRunscLayout, workspace: Path, authority: socket.socket, expected_parent_pid: int,
     max_artifact_bytes: int, max_image_archive_bytes: int,
+    recovery_finalization_sha256: str | None = None,
 ) -> NativeBuildSessionResult:
     """No artifact is opened before successful execution and confirmed cleanup.
 
@@ -106,7 +107,8 @@ def execute_native_build_session(*, claim: BuildClaimRequestV1, context: BuildSo
         raise ValueError("native build workspace must be private and owner-controlled")
     with _broker_session(layout) as (channel, broker):
         supervision = supervise_native_execution(claim, source_binding_sha256=context.source_binding_sha256,
-            authority=authority, broker_channel=channel, broker_process=broker)
+            authority=authority, broker_channel=channel, broker_process=broker,
+            recovery_finalization_sha256=recovery_finalization_sha256)
     cleanup = reconcile_native_runtime_cleanup(layout, broker_process=broker)
     if not supervision.client_succeeded or not supervision.broker_reaped or not cleanup.confirmed:
         return NativeBuildSessionResult(supervision, cleanup, None)

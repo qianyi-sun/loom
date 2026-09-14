@@ -80,11 +80,12 @@ class NativeMappedScratch:
 
 
 def capture_native_mapped_scratch(spec: NativeRootlessSpecV2) -> NativeMappedScratch:
-    from loom_capacity_executor.native_rootless_runtime import NativeRootlessSpecV2
+    from loom_capacity_executor.native_rootless_runtime import NativeRootlessSpecV2, NativeRootlessSpecV3
 
     _require_mapped_root()
     # Revalidate even a caller-created model_copy before deriving deletion paths.
-    NativeRootlessSpecV2.model_validate_json(spec.model_dump_json())
+    model = NativeRootlessSpecV3 if isinstance(spec, NativeRootlessSpecV3) else NativeRootlessSpecV2
+    model.model_validate_json(spec.model_dump_json())
     workspace = Path(spec.workspace)
     with ExitStack() as stack:
         attempt = _capture(workspace.parent, stack, private=True)
