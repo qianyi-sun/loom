@@ -1,5 +1,6 @@
 """Recovery-capable launch refuses writable historical cgroup escape paths."""
 
+import errno
 import os
 from importlib import import_module
 from pathlib import Path
@@ -34,7 +35,7 @@ def cgroups(tmp_path, monkeypatch):
     return module, root, job, step
 
 
-@pytest.mark.parametrize("fault", ["exact", "ancestor", "job", "descendant", "procs", "threads", "owner", "mount", "symlink", "bound"])
+@pytest.mark.parametrize("fault", ["exact", "ancestor", "job", "descendant", "procs", "threads", "owner", "mount", "symlink", "bound", "acl", "acl-error"])
 def test_cgroup_authority_covers_ancestors_and_whole_job(cgroups, monkeypatch, fault):
     module, root, job, step = cgroups
     if fault in {"ancestor", "job", "descendant"}:
@@ -59,6 +60,12 @@ def test_cgroup_authority_covers_ancestors_and_whole_job(cgroups, monkeypatch, f
         (step / "cgroup.procs").symlink_to(job / "cgroup.procs")
     elif fault == "bound":
         monkeypatch.setattr(module, "_MAX_NODES", 2)
+    elif fault in {"acl", "acl-error"}:
+        def attribute(fd, name):
+            if fault == "acl-error":
+                raise OSError(errno.EACCES, "unavailable")
+            return b"nonempty-acl"
+        monkeypatch.setattr(module.os, "getxattr", attribute)
     with module.ExitStack() as stack:
         root_fd = module._open_directory(root, stack)
         if fault == "exact":

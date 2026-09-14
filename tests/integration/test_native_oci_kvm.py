@@ -225,6 +225,25 @@ def test_quarantine_pruner_preserves_real_ownership_and_mount_fences(mode):
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
 
 
+def test_native_recovery_cgroup_authority_checks_real_kernel_controls():
+    name = "loom-native-cgroup-authority-" + uuid4().hex
+    try:
+        result = checked("docker", "run", "--rm", "--init", "--name", name,
+            "--network=none", "--cgroupns=private", "--cpus=1", "--memory=256m", "--pids-limit=64",
+            "--user=0:0", "--cap-drop=ALL", "--cap-add=SYS_ADMIN", "--cap-add=CHOWN",
+            "--cap-add=SETUID", "--cap-add=SETGID", "--security-opt=apparmor=unconfined",
+            "--security-opt=seccomp=unconfined", "--read-only", "--tmpfs=/run:rw,nodev,size=16m,mode=0755",
+            "--env=PYTHONPATH=/trusted-src",
+            "--mount", f"type=bind,src={ROOT / 'tests/support/native_kvm'},dst=/test-support,readonly",
+            "--mount", f"type=bind,src={ROOT / 'src'},dst=/trusted-src,readonly",
+            EXECUTOR, "python3", "/test-support/cgroup_authority.py", capture_output=True, text=True)
+        assert "native-cgroup-authority-verified" in result.stdout
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(f"native cgroup authority fixture failed:\n{exc.stdout}\n{exc.stderr}")
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
+
+
 def test_unprivileged_rootlesskit_launches_fixed_native_kvm_runtime(tmp_path):
     """Rootless outer runtime prerequisite, not complete native build acceptance.
 
