@@ -21,7 +21,7 @@ async def test_upgrade_does_not_invent_identity_for_historical_claim(
     isolated_migration_postgres_url: str,
 ) -> None:
     config = _config(isolated_migration_postgres_url)
-    await asyncio.to_thread(command.downgrade, config, "0143")
+    await asyncio.to_thread(command.downgrade, config, "0146")
     engine = create_async_engine(isolated_migration_postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     try:
@@ -34,7 +34,7 @@ async def test_upgrade_does_not_invent_identity_for_historical_claim(
             before = (await session.execute(text(
                 "SELECT state, worker_id, attempt_count, claimed_at FROM trials WHERE id=:id"
             ), {"id": trial_id})).one()
-        await asyncio.to_thread(command.upgrade, config, "0144")
+        await asyncio.to_thread(command.upgrade, config, "0147")
         async with sessions() as session:
             after = (await session.execute(text(
                 "SELECT state, worker_id, attempt_count, claimed_at, legacy_claim_id "
@@ -43,8 +43,8 @@ async def test_upgrade_does_not_invent_identity_for_historical_claim(
             assert after[:-1] == tuple(before) and after[-1] is None
         # No new claim identity exists, so an unchanged historical row permits
         # an ordinary schema rollback and reupgrade without data rewriting.
-        await asyncio.to_thread(command.downgrade, config, "0143")
-        await asyncio.to_thread(command.upgrade, config, "0144")
+        await asyncio.to_thread(command.downgrade, config, "0146")
+        await asyncio.to_thread(command.upgrade, config, "0147")
     finally:
         await engine.dispose()
 
@@ -61,9 +61,9 @@ async def test_retained_claim_prevents_lossy_downgrade(
             assert row is not None and isinstance(row["claim_id"], UUID)
             identity = row["claim_id"]
         with pytest.raises(DBAPIError, match="retained legacy claim identities"):
-            await asyncio.to_thread(command.downgrade, config, "0143")
+            await asyncio.to_thread(command.downgrade, config, "0146")
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0144"
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0147"
             assert await connection.scalar(text(
                 "SELECT legacy_claim_id FROM trials WHERE id=:id"
             ), {"id": trial_id}) == identity
@@ -100,9 +100,9 @@ async def test_refund_history_without_claim_identity_prevents_lossy_downgrade(
                 "SELECT count(*) FROM trials WHERE legacy_claim_id IS NOT NULL"
             )) == 0
         with pytest.raises(DBAPIError, match="retained legacy claim identities"):
-            await asyncio.to_thread(command.downgrade, config, "0143")
+            await asyncio.to_thread(command.downgrade, config, "0146")
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0144"
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0147"
             assert (await connection.execute(history, {"id": trial_id})).one() == before
     finally:
         await engine.dispose()
@@ -122,16 +122,16 @@ def test_guard_compatibility_precedes_application_index_change(capacity_guard_da
     )
     try:
         # Recreate the real previous function in this disposable database only.
-        command.downgrade(app_config, "0143")
+        command.downgrade(app_config, "0146")
         command.downgrade(guard_config, "guard_0032")
         with engine.begin() as connection:
             before = connection.execute(query, {"signature": signature}).one()
             assert before[0].count(new) == 1
             connection.execute(text(before[0].replace(new, old)))
         with pytest.raises(RuntimeError, match="installed guard_0033"):
-            command.upgrade(app_config, "0144")
+            command.upgrade(app_config, "0147")
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0143"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0146"
             assert connection.scalar(text(
                 "SELECT count(*) FROM information_schema.columns "
                 "WHERE table_schema='public' AND table_name='trials' "
@@ -141,7 +141,7 @@ def test_guard_compatibility_precedes_application_index_change(capacity_guard_da
         with engine.connect() as connection:
             compatible = connection.execute(query, {"signature": signature}).one()
             assert compatible == before
-        command.upgrade(app_config, "0144")
+        command.upgrade(app_config, "0147")
         # Guard label rollback must not reopen an incompatible ON CONFLICT target.
         command.downgrade(guard_config, "guard_0032")
         command.upgrade(guard_config, "guard_0033")

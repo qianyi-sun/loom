@@ -1,15 +1,15 @@
 """Persist legacy worker claim identities independently of refundable attempts.
 
-Revision ID: 0144
-Revises: 0143
+Revision ID: 0147
+Revises: 0146
 """
 
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0144"
-down_revision = "0143"
+revision = "0147"
+down_revision = "0146"
 branch_labels = None
 depends_on = None
 
@@ -194,7 +194,7 @@ def downgrade() -> None:
         IF EXISTS (SELECT 1 FROM public.trials WHERE legacy_claim_id IS NOT NULL)
            OR EXISTS (SELECT 1 FROM public.execution_admission_reservations
                        WHERE release_reason = 'trial_setup_refund') THEN
-          RAISE EXCEPTION 'cannot downgrade 0144 with retained legacy claim identities';
+          RAISE EXCEPTION 'cannot downgrade 0147 with retained legacy claim identities';
         END IF;
         END $block$""")
     op.drop_index("trials_legacy_claim_id_uidx", table_name="trials")

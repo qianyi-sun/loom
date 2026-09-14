@@ -327,7 +327,7 @@ verifier container starts; Phase 1 behavior is unchanged.
 
 ### Refundable legacy claims and migration order
 
-Application migration `0144` adds the nullable legacy identity without upgrading
+Application migration `0147` adds the nullable legacy identity without upgrading
 old claims. A pre-start `node_setup_health` refund releases admission in the
 `AFTER UPDATE` trigger using `OLD.attempt_count`, in the same transaction as the
 counter decrement. Only a released
