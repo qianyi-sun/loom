@@ -26,6 +26,19 @@ from loom.trial_writer_trigger_authority import application_public_definer_refer
 
 
 @dataclass(frozen=True, slots=True)
+class ApplicationGuardOwner:
+    """Exact guard schema owner from the independently admitted capacity operation."""
+
+    role_name: str
+    role_oid: int
+
+    def __post_init__(self) -> None:
+        if (re.fullmatch(r"[a-z][a-z0-9_]{0,62}", self.role_name) is None
+                or type(self.role_oid) is not int or not 0 < self.role_oid < 2**32):
+            raise ValueError("completed application guard owner identity is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class ApplicationOwnerSuccessor:
     """Exact role identity from an admitted successor journal, never live discovery.
 
@@ -35,10 +48,13 @@ class ApplicationOwnerSuccessor:
 
     role_name: str
     role_oid: int
+    guard_owner: ApplicationGuardOwner | None = None
 
     def __post_init__(self) -> None:
         if (re.fullmatch(r"[a-z][a-z0-9_]{0,62}", self.role_name) is None
-                or type(self.role_oid) is not int or not 0 < self.role_oid < 2**32):
+                or type(self.role_oid) is not int or not 0 < self.role_oid < 2**32
+                or (self.guard_owner is not None and (type(self.guard_owner) is not ApplicationGuardOwner
+                    or self.guard_owner.role_name == self.role_name or self.guard_owner.role_oid == self.role_oid))):
             raise ValueError("completed application successor identity is invalid")
 
 
@@ -132,20 +148,51 @@ def _require_successor(
     roles = [target.owner_oid, target.successor_oid]
     if successor is not None:
         roles.append(successor.role_oid)
+        guard = successor.guard_owner
+        if guard is not None:
+            if (guard.role_name in {target.owner_role, target.successor_role}
+                    or guard.role_oid in roles):
+                raise RuntimeError("completed application guard owner identity overlaps")
+            roles.append(guard.role_oid)
+            if connection.execute(application_sql(
+                "SELECT r.oid={} AND NOT (r.rolcanlogin OR r.rolinherit OR r.rolsuper "
+                "OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls) "
+                "AND r.rolpassword IS NULL AND n.nspowner=r.oid "
+                "FROM pg_catalog.pg_authid r JOIN pg_catalog.pg_namespace n "
+                "ON n.nspname='loom_capacity_guard' WHERE r.rolname={}",
+                guard.role_oid, guard.role_name,
+            )).fetchone() != (True,):
+                raise RuntimeError("completed application guard owner authority changed")
+            if connection.execute(application_sql(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_shdepend "
+                "WHERE refclassid='pg_catalog.pg_authid'::regclass AND refobjid={} "
+                "AND NOT (dbid={} OR dbid=0 AND classid='pg_catalog.pg_database'::regclass AND objid={}))",
+                guard.role_oid, target.database_oid, target.database_oid,
+            )).fetchone() != (False,):
+                raise RuntimeError("completed application guard owner has foreign dependencies")
         if connection.execute(application_sql(
-            "SELECT oid={} AND NOT rolsuper AND NOT rolinherit AND NOT rolcreatedb "
+            "SELECT oid={} AND NOT rolsuper AND rolinherit={} AND NOT rolcreatedb "
             "AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls "
             "AND (NOT rolcanlogin AND rolpassword IS NULL OR rolcanlogin AND rolpassword IS NOT NULL "
             "AND rolvaliduntil IS NOT NULL AND rolvaliduntil<>'infinity'::timestamptz) "
-            "FROM pg_catalog.pg_authid WHERE rolname={}", successor.role_oid, successor.role_name,
+            "FROM pg_catalog.pg_authid WHERE rolname={}", successor.role_oid, guard is not None, successor.role_name,
         )).fetchone() != (True,):
             raise RuntimeError("completed application successor role identity or authority changed")
+    if connection.execute(application_sql(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_db_role_setting WHERE setrole=ANY({}::oid[]))", roles,
+    )).fetchone() != (False,):
+        raise RuntimeError("completed application role settings changed")
     memberships = connection.execute(application_sql(
         "SELECT member::bigint,roleid::bigint,admin_option,inherit_option,set_option "
         "FROM pg_catalog.pg_auth_members WHERE member=ANY({}::oid[]) OR roleid=ANY({}::oid[]) "
         "ORDER BY member,roleid", roles, roles,
     )).fetchall()
-    expected = [] if successor is None else [(successor.role_oid, target.successor_oid, False, False, True)]
+    expected = []
+    if successor is not None:
+        expected.append((successor.role_oid, target.successor_oid, False, successor.guard_owner is not None, True))
+        if successor.guard_owner is not None:
+            expected.append((successor.role_oid, successor.guard_owner.role_oid, False, True, True))
+        expected.sort()
     if memberships != expected:
         raise RuntimeError("completed application owner or runtime memberships changed")
 
