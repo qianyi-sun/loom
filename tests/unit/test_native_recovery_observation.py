@@ -32,6 +32,9 @@ def host(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "_require_original_identity", lambda: None)
     monkeypatch.setattr(module, "_read_kernel_text", lambda path, bound: kernel[str(path)])
     monkeypatch.setattr(module, "_require_cgroup_mount", lambda descriptor: module._mount_id(descriptor))
+    # The authority scanner has separate real-kernel coverage. This fixture
+    # isolates original-UID observation with deliberately user-owned temp dirs.
+    monkeypatch.setattr(module, "require_native_cgroup_authority", lambda *args, **kwargs: None, raising=False)
     namespace = os.stat("/proc/self/ns/cgroup")
     host_identity = module.NativeRecoveryHostIdentityV1(node_id=locator.physical.binding.node_ids[0],
         boot_id=boot, original_uid=os.getuid(), original_gid=os.getgid(),
@@ -52,6 +55,28 @@ def test_capture_records_actual_job_root_not_step_or_asserted_identity(host):
     assert (captured.original_uid, captured.original_gid) == (os.getuid(), os.getgid())
     assert captured.launch_profile_sha256 == kwargs["launch_profile_sha256"]
     assert list(Path(locator.directory).iterdir()) == [], "observation grants no publication or cleanup"
+
+
+def test_capture_refuses_delegated_job_before_publication(host, monkeypatch):
+    module, locator, kwargs, _, _, _ = host
+    def delegated(*args, **kwargs):
+        raise ValueError("delegated job controls")
+    monkeypatch.setattr(module, "require_native_cgroup_authority", delegated)
+    with pytest.raises(ValueError, match="delegated"):
+        module.capture_native_recovery_preparation(locator, **kwargs)
+
+
+def test_capture_rechecks_nondelegation_before_returning_facts(host, monkeypatch):
+    module, locator, kwargs, _, _, _ = host
+    calls = []
+    def changed(*args, **kwargs):
+        calls.append(kwargs["relative"])
+        if len(calls) == 2:
+            raise ValueError("delegation changed")
+    monkeypatch.setattr(module, "require_native_cgroup_authority", changed)
+    with pytest.raises(ValueError, match="delegation changed"):
+        module.capture_native_recovery_preparation(locator, **kwargs)
+    assert calls == [Path("system.slice/slurmstepd.scope/job_101")] * 2
 
 
 @pytest.mark.parametrize("fault", ["foreign-job", "nested-job", "no-step", "no-slurm", "traversal",
