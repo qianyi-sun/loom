@@ -394,3 +394,45 @@ def test_subprocess_timeout_with_partial_secret_is_sanitized(tmp_path, monkeypat
     assert sensitive.decode() not in repr(caught.value)
     assert caught.value.__suppress_context__
     assert not list(journal.root.rglob("application-credentials.json"))
+
+
+def test_classification_observes_original_credentials_without_publishing(tmp_path, monkeypatch):
+    from loom_cli.rollout.operator.protected_application_credential_recovery import (
+        observe_application_runtime_credential,
+    )
+    from loom_cli.rollout.operator.protected_apply_journal import ProtectedApplyJournal
+
+    plan, live = _sources(tmp_path)
+    runner = _Runner(live)
+    before = {p: p.read_bytes() for p in tmp_path.rglob('*') if p.is_file()}
+    def forbid(*args, **kwargs):
+        pytest.fail('credential observation cannot publish or fsync')
+    monkeypatch.setattr(os, 'fsync', forbid)
+    monkeypatch.setattr(ProtectedApplyJournal, '_publish_or_match', forbid)
+    observed = observe_application_runtime_credential(plan, runner=runner, service_uid=os.getuid())
+    assert observed.credential.password == _PASSWORD
+    assert _PASSWORD not in repr(observed)
+    assert observed.binding.manifest_sha256 == plan.backup_manifest_sha256
+    assert observed.configuration.cluster_uid == '11111111-1111-4111-8111-111111111111'
+    assert {p: p.read_bytes() for p in tmp_path.rglob('*') if p.is_file()} == before
+
+
+def test_saved_credential_and_writer_bindings_are_available_without_apply_authority(tmp_path, monkeypatch):
+    from dataclasses import asdict
+
+    plan, live = _sources(tmp_path)
+    journal, runner = _journal(tmp_path), _Runner(live)
+    def apply(_):
+        _read(plan, journal, runner)
+        raise RuntimeError('saved original credentials')
+    component = _component(apply)
+    with pytest.raises(RuntimeError, match='saved original'):
+        journal.execute(plan, [component])
+    def forbid(*args, **kwargs):
+        pytest.fail('classification cannot publish or sync')
+    monkeypatch.setattr(journal, '_sync_application_recovery', forbid)
+    monkeypatch.setattr(journal, '_publish_or_match', forbid)
+    view = journal.read_application_recovery_view(plan, component, ordinal=0)
+    assert view.credential_binding.manifest_sha256 == plan.backup_manifest_sha256
+    assert view.cnpg_configuration.cluster_uid == '11111111-1111-4111-8111-111111111111'
+    assert _PASSWORD not in json.dumps(asdict(view))
