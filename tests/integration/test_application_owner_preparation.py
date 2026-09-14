@@ -122,17 +122,19 @@ async def test_staging_owner_creation_recovers_only_its_saved_oid(
 @pytest.mark.parametrize("transfer_postgres", [17], indirect=True)
 @pytest.mark.parametrize("transfer_database", ["protected-staging"], indirect=True)
 @pytest.mark.parametrize("interruption", [None, "owner", "seal", "admission-record", "close"])
+@pytest.mark.parametrize("transport", ["psycopg", "installed-peer"])
 async def test_initial_database_phase_recovers_each_commit_without_recapturing_closed_target(
-    transfer_database, tmp_path, monkeypatch, interruption,  # noqa: F811
+    transfer_database, transfer_postgres, tmp_path, monkeypatch, interruption, transport,  # noqa: F811
 ):
-    from contextlib import nullcontext
+    from contextlib import ExitStack, nullcontext
 
-    from loom_cli.rollout.operator.protected_application_database_preparation import (
-        prepare_protected_application_database,
-    )
     from loom_cli.rollout.operator.protected_application_owner_preparation import (
         APPLICATION_OWNER_ROLE,
     )
+    from loom_cli.rollout.operator.protected_apply_executor import (
+        SubprocessProtectedApplyCommandRunner,
+    )
+    from tests.integration.test_protected_peer_database_connection import _peer
     from tests.loom_cli.rollout.operator.test_application_credential_recovery import (
         _Runner,
         _sources,
@@ -144,9 +146,11 @@ async def test_initial_database_phase_recovers_each_commit_without_recapturing_c
     evidence = _guard(plan)
     request = dict(request_id=plan.request_id, candidate_sha=plan.candidate_sha,
                    candidate_tree=plan.candidate_tree, generation=evidence.generation)
-    with _closed(transfer_database, request=request) as (peer, maintenance, db_guard, _arguments):
+    with _closed(transfer_database, request=request) as (peer, maintenance, db_guard, _arguments), ExitStack() as stack:
         maintenance.execute("ALTER DATABASE loom ALLOW_CONNECTIONS true")
         peer.execute(sql.SQL("ALTER ROLE loom LOGIN INHERIT PASSWORD {}").format(sql.Literal(password)))
+        initial_peer = peer if transport == "psycopg" else stack.enter_context(_peer(transfer_postgres, "loom"))
+        initial_maintenance = maintenance if transport == "psycopg" else stack.enter_context(_peer(transfer_postgres, "postgres"))
         evidence = MutationGuardEvidence.build(**{
             k: v for k, v in evidence.to_dict().items()
             if k not in {"schema_version", "evidence_digest", "database_backend_pid"}
@@ -159,7 +163,7 @@ async def test_initial_database_phase_recovers_each_commit_without_recapturing_c
                 self.connection, self.armed = connection, None
                 self.info = connection.info
             def execute(self, query):
-                text = query if isinstance(query, str) else query.as_string(self.connection)
+                text = query if isinstance(query, str) else query.as_string()
                 result = self.connection.execute(query)
                 phase = None
                 if text.startswith("CREATE ROLE "):
@@ -181,11 +185,15 @@ async def test_initial_database_phase_recovers_each_commit_without_recapturing_c
                     interrupted.append(phase)
                     raise RuntimeError("phase acknowledgement lost")
 
-        wrapped_peer, wrapped_maintenance = InterruptCommit(peer), InterruptCommit(maintenance)
-        class Runner(_Runner):
+        wrapped_peer, wrapped_maintenance = InterruptCommit(initial_peer), InterruptCommit(initial_maintenance)
+        fixture = _Runner(live)
+        class Runner(SubprocessProtectedApplyCommandRunner):
+            def capture_stdout(self, *args, **kwargs):
+                return fixture.capture_stdout(*args, **kwargs)
             def open_staging_peer_maintenance_database(self):
                 return nullcontext(wrapped_maintenance)
-        runner = Runner(live)
+        runner = Runner()
+        fixture.environment = runner.environment
         record = journal.record_application_admission_recovery
         publications = []
         def publish(**kwargs):
@@ -201,8 +209,8 @@ async def test_initial_database_phase_recovers_each_commit_without_recapturing_c
             journal.retain_application_guard(plan, guard=evidence)
             assert application_guard_is_retained(tmp_path / "state", request_id=plan.request_id,
                                                 service_uid=os.getuid(), guard=evidence, acknowledge=True)
-            outcomes.append(prepare_protected_application_database(
-                plan, journal=journal, runner=runner, connection=wrapped_peer, guard=evidence))
+            outcomes.append(runner.prepare_staging_application_database(
+                plan, journal=journal, connection=wrapped_peer, guard=evidence))
             raise RuntimeError("initial database phase verified")
         try:
             if interruption:
