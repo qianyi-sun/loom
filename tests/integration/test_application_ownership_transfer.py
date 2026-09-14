@@ -55,7 +55,9 @@ async def transfer_database(
         # Fixed staging DB/role names only inside this disposable PostgreSQL.
         identity = replace(identity, database="loom", db_role="loom")
         password = "ab" * 16
-    provisioner = PsycopgPersonalDevCapacityDatabase(transfer_postgres_url)
+    baseline = getattr(request, "param", None) == "baseline"
+    from scripts.application_schema_baseline import BaselineReferenceDatabase
+    provisioner = (BaselineReferenceDatabase if baseline else PsycopgPersonalDevCapacityDatabase)(transfer_postgres_url)
     await PsycopgSharedFixtureSqlExecutor(transfer_postgres_url).apply_role_and_database(
         identity,
         role_sql=render_role_convergence_sql(identity, password),
@@ -75,7 +77,7 @@ async def transfer_database(
     )
     url = url.replace("postgresql+psycopg://", "postgresql://", 1)
     try:
-        command.upgrade(config, "head")
+        command.upgrade(config, "0134" if baseline else "head")
         (
             owner,
             migrator,
@@ -86,7 +88,9 @@ async def transfer_database(
             migrator_url,
             _,
         ) = await provisioner._converge_roles(identity, _new_credentials())
-        await provisioner._migrate(
+        from scripts.build_application_schema_reference import _migrate_reference_guard
+        await _migrate_reference_guard(
+            guard_head="guard_0030" if baseline else "guard_0033",
             migrator_url=migrator_url,
             owner=owner,
             agent=agent,
@@ -140,6 +144,8 @@ def _install_staging_readonly(admin):
     # Execute the installer's unchanged SQL, minus its psql-only error directive.
     # This connection belongs exclusively to the disposable fixture database.
     admin.execute(payload.removeprefix("\\set ON_ERROR_STOP on\n"))
+    database = admin.execute("SELECT current_database()").fetchone()[0]
+    admin.execute(psycopg.sql.SQL("REVOKE ALL PRIVILEGES ON DATABASE {} FROM PUBLIC").format(psycopg.sql.Identifier(database)))
     return credential.password
 
 

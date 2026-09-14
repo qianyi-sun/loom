@@ -104,12 +104,14 @@ class InterruptCommit:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("transfer_database", ["release", "baseline"], indirect=True)
 @pytest.mark.parametrize("interruption", [None, "transfer", "reopen", "login"])
-async def test_completion_recovers_each_committed_phase_with_original_guard(transfer_database, interruption):  # noqa: F811
+async def test_completion_recovers_each_committed_phase_with_original_guard(transfer_database, interruption, request):  # noqa: F811
     from loom.application_handoff_completion import complete_application_handoff_database
 
     url, owner, _bindings = transfer_database
     with _closed(transfer_database) as (peer, maintenance, guard, arguments):
+        arguments["schema_revision"] = ("0134/guard_0030" if request.node.callspec.params["transfer_database"] == "baseline" else "0142/guard_0033")
         original_backend = guard.info.backend_pid
         original_server = guard.execute("SELECT pg_postmaster_start_time()").fetchone()
         if interruption:
