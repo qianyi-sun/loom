@@ -465,9 +465,13 @@ can satisfy its preconditions.
 These observations are not trusted reference artifacts or ownership-transfer
 receipts. The runtime package now bundles separate PostgreSQL-major-bound
 legacy-owner and sealed-owner references for the reviewed pairs
-`0134` / `guard_0030` and `0142` / `guard_0033`. The latter includes the publication/keyset, task-source, personal
+`0134` / `guard_0030`, `0142` / `guard_0033` and `0146` / `guard_0033`.
+The 0142 pair includes the publication/keyset, task-source, personal
 membership, incarnation-storage and build-platform objects introduced by
-application migrations `0135`–`0142`. The trial-writer migration follows the
+application migrations `0135`–`0142`. The current 0146 pair additionally includes
+the reviewed build-grant constraint, reward backfill, zero-quota constraint and
+native build observation changes. Older reference pins remain available for
+their explicit historical revisions. The trial-writer migration follows the
 native-reader fence (`guard_0031`) and typed-terminal importer (`guard_0032`);
 it does not replace either upstream security boundary. Both PostgreSQL
 majors have independently generated pins; PostgreSQL 17 uses a pinned vanilla

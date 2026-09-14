@@ -74,7 +74,7 @@ def application_public_definer_references() -> tuple[tuple[str, str, str], ...]:
 def application_trigger_owner_handoff_ddl(
     *, previous_owner: str, application_owner: str, guard_owner: str,
     coordination_guard: ApplicationDatabaseCoordinationGuard | None = None,
-    schema_revision: ApplicationSchemaRevision = "0142/guard_0033",
+    schema_revision: ApplicationSchemaRevision = "0146/guard_0033",
 ) -> sql.Composed:
     """Move the revision-bound canonical definers in a protected ownership transaction.
 
