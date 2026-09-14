@@ -147,7 +147,7 @@ def test_observation_cannot_hide_original_guard_or_epoch_loss(tmp_path, monkeypa
     )
     monkeypatch.setattr(type(component), '_inputs', observe)
     monkeypatch.setattr(journal, 'read_active_application_recovery_view', lambda _: baseline)
-    with pytest.raises(RuntimeError, match='guard|epoch'):
+    with pytest.raises(RuntimeError, match=r'guard|epoch'):
         if boundary == 'classify':
             component.classify(plan)
         else:
