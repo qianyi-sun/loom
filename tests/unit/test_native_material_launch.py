@@ -88,11 +88,23 @@ def test_mapped_v2_prepares_after_parent_binding_before_any_session(tmp_path, mo
             raise ValueError("fixture invalid material")
 
     def execute(**kwargs):
-        assert events == ["parent", "prepare"]
+        assert events == ["parent", "prepare", "capture"]
         assert kwargs["layout"] == spec.layout()
         events.append("execute")
         return NativeBuildSessionResult(NativeSupervisionResult(False, "expired", True),
             NativeRuntimeCleanupResult(True, "fixture"), None)
+
+    snapshot = object()
+
+    def capture(observed):
+        assert observed == spec and events == ["parent", "prepare"]
+        assert (tmp_path / "runsc").is_dir()
+        events.append("capture")
+        return snapshot
+
+    def clean(observed):
+        assert observed is snapshot and events == ["parent", "prepare", "capture", "execute"]
+        events.append("clean")
 
     monkeypatch.setenv("LISTEN_PID", str(os.getpid()))
     monkeypatch.setenv("LISTEN_FDS", "2")
@@ -100,6 +112,8 @@ def test_mapped_v2_prepares_after_parent_binding_before_any_session(tmp_path, mo
     monkeypatch.setattr(module, "_activation_channels", lambda: (authority, artifact))
     monkeypatch.setattr(module, "prepare_native_rootless_material", prepare)
     monkeypatch.setattr(module, "execute_native_build_session", execute)
+    monkeypatch.setattr(module, "capture_native_mapped_scratch", capture)
+    monkeypatch.setattr(module, "clean_native_mapped_scratch", clean)
     try:
         if fail_at:
             with pytest.raises(ValueError, match="fixture invalid material"):
@@ -107,7 +121,63 @@ def test_mapped_v2_prepares_after_parent_binding_before_any_session(tmp_path, mo
             assert events == ["parent", "prepare"]
         else:
             result = module.run_native_mapped_runtime(path, expected_sha256=digest, expected_rootless_pid=123)
-            assert result.artifact is None and events == ["parent", "prepare", "execute"]
+            assert result.artifact is None and events == ["parent", "prepare", "capture", "execute", "clean"]
+        assert authority.fileno() == artifact.fileno() == -1
+    finally:
+        for channel in (authority, peer, artifact, artifact_peer):
+            channel.close()
+
+
+@pytest.mark.parametrize("boundary", ["success", "unreaped", "uncertain", "send", "clean"])
+def test_v2_pruning_requires_confirmed_runtime_and_acknowledged_transfer(tmp_path, monkeypatch, boundary):
+    from types import SimpleNamespace
+
+    from loom_capacity_agent.build_admission import BuildArtifactV1
+
+    module, spec, path, digest = material_spec(tmp_path)
+    authority, peer = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    artifact, artifact_peer = socket.socketpair()
+    events = []
+    snapshot = object()
+    value = BuildArtifactV1(archive_sha256="a" * 64, archive_size_bytes=1)
+
+    def execute(**kwargs):
+        events.append("execute")
+        return SimpleNamespace(artifact=object(),
+            supervision=SimpleNamespace(client_succeeded=True, broker_reaped=boundary != "unreaped"),
+            cleanup=SimpleNamespace(confirmed=boundary != "uncertain"))
+
+    async def send(*args, **kwargs):
+        assert kwargs["require_ack"] is True
+        events.append("ack")
+        if boundary == "send":
+            raise ValueError("fixture acknowledgment failed")
+        return value
+
+    def clean(observed):
+        assert observed is snapshot and events == ["execute", "ack"]
+        events.append("clean")
+        if boundary == "clean":
+            raise ValueError("fixture pruning failed")
+
+    monkeypatch.setenv("LISTEN_PID", str(os.getpid()))
+    monkeypatch.setenv("LISTEN_FDS", "2")
+    monkeypatch.setattr(module, "bind_native_rootless_parent", lambda *args, **kwargs: 321)
+    monkeypatch.setattr(module, "_activation_channels", lambda: (authority, artifact))
+    monkeypatch.setattr(module, "prepare_native_rootless_material", lambda spec: None)
+    monkeypatch.setattr(module, "capture_native_mapped_scratch", lambda spec: snapshot)
+    monkeypatch.setattr(module, "execute_native_build_session", execute)
+    monkeypatch.setattr(module, "send_native_artifact", send)
+    monkeypatch.setattr(module, "clean_native_mapped_scratch", clean)
+    try:
+        if boundary == "success":
+            result = module.run_native_mapped_runtime(path, expected_sha256=digest, expected_rootless_pid=123)
+            assert result.artifact == value
+        else:
+            with pytest.raises(ValueError):
+                module.run_native_mapped_runtime(path, expected_sha256=digest, expected_rootless_pid=123)
+        assert events == (["execute"] if boundary in {"unreaped", "uncertain"} else
+            ["execute", "ack"] if boundary == "send" else ["execute", "ack", "clean"])
         assert authority.fileno() == artifact.fileno() == -1
     finally:
         for channel in (authority, peer, artifact, artifact_peer):

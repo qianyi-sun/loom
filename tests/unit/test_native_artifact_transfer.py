@@ -10,7 +10,8 @@ from importlib import import_module
 import pytest
 
 
-async def test_real_local_transfer_stages_exact_bytes_and_cleans_spool(tmp_path):
+@pytest.mark.parametrize("acknowledged", [False, True])
+async def test_real_local_transfer_stages_exact_bytes_and_cleans_spool(tmp_path, acknowledged):
     module = import_module("loom_capacity_executor.native_artifact_transfer")
     payload = b"artifact-bytes" * 170000
     archive = tmp_path / "artifact.tar"
@@ -19,10 +20,12 @@ async def test_real_local_transfer_stages_exact_bytes_and_cleans_spool(tmp_path)
     workspace.mkdir(mode=0o700)
     sender, receiver = socket.socketpair()
     task = asyncio.create_task(module.send_native_artifact(sender, archive=archive,
-        claim_digest="a" * 64, source_binding_sha256="b" * 64, max_artifact_bytes=4 * 1024**2))
+        claim_digest="a" * 64, source_binding_sha256="b" * 64, max_artifact_bytes=4 * 1024**2,
+        require_ack=acknowledged))
     try:
         async with module.receive_native_artifact(receiver, workspace=workspace,
-            claim_digest="a" * 64, source_binding_sha256="b" * 64, max_artifact_bytes=4 * 1024**2) as received:
+            claim_digest="a" * 64, source_binding_sha256="b" * 64, max_artifact_bytes=4 * 1024**2,
+            acknowledge=acknowledged) as received:
             assert received.archive.read_bytes() == payload
             assert received.artifact.archive_size_bytes == len(payload)
             assert received.artifact.archive_sha256 == hashlib.sha256(payload).hexdigest()
@@ -40,7 +43,8 @@ async def test_real_local_transfer_stages_exact_bytes_and_cleans_spool(tmp_path)
 
 @pytest.mark.parametrize("boundary", ["fragmented", "claim", "source", "digest", "size", "extra", "truncated",
     "header-limit", "noncanonical", "credential", "descriptor", "cancelled"])
-async def test_received_stream_rejects_bad_identity_or_bytes_and_removes_partial_files(tmp_path, boundary):
+@pytest.mark.parametrize("acknowledged", [False, True])
+async def test_received_stream_rejects_bad_identity_or_bytes_and_removes_partial_files(tmp_path, boundary, acknowledged):
     import array
     import os
 
@@ -55,7 +59,7 @@ async def test_received_stream_rejects_bad_identity_or_bytes_and_removes_partial
     wire = json.dumps(header, sort_keys=True, separators=(",", ":")).encode()
     if boundary == "noncanonical":
         wire += b" "
-    prefix = b"LOOMNAT1" + (4097 if boundary == "header-limit" else len(wire)).to_bytes(4, "big")
+    prefix = (b"LOOMNAT2" if acknowledged else b"LOOMNAT1") + (4097 if boundary == "header-limit" else len(wire)).to_bytes(4, "big")
     data = prefix + wire + (payload[:-1] if boundary == "truncated" else payload)
     if boundary == "extra":
         data += b"!"
@@ -80,7 +84,7 @@ async def test_received_stream_rejects_bad_identity_or_bytes_and_removes_partial
 
     async def receive():
         async with module.receive_native_artifact(receiver, workspace=workspace, claim_digest="a" * 64,
-            source_binding_sha256="b" * 64, max_artifact_bytes=1024) as received:
+            source_binding_sha256="b" * 64, max_artifact_bytes=1024, acknowledge=acknowledged) as received:
             assert boundary == "fragmented"
             assert received.archive.read_bytes() == payload
 
@@ -100,6 +104,96 @@ async def test_received_stream_rejects_bad_identity_or_bytes_and_removes_partial
                 await task
         assert list(workspace.iterdir()) == []
     finally:
+        sender.close()
+        receiver.close()
+
+
+@pytest.mark.parametrize("acknowledged", [False, True])
+async def test_receiver_rejects_transfer_protocol_mismatch(tmp_path, acknowledged):
+    module = import_module("loom_capacity_executor.native_artifact_transfer")
+    workspace = tmp_path / "io"
+    workspace.mkdir(mode=0o700)
+    peer, receiver = socket.socketpair()
+    try:
+        peer.sendall((b"LOOMNAT1" if acknowledged else b"LOOMNAT2") + (1).to_bytes(4, "big"))
+        with pytest.raises(ValueError, match="header is invalid"):
+            async with module.receive_native_artifact(receiver, workspace=workspace, claim_digest="a" * 64,
+                source_binding_sha256="b" * 64, max_artifact_bytes=1024, acknowledge=acknowledged):
+                pytest.fail("mismatched protocol yielded artifact")
+        assert list(workspace.iterdir()) == []
+    finally:
+        peer.close()
+        receiver.close()
+
+
+@pytest.mark.parametrize("boundary", ["timeout", "cancelled"])
+async def test_sender_waiting_for_ack_has_bounded_cancellable_lifetime(tmp_path, boundary):
+    module = import_module("loom_capacity_executor.native_artifact_transfer")
+    archive = tmp_path / "archive"
+    archive.write_bytes(b"payload")
+    sender, peer = socket.socketpair()
+    peer.setblocking(False)
+    sending = asyncio.create_task(module.send_native_artifact(sender, archive=archive,
+        claim_digest="a" * 64, source_binding_sha256="b" * 64, max_artifact_bytes=1024,
+        require_ack=True, timeout_seconds=1))
+    try:
+        async with asyncio.timeout(5):
+            while await asyncio.get_running_loop().sock_recv(peer, 4096):
+                pass
+            assert not sending.done()
+            if boundary == "cancelled":
+                sending.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await sending
+            else:
+                with pytest.raises(TimeoutError):
+                    await sending
+        assert archive.read_bytes() == b"payload"
+    finally:
+        sending.cancel()
+        await asyncio.gather(sending, return_exceptions=True)
+        sender.close()
+        peer.close()
+
+
+@pytest.mark.parametrize("failed_sync", [1, 2, 3])
+async def test_receiver_durability_failure_never_acknowledges(tmp_path, monkeypatch, failed_sync):
+    module = import_module("loom_capacity_executor.native_artifact_transfer")
+    archive = tmp_path / "archive"
+    archive.write_bytes(b"payload")
+    workspace = tmp_path / "io"
+    workspace.mkdir(mode=0o700)
+    original = module._settled_io
+    syncs = 0
+
+    async def failed(function, *args, **kwargs):
+        nonlocal syncs
+        if function is module.os.fsync:
+            syncs += 1
+            if syncs == failed_sync:
+                raise OSError("fixture sync failure")
+        return await original(function, *args, **kwargs)
+
+    monkeypatch.setattr(module, "_settled_io", failed)
+    sender, receiver = socket.socketpair()
+    sending = asyncio.create_task(module.send_native_artifact(sender, archive=archive,
+        claim_digest="a" * 64, source_binding_sha256="b" * 64, max_artifact_bytes=1024,
+        require_ack=True, timeout_seconds=5))
+    try:
+        with pytest.raises(OSError, match="fixture sync failure"):
+            async with module.receive_native_artifact(receiver, workspace=workspace,
+                claim_digest="a" * 64, source_binding_sha256="b" * 64,
+                max_artifact_bytes=1024, acknowledge=True):
+                pytest.fail("unconfirmed durability yielded artifact")
+        assert not sending.done()
+        receiver.shutdown(socket.SHUT_WR)
+        with pytest.raises(ValueError, match="truncated"):
+            await sending
+        assert list(workspace.iterdir()) == []
+        assert archive.read_bytes() == b"payload"
+    finally:
+        sending.cancel()
+        await asyncio.gather(sending, return_exceptions=True)
         sender.close()
         receiver.close()
 
@@ -266,3 +360,73 @@ async def test_sender_total_timeout_stops_blocked_peer(tmp_path):
     finally:
         sender.close()
         receiver.close()
+
+
+async def test_acknowledged_sender_waits_for_receiver_fsync(tmp_path, monkeypatch):
+    module = import_module("loom_capacity_executor.native_artifact_transfer")
+    original = module._settled_io
+    reached, release = asyncio.Event(), asyncio.Event()
+    archive = tmp_path / "archive"
+    archive.write_bytes(b"verified")
+    workspace = tmp_path / "io"
+    workspace.mkdir(mode=0o700)
+    sender, receiver = socket.socketpair()
+
+    async def held(function, *args, **kwargs):
+        if function is module.os.fsync:
+            reached.set()
+            await release.wait()
+        return await original(function, *args, **kwargs)
+
+    monkeypatch.setattr(module, "_settled_io", held)
+    sending = asyncio.create_task(module.send_native_artifact(sender, archive=archive,
+        claim_digest="a" * 64, source_binding_sha256="b" * 64, max_artifact_bytes=1024, require_ack=True))
+
+    async def receiving():
+        async with module.receive_native_artifact(receiver, workspace=workspace,
+            claim_digest="a" * 64, source_binding_sha256="b" * 64, max_artifact_bytes=1024,
+            acknowledge=True) as received:
+            return received.artifact
+
+    receiving_task = asyncio.create_task(receiving())
+    try:
+        async with asyncio.timeout(5):
+            await reached.wait()
+            assert not sending.done()
+            release.set()
+            assert await sending == await receiving_task
+    finally:
+        release.set()
+        sending.cancel()
+        receiving_task.cancel()
+        await asyncio.gather(sending, receiving_task, return_exceptions=True)
+        sender.close()
+        receiver.close()
+
+
+@pytest.mark.parametrize("reply", [b"", b"wrong-ack", b"LOOMACK2" + b"x" * 32])
+async def test_sender_rejects_missing_or_mismatched_acknowledgment(tmp_path, reply):
+    module = import_module("loom_capacity_executor.native_artifact_transfer")
+    archive = tmp_path / "archive"
+    archive.write_bytes(b"payload")
+    sender, peer = socket.socketpair()
+    peer.setblocking(False)
+    sending = asyncio.create_task(module.send_native_artifact(sender, archive=archive,
+        claim_digest="a" * 64, source_binding_sha256="b" * 64, max_artifact_bytes=1024,
+        require_ack=True, timeout_seconds=5))
+    try:
+        loop = asyncio.get_running_loop()
+        async with asyncio.timeout(5):
+            while await loop.sock_recv(peer, 4096):
+                pass
+            assert not sending.done(), "half-close alone cannot authorize source-copy deletion"
+            if reply:
+                await loop.sock_sendall(peer, reply)
+            peer.shutdown(socket.SHUT_WR)
+            with pytest.raises(ValueError):
+                await sending
+    finally:
+        sending.cancel()
+        await asyncio.gather(sending, return_exceptions=True)
+        sender.close()
+        peer.close()
