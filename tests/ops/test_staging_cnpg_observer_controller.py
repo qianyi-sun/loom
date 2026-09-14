@@ -286,3 +286,38 @@ def test_real_authority_wiring_runs_before_any_output(tmp_path, monkeypatch, ref
         assert [item[0] for item in events[:3]] == ["source", "record", "history"]
         assert events[2][1] == ("a" * 40, "b" * 40)
         assert args["inventory_file"] in [event[1][0] for event in events if event[0] == "parent"]
+
+
+def test_installed_identity_deleted_after_readback_is_not_recreated(tmp_path, monkeypatch):
+    module, args = _context(tmp_path, monkeypatch)
+    module.prepare_controller(**args)
+    write = module._write
+
+    def disappear(path, payload, **kwargs):
+        if path == module.IDENTITY:
+            path.unlink()
+        write(path, payload, **kwargs)
+
+    monkeypatch.setattr(module, "_write", disappear)
+    with pytest.raises((ValueError, FileNotFoundError)):
+        module.prepare_controller(**args)
+    assert not module.IDENTITY.exists()
+
+
+def test_new_foreign_destination_at_atomic_publication_is_not_overwritten(tmp_path, monkeypatch):
+    module, args = _context(tmp_path, monkeypatch)
+    replace, link = module.os.replace, module.os.link
+
+    def race(operation):
+        def publish(source, destination, *positional, **kwargs):
+            if destination == module.IDENTITY:
+                destination.write_bytes(b"foreign publication\n")
+                destination.chmod(0o600)
+            return operation(source, destination, *positional, **kwargs)
+        return publish
+
+    monkeypatch.setattr(module.os, "replace", race(replace))
+    monkeypatch.setattr(module.os, "link", race(link))
+    with pytest.raises((ValueError, FileExistsError)):
+        module.prepare_controller(**args)
+    assert module.IDENTITY.read_bytes() == b"foreign publication\n"
