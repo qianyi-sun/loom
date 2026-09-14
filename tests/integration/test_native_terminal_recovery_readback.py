@@ -171,3 +171,105 @@ async def test_terminal_discovery_rejects_invalid_bounds_in_sql(prepared_input, 
                     :installation,:wire,:after,:through,:limit)"""),
                     {"installation": installation.id, "wire": installation.wire_payload,
                         "after": after, "through": through, "limit": limit})
+
+
+@pytest.mark.parametrize("field", ["reporter_incarnation", "request_digest", "bootstrap_registration_epoch", "protected_registration_epoch", "release_epoch"])
+async def test_terminal_recovery_rejects_mutated_release_response(prepared_input, owner_sessions, monkeypatch, field):
+    import json
+    from uuid import uuid4
+
+    from loom_capacity_build_guard.native_terminal_recovery import NativeTerminalRecoveryStore
+    from loom_capacity_build_guard.terminal_recovery import BuildTerminalRecoveryCoordinator
+
+    claim, _profile, _prepared, _final, terminal = await retained_attempt(prepared_input, owner_sessions, monkeypatch)
+    factory, _engine, installation, *_ = prepared_input
+
+    class Manager:
+        async def get_build_terminal_inventory_evidence(self, intent_id):
+            return terminal
+
+    assert (await BuildTerminalRecoveryCoordinator(session_factory=factory, installation=installation, manager=Manager()).reconcile())[0].state == "released"
+    async with factory.begin() as session:
+        original = session.scalar
+
+        async def corrupted(*args, **kwargs):
+            value = json.loads(await original(*args, **kwargs))
+            value["release"][field] = str(uuid4()) if field == "reporter_incarnation" else "f" * 64 if field == "request_digest" else 9
+            return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+        monkeypatch.setattr(session, "scalar", corrupted)
+        with pytest.raises(ValueError, match=r"release|binding"):
+            await NativeTerminalRecoveryStore(session, installation=installation).read(claim.operation_id)
+
+
+@pytest.mark.parametrize("signature", ["read_terminal_native_recovery(uuid,bytea,uuid)", "discover_terminal_native_recovery(uuid,bytea,bigint,bigint,integer)"])
+@pytest.mark.parametrize("boundary", ["grant", "public", "search-path"])
+def test_terminal_recovery_readback_privilege_drift_fails_closed(build_guard_database, signature, boundary):
+    from alembic import command
+
+    config, engine, _owner, agent, _url = build_guard_database
+    command.upgrade(config, "head")
+    signature = "loom_capacity_build_guard." + signature
+    statements = {"grant": f"REVOKE EXECUTE ON FUNCTION {signature} FROM {engine.dialect.identifier_preparer.quote(agent)}",
+        "public": f"GRANT EXECUTE ON FUNCTION {signature} TO PUBLIC", "search-path": f"ALTER FUNCTION {signature} SET search_path=public"}
+    with engine.begin() as connection:
+        connection.execute(text(statements[boundary]))
+    with pytest.raises(RuntimeError, match=r"privilege|surface"):
+        command.upgrade(config, "head")
+
+
+async def test_terminal_discovery_pages_and_resets_across_retried_allocations(prepared_input, owner_sessions, monkeypatch):
+    from uuid import uuid4
+
+    from loom_capacity_build_guard.native_terminal_recovery import NativeTerminalRecoveryStore
+    from loom_capacity_build_guard.terminal_recovery import BuildTerminalRecoveryCoordinator
+    from tests.integration import test_personal_dev_build_guard_terminal as terminal_fixture
+    from tests.integration.test_personal_dev_build_guard_hold_retirement import release_witness, retirement
+    from tests.integration.test_personal_dev_build_guard_release_outbox import outbox
+
+    factory, _engine, installation, plan, source, platform = prepared_input
+
+    async def settle(values, *, retire_hold):
+        claim, _profile, _prepared, _final, terminal = await retained_attempt(values, owner_sessions, monkeypatch)
+
+        class Manager:
+            async def get_build_terminal_inventory_evidence(self, intent_id):
+                return terminal
+
+        assert (await BuildTerminalRecoveryCoordinator(session_factory=factory, installation=installation, manager=Manager()).reconcile())[0].state == "released"
+        if retire_hold:
+            async with factory.begin() as session:
+                publication = await outbox(session, installation).read_next()
+            async with factory.begin() as session:
+                await outbox(session, installation).acknowledge(publication, manager_acknowledgement_digest=publication.publication_digest)
+            async with factory.begin() as session:
+                await retirement(session, installation).retire(release_witness(publication, terminal))
+        return claim
+
+    first = await settle(prepared_input, retire_hold=True)
+    async with factory.begin() as session:
+        original_page = await NativeTerminalRecoveryStore(session, installation=installation).discover(limit=1)
+    assert original_page.attempts[0].claim_id == first.operation_id
+    binding = plan.shapes[0].binding.model_copy(update={"intent_id": uuid4(), "tranche_id": uuid4(),
+        "shape_instance_id": plan.shapes[0].binding.shape_instance_id + "-retry"})
+    successor = plan.model_copy(update={"plan_id": uuid4(), "proposal_id": uuid4(), "admission_incarnation": uuid4(),
+        "shapes": (plan.shapes[0].model_copy(update={"binding": binding}),),
+        "allowances": (plan.allowances[0].model_copy(update={"allowance_id": uuid4(),
+            "submission_intent_id": binding.intent_id, "shape_instance_id": binding.shape_instance_id}),)})
+    original_physical = terminal_fixture.physical
+    monkeypatch.setattr(terminal_fixture, "physical", lambda registration: original_physical(registration).model_copy(update={"slurm_job_id": "1235"}))
+    second = await settle((factory, _engine, installation, successor, source, platform), retire_hold=False)
+    async with factory.begin() as session:
+        reader = NativeTerminalRecoveryStore(session, installation=installation)
+        assert (await reader.discover(after_event_id=original_page.attempts[0].event_id,
+            through_event_id=original_page.through_event_id, limit=1)).attempts == ()
+        reset = await reader.discover(limit=1)
+        assert reset.through_event_id > original_page.through_event_id
+        assert reset.attempts[0].claim_id == first.operation_id
+        following = await reader.discover(after_event_id=reset.attempts[0].event_id,
+            through_event_id=reset.through_event_id, limit=1)
+        assert following.attempts[0].claim_id == second.operation_id
+        assert following.attempts[0].event_id > reset.attempts[0].event_id
+        assert (await reader.discover(after_event_id=following.attempts[0].event_id,
+            through_event_id=reset.through_event_id, limit=1)).attempts == ()
+        assert await reader.read(first.operation_id) is not None and await reader.read(second.operation_id) is not None
