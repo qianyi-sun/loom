@@ -17,10 +17,11 @@ from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 from tests.unit.test_native_rootless_runtime import spec_file
 
 
-@pytest.mark.parametrize("mode", ["success", "failed", "oversize", "stdout-flood", "wrong-claim", "malformed", "artifact-mismatch",
+@pytest.mark.parametrize("mode,startup_delay", [(mode, 0) for mode in ["success", "failed", "oversize", "stdout-flood", "wrong-claim", "malformed", "artifact-mismatch",
     "uncertain", "upload-error", "early-upload-reply", "outcome-error", "cancel", "authority-cleanup-cancel",
-    "upload-cleanup-cancel", "outcome-cleanup-cancel"])
-async def test_outer_io_matches_stream_and_result_before_upload_or_outcome(tmp_path, monkeypatch, mode):
+    "upload-cleanup-cancel", "outcome-cleanup-cancel"]] + [pytest.param(mode, 4,
+        id=mode + "-cold-start") for mode in ["authority-cleanup-cancel", "upload-cleanup-cancel", "outcome-cleanup-cancel"]])
+async def test_outer_io_matches_stream_and_result_before_upload_or_outcome(tmp_path, monkeypatch, mode, startup_delay):
     module = import_module("loom_capacity_executor.native_outer_build")
     _runtime, spec, spec_path, _digest = spec_file(tmp_path)
     source_path = tmp_path / "source.tar"
@@ -57,6 +58,10 @@ async def test_outer_io_matches_stream_and_result_before_upload_or_outcome(tmp_p
             write_settled.append(True)
 
     async def spawn(*args, **kwargs):
+        if startup_delay:
+            # Fault injection: cold imports/runner contention may exceed three
+            # seconds. This is not a delay used to guess cancellation readiness.
+            await asyncio.sleep(startup_delay)
         assert args[:4] == (sys.executable, "-I", "-m", "loom_capacity_executor.native_rootless_runtime")
         assert args[4] == "launch" and "--expected-parent" in args
         assert kwargs["env"] == {"PATH": "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"}
