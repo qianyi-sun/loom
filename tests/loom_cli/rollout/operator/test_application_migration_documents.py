@@ -67,9 +67,11 @@ def test_generation_documents_refuse_changed_attested_inputs(tmp_path, drift):
     if drift == "artifact":
         payload += b"# changed\n"
     elif drift == "guard":
-        guard = replace(guard, generation="e" * 32)
+        fields = {key: value for key, value in guard.to_dict().items() if key not in {"schema_version", "evidence_digest"}}
+        guard = type(guard).build(**{**fields, "generation": "e" * 32})
     elif drift == "candidate":
-        plan = replace(plan, candidate_sha="d" * 40)
+        fields = {key: value for key, value in guard.to_dict().items() if key not in {"schema_version", "evidence_digest"}}
+        guard = type(guard).build(**{**fields, "candidate_sha": "d" * 40})
     else:
         document = yaml.safe_load(payload)
         document["spec"]["template"]["spec"]["containers"][0]["env"][1]["value"] = "loom"

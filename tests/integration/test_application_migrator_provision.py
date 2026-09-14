@@ -217,10 +217,14 @@ async def test_migration_recovery_waits_for_exact_prior_peer_and_never_adopts_un
 
 @pytest.mark.asyncio
 async def test_protected_migration_runtime_connects_actual_sql_lifecycle(transfer_database, tmp_path):  # noqa: F811
+    from loom_cli.rollout.operator.protected_application_migration_journal import (
+        ApplicationMigrationEvent,
+    )
+    from loom_cli.rollout.operator.protected_application_migration_runtime import (
+        ProtectedApplicationMigrationRuntime,
+    )
     from tests.integration.test_application_database_admission import _maintenance
     from tests.loom_cli.rollout.operator.test_application_migration_documents import _inputs
-    from loom_cli.rollout.operator.protected_application_migration_journal import ApplicationMigrationEvent
-    from loom_cli.rollout.operator.protected_application_migration_runtime import ProtectedApplicationMigrationRuntime
 
     plan, template, evidence, _ = _inputs(tmp_path)
     request = dict(request_id=evidence.request_id, candidate_sha=evidence.candidate_sha,
@@ -228,11 +232,15 @@ async def test_protected_migration_runtime_connects_actual_sql_lifecycle(transfe
     with _closed(transfer_database, request=request) as (peer, maintenance, _guard, args):
         complete_application_handoff_database(peer, maintenance=maintenance, **args)
         class Runner:
-            environment = {"KUBECONFIG": "/disposable-only"}
+            @property
+            def environment(self):
+                return {"KUBECONFIG": "/disposable-only"}
             def open_staging_peer_database(self):
                 return psycopg.connect(transfer_database[0], autocommit=True)
             def open_staging_peer_maintenance_database(self):
                 return _maintenance(peer)
+        fields = {key: value for key, value in evidence.to_dict().items() if key not in {"schema_version", "evidence_digest"}}
+        evidence = type(evidence).build(**{**fields, "database_backend_pid": args["coordination_guard"].backend.pid})
         observed = []
         with ProtectedApplicationMigrationRuntime(plan=plan, guard=evidence, target=args["target"],
                 coordination_guard=args["coordination_guard"], runner=Runner(), template=template,
