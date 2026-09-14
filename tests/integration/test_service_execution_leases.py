@@ -823,7 +823,7 @@ async def test_reservation_persists_trial_lease_command_and_history_atomically(
             assert cost_reservation.estimated_cost_microusd == 3_600_000
             assert cost_reservation.requested_cpu_millis == 1_000
             assert cost_reservation.requested_memory_mib == 1_024
-            assert cost_reservation.requested_ephemeral_storage_mib == 4_148
+            assert cost_reservation.requested_ephemeral_storage_mib == 2_048
             assert history.snapshot_json["selected_pool_id"] == "nebius-cpu"
             projection = execution_lease_projection(persisted)
             assert projection["selected_pool_id"] == "nebius-cpu"
