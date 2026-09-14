@@ -63,7 +63,7 @@ async def _observe_fresh_database(
     identity: DevInstanceIdentity,
     *,
     profile: ApplicationSchemaProfile = "legacy-owner",
-    revision: ApplicationSchemaRevision = "0142/guard_0033",
+    revision: ApplicationSchemaRevision = "0146/guard_0033",
 ) -> ApplicationSchemaInventory:
     """Internal helper: admin_url belongs exclusively to our disposable container."""
     from scripts.application_schema_baseline import BaselineReferenceDatabase
@@ -301,7 +301,7 @@ async def _retire_application_migrator(
 
 async def build_application_schema_reference(
     *, profile: ApplicationSchemaProfile = "legacy-owner", postgres_major: int = 16,
-    revision: ApplicationSchemaRevision = "0142/guard_0033",
+    revision: ApplicationSchemaRevision = "0146/guard_0033",
 ) -> ApplicationSchemaReference:
     """Require two independent fresh installations to agree before emitting metadata."""
     if profile not in {
@@ -314,7 +314,7 @@ async def build_application_schema_reference(
     }:
         raise ValueError("application schema reference profile is invalid")
     application_head, guard_head = application_schema_revisions(revision)
-    if revision == "0142/guard_0033" and (application_head, guard_head) != (_head("migrations"), _head("capacity_guard_migrations")):
+    if revision == "0146/guard_0033" and (application_head, guard_head) != (_head("migrations"), _head("capacity_guard_migrations")):
         raise RuntimeError("current application schema reference revisions require review")
     image = application_reference_postgres_image(postgres_major=postgres_major)
     with PostgresContainer(
@@ -369,7 +369,7 @@ async def _build_profiles() -> dict[str, object]:
         "cnpg-staging-legacy-owner",
         "cnpg-staging-sealed-owner",
     )
-    revisions: tuple[ApplicationSchemaRevision, ...] = ("0142/guard_0033", "0134/guard_0030")
+    revisions: tuple[ApplicationSchemaRevision, ...] = ("0146/guard_0033", "0142/guard_0033", "0134/guard_0030")
     for major in (16, 17):
         result[str(major)] = {
             revision: {
