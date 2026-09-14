@@ -73,26 +73,41 @@ def reopen_application_guard_migrator_admission(
     _identity(identity, target, provisioner_role, coordination_guard)
     with _transaction(connection, target, coordination_guard, provisioner_role, allow_closed=True):
         _require_maintenance(connection, target)
-        _sealed(connection, target, identity)
-        if _memberships(connection, target, identity):
-            raise RuntimeError("application guard migrator memberships have not retired")
-        if connection.execute(
-            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE locktype='object' "
-            "AND classid='pg_catalog.pg_database'::regclass AND mode='RowExclusiveLock')"
-        ).fetchone() != (False,):
-            raise RuntimeError("application guard migrator admission has pending database startup")
-        connection.execute("SELECT pg_catalog.pg_stat_clear_snapshot()")
-        if connection.execute(application_sql(
-            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE usesysid={}) "
-            "OR EXISTS (SELECT 1 FROM pg_catalog.pg_shdepend WHERE refclassid='pg_catalog.pg_authid'::regclass AND refobjid={})",
-            identity.role_oid, identity.role_oid,
-        )).fetchone() != (False,):
-            raise RuntimeError("application guard migrator authority has not retired")
+        _require_retired(connection, target, identity)
         _require_runtime_credential(connection, target, runtime_password)
         if not _allowed(connection, target):
             connection.execute(sql.SQL("ALTER DATABASE {} ALLOW_CONNECTIONS true").format(sql.Identifier(target.database)))
         if not _allowed(connection, target):
             raise RuntimeError("application guard migrator admission did not reopen")
+
+
+def require_application_guard_migrator_retired(
+    connection: ApplicationDatabaseConnection, *, target: ApplicationDatabaseAdmissionTarget,
+    coordination_guard: ApplicationDatabaseCoordinationGuard, provisioner_role: str, identity: ApplicationOwnerSuccessor,
+) -> None:
+    """Read current retirement of the permanent role under the original authority."""
+    _identity(identity, target, provisioner_role, coordination_guard)
+    with _transaction(connection, target, coordination_guard, provisioner_role, allow_closed=True):
+        _require_retired(connection, target, identity)
+
+
+def _require_retired(connection: ApplicationDatabaseConnection, target: ApplicationDatabaseAdmissionTarget,
+                     identity: ApplicationOwnerSuccessor) -> None:
+    _sealed(connection, target, identity)
+    if _memberships(connection, target, identity):
+        raise RuntimeError("application guard migrator memberships have not retired")
+    if connection.execute(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE locktype='object' "
+        "AND classid='pg_catalog.pg_database'::regclass AND mode='RowExclusiveLock')"
+    ).fetchone() != (False,):
+        raise RuntimeError("application guard migrator admission has pending database startup")
+    connection.execute("SELECT pg_catalog.pg_stat_clear_snapshot()")
+    if connection.execute(application_sql(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE usesysid={}) "
+        "OR EXISTS (SELECT 1 FROM pg_catalog.pg_shdepend WHERE refclassid='pg_catalog.pg_authid'::regclass AND refobjid={})",
+        identity.role_oid, identity.role_oid,
+    )).fetchone() != (False,):
+        raise RuntimeError("application guard migrator authority has not retired")
 
 
 def _identity(identity: ApplicationOwnerSuccessor, target: ApplicationDatabaseAdmissionTarget,
