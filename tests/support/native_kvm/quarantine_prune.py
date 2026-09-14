@@ -134,8 +134,10 @@ def journal_main(interruption):
 
     def interrupted_save(self, phase):
         nonlocal fired
-        if phase == interruption and not fired:
+        if phase == interruption.removeprefix("retired-") and not fired:
             fired = True
+            if interruption.startswith("retired-"):
+                scratch.rmdir()
             raise InterruptedError("simulated process death before progress publication")
         return original_save(self, phase)
 
