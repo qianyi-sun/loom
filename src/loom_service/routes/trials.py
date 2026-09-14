@@ -79,6 +79,8 @@ from loom_service.routes.object_downloads import stream_object_response
 from loom_service.service_execution_status import service_execution_lifecycle_stage
 from loom_service.stale_running_debug import trial_stale_running_debug_context
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
+from loom_service.task_image_preparation import task_image_preparation_for_trial
+from loom_service.trial_timing import trial_started_at
 from loom_service.usage_accounting import (
     cost_meta_filter as _cost_meta_filter,
 )
@@ -280,6 +282,7 @@ def _trial_row(
     submitted_by_user: User | None = None,
 ) -> dict[str, Any]:
     agent_name, model = _extract_agent_projection(t.config)
+    started_at = trial_started_at(t.started_at, t.result)
     usage_projection = usage or _empty_usage_projection()
     llm_evidence = project_trial_llm_evidence(
         t,
@@ -294,7 +297,7 @@ def _trial_row(
         "failure_reason": t.failure_reason,
         "failure_message": t.failure_message,
         "submitted_at": t.submitted_at.isoformat(),
-        "started_at": t.started_at.isoformat() if t.started_at else None,
+        "started_at": started_at.isoformat() if started_at else None,
         "finished_at": (t.finished_at.isoformat() if t.finished_at else None),
         "attempt_count": t.attempt_count,
         "aggregate_reward": _extract_reward(t.result),
@@ -681,6 +684,7 @@ async def get_trial(
         submitted_by_user=submitted_by_user,
     )
     base["result"] = trial.result
+    base["task_environment_preparation"] = await task_image_preparation_for_trial(s, trial)
     base["price_snapshots"] = await price_snapshots_for_trials(s, [trial.id])
     trajectory_index = trial.trajectory_index or {}
     materialization = (

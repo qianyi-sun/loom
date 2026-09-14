@@ -974,6 +974,23 @@ export interface components {
       next_cursor: string | null;
     };
     TrialDetail: components["schemas"]["Trial"] & {
+      task_environment_preparation?: {
+        observation_scope: "current_materialization";
+        cpu_arch: string;
+        state: string;
+        attempt_count: number;
+        failure_reason: string | null;
+        message: string | null;
+        next_attempt_at: string | null;
+        phases: {
+          name: "prepare" | "build" | "publish";
+          state: "waiting" | "running" | "terminated";
+          exit_code?: number;
+          started_at?: string;
+          finished_at?: string;
+        }[];
+        resources_released: boolean | null;
+      }[];
       owner_team?: { id: string; name: string };
       team_name?: string | null;
       submitted_by_user?: {

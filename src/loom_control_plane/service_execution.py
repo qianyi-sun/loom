@@ -1592,6 +1592,28 @@ async def record_execution_event(
         lease.error_code = str(payload.get("error_code") or "execution_failed")[:120]
         raw_message = payload.get("error_message")
         lease.error_message = str(raw_message)[:2000] if raw_message is not None else None
+    if (
+        advances_projection
+        and lease.execution_role == "attempt"
+        and lease.desired_state in {"create", "start", "finalize"}
+        and lease.revoked_at is None
+        and event_kind in {"started", "kubernetes_observed"}
+    ):
+        trial = await session.get(Trial, lease.trial_id, with_for_update=True)
+        if (
+            trial is not None
+            and trial.attempt_count == lease.attempt
+            and trial.state in {"claimed", "running"}
+        ):
+            actual_start = lease.pod_started_at if event_kind == "kubernetes_observed" else observed_at
+            if actual_start is not None and trial.started_at is None:
+                trial.started_at = actual_start
+            if event_kind == "started" or (
+                payload.get("normalized_state") == "running" and actual_start is not None
+            ):
+                # Native attempts do not call the legacy worker PATCH /state.
+                # Update the durable Trial so list, batch and monitor agree.
+                trial.state = "running"
     lease.updated_at = datetime.now(UTC)
     await session.flush()
     return event, False

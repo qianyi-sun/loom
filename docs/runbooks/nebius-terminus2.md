@@ -75,6 +75,21 @@ architecture-independent task may also have an arm64 prerequisite; that row
 does not block the x86_64 Nebius execution path. A failed x86_64 prerequisite
 finishes the waiting Trial with `task_image_build_failed` and no consumed attempt.
 
+`GET /api/v1/trials/{id}` exposes `task_environment_preparation` to the Trial's
+authorized readers, including before execution starts. Each entry reports the
+linked architecture's current shared preparation state, build-attempt count,
+known failure reason, safe explanation, prepare/build/publish phase timestamps
+and exit code, and whether native build resources have been released. It uses
+the current materialization epoch; this is not historical evidence of which
+build a completed Trial used. A later cache rebuild can change this view.
+Arbitrary Dockerfile output, source locations, registry references and frozen
+build configuration are not exposed. Operators retain the bounded build log
+for deeper diagnosis. Cancelling the last waiting Trial can leave preparation
+queued with `build_cancelled` and no active demand; it does not mean another
+build is running. A pre-execution failure or cancellation has no execution
+bundle, so `/bundle/download` continues returning HTTP 409 rather than creating
+a synthetic successful trajectory.
+
 When the platform's native task-image builder is enabled, its existing actuator
 prepares and publishes the queued Dockerfile image. Import alone does not
 activate a builder or permit arbitrary prebuilt images. The trusted controller and

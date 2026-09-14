@@ -91,13 +91,19 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
         scheduled = _condition(getattr(pod.status, "conditions", None), "PodScheduled")
         if getattr(scheduled, "status", None) == "True":
             scheduled_at = getattr(scheduled, "last_transition_time", None)
-        started_at = getattr(pod.status, "start_time", None)
-        # kubelet can publish ``status.startTime`` before the PodScheduled
-        # condition controller publishes its transition timestamp. The latter
-        # is therefore only an upper-bound observation, not proof that the Pod
-        # started before it was scheduled.
-        if scheduled_at is not None and started_at is not None and scheduled_at > started_at:
-            scheduled_at = started_at
+        statuses = list(getattr(pod.status, "container_statuses", None) or [])
+        execution_status = next(
+            (status for status in statuses if getattr(status, "name", None) == "execution"),
+            None,
+        )
+        execution_state = getattr(execution_status, "state", None)
+        execution_terminated = getattr(execution_state, "terminated", None)
+        # Pod startTime acknowledges the kubelet, before image pulls and init
+        # containers. Only the execution container starts the workload; task
+        # and verifier init sidecars merely prepare its private sandboxes.
+        started_at = getattr(
+            getattr(execution_state, "running", None), "started_at", None
+        ) or getattr(execution_terminated, "started_at", None)
         if pod.metadata.deletion_timestamp is not None:
             state = NormalizedJobState.TERMINATING
         pod_reason = getattr(pod.status, "reason", None)
@@ -107,7 +113,6 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
         elif pod_reason in {"NodeLost", "Shutdown"}:
             state, reason, message = NormalizedJobState.NODE_LOST, pod_reason, pod_message
         else:
-            statuses = list(getattr(pod.status, "container_statuses", None) or [])
             terminated = [
                 status.state.terminated
                 for status in statuses
@@ -118,13 +123,6 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
                 for status in statuses
                 if getattr(getattr(status, "state", None), "waiting", None) is not None
             ]
-            execution_status = next(
-                (status for status in statuses if getattr(status, "name", None) == "execution"),
-                None,
-            )
-            execution_terminated = getattr(
-                getattr(execution_status, "state", None), "terminated", None
-            )
             raw_summary = getattr(execution_terminated, "message", None)
             if raw_summary:
                 try:

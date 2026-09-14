@@ -644,6 +644,23 @@ terminating, missing, and deleted states have explicit mappings. A stuck Job
 remains visible as observed failure/debt; the actuator never fabricates a Loom
 success or changes retry policy outside the fenced control-plane transition.
 
+Execution start means the `execution` container's actual running/terminated
+start timestamp, not kubelet acknowledgement (`Pod.status.startTime`) or a
+task/verifier init-container start. Missing container evidence remains unknown.
+The authoritative current attempt observation also moves its Trial from claimed
+to running, so ordinary detail, list, batch and monitor views share the durable
+state. Replayed observations, previous attempts, verifier leases and cancelled
+or finished Trials cannot restart that Trial. Older native results with a missing
+Trial start expose the recorded runtime start on read without rewriting history.
+
+Trial detail exposes `task_environment_preparation` separately from execution
+and canonical output. It describes the current shared image preparation, with
+bounded phase states, exit codes and actionable messages. It is not a historical
+build-attempt binding for the Trial. Raw build logs and source/registry locations
+are excluded because arbitrary Dockerfiles can print secrets. A pre-execution
+build failure or cancellation can have diagnostics without a canonical Trial
+bundle; such a bundle remains unavailable rather than pretending to be complete.
+
 The #1550 renderer consumes only the lease-frozen
 `loom.execution-runtime-plan.v1`. For the supported `init_payload` composition
 it creates a digest-pinned runtime materializer, verifies the static runtime
