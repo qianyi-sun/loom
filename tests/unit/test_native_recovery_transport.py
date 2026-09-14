@@ -58,8 +58,9 @@ async def test_recovery_route_binds_exact_claim_and_closes_transport(tmp_path, p
 
 
 @pytest.mark.parametrize("purpose", ["personal-build-worker", "application-worker"])
-@pytest.mark.parametrize("boundary", ["exact", "changed", "invalid"])
+@pytest.mark.parametrize("boundary", ["exact", "changed", "invalid", "foreign-installation"])
 async def test_recovery_admission_routes_exact_request_without_application_authority(tmp_path, purpose, boundary):
+    from loom_capacity_build_guard.installation_store import _identity
     from loom_capacity_agent.native_recovery_publication import (
         NativeRecoveryAdmissionRequestV1,
         NativeRecoveryAdmissionV1,
@@ -73,10 +74,13 @@ async def test_recovery_admission_routes_exact_request_without_application_autho
     request = NativeRecoveryAdmissionRequestV1(claim=claim, node_id=claim.binding.node_ids[0], boot_id=uuid4())
     changed = request.model_copy(update={"claim": claim.model_copy(update={"operation_id": uuid4()})}) if boundary == "changed" else request
     response = NativeRecoveryAdmissionV1(request=changed, profile=NativeRecoveryProfileV1(
-        installation_id=uuid4(), pool_id="oldlab", launch_profile_sha256="a" * 64,
+        installation_id=_identity(claim.binding.subject_id, claim.binding.subject_incarnation, claim.binding.deployment_generation),
+        pool_id="oldlab", launch_profile_sha256="a" * 64,
         worker_config_sha256="b" * 64, release_manifest_sha256="c" * 64),
         host=NativeRecoveryHostIdentityV1(node_id=request.node_id, boot_id=request.boot_id,
             original_uid=24850, original_gid=24851, cgroup_namespace_device=4, cgroup_namespace_inode=100))
+    if boundary == "foreign-installation":
+        response = response.model_copy(update={"profile": response.profile.model_copy(update={"installation_id": uuid4()})})
     calls = []
 
     async def invoke(incoming, **kwargs):

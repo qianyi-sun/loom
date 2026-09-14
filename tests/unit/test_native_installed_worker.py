@@ -60,6 +60,7 @@ async def test_installed_worker_closes_handoff_before_checks_and_retains_recover
         max_unpacked_bytes=32 * 1024**2, max_rootfs_entries=1000, tmp_bytes=1024**2,
         buildkit_state_bytes=32 * 1024**2, timeout_seconds=60)
     if recovery:
+        from loom_capacity_build_guard.installation_store import _identity
         config = module.NativeInstalledWorkerConfigV2.model_validate({**config.model_dump(), "schema_version": 2,
             "host_identity_path": "/protected/host.json", "node_id": physical.binding.node_ids[0]})
     claim = module.allocated_claim_request(packet.registration).model_dump()
@@ -118,7 +119,8 @@ async def test_installed_worker_closes_handoff_before_checks_and_retains_recover
 
         host = NativeRecoveryHostIdentityV1(node_id=config.node_id, boot_id=uuid4(), original_uid=24850,
             original_gid=24851, cgroup_namespace_device=4, cgroup_namespace_inode=100)
-        profile = NativeRecoveryProfileV1(installation_id=uuid4(), pool_id="oldlab", launch_profile_sha256="e" * 64,
+        profile = NativeRecoveryProfileV1(installation_id=_identity(claim.binding.subject_id, claim.binding.subject_incarnation,
+            claim.binding.deployment_generation), pool_id="oldlab", launch_profile_sha256="e" * 64,
             worker_config_sha256="f" * 64 if boundary == "admitted-config" else "d" * 64,
             release_manifest_sha256="f" * 64 if boundary == "admitted-release" else config.release_manifest_sha256)
         monkeypatch.setattr(module, "read_native_recovery_boot_id", lambda: host.boot_id)
