@@ -18,12 +18,14 @@ from loom.application_schema_reference import (
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("revision", ["0142/guard_0033", "0134/guard_0030"])
 @pytest.mark.parametrize("postgres_major", [16, 17])
 @pytest.mark.parametrize("profile", ["legacy-owner", "sealed-owner", "staging-readonly-legacy-owner", "staging-readonly-sealed-owner"])
 async def test_bundled_reference_matches_independent_actual_provisioning(
     monkeypatch: pytest.MonkeyPatch,
     profile: str,
     postgres_major: int,
+    revision: str,
 ) -> None:
     # Neither inherited migration setting is authority for reference generation.
     monkeypatch.setenv("LOOM_DB_URL", "postgresql://invalid.invalid:1/not_a_reference")
@@ -37,22 +39,22 @@ async def test_bundled_reference_matches_independent_actual_provisioning(
         return observed
 
     monkeypatch.setattr(builder, "_observe_fresh_database", capture)
-    generated = await build_application_schema_reference(profile=profile, postgres_major=postgres_major)
-    expected = application_schema_reference(profile=profile, postgres_major=postgres_major)
+    generated = await build_application_schema_reference(profile=profile, postgres_major=postgres_major, revision=revision)
+    expected = application_schema_reference(profile=profile, postgres_major=postgres_major, revision=revision)
     assert generated == expected
     assert generated.object_count > 200
     assert generated.postgres_major == postgres_major
     assert generated.inventory_sha256 != "0" * 64
     assert len(observations) == 2
     for observed in observations:
-        require_application_schema_reference(observed, profile=profile)
+        require_application_schema_reference(observed, profile=profile, revision=revision)
         with pytest.raises(ApplicationSchemaReferenceError, match="trusted reference"):
             require_application_schema_reference(
-                replace(observed, postgres_major=17 if postgres_major == 16 else 16), profile=profile
+                replace(observed, postgres_major=17 if postgres_major == 16 else 16), profile=profile, revision=revision
             )
         with pytest.raises(ApplicationSchemaReferenceError, match="trusted reference"):
             require_application_schema_reference(
-                observed, profile="sealed-owner" if profile == "legacy-owner" else "legacy-owner"
+                observed, profile="sealed-owner" if profile == "legacy-owner" else "legacy-owner", revision=revision
             )
     observed = observations[0]
     changed = replace(
@@ -60,7 +62,7 @@ async def test_bundled_reference_matches_independent_actual_provisioning(
         objects=(replace(observed.objects[0], definition_sha256="f" * 64), *observed.objects[1:]),
     )
     with pytest.raises(ApplicationSchemaReferenceError, match="trusted reference"):
-        require_application_schema_reference(changed, profile=profile)
+        require_application_schema_reference(changed, profile=profile, revision=revision)
 
 
 def test_sealed_reference_is_distinct_from_legacy_reference() -> None:

@@ -83,3 +83,19 @@ def test_arbitrary_observation_is_not_reference_authority(postgres_major: int) -
     )
     with pytest.raises(ApplicationSchemaReferenceError, match="trusted reference"):
         require_application_schema_reference(observed)
+
+
+@pytest.mark.parametrize("major", [16, 17])
+@pytest.mark.parametrize("profile", ["legacy-owner", "sealed-owner", "staging-readonly-legacy-owner", "staging-readonly-sealed-owner"])
+def test_supported_baseline_has_independent_revision_pins(major, profile):
+    baseline = application_schema_reference(profile=profile, postgres_major=major, revision="0134/guard_0030")
+    current = application_schema_reference(profile=profile, postgres_major=major)
+    assert (baseline.application_head, baseline.guard_head) == ("0134", "guard_0030")
+    assert baseline.inventory_sha256 != current.inventory_sha256
+    assert baseline.object_count < current.object_count
+
+
+@pytest.mark.parametrize("revision", [None, "head", "0134/guard_0033", "0142/guard_0030", "f" * 64])
+def test_unreviewed_revision_pair_is_not_reference_authority(revision):
+    with pytest.raises(ApplicationSchemaReferenceError, match="revision"):
+        application_schema_reference(revision=revision)
