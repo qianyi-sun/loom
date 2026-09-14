@@ -469,7 +469,7 @@ def test_cnpg_effective_sql_admission_rejects_unconfigured_database_writers(cnpg
     from loom_cli.rollout.operator.protected_peer_database_connection import PeerDatabaseConnection
     from tests.integration.test_application_database_admission import _handoff
 
-    argv, _kube, pod, _manager = cnpg_probe
+    argv, kube, pod, _manager = cnpg_probe
     def peer(database):
         return PeerDatabaseConnection(subprocess.Popen(
             argv('exec', '-i', pod, '-c', 'postgres', '--', 'env', 'PGOPTIONS=-c event_triggers=off',
@@ -489,6 +489,8 @@ def test_cnpg_effective_sql_admission_rejects_unconfigured_database_writers(cnpg
             ("CREATE FUNCTION public.foreign_hook() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$", 'DROP FUNCTION public.foreign_hook()'),
             ("CREATE PUBLICATION foreign_pub", 'DROP PUBLICATION foreign_pub'),
             ('CREATE ROLE foreign_superuser SUPERUSER NOLOGIN', 'DROP ROLE foreign_superuser'),
+            ("CREATE FUNCTION public.extra_native(internal) RETURNS internal LANGUAGE C STRICT AS '$libdir/dict_snowball','dsnowball_init'",
+             'DROP FUNCTION public.extra_native(internal)'),
         ]
         for create, cleanup in cases:
             try:
@@ -500,6 +502,16 @@ def test_cnpg_effective_sql_admission_rejects_unconfigured_database_writers(cnpg
                 with maintenance.transaction():
                     maintenance.execute(cleanup)
             assert check()
+        auto = '/var/lib/postgresql/data/pgdata/postgresql.auto.conf'
+        original_config = kube('exec', pod, '-c', 'postgres', '--', 'cat', auto)
+        try:
+            kube('exec', '-i', pod, '-c', 'postgres', '--', 'sh', '-ceu', 'cat >> "$1"', 'sh', auto,
+                 data=b"\nsession_preload_libraries = 'foreign_hook'\n")
+            with pytest.raises(RuntimeError, match='CNPG SQL pending'):
+                check()
+        finally:
+            kube('exec', '-i', pod, '-c', 'postgres', '--', 'sh', '-ceu', 'cat > "$1"', 'sh', auto, data=original_config)
+        assert check()
         with maintenance.transaction():
             maintenance.execute("SET session_preload_libraries='foreign_hook'")
         with pytest.raises(RuntimeError, match='CNPG SQL'):
