@@ -269,7 +269,7 @@ def _validate_history(plan: FinalGatePlan, events: Sequence[ApplicationMigration
                 raise ValueError("application migration phase skipped an original prerequisite")
             if phase in _EMPTY:
                 _fields(payload, set())
-                if phase == "closed" and "role" not in phases:
+                if phase == "closed" and "role" not in phases and not capacity:
                     raise ValueError("application migration closure lacks a recorded role")
             elif phase == "role":
                 _fields(payload, {"oid"})
