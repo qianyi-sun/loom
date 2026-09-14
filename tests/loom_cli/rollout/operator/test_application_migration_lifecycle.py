@@ -1,14 +1,19 @@
 """Real journal ordering across interrupted migration effects; no live resources."""
 
 import os
-from dataclasses import asdict, replace
+from dataclasses import replace
 
 import pytest
 
-from loom_cli.rollout.operator.protected_application_guard_retention import application_guard_is_retained
+from loom_cli.rollout.operator.protected_application_guard_retention import (
+    application_guard_is_retained,
+)
 from tests.loom_cli.rollout.operator.test_application_admission_recovery import _component, _handoff
 from tests.loom_cli.rollout.operator.test_application_guard_retention import _guard, _setup
-from tests.loom_cli.rollout.operator.test_application_migration_journal import _authority, _generation
+from tests.loom_cli.rollout.operator.test_application_migration_journal import (
+    _authority,
+    _generation,
+)
 from tests.loom_cli.rollout.operator.test_application_migration_resources import _resources
 
 
@@ -18,8 +23,12 @@ class ProcessLost(BaseException):
 
 @pytest.mark.parametrize("interrupt", [None, "create", "arm", "seal", "close", "retire", "reopen"])
 def test_migration_lifecycle_recovers_and_retires_before_delivering_fresh_credentials(tmp_path, interrupt):
-    from loom_cli.rollout.operator.protected_application_migration_journal import ApplicationMigrationJournal
-    from loom_cli.rollout.operator.protected_application_migration_lifecycle import ApplicationMigrationLifecycle
+    from loom_cli.rollout.operator.protected_application_migration_journal import (
+        ApplicationMigrationJournal,
+    )
+    from loom_cli.rollout.operator.protected_application_migration_lifecycle import (
+        ApplicationMigrationLifecycle,
+    )
 
     plan, journal = _setup(tmp_path)
     guard = _guard(plan)
