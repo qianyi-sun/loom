@@ -5,6 +5,8 @@ simulate sudo identity to isolate node guards. No host cgroup or writable host
 mount is exposed; this is not installed Slurm acceptance.
 """
 
+import asyncio
+import hashlib
 import os
 import pwd
 import socket
@@ -18,6 +20,8 @@ from loom_capacity_agent.native_recovery_publication import NativeRecoveryReceip
 from loom_capacity_build_guard.native_recovery_sender import (
     NativeNodeRecoveryRequestV1,
     NativeNodeRecoveryResultV1,
+    NativeRecoveryTargetV1,
+    _exchange,
 )
 from loom_capacity_executor.native_mapped_scratch import _mount_id
 from loom_capacity_executor.native_node_recovery import run_native_recovery_helper
@@ -59,6 +63,7 @@ def ssh_recover(request, policy_path, policy_digest):
     # Fail closed host-key checking even for this private loopback-only daemon.
     known_hosts = root / "known_hosts"
     known_hosts.write_bytes(b"[127.0.0.1]:22222 " + host_key.with_suffix(".pub").read_bytes())
+    known_hosts.chmod(0o600)
     # /run is a new container-private tmpfs, hiding image-build directories.
     Path("/run/sshd").mkdir(mode=0o755)
     Path("/run/loom-native-recovery").mkdir(mode=0o755)
@@ -89,10 +94,15 @@ def ssh_recover(request, policy_path, policy_digest):
         rejected = subprocess.run([*argv[:-1], "-N", "-o", "ExitOnForwardFailure=yes", "-R",
             "127.0.0.1:0:127.0.0.1:22222", argv[-1]], capture_output=True, timeout=5)
         assert rejected.returncode == 255 and b"remote port forwarding failed" in rejected.stderr
-        result = subprocess.run(argv, input=canonical_bytes(request), capture_output=True, timeout=30)
-        assert result.returncode == 0, (result.stderr.decode(), (root / "sshd-error").read_text())
-        parsed = NativeNodeRecoveryResultV1.model_validate_json(result.stdout)
-        assert canonical_bytes(parsed) + b"\n" == result.stdout
+        target = NativeRecoveryTargetV1(installation_id=request.history.profile.installation_id,
+            pool_id=request.history.profile.pool_id, node_id=request.history.host.node_id,
+            address="127.0.0.1", port=22222, profile_sha256=canonical_digest(request.history.profile),
+            host_sha256=canonical_digest(request.history.host), identity=str(client_key),
+            identity_sha256=hashlib.sha256(client_key.read_bytes()).hexdigest(), known_hosts=str(known_hosts),
+            known_hosts_sha256=hashlib.sha256(known_hosts.read_bytes()).hexdigest())
+        reply = asyncio.run(_exchange(target, canonical_bytes(request), timeout_seconds=30))
+        parsed = NativeNodeRecoveryResultV1.model_validate_json(reply)
+        assert canonical_bytes(parsed) + b"\n" == reply
         return parsed
     finally:
         daemon.terminate()
