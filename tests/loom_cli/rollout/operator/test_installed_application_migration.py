@@ -46,3 +46,30 @@ def test_installed_migration_selects_retained_epoch_without_ordinary_sql(tmp_pat
     assert calls == [] and not journal.root.exists()
     assert factory.epoch(plan) == plan.starting_mutation_epoch + 1
     assert calls == ["retained" if acknowledged else "ordinary"]
+
+
+def test_installed_capacity_binds_original_chain_without_opening_database(tmp_path):
+    from loom_cli.rollout.operator.installed_application_handoff import InstalledApplicationHandoffFactory
+    from loom_cli.rollout.operator.installed_application_migration import InstalledApplicationMigrationFactory
+    from loom_cli.rollout.operator.protected_apply_journal import ProtectedApplyJournal
+    from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
+        KubernetesProtectedStagingCapacityDatabaseComponent,
+    )
+
+    plan, config = _plan(tmp_path), _config(tmp_path)
+    runner = SimpleNamespace(environment={})
+    handoff = InstalledApplicationHandoffFactory(config=config, service_uid=os.getuid(),
+        runner=runner, successor_source=lambda *args: None)
+    factory = InstalledApplicationMigrationFactory(handoff=handoff, container_registry="registry.example")
+    journal = ProtectedApplyJournal(config.state_root, request_id=plan.request_id, attempt_number=plan.attempt_number)
+    base = KubernetesProtectedStagingCapacityDatabaseComponent(runner, "registry.example", lambda: {})
+    capacity = factory.capacity(plan, journal=journal, ordinal=5, handoff_ordinal=2,
+        base=base, seed_source=lambda: {})
+    assert capacity.component_id == "staging-capacity-database"
+    assert capacity.terminal_recovery_authority is None
+    owner = capacity.apply.__self__
+    assert owner.journal is journal and owner.ordinal == 5
+    assert owner.base.application_owner_role == "loom_app_staging_owner"
+    assert not journal.root.exists()
+    with pytest.raises(ValueError, match="ordinal"):
+        factory.capacity(plan, journal=journal, ordinal=4, handoff_ordinal=2, base=base, seed_source=lambda: {})
