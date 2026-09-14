@@ -41,52 +41,64 @@ func loadBundleDownloadTrust(disk bundleTrustDiskConfig, releaseRoot string) (Bu
 	if _, err := registeredBundleOrigin(trust); err != nil {
 		return BundleDownloadTrust{}, err
 	}
-	if !isDigest(disk.CA.SHA256) {
-		return BundleDownloadTrust{}, errors.New("bundle trust CA digest invalid")
-	}
-	payload, err := readBundleReleaseCA(disk.CA.Path, releaseRoot)
+	payload, err := loadReleaseCAPEM(disk.CA, releaseRoot)
 	if err != nil {
 		return BundleDownloadTrust{}, err
 	}
-	if fmt.Sprintf("%x", sha256.Sum256(payload)) != disk.CA.SHA256 {
-		return BundleDownloadTrust{}, errors.New("bundle trust CA digest mismatch")
+	trust.Roots = x509.NewCertPool()
+	if !trust.Roots.AppendCertsFromPEM(payload) {
+		return BundleDownloadTrust{}, errors.New("bundle trust CA unavailable")
 	}
-	roots := x509.NewCertPool()
+	return trust, nil
+}
+
+// loadReleaseCAPEM returns an owned snapshot of public CA data from one exact
+// immutable release member. Bundle and publication trust share this boundary,
+// but retain independently configured endpoints and roots.
+func loadReleaseCAPEM(member executableDiskConfig, releaseRoot string) ([]byte, error) {
+	if !isDigest(member.SHA256) {
+		return nil, errors.New("release CA digest invalid")
+	}
+	payload, err := readBundleReleaseCA(member.Path, releaseRoot)
+	if err != nil {
+		return nil, err
+	}
+	if fmt.Sprintf("%x", sha256.Sum256(payload)) != member.SHA256 {
+		return nil, errors.New("release CA digest mismatch")
+	}
 	count := 0
 	for remaining := bytes.TrimSpace(payload); len(remaining) > 0; {
 		// A CA artifact is public trust data only. Do not silently ignore private
 		// keys, unknown PEM blocks or arbitrary bytes around an otherwise valid CA.
 		if !bytes.HasPrefix(remaining, []byte("-----BEGIN CERTIFICATE-----")) {
-			return BundleDownloadTrust{}, errors.New("bundle trust CA PEM invalid")
+			return nil, errors.New("release CA PEM invalid")
 		}
 		end := bytes.Index(remaining, []byte("-----END CERTIFICATE-----"))
 		if end < 0 {
-			return BundleDownloadTrust{}, errors.New("bundle trust CA PEM invalid")
+			return nil, errors.New("release CA PEM invalid")
 		}
 		end += len("-----END CERTIFICATE-----")
 		encoded := remaining[:end]
 		// pem.Decode searches past malformed leading blocks; isolate exactly one
 		// block so a later valid certificate cannot conceal invalid preceding data.
 		if bytes.Count(encoded, []byte("-----BEGIN CERTIFICATE-----")) != 1 {
-			return BundleDownloadTrust{}, errors.New("bundle trust CA PEM invalid")
+			return nil, errors.New("release CA PEM invalid")
 		}
 		block, rest := pem.Decode(encoded)
 		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) != 0 || len(bytes.TrimSpace(rest)) != 0 {
-			return BundleDownloadTrust{}, errors.New("bundle trust CA PEM invalid")
+			return nil, errors.New("release CA PEM invalid")
 		}
 		certificate, err := x509.ParseCertificate(block.Bytes)
 		if err != nil || !certificate.IsCA || !certificate.BasicConstraintsValid {
-			return BundleDownloadTrust{}, errors.New("bundle trust CA certificate invalid")
+			return nil, errors.New("release CA certificate invalid")
 		}
-		roots.AddCert(certificate)
 		count++
 		remaining = bytes.TrimSpace(remaining[end:])
 	}
 	if count == 0 {
-		return BundleDownloadTrust{}, errors.New("bundle trust CA unavailable")
+		return nil, errors.New("release CA unavailable")
 	}
-	trust.Roots = roots
-	return trust, nil
+	return payload, nil
 }
 
 func readBundleReleaseCA(memberPath, releaseRoot string) ([]byte, error) {

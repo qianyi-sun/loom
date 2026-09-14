@@ -7,6 +7,13 @@ and record an immutable publication candidate. It does not activate builder
 production publication, does not mark materializations ready, and does not
 grant task execution from registry state.
 
+Later supervisor composition supports explicit release-pinned publication
+configuration and the V2 verification/receipt lifecycle. That does not activate
+Phase 2 or relax this runbook's deployment boundary. The supervisor's public
+trust fields are documented in the
+[supervisor runbook](task-image-builder-phase2c-supervisor.md#safety-boundary);
+registry signing keys remain authority-only, never supervisor configuration.
+
 ## Inert production boundary
 
 Keep these conditions true until a later protected activation explicitly

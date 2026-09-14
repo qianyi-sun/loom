@@ -328,6 +328,22 @@ are exactly
 `loom-task-image-shadow/<campaign-id>/<architecture>/<attempt-id>/<component>`.
 Registry repository authorization, not a tag prefix, enforces this separation.
 
+The supervisor selects its publication lifecycle only when the root-owned
+release configuration includes the complete optional `publication` group:
+`origin`, `service`, `server_name`, `issuer`, `key_id`, and `ca` (`path`, `sha256`).
+The key ID is the registry key's 43-character RFC 7638 SHA-256 JWK thumbprint,
+not a descriptive key label. The CA is a root-owned 0444 public-certificate
+member beneath the same immutable 0555 release tree as the supervisor. Loading
+checks its digest, rejects symlinks and non-CA/private-key content, and captures
+an owned trust snapshot. Bundle and publication trust are independent; neither
+uses ambient TLS roots. Credentials remain guard-mediated, not configuration
+data. Missing publication configuration keeps the handoff disabled; incomplete,
+null, unknown, or case-ambiguous configuration refuses startup before guard or
+environment effects. Explicit configuration composes upload, V2 candidate
+recording, verification submit/poll, and exact completion-receipt validation;
+upload alone is never readiness. This composition does not enable provider
+policy, provision authority/signing services, or establish native acceptance.
+
 Publication statements use RFC 8785 canonical JSON and Ed25519 domain-separated
 signatures. Publication keys are distinct from execution-grant, bootstrap, and
 registry keys. Routine rotation preserves verify-only keys. Compromise
