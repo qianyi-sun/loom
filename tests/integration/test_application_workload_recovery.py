@@ -104,6 +104,9 @@ async def test_real_workload_pause_and_sql_recovery_survive_lost_patch_ack(
                        candidate_tree=plan.candidate_tree, generation=evidence.generation)
         with _closed(transfer_database, request=request) as (peer, maintenance, db_guard, arguments):
             arguments["password"] = "ab" * 16
+            # The protected-staging fixture uses CNPG's template0/C database.
+            # Match the installed completion adapter's independently pinned ACL profile.
+            arguments["schema_acl_profile"] = "cnpg-staging"
             evidence = MutationGuardEvidence.build(**{
                 k: v for k, v in evidence.to_dict().items()
                 if k not in {"schema_version", "evidence_digest", "database_backend_pid", "cronjob_uid", "suspended_resource_version"}
