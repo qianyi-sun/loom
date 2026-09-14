@@ -8,7 +8,7 @@ import pytest
 from loom_capacity_build_guard.native_recovery_sender import NativeNodeRecoveryRequestV1
 from loom_capacity_build_guard.native_terminal_recovery import NativeTerminalRecoveryStore
 from loom_capacity_build_guard.terminal_recovery import BuildTerminalRecoveryCoordinator
-from loom_capacity_manager.contracts import canonical_digest
+from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 from tests.integration.test_native_terminal_recovery_readback import (
     build_guard_database as build_guard_database,
 )
@@ -68,6 +68,9 @@ async def test_node_policy_binds_retained_history_without_accepting_caller_paths
     assert str(bound.source) == prepared.request.record.locator.directory
     assert bound.identity.inode == prepared.request.record.locator.inode
     assert bound.scope == scope
+    # The installed worker keeps its original V1 locator on disk. Final V2
+    # mapping publication is protected history, not a local locator rewrite.
+    assert bound.locator_wire == canonical_bytes(prepared.request.record.locator)
     assert bound.key == module.bind_native_node_recovery(policy, request.model_copy(update={"invocation_id": uuid4()})).key
     if final is None:
         assert bound.identity.uid_ranges == ((history.host.original_uid, 1),)
