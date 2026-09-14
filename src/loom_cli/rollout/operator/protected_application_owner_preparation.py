@@ -75,17 +75,19 @@ class ApplicationOwnerCreationIntent:
                    ApplicationDatabaseCoordinationGuard(_backend(guard["backend"]), guard["role_oid"], guard["application_name"]))
 
 
-def _observe(connection: ApplicationDatabaseConnection, guard: MutationGuardEvidence,
+def _observe(connection: ApplicationDatabaseConnection, guard: MutationGuardEvidence, *, owner_role: str = "loom",
              ) -> tuple[ApplicationDatabaseHandoffBackend, ApplicationDatabaseCoordinationGuard]:
+    if owner_role not in {"loom", APPLICATION_OWNER_ROLE}:
+        raise ValueError("application owner observer role is invalid")
     with connection.transaction():
         connection.execute("SET TRANSACTION READ ONLY")
         connection.execute("SET LOCAL search_path=pg_catalog,pg_temp")
-        if connection.execute(
+        if connection.execute(application_sql(
             "SELECT current_database()='loom' AND current_user=session_user AND current_user='postgres' "
             "AND r.rolsuper AND current_setting('transaction_isolation')='read committed' "
-            "AND pg_get_userbyid(d.datdba)='loom' FROM pg_roles r CROSS JOIN pg_database d "
-            "WHERE r.rolname=current_user AND d.datname=current_database()"
-        ).fetchone() != (True,):
+            "AND pg_get_userbyid(d.datdba)={} FROM pg_roles r CROSS JOIN pg_database d "
+            "WHERE r.rolname=current_user AND d.datname=current_database()", owner_role,
+        )).fetchone() != (True,):
             raise RuntimeError("application owner preparation database authority changed")
         row = connection.execute(
             "SELECT a.pid,a.backend_start::text,s.system_identifier::text,pg_postmaster_start_time()::text,a.datid::bigint "
