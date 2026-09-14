@@ -113,11 +113,13 @@ def _run_converger(
     _fake_scontrol(fake_bin)
     config = tmp_path / "etc" / "slurm.conf"
     config.parent.mkdir()
+    config.parent.chmod(0o755)
     config.write_text(config_text, encoding="utf-8")
     config.chmod(config_mode)
     authority = tmp_path / "authority"
     if backup_text is not None:
         authority.mkdir()
+        authority.chmod(0o755)
         backup = authority / "slurm.conf.before-loom-staging-partition"
         backup.write_text(backup_text, encoding="utf-8")
         backup.chmod(backup_mode)
@@ -247,7 +249,8 @@ def test_canonical_durable_partition_reloads_missing_live_state(tmp_path: Path) 
 
     assert result.returncode == 0, result.stderr
     assert config.read_text(encoding="utf-8") == canonical_config
-    assert not authority.exists()
+    assert not (authority / "slurm.conf.before-loom-staging-partition").exists()
+    assert (authority / "slurm.conf.before-root-authority").read_text() == canonical_config
     assert reconfigure_count.read_text(encoding="utf-8") == "1\n"
 
 
@@ -262,7 +265,8 @@ def test_canonical_durable_partition_reloads_drifted_live_state(tmp_path: Path) 
 
     assert result.returncode == 0, result.stderr
     assert config.read_text(encoding="utf-8") == canonical_config
-    assert not authority.exists()
+    assert not (authority / "slurm.conf.before-loom-staging-partition").exists()
+    assert (authority / "slurm.conf.before-root-authority").read_text() == canonical_config
     assert reconfigure_count.read_text(encoding="utf-8") == "1\n"
 
 

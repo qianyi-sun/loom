@@ -7,8 +7,10 @@ CLUSTER="trt-oldlab"
 CONFIG="/etc/slurm/slurm.conf"
 STATE_ROOT="/var/lib/loom-oldlab-slurm-authority"
 BACKUP="$STATE_ROOT/slurm.conf.before-loom-staging-partition"
-CONFIG_OWNER="trt"
-CONFIG_GROUP="sharedwork"
+CONFIG_OWNER="root"
+CONFIG_GROUP="root"
+LEGACY_CONFIG_OWNER="trt"
+LEGACY_CONFIG_GROUP="sharedwork"
 STATE_OWNER="root"
 STATE_GROUP="root"
 ANCHOR_LINE="PartitionName=all Nodes=ALL Default=YES MaxTime=INFINITE State=UP OverSubscribe=NO"
@@ -16,9 +18,75 @@ PARTITION="loom-staging"
 PARTITION_LINE="PartitionName=$PARTITION Nodes=trt-eai-oldlab-[3-5] Default=NO MaxTime=2-00:00:00 State=UP PriorityTier=100 AllowGroups=loom-rollout OverSubscribe=NO"
 EXPECTED_NODES=$'trt-eai-oldlab-3\ntrt-eai-oldlab-4\ntrt-eai-oldlab-5'
 
+loom_oldlab_harden_authority() {
+  local snapshot="$STATE_ROOT/slurm.conf.before-root-authority"
+  local temporary=""
+  local identity
+  local metadata
+  local parent
+  local parent_mode
+
+  metadata="$(stat -c '%U:%G:%a:%F:%h' "$CONFIG")"
+  if [ ! -L "$CONFIG" ] \
+    && [ "$metadata" = "$CONFIG_OWNER:$CONFIG_GROUP:644:regular file:1" ]; then
+    return
+  fi
+  parent="$(dirname "$CONFIG")"
+  parent_mode="$(stat -c '%a' "$parent")"
+  if [ -L "$CONFIG" ] || [ -L "$parent" ] \
+    || [ "$metadata" != "$LEGACY_CONFIG_OWNER:$LEGACY_CONFIG_GROUP:664:regular file:1" ] \
+    || [ "$(stat -c '%U:%G:%F' "$parent")" != "$CONFIG_OWNER:$CONFIG_GROUP:directory" ] \
+    || (( (8#$parent_mode & 0022) != 0 )); then
+    echo "error: Slurm authority migration metadata is unsafe" >&2
+    exit 1
+  fi
+  identity="$(stat -c '%d:%i:%u:%g:%a:%h:%s:%y:%z' "$CONFIG")"
+  if [ -e "$STATE_ROOT" ] || [ -L "$STATE_ROOT" ]; then
+    if [ -L "$STATE_ROOT" ] \
+      || [ "$(stat -c '%U:%G:%a:%F' "$STATE_ROOT")" != "$STATE_OWNER:$STATE_GROUP:755:directory" ]; then
+      echo "error: OLDLAB authority snapshot directory is unsafe" >&2
+      exit 1
+    fi
+  else
+    install -d -o "$STATE_OWNER" -g "$STATE_GROUP" -m 0755 "$STATE_ROOT"
+  fi
+  if [ -e "$snapshot" ] || [ -L "$snapshot" ]; then
+    if [ -L "$snapshot" ] \
+      || [ "$(stat -c '%U:%G:%a:%F:%h' "$snapshot")" != "$STATE_OWNER:$STATE_GROUP:600:regular file:1" ] \
+      || ! cmp -s "$snapshot" "$CONFIG"; then
+      echo "error: OLDLAB authority snapshot is unsafe or stale" >&2
+      exit 1
+    fi
+  else
+    install -o "$STATE_OWNER" -g "$STATE_GROUP" -m 0600 "$CONFIG" "$snapshot"
+    sync -f "$snapshot"
+  fi
+  temporary="$(mktemp "$parent/.slurm.conf.authority.XXXXXX")"
+  trap 'if [ -n "${temporary:-}" ] && [ -e "$temporary" ]; then unlink "$temporary"; fi' EXIT
+  install -o "$CONFIG_OWNER" -g "$CONFIG_GROUP" -m 0644 "$snapshot" "$temporary"
+  sync -f "$temporary"
+  if [ -L "$CONFIG" ] \
+    || [ "$(stat -c '%d:%i:%u:%g:%a:%h:%s:%y:%z' "$CONFIG")" != "$identity" ] \
+    || ! cmp -s "$CONFIG" "$snapshot"; then
+    echo "error: OLDLAB configuration changed during authority migration" >&2
+    exit 1
+  fi
+  # A new inode retires pre-existing writable descriptors to the legacy file.
+  # Bytes are unchanged, so metadata migration alone never reloads the controller.
+  mv -T "$temporary" "$CONFIG"
+  temporary=""
+  trap - EXIT
+  sync -f "$parent"
+  if [ "$(stat -c '%U:%G:%a:%F:%h' "$CONFIG")" != "$CONFIG_OWNER:$CONFIG_GROUP:644:regular file:1" ] \
+    || ! cmp -s "$CONFIG" "$snapshot"; then
+    echo "error: OLDLAB authority migration readback failed" >&2
+    exit 1
+  fi
+}
+
 loom_oldlab_restore_backup_and_fail() {
   local failure="$1"
-  install -o "$CONFIG_OWNER" -g "$CONFIG_GROUP" -m 0664 "$BACKUP" "$CONFIG"
+  install -o "$input_owner" -g "$input_group" -m "$input_mode" "$BACKUP" "$CONFIG"
   if ! scontrol reconfigure; then
     echo "error: $failure; restored backup on disk, but Slurm rejected the restored backup reconfigure" >&2
     exit 1
@@ -84,14 +152,23 @@ loom_oldlab_converge_partition() {
   local partition_count
   local partition_state
   local temporary=""
+  local input_owner="$CONFIG_OWNER"
+  local input_group="$CONFIG_GROUP"
+  local input_mode=0644
+  local metadata
   if ! scontrol show config | grep -E \
     "^ClusterName[[:space:]]*=[[:space:]]*$CLUSTER$" >/dev/null; then
     echo "error: local Slurm cluster does not match OLDLAB" >&2
     exit 1
   fi
-  if [ -L "$CONFIG" ] \
-    || [ "$(stat -c '%U:%G:%a:%F' "$CONFIG")" \
-      != "$CONFIG_OWNER:$CONFIG_GROUP:664:regular file" ]; then
+  metadata="$(stat -c '%U:%G:%a:%F:%h' "$CONFIG")"
+  if [ ! -L "$CONFIG" ] \
+    && [ "$metadata" = "$LEGACY_CONFIG_OWNER:$LEGACY_CONFIG_GROUP:664:regular file:1" ]; then
+    input_owner="$LEGACY_CONFIG_OWNER"
+    input_group="$LEGACY_CONFIG_GROUP"
+    input_mode=0664
+  elif [ -L "$CONFIG" ] \
+    || [ "$metadata" != "$CONFIG_OWNER:$CONFIG_GROUP:644:regular file:1" ]; then
     echo "error: Slurm configuration metadata is unsafe" >&2
     exit 1
   fi
@@ -120,8 +197,8 @@ loom_oldlab_converge_partition() {
     trap 'if [ -n "${temporary:-}" ] && [ -e "$temporary" ]; then unlink "$temporary"; fi' EXIT
     awk -v anchor="$ANCHOR_LINE" -v partition="$PARTITION_LINE" \
       '{ print; if ($0 == anchor) print partition }' "$CONFIG" >"$temporary"
-    chown "$CONFIG_OWNER:$CONFIG_GROUP" "$temporary"
-    chmod 0664 "$temporary"
+    chown "$input_owner:$input_group" "$temporary"
+    chmod "$input_mode" "$temporary"
     mv "$temporary" "$CONFIG"
     temporary=""
     trap - EXIT
@@ -191,7 +268,8 @@ loom_oldlab_converge_partition() {
         "$partition_added"
     fi
   done
-  printf 'converged dedicated OLDLAB staging partition: trt-eai-oldlab-[3-5]\n'
+  loom_oldlab_harden_authority
+  printf 'converged dedicated OLDLAB staging partition and root-owned authority: trt-eai-oldlab-[3-5]\n'
 }
 
 main() {
