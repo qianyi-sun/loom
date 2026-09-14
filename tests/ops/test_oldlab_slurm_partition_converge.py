@@ -246,8 +246,12 @@ def test_hardened_input_stays_hardened_on_reconfigure_rollback(tmp_path: Path) -
 
 
 @pytest.mark.parametrize("kind", ["stale", "mode", "symlink", "hardlink"])
-def test_authority_snapshot_refusals_preserve_live_configuration(tmp_path: Path, kind: str) -> None:
+@pytest.mark.parametrize("scenario", ["exact", "missing-partition", "drifted-live"])
+def test_authority_snapshot_refusals_preserve_live_configuration(
+    tmp_path: Path, kind: str, scenario: str,
+) -> None:
     canonical = f"{INITIAL_CONFIG}{PARTITION_LINE}\n"
+    initial = INITIAL_CONFIG if scenario == "missing-partition" else canonical
 
     def prepare(config: Path, authority: Path, _bin: Path) -> None:
         authority.mkdir(mode=0o755)
@@ -263,11 +267,15 @@ def test_authority_snapshot_refusals_preserve_live_configuration(tmp_path: Path,
             snapshot.chmod(0o664 if kind == "mode" else 0o600)
 
     result, config, _authority, reload_count = _run_converger(
-        tmp_path, config_text=canonical, prepare_fixture=prepare,
+        tmp_path, config_text=initial, prepare_fixture=prepare,
+        partition_state_before_reconfigure=(
+            LIVE_PARTITION.replace("PriorityTier=100", "PriorityTier=1")
+            if scenario == "drifted-live" else ""
+        ),
     )
     assert result.returncode == 1
     assert "authority snapshot is unsafe or stale" in result.stderr
-    assert config.read_text() == canonical
+    assert config.read_text() == initial
     assert stat.S_IMODE(config.stat().st_mode) == 0o664
     assert not reload_count.exists()
 
