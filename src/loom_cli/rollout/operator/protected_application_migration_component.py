@@ -143,12 +143,12 @@ class ProtectedApplicationMigrationComponent:
         except FileNotFoundError:
             return None
         if (not _finished(events) or terminal.intent_digest != migration.intent.intent_digest
-                or terminal.component_id != "database-migration" or terminal.observed_epoch != self.plan.starting_mutation_epoch + 1
+                or terminal.component_id != self.component().component_id or terminal.observed_epoch != self.plan.starting_mutation_epoch + 1
                 or terminal.evidence_digest != self._evidence(events)):
             raise RuntimeError("application migration terminal has no completed retirement")
         from .protected_application_guard_retention import _read_pending_retention
         if _read_pending_retention(self.journal.attempt_root.parents[3], request_id=self.plan.request_id,
-                service_uid=self.journal.service_uid, require_record=True, component_id="database-migration") is not None:
+                service_uid=self.journal.service_uid, require_record=True, component_id=self.component().component_id) is not None:
             raise RuntimeError("application migration completed guard retention is still pending")
         self.journal._sync_application_recovery(migration.root, "terminal.json")
         return terminal
@@ -171,7 +171,7 @@ class ProtectedApplicationMigrationComponent:
 
     def _evidence(self, events: Sequence[ApplicationMigrationEvent]) -> str:
         return admission_record_digest({"migration_event_digest": events[-1].event_digest,
-            "target_revision": self.plan.migration_target_revision, "plan_digest": self.plan.plan_digest})
+            "target_revision": self._journal().target_revision, "plan_digest": self.plan.plan_digest})
 
     def classify(self, plan: FinalGatePlan) -> ComponentObservation:
         if plan != self.plan:

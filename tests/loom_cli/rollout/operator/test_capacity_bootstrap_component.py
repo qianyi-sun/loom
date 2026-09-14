@@ -71,9 +71,9 @@ def test_pending_capacity_classifies_without_application_database_reads(tmp_path
         values = {k: v for k, v in guard.to_dict().items() if k not in {"schema_version", "evidence_digest"}}
         current["guard"] = type(guard).build(**{**values, "generation": "d" * 32})
     elif drift:
-        current[drift] = "e" * 64
+        current[drift] = "f" * 64
     if drift:
-        with pytest.raises(RuntimeError, match="migration|capacity"):
+        with pytest.raises(RuntimeError, match=r"migration|capacity"):
             component.classify(plan)
     else:
         assert component.classify(plan).state is ComponentState.READY
