@@ -328,8 +328,9 @@ verifier container starts; Phase 1 behavior is unchanged.
 ### Refundable legacy claims and migration order
 
 Application migration `0144` adds the nullable legacy identity without upgrading
-old claims. A pre-start `node_setup_health` refund releases admission using the
-**old** attempt number, before the refundable counter changes. Only a released
+old claims. A pre-start `node_setup_health` refund releases admission in the
+`AFTER UPDATE` trigger using `OLD.attempt_count`, in the same transaction as the
+counter decrement. Only a released
 legacy reservation explicitly marked `trial_setup_refund` leaves the attempt/role
 uniqueness fence; active reservations, other release reasons (including NULL),
 and service/protected owners retain their fence. A later claim inserts a new

@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from loom_control_plane.routes.workers import _REQUEUE_TRIAL_RETRY_SQL
 from tests.integration.test_capacity_guard_migrations import _guard_config
 from tests.integration.test_protected_claim_application_migration import _config
 from tests.integration.test_trial_legacy_claim_identity import _claim, _seed
@@ -66,6 +67,43 @@ async def test_retained_claim_prevents_lossy_downgrade(
             assert await connection.scalar(text(
                 "SELECT legacy_claim_id FROM trials WHERE id=:id"
             ), {"id": trial_id}) == identity
+    finally:
+        await engine.dispose()
+
+
+async def test_refund_history_without_claim_identity_prevents_lossy_downgrade(
+    isolated_migration_postgres_url: str,
+) -> None:
+    config = _config(isolated_migration_postgres_url)
+    engine = create_async_engine(isolated_migration_postgres_url)
+    history = text(
+        "SELECT id, attempt, owner_kind, state, release_reason "
+        "FROM execution_admission_reservations WHERE trial_id=:id"
+    )
+    try:
+        async with async_sessionmaker(engine)() as session, session.begin():
+            trial_id, worker_id = await _seed(session)
+            assert await _claim(session, worker_id, shared=False) is not None
+            assert await session.scalar(_REQUEUE_TRIAL_RETRY_SQL, {
+                "trial_id": trial_id, "worker_id": worker_id,
+                "failure_reason": "node_setup_health", "failure_message": "fixture",
+                "retry_after_sec": 0,
+            }) == trial_id
+            # Disposable database only: isolate the independent refund-history
+            # refusal from the retained-UUID refusal tested above.
+            await session.execute(text(
+                "UPDATE trials SET legacy_claim_id=NULL WHERE id=:id"
+            ), {"id": trial_id})
+            before = (await session.execute(history, {"id": trial_id})).one()
+            assert before.state == "released" and before.release_reason == "trial_setup_refund"
+            assert await session.scalar(text(
+                "SELECT count(*) FROM trials WHERE legacy_claim_id IS NOT NULL"
+            )) == 0
+        with pytest.raises(DBAPIError, match="retained legacy claim identities"):
+            await asyncio.to_thread(command.downgrade, config, "0143")
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0144"
+            assert (await connection.execute(history, {"id": trial_id})).one() == before
     finally:
         await engine.dispose()
 

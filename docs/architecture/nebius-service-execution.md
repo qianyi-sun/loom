@@ -206,7 +206,8 @@ the concurrency seat and the audit evidence, not a cache derived from worker
 heartbeats.
 
 A pre-start legacy `node_setup_health` refund releases the old attempt's slot
-before decrementing the refundable attempt counter. Only that explicitly marked
+in an `AFTER UPDATE` trigger using `OLD.attempt_count`, in the same transaction as
+the refundable counter decrement. Only that explicitly marked
 released legacy reservation permits a new reservation with the same logical
 attempt/role; the old row stays immutable. Other release reasons, NULL reasons
 and nonlegacy owners retain their historical uniqueness fence. Every replacement
