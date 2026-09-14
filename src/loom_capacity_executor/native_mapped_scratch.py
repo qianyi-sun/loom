@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pydantic import TypeAdapter
+
 from loom_capacity_executor.native_mapper_capabilities import _require_mapped_root
 from loom_capacity_executor.native_oci_material import _open_directory
 
@@ -87,8 +89,9 @@ def capture_native_mapped_scratch(spec: NativeRootlessSpecV2) -> NativeMappedScr
 
     _require_mapped_root()
     # Revalidate even a caller-created model_copy before deriving deletion paths.
-    model = NativeRootlessSpecV3 if isinstance(spec, NativeRootlessSpecV3) else NativeRootlessSpecV2
-    model.model_validate_json(spec.model_dump_json())
+    # python -m executes the specification class in __main__, distinct from
+    # this canonical import. Validate serialized identity, not class identity.
+    spec = TypeAdapter(NativeRootlessSpecV2 | NativeRootlessSpecV3).validate_json(spec.model_dump_json())
     workspace = Path(spec.workspace)
     with ExitStack() as stack:
         attempt = _capture(workspace.parent, stack, private=True)
