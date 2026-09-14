@@ -33,3 +33,9 @@ KUBERNETES_WATCH_RESTARTS_TOTAL = Counter(
     "Watch restarts by bounded outcome.",
     labelnames=("outcome",),
 )
+
+RESOURCE_USAGE_ERRORS_TOTAL = Counter(
+    "loom_execution_actuator_resource_usage_errors_total",
+    "Non-fatal native telemetry errors by bounded collection/parse/persist operation.",
+    labelnames=("operation",),
+)

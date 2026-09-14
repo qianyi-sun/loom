@@ -140,6 +140,7 @@ def _render_yaml(
             label=source.name,
         )
     if source.name == _ACTUATOR_TEMPLATE:
+        text = text.replace("loom-execution-actuator-usage", str(target["namespace_name"]) + "-actuator-usage")
         text = _render_resource_quota(text, policy, label=source.name)
     if _SOURCE_TARGET in text:
         text = _replace_exact(

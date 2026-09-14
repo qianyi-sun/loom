@@ -9615,11 +9615,21 @@ class TrialResourceUsage(Base):
         ForeignKey("trials.id", ondelete="CASCADE"),
         nullable=False,
     )
-    worker_id: Mapped[UUID] = mapped_column(
+    worker_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("workers.id", ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
     )
+    execution_lease_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("execution_leases.id", ondelete="RESTRICT")
+    )
+    resource_generation: Mapped[int | None] = mapped_column(Integer)
+    target_id: Mapped[str | None] = mapped_column(Text)
+    pod_uid: Mapped[str | None] = mapped_column(Text)
+    cpu_sampled_max_nanocores: Mapped[int | None] = mapped_column(BigInteger)
+    memory_sampled_max_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    filesystem_sampled_max_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    ephemeral_storage_sampled_max_bytes: Mapped[int | None] = mapped_column(BigInteger)
     lifecycle_authority_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("data_lifecycle_authorities.id", ondelete="RESTRICT"),
