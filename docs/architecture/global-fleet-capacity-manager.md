@@ -657,6 +657,72 @@ to remove credentials while a Job or Pod still consumes them. These effects are
 subordinate to the migration journal and SQL retirement phases, not standalone
 rollout or credential authority.
 
+The private migration journal records a bounded, hash-chained sequence beneath
+its original component intent. It binds the completed handoff, original guard,
+credential and input digests, each fixed credential generation and creation peer,
+the role OID before SQL commit, and Secret/Job dispatch before delivery. Recovery
+retires an interrupted generation before issuing another credential. Replacement
+maintenance peers are recorded before continuing cleanup, after fresh catalog
+checks prove that their predecessors cannot still commit. An unrecorded or
+replaced role is never adopted.
+
+The migration lifecycle composes these SQL and Kubernetes phases. It seals the
+login, stops the generation's Job and Pods, closes database admission, retires
+role sessions and memberships, removes the role and Secret, then reopens admission
+with the original runtime password. Read-only resource reconciliation handles
+lost creation acknowledgements without recreating credentials. If an interrupted
+Job already committed its migration, the fully retired lifecycle can observe the
+target revision without rerunning it. A completed component checks enduring
+ownership, target revision and the absence of every retired generation's resources
+and roles under the current guard; a pending component retains its original guard
+and avoids ordinary application database reads.
+
+Generation manifests derive only names and credential references from the
+attested protected Job. The URL is fixed to the staging PostgreSQL read-write
+service and `loom` database with `verify-full` and the dedicated CA mount. CA
+admission checks the fixed CNPG Secret, owning cluster, unchanged Secret UID and
+resource version, certificate authority constraint and remaining validity. It
+retains only the public certificate. The installed migration factory shares the
+handoff's journal and input observers, and uses the retained epoch connection
+while admission can be closed. Apply and convergence select the same installed
+handoff/migration pair after the epoch claim, preserving their original ordinals.
+Before ordinary final admission reads, the worker resolves the original pending
+operation and invokes its installed recovery path under the same acknowledged
+guard. It requires a matching terminal and completed retention before proceeding.
+Normal prefix and convergence observations require later owner grants to have
+retired; they do not adopt active memberships as successor authority.
+
+Later requests select the original completed ownership transfer from a bounded
+inventory of private request journals. They revalidate its original plan, intent,
+phase chain and terminal, rejecting contradictory origins. A current guarded
+observation checks the enduring SQL effect and retired fences, then records a new
+observational terminal at ordinal two. Migration and capacity require that current
+terminal before consuming the original handoff evidence. Historical observations
+cannot authorize another ownership transfer or replace current operation guards.
+
+Capacity bootstrap uses a permanent migrator with exactly the application owner
+and guard owner memberships. Its SQL helpers retain both owner identities, keep
+the permanent roles sealed after session retirement and verify the original
+runtime password before reopening admission. The private ordered journal binds
+the six original capacity role OIDs, seed and preceding migration digests, and
+each fixed credential lease before delivery. A resumed generation must finish
+retirement before another can be armed. Installed apply, convergence and early
+recovery select this lifecycle at its original ordinal, passing the executing
+journal instance through the capacity component. Reopening follows exact resource
+retirement and removal of both owner memberships and the guard owner's temporary
+schema-creation grant. Ordinary credentials become durable only after full
+configuration observation; a retry preserves credentials already durable.
+
+An unused legacy authority can migrate only from its independently certified
+configuration and complete audit history. The component journals that initial
+state and the certified SQL digest before a credential generation, then executes
+the same bounded transaction through its recorded creation connection. Recovery
+observes a committed target before retrying. Unknown configuration or surviving
+legacy bootstrap resources cannot become fresh bootstrap authority. Completion
+also rechecks the original ordinary role OIDs and passwords. These checks establish
+the capacity database component's result; fleet activation retains its separate
+evidence requirements.
+
 The read-only CNPG operator observer admits the fixed 1.25.1 command, environment,
 security context, volume projections and absent configuration overrides. It brackets
 a host-process observation with unchanged Kubernetes inputs. The host reader binds

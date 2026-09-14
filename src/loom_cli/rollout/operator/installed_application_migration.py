@@ -8,6 +8,10 @@ from dataclasses import dataclass, replace
 from .final_gate_plan import FinalGatePlan
 from .installed_application_handoff import InstalledApplicationHandoffFactory
 from .protected_application_guard_retention import _read_pending_retention
+from .protected_application_handoff_history import (
+    CompletedApplicationHandoffOrigin,
+    select_completed_handoff,
+)
 from .protected_application_migration_ca import observe_application_migration_ca
 from .protected_application_migration_component import (
     ApplicationMigrationInputs,
@@ -41,8 +45,16 @@ class InstalledApplicationMigrationFactory:
     def components(self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal,
                    ordinal: int) -> tuple[ProtectedApplyComponent, ...]:
         """Construct the identical ordered pair without opening a database peer."""
-        return (self.handoff(plan, journal=journal, ordinal=ordinal),
-                self(plan, journal=journal, ordinal=ordinal + 1, handoff_ordinal=ordinal))
+        if ordinal != 2:
+            raise ValueError("installed application handoff ordinal changed")
+        origin = self._origin(plan)
+        ownership = (self.handoff(plan, journal=journal, ordinal=ordinal) if origin is None
+            else self.handoff.historical_component(plan, journal=journal, origin=origin))
+        return (ownership, self(plan, journal=journal, ordinal=ordinal + 1, handoff_ordinal=ordinal))
+
+    def _origin(self, plan: FinalGatePlan) -> CompletedApplicationHandoffOrigin | None:
+        return select_completed_handoff(plan, state_root=self.handoff.config.state_root,
+            service_uid=self.handoff.service_uid, build_component=self.handoff)
 
     def epoch(self, plan: FinalGatePlan) -> int:
         guard = self.handoff.completed_guard(plan)
@@ -69,8 +81,12 @@ class InstalledApplicationMigrationFactory:
         if ordinal != handoff_ordinal + 1:
             raise ValueError("installed application migration must directly follow its handoff")
         handoff = self.handoff.build(plan, journal=journal, ordinal=handoff_ordinal)
-        component = handoff.component(plan)
+        origin = self._origin(plan)
+        component = (handoff.component(plan) if origin is None
+            else self.handoff.historical_component(plan, journal=journal, origin=origin))
         def history() -> tuple[ApplicationRecoveryView, ComponentTerminal]:
+            if origin is not None:
+                return origin.admitted_for(plan, journal=journal, component=component)
             terminal = journal.read_application_handoff_terminal(plan, component, ordinal=handoff_ordinal)
             view = journal.read_application_recovery_view(plan, component, ordinal=handoff_ordinal)
             if terminal is None or view is None:
@@ -83,7 +99,8 @@ class InstalledApplicationMigrationFactory:
         return ProtectedApplicationMigrationComponent(plan=plan, journal=journal, runner=self.handoff.runner,
             ordinal=ordinal, guard_source=lambda: self.handoff.completed_guard(plan), epoch_source=lambda: self.epoch(plan),
             inputs_source=inputs, handoff_source=history,
-            successor_source=lambda: self.handoff.successor_source(plan, journal), container_registry=self.container_registry)
+            successor_source=lambda: self.handoff.successor_source(plan, journal), container_registry=self.container_registry,
+            handoff_plan_source=None if origin is None else lambda: origin.plan)
 
     def capacity(self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal, ordinal: int,
                  handoff_ordinal: int, base: KubernetesProtectedStagingCapacityDatabaseComponent,
@@ -104,4 +121,4 @@ class InstalledApplicationMigrationFactory:
             inputs_source=migration.inputs_source, handoff_source=migration.handoff_source,
             successor_source=migration.successor_source, container_registry=self.container_registry,
             base=replace(base, application_owner_role=APPLICATION_OWNER_ROLE), seed_source=seed_source,
-            migration_source=history).component()
+            migration_source=history, handoff_plan_source=migration.handoff_plan_source).component()

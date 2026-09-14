@@ -96,7 +96,9 @@ def test_history_rejects_unsafe_request_directory(tmp_path, monkeypatch):
 
 
 def test_historical_origin_requires_its_new_observer_terminal_before_migration(tmp_path, monkeypatch):
-    from loom_cli.rollout.operator.protected_application_completed import historical_handoff_evidence
+    from loom_cli.rollout.operator.protected_application_completed import (
+        historical_handoff_evidence,
+    )
     from loom_cli.rollout.operator.protected_application_handoff_history import (
         HISTORICAL_HANDOFF_IMPLEMENTATION,
         select_completed_handoff,
@@ -107,7 +109,7 @@ def test_historical_origin_requires_its_new_observer_terminal_before_migration(t
     journal = ProtectedApplyJournal(root, request_id=current.request_id, attempt_number=current.attempt_number)
     observer = replace(component, implementation_digest=HISTORICAL_HANDOFF_IMPLEMENTATION,
         input_fingerprint=historical_handoff_evidence(current, origin.terminal))
-    with pytest.raises(RuntimeError, match="current.*terminal"):
+    with pytest.raises(RuntimeError, match=r"current.*terminal"):
         origin.admitted_for(current, journal=journal, component=observer)
     for directory in (journal.attempt_root.parent.parent, journal.attempt_root.parent, journal.attempt_root,
                       journal.root, journal.root / "02-application-ownership-handoff"):
@@ -119,5 +121,5 @@ def test_historical_origin_requires_its_new_observer_terminal_before_migration(t
     journal._publish_or_match(component_root / "intent.json", intent.to_dict())
     journal._publish_or_match(component_root / "terminal.json", terminal.to_dict())
     assert origin.admitted_for(current, journal=journal, component=observer) == origin.read()
-    with pytest.raises(RuntimeError, match="current.*terminal"):
+    with pytest.raises(RuntimeError, match=r"current.*terminal"):
         origin.admitted_for(current, journal=journal, component=replace(observer, input_fingerprint="0" * 64))
