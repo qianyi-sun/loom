@@ -183,12 +183,21 @@ class NativeQuarantineJournal:
                 if quarantined is not None:
                     raise ValueError("completed quarantine unexpectedly reappeared")
                 return "completed"  # Owner teardown may already have removed its scratch root.
-            source_parent = _open_directory(self._source.parent, stack)
-            metadata = os.fstat(source_parent)
-            if ((metadata.st_uid, metadata.st_gid) != (self._identity.uid_ranges[0][0], self._identity.gid_ranges[0][0])
-                or stat.S_IMODE(metadata.st_mode) != 0o700 or _mount_id(source_parent) != self._identity.mount_id):
-                raise ValueError("quarantine source parent identity changed")
-            source = self._attempt(source_parent, self._source.name, stack)
+            source_parent: int | None
+            try:
+                source_parent = _open_directory(self._source.parent, stack)
+            except FileNotFoundError:
+                if self._progress is None:
+                    raise ValueError("quarantine source absence lacks a retained transition") from None
+                source_parent = None
+            if source_parent is not None:
+                metadata = os.fstat(source_parent)
+                if ((metadata.st_uid, metadata.st_gid) != (self._identity.uid_ranges[0][0], self._identity.gid_ranges[0][0])
+                    or stat.S_IMODE(metadata.st_mode) != 0o700 or _mount_id(source_parent) != self._identity.mount_id):
+                    raise ValueError("quarantine source parent identity changed")
+                source = self._attempt(source_parent, self._source.name, stack)
+            else:
+                source = None
             if self._progress is None:
                 if source is None or quarantined is not None:
                     raise ValueError("quarantine has no retained transition explaining its location")
@@ -196,6 +205,7 @@ class NativeQuarantineJournal:
             assert self._progress is not None
             if self._progress.phase == "quarantining":
                 if source is not None and quarantined is None:
+                    assert source_parent is not None
                     _rename_exclusive(source_parent, self._source.name, destination)
                     os.fsync(source_parent)
                     os.fsync(destination)
