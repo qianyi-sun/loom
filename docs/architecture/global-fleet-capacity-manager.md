@@ -628,6 +628,16 @@ admission may be closed. The original handoff-only entrypoint remains restricted
 to handoff recovery. Installed worker dispatch must invoke the general entrypoint
 before its normal database admission reads.
 
+The migration artifact builder can bind the fixed separated staging owner into
+its digest and deterministic Job name. That profile references a dedicated
+per-Job Secret for the temporary database URL and CA, passes the explicit owner
+to Alembic, disables service-account token mounting and uses a non-root process
+with a read-only filesystem. It omits automatic Job TTL deletion so the protected
+lifecycle can observe and retire the exact Job and its Pods. Artifact inspection
+rejects a runtime credential substitution, changed owner, extra environment
+authority or automatic deletion. The existing default renderer remains available
+for legacy environments; installed selection requires the complete owner lifecycle.
+
 The read-only CNPG operator observer admits the fixed 1.25.1 command, environment,
 security context, volume projections and absent configuration overrides. It brackets
 a host-process observation with unchanged Kubernetes inputs. The host reader binds

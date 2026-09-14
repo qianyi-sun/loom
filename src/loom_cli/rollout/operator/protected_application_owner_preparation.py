@@ -23,6 +23,9 @@ from loom.application_database_admission import (
 )
 from loom.application_database_connection import ApplicationDatabaseConnection, application_sql
 from loom.staging_mutation_coordination import rollout_guard_application_name
+from loom_cli.rollout.application_migration_contract import (
+    APPLICATION_OWNER_ROLE as APPLICATION_OWNER_ROLE,
+)
 
 from .final_gate_plan import FinalGatePlan
 from .protected_application_admission_recovery import _backend, admission_record_digest
@@ -31,7 +34,6 @@ if TYPE_CHECKING:
     from .protected_apply_journal import ProtectedApplyJournal
     from .staging_mutation_guard import MutationGuardEvidence
 
-APPLICATION_OWNER_ROLE = "loom_app_staging_owner"
 MAX_OWNER_CREATIONS = 8
 
 

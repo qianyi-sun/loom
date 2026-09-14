@@ -12,6 +12,10 @@ import yaml  # type: ignore[import-untyped]
 from loom_cli.cluster_config import validate_container_registry_prefix
 from loom_cli.cluster_migration import render_migration_manifest
 
+from .application_migration_contract import (
+    APPLICATION_OWNER_ROLE,
+    require_application_migration_job,
+)
 from .manifest_readiness import ServerDryRun
 
 _SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -40,6 +44,7 @@ class MigrationManifestArtifact:
     artifact_digest: str
     container_registry: str = ""
     registry_digest: str = ""
+    application_owner_role: str = ""
 
     def __post_init__(self) -> None:
         if (
@@ -57,6 +62,10 @@ class MigrationManifestArtifact:
             or _SHA256_RE.fullmatch(self.artifact_digest) is None
         ):
             raise ValueError("migration manifest artifact identity is invalid")
+        if self.application_owner_role and (
+            self.application_owner_role != APPLICATION_OWNER_ROLE or self.namespace != "loom-staging"
+        ):
+            raise ValueError("application migration owner binding is invalid")
         if self.container_registry:
             validate_container_registry_prefix(
                 self.container_registry,
@@ -78,6 +87,7 @@ def build_migration_manifest_artifact(
     migration_target_revision: str,
     container_registry: str = "",
     registry_digest: str = "",
+    application_owner_role: str = "",
 ) -> MigrationManifestArtifact:
     """Render and server-validate the only migration Job used downstream."""
     binding = {
@@ -93,6 +103,8 @@ def build_migration_manifest_artifact(
         binding["container_registry"] = container_registry
     if registry_digest:
         binding["registry_digest"] = registry_digest
+    if application_owner_role:
+        binding["application_owner_role"] = application_owner_role
     _validate_binding(binding)
     suffix = hashlib.sha256(_json_bytes(binding)).hexdigest()[:12]
     rendered = render_migration_manifest(
@@ -101,6 +113,7 @@ def build_migration_manifest_artifact(
         job_suffix=f"pf-{suffix}",
         container_registry=container_registry,
         registry_digest=registry_digest,
+        application_owner_role=application_owner_role,
     )
     job_name = _validate_rendered_job(
         rendered,
@@ -109,6 +122,7 @@ def build_migration_manifest_artifact(
         suffix=suffix,
         container_registry=container_registry,
         registry_digest=registry_digest,
+        application_owner_role=application_owner_role,
     )
     result = server_dry_run(rendered)
     if result.returncode != 0:
@@ -133,6 +147,7 @@ def build_migration_manifest_artifact(
         artifact_digest=hashlib.sha256(_json_bytes(artifact_payload)).hexdigest(),
         container_registry=container_registry,
         registry_digest=registry_digest,
+        application_owner_role=application_owner_role,
     )
 
 
@@ -148,6 +163,7 @@ def inspect_migration_manifest_artifact(
     migration_target_revision: str,
     container_registry: str = "",
     registry_digest: str = "",
+    application_owner_role: str = "",
 ) -> MigrationManifestArtifact:
     """Reconstruct one publication without rerendering or server mutation."""
     binding = {
@@ -163,6 +179,8 @@ def inspect_migration_manifest_artifact(
         binding["container_registry"] = container_registry
     if registry_digest:
         binding["registry_digest"] = registry_digest
+    if application_owner_role:
+        binding["application_owner_role"] = application_owner_role
     _validate_binding(binding)
     suffix = hashlib.sha256(_json_bytes(binding)).hexdigest()[:12]
     job_name = _validate_rendered_job(
@@ -172,6 +190,7 @@ def inspect_migration_manifest_artifact(
         suffix=suffix,
         container_registry=container_registry,
         registry_digest=registry_digest,
+        application_owner_role=application_owner_role,
     )
     rendered_sha256 = hashlib.sha256(rendered.encode()).hexdigest()
     artifact_payload = {
@@ -193,10 +212,15 @@ def inspect_migration_manifest_artifact(
         artifact_digest=hashlib.sha256(_json_bytes(artifact_payload)).hexdigest(),
         container_registry=container_registry,
         registry_digest=registry_digest,
+        application_owner_role=application_owner_role,
     )
 
 
 def _validate_binding(binding: dict[str, str]) -> None:
+    if binding.get("application_owner_role") and (
+        binding["application_owner_role"] != APPLICATION_OWNER_ROLE or binding["namespace"] != "loom-staging"
+    ):
+        raise ValueError("application migration owner binding is invalid")
     if (
         _SHA_RE.fullmatch(binding["candidate_sha"]) is None
         or _SHA_RE.fullmatch(binding["candidate_tree"]) is None
@@ -224,6 +248,7 @@ def _validate_rendered_job(
     suffix: str,
     container_registry: str,
     registry_digest: str,
+    application_owner_role: str = "",
 ) -> str:
     if not rendered or len(rendered.encode()) > _MAX_MANIFEST_BYTES:
         raise ValueError("migration manifest is empty or unbounded")
@@ -269,6 +294,11 @@ def _validate_rendered_job(
         != ["alembic", "-c", "migrations/alembic.ini", "upgrade", "head"]
     ):
         raise ValueError("migration manifest contract drifted")
+    if application_owner_role:
+        require_application_migration_job(job, owner_role=application_owner_role)
+    elif any(isinstance(item, dict) and item.get("name") == "LOOM_DB_OWNER_ROLE"
+             for item in containers[0].get("env", [])):
+        raise ValueError("migration manifest owner selection changed")
     return str(metadata["name"])
 
 
