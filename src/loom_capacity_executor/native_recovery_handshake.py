@@ -51,7 +51,8 @@ def acknowledge_mapped_recovery(channel: socket.socket, *, spec: NativeRootlessS
         descriptor = _open_directory(Path(preparation.locator.directory), stack)
         metadata = os.fstat(descriptor)
         if ((metadata.st_dev, metadata.st_ino) != (preparation.locator.device, preparation.locator.inode)
-            or metadata.st_mode & 0o7777 != 0o700):
+            or metadata.st_mode & 0o7777 != 0o700
+            or (metadata.st_uid, metadata.st_gid) != (os.geteuid(), os.getegid())):
             raise ValueError("native mapped recovery attempt identity changed")
         actual = observe_native_mapped_identity()
         record = NativeInstalledAttemptV2(preparation=preparation, runtime_spec_sha256=runtime_spec_sha256,
@@ -66,7 +67,8 @@ def acknowledge_mapped_recovery(channel: socket.socket, *, spec: NativeRootlessS
         if not isinstance(acknowledgment, NativeRecoveryAcknowledgment) or acknowledgment.request_digest != canonical_digest(request):
             raise ValueError("native mapped recovery acknowledgment changed")
         visible = os.fstat(_open_directory(Path(preparation.locator.directory), stack))
-        if (visible.st_dev, visible.st_ino, visible.st_mode) != (metadata.st_dev, metadata.st_ino, metadata.st_mode):
+        if ((visible.st_dev, visible.st_ino, visible.st_mode, visible.st_uid, visible.st_gid)
+            != (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid, metadata.st_gid)):
             raise ValueError("native mapped recovery attempt changed during publication")
         return acknowledgment.request_digest
 
