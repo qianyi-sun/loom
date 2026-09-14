@@ -241,6 +241,32 @@ def test_workload_runtime_refuses_unknown_writers_before_any_patch(tmp_path, blo
         journal.execute(plan, [_component(apply)])
 
 
+def test_database_completion_is_preceded_by_durable_forward_recovery_direction(tmp_path):
+    from loom_cli.rollout.operator.protected_application_workload_runtime import (
+        pause_application_workloads,
+        restore_application_workloads,
+    )
+    plan, journal, evidence, _, runner, admit = _context(tmp_path)
+    complete = runner.recover_and_complete_staging_application_database
+    def interrupted(candidate, *, journal, guard):
+        assert journal.application_workloads_restoring(candidate), 'SQL completion preceded its recovery direction'
+        raise RuntimeError('lost SQL completion reply')
+    def apply(_):
+        admit()
+        pause_application_workloads(plan, journal=journal, runner=runner, guard=evidence)
+        before = list(runner.patch_calls)
+        runner.recover_and_complete_staging_application_database = interrupted
+        with pytest.raises(RuntimeError, match='lost SQL completion reply'):
+            restore_application_workloads(plan, journal=journal, runner=runner, guard=evidence)
+        assert runner.patch_calls == before, 'workload restarted without actual database completion'
+        assert journal.application_workloads_restoring(plan)
+        runner.recover_and_complete_staging_application_database = complete
+        restore_application_workloads(plan, journal=journal, runner=runner, guard=evidence)
+        raise RuntimeError('recovered forward')
+    with pytest.raises(RuntimeError, match='recovered forward'):
+        journal.execute(plan, [_component(apply)])
+
+
 def test_recovery_refuses_a_deleted_saved_job_with_surviving_active_pods(tmp_path):
     from loom_cli.rollout.operator.protected_application_workload_runtime import (
         pause_application_workloads,
