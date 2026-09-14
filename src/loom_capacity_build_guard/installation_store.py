@@ -27,7 +27,6 @@ from loom_capacity_agent.build_admission import build_installation_id
 from loom_capacity_manager.build_value_contracts import PersonalBuildMemberV1
 from loom_capacity_manager.contracts import Digest, PositiveQuantity, StrictV1Model, canonical_bytes
 
-
 _identity = build_installation_id  # Preserve the existing owner-store import surface.
 
 
