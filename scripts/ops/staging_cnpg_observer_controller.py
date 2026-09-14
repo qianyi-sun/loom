@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import fcntl
 import hashlib
 import importlib.util
@@ -103,15 +104,36 @@ def _sync(path: Path) -> None:
         os.close(fd)
 
 
-def _write(path: Path, payload: bytes, *, uid: int, gid: int, mode: int,
-           replace_existing: bool = True) -> None:
+def _rename_absent(source: Path, destination: Path) -> None:
+    """Publish once, atomically, on the admitted Linux controller.
+
+    link/unlink is not equivalent: interruption between them leaves a forbidden
+    two-link identity. No overwrite or non-atomic fallback is permitted.
+    """
     try:
-        if _read(path, uid=uid, gid=gid, mode=mode) == payload:
+        rename = ctypes.CDLL(None, use_errno=True).renameat2
+    except AttributeError as exc:
+        raise _refuse() from exc
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    if rename(-100, os.fsencode(source), -100, os.fsencode(destination), 1) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def _write(path: Path, payload: bytes, *, uid: int, gid: int, mode: int,
+           expected_existing: bool | None = None) -> None:
+    try:
+        actual = _read(path, uid=uid, gid=gid, mode=mode)
+        if expected_existing is False:
+            raise _refuse()
+        if actual == payload:
             return
-        if not replace_existing:
+        if expected_existing is True:
             raise _refuse()
     except FileNotFoundError:
-        pass
+        if expected_existing is True:
+            raise _refuse() from None
     temporary = path.with_name("." + path.name + "." + uuid4().hex)
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
@@ -121,7 +143,12 @@ def _write(path: Path, payload: bytes, *, uid: int, gid: int, mode: int,
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        if expected_existing is False:
+            # Atomic no-clobber publication: a service-created destination must
+            # never be overwritten between validation and publication.
+            _rename_absent(temporary, path)
+        else:
+            os.replace(temporary, path)
         _sync(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
@@ -297,19 +324,23 @@ def prepare_controller(*, inventory_file: Path, inventory_sha256: str) -> dict[s
                   "file_sha256": {str(path): _digest(data[0]) for path, data in desired.items()}}
         if current is not None and current != result:
             raise _refuse()
+        observed_existing: dict[Path, bool] = {}
         for path, (data, owner, group, mode) in desired.items():
             try:
                 actual = _read(path, uid=owner, gid=group, mode=mode)
             except FileNotFoundError:
                 if current is not None:
                     raise _refuse() from None
+                observed_existing[path] = False
             else:
                 if actual != data:
                     raise _refuse()
+                observed_existing[path] = True
         if _inventory(inventory_file, inventory_sha256) != (config, known):
             raise _refuse()
         for path, (data, owner, group, mode) in desired.items():
-            _write(path, data, uid=owner, gid=group, mode=mode, replace_existing=False)
+            _write(path, data, uid=owner, gid=group, mode=mode,
+                   expected_existing=observed_existing[path])
         for path, (data, owner, group, mode) in desired.items():
             if _read(path, uid=owner, gid=group, mode=mode) != data:
                 raise _refuse()

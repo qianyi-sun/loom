@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="OLDLAB controller uses Linux renameat2")
+
 
 def _json(value):
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -139,17 +141,20 @@ def test_installed_key_drift_is_never_repaired_by_rotation(tmp_path, monkeypatch
 @pytest.mark.parametrize("target", ["IDENTITY", "CONFIG", "KNOWN_HOSTS", "PUBLIC_KEY"])
 def test_lost_publish_ack_recovers_original_key_and_exact_inventory(tmp_path, monkeypatch, target):
     module, args = _context(tmp_path, monkeypatch)
-    replace = module.os.replace
+    replace, publish_absent = module.os.replace, module._rename_absent
     failed = False
 
-    def interrupted(source, destination):
-        nonlocal failed
-        replace(source, destination)
-        if destination == getattr(module, target) and not failed:
-            failed = True
-            raise OSError("lost write acknowledgement")
+    def interrupted(operation):
+        def publish(source, destination, *positional, **kwargs):
+            nonlocal failed
+            operation(source, destination, *positional, **kwargs)
+            if destination == getattr(module, target) and not failed:
+                failed = True
+                raise OSError("lost write acknowledgement")
+        return publish
 
-    monkeypatch.setattr(module.os, "replace", interrupted)
+    monkeypatch.setattr(module.os, "replace", interrupted(replace))
+    monkeypatch.setattr(module, "_rename_absent", interrupted(publish_absent))
     with pytest.raises(OSError, match="lost write"):
         module.prepare_controller(**args)
     key = (module.STATE / "identity").read_bytes()
@@ -306,7 +311,7 @@ def test_installed_identity_deleted_after_readback_is_not_recreated(tmp_path, mo
 
 def test_new_foreign_destination_at_atomic_publication_is_not_overwritten(tmp_path, monkeypatch):
     module, args = _context(tmp_path, monkeypatch)
-    replace, link = module.os.replace, module.os.link
+    replace, publish_absent = module.os.replace, module._rename_absent
 
     def race(operation):
         def publish(source, destination, *positional, **kwargs):
@@ -317,7 +322,20 @@ def test_new_foreign_destination_at_atomic_publication_is_not_overwritten(tmp_pa
         return publish
 
     monkeypatch.setattr(module.os, "replace", race(replace))
-    monkeypatch.setattr(module.os, "link", race(link))
+    monkeypatch.setattr(module, "_rename_absent", race(publish_absent))
     with pytest.raises((ValueError, FileExistsError)):
         module.prepare_controller(**args)
     assert module.IDENTITY.read_bytes() == b"foreign publication\n"
+
+
+def test_atomic_publication_never_exposes_a_multi_link_identity(tmp_path, monkeypatch):
+    module, args = _context(tmp_path, monkeypatch)
+    publish_absent = module._rename_absent
+
+    def verify(source, destination):
+        publish_absent(source, destination)
+        assert not source.exists()
+        assert destination.stat().st_nlink == 1
+
+    monkeypatch.setattr(module, "_rename_absent", verify)
+    module.prepare_controller(**args)
