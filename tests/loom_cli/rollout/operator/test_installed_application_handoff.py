@@ -1,12 +1,15 @@
 """The installed handoff keeps the original supervised guard through closed admission."""
 
 import os
-from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
-from loom_cli.rollout.operator.protected_apply_journal import ComponentObservation, ComponentState, ProtectedApplyJournal
+from loom_cli.rollout.operator.protected_apply_journal import (
+    ComponentObservation,
+    ComponentState,
+    ProtectedApplyJournal,
+)
 from tests.loom_cli.rollout.operator.test_application_guard_retention import _guard
 from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
 from tests.loom_cli.rollout.operator.test_staging_mutation_guard import _config
@@ -49,7 +52,7 @@ def test_installed_handoff_uses_original_guard_probe_only_after_retention_ack(tm
     assert component.component_id == 'application-ownership-handoff'
     assert calls == [], 'building the full chain observed or mutated a component'
     if drift:
-        with pytest.raises((ValueError, RuntimeError), match='guard|epoch'):
+        with pytest.raises((ValueError, RuntimeError), match=r'guard|epoch'):
             factory.epoch(plan)
     else:
         assert factory.epoch(plan) == plan.starting_mutation_epoch + 1
@@ -64,7 +67,7 @@ def test_installed_handoff_refuses_wrong_journal_before_constructing_callbacks(t
     factory = module.InstalledApplicationHandoffFactory(config=config, service_uid=os.getuid(),
         runner=SimpleNamespace(environment={'KUBECONFIG': '/fixture'}))
     journal = ProtectedApplyJournal(config.state_root, request_id=plan.request_id, attempt_number=plan.attempt_number + 1)
-    with pytest.raises(ValueError, match='handoff.*journal'):
+    with pytest.raises(ValueError, match=r'handoff.*journal'):
         factory(plan, journal=journal, ordinal=2)
     assert not journal.root.exists()
 

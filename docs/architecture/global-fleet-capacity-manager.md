@@ -553,8 +553,12 @@ original guard and inputs; only freshly observed restoration and retired fences
 permit an exact terminal. External operator/process/storage writer admission and
 supervised guard/epoch readers are required enclosing capabilities. Their binding
 is recorded before SQL mutation; a recorded digest does not establish authority.
-The installed executor and early worker recovery still need those capabilities
-and this component wired into the full chain.
+The installed handoff factory now supplies supervised original-guard checks,
+actual operator/storage observations and exact epoch readers without observing or
+mutating while the component chain is constructed. It uses normal exact epoch
+reads before retention acknowledgement, then the original guard mailbox while
+admission can be closed; both paths recheck guard identity. The enclosing executor
+and early worker recovery still need the component wired into the full chain.
 
 The read-only CNPG operator observer admits the fixed 1.25.1 command, environment,
 security context, volume projections and absent configuration overrides. It brackets
