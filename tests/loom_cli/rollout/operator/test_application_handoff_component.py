@@ -103,8 +103,22 @@ def test_handoff_component_resumes_original_phases_without_resealing_or_redispat
         journal.begin_application_cnpg_fence_retirement(candidate, guard=guard)
         event('retire')
     monkeypatch.setattr(module, 'retire_cnpg_input_fence', retire)
+    completed_reads = []
+    old_guard_lost = [False]
+    reject_completed = [False]
+    def guard_source(_):
+        if old_guard_lost[0]:
+            raise RuntimeError('old guard has finished')
+        return guard
+    def completed_effect(candidate, view, terminal):
+        assert candidate == plan and view.fences_retiring and view.restoration is not None
+        completed_reads.append(terminal)
+        if reject_completed[0]:
+            raise RuntimeError('current completed effect drifted')
+        return ComponentObservation(ComponentState.EXACT, terminal.evidence_digest, terminal.observed_epoch)
     component = module.ProtectedApplicationAuthorityHandoffComponent(
-        journal=journal, runner=Runner(), ordinal=1, guard_source=lambda _: guard,
+        journal=journal, runner=Runner(), ordinal=1, guard_source=guard_source,
+        observe_completed_effect=completed_effect,
         epoch_source=lambda _: plan.starting_mutation_epoch + 1,
         observe_external_authority=lambda *args: 'e' * 64,
     ).component(plan)
@@ -119,8 +133,15 @@ def test_handoff_component_resumes_original_phases_without_resealing_or_redispat
     assert result['application-ownership-handoff'].observed_epoch == plan.starting_mutation_epoch + 1
     assert events.count('prepare') == events.count('dispatch') == 1
     assert events.index('sql-profile') < events.index('prepare') < events.index('drain') < events.index('dispatch') < events.index('restore') < events.index('retire')
+    assert completed_reads == []
     before = list(events)
+    old_guard_lost[0] = True
     assert journal.execute(plan, [epoch, component]) == result
+    assert completed_reads == [result['application-ownership-handoff']]
+    assert events == before
+    reject_completed[0] = True
+    with pytest.raises(RuntimeError, match='current completed effect drifted'):
+        journal.execute(plan, [epoch, component])
     assert events == before
 
 
@@ -143,6 +164,7 @@ def test_observation_cannot_hide_original_guard_or_epoch_loss(tmp_path, monkeypa
         return credential, baseline.cnpg_runtime, 'e' * 64
     component = module.ProtectedApplicationAuthorityHandoffComponent(
         journal=journal, runner=object(), ordinal=1, guard_source=guard_source,
+        observe_completed_effect=lambda *args: pytest.fail("pending handoff used completed recovery"),
         epoch_source=epoch_source, observe_external_authority=lambda *args: 'e' * 64,
     )
     monkeypatch.setattr(type(component), '_inputs', observe)
