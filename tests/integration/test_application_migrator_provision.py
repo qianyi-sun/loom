@@ -182,3 +182,34 @@ async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(tra
             retire_application_migrator(maintenance, **authority, migrator_role=identity.role_name, migrator_oid=identity.role_oid)
             reopen_application_migrator_admission(maintenance, **authority, identity=identity, runtime_password=args["password"])
         observe_completed_application_authority(peer, target=target, runtime_password=args["password"])
+
+
+@pytest.mark.asyncio
+async def test_migration_recovery_waits_for_exact_prior_peer_and_never_adopts_unrecorded_role(transfer_database):  # noqa: F811
+    from loom.application_migrator_provision import create_application_migrator
+    from loom.application_migrator_recovery import (
+        observe_application_migration_backend,
+        observe_application_migrator_role,
+        require_application_migration_peer_retired,
+    )
+
+    with _closed(transfer_database) as (peer, maintenance, _guard, args):
+        complete_application_handoff_database(peer, maintenance=maintenance, **args)
+        target = args["target"]
+        authority = dict(target=target, coordination_guard=args["coordination_guard"],
+            provisioner_role=next(n for n, a in args["role_bindings"].items() if a == "provisioner"))
+        with psycopg.connect(transfer_database[0], autocommit=True) as creator:
+            backend = observe_application_migration_backend(creator, **authority, maintenance=False)
+            with pytest.raises(RuntimeError, match="previous peer"):
+                require_application_migration_peer_retired(maintenance, **authority, backend=backend)
+        require_application_migration_peer_retired(maintenance, **authority, backend=backend)
+        name = "app_migrator_" + uuid4().hex
+        assert not observe_application_migrator_role(maintenance, **authority, migrator_role=name, migrator_oid=None)
+        identity = create_application_migrator(peer, **authority, migrator_role=name, persist_identity=lambda _: None)
+        try:
+            with pytest.raises(RuntimeError, match="unrecorded"):
+                observe_application_migrator_role(maintenance, **authority, migrator_role=name, migrator_oid=None)
+            assert observe_application_migrator_role(maintenance, **authority, migrator_role=name, migrator_oid=identity.role_oid)
+        finally:
+            peer.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(name)))
+        assert not observe_application_migrator_role(maintenance, **authority, migrator_role=name, migrator_oid=identity.role_oid)
