@@ -1202,15 +1202,14 @@ def test_subprocess_runner_has_fixed_environment_and_redacted_failure(
         )
 
 
-@pytest.mark.parametrize("maintenance", [False, True])
+@pytest.mark.parametrize("database", ["loom", "postgres", "template1"])
 def test_subprocess_runner_opens_one_fixed_bounded_staging_peer_channel(
-    monkeypatch, maintenance
+    monkeypatch, database
 ) -> None:
     runner = SubprocessProtectedApplyCommandRunner()
     popen = subprocess.Popen
     calls = []
     children = []
-    database = "postgres" if maintenance else "loom"
     child_code = _CHILD.replace('456, "loom", "postgres"', f'456, "{database}", "postgres"')
 
     def start(argv, **kwargs):
@@ -1224,11 +1223,9 @@ def test_subprocess_runner_opens_one_fixed_bounded_staging_peer_channel(
     monkeypatch.setattr(
         "loom_cli.rollout.operator.protected_apply_executor.subprocess.Popen", start
     )
-    open_peer = (
-        runner.open_staging_peer_maintenance_database
-        if maintenance
-        else runner.open_staging_peer_database
-    )
+    open_peer = getattr(runner, {"loom": "open_staging_peer_database",
+                                "postgres": "open_staging_peer_maintenance_database",
+                                "template1": "open_staging_peer_template_database"}[database])
     with open_peer() as connection:
         with connection.transaction():
             pass
@@ -1259,14 +1256,13 @@ def test_subprocess_runner_opens_one_fixed_bounded_staging_peer_channel(
 
 
 @pytest.mark.parametrize("wrong", ["database", "session-user", "server-version"])
-@pytest.mark.parametrize("maintenance", [False, True])
+@pytest.mark.parametrize("database", ["loom", "postgres", "template1"])
 def test_subprocess_runner_refuses_wrong_peer_target_and_reaps(
-    monkeypatch, wrong, maintenance
+    monkeypatch, wrong, database
 ) -> None:
     runner = SubprocessProtectedApplyCommandRunner()
     popen = subprocess.Popen
     children = []
-    database = "postgres" if maintenance else "loom"
     observed_database = "wrong" if wrong == "database" else database
     observed_user = "wrong" if wrong == "session-user" else "postgres"
     child_code = _CHILD.replace(
@@ -1284,10 +1280,9 @@ def test_subprocess_runner_refuses_wrong_peer_target_and_reaps(
         "loom_cli.rollout.operator.protected_apply_executor.subprocess.Popen", start
     )
     with pytest.raises(RuntimeError, match="peer identity"):
-        if maintenance:
-            runner.open_staging_peer_maintenance_database()
-        else:
-            runner.open_staging_peer_database()
+        getattr(runner, {"loom": "open_staging_peer_database",
+                         "postgres": "open_staging_peer_maintenance_database",
+                         "template1": "open_staging_peer_template_database"}[database])()
     assert len(children) == 1 and children[0].poll() is not None
 
 
