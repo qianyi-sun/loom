@@ -4271,3 +4271,20 @@ def test_capacity_runtime_selects_installed_database_lifecycle_without_legacy_wr
     components = source.components(plan, epoch_guard=lambda _: pytest.fail("ordinary epoch read during construction"), journal=journal)
     assert components[1] is selected and calls == [plan]
     assert components[1].terminal_recovery_authority is None
+
+
+def test_legacy_authority_rebind_can_be_rendered_before_journaled_peer_dispatch(tmp_path):
+    plan, runner, _ = _database_component(tmp_path, database_state="exact")
+    runner.registration_overrides = {"authority_incarnation": "558afea6-2a37-55a1-9f7c-3399695da966"}
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(runner, "registry.example.test/loom", lambda: runner.seed)
+    before = list(runner.calls)
+    payload = direct._legacy_authority_rebind_payload(plan, runner.seed)
+    assert payload.startswith(b"BEGIN;") and payload.endswith(b"COMMIT;\n")
+    assert b"ACCESS EXCLUSIVE MODE NOWAIT" in payload
+    assert runner.registration_overrides and not any(call.endswith("-apply") for call in runner.calls[len(before):])
+    # Legacy dispatch and retained dispatch must consume the same certified SQL.
+    observed = []
+    from unittest.mock import patch
+    with patch.object(type(direct), "_run_peer_payload", lambda self, value: observed.append(value)):
+        direct._rebind_legacy_authority(plan, runner.seed)
+    assert observed == [payload]
