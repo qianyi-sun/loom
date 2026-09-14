@@ -18,7 +18,7 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, TypeAdapter, field_validator, model_validator
 
 from loom_capacity_agent.build_admission import BuildOutcomeReceiptV1
 from loom_capacity_agent.native_recovery import NativeInstalledAttemptV1 as NativeInstalledAttemptV1
@@ -37,9 +37,15 @@ from loom_capacity_executor.native_installed_release import (
 )
 from loom_capacity_executor.native_oci_material import _open_directory
 from loom_capacity_executor.native_outer_build import run_native_outer_build
+from loom_capacity_executor.native_recovery_observation import (
+    capture_native_recovery_preparation,
+    read_native_recovery_boot_id,
+    read_native_recovery_host_identity,
+)
 from loom_capacity_executor.native_rootless_material import NativeRootlessMaterialV1
 from loom_capacity_executor.native_rootless_runtime import (
     NativeRootlessSpecV2,
+    NativeRootlessSpecV3,
     read_native_rootless_spec,
 )
 from loom_capacity_executor.native_worker_handoff import (
@@ -47,7 +53,7 @@ from loom_capacity_executor.native_worker_handoff import (
     NativeWorkerHandoffV1,
     consume_native_worker_handoff,
 )
-from loom_capacity_manager.contracts import Digest, StrictV1Model, canonical_bytes, canonical_digest
+from loom_capacity_manager.contracts import Digest, Identifier, StrictV1Model, canonical_bytes, canonical_digest
 from loom_capacity_manager.executable_contracts import canonical_executable_bytes
 
 
@@ -77,13 +83,40 @@ class NativeInstalledWorkerConfigV1(StrictV1Model):
         return self
 
 
+class NativeInstalledWorkerConfigV2(NativeInstalledWorkerConfigV1):
+    """Static recovery-capable config; boot facts remain separately admitted."""
+
+    schema_version: Literal[2] = 2  # type: ignore[assignment]
+    host_identity_path: str
+    node_id: Identifier
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _version(cls, value: object) -> object:
+        if type(value) is not int or value != 2:
+            raise ValueError("native installed worker version must be exact integer two")
+        return value
+
+    @model_validator(mode="after")
+    def _host_path(self) -> Self:
+        host, scratch = _path(self.host_identity_path), _path(self.scratch_root)
+        if host == scratch or scratch in host.parents or host in scratch.parents:
+            raise ValueError("native installed host identity and scratch must be disjoint")
+        return self
+
+
+_CONFIG: TypeAdapter[NativeInstalledWorkerConfigV1 | NativeInstalledWorkerConfigV2] = TypeAdapter(
+    NativeInstalledWorkerConfigV1 | NativeInstalledWorkerConfigV2)
+
+
 def read_installed_worker_config(path: Path, *, expected_sha256: str) -> NativeInstalledWorkerConfigV1:
     _require_original_identity()
     _path(str(path))
     observation = _Observation()
     wire = observation.read(path, digest=expected_sha256, size=None, mode=0o444, bound=16384, collect=True)
-    config = NativeInstalledWorkerConfigV1.model_validate_json(wire)
-    if canonical_bytes(config) != wire:
+    config = _CONFIG.validate_json(wire)
+    canonical = canonical_executable_bytes(config) if isinstance(config, NativeInstalledWorkerConfigV2) else canonical_bytes(config)
+    if canonical != wire:
         raise ValueError("native installed worker config must be canonical")
     observation.finish()
     return config
@@ -161,7 +194,7 @@ def _write_private(parent: int, name: str, wire: bytes) -> None:
 @contextmanager
 def _attempt(packet: NativeWorkerHandoffV1, config: NativeInstalledWorkerConfigV1,
     config_sha256: str,
-) -> Iterator[tuple[Path, Callable[[], None]]]:
+) -> Iterator[tuple[Path, Callable[[], None], NativeInstalledAttemptV1]]:
     root = Path(config.scratch_root)
     name = "attempt-" + str(allocated_claim_request(packet.registration).operation_id)
     path = root / name
@@ -203,7 +236,7 @@ def _attempt(packet: NativeWorkerHandoffV1, config: NativeInstalledWorkerConfigV
         unchanged()
         # No recursive original-UID cleanup: mapped subordinate-owned data is
         # inaccessible here. Manager-owned recovery must retain this locator.
-        yield path, unchanged
+        yield path, unchanged, record
 
 
 async def _execute(packet: NativeWorkerHandoffV1, *, config_path: Path, config_sha256: str,
@@ -218,7 +251,7 @@ async def _execute(packet: NativeWorkerHandoffV1, *, config_path: Path, config_s
         expected_sha256=config.release_manifest_sha256, expected_source_sha=config.tooling_source_sha,
         expected_platform=config.platform)
     _bind_running_installation(release)
-    with _attempt(packet, config, config_sha256) as (attempt, unchanged):
+    with _attempt(packet, config, config_sha256) as (attempt, unchanged, locator):
         async with allocated_native_packet_io(packet, job_id=job_id, workspace=attempt / "source",
             max_archive_bytes=config.max_source_archive_bytes) as owner:
             unchanged()
@@ -232,6 +265,23 @@ async def _execute(packet: NativeWorkerHandoffV1, *, config_path: Path, config_s
                     max_entries=config.max_rootfs_entries, client_seccomp=release.client_seccomp.decode("utf-8"),
                     client_seccomp_sha256=hashlib.sha256(release.client_seccomp).hexdigest(),
                     tmp_bytes=config.tmp_bytes, buildkit_state_bytes=config.buildkit_state_bytes))
+            if isinstance(config, NativeInstalledWorkerConfigV2):
+                boot_id = await _settled_io(read_native_recovery_boot_id)
+                admission = await owner.read_recovery_admission(node_id=config.node_id, boot_id=boot_id)
+                if (admission.profile.worker_config_sha256 != config_sha256
+                    or admission.profile.release_manifest_sha256 != config.release_manifest_sha256):
+                    raise ValueError("native installed recovery profile differs from fixed configuration")
+                host_digest = canonical_digest(admission.host)
+                host = await _settled_io(read_native_recovery_host_identity, Path(config.host_identity_path),
+                    expected_sha256=host_digest)
+                unchanged()
+                preparation = await _settled_io(capture_native_recovery_preparation, locator,
+                    launch_profile_sha256=admission.profile.launch_profile_sha256,
+                    node_configuration_sha256=host_digest, host_identity=host)
+                await owner.prepare_recovery(preparation)
+                unchanged()
+                spec = NativeRootlessSpecV3.model_validate({**spec.model_dump(), "schema_version": 3,
+                    "recovery_preparation": preparation})
             wire = canonical_executable_bytes(spec)
             digest = hashlib.sha256(wire).hexdigest()
             spec_path = attempt / "work/runtime-spec.json"

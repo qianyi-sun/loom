@@ -7,6 +7,7 @@ import socket
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from typing import Protocol
+from uuid import UUID
 
 from loom_capacity_agent.build_admission import (
     BuildArtifactV1,
@@ -19,6 +20,8 @@ from loom_capacity_agent.build_admission import (
 from loom_capacity_agent.build_artifact_stream import BuildArtifactUploadReceiptV1
 from loom_capacity_agent.native_recovery import NativeRecoveryPreparationV1
 from loom_capacity_agent.native_recovery_publication import (
+    NativeRecoveryAdmissionRequestV1,
+    NativeRecoveryAdmissionV1,
     NativeRecoveryPublicationV1,
     NativeRecoveryReceiptV1,
 )
@@ -32,6 +35,8 @@ from loom_capacity_manager.contracts import canonical_digest
 
 
 class NativeAllocatedIOClient(NativeExecutionAuthorityClient, Protocol):
+    async def read_recovery_admission(self, request: NativeRecoveryAdmissionRequestV1, *, worker_credential: str) -> NativeRecoveryAdmissionV1: ...
+
     async def publish_recovery(self, request: NativeRecoveryPublicationV1, *, worker_credential: str) -> NativeRecoveryReceiptV1: ...
 
     async def upload_artifact(self, claim: BuildClaimRequestV1, *, worker_credential: str,
@@ -87,6 +92,17 @@ class NativeAllocatedIO:
             yield self._credential
         finally:
             self._operations.discard(task)
+
+    async def read_recovery_admission(self, *, node_id: str, boot_id: UUID) -> NativeRecoveryAdmissionV1:
+        with self._operation() as credential:
+            request = NativeRecoveryAdmissionRequestV1(claim=self.claim, node_id=node_id, boot_id=boot_id)
+            admission = await self._client.read_recovery_admission(request, worker_credential=credential)
+            if not isinstance(admission, NativeRecoveryAdmissionV1):
+                raise ValueError("native recovery admission is not typed")
+            admission = NativeRecoveryAdmissionV1.model_validate_json(admission.model_dump_json())
+            if admission.request != request:
+                raise ValueError("native recovery admission identity changed")
+            return admission
 
     async def prepare_recovery(self, preparation: NativeRecoveryPreparationV1) -> NativeRecoveryReceiptV1:
         """Publish once; uncertainty never permits mapped startup."""

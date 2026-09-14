@@ -78,6 +78,14 @@ def _require_host_cgroup_namespace(identity: NativeRecoveryHostIdentityV1) -> No
         raise ValueError("native recovery requires the host cgroup namespace")
 
 
+def read_native_recovery_boot_id() -> UUID:
+    wire = _read_kernel_text(_BOOT, 128)
+    boot_id = UUID(wire.strip())
+    if wire != f"{boot_id}\n":
+        raise ValueError("native recovery boot identity is not canonical")
+    return boot_id
+
+
 def _require_cgroup_mount(descriptor: int) -> int:
     mount = _mount_id(descriptor)
     rows = [row.split() for row in _read_kernel_text(Path("/proc/self/mountinfo"), 1024**2).splitlines()]
