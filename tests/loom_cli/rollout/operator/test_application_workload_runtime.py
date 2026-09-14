@@ -314,7 +314,9 @@ def test_recovery_rechecks_saved_uid_after_serving_generation_read(tmp_path):
 
 @pytest.mark.parametrize("change", [None, "paused", "template", "not-ready", "foreign-client"])
 def test_restored_workload_observation_is_readonly_and_requires_actual_readiness(tmp_path, monkeypatch, change):
-    from loom_cli.rollout.operator.protected_application_workload_runtime import observe_recovered_application_workloads
+    from loom_cli.rollout.operator.protected_application_workload_runtime import (
+        observe_recovered_application_workloads,
+    )
     from loom_cli.rollout.operator.protected_application_workloads import ApplicationWorkload
 
     plan, _journal, guard, _database, runner, _admit = _context(tmp_path)

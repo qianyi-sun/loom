@@ -24,7 +24,9 @@ from .protected_application_workloads import (
     APPLICATION_CRONJOB,
     APPLICATION_DEPLOYMENTS,
     ApplicationWorkload,
+    _digest,
     _mapping,
+    validate_workload_inventory,
 )
 from .protected_apply_journal import ProtectedApplyJournal
 from .staging_mutation_guard import MutationGuardEvidence
@@ -318,6 +320,33 @@ def pause_application_workloads(plan: FinalGatePlan, *, journal: ProtectedApplyJ
         time.sleep(0.25)
 
 
+def observe_recovered_application_workloads(
+    plan: FinalGatePlan, *, runner: ApplicationWorkloadRunner, guard: MutationGuardEvidence,
+    workloads: tuple[ApplicationWorkload, ...],
+) -> str:
+    """Read actual original serving generations without patching or completing SQL.
+
+    This observation alone does not prove the earlier workload drain, current
+    database outcome or guard liveness. The enclosing handoff combines those
+    checks with its immutable restoration intent before recording an outcome.
+    """
+    saved = validate_workload_inventory(workloads)
+    _require_saved_guard_cron(saved, guard)
+    objects, _ = _observe(plan, runner, guard, saved)
+    _require_recovered_endpoints(saved, objects)
+    for item in saved:
+        if item.kind != "Deployment":
+            continue
+        current = objects[(item.kind, item.name)]
+        desired = ApplicationDeployment(item.name, _NAMESPACE, int(item.original_value),
+                                        _mapping(_mapping(current["spec"])["template"]))
+        if not deployment_is_ready(desired, runner=runner, environment=runner.environment, timeout_seconds=30):
+            raise RuntimeError("application workload original serving generation is not ready")
+    verified, _ = _observe(plan, runner, guard, saved)
+    _require_recovered_endpoints(saved, verified)
+    return _digest([item.to_dict() for item in saved])
+
+
 def restore_application_workloads(plan: FinalGatePlan, *, journal: ProtectedApplyJournal,
                                  runner: ApplicationWorkloadRunner, guard: MutationGuardEvidence) -> None:
     """Recheck actual database completion, then recover only original workloads."""
@@ -351,8 +380,7 @@ def restore_application_workloads(plan: FinalGatePlan, *, journal: ProtectedAppl
                                                 _mapping(_mapping(current["spec"])["template"]))
                 ready = deployment_is_ready(desired, runner=runner, environment=runner.environment, timeout_seconds=30) and ready
         if not changed and ready:
-            verified, _ = _observe(plan, runner, guard, saved)
-            _require_recovered_endpoints(saved, verified)
+            observe_recovered_application_workloads(plan, runner=runner, guard=guard, workloads=saved)
             _live_guard(plan, journal, runner, guard)
             return
         if time.monotonic() >= deadline:

@@ -541,6 +541,15 @@ remains suspended under the original rollout guard until that guard is released.
 These operations are parts of the application handoff, not component terminal or
 CNPG input-fence release authority.
 
+The read-only restoration observer combines the exact replacement runtime,
+original credential/configuration bindings, PostgreSQL's restored login/schema
+state and the complete saved workload inventory at its original ready endpoints.
+It brackets workload readiness with fresh process, credential and SQL observations.
+Its stable digest contains no passwords. Partial phase records or database-only
+completion cannot supply this evidence. The enclosing handoff must still preserve
+the original supervised guard and exclude other privileged writers; this observer
+does not publish an outcome or retire a policy.
+
 The internal `retire_application_migrator` cleanup requires the saved transient
 role name/OID, original database/postmaster and coordination guard, committed
 NOLOGIN/PASSWORD NULL, and closed database admission. Revoking SET membership
