@@ -217,6 +217,12 @@ def test_mapped_scratch_accepts_exact_v3_and_revalidates_copies(tmp_path, monkey
     Path(spec.workspace).mkdir(mode=0o700, exist_ok=True)
     monkeypatch.setattr(module, "_require_mapped_root", lambda: None)
     assert module.capture_native_mapped_scratch(spec).attempt.inode == tmp_path.stat().st_ino
+    from types import SimpleNamespace
+
+    # python -m creates the runtime class in __main__; importing the canonical
+    # module again produces a distinct class. Validation must use the bytes.
+    separate_runtime_class = SimpleNamespace(model_dump_json=spec.model_dump_json, workspace=spec.workspace)
+    assert module.capture_native_mapped_scratch(separate_runtime_class).attempt.inode == tmp_path.stat().st_ino
     bad = spec.model_copy(update={"workspace": str(tmp_path / "elsewhere/work")})
     with pytest.raises(ValueError):
         module.capture_native_mapped_scratch(bad)
