@@ -34,6 +34,36 @@ class NativeRecoveryProfileV1(StrictV1Model):
     release_manifest_sha256: Digest
 
 
+class NativeRecoveryAdmissionRequestV1(StrictV1Model):
+    claim: BuildClaimRequestV1
+    node_id: Identifier
+    boot_id: UUID
+
+    @model_validator(mode="after")
+    def _node(self) -> Self:
+        if self.node_id not in self.claim.binding.node_ids:
+            raise ValueError("native recovery admission node is outside allocation")
+        return self
+
+
+class NativeRecoveryAdmissionV1(StrictV1Model):
+    request: NativeRecoveryAdmissionRequestV1
+    profile: NativeRecoveryProfileV1
+    host: NativeRecoveryHostIdentityV1
+
+    @model_validator(mode="after")
+    def _binding(self) -> Self:
+        if (self.profile.pool_id != self.request.claim.binding.pool_id
+            or self.host.node_id != self.request.node_id or self.host.boot_id != self.request.boot_id):
+            raise ValueError("native recovery admission binding changed")
+        return self
+
+
+class NativeRecoveryAdmissionExchangeV1(StrictV1Model):
+    request: NativeRecoveryAdmissionRequestV1
+    worker_credential: str = Field(min_length=43, max_length=512, pattern=r"^[A-Za-z0-9_-]+$", repr=False)
+
+
 class NativeRecoveryPublicationV1(StrictV1Model):
     claim: BuildClaimRequestV1
     record: Annotated[NativeRecoveryPreparationV1 | NativeInstalledAttemptV2, Field(discriminator="schema_version")]

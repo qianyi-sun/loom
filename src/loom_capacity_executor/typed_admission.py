@@ -43,6 +43,8 @@ from loom_capacity_agent.native_recovery_execution import (
     BuildExecutionRequestV2,
 )
 from loom_capacity_agent.native_recovery_publication import (
+    NativeRecoveryAdmissionRequestV1,
+    NativeRecoveryAdmissionV1,
     NativeRecoveryHistoryV1,
     NativeRecoveryPublicationV1,
     NativeRecoveryReceiptV1,
@@ -114,7 +116,7 @@ _BUILD_CONSUMERS = frozenset({
     "prepare_worker", "bind_slurm_job", "observe_intent", "revoke_prepared_bootstrap",
     "withdraw_unregistered_worker", "register_worker", "claim_platform", "begin_drain", "record_outcome", "acknowledge_release",
     "read_source", "read_source_context", "claim_assigned_platform", "upload_artifact", "authorize_execution",
-    "publish_recovery", "read_recovery",
+    "publish_recovery", "read_recovery", "read_recovery_admission",
     "authorize_recovery_execution",
 })
 
@@ -262,6 +264,18 @@ class TypedAdmissionRouter:
         if permit.request != request:
             raise ValueError("native recovery execution route returned changed permission")
         return permit
+
+    async def read_recovery_admission(self, request: NativeRecoveryAdmissionRequestV1, *, worker_credential: str) -> NativeRecoveryAdmissionV1:
+        request = NativeRecoveryAdmissionRequestV1.model_validate_json(request.model_dump_json())
+        if self.purpose(request.claim.binding) != "personal-build-worker":
+            raise ValueError("native recovery admission requires a build-purpose route")
+        admission = await self._call(request.claim.binding, "read_recovery_admission", request, worker_credential=worker_credential)
+        if not isinstance(admission, NativeRecoveryAdmissionV1):
+            raise ValueError("native recovery admission route returned invalid admission")
+        admission = NativeRecoveryAdmissionV1.model_validate_json(admission.model_dump_json())
+        if admission.request != request:
+            raise ValueError("native recovery admission route returned changed request")
+        return admission
 
     async def publish_recovery(self, request: NativeRecoveryPublicationV1, *, worker_credential: str) -> NativeRecoveryReceiptV1:
         request = NativeRecoveryPublicationV1.model_validate_json(request.model_dump_json())

@@ -14,7 +14,7 @@ branch_labels = None
 depends_on = None
 SCHEMA = "loom_capacity_build_guard"
 FUNCTIONS = ("publish_recovery(uuid,jsonb,bytea,text,text)", "read_recovery(uuid,jsonb,bytea,text,text)",
-    "authorize_recovery_execution(uuid,jsonb,bytea,text,text)")
+    "authorize_recovery_execution(uuid,jsonb,bytea,text,text)", "read_recovery_admission(uuid,jsonb,bytea,text,text)")
 HELPERS = ("assert_recovery_shape(jsonb,text[])", "assert_recovery_record(jsonb)",
     "recovery_authenticated_claim(uuid,jsonb,bytea,text,text)")
 
@@ -177,6 +177,37 @@ def upgrade():
                 OR registration.credential_sha256 IS DISTINCT FROM credential_hash THEN
                 RAISE EXCEPTION 'native recovery credential changed'; END IF;
             RETURN claim.id;
+        END $function$;
+
+        CREATE FUNCTION {SCHEMA}.read_recovery_admission(p_installation uuid,p jsonb,wire bytea,digest text,credential_hash text)
+        RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $function$
+        DECLARE claim_wire bytea; pool text; profile {SCHEMA}.native_recovery_profiles%ROWTYPE;
+            host {SCHEMA}.native_recovery_hosts%ROWTYPE;
+        BEGIN
+            PERFORM {SCHEMA}.assert_recovery_shape(p,ARRAY['schema_version','claim','node_id','boot_id']);
+            IF p->'schema_version' IS DISTINCT FROM '1'::jsonb OR p->>'schema_version'<>'1'
+                OR wire IS NULL OR octet_length(wire) NOT BETWEEN 2 AND 131072
+                OR wire IS DISTINCT FROM convert_to({SCHEMA}.canonical_plan_json(p),'UTF8')
+                OR digest IS DISTINCT FROM encode(sha256(wire),'hex')
+                OR jsonb_typeof(p->'node_id') IS DISTINCT FROM 'string'
+                OR p->>'node_id' !~ '^[a-z0-9][a-z0-9_.-]{{0,127}}$'
+                OR jsonb_typeof(p->'boot_id') IS DISTINCT FROM 'string'
+                OR (p->>'boot_id')::uuid::text IS DISTINCT FROM p->>'boot_id'
+                OR NOT (p->'claim'->'binding'->'node_ids') @> jsonb_build_array(p->'node_id') THEN
+                RAISE EXCEPTION 'native recovery admission request changed'; END IF;
+            claim_wire := convert_to({SCHEMA}.canonical_plan_json(p->'claim'),'UTF8');
+            PERFORM {SCHEMA}.recovery_authenticated_claim(p_installation,p->'claim',claim_wire,encode(sha256(claim_wire),'hex'),credential_hash);
+            PERFORM {SCHEMA}.authorize_source(p_installation,p->'claim',claim_wire,encode(sha256(claim_wire),'hex'),credential_hash);
+            pool := p->'claim'->'binding'->>'pool_id';
+            SELECT * INTO STRICT profile FROM {SCHEMA}.native_recovery_profiles
+                WHERE installation_id=p_installation AND pool_id=pool;
+            SELECT * INTO STRICT host FROM {SCHEMA}.native_recovery_hosts
+                WHERE installation_id=p_installation AND pool_id=pool
+                    AND payload->'node_id'=p->'node_id' AND payload->'boot_id'=p->'boot_id';
+            IF profile.retention_xid=pg_current_xact_id() OR host.retention_xid=pg_current_xact_id() THEN
+                RAISE EXCEPTION 'native recovery admission requires committed profile and host'; END IF;
+            RETURN {SCHEMA}.canonical_plan_json(jsonb_build_object('schema_version',1,'request',p,
+                'profile',profile.payload,'host',host.payload));
         END $function$;
 
         CREATE FUNCTION {SCHEMA}.publish_recovery(p_installation uuid,p jsonb,wire bytea,digest text,credential_hash text)

@@ -63,6 +63,9 @@ from loom_capacity_agent.native_recovery_execution import (
     BuildExecutionRequestV2,
 )
 from loom_capacity_agent.native_recovery_publication import (
+    NativeRecoveryAdmissionExchangeV1,
+    NativeRecoveryAdmissionRequestV1,
+    NativeRecoveryAdmissionV1,
     NativeRecoveryExchangeV1,
     NativeRecoveryHistoryV1,
     NativeRecoveryPublicationV1,
@@ -224,6 +227,14 @@ class BuildAdmissionClient:
         if permit.request != envelope.request:
             raise BuildAdmissionTransportError("native recovery execution response binding changed")
         return permit
+
+    async def read_recovery_admission(self, request: NativeRecoveryAdmissionRequestV1, *, worker_credential: str) -> NativeRecoveryAdmissionV1:
+        envelope = NativeRecoveryAdmissionExchangeV1.model_validate_json(NativeRecoveryAdmissionExchangeV1(
+            request=request, worker_credential=worker_credential).model_dump_json())
+        admission = await self._post(envelope.request.claim.binding, "recovery-admission", canonical_bytes(envelope), NativeRecoveryAdmissionV1)
+        if admission.request != envelope.request:
+            raise BuildAdmissionTransportError("native recovery admission response binding changed")
+        return admission
 
     async def publish_recovery(self, request: NativeRecoveryPublicationV1, *, worker_credential: str) -> NativeRecoveryReceiptV1:
         envelope = NativeRecoveryExchangeV1.model_validate_json(NativeRecoveryExchangeV1(

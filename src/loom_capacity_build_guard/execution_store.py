@@ -41,6 +41,8 @@ from loom_capacity_agent.native_recovery_execution import (
     BuildExecutionRequestV2,
 )
 from loom_capacity_agent.native_recovery_publication import (
+    NativeRecoveryAdmissionRequestV1,
+    NativeRecoveryAdmissionV1,
     NativeRecoveryHistoryV1,
     NativeRecoveryPublicationV1,
     NativeRecoveryReceiptV1,
@@ -342,10 +344,22 @@ class BuildGuardExecutionStore:
                 raise ValueError("native recovery execution response changed")
             return permit
 
-    async def _recovery_call(self, method: str, request: NativeRecoveryPublicationV1 | BuildClaimRequestV1 | BuildExecutionRequestV2,
+    async def read_recovery_admission(self, request: NativeRecoveryAdmissionRequestV1, *, worker_credential: str) -> NativeRecoveryAdmissionV1:
+        if not self._session.in_transaction():
+            raise ValueError("native recovery admission requires an outer transaction")
+        request = NativeRecoveryAdmissionRequestV1.model_validate_json(request.model_dump_json())
+        async with self._session.begin_nested():
+            returned = await self._recovery_call("read_recovery_admission", request, worker_credential)
+            admission = NativeRecoveryAdmissionV1.model_validate_json(returned)
+            if (canonical_bytes(admission).decode("ascii") != returned or admission.request != request
+                or admission.profile.installation_id != self._installation.id):
+                raise ValueError("native recovery admission response changed")
+            return admission
+
+    async def _recovery_call(self, method: str, request: NativeRecoveryPublicationV1 | BuildClaimRequestV1 | BuildExecutionRequestV2 | NativeRecoveryAdmissionRequestV1,
         worker_credential: str,
     ) -> str:
-        if not self._session.in_transaction() or method not in {"publish_recovery", "read_recovery", "authorize_recovery_execution"}:
+        if not self._session.in_transaction() or method not in {"publish_recovery", "read_recovery", "authorize_recovery_execution", "read_recovery_admission"}:
             raise ValueError("native recovery requires an outer transaction and fixed procedure")
         if not isinstance(worker_credential, str) or re.fullmatch(r"[A-Za-z0-9_-]{43,512}", worker_credential) is None:
             raise ValueError("native recovery credential is invalid")
