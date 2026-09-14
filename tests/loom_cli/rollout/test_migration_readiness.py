@@ -4,19 +4,22 @@ import json
 from pathlib import Path
 
 import pytest
+from alembic.script import ScriptDirectory
 
 from loom_cli.rollout.migration_readiness import inspect_migration_plan
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+EXPECTED_HEAD = json.loads((REPO_ROOT / "config/staging-migration-policy.json").read_text())["expected_head"]
 
 
 def test_repository_migration_plan_is_single_head_and_policy_bound() -> None:
     result = inspect_migration_plan(REPO_ROOT / "migrations/alembic.ini")
 
-    assert result.head == "0135"
+    assert result.head == EXPECTED_HEAD
     assert result.base == "0001"
-    assert result.revision_count == 134
-    assert len(result.revision_sha256) == 134
+    revisions = {item.revision for item in ScriptDirectory(str(REPO_ROOT / "migrations")).walk_revisions()}
+    assert result.revision_count == len(revisions)
+    assert set(result.revision_sha256) == revisions
     assert result.graph_policy == "single-head-closed-dag"
     assert result.upgrade_policy == "expand-contract-before-destructive-change"
     assert result.downgrade_policy == "revision-declared-fail-closed"
@@ -32,8 +35,8 @@ def test_repository_migration_plan_is_independent_of_process_cwd(
 
     result = inspect_migration_plan(REPO_ROOT / "migrations/alembic.ini")
 
-    assert result.head == "0135"
-    assert result.revision_count == 134
+    assert result.head == EXPECTED_HEAD
+    assert result.revision_count == len(result.revision_sha256)
 
 
 def test_migration_plan_rejects_noncanonical_script_location(tmp_path: Path) -> None:
