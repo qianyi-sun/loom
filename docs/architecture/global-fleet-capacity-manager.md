@@ -1273,6 +1273,11 @@ in every policy scope, including saved Pooler scale endpoints. Partial acquisiti
 do not qualify. The disposable Kubernetes test runs this executor through actual
 kubectl with lost patch replies; its database/process/workload observations are
 controlled fixtures, so it is not full installed handoff evidence.
+Read-only classification uses the same exact retired-object and propagation
+observer against the original journal ordinal. It validates every stored binding
+without publishing or flushing records and returns a stable retirement digest.
+The component must independently combine this with fresh restoration and original
+guard/writer checks before deriving its terminal.
 Retained objects must not be pruned by GitOps, later operations or
 cleanup; eventual garbage collection still needs outstanding-request retirement
 and separate authority. The approach eliminates this operation's delayed-CREATE

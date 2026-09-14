@@ -325,6 +325,7 @@ def test_cnpg_input_fence_enforces_on_disposable_kubernetes(existing_pooler, tmp
 
         from loom_cli.rollout.operator import protected_application_restoration as restoration
         from loom_cli.rollout.operator.protected_cnpg_fence_retirement import (
+            observe_application_cnpg_fence_retirement,
             retire_cnpg_input_fence,
         )
 
@@ -352,6 +353,16 @@ def test_cnpg_input_fence_enforces_on_disposable_kubernetes(existing_pooler, tmp
                         raise
                 assert time.monotonic() < deadline, "retirement never converged"
                 time.sleep(0.1)
+
+            with monkeypatch.context() as readonly:
+                def forbid(*args, **kwargs):
+                    pytest.fail("retired classification attempted a journal write or fsync")
+                readonly.setattr(journal, "_sync_application_recovery", forbid)
+                readonly.setattr(journal, "_publish_or_match", forbid)
+                digest = observe_application_cnpg_fence_retirement(
+                    plan, journal=journal, component=_component(retire), ordinal=0, runner=runner,
+                )
+                assert len(digest) == 64
 
             def inspect_retired(_):
                 request = journal.read_application_cnpg_fence(plan)
