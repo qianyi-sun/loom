@@ -5,10 +5,10 @@ caller-supplied model is not authentication. No worker HTTP operation exposes
 this read, and local terminal/quiescence/identity checks remain mandatory.
 """
 
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,7 +26,13 @@ from loom_capacity_build_guard.installation_store import (
     RetainedBuildInstallation,
 )
 from loom_capacity_build_guard.terminal_store import ImportedBuildTerminalEvidenceV1
-from loom_capacity_manager.contracts import StrictV1Model, canonical_bytes, canonical_digest
+from loom_capacity_manager.contracts import (
+    PositiveQuantity,
+    Quantity,
+    StrictV1Model,
+    canonical_bytes,
+    canonical_digest,
+)
 
 
 class NativeTerminalRecoveryV1(StrictV1Model):
@@ -62,6 +68,21 @@ class NativeTerminalRecoveryV1(StrictV1Model):
         return self
 
 
+class NativeTerminalRecoveryReferenceV1(StrictV1Model):
+    """A lookup selector, not authenticated node-operation evidence."""
+
+    event_id: PositiveQuantity
+    claim_id: UUID
+
+
+class NativeTerminalRecoveryPageV1(StrictV1Model):
+    installation_id: UUID
+    after_event_id: Quantity
+    through_event_id: Quantity
+    attempts: Annotated[tuple[NativeTerminalRecoveryReferenceV1, ...], Field(max_length=64)]
+    executable: Literal[False] = False
+
+
 class NativeTerminalRecoveryStore:
     def __init__(self, session: AsyncSession, *, installation: RetainedBuildInstallation) -> None:
         document = BuildGuardInstallationV1.model_validate_json(installation.wire_payload)
@@ -69,6 +90,33 @@ class NativeTerminalRecoveryStore:
             raise ValueError("terminal recovery installation changed")
         self._session = session
         self._installation = installation
+
+    async def discover(self, *, after_event_id: int = 0, through_event_id: int | None = None,
+        limit: int = 16,
+    ) -> NativeTerminalRecoveryPageV1:
+        """Finite historical sweep; reset after each pass to revisit retained work."""
+        if (not self._session.in_transaction() or type(after_event_id) is not int or not 0 <= after_event_id < 2**63
+            or (through_event_id is not None and (type(through_event_id) is not int or not after_event_id <= through_event_id < 2**63))
+            or type(limit) is not int or not 1 <= limit <= 64):
+            raise ValueError("terminal recovery requires a transaction and bounded cursor")
+        async with self._session.begin_nested():
+            returned = await self._session.scalar(text("""SELECT loom_capacity_build_guard.discover_terminal_native_recovery(
+                :installation,:installation_wire,:after,:through,:limit)"""),
+                {"installation": self._installation.id, "installation_wire": self._installation.wire_payload,
+                    "after": after_event_id, "through": through_event_id, "limit": limit})
+            page = NativeTerminalRecoveryPageV1.model_validate_json(returned)
+            if (canonical_bytes(page).decode("ascii") != returned or page.installation_id != self._installation.id
+                or page.after_event_id != after_event_id or page.through_event_id < after_event_id
+                or (through_event_id is not None and page.through_event_id != through_event_id)
+                or len(page.attempts) > limit):
+                raise ValueError("terminal recovery page binding changed")
+            previous, seen = after_event_id, set()
+            for attempt in page.attempts:
+                if not previous < attempt.event_id <= page.through_event_id or attempt.claim_id in seen:
+                    raise ValueError("terminal recovery page ordering changed")
+                previous = attempt.event_id
+                seen.add(attempt.claim_id)
+            return page
 
     async def read(self, claim_operation_id: UUID) -> NativeTerminalRecoveryV1 | None:
         """Read committed terminal history without a live lease or lost secret."""

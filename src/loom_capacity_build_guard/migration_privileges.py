@@ -17,7 +17,8 @@ def verify_migration_privileges(connection: Connection, *, owner: str, agent: st
     callables: list[str] = []
     additional_helpers: list[str] = []
     if revision == "build_guard_0033":
-        callables.append(f"{SCHEMA}.read_terminal_native_recovery(uuid,bytea,uuid)")
+        callables.extend((f"{SCHEMA}.read_terminal_native_recovery(uuid,bytea,uuid)",
+            f"{SCHEMA}.discover_terminal_native_recovery(uuid,bytea,bigint,bigint,integer)"))
         revision = "build_guard_0032"
     if revision == "build_guard_0032":
         callables.extend((f"{SCHEMA}.publish_recovery(uuid,jsonb,bytea,text,text)",

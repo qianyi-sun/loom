@@ -156,3 +156,18 @@ async def test_terminal_readback_requires_committed_exact_scope(prepared_input, 
     # The failure did not roll back the caller's unrelated terminal/release work.
     async with factory.begin() as session:
         assert await NativeTerminalRecoveryStore(session, installation=installation).read(claim.operation_id) is not None
+
+
+@pytest.mark.parametrize("bounds", [(-1, None, 1), (1, 0, 1), (0, None, 0), (0, None, 65), (None, None, 1)])
+async def test_terminal_discovery_rejects_invalid_bounds_in_sql(prepared_input, bounds):
+    from sqlalchemy.exc import DBAPIError
+
+    factory, _engine, installation, *_ = prepared_input
+    after, through, limit = bounds
+    async with factory.begin() as session:
+        with pytest.raises(DBAPIError, match="bounds"):
+            async with session.begin_nested():
+                await session.scalar(text("""SELECT loom_capacity_build_guard.discover_terminal_native_recovery(
+                    :installation,:wire,:after,:through,:limit)"""),
+                    {"installation": installation.id, "wire": installation.wire_payload,
+                        "after": after, "through": through, "limit": limit})

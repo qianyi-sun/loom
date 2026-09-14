@@ -2304,6 +2304,27 @@ multi-owner acceptance. Installed recovery after interruption, restricted
 dependency networking, release publication and concurrent-owner acceptance
 remain activation requirements.
 
+Revision `build_guard_0033` adds a separate management-only historical recovery
+read and bounded discovery. It joins committed preparation/finalization,
+admitted profile/host, exact physical bytes, imported terminal evidence and
+protected worker release under the retained installation wire. It needs neither
+the lost worker credential nor a live source lease. Discovery uses the existing
+registration event sequence and does not join live request holds, so terminal
+attempts remain discoverable after capacity retirement. Sweeps must reset their
+cursor after each finite pass to revisit retained work and newly terminal older
+registrations. The additive management registry retains previous installation
+scopes across updates.
+
+Discovery returns lookup selectors only; trusted management must perform the
+exact read before constructing a node operation. Neither procedure is exposed
+through pool-worker HTTP, and neither returned models nor terminal/release
+receipts alone authorize deletion. The fixed authenticated node sender/helper,
+local quiescence/exclusion, protected cleanup journal, quarantine and interrupted
+pruning still require implementation and installed acceptance. Unknown early
+orphans without committed preparation remain retained, not adopted from their
+adjacent local locator. This history extension does not enable intake or add
+another capacity ledger.
+
 The versioned client policy is
 `deploy/personal-dev-builder/client-seccomp-v1.json`. It permits ordinary
 Python/buildctl file IO, read-only extended-attribute inspection, constrained
