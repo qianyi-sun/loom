@@ -569,6 +569,7 @@ def test_installed_protected_dispatch_binds_fixed_candidate_and_supervisor_trans
     assert staging_capacity.service_uid == os.geteuid()
     assert staging_capacity.service_gid == os.getegid()
     assert staging_capacity.container_registry == ""
+    assert callable(staging_capacity.database_component_factory)
     from loom_cli.rollout.operator.installed_application_migration import (
         InstalledApplicationMigrationFactory,
     )
