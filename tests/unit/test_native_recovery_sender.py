@@ -200,3 +200,31 @@ async def test_transport_uses_sealed_verified_bytes_during_material_rotation(tmp
             "import pathlib,sys; assert pathlib.Path(sys.argv[1]).read_bytes()==b'original-private-fixture'",
             snapshot.identity, close_fds=True)
         assert await process.wait() == 0
+
+
+def test_openssh_reads_original_private_key_from_sealed_parent_snapshot(tmp_path, monkeypatch):
+    import subprocess
+    from contextlib import ExitStack
+
+    module = import_module("loom_capacity_build_guard.native_recovery_sender")
+    identity, known = tmp_path / "key", tmp_path / "known_hosts"
+    subprocess.run(["/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(identity)],
+        check=True, timeout=5, capture_output=True)
+    expected = subprocess.run(["/usr/bin/ssh-keygen", "-y", "-f", str(identity)], check=True,
+        timeout=5, capture_output=True).stdout
+    known.write_bytes(b"fixture-host-key")
+    known.chmod(0o600)
+
+    def fixture_parent(path, stack):
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        stack.callback(os.close, fd)
+        return fd
+    monkeypatch.setattr(module, "_protected_parents", fixture_parent)
+    configured = target(module, identity=str(identity), known_hosts=str(known),
+        identity_sha256=sha256(identity.read_bytes()).hexdigest(), known_hosts_sha256=sha256(known.read_bytes()).hexdigest())
+    with ExitStack() as stack:
+        snapshot = module._snapshot_target(configured, stack)
+        identity.write_bytes(b"replaced-after-validation")
+        observed = subprocess.run(["/usr/bin/ssh-keygen", "-y", "-f", snapshot.identity], check=True,
+            timeout=5, capture_output=True).stdout
+        assert observed == expected

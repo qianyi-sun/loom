@@ -105,7 +105,7 @@ def _protected_parents(path: Path, stack: ExitStack) -> int:
     return descriptor
 
 
-def _read_transport_material(path: Path, *, expected_sha256: str) -> None:
+def _read_transport_material(path: Path, *, expected_sha256: str) -> bytes:
     _path(str(path))
     with ExitStack() as stack:
         parent = _protected_parents(path.parent, stack)
@@ -126,6 +126,32 @@ def _read_transport_material(path: Path, *, expected_sha256: str) -> None:
             or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
             != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
             raise ValueError("recovery transport material identity changed")
+        return bytes(wire)
+
+
+def _snapshot_target(target: NativeRecoveryTargetV1, stack: ExitStack) -> NativeRecoveryTargetV1:
+    """Consume exact verified bytes despite atomic management-side rotation.
+
+    OpenSSH may close inherited descriptors. Same-UID parent /proc FD paths
+    remain available through the entire exchange, with immutable memfd bytes.
+    No credential copy is written to disk or exposed to a workload identity.
+    """
+    from loom_capacity_executor.trusted_launcher import (
+        _create_candidate_snapshot_descriptor,
+        _seal_candidate_snapshot,
+        _write_all,
+    )
+
+    updates = {}
+    for field, digest in (("identity", target.identity_sha256), ("known_hosts", target.known_hosts_sha256)):
+        wire = _read_transport_material(Path(getattr(target, field)), expected_sha256=digest)
+        descriptor = _create_candidate_snapshot_descriptor()
+        stack.callback(os.close, descriptor)
+        os.fchmod(descriptor, 0o600)
+        _write_all(descriptor, wire)
+        _seal_candidate_snapshot(descriptor)
+        updates[field] = f"/proc/{os.getpid()}/fd/{descriptor}"
+    return target.model_copy(update=updates)
 
 
 def _ssh_argv(target: NativeRecoveryTargetV1) -> tuple[str, ...]:
@@ -134,6 +160,7 @@ def _ssh_argv(target: NativeRecoveryTargetV1) -> tuple[str, ...]:
         "ForwardAgent=no", "ForwardX11=no", "ClearAllForwardings=yes", "PermitLocalCommand=no",
         "ControlMaster=no", "ControlPath=none", "ProxyCommand=none", "ProxyJump=none",
         "PasswordAuthentication=no", "KbdInteractiveAuthentication=no", "PreferredAuthentications=publickey",
+        "CertificateFile=none", "KnownHostsCommand=none", "HostbasedAuthentication=no", "GSSAPIAuthentication=no",
         "UpdateHostKeys=no", "GlobalKnownHostsFile=/dev/null", f"UserKnownHostsFile={target.known_hosts}",
         "ConnectTimeout=10", "ConnectionAttempts=1", "ServerAliveInterval=5", "ServerAliveCountMax=2",
         "RequestTTY=no", "EscapeChar=none", "LogLevel=ERROR")
@@ -142,8 +169,6 @@ def _ssh_argv(target: NativeRecoveryTargetV1) -> tuple[str, ...]:
 
 
 async def _spawn(target: NativeRecoveryTargetV1) -> asyncio.subprocess.Process:
-    _read_transport_material(Path(target.identity), expected_sha256=target.identity_sha256)
-    _read_transport_material(Path(target.known_hosts), expected_sha256=target.known_hosts_sha256)
     starting = asyncio.create_task(asyncio.create_subprocess_exec(*_ssh_argv(target),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         limit=_MAX_REPLY + 1, env={"PATH": "/usr/bin:/bin", "LANG": "C"}))
@@ -168,9 +193,10 @@ async def _exchange(target: NativeRecoveryTargetV1, wire: bytes, *, timeout_seco
         or not 0.05 <= timeout_seconds <= 120):
         raise ValueError("recovery transport timeout exceeds bound")
     process = None
+    material = ExitStack()
     try:
         async with asyncio.timeout(timeout_seconds):
-            process = await _spawn(target)
+            process = await _spawn(_snapshot_target(target, material))
             if process.stdin is None or process.stdout is None:
                 raise ValueError("recovery transport pipes absent")
             process.stdin.write(wire)
@@ -185,8 +211,11 @@ async def _exchange(target: NativeRecoveryTargetV1, wire: bytes, *, timeout_seco
                 raise ValueError("recovery transport failed; node outcome is unknown")
             return bytes(reply)
     finally:
-        if process is not None:
-            await _join(asyncio.create_task(_stop_process(process)))
+        try:
+            if process is not None:
+                await _join(asyncio.create_task(_stop_process(process)))
+        finally:
+            material.close()
 
 
 class NativeRecoverySender:
