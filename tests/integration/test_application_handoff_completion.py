@@ -75,8 +75,10 @@ class LostAcknowledgementError(RuntimeError):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("autovacuum", [False, True])
-async def test_handoff_retries_rolled_back_quiescence_only_for_autovacuum(transfer_database, monkeypatch, autovacuum):  # noqa: F811
+@pytest.mark.parametrize("refusal", ["trigger", "sessions", "prepared"])
+async def test_handoff_retries_rolled_back_quiescence_only_for_autovacuum(transfer_database, monkeypatch, autovacuum, refusal):  # noqa: F811
     from loom import application_handoff_completion as module
+    from loom.application_ownership_transfer import ApplicationOwnershipTransferError
 
     transfer = module.transfer_application_ownership
     calls = []
@@ -84,16 +86,22 @@ async def test_handoff_retries_rolled_back_quiescence_only_for_autovacuum(transf
         transfer(connection, **kwargs)
         calls.append(1)
         if len(calls) == 1:
+            if refusal != "trigger":
+                raise ApplicationOwnershipTransferError(
+                    "application ownership requires reconciled sessions" if refusal == "sessions"
+                    else "application ownership has prepared transactions"
+                )
             connection.execute("DO $$ BEGIN RAISE EXCEPTION 'application trigger handoff requires quiescent legacy authority' "
                 "USING ERRCODE='55000'; END $$")
     monkeypatch.setattr(module, "transfer_application_ownership", interrupted)
     monkeypatch.setattr(module, "_autovacuum_active", lambda *args, **kwargs: autovacuum, raising=False)
     with _closed(transfer_database) as (peer, maintenance, _guard_peer, arguments):
-        if autovacuum:
+        if autovacuum and refusal != "prepared":
             module.complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
             assert len(calls) == 2
         else:
-            with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
+            error = psycopg.errors.ObjectNotInPrerequisiteState if refusal == "trigger" else ApplicationOwnershipTransferError
+            with pytest.raises(error):
                 module.complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
             assert len(calls) == 1
             assert peer.execute("SELECT datdba FROM pg_database WHERE datname=current_database()").fetchone() == (arguments["target"].owner_oid,)
