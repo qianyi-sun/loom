@@ -229,7 +229,7 @@ async def test_guarded_seal_preserves_original_login_when_guard_or_peer_changes(
                       provisioner_role=next(role for role, alias in arguments["role_bindings"].items() if alias == "provisioner"),
                       handoff_backend=backend, coordination_guard=arguments["coordination_guard"])
         if loss:
-            with pytest.raises(RuntimeError, match="guard|peer"):
+            with pytest.raises(RuntimeError, match=r"guard|peer"):
                 seal_guarded_application_login(LoseGuard(), **kwargs)
             assert peer.execute("SELECT oid,rolcanlogin,rolinherit,rolpassword FROM pg_authid WHERE rolname=%s",
                                 (target.owner_role,)).fetchone() == before
@@ -240,3 +240,49 @@ async def test_guarded_seal_preserves_original_login_when_guard_or_peer_changes(
             assert peer.execute("SELECT oid,rolcanlogin,rolinherit,rolpassword FROM pg_authid WHERE rolname=%s",
                                 (target.owner_role,)).fetchone() == (before[0], False, False, None)
             assert guard.execute("SELECT pg_backend_pid()").fetchone() == (arguments["coordination_guard"].backend.pid,)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("loss", [None, "before", "after-alter", "wrong-peer"])
+async def test_guarded_closure_rolls_back_on_original_guard_loss(transfer_database, loss):  # noqa: F811
+    from dataclasses import replace
+
+    from loom.application_database_admission import close_guarded_application_database_admission
+
+    with _closed(transfer_database) as (peer, maintenance, guard, arguments):
+        target = arguments["target"]
+        maintenance.execute(sql.SQL("ALTER DATABASE {} ALLOW_CONNECTIONS true").format(sql.Identifier(target.database)))
+        changed = []
+
+        class LoseGuard:
+            info = maintenance.info
+            transaction = maintenance.transaction
+
+            def execute(self, query):
+                rendered = query if isinstance(query, str) else query.as_string(maintenance)
+                result = maintenance.execute(query)
+                if rendered.startswith("ALTER DATABASE "):
+                    changed.append(True)
+                    if loss == "after-alter":
+                        assert guard.execute("SELECT pg_advisory_unlock(5498691230183247727)").fetchone() == (True,)
+                return result
+
+        if loss == "before":
+            assert guard.execute("SELECT pg_advisory_unlock(5498691230183247727)").fetchone() == (True,)
+        backend = arguments["handoff_backend"]
+        if loss == "wrong-peer":
+            backend = replace(backend, pid=backend.pid + 10000)
+        kwargs = dict(target=target,
+                      provisioner_role=next(role for role, alias in arguments["role_bindings"].items() if alias == "provisioner"),
+                      handoff_backend=backend, coordination_guard=arguments["coordination_guard"],
+                      runtime_password=arguments["password"])
+        if loss:
+            with pytest.raises(RuntimeError, match=r"guard|peer"):
+                close_guarded_application_database_admission(LoseGuard(), **kwargs)
+            assert peer.execute("SELECT datallowconn FROM pg_database WHERE datname=%s", (target.database,)).fetchone() == (True,)
+            assert changed == ([True] if loss == "after-alter" else [])
+        else:
+            for _ in range(2):
+                close_guarded_application_database_admission(LoseGuard(), **kwargs)
+            assert peer.execute("SELECT datallowconn FROM pg_database WHERE datname=%s", (target.database,)).fetchone() == (False,)
+            assert changed == [True]
