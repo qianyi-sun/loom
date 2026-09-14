@@ -486,17 +486,29 @@ async def test_reconciliation_revokes_terminal_or_zero_and_journals_cancellation
             inventory=running_inventory,
             now=_NOW + timedelta(seconds=2),
         )
-        cancel_repeat = await reconcile_task_image_build_submission(
+        stale_after_revocation = await reconcile_task_image_build_submission(
             session,
             grant_id=cancel_grant.grant_id,
             inventory=running_inventory,
             now=_NOW + timedelta(seconds=3),
         )
+        assert stale_after_revocation.action == "wait"
+        assert stale_after_revocation.reason == "inventory_snapshot_precedes_revocation"
+        cancel_repeat = await reconcile_task_image_build_submission(
+            session,
+            grant_id=cancel_grant.grant_id,
+            inventory=running_inventory.model_copy(
+                update={"observed_at": _NOW + timedelta(seconds=3)}
+            ),
+            now=_NOW + timedelta(seconds=3),
+        )
         await session.commit()
 
         assert (empty.action, terminal.action) == ("revoke", "revoke")
-        assert cancel_first == cancel_repeat
-        assert cancel_first.action == "cancel_then_reconcile"
+        assert cancel_first.action == cancel_repeat.action == "cancel_then_reconcile"
+        assert cancel_first.cancel_job_ids == cancel_repeat.cancel_job_ids == ("33333",)
+        assert cancel_first.reason == "submission_protocol_violation"
+        assert cancel_repeat.reason == "revoked_grant_live_submission"
         rows = {
             row.id: row
             for row in (
