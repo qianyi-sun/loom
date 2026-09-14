@@ -6,12 +6,19 @@ from types import SimpleNamespace
 
 import pytest
 
-from loom_cli.rollout.operator.protected_application_guard_retention import application_guard_is_retained
-from loom_cli.rollout.operator.protected_application_migration_journal import ApplicationMigrationJournal
+from loom_cli.rollout.operator.protected_application_guard_retention import (
+    application_guard_is_retained,
+)
+from loom_cli.rollout.operator.protected_application_migration_journal import (
+    ApplicationMigrationJournal,
+)
 from loom_cli.rollout.operator.protected_apply_journal import ComponentState
 from tests.loom_cli.rollout.operator.test_application_admission_recovery import _handoff
 from tests.loom_cli.rollout.operator.test_application_guard_retention import _guard, _setup
-from tests.loom_cli.rollout.operator.test_application_migration_journal import _authority, _generation
+from tests.loom_cli.rollout.operator.test_application_migration_journal import (
+    _authority,
+    _generation,
+)
 
 
 @pytest.mark.parametrize("drift", [None, "inputs", "guard", "handoff"])
