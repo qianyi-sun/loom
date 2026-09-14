@@ -7,7 +7,10 @@ from importlib import import_module
 
 import pytest
 
-from loom_capacity_agent.native_recovery_publication import NativeRecoveryPublicationV1, NativeRecoveryReceiptV1
+from loom_capacity_agent.native_recovery_publication import (
+    NativeRecoveryPublicationV1,
+    NativeRecoveryReceiptV1,
+)
 from loom_capacity_executor.native_identity_mapping import NativeIdentityRange, NativeMappedIdentity
 from loom_capacity_manager.contracts import canonical_digest
 from tests.unit.test_native_material_launch import material_spec

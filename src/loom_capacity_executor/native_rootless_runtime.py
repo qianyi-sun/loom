@@ -17,15 +17,17 @@ import socket
 import stat
 import sys
 from pathlib import Path
-from typing import NoReturn, Self
+from typing import Literal, NoReturn, Self
 
-from pydantic import BaseModel, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, Field, TypeAdapter, field_validator, model_validator
 
 from loom_capacity_agent.build_admission import (
     BuildArtifactV1,
     BuildClaimRequestV1,
     BuildSourceContextV1,
 )
+from loom_capacity_agent.native_recovery import NativeRecoveryPreparationV1
+from loom_capacity_agent.native_recovery_publication import NativeRecoveryPublicationV1
 from loom_capacity_executor.native_artifact_transfer import send_native_artifact
 from loom_capacity_executor.native_build_session import execute_native_build_session
 from loom_capacity_executor.native_mapped_scratch import (
@@ -110,7 +112,28 @@ class NativeRootlessSpecV2(_NativeRootlessSpec, StrictV2Model):
         return self
 
 
-NativeRootlessSpec = NativeRootlessSpecV1 | NativeRootlessSpecV2
+class NativeRootlessSpecV3(NativeRootlessSpecV2):
+    """Recovery-capable material launch; legacy V2 canonical bytes stay unchanged."""
+
+    schema_version: Literal[3] = 3  # type: ignore[assignment]
+    recovery_preparation: NativeRecoveryPreparationV1
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _exact_version(cls, value: object) -> object:
+        if type(value) is not int or value != 3:
+            raise ValueError("native recovery specification requires integer version3")
+        return value
+
+    @model_validator(mode="after")
+    def _recovery_scope(self) -> Self:
+        NativeRecoveryPublicationV1(claim=self.claim, record=self.recovery_preparation)
+        if Path(self.recovery_preparation.locator.directory) != Path(self.workspace).parent:
+            raise ValueError("native recovery specification attempt changed")
+        return self
+
+
+NativeRootlessSpec = NativeRootlessSpecV1 | NativeRootlessSpecV2 | NativeRootlessSpecV3
 _SPEC_ADAPTER: TypeAdapter[NativeRootlessSpec] = TypeAdapter(NativeRootlessSpec)
 
 
