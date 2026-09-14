@@ -128,6 +128,9 @@ def _write(path: Path, payload: bytes, *, uid: int, gid: int, mode: int,
         if expected_existing is False:
             raise _refuse()
         if actual == payload:
+            # A prior publication may have completed before its directory sync
+            # acknowledgement. Re-established durability precedes completion.
+            _sync(path.parent)
             return
         if expected_existing is True:
             raise _refuse()
