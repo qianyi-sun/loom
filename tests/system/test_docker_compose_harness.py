@@ -640,3 +640,10 @@ def test_workflow_prints_runner_temp_diagnostics_before_cleanup() -> None:
     cleanup_index = workflow.index("- name: Cleanup system-smoke compose stack")
     assert capture_index < cat_index < cleanup_index
     assert "timeout 60s docker compose" in workflow
+
+
+def test_system_stack_uses_shared_digest_pinned_minio() -> None:
+    from tests.integration.minio_test_images import MINIO_TEST_IMAGE
+
+    config = yaml.safe_load(docker_compose.COMPOSE_FILE.read_text())
+    assert config["services"]["minio"]["image"] == MINIO_TEST_IMAGE
