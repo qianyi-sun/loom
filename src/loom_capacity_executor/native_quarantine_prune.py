@@ -94,7 +94,6 @@ def prune_native_quarantine(descriptor: int, *, identity: NativeQuarantineIdenti
 
     def visit(parent: int, name: str, *, depth: int) -> None:
         nonlocal entries
-        entries += 1
         budget(depth)
         checked(descriptor, root=True)
         node = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
@@ -107,6 +106,8 @@ def prune_native_quarantine(descriptor: int, *, identity: NativeQuarantineIdenti
                 if not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
                     raise ValueError("quarantine locator identity changed")
                 return
+            entries += 1
+            budget(depth)
             if not stat.S_ISDIR(observed.st_mode):
                 os.unlink(name, dir_fd=parent)
                 return
@@ -126,14 +127,23 @@ def prune_native_quarantine(descriptor: int, *, identity: NativeQuarantineIdenti
 
     def walk(parent: int, depth: int) -> None:
         names: list[str] = []
+        more = False
         with os.scandir(parent) as children:
             for child in children:
-                budget(depth, len(names) + 1)
+                if depth == 0 and child.name == "recovery.json":
+                    continue
+                budget(depth)
+                if len(names) >= _MAX_ENTRIES - entries:
+                    more = True
+                    break
                 names.append(child.name)
         for name in names:
             visit(parent, name, depth=depth)
         os.fsync(parent)
+        if more:
+            raise ValueError("quarantine pruning exceeds bound; partial progress retained")
 
     checked(descriptor, root=True)
+    visit(descriptor, "recovery.json", depth=0)
     walk(descriptor, 0)
     checked(descriptor, root=True)
