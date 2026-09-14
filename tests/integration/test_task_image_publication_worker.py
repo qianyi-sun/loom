@@ -695,8 +695,10 @@ async def test_blocked_renewal_closes_stream_at_lease_expiry_not_database_timeou
             # The lease is .5 s, not the 5 s DB timeout. Wait for actual socket closure.
             await asyncio.wait_for(tls_registry.peer_closed.wait(), 1.5)
             await blocker.rollback()
+        done, _ = await asyncio.wait((task,), timeout=5)
+        assert task in done, "worker did not finish without harness cancellation"
         with pytest.raises(TimeoutError):
-            await asyncio.wait_for(task, 5)
+            task.result()
         assert values[2].closed.is_set()
     finally:
         task.cancel()
