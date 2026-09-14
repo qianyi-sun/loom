@@ -22,6 +22,7 @@ from loom.application_database_admission import (
 )
 from loom.application_database_connection import ApplicationDatabaseConnection, application_sql
 from loom.application_ownership_transfer import require_application_role_scope
+from loom.application_password import matches_application_scram
 
 
 class ApplicationLoginSealingError(RuntimeError):
@@ -38,13 +39,14 @@ def seal_application_login(
     the sealing transaction as well.
     """
     _seal_application_login(connection, database=database, role=role, provisioner_role=provisioner_role,
-                            handoff_backend=None, coordination_guard=None)
+                            handoff_backend=None, coordination_guard=None, runtime_password=None)
 
 
 def seal_guarded_application_login(
     connection: ApplicationDatabaseConnection, *, database: str, role: str, provisioner_role: str,
     handoff_backend: ApplicationDatabaseHandoffBackend,
     coordination_guard: ApplicationDatabaseCoordinationGuard,
+    runtime_password: str,
 ) -> None:
     """Seal on the exact saved peer, checking the original guard inside the transaction.
 
@@ -54,10 +56,12 @@ def seal_guarded_application_login(
     ALTER rolls back the login/password changes; no guard is reacquired here.
     """
     if (type(handoff_backend) is not ApplicationDatabaseHandoffBackend
-            or type(coordination_guard) is not ApplicationDatabaseCoordinationGuard):
+            or type(coordination_guard) is not ApplicationDatabaseCoordinationGuard
+            or not isinstance(runtime_password, str) or not runtime_password):
         raise ApplicationLoginSealingError("application login guard identity is invalid")
     _seal_application_login(connection, database=database, role=role, provisioner_role=provisioner_role,
-                            handoff_backend=handoff_backend, coordination_guard=coordination_guard)
+                            handoff_backend=handoff_backend, coordination_guard=coordination_guard,
+                            runtime_password=runtime_password)
 
 
 def _require_guarded_peer(connection: ApplicationDatabaseConnection,
@@ -84,6 +88,7 @@ def _seal_application_login(
     connection: ApplicationDatabaseConnection, *, database: str, role: str, provisioner_role: str,
     handoff_backend: ApplicationDatabaseHandoffBackend | None,
     coordination_guard: ApplicationDatabaseCoordinationGuard | None,
+    runtime_password: str | None,
 ) -> None:
     """Commit NOLOGIN/NOINHERIT/PASSWORD NULL for the ordinary legacy owner.
 
@@ -170,6 +175,14 @@ def _seal_application_login(
             raise ApplicationLoginSealingError(
                 "application login has foreign sessions or prepared transactions"
             )
+        if runtime_password is not None:
+            password_state = connection.execute(application_sql(
+                "SELECT rolcanlogin,rolpassword FROM pg_catalog.pg_authid WHERE rolname={}", role,
+            )).fetchone()
+            if (password_state is None or len(password_state) != 2
+                    or not ((password_state[0] is False and password_state[1] is None)
+                            or matches_application_scram(runtime_password, password_state[1]))):
+                raise ApplicationLoginSealingError("application login original password changed")
         connection.execute(
             sql.SQL("ALTER ROLE {} NOLOGIN NOINHERIT PASSWORD NULL").format(sql.Identifier(role))
         )
