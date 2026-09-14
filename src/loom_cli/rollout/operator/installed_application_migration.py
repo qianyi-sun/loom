@@ -27,6 +27,16 @@ class InstalledApplicationMigrationFactory:
     handoff: InstalledApplicationHandoffFactory
     container_registry: str
 
+    def new_journal(self, plan: FinalGatePlan) -> ProtectedApplyJournal:
+        return ProtectedApplyJournal(self.handoff.config.state_root, request_id=plan.request_id,
+            attempt_number=plan.attempt_number, service_uid=self.handoff.service_uid)
+
+    def components(self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal,
+                   ordinal: int) -> tuple[ProtectedApplyComponent, ...]:
+        """Construct the identical ordered pair without opening a database peer."""
+        return (self.handoff(plan, journal=journal, ordinal=ordinal),
+                self(plan, journal=journal, ordinal=ordinal + 1, handoff_ordinal=ordinal))
+
     def epoch(self, plan: FinalGatePlan) -> int:
         guard = self.handoff.completed_guard(plan)
         pending = _read_pending_retention(self.handoff.config.state_root, request_id=plan.request_id,

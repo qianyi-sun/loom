@@ -37,6 +37,7 @@ from loom_cli.rollout.final_gate_readiness import FinalGateResult
 from loom_cli.rollout.preflight_contract import CheckOperation
 
 from .final_gate_plan import FinalGatePlan
+from .installed_application_migration import InstalledApplicationMigrationFactory
 from .protected_application_admission_recovery import ApplicationAdmissionRecoveryRecord
 from .protected_apply_journal import (
     ComponentObservation,
@@ -654,6 +655,23 @@ class SubprocessProtectedApplyCommandRunner:
         return command
 
 
+def _application_components(
+    plan: FinalGatePlan, *, runner: ProtectedApplyCommandRunner, service_uid: int,
+    container_registry: str, factory: InstalledApplicationMigrationFactory | None,
+    journal: ProtectedApplyJournal | None,
+) -> tuple[ProtectedApplyComponent, ...]:
+    if factory is None:
+        return (KubernetesProtectedMigrationComponent(runner=runner, environment=runner.environment,
+            service_uid=service_uid, container_registry=container_registry).component(plan),)
+    if journal is None or requires_legacy_epoch_bootstrap(plan):
+        raise ValueError("installed application handoff requires original journal and existing epoch authority")
+    components = factory.components(plan, journal=journal, ordinal=2)
+    if tuple(component.component_id for component in components) != (
+            "application-ownership-handoff", "database-migration"):
+        raise ValueError("installed application component order changed")
+    return components
+
+
 @dataclass(frozen=True, slots=True)
 class MigrationEpochProtectedApplyExecutor:
     """Execute the exact migration and epoch claim through one component journal."""
@@ -680,6 +698,7 @@ class MigrationEpochProtectedApplyExecutor:
         default_factory=HttpxProductionDefaultsTransport
     )
     container_registry: str = ""
+    application_factory: InstalledApplicationMigrationFactory | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -768,12 +787,8 @@ class MigrationEpochProtectedApplyExecutor:
             runner=self.runner,
             environment=environment,
         ).component(plan)
-        migration = KubernetesProtectedMigrationComponent(
-            runner=self.runner,
-            environment=environment,
-            service_uid=self.service_uid,
-            container_registry=self.container_registry,
-        ).component(plan)
+        application = _application_components(plan, runner=self.runner, service_uid=self.service_uid,
+            container_registry=self.container_registry, factory=self.application_factory, journal=journal)
         staging_capacity = self._staging_capacity_components(plan, epoch.classify)
         manifests = KubernetesProtectedManifestComponent(
             runner=self.runner,
@@ -824,7 +839,7 @@ class MigrationEpochProtectedApplyExecutor:
         components = (
             (
                 supervisor_reconciliation,
-                migration,
+                *application,
                 epoch,
                 *staging_capacity,
                 manifests,
@@ -840,7 +855,7 @@ class MigrationEpochProtectedApplyExecutor:
             else (
                 supervisor_reconciliation,
                 epoch,
-                migration,
+                *application,
                 *staging_capacity,
                 manifests,
                 external_supervisor_database,
@@ -898,6 +913,7 @@ class KubernetesProtectedConvergenceExecutor:
         default_factory=HttpxProductionDefaultsTransport
     )
     container_registry: str = ""
+    application_factory: InstalledApplicationMigrationFactory | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -959,13 +975,11 @@ class KubernetesProtectedConvergenceExecutor:
             epoch_guard=epoch.classify,
         )
         staging_capacity = self._staging_capacity_components(plan, epoch.classify)
+        application = _application_components(plan, runner=self.runner, service_uid=self.service_uid,
+            container_registry=self.container_registry, factory=self.application_factory,
+            journal=None if self.application_factory is None else self.application_factory.new_journal(plan))
         observations = {
-            "database-migration": KubernetesProtectedMigrationComponent(
-                runner=self.runner,
-                environment=environment,
-                service_uid=self.service_uid,
-                container_registry=self.container_registry,
-            ).classify(plan),
+            **{component.component_id: component.classify(plan) for component in application},
             "mutation-epoch-claim": epoch.classify(plan),
             "staging-manifests": KubernetesProtectedManifestComponent(
                 runner=self.runner,
@@ -1032,6 +1046,7 @@ class KubernetesProtectedConvergenceExecutor:
         if observations["external-supervisor-transition-cleanup"].observed_epoch != expected_epoch:
             blockers["external-supervisor-transition-cleanup"] = "protected-epoch-not-exact"
         for component_id in (
+            *(component.component_id for component in application),
             *staging_capacity_component_ids,
             *credential_component_ids,
             *external_component_ids,
