@@ -124,3 +124,30 @@ def test_waiting_foreign_pod_cannot_receive_a_new_migration_credential(tmp_path)
     with pytest.raises(RuntimeError, match="consumer"):
         resources.ensure_secret(creation_dispatched=True)
     assert runner.events == []
+
+
+@pytest.mark.parametrize("kind", ["Secret", "Job"])
+def test_cleanup_observes_lost_creation_acknowledgement_without_creating(tmp_path, kind):
+    resources, runner = _resources(tmp_path)
+    assert resources.observe_secret() is None
+    assert resources.observe_job() is None
+    assert runner.events == []
+    runner.lose_create = kind == "Secret"
+    if kind == "Secret":
+        with pytest.raises(RuntimeError, match="reply lost"):
+            resources.ensure_secret(creation_dispatched=True)
+    else:
+        secret = resources.ensure_secret(creation_dispatched=True)
+        runner.lose_create = True
+        with pytest.raises(RuntimeError, match="reply lost"):
+            resources.ensure_job(creation_dispatched=True, expected_secret_uid=secret.uid)
+    observed = resources.observe_secret() if kind == "Secret" else resources.observe_job()
+    before = list(runner.events)
+    assert observed is not None
+    assert runner.events == before
+    if kind == "Job":
+        resources.delete_job(expected_uid=observed.uid)
+    else:
+        resources.delete_secret(expected_uid=observed.uid)
+    assert (resources.observe_secret() if kind == "Secret" else resources.observe_job()) is None
+    assert len(runner.events) == len(before) + 1
