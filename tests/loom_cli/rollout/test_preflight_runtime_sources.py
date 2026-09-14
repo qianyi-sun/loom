@@ -466,6 +466,14 @@ def test_sources_build_complete_registry_and_checkpoint_manifest_probe(
         monkeypatch.setattr(runtime_sources_module, builder_name, record_concurrency)
 
     original_manifest_builder = runtime_sources_module.build_manifest_preflight_checks
+    original_migration_builder = runtime_sources_module.build_migration_manifest_check
+    migration_owner_modes = []
+
+    def record_migration_owner(*args, **kwargs):
+        migration_owner_modes.append(kwargs.get("application_owner_role"))
+        return original_migration_builder(*args, **kwargs)
+
+    monkeypatch.setattr(runtime_sources_module, "build_migration_manifest_check", record_migration_owner)
 
     def record_manifest_retry(*args, **kwargs):
         manifest_retries.append(kwargs.get("field_ownership_retry_render", missing_retry))
@@ -490,6 +498,7 @@ def test_sources_build_complete_registry_and_checkpoint_manifest_probe(
     )
 
     runtime = sources.build(mutation_epoch=9)
+    assert migration_owner_modes == ["loom_app_staging_owner"]
     plan = runtime.prebackup_plan(candidate)
 
     assert plan.registry.through_tier == 3
