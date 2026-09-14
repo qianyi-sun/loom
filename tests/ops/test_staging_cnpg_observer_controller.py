@@ -339,3 +339,31 @@ def test_atomic_publication_never_exposes_a_multi_link_identity(tmp_path, monkey
 
     monkeypatch.setattr(module, "_rename_absent", verify)
     module.prepare_controller(**args)
+
+
+def test_lost_reply_recovery_syncs_existing_identity_before_completion(tmp_path, monkeypatch):
+    module, args = _context(tmp_path, monkeypatch)
+    sync, write_record = module._sync, module._root_write
+    interrupted = False
+    synced = set()
+
+    def lose_first_sync(path):
+        nonlocal interrupted
+        if path == module.IDENTITY.parent and not interrupted:
+            interrupted = True
+            raise OSError("lost reply before destination directory sync")
+        sync(path)
+        synced.add(path)
+
+    def require_durable_output(path, value):
+        if path == module.STATE / "current.json":
+            assert module.IDENTITY.parent in synced
+        write_record(path, value)
+
+    monkeypatch.setattr(module, "_sync", lose_first_sync)
+    monkeypatch.setattr(module, "_root_write", require_durable_output)
+    with pytest.raises(OSError, match="lost reply"):
+        module.prepare_controller(**args)
+    assert module.IDENTITY.exists()
+    synced.clear()
+    assert module.prepare_controller(**args)["status"] == "prepared-not-observed"
