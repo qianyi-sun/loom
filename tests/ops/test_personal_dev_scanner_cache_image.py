@@ -22,9 +22,17 @@ def test_scanner_cache_image_is_minimal_nonroot_and_immutable() -> None:
         "FROM python:3.11-slim@sha256:"
         "9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7"
     )
-    assert "RUN " not in "\n".join(lines)
+    # The sole build-time command repairs the pinned base's Perl CVEs. Keep
+    # this an exact exception, not permission for arbitrary downloads/installs.
+    assert lines[1:4] == [
+        "RUN apt-get update -qq && \\",
+        "    apt-get install -y --only-upgrade --no-install-recommends perl-base=5.40.1-6+deb13u1 && \\",
+        "    rm -rf /var/lib/apt/lists/*",
+    ]
+    remaining = "\n".join(lines[:1] + lines[4:])
+    assert "RUN " not in remaining
     assert not any(
-        command in "\n".join(lines).lower() for command in ("curl", "wget", "apt", "pip")
+        command in remaining.lower() for command in ("curl", "wget", "apt", "pip")
     )
     assert (
         lines.count(

@@ -33,56 +33,57 @@ IGNORE_BYTES = (
     b"vulnerabilities:\n"
     b"  - id: CVE-2023-45853\n"
     b"    purls:\n"
-    b'      - "pkg:deb/debian/zlib1g"\n'
-    b"    expired_at: 2026-09-12\n"
-    b"    statement: Debian marked this finding will-not-fix on 2026-08-12; zlib1g is a required dependency of the staging-compatible PostgreSQL 17.4 rehearsal image.\n"
+    b"      - \"pkg:deb/debian/zlib1g\"\n"
+    b"    expired_at: 2026-10-14\n"
+    b"    statement: \"Reviewed 2026-09-14: Debian Bookworm does not build the affected MiniZip code in zlib1g; temporary exception for pinned PostgreSQL 17.4 and Python pipeline compatibility fixtures.\"\n"
     b"  - id: CVE-2025-7458\n"
     b"    purls:\n"
-    b'      - "pkg:deb/debian/libsqlite3-0"\n'
-    b"    expired_at: 2026-09-12\n"
-    b"    statement: No fixed Debian package was available on 2026-08-12; this package is a required dependency of the staging-compatible PostgreSQL 17.4 rehearsal image.\n"
+    b"      - \"pkg:deb/debian/libsqlite3-0\"\n"
+    b"    expired_at: 2026-10-14\n"
+    b"    statement: \"Reviewed 2026-09-14: no fixed Bookworm package; temporary risk acceptance for pinned PostgreSQL 17.4 and Python pipeline compatibility dependencies.\"\n"
     b"  - id: CVE-2026-13221\n"
     b"    purls:\n"
-    b'      - "pkg:deb/debian/libperl5.36"\n'
-    b'      - "pkg:deb/debian/libperl5.40"\n'
-    b'      - "pkg:deb/debian/perl"\n'
-    b'      - "pkg:deb/debian/perl-base"\n'
-    b'      - "pkg:deb/debian/perl-modules-5.36"\n'
-    b'      - "pkg:deb/debian/perl-modules-5.40"\n'
-    b"    expired_at: 2026-09-12\n"
-    b"    statement: No fixed Debian package was available on 2026-08-12; these Perl packages are required by Debian base runtimes, the agent toolchain, and the staging-compatible PostgreSQL 17.4 rehearsal image.\n"
+    b"      - \"pkg:deb/debian/libperl5.36\"\n"
+    b"      - \"pkg:deb/debian/perl\"\n"
+    b"      - \"pkg:deb/debian/perl-base\"\n"
+    b"      - \"pkg:deb/debian/perl-modules-5.36\"\n"
+    b"    expired_at: 2026-10-14\n"
+    b"    statement: \"Reviewed 2026-09-14: no fixed Bookworm Perl package; temporary risk acceptance for pinned PostgreSQL 17.4 and Python pipeline compatibility fixtures. Trixie runtimes must use fixed Perl.\"\n"
     b"  - id: CVE-2026-42496\n"
     b"    purls:\n"
-    b'      - "pkg:deb/debian/libperl5.36"\n'
-    b'      - "pkg:deb/debian/libperl5.40"\n'
-    b'      - "pkg:deb/debian/perl"\n'
-    b'      - "pkg:deb/debian/perl-base"\n'
-    b'      - "pkg:deb/debian/perl-modules-5.36"\n'
-    b'      - "pkg:deb/debian/perl-modules-5.40"\n'
-    b"    expired_at: 2026-09-12\n"
-    b"    statement: No fixed Debian package was available on 2026-08-12; these Perl packages are required by Debian base runtimes, the agent toolchain, and the staging-compatible PostgreSQL 17.4 rehearsal image.\n"
+    b"      - \"pkg:deb/debian/libperl5.36\"\n"
+    b"      - \"pkg:deb/debian/perl\"\n"
+    b"      - \"pkg:deb/debian/perl-base\"\n"
+    b"      - \"pkg:deb/debian/perl-modules-5.36\"\n"
+    b"    expired_at: 2026-10-14\n"
+    b"    statement: \"Reviewed 2026-09-14: no fixed Bookworm Perl package; temporary risk acceptance for pinned PostgreSQL 17.4 and Python pipeline compatibility fixtures. Trixie runtimes must use fixed Perl.\"\n"
     b"  - id: CVE-2026-43185\n"
     b"    purls:\n"
-    b'      - "pkg:deb/debian/linux-libc-dev"\n'
-    b"    expired_at: 2026-09-12\n"
-    b"    statement: No fixed Debian package was available on 2026-08-12; linux-libc-dev is required by the agent sandbox compiler toolchain.\n"
+    b"      - \"pkg:deb/debian/linux-libc-dev\"\n"
+    b"    expired_at: 2026-10-14\n"
+    b"    statement: \"Reviewed 2026-09-14: stable Debian has no fixed source package; agent compiler needs linux-libc-dev headers, not the affected ksmbd kernel runtime. Temporary exception does not attest host kernel safety.\"\n"
     b"  - id: CVE-2026-6653\n"
     b"    purls:\n"
-    b'      - "pkg:deb/debian/libxml2"\n'
-    b"    expired_at: 2026-09-12\n"
-    b"    statement: No fixed Debian package was available on 2026-08-12; this package is a required dependency of the staging-compatible PostgreSQL 17.4 rehearsal image.\n"
+    b"      - \"pkg:deb/debian/libxml2\"\n"
+    b"    expired_at: 2026-10-14\n"
+    b"    statement: \"Reviewed 2026-09-14: no fixed Bookworm package; temporary risk acceptance for pinned PostgreSQL 17.4 and Python pipeline compatibility dependencies.\"\n"
     b"  - id: CVE-2026-8376\n"
     b"    purls:\n"
-    b'      - "pkg:deb/debian/libperl5.36"\n'
-    b'      - "pkg:deb/debian/libperl5.40"\n'
-    b'      - "pkg:deb/debian/perl"\n'
-    b'      - "pkg:deb/debian/perl-base"\n'
-    b'      - "pkg:deb/debian/perl-modules-5.36"\n'
-    b'      - "pkg:deb/debian/perl-modules-5.40"\n'
-    b"    expired_at: 2026-09-12\n"
-    b"    statement: No fixed Debian package was available on 2026-08-12; these Perl packages are required by Debian base runtimes, the agent toolchain, and the staging-compatible PostgreSQL 17.4 rehearsal image.\n"
+    b"      - \"pkg:deb/debian/libperl5.36\"\n"
+    b"      - \"pkg:deb/debian/perl\"\n"
+    b"      - \"pkg:deb/debian/perl-base\"\n"
+    b"      - \"pkg:deb/debian/perl-modules-5.36\"\n"
+    b"    expired_at: 2026-10-14\n"
+    b"    statement: \"Reviewed 2026-09-14: no fixed Bookworm Perl package; temporary risk acceptance for pinned PostgreSQL 17.4 and Python pipeline compatibility fixtures. Trixie runtimes must use fixed Perl.\"\n"
 )
-IGNORE_SHA256 = "11f957c7a63686da04c9f38e39aa2ca1eeef743b36c75810054afc84571ed2f7"
+IGNORE_SHA256 = "2fe828560a3df13427bff6634f08509ec6be55ca75de9fb7e3fd095805a28c12"
+
+
+def test_rendered_policy_is_valid_yaml_with_exact_statements() -> None:
+    parsed = yaml.safe_load(policy.TRIVY_IGNORE_BYTES)
+    assert [item["statement"] for item in parsed["vulnerabilities"]] == [
+        item.statement for item in policy.TRIVY_EXCEPTIONS
+    ]
 
 
 def test_temporary_exceptions_cover_only_required_unfixed_packages() -> None:
@@ -90,11 +91,9 @@ def test_temporary_exceptions_cover_only_required_unfixed_packages() -> None:
 
     expected_perl_purls = (
         "pkg:deb/debian/libperl5.36",
-        "pkg:deb/debian/libperl5.40",
         "pkg:deb/debian/perl",
         "pkg:deb/debian/perl-base",
         "pkg:deb/debian/perl-modules-5.36",
-        "pkg:deb/debian/perl-modules-5.40",
     )
     for vulnerability_id in (
         "CVE-2026-13221",
@@ -112,9 +111,7 @@ def test_temporary_exceptions_cover_only_required_unfixed_packages() -> None:
 def test_temporary_perl_exceptions_explain_every_required_runtime() -> None:
     exceptions = {item.vulnerability_id: item for item in policy.TRIVY_EXCEPTIONS}
     expected_statement = (
-        "No fixed Debian package was available on 2026-08-12; these Perl packages are "
-        "required by Debian base runtimes, the agent toolchain, and the staging-compatible "
-        "PostgreSQL 17.4 rehearsal image."
+        "Reviewed 2026-09-14: no fixed Bookworm Perl package; temporary risk acceptance for pinned PostgreSQL 17.4 and Python pipeline compatibility fixtures. Trixie runtimes must use fixed Perl."
     )
 
     for vulnerability_id in (
@@ -169,7 +166,7 @@ def test_policy_writer_rejects_expired_temporary_exceptions(tmp_path: Path) -> N
         policy.write_release_policy(
             tmp_path / "trivy.yaml",
             tmp_path / "trivy.ignore",
-            today=date(2026, 9, 12),
+            today=date(2026, 10, 14),
         )
 
     assert list(tmp_path.iterdir()) == []

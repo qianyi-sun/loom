@@ -13,7 +13,7 @@ COPY packages ./packages
 # git is required only while pip resolves the pinned Harbor source. Purging it
 # in the same layer removes Git's unused Perl runtime from the final image.
 RUN apt-get update -qq && \
-    apt-get install -y --no-install-recommends git && \
+    apt-get install -y --no-install-recommends perl-base=5.40.1-6+deb13u1 git && \
     pip install --no-cache-dir -e ./packages/loom-bundle-checksum && \
     pip install --no-cache-dir -e . && \
     pip install --no-cache-dir -e ./packages/loom-launcher && \

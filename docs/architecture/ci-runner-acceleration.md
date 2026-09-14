@@ -297,15 +297,25 @@ trusted publication scans both use pinned Trivy v0.74.0 with `scan-type: image`,
 '1'`, `ignore-unfixed: 'false'`, `scanners: vuln`, and `cache: 'false'`. Before
 each scan, a repository helper writes the fixed config and reviewed ignore file
 outside the checkout. Maintained images and dependencies are upgraded before
-an exception is considered. The temporary exceptions cover only the three
-unfixed CRITICAL Perl findings (CVE-2026-13221, CVE-2026-42496, and
-CVE-2026-8376) on the exact Debian Perl packages required by Debian base
-runtimes, the agent toolchain, and the staging-compatible PostgreSQL 17.4
-rehearsal image, CVE-2026-43185 on the agent compiler's
-`linux-libc-dev`, and CVE-2025-7458, CVE-2026-6653, and CVE-2023-45853 on the
-staging-compatible PostgreSQL 17.4 rehearsal dependencies. Each structured
-exception records its exact Debian PURL scope and review statement and expires
-at 2026-09-12 UTC; policy generation fails closed at that boundary. A second
+an exception is considered. The September 14 review requires fixed Trixie Perl
+`5.40.1-6+deb13u1` in maintained runtimes; those components accept no Perl
+suppression. The agent toolchain retains only CVE-2026-43185 on
+`linux-libc-dev`: headers do not execute the affected ksmbd kernel code, and
+this image exception does not attest host kernel safety.
+
+Temporary risk acceptance, not remediation, remains for the pinned Bookworm
+PostgreSQL 17.4 and Python pipeline compatibility fixtures: their exact Perl
+packages (CVE-2026-13221, CVE-2026-42496, CVE-2026-8376), SQLite
+(CVE-2025-7458), and PostgreSQL's libxml2 (CVE-2026-6653) have no fixed
+Bookworm package in the September 14 Debian tracker and fresh Trivy evidence.
+CVE-2023-45853 on Bookworm zlib1g concerns MiniZip code that Debian does not
+build into that binary. Source status is recorded by the
+[Debian security tracker](https://security-tracker.debian.org/tracker/).
+Each structured exception binds exact package and component scope, rejects any
+available fixed version, and expires at 2026-10-14 UTC. Both policy generation
+and report validation fail closed at that boundary. New policy hashes require
+new protected scan/attestation evidence; old attestations are not reusable.
+A second
 repository-owned helper installs only
 the architecture-specific v0.74.0 release archive against its
 repository-pinned SHA-256; this avoids relying on actions forbidden by

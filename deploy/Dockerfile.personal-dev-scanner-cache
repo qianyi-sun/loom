@@ -1,4 +1,7 @@
 FROM python:3.11-slim@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7
+RUN apt-get update -qq && \
+    apt-get install -y --only-upgrade --no-install-recommends perl-base=5.40.1-6+deb13u1 && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/loom-personal-dev-scanner-cache
 COPY src/loom/__init__.py ./loom/__init__.py

@@ -30,43 +30,36 @@ _TRIVY_ARM64 = "b94ce1976bbf3c15b514b605ee88be7c6d94a29be2302847ff01cb794d47aad5
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts/ci_image_release_evidence.py"
 _PERL_PURLS = [
     "pkg:deb/debian/libperl5.36",
-    "pkg:deb/debian/libperl5.40",
     "pkg:deb/debian/perl",
     "pkg:deb/debian/perl-base",
     "pkg:deb/debian/perl-modules-5.36",
-    "pkg:deb/debian/perl-modules-5.40",
 ]
 _PERL_STATEMENT = (
-    "No fixed Debian package was available on 2026-08-12; these Perl packages are "
-    "required by Debian base runtimes, the agent toolchain, and the staging-compatible "
-    "PostgreSQL 17.4 rehearsal image."
+    "Reviewed 2026-09-14: no fixed Bookworm Perl package; temporary risk acceptance for pinned PostgreSQL 17.4 and Python pipeline compatibility fixtures. Trixie runtimes must use fixed Perl."
 )
 _POSTGRES_STATEMENT = (
-    "No fixed Debian package was available on 2026-08-12; this package is a required "
-    "dependency of the staging-compatible PostgreSQL 17.4 rehearsal image."
+    "Reviewed 2026-09-14: no fixed Bookworm package; temporary risk acceptance for pinned PostgreSQL 17.4 and Python pipeline compatibility dependencies."
 )
 _TRIVY_EXCEPTIONS = [
     {
         "id": "CVE-2023-45853",
         "purls": ["pkg:deb/debian/zlib1g"],
-        "expires_at": "2026-09-12",
+        "expires_at": "2026-10-14",
         "statement": (
-            "Debian marked this finding will-not-fix on 2026-08-12; zlib1g is a "
-            "required dependency of the staging-compatible PostgreSQL 17.4 rehearsal "
-            "image."
+            "Reviewed 2026-09-14: Debian Bookworm does not build the affected MiniZip code in zlib1g; temporary exception for pinned PostgreSQL 17.4 and Python pipeline compatibility fixtures."
         ),
     },
     {
         "id": "CVE-2025-7458",
         "purls": ["pkg:deb/debian/libsqlite3-0"],
-        "expires_at": "2026-09-12",
+        "expires_at": "2026-10-14",
         "statement": _POSTGRES_STATEMENT,
     },
     *[
         {
             "id": vulnerability_id,
             "purls": _PERL_PURLS,
-            "expires_at": "2026-09-12",
+            "expires_at": "2026-10-14",
             "statement": _PERL_STATEMENT,
         }
         for vulnerability_id in (
@@ -77,22 +70,21 @@ _TRIVY_EXCEPTIONS = [
     {
         "id": "CVE-2026-43185",
         "purls": ["pkg:deb/debian/linux-libc-dev"],
-        "expires_at": "2026-09-12",
+        "expires_at": "2026-10-14",
         "statement": (
-            "No fixed Debian package was available on 2026-08-12; linux-libc-dev is "
-            "required by the agent sandbox compiler toolchain."
+            "Reviewed 2026-09-14: stable Debian has no fixed source package; agent compiler needs linux-libc-dev headers, not the affected ksmbd kernel runtime. Temporary exception does not attest host kernel safety."
         ),
     },
     {
         "id": "CVE-2026-6653",
         "purls": ["pkg:deb/debian/libxml2"],
-        "expires_at": "2026-09-12",
+        "expires_at": "2026-10-14",
         "statement": _POSTGRES_STATEMENT,
     },
     {
         "id": "CVE-2026-8376",
         "purls": _PERL_PURLS,
-        "expires_at": "2026-09-12",
+        "expires_at": "2026-10-14",
         "statement": _PERL_STATEMENT,
     },
 ]
@@ -198,7 +190,7 @@ def test_architecture_predicate_binds_source_build_scan_and_invocation() -> None
             "archives": {"linux/amd64": _TRIVY_AMD64},
         },
         "config_sha256": ("bd8896276b5d8d00d8bb3c3d7a51d359b4931ea2811c21cb8ed692766a7eb8cf"),
-        "ignore_sha256": ("11f957c7a63686da04c9f38e39aa2ca1eeef743b36c75810054afc84571ed2f7"),
+        "ignore_sha256": ("2fe828560a3df13427bff6634f08509ec6be55ca75de9fb7e3fd095805a28c12"),
         "scan_type": "image",
         "vuln_type": ["os", "library"],
         "timeout": "20m0s",
@@ -465,7 +457,7 @@ def test_manifest_attestation_binds_both_verified_architecture_subjects() -> Non
             },
         },
         "config_sha256": ("bd8896276b5d8d00d8bb3c3d7a51d359b4931ea2811c21cb8ed692766a7eb8cf"),
-        "ignore_sha256": ("11f957c7a63686da04c9f38e39aa2ca1eeef743b36c75810054afc84571ed2f7"),
+        "ignore_sha256": ("2fe828560a3df13427bff6634f08509ec6be55ca75de9fb7e3fd095805a28c12"),
         "scan_type": "image",
         "vuln_type": ["os", "library"],
         "timeout": "20m0s",

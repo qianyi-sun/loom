@@ -17,19 +17,13 @@ _PERL_CVES = (
     "CVE-2026-42496",
     "CVE-2026-8376",
 )
-_AGENT_PERL_PACKAGES = (
-    "libperl5.40",
-    "perl",
-    "perl-base",
-    "perl-modules-5.40",
-)
 _POSTGRES_PERL_PACKAGES = (
     "libperl5.36",
     "perl",
     "perl-base",
     "perl-modules-5.36",
 )
-_PERL_BASE_COMPONENTS = (
+_REMEDIATED_COMPONENTS = (
     "capacity-executor",
     "capacity-manager",
     "control-plane",
@@ -55,12 +49,7 @@ _PERL_BASE_FINDINGS = frozenset(
     (vulnerability_id, "pkg:deb/debian/perl-base") for vulnerability_id in _PERL_CVES
 )
 _EXPECTED_FINDINGS = {
-    "agent-sandbox": frozenset(
-        (vulnerability_id, f"pkg:deb/debian/{package}")
-        for vulnerability_id in _PERL_CVES
-        for package in _AGENT_PERL_PACKAGES
-    )
-    | {("CVE-2026-43185", "pkg:deb/debian/linux-libc-dev")},
+    "agent-sandbox": frozenset({("CVE-2026-43185", "pkg:deb/debian/linux-libc-dev")}),
     "rehearsal-postgres": frozenset(
         (vulnerability_id, f"pkg:deb/debian/{package}")
         for vulnerability_id in _PERL_CVES
@@ -76,7 +65,7 @@ _EXPECTED_FINDINGS = {
         ("CVE-2023-45853", "pkg:deb/debian/zlib1g"),
         ("CVE-2025-7458", "pkg:deb/debian/libsqlite3-0"),
     },
-    **{component: _PERL_BASE_FINDINGS for component in _PERL_BASE_COMPONENTS},
+    **{component: frozenset() for component in _REMEDIATED_COMPONENTS},
     **{component: frozenset() for component in _EMPTY_COMPONENTS},
 }
 
@@ -86,8 +75,6 @@ def _version(package: str) -> tuple[str, str, str | None]:
         return "1:1.2.13.dfsg-1", "1.2.13.dfsg-1", "1"
     if package in _POSTGRES_PERL_PACKAGES:
         return "5.36.0-7+deb12u3", "5.36.0-7+deb12u3", None
-    if package in _AGENT_PERL_PACKAGES:
-        return "5.40.1-6", "5.40.1-6", None
     if package == "linux-libc-dev":
         return "6.12.101-1", "6.12.101-1", None
     if package == "libsqlite3-0":
@@ -264,7 +251,7 @@ def test_validator_accepts_each_exact_component_inventory(
         "pipeline-orchestrator",
     ),
 )
-def test_validator_accepts_observed_python_slim_perl_base_inventory(
+def test_validator_accepts_repaired_python_slim_without_exceptions(
     tmp_path: Path,
     component: str,
 ) -> None:
@@ -288,6 +275,33 @@ def test_validator_accepts_service_alpine_inventory_without_debian_exceptions(
     result = _run_validator(tmp_path, payload, component="service")
 
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("component", (*_REMEDIATED_COMPONENTS, "agent-sandbox"))
+def test_repaired_components_reject_any_perl_suppression(tmp_path: Path, component: str) -> None:
+    ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
+    payload = _report(component, ignore_file)
+    payload["Results"][0]["ExperimentalModifiedFindings"].append(  # type: ignore[index,union-attr]
+        _wrapper("CVE-2026-13221", "pkg:deb/debian/perl-base",
+            architecture="amd64", ignore_file=ignore_file)
+    )
+    _assert_rejected(_run_validator(tmp_path, payload, component=component))
+
+
+def test_report_validator_independently_rejects_expired_review(monkeypatch) -> None:
+    from datetime import UTC, datetime
+
+    from scripts import validate_trivy_release_report as validator
+
+    class ExpiredClock:
+        @staticmethod
+        def now(zone):
+            assert zone is UTC
+            return datetime(2026, 10, 14, tzinfo=UTC)
+
+    monkeypatch.setattr(validator, "datetime", ExpiredClock)
+    with pytest.raises(validator.TrivyReportError, match="expired"):
+        validator._policy_statements()
 
 
 def test_validator_rejects_a_missing_suppressed_finding(tmp_path: Path) -> None:
@@ -448,13 +462,13 @@ def test_validator_rejects_an_unsupported_nested_status(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "purl",
     (
-        "pkg:deb/debian/libperl5.40?arch=amd64&distro=debian-13.6",
-        "pkg:deb/debian/not-libperl@5.40.1-6?arch=amd64&distro=debian-13.6",
-        "pkg:deb/debian/libperl5.40@5.40.1-7?arch=amd64&distro=debian-13.6",
-        "pkg:deb/debian/libperl5.40@5.40.1-6?arch=amd64&distro=debian-13.6&epoch=1",
-        "pkg:deb/debian/libperl5.40@5.40.1-6?arch=s390x&distro=debian-13.6",
-        "pkg:deb/debian/libperl5.40@5.40.1-6?arch=amd64&distro=debian-12.0",
-        "pkg:deb/debian/libperl5.40@5.40.1-6?arch=amd64&distro=debian-13.6&other=x",
+        "pkg:deb/debian/linux-libc-dev?arch=all&distro=debian-13.6",
+        "pkg:deb/debian/not-libperl@6.12.101-1?arch=all&distro=debian-13.6",
+        "pkg:deb/debian/linux-libc-dev@6.12.101-2?arch=all&distro=debian-13.6",
+        "pkg:deb/debian/linux-libc-dev@6.12.101-1?arch=all&distro=debian-13.6&epoch=1",
+        "pkg:deb/debian/linux-libc-dev@6.12.101-1?arch=s390x&distro=debian-13.6",
+        "pkg:deb/debian/linux-libc-dev@6.12.101-1?arch=all&distro=debian-12.0",
+        "pkg:deb/debian/linux-libc-dev@6.12.101-1?arch=all&distro=debian-13.6&other=x",
     ),
 )
 def test_validator_rejects_a_malformed_or_inconsistent_versioned_purl(
@@ -572,11 +586,11 @@ def test_validator_rejects_arch_all_for_an_architecture_specific_package(
     tmp_path: Path,
 ) -> None:
     ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
-    payload = _report("agent-sandbox", ignore_file)
+    payload = _report("rehearsal-postgres", ignore_file)
     finding = payload["Results"][0]["ExperimentalModifiedFindings"][0]["Finding"]  # type: ignore[index]
     identifier = finding["PkgIdentifier"]  # type: ignore[index]
     identifier["PURL"] = identifier["PURL"].replace("arch=amd64", "arch=all")  # type: ignore[index,union-attr]
-    _assert_rejected(_run_validator(tmp_path, payload))
+    _assert_rejected(_run_validator(tmp_path, payload, component="rehearsal-postgres"))
 
 
 def test_validator_rejects_malformed_json(tmp_path: Path) -> None:

@@ -31,6 +31,10 @@ RUN set -eux; \
       curl \
       git \
       gnupg \
+      perl-base=5.40.1-6+deb13u1 \
+      perl=5.40.1-6+deb13u1 \
+      libperl5.40=5.40.1-6+deb13u1 \
+      perl-modules-5.40=5.40.1-6+deb13u1 \
       ripgrep \
       tini \
       tmux; \
