@@ -17,7 +17,7 @@ def prepared(tmp_path, monkeypatch):
         root.mkdir(mode=0o700)
         (root / "nested").mkdir(mode=0o700)
         (root / "nested/data").write_text("scratch")
-    return module, spec, roots
+    return module, module.capture_native_mapped_scratch(spec), roots
 
 
 def test_only_fixed_scratch_removed_and_symlinks_never_followed(tmp_path, monkeypatch):
@@ -69,3 +69,67 @@ def test_entry_bound_stops_without_removing_unvisited_content(tmp_path, monkeypa
     with pytest.raises(ValueError, match="bound"):
         module.clean_native_mapped_scratch(spec)
     assert (roots[0] / "nested/data").read_text() == "scratch"
+
+
+def test_replaced_attempt_is_not_adopted_at_cleanup(tmp_path, monkeypatch):
+    module, snapshot, _roots = prepared(tmp_path, monkeypatch)
+    retained = tmp_path.with_name(tmp_path.name + "-retained")
+    tmp_path.rename(retained)
+    tmp_path.mkdir(mode=0o700)
+    (tmp_path / "keep").write_text("replacement")
+    try:
+        with pytest.raises(ValueError, match="changed"):
+            module.clean_native_mapped_scratch(snapshot)
+        assert (tmp_path / "keep").read_text() == "replacement"
+        assert (retained / "material/nested/data").read_text() == "scratch"
+    finally:
+        (tmp_path / "keep").unlink()
+        tmp_path.rmdir()
+        retained.rename(tmp_path)
+
+
+@pytest.mark.parametrize("parent", ["attempt", "workspace"])
+def test_parent_must_remain_private_before_cleanup(tmp_path, monkeypatch, parent):
+    module, snapshot, roots = prepared(tmp_path, monkeypatch)
+    path = getattr(snapshot, parent).path
+    path.chmod(0o777)
+    try:
+        with pytest.raises(ValueError, match="private"):
+            module.clean_native_mapped_scratch(snapshot)
+        assert all((root / "nested/data").read_text() == "scratch" for root in roots)
+    finally:
+        path.chmod(0o700)
+
+
+def test_root_replacement_between_precheck_and_traversal_is_not_adopted(tmp_path, monkeypatch):
+    module, snapshot, roots = prepared(tmp_path, monkeypatch)
+    original = module.os.stat
+    moved = tmp_path / "retained-material"
+    swapped = False
+
+    def replace_at_traversal(path, *args, **kwargs):
+        nonlocal swapped
+        if path == "material" and kwargs.get("dir_fd") is not None and not swapped:
+            swapped = True
+            roots[0].rename(moved)
+            roots[0].mkdir(mode=0o700)
+            (roots[0] / "foreign").write_text("preserve")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "stat", replace_at_traversal)
+    with pytest.raises(ValueError, match="changed"):
+        module.clean_native_mapped_scratch(snapshot)
+    assert (roots[0] / "foreign").read_text() == "preserve"
+    assert (moved / "nested/data").read_text() == "scratch"
+
+
+@pytest.mark.parametrize("bound", ["depth", "time"])
+def test_depth_and_time_bound_retain_unvisited_content(tmp_path, monkeypatch, bound):
+    module, snapshot, roots = prepared(tmp_path, monkeypatch)
+    if bound == "depth":
+        monkeypatch.setattr(module, "_MAX_DEPTH", 0)
+    else:
+        monkeypatch.setattr(module, "_MAX_SECONDS", 0)
+    with pytest.raises(ValueError, match="bound"):
+        module.clean_native_mapped_scratch(snapshot)
+    assert all((root / "nested/data").read_text() == "scratch" for root in roots)
