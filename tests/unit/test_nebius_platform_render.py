@@ -509,11 +509,14 @@ def test_execution_quota_uses_native_envelope_and_namespace_control_requests(
         "requests.ephemeral-storage": "8192000Mi",
     }
     # Cold-template discovery adds no mutation or cloud privileges.
-    role = next(doc for doc in docs if doc["kind"] == "ClusterRole")
+    role = next(doc for doc in docs if doc["kind"] == "ClusterRole" and doc["metadata"]["name"].endswith("-collector"))
     assert {"apiGroups": ["apps"], "resources": ["daemonsets"], "verbs": ["get", "list"]} in role[
         "rules"
     ]
     assert all(set(rule["verbs"]) <= {"get", "list"} for rule in role["rules"])
+    usage = next(doc for doc in docs if doc["kind"] == "ClusterRole" and doc["metadata"]["name"].endswith("-actuator-usage"))
+    assert usage["rules"] == [{"apiGroups": [""], "resources": ["nodes/proxy"], "verbs": ["get"]}]
+    assert len({(doc["kind"], doc["metadata"]["name"]) for doc in docs}) == len(docs)
 
 
 def test_execution_quota_preserves_explicit_lower_limits(platform_inputs: tuple) -> None:
@@ -616,6 +619,8 @@ def test_regional_manifests_separate_native_roles_from_primary_processes(
     assert {doc["subjects"][0]["name"] for doc in bindings} == set(
         target["service_account_ids"].values()
     )
+    usage_binding = next(doc for doc in bindings if doc["metadata"]["name"].endswith("-actuator-usage"))
+    assert usage_binding["subjects"][0]["name"] == target["service_account_ids"]["actuator"]
     assert all(
         doc["subjects"]
         == [

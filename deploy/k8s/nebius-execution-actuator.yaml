@@ -58,6 +58,28 @@ roleRef:
   kind: Role
   name: loom-execution-actuator
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: loom-execution-actuator-usage
+rules:
+  - apiGroups: [""]
+    resources: ["nodes/proxy"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: loom-execution-actuator-usage
+subjects:
+  - kind: ServiceAccount
+    name: loom-execution-actuator
+    namespace: loom-nebius-development
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: loom-execution-actuator-usage
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

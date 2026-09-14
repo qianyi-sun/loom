@@ -56,6 +56,7 @@ ACTUATOR_TASK_IMAGE_WRITES = {
     "task_image_publication_evidence": ("INSERT",),
 }
 ACTUATOR_TABLES = (
+    "trial_resource_usage",
     *COMMON_EXECUTION_TABLES,
     "batches",
     "trial_task_image_materializations",
@@ -208,6 +209,7 @@ def bootstrap_database(config: dict[str, Any]) -> None:
                     tables = sql.SQL(", ").join(sql.Identifier(table) for table in inventory)
                     cursor.execute(sql.SQL("GRANT SELECT ON {} TO {}").format(tables, identifier))
                     read_only = {
+                        "trial_resource_usage",
                         "alembic_version",
                         "users",
                         "tokens",
@@ -247,6 +249,7 @@ def bootstrap_database(config: dict[str, Any]) -> None:
                             "GRANT UPDATE (last_used_at, last_seen_at) ON tokens TO loom_gateway"
                         )
                     if role == "loom_actuator":
+                        cursor.execute("GRANT INSERT, UPDATE ON trial_resource_usage TO loom_actuator")
                         for table, privileges in ACTUATOR_TASK_IMAGE_WRITES.items():
                             cursor.execute(
                                 sql.SQL("GRANT {} ON {} TO loom_actuator").format(

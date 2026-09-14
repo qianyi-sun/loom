@@ -4,10 +4,12 @@ import json
 from pathlib import Path
 
 import pytest
+from alembic.script import ScriptDirectory
 
 from loom_cli.rollout.migration_readiness import inspect_migration_plan
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+EXPECTED_HEAD = json.loads((REPO_ROOT / "config/staging-migration-policy.json").read_text())["expected_head"]
 
 
 def test_repository_migration_plan_is_single_head_and_policy_bound() -> None:

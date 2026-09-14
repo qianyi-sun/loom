@@ -278,6 +278,22 @@ class InClusterKubernetesJobApi:
             self._batch = client.BatchV1Api()
             self._core = client.CoreV1Api()
 
+    async def resource_summary(self, *, node_name: str) -> dict[str, Any]:
+        """Read kubelet summaries via the API server; never expose raw node data."""
+
+        def read() -> dict[str, Any]:
+            import json
+
+            try:
+                result = self._core.connect_get_node_proxy_with_path(
+                    name=node_name, path="stats/summary", _request_timeout=10
+                )
+                return json.loads(result) if isinstance(result, str) else dict(result)
+            except Exception as exc:
+                raise self._translate(exc, "resource_summary") from exc
+
+        return await asyncio.to_thread(read)
+
     async def close(self) -> None:
         try:
             if self._api_client is not None:

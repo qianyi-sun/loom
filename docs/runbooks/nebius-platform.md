@@ -911,3 +911,42 @@ two new Dockerfiles, unchanged-input reuse, a relevant input change, useful fail
 without a model call, last-consumer cancellation, restart recovery and final
 Job/Pod/capacity cleanup. These preparation checks do not replace the separate
 minimal-harness and real trajectory acceptance in #1550/#1538/#1766.
+
+### Native Trial resource observations
+
+The execution actuator samples kubelet `/stats/summary` through the Kubernetes
+API server during ordinary reconciliation (normally 30 seconds; a 15-second
+per-node cache coalesces watch/reconcile reads). Only the lease's namespace and
+exact Pod UID are persisted. The actuator needs GET `nodes/proxy`; execution
+Pods retain no Kubernetes API privilege. This node-proxy permission belongs only
+to the trusted actuator, not a user task.
+
+Trial/Batch `resource-usage` APIs and delivery exports retain the same durable
+ledger after native nodes are removed. Native rows carry execution lease,
+resource generation, target and Pod UID with a null worker ID. Legacy worker
+reporting cannot submit native identities. Controller (`execution`), task sandbox,
+verifier sandbox and materializer counters remain separate. The `pod` row alone
+holds kubelet's ephemeral-storage total, including shared volumes; container
+rootfs/log observations must not be added to that total again.
+
+`memory_sampled_max_bytes`, `cpu_sampled_max_nanocores` and filesystem/ephemeral
+sampled maxima are the largest observed samples, **not kernel high-water marks**.
+Short spikes between samples may be missed. CPU cumulative nanoseconds are
+converted to microseconds; kubelet container `startTime` separates observed
+incarnations so sidecar restarts do not overwrite previous CPU counters. Missing
+start times or counter resets leave partial evidence, never an exact whole-run
+total. Role image digests come from the frozen runtime plan. Unavailable throttling, true memory peaks and I/O
+counters remain null. Cumulative disk writes are not a storage-capacity estimate.
+Terminal/delete reconciliation finalizes captured rows before UID-scoped cleanup;
+missing kubelet data leaves `partial` or `unavailable` records and does not stall
+cleanup. A Pod that never acquired a UID has no invented container record.
+These observations are reference data, not an automatic sizing policy or an
+acceptance requirement for existing runs. Historical runs are not backfilled
+with guessed usage, and resource requests remain unchanged.
+
+Collection/parsing/persistence faults increment
+`loom_execution_actuator_resource_usage_errors_total` and emit a lease-scoped,
+secret-safe warning. Usage writes use a savepoint so telemetry failure cannot
+roll back primary lifecycle observations or prevent cleanup. A persistence
+failure can therefore leave missing/unfinalized usage; operators must not treat
+absence of usage as zero consumption or evidence sufficient to reduce requests.
