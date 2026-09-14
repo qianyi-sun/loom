@@ -288,9 +288,7 @@ def test_config_reader_requires_protected_canonical_bytes(release, monkeypatch, 
     digest = "f" * 64 if fault == "digest" else hashlib.sha256(wire).hexdigest()
     if fault == "exact":
         result = module.read_installed_worker_config(path, expected_sha256=digest)
-        from loom_capacity_manager.executable_contracts import canonical_executable_bytes
-
-        assert (canonical_bytes(result) if version == 1 else canonical_executable_bytes(result)) == wire
+        assert canonical_bytes(result) == wire
     else:
         with pytest.raises((ValueError, OSError)):
             module.read_installed_worker_config(path, expected_sha256=digest)

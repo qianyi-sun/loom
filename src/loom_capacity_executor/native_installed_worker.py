@@ -115,8 +115,7 @@ def read_installed_worker_config(path: Path, *, expected_sha256: str) -> NativeI
     observation = _Observation()
     wire = observation.read(path, digest=expected_sha256, size=None, mode=0o444, bound=16384, collect=True)
     config = _CONFIG.validate_json(wire)
-    canonical = canonical_executable_bytes(config) if isinstance(config, NativeInstalledWorkerConfigV2) else canonical_bytes(config)
-    if canonical != wire:
+    if canonical_bytes(config) != wire:
         raise ValueError("native installed worker config must be canonical")
     observation.finish()
     return config
