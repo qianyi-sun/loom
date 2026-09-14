@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from loom.application_capacity_runtime_credentials import (
+    _credentials,
     _roles,
     arm_application_capacity_runtime_credentials,
     finalize_application_capacity_runtime_credentials,
@@ -142,9 +143,14 @@ class ProtectedCapacityBootstrapRuntime(ProtectedApplicationMigrationRuntime):
 
     def read_revision(self) -> str:
         self.checkpoint()
+        with self.runner.open_staging_peer_database() as peer:
+            with _transaction(peer, self.target, self.coordination_guard, self.provisioner_role):
+                roles = _roles(peer, self.runtime_role_oids)
+                _credentials(roles, self._passwords(), require_login=False)
         state = self.base._database_state(self.plan, dict(self.seed))
         self.checkpoint()
         if state == _DatabaseState.EXACT:
+            _credentials(roles, self._passwords(), require_login=True)
             return "exact"
         if state == _DatabaseState.NEEDS_CONVERGENCE:
             return "pending"
