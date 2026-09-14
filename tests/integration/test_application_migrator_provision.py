@@ -158,6 +158,13 @@ async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(tra
 
     with _closed(transfer_database) as (peer, maintenance, _guard, args):
         args.update(schema_revision="0134/guard_0030", schema_acl_profile="cnpg-staging")
+        team, trial, task = uuid4(), uuid4(), "handoff-reward-" + uuid4().hex
+        peer.execute("INSERT INTO teams(id,name) VALUES (%s,'handoff reward')", (team,))
+        peer.execute("INSERT INTO tasks(id,config,checksum) VALUES (%s,'{}',%s)", (task, "a" * 64))
+        peer.execute("""INSERT INTO trials(id,team_id,task_id,config,requires_caps,state,result)
+            VALUES (%s,%s,%s,'{}','{}','succeeded',
+            '{"schema_version":"loom.service-execution-trial-result.v1","reward":{"passed":1.0},
+              "runtime_result":{"verifier_rewards":{"passed":1.0},"status":"succeeded"}}')""", (trial, team, task))
         complete_application_handoff_database(peer, maintenance=maintenance, **args)
         target = args["target"]
         authority = dict(target=target, coordination_guard=args["coordination_guard"],
@@ -176,6 +183,8 @@ async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(tra
         try:
             command.upgrade(config, target_revision)
             assert peer.execute("SELECT version_num FROM public.alembic_version").fetchone() == (target_revision,)
+            assert peer.execute("SELECT result->>'aggregate_reward' FROM trials WHERE id=%s", (trial,)).fetchone() == (
+                "1.0" if target_revision == "0146" else None,)
             observe_completed_application_authority(peer, target=target, runtime_password=args["password"], successor=identity)
         finally:
             seal_application_migrator(maintenance, **authority, identity=identity)
