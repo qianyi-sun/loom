@@ -127,7 +127,7 @@ class InstalledApplicationHandoffFactory:
                 epoch_source=lambda: self.completed_epoch(candidate),
                 observe_inputs=lambda: handoff._inputs(candidate, None),
                 successor_source=lambda: self.successor_source(candidate, journal),
-                admit_sql_profile=lambda peer, guard: _admit_sql_profiles(self.runner, peer, guard),
+                admit_sql_profile=lambda peer, guard: _admit_sql_profiles(self.runner, peer, guard, separated_owner=True),
                 observe_retired_fences=lambda: observe_application_cnpg_fence_retirement(candidate,
                     journal=journal, component=handoff.component(candidate), ordinal=ordinal, runner=self.runner))
         handoff = ProtectedApplicationAuthorityHandoffComponent(journal=journal, runner=self.runner, ordinal=ordinal,

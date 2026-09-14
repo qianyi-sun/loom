@@ -85,9 +85,13 @@ class ApplicationHandoffRunner(CNPGFenceRetirementRunner, ApplicationRestoration
 
 
 def _admit_sql_profiles(
-    runner: ApplicationHandoffRunner, peer: ApplicationDatabaseConnection, guard: MutationGuardEvidence,
+    runner: ApplicationHandoffRunner, peer: ApplicationDatabaseConnection, guard: MutationGuardEvidence, *, separated_owner: bool = False,
 ) -> None:
-    original, _ = _observe(peer, guard)
+    if separated_owner:
+        from .protected_application_owner_preparation import APPLICATION_OWNER_ROLE
+        original, _ = _observe(peer, guard, owner_role=APPLICATION_OWNER_ROLE)
+    else:
+        original, _ = _observe(peer, guard)
     require_cnpg_effective_sql_profile(peer, database='loom', original=original)
     with runner.open_staging_peer_maintenance_database() as maintenance:
         require_cnpg_effective_sql_profile(maintenance, database='postgres', original=original)
