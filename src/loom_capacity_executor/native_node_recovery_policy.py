@@ -8,6 +8,7 @@ neither worker JSON nor current filesystem contents create historical scope.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from itertools import pairwise
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -15,11 +16,23 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
-from loom_capacity_agent.native_recovery import NativeRecoveryMappingRange
+from loom_capacity_agent.native_recovery import (
+    NativeInstalledAttemptV2,
+    NativeRecoveryMappingRange,
+    NativeRecoveryPreparationV1,
+)
 from loom_capacity_agent.native_recovery_publication import NativeRecoveryHostIdentityV1
+from loom_capacity_build_guard.native_recovery_sender import NativeNodeRecoveryRequestV1
 from loom_capacity_executor.native_installed_release import _Observation, _path
 from loom_capacity_executor.native_quarantine_prune import NativeQuarantineIdentity
-from loom_capacity_manager.contracts import Digest, Identifier, StrictV1Model, canonical_bytes
+from loom_capacity_manager.contracts import (
+    Digest,
+    Identifier,
+    StrictV1Model,
+    canonical_bytes,
+    canonical_digest,
+)
+from loom_capacity_manager.executable_contracts import canonical_executable_bytes
 
 
 class NativeNodeRecoveryScopeV1(StrictV1Model):
@@ -86,3 +99,54 @@ def read_native_node_recovery_policy(path: Path, *, expected_sha256: str) -> Nat
         raise ValueError("recovery node policy must be canonical")
     observation.finish()
     return policy
+
+
+@dataclass(frozen=True, slots=True)
+class BoundNativeNodeRecovery:
+    """Scope correspondence only; no local deletion authorization is conveyed."""
+
+    scope: NativeNodeRecoveryScopeV1
+    key: str
+    source: Path
+    identity: NativeQuarantineIdentity
+    locator_wire: bytes
+
+
+def bind_native_node_recovery(policy: NativeNodeRecoveryPolicyV1,
+    request: NativeNodeRecoveryRequestV1,
+) -> BoundNativeNodeRecovery:
+    """Narrow already authenticated sender history to retained installed scope.
+
+    No path, identity, or map comes from adjacent worker-owned recovery files.
+    A replay has the same journal key even when its transport nonce changes.
+    Actual boot/mount/cgroup/quiescence observations remain the helper's job.
+    """
+    policy = NativeNodeRecoveryPolicyV1.model_validate_json(canonical_bytes(policy))
+    request = NativeNodeRecoveryRequestV1.model_validate_json(canonical_bytes(request))
+    history = request.history
+    prepared = history.preparation.request.record
+    assert isinstance(prepared, NativeRecoveryPreparationV1)
+    matches = [scope for scope in policy.scopes if scope.installation_id == history.profile.installation_id
+        and scope.pool_id == history.profile.pool_id and scope.profile_sha256 == canonical_digest(history.profile)
+        and scope.host == history.host]
+    if len(matches) != 1:
+        raise ValueError("recovery history has no unique protected node scope")
+    scope = matches[0]
+    source = Path(scope.scratch_root) / ("attempt-" + str(history.preparation.request.claim.operation_id))
+    if str(source) != prepared.locator.directory or scope.scratch_device != prepared.locator.device:
+        raise ValueError("recovery attempt differs from protected local scratch scope")
+    identity = scope.quarantine_identity(inode=prepared.locator.inode)
+    final = history.finalization.request.record if history.finalization is not None else None
+    if final is None:
+        # No mapped execution facts were committed. Do not infer or adopt maps
+        # from the nearby locator or remove any subordinate-owned residue.
+        identity = replace(identity, uid_ranges=((scope.host.original_uid, 1),),
+            gid_ranges=((scope.host.original_gid, 1),))
+        wire = canonical_bytes(prepared.locator)
+    else:
+        if not isinstance(final, NativeInstalledAttemptV2) or (final.uid_map, final.gid_map) != (scope.uid_map, scope.gid_map):
+            raise ValueError("recovery mapping differs from retained installed policy")
+        wire = canonical_executable_bytes(final)
+    identity.validate()
+    return BoundNativeNodeRecovery(scope=scope, key=canonical_digest(history), source=source,
+        identity=identity, locator_wire=wire)
