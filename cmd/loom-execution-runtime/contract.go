@@ -121,6 +121,7 @@ type plan struct {
 	RunAsGroup                 int64                   `json:"run_as_group"`
 	FSGroup                    int64                   `json:"fs_group"`
 	TaskResources              resources               `json:"task_resources"`
+	ControllerResources        *resources              `json:"controller_resources,omitempty"`
 	WorkspaceMiB               int64                   `json:"workspace_mib"`
 	RuntimeVolumeMiB           int64                   `json:"runtime_volume_mib"`
 	TerminationGraceSec        int64                   `json:"termination_grace_seconds"`
@@ -272,6 +273,29 @@ func (p plan) validate() error {
 			return err
 		}
 		known[item.RoleName] = true
+	}
+	if p.ControllerResources != nil {
+		if err := p.ControllerResources.validate(); err != nil {
+			return fmt.Errorf("invalid controller resources: %w", err)
+		}
+		if p.AgentImageRef == nil || p.ExecutionRole != "attempt" || p.Composition != "init_payload" {
+			return fmt.Errorf("controller resources require an isolated attempt controller")
+		}
+		sandboxes := map[string]bool{}
+		for _, item := range p.Sidecars {
+			if item.PrivateSandbox {
+				sandboxes[item.RoleName] = true
+				if item.Resources != p.TaskResources {
+					return fmt.Errorf("controller sizing must preserve task and verifier resources")
+				}
+			}
+		}
+		if !sandboxes["task-sandbox"] || !sandboxes["verifier-sandbox"] {
+			return fmt.Errorf("controller resources require an isolated attempt controller")
+		}
+		if p.ControllerResources.EphemeralStorageMiB != p.TaskResources.EphemeralStorageMiB {
+			return fmt.Errorf("controller sizing must preserve task-derived storage")
+		}
 	}
 	// The authenticated lease carries the Control Plane's task-image authorization.
 	// Only that prepared task image and matching private sandboxes are exempt from
