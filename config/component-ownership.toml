@@ -252,6 +252,8 @@ source_paths = [
   "scripts/ops/capacity_executor_release.py",
   "scripts/ops/global_fleet_pool_executor_once.py",
   "scripts/ops/install_capacity_executor.py",
+  "src/loom_control_plane/__init__.py",
+  "src/loom_control_plane/slurm_job_cgroup.py",
   "src/loom/**",
   "src/loom_capacity_agent/**",
   "src/loom_capacity_executor/**",

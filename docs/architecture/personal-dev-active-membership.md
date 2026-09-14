@@ -2216,6 +2216,9 @@ The builder image provisions root-owned empty mountpoints before switching to
 UID 1000; the runtime never makes its root filesystem writable to add them.
 
 `tests/integration/test_native_oci_kvm.py` belongs to the Docker integration lane.
+The executor release wheel includes the shared Slurm cgroup utility required by
+the installed native worker. Its image-build check imports that worker from the
+installed wheel under isolated Python, without a source mount or `PYTHONPATH`.
 On a native KVM host it verifies pinned gVisor bytes, exports a digest-pinned
 builder filesystem and overlays current trusted Python for a disposable test.
 It consumes the real rendered bundles and client profile, runs all component
