@@ -468,6 +468,7 @@ def _defaults_request(**kwargs):
 
 def test_executor_orders_epoch_before_nonlegacy_migration_and_recovers(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = tmp_path / "state"
     _attempt(state)
@@ -491,6 +492,23 @@ def test_executor_orders_epoch_before_nonlegacy_migration_and_recovers(
         production_defaults_request=_defaults_request,
     )
 
+    # Recovery and normal execution must construct one identical ordered chain,
+    # with the SAME journal instance available to its component closures.
+    from loom_cli.rollout.operator.protected_apply_journal import ProtectedApplyJournal
+    built = []
+    original_build = MigrationEpochProtectedApplyExecutor.build_components
+    original_execute = ProtectedApplyJournal.execute
+    def build(self, candidate, *, journal):
+        before = tuple(runner.calls)
+        components = original_build(self, candidate, journal=journal)
+        assert tuple(runner.calls) == before, 'building recovery chain executed a component'
+        built.append((journal, components))
+        return components
+    def execute(self, candidate, components):
+        assert built[-1][0] is self and built[-1][1] is components
+        return original_execute(self, candidate, components)
+    monkeypatch.setattr(MigrationEpochProtectedApplyExecutor, 'build_components', build)
+    monkeypatch.setattr(ProtectedApplyJournal, 'execute', execute)
     result = executor("final.protected-apply", CheckOperation.APPLY, plan)
 
     assert result.ready
