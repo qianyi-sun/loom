@@ -120,6 +120,7 @@ def _terminal(
             "username": "devansh",
             "team_id": "11111111-1111-4111-8111-111111111111",
         },
+        "purpose": "evaluation",
         "task_filter": {"task_ids": [task_id]},
         "trial_config": trial_config or {"agent_name": "oracle", "agent_model": None},
         "required_worker_pools": ["gb10"],

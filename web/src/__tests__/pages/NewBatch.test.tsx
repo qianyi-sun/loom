@@ -607,6 +607,11 @@ async function pickBenchmark(id: string = "humaneval"): Promise<void> {
 
 async function pickTaskSet(id: string = "ts/team-uuid/sample-tasks"): Promise<void> {
   const user = userEvent.setup();
+  await user.click(
+    screen.getByRole("radio", {
+      name: /Trajectory generation/i,
+    }),
+  );
   const cb = await screen.findByRole("checkbox", {
     name: new RegExp(`Select TaskSet ${id}`, "i"),
   });
@@ -1085,6 +1090,9 @@ describe("NewBatch", () => {
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
     await pickBackend();
+    await user.click(
+      screen.getByRole("radio", { name: /Trajectory generation/i }),
+    );
     await pickBenchmark();
     await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
@@ -1096,9 +1104,29 @@ describe("NewBatch", () => {
     );
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
-    const tc = batchCall(spy)!.body.trial_config as Record<string, unknown>;
+    const body = batchCall(spy)!.body;
+    expect(body.purpose).toBe("trajectory_generation");
+    const tc = body.trial_config as Record<string, unknown>;
     expect(tc.force_build).toBe(true);
     expect(tc.skip_verifier).toBe(true);
+  });
+
+  it("hides skip verifier for evaluation and sends purpose evaluation", async () => {
+    const spy = mockEndpoints({ matchingTasks: 12 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+    await pickBackend();
+    await pickBenchmark();
+    await pickDefaultModel(user);
+    await screen.findByText(/12 tasks match across 1 benchmark/i);
+    expect(
+      screen.queryByRole("checkbox", { name: /Skip verifier/i }),
+    ).toBeNull();
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
+    expect(batchCall(spy)!.body.purpose).toBe("evaluation");
+    expect(batchCall(spy)!.body.trial_config).not.toHaveProperty("skip_verifier");
   });
 
   it("emits submit_priority when changed from the default", async () => {
@@ -1226,7 +1254,7 @@ describe("NewBatch", () => {
     });
   });
 
-  it("submits evaluation-ready TaskSets with task_set_ids, not benchmark_ids", async () => {
+  it("submits ready TaskSets with task_set_ids under trajectory purpose", async () => {
     const spy = mockEndpoints();
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
@@ -1237,6 +1265,7 @@ describe("NewBatch", () => {
     await screen.findByText(/2 tasks match across 1 source/i);
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
+    expect(batchCall(spy)!.body.purpose).toBe("trajectory_generation");
     expect(batchCall(spy)!.body.task_filter).toEqual({
       subset_kind: "all",
       task_set_ids: ["ts/team-uuid/sample-tasks"],

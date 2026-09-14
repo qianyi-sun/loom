@@ -100,6 +100,7 @@ const RETRY_REASONS = [
 type RetryReason = (typeof RETRY_REASONS)[number]["value"];
 
 type SubsetKind = "all" | "first_n" | "last_n" | "random_n" | "explicit";
+type BatchPurpose = "evaluation" | "trajectory_generation";
 
 function clampInt(raw: string, min: number, max: number): string {
   if (raw === "") return raw;
@@ -871,6 +872,7 @@ export default function NewBatch(): JSX.Element {
   const { currentTeamId } = useAuth();
   const [nameSuffix, setNameSuffix] = useState("");
   const [backend, setBackend] = useState("");
+  const [batchPurpose, setBatchPurpose] = useState<BatchPurpose>("evaluation");
   const [selectedBenchmarks, setSelectedBenchmarks] = useState<Set<string>>(
     () => new Set(),
   );
@@ -901,9 +903,10 @@ export default function NewBatch(): JSX.Element {
     staleTime: 5 * 60 * 1000,
   });
   const evalTaskSets = useQuery({
-    queryKey: ["taskSets", "evaluation-ready"],
+    queryKey: ["taskSets", "batch-purpose", batchPurpose],
     queryFn: () => api.listTaskSets(),
     staleTime: 5 * 60 * 1000,
+    enabled: batchPurpose === "trajectory_generation",
   });
   const agents = useQuery({
     queryKey: ["agents"],
@@ -926,6 +929,21 @@ export default function NewBatch(): JSX.Element {
     queryFn: () => api.listModels("default"),
     staleTime: 5 * 60 * 1000,
   });
+
+  // Drop TaskSet selections when switching to evaluation (native
+  // benchmarks only). Clear skip_verifier so evaluation cannot carry it.
+  useEffect(() => {
+    if (batchPurpose !== "evaluation") return;
+    setSelectedBenchmarks((prev) => {
+      const next = new Set(
+        Array.from(prev).filter((id) => !isTaskSetId(id)),
+      );
+      return next.size === prev.size ? prev : next;
+    });
+    setAdvanced((prev) =>
+      prev.skipVerifier ? { ...prev, skipVerifier: false } : prev,
+    );
+  }, [batchPurpose]);
 
   // Default-pick the backend once the catalog loads: docker if
   // advertised, else the first `available` backend, else the first
@@ -1011,7 +1029,7 @@ export default function NewBatch(): JSX.Element {
   // query is in flight.
   const hasTagFilter = Object.values(tagFilters).some((v) => v.size > 0);
   const sumOfSelectedTasks = useMemo(() => {
-    if (!benchmarks.data || !evalTaskSets.data || selectedBenchmarks.size === 0) {
+    if (!benchmarks.data || selectedBenchmarks.size === 0) {
       return undefined;
     }
     let total = 0;
@@ -1024,16 +1042,30 @@ export default function NewBatch(): JSX.Element {
       }
       total += b.task_count;
     }
-    for (const ts of evalTaskSets.data.items) {
-      if (!selectedBenchmarks.has(ts.task_set_id)) continue;
-      if (typeof ts.task_count !== "number") {
-        allKnown = false;
-        break;
+    if (batchPurpose === "trajectory_generation" && evalTaskSets.data) {
+      for (const ts of evalTaskSets.data.items) {
+        if (!selectedBenchmarks.has(ts.task_set_id)) continue;
+        if (typeof ts.task_count !== "number") {
+          allKnown = false;
+          break;
+        }
+        total += ts.task_count;
       }
-      total += ts.task_count;
+    } else if (
+      batchPurpose === "trajectory_generation" &&
+      taskSetIdsSorted.length > 0 &&
+      !evalTaskSets.data
+    ) {
+      allKnown = false;
     }
     return allKnown ? total : undefined;
-  }, [benchmarks.data, evalTaskSets.data, selectedBenchmarks]);
+  }, [
+    benchmarks.data,
+    evalTaskSets.data,
+    selectedBenchmarks,
+    batchPurpose,
+    taskSetIdsSorted.length,
+  ]);
 
   // Build the same `task_filter` the submit handler would send. The
   // count endpoint returns the runnable count after stored TaskConfig
@@ -1259,7 +1291,11 @@ export default function NewBatch(): JSX.Element {
       }
     } else {
       if (selectedBenchmarks.size === 0) {
-        setLocalError("Pick at least one benchmark or TaskSet.");
+        setLocalError(
+          batchPurpose === "evaluation"
+            ? "Pick at least one native benchmark."
+            : "Pick at least one benchmark or TaskSet.",
+        );
         return;
       }
       if (subsetKind !== "all") {
@@ -1321,7 +1357,11 @@ export default function NewBatch(): JSX.Element {
       return;
     }
 
-    const adv = buildAdvancedConfig(advanced);
+    const adv = buildAdvancedConfig(
+      batchPurpose === "evaluation"
+        ? { ...advanced, skipVerifier: false }
+        : advanced,
+    );
     if (!adv.ok) {
       setLocalError(`Advanced options: ${adv.error}`);
       return;
@@ -1396,6 +1436,7 @@ export default function NewBatch(): JSX.Element {
 
     const payload: CreateBatchBody = {
       team_id: currentTeamId,
+      purpose: batchPurpose,
       backend,
       task_filter,
       trial_config,
@@ -1426,7 +1467,10 @@ export default function NewBatch(): JSX.Element {
   if (subsetKind === "explicit") {
     countSummary = "";
   } else if (selectedBenchmarks.size === 0) {
-    countSummary = "Pick at least one benchmark or TaskSet to count matching tasks.";
+    countSummary =
+      batchPurpose === "evaluation"
+        ? "Pick at least one native benchmark to count matching tasks."
+        : "Pick at least one benchmark or TaskSet to count matching tasks.";
   } else if (hasTagFilter && exactCount.isLoading) {
     // Real count is in flight; show the running upper-bound while we
     // wait so the page stays responsive.
@@ -1548,9 +1592,46 @@ export default function NewBatch(): JSX.Element {
           <Card>
             <Card.Header
               title="Task selection"
-              description="Choose benchmark or TaskSet tasks to run. You can select whole sources, narrow benchmarks by tags, take a subset, or paste exact task IDs."
+              description="Choose purpose first. Evaluation uses official native benchmarks with verification. Trajectory generation can use TaskSets and, during transition, benchmarks too."
             />
             <Card.Body className="space-y-4">
+              <fieldset className="space-y-2">
+                <legend className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+                  Purpose
+                </legend>
+                {(
+                  [
+                    [
+                      "evaluation",
+                      "Evaluation — native benchmarks, verification required",
+                    ],
+                    [
+                      "trajectory_generation",
+                      "Trajectory generation — TaskSets (benchmarks still allowed)",
+                    ],
+                  ] as Array<[BatchPurpose, string]>
+                ).map(([value, label]) => (
+                  <label
+                    key={value}
+                    className="flex items-center gap-2 text-sm text-slate-700"
+                  >
+                    <input
+                      type="radio"
+                      name="batch-purpose"
+                      value={value}
+                      checked={batchPurpose === value}
+                      onChange={() => setBatchPurpose(value)}
+                      className="h-4 w-4 border-slate-300"
+                    />
+                    {label}
+                  </label>
+                ))}
+                <Help>
+                  Same trial harness and trajectory export either way. Purpose
+                  only controls which catalogs you may select and whether
+                  grading can be skipped.
+                </Help>
+              </fieldset>
               <label className="block max-w-sm">
                 <FieldLabel hint="required">Backend</FieldLabel>
                 <select
@@ -1609,19 +1690,31 @@ export default function NewBatch(): JSX.Element {
                 <BenchmarkPicker
                   items={[
                     ...((benchmarks.data?.items ?? []) as BenchmarkItem[]),
-                    ...((evalTaskSets.data?.items ?? [])
-                      .filter((ts) => ts.evaluation_ready && ts.status === "ready")
-                      .map((ts) => ({
-                        id: ts.task_set_id,
-                        display_name: ts.display_name,
-                        task_count: ts.task_count,
-                        readiness_state: "ready",
-                        readiness_label: "evaluation-ready",
-                        selectable: true,
-                        series: "User Task Sets",
-                      } satisfies BenchmarkItem))),
+                    ...(batchPurpose === "trajectory_generation"
+                      ? (evalTaskSets.data?.items ?? [])
+                          .filter(
+                            (ts) =>
+                              ts.status === "ready" || ts.status === "partial",
+                          )
+                          .map(
+                            (ts) =>
+                              ({
+                                id: ts.task_set_id,
+                                display_name: ts.display_name,
+                                task_count: ts.task_count,
+                                readiness_state: "ready",
+                                readiness_label: ts.status,
+                                selectable: true,
+                                series: "User Task Sets",
+                              }) satisfies BenchmarkItem,
+                          )
+                      : []),
                   ]}
-                  loading={benchmarks.isPending || evalTaskSets.isPending}
+                  loading={
+                    benchmarks.isPending ||
+                    (batchPurpose === "trajectory_generation" &&
+                      evalTaskSets.isPending)
+                  }
                   selected={selectedBenchmarks}
                   onChange={setSelectedBenchmarks}
                 />
@@ -1835,20 +1928,27 @@ export default function NewBatch(): JSX.Element {
                       </Help>
                     </span>
                   </label>
-                  <label className="flex items-start gap-2 text-sm text-slate-700">
-                    <input
-                      type="checkbox"
-                      checked={advanced.skipVerifier}
-                      onChange={(e) => setAdv("skipVerifier", e.target.checked)}
-                      className="mt-1 h-4 w-4 rounded border-slate-300"
-                    />
-                    <span>
-                      Skip verifier
-                      <Help>
-                        Default: off. When on, no grading happens.
-                      </Help>
-                    </span>
-                  </label>
+                  {batchPurpose === "trajectory_generation" ? (
+                    <label className="flex items-start gap-2 text-sm text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={advanced.skipVerifier}
+                        onChange={(e) => setAdv("skipVerifier", e.target.checked)}
+                        className="mt-1 h-4 w-4 rounded border-slate-300"
+                      />
+                      <span>
+                        Skip verifier
+                        <Help>
+                          Allowed for trajectory generation. Evaluation always
+                          runs verification.
+                        </Help>
+                      </span>
+                    </label>
+                  ) : (
+                    <p className="text-xs text-slate-500">
+                      Evaluation always runs the verifier; skip is unavailable.
+                    </p>
+                  )}
                   <label className="block max-w-sm">
                     <FieldLabel hint="default: task setting">Verifier env mode</FieldLabel>
                     <select

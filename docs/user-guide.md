@@ -282,6 +282,7 @@ Submit, monitor, inspect usage, and download through public `/api/v1` routes:
 
 ```bash
 loom eval batch create \
+  --purpose evaluation \
   --name-suffix public-cli-smoke \
   --agent direct-completion \
   --provider smoke-openai \
@@ -293,6 +294,7 @@ loom eval batch create \
 # path-tracing) should select the TB21 private-path staging policy so the
 # agent cannot read the oracle:
 loom eval batch create \
+  --purpose trajectory_generation \
   --workspace-staging-policy tb21 \
   --agent terminus-2 \
   --provider smoke-openai \

@@ -219,6 +219,7 @@ async def test_subset_first_n(setup: tuple[FastAPI, str]) -> None:
         {
             "name": "first-3",
             "backend": "docker",
+            "purpose": "evaluation",
             "task_filter": {
                 "license": "MIT",
                 "subset_kind": "first_n",
@@ -242,6 +243,7 @@ async def test_subset_last_n(setup: tuple[FastAPI, str]) -> None:
         raw,
         {
             "name": "last-2",
+            "purpose": "evaluation",
             "task_filter": {
                 "license": "MIT",
                 "subset_kind": "last_n",
@@ -266,6 +268,7 @@ async def test_subset_random_n_reproducible(
     app, raw = setup
     body = {
         "name": "rand-5-seed-42",
+        "purpose": "evaluation",
         "task_filter": {
             "license": "MIT",
             "subset_kind": "random_n",
@@ -291,6 +294,7 @@ async def test_subset_random_n_requires_seed(
         raw,
         {
             "name": "no-seed",
+            "purpose": "evaluation",
             "task_filter": {
                 "license": "MIT",
                 "subset_kind": "random_n",
@@ -315,6 +319,7 @@ async def test_subset_unknown_kind_rejected(
         raw,
         {
             "name": "phantom",
+            "purpose": "evaluation",
             "task_filter": {
                 "license": "MIT",
                 "subset_kind": "fancy_n",
@@ -346,6 +351,7 @@ async def test_combinations_compute_expected_count(
         raw,
         {
             "name": "multi-combo",
+            "purpose": "evaluation",
             "task_filter": {"license": "MIT"},
             "trial_config": {},
             "combinations": [
@@ -415,6 +421,7 @@ async def test_combinations_preserve_per_combo_provider_routing(
         raw,
         {
             "name": "combo-provider-routing",
+            "purpose": "evaluation",
             "task_filter": {"license": "MIT", "subset_kind": "first_n", "n": 2},
             "trial_config": {},
             "combinations": [
@@ -498,6 +505,7 @@ async def test_combinations_reject_provider_model_cache_per_combo(
         raw,
         {
             "name": "combo-provider-cache-fail",
+            "purpose": "evaluation",
             "task_filter": {"license": "MIT", "subset_kind": "first_n", "n": 1},
             "trial_config": {},
             "combinations": [
@@ -529,6 +537,7 @@ async def test_combinations_reject_agent_in_trial_config(
         raw,
         {
             "name": "ambiguous",
+            "purpose": "evaluation",
             "task_filter": {"license": "MIT"},
             "trial_config": {
                 "agent_name": "oracle",
@@ -557,6 +566,7 @@ async def test_combinations_unique_labels(
         raw,
         {
             "name": "dupes",
+            "purpose": "evaluation",
             "task_filter": {"license": "MIT"},
             "trial_config": {},
             "combinations": [
@@ -588,6 +598,7 @@ async def test_combinations_reject_unknown_agent(
         raw,
         {
             "name": "ghost",
+            "purpose": "evaluation",
             "task_filter": {"license": "MIT"},
             "trial_config": {},
             "combinations": [
@@ -615,6 +626,7 @@ async def test_combinations_reject_agent_without_service_runtime(
         raw,
         {
             "name": "opencode-combo",
+            "purpose": "evaluation",
             "task_filter": {"license": "MIT"},
             "trial_config": {},
             "combinations": [
@@ -670,6 +682,7 @@ async def test_combinations_reject_oracle_when_any_task_is_incompat(
         raw,
         {
             "name": "oracle+litellm-on-script-task",
+            "purpose": "evaluation",
             "task_filter": {
                 "task_ids": ["local/script-only-combo"],
                 "subset_kind": "explicit",
@@ -701,6 +714,7 @@ async def test_backend_stored_on_batch(setup: tuple[FastAPI, str]) -> None:
         {
             "name": "docker-batch",
             "backend": "docker",
+            "purpose": "evaluation",
             "task_filter": {"license": "MIT", "subset_kind": "first_n", "n": 1},
             "trial_config": {
                 "agent_name": "oracle",

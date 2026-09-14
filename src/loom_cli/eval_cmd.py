@@ -729,6 +729,14 @@ def _batch_create(args: argparse.Namespace) -> int:
                             args.multi_model_episode_ceiling
                         )
                 trial_config["multi_model"] = multi_model_block
+            if getattr(args, "skip_verifier", False):
+                if args.purpose != "trajectory_generation":
+                    sys.stderr.write(
+                        "error: --skip-verifier is only allowed with "
+                        "--purpose trajectory_generation.\n",
+                    )
+                    return 2
+                trial_config["skip_verifier"] = True
             # --benchmark / --task-set are shortcuts for common task_filter
             # shapes. Operators wanting richer filters use --task-filter JSON
             # instead. Multiple selector forms are rejected so precedence stays
@@ -761,7 +769,24 @@ def _batch_create(args: argparse.Namespace) -> int:
                     "is required.\n",
                 )
                 return 2
+            if args.purpose == "evaluation":
+                if args.task_set is not None or (
+                    isinstance(task_filter.get("task_set_id"), str)
+                    and task_filter.get("task_set_id")
+                ) or (
+                    isinstance(task_filter.get("task_set_ids"), (list, tuple))
+                    and any(
+                        isinstance(item, str) and item
+                        for item in task_filter.get("task_set_ids", [])
+                    )
+                ):
+                    sys.stderr.write(
+                        "error: --purpose evaluation only allows native "
+                        "benchmarks (no TaskSet selectors).\n",
+                    )
+                    return 2
             payload: dict[str, Any] = {
+                "purpose": args.purpose,
                 "task_filter": task_filter,
                 "trial_config": trial_config,
             }
@@ -1543,9 +1568,32 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_bc.add_argument(
+        "--purpose",
+        choices=("evaluation", "trajectory_generation"),
+        required=True,
+        help=(
+            "Batch purpose. evaluation = native benchmarks with verification; "
+            "trajectory_generation = TaskSets and/or benchmarks (transition), "
+            "verifier optional. Same trial harness either way."
+        ),
+    )
+    p_bc.add_argument(
+        "--skip-verifier",
+        dest="skip_verifier",
+        action="store_true",
+        help=(
+            "Skip the verifier phase (trajectory_generation only). "
+            "Rejected with --purpose evaluation."
+        ),
+    )
+    p_bc.add_argument(
         "--benchmark",
         default=None,
-        help=('Benchmark slug — shortcut for --task-filter \'{"benchmark_id":"..."}\'.'),
+        help=(
+            "Native benchmark slug — shortcut for "
+            '--task-filter \'{"benchmark_id":"..."}\'. Required selector form '
+            "for --purpose evaluation."
+        ),
     )
     p_bc.add_argument(
         "--task-set",
@@ -1553,7 +1601,8 @@ def dispatch(argv: list[str]) -> int:
         default=None,
         help=(
             "TaskSet id — shortcut for --task-filter "
-            '\'{"task_set_id":"..."}\'. Use `loom tasksets list` to find ids.'
+            '\'{"task_set_id":"..."}\'. Use `loom tasksets list` to find ids. '
+            "Allowed for --purpose trajectory_generation only."
         ),
     )
     p_bc.add_argument(
