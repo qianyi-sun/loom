@@ -162,3 +162,26 @@ def test_migration_retirement_journals_replacement_peer_before_continuing(tmp_pa
     component = replace(_component(apply), component_id="database-migration")
     with pytest.raises(RuntimeError, match="end test"):
         journal.execute(plan, [component])
+
+
+@pytest.mark.parametrize("state", ["needs-convergence", "exact", "authority-rebind-required", "authority-rebind-recovery-required"])
+def test_capacity_journal_binds_initial_configuration_and_certified_rebind_sql(tmp_path, state):
+    from loom_cli.rollout.operator.protected_application_migration_journal import (
+        ApplicationMigrationJournal,
+    )
+
+    plan, journal = _setup(tmp_path)
+    guard = _guard(plan)
+    def apply(_):
+        journal.retain_application_guard(plan, guard=guard)
+        application_guard_is_retained(tmp_path / "state", request_id=plan.request_id,
+            service_uid=os.getuid(), guard=guard, acknowledge=True)
+        migration = ApplicationMigrationJournal(journal, plan, component, 0)
+        authority = _authority(plan, component, guard)
+        authority.update(initial_database_state=state, rebind_sha256="f" * 64 if state == "authority-rebind-required" else None)
+        migration.append("authority", authority, guard=guard)
+        assert migration.read()[0].payload["initial_database_state"] == state
+        raise RuntimeError("end test")
+    component = replace(_component(apply), component_id="staging-capacity-database")
+    with pytest.raises(RuntimeError, match="end test"):
+        journal.execute(plan, [component])
