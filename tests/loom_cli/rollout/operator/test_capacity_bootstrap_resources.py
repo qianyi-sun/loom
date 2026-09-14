@@ -6,14 +6,18 @@ import json
 
 import pytest
 
-from loom_cli.rollout.operator.protected_application_migration_journal import ApplicationMigrationEvent
+from loom_cli.rollout.operator.protected_application_migration_journal import (
+    ApplicationMigrationEvent,
+)
 from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
     KubernetesProtectedStagingCapacityDatabaseComponent,
 )
 from tests.loom_cli.rollout.operator.test_application_guard_retention import _guard
 from tests.loom_cli.rollout.operator.test_application_migration_journal import _generation
 from tests.loom_cli.rollout.operator.test_application_migration_resources import Runner
-from tests.loom_cli.rollout.operator.test_protected_staging_capacity_runtime import _database_component
+from tests.loom_cli.rollout.operator.test_protected_staging_capacity_runtime import (
+    _database_component,
+)
 
 
 @pytest.mark.parametrize("interruption", [None, "secret", "job"])
@@ -39,22 +43,20 @@ def test_capacity_bootstrap_resources_retire_lost_deliveries_without_recreation(
     assert {v["secret"]["secretName"] for v in pod["volumes"]} == {resources.secret["metadata"]["name"]}
     assert pod["containers"][0]["command"][-1] == "loom.staging_capacity_database_bootstrap"
     assert resources.job["metadata"]["name"] != "loom-staging-capacity-database-bootstrap"
-    for kind in ("secret", "job"):
+    def deliver(kind, secret_uid=None):
         runner.lose_create = kind == interruption
-        if kind == "secret":
-            create = lambda: resources.ensure_secret(creation_dispatched=True)
-        else:
-            create = lambda: resources.ensure_job(creation_dispatched=True, expected_secret_uid=secret.uid)
+        def create():
+            if kind == "secret":
+                return resources.ensure_secret(creation_dispatched=True)
+            return resources.ensure_job(creation_dispatched=True, expected_secret_uid=secret_uid)
         if kind == interruption:
             with pytest.raises(RuntimeError, match="reply lost"):
                 create()
         else:
             create()
-        observed = resources.observe_secret() if kind == "secret" else resources.observe_job()
-        if kind == "secret":
-            secret = observed
-        else:
-            job = observed
+        return resources.observe_secret() if kind == "secret" else resources.observe_job()
+    secret = deliver("secret")
+    job = deliver("job", secret.uid)
     runner.objects["Job"]["spec"].update(parallelism=1, completions=1)
     resources.delete_job(expected_uid=job.uid)
     resources.delete_secret(expected_uid=secret.uid)

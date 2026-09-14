@@ -80,6 +80,9 @@ class ProtectedApplicationMigrationResources:
                 or secret_metadata.get("annotations") != annotations
                 or set(_mapping(self.secret.get("data"))) != {"db-url", "ca.crt"}):
             raise ValueError("application migration resource binding is invalid")
+        self._freeze_documents()
+
+    def _freeze_documents(self) -> None:
         object.__setattr__(self, "job", copy.deepcopy(dict(self.job)))
         object.__setattr__(self, "secret", copy.deepcopy(dict(self.secret)))
         object.__setattr__(self, "_job_digest", _digest(self.job))
