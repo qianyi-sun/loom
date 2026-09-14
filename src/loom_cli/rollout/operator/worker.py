@@ -800,7 +800,7 @@ def run_attempt(
             observed_epoch = read_epoch(retained_guard)
             if type(observed_epoch) is not int or observed_epoch != expected_mutation_epoch:
                 raise ValueError("staging mutation guard live epoch drifted")
-            expected_mutation_epoch = original.mutation_epoch
+            expected_mutation_epoch = retained_guard.mutation_epoch
         if evidence.mutation_epoch != expected_mutation_epoch:
             raise ValueError("staging mutation guard binding drifted")
         return _run_attempt_owned(
