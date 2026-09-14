@@ -26,7 +26,7 @@ def test_external_admission_combines_actual_inputs_without_certifying_the_window
     monkeypatch.setattr(module, 'observe_cnpg_operator', operator)
     monkeypatch.setattr(module, 'observe_cnpg_volume', volume)
     if change == 'plan':
-        plan = replace(plan, checkpoint_schema_version=2)
+        object.__setattr__(plan, 'checkpoint_schema_version', 2)
     if change:
         with pytest.raises(ValueError, match='CNPG'):
             module.observe_cnpg_external_inputs(plan, runtime, runner=object())
