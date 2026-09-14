@@ -163,9 +163,9 @@ def render_execution_job(
     image_ref = requirements.get("image_ref")
     if not isinstance(image_ref, str) or not _DIGEST_IMAGE.fullmatch(image_ref):
         raise ActuatorContractError("execution image must be immutable by sha256 digest")
-    cpu_millis = _required_positive(requirements, "cpu_millis")
-    memory_mib = _required_positive(requirements, "memory_mib")
-    storage_mib = _required_positive(requirements, "ephemeral_storage_mib")
+    _required_positive(requirements, "cpu_millis")
+    _required_positive(requirements, "memory_mib")
+    _required_positive(requirements, "ephemeral_storage_mib")
     plan = _runtime_plan(lease)
     current_time = (now or datetime.now(UTC)).astimezone(UTC)
     try:
@@ -216,9 +216,9 @@ def render_execution_job(
         ]
     )
     resources = _resources(
-        cpu_millis=cpu_millis,
-        memory_mib=memory_mib,
-        storage_mib=storage_mib,
+        cpu_millis=plan.execution_resources.cpu_millis,
+        memory_mib=plan.execution_resources.memory_mib,
+        storage_mib=plan.execution_resources.ephemeral_storage_mib,
     )
     plan_payload = canonical_document(plan.canonical_payload())
     encoded_plan = base64.urlsafe_b64encode(plan_payload).rstrip(b"=").decode("ascii")

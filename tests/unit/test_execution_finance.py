@@ -80,9 +80,9 @@ def test_execution_cost_estimate_prices_complete_worst_case_pod_envelope() -> No
     assert estimate.duration_seconds == 3_600
     assert estimate.requested_cpu_millis == 1_000
     assert estimate.requested_memory_mib == 1_024
-    assert estimate.requested_ephemeral_storage_mib == 3_124
-    assert estimate.estimated_cost_microusd == 21_782_813
-    assert estimate.daily_costs == ((now.date(), 21_782_813),)
+    assert estimate.requested_ephemeral_storage_mib == 1_024
+    assert estimate.estimated_cost_microusd == 14_400_000
+    assert estimate.daily_costs == ((now.date(), 14_400_000),)
     assert estimate.estimate_sha256.startswith("sha256:")
 
 

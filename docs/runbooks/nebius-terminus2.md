@@ -57,12 +57,38 @@ separate verifier and transform fields empty. Select `terminus-2` + `glm-5.2` wh
 model/provider configuration and credentials stay in the Gateway. Catalog/model
 availability must be verified on the target environment. The task configuration
 starts with 2 vCPU, 4 GiB memory and 8 GiB storage for the task container. The
-controller and verifier each request another 2 vCPU and 4 GiB: the complete Trial
-therefore requests 6 vCPU and 12 GiB, with about 33 GiB conservatively accounted
-storage including workspaces and runtime volumes. The current 16-vCPU/64-GiB
-node template can fit this Trial. This is an initial allocation, not a promise
-for all 90 tasks; placement must account for all containers and live regional
-quota. Agent and verifier each retain the original 900-second timeout.
+verifier requests the same task resources. Newly published Nebius profiles set
+`controller_resources: {"cpu_millis": 1000, "memory_mib": 2048}` for the trusted
+Harbor controller, independently of the task's compute. This example therefore
+requests 5 vCPU and 10 GiB across the complete Pod. Controller storage remains
+task-derived (8 GiB here), as do the task/verifier allocations, workspace and
+output bounds. The Pod requests 24 GiB of temporary storage. The workspace,
+runtime and output emptyDir limits bound usage within that Pod budget; admission
+and cost reservation use the same request as native scheduling and observation,
+without adding those limits again. Existing reservations and historical cost
+records are not rewritten. The current
+16-vCPU/64-GiB node template can fit this Trial. CPU/RAM savings alone do not
+establish better packing when storage is the limiting resource. This is an
+initial allocation, not a promise for all 90 tasks; placement accounts for all
+containers and live regional quota. Agent and verifier each retain the original
+900-second timeout.
+
+The deployment runtime profile's optional `controller_resources` contains only
+CPU and memory. Automatic native Terminus plans freeze it with task-derived
+storage. An absent setting preserves legacy task-sized controller behavior;
+existing frozen plans retain their original allocation and remain readable.
+Direct-completion plans do not use this setting. Explicit published harness
+versions retain their selected controller image. The runtime image supplies the
+Go plan reader; the selected Harbor image receives unchanged task/trial inputs
+and phase arguments, not the execution plan or deployment profile.
+The Python compiler, actuator,
+capacity admission and Go execution runtime must be deployed together before
+publishing plans with the new field. The 1-vCPU/2-GiB controller baseline retains
+the allocation exercised by the ordinary-task acceptance; it is not derived
+from a low point-in-time usage sample. Further reductions require evidence from
+startup, Harbor processing, workspace handoff and output publication, including
+memory peaks and CPU throttling. Both resource requests and limits use the
+configured values.
 
 ## Dockerfile task prerequisites
 

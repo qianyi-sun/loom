@@ -101,20 +101,13 @@ def estimate_execution_cost(
     if deadline <= start:
         raise ValueError("deadline_at must be after acquired_at")
     duration_seconds = max(1, _ceil_timedelta_seconds(deadline - start))
-    output_mib = max(
-        1,
-        (runtime_plan.max_artifact_bytes + 2 * runtime_plan.max_log_bytes_per_stream + 1_048_575)
-        // 1_048_576,
-    )
     pod_resources = runtime_pod_resources(runtime_plan)
     cpu_millis = pod_resources.cpu_millis
     memory_mib = pod_resources.memory_mib
-    storage_mib = (
-        pod_resources.ephemeral_storage_mib
-        + runtime_plan.workspace_mib
-        + runtime_plan.runtime_volume_mib
-        + output_mib
-    )
+    # Disk-backed emptyDir usage is included in the Pod's ephemeral-storage
+    # envelope, not reserved in addition to container requests. Keep finance,
+    # pre-Pod admission and native placement on the same effective request.
+    storage_mib = pod_resources.ephemeral_storage_mib
     hourly_cost = (
         Fraction(price.base_microusd_per_hour)
         + Fraction(price.vcpu_microusd_per_hour * cpu_millis, 1000)
