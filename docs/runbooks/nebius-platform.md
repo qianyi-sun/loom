@@ -921,6 +921,12 @@ exact Pod UID are persisted. The actuator needs GET `nodes/proxy`; execution
 Pods retain no Kubernetes API privilege. This node-proxy permission belongs only
 to the trusted actuator, not a user task.
 
+The Kubernetes Python client's generated proxy method declares a string response
+even when kubelet returns JSON. Read the raw HTTP response and decode its JSON
+once; decoding the SDK's stringified Python dictionary fails despite a successful
+request. Regression coverage must exercise the real SDK response conversion,
+not only a stub that returns a JSON string.
+
 Trial/Batch `resource-usage` APIs and delivery exports retain the same durable
 ledger after native nodes are removed. Native rows carry execution lease,
 resource generation, target and Pod UID with a null worker ID. Legacy worker

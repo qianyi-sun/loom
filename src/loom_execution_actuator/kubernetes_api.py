@@ -285,10 +285,22 @@ class InClusterKubernetesJobApi:
             import json
 
             try:
-                result = self._core.connect_get_node_proxy_with_path(
-                    name=node_name, path="stats/summary", _request_timeout=10
+                # This generated connect API declares response_type='str'. Its
+                # deserializer converts JSON objects into Python repr strings,
+                # so decode the raw JSON before that lossy coercion.
+                response = self._core.connect_get_node_proxy_with_path(
+                    name=node_name,
+                    path="stats/summary",
+                    _request_timeout=10,
+                    _preload_content=False,
                 )
-                return json.loads(result) if isinstance(result, str) else dict(result)
+                try:
+                    result = json.loads(response.data)
+                    if not isinstance(result, dict):
+                        raise ValueError("kubelet summary is not a JSON object")
+                    return result
+                finally:
+                    response.release_conn()
             except Exception as exc:
                 raise self._translate(exc, "resource_summary") from exc
 
