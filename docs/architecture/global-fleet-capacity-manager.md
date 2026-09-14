@@ -556,6 +556,17 @@ is recorded before SQL mutation; a recorded digest does not establish authority.
 The installed executor and early worker recovery still need those capabilities
 and this component wired into the full chain.
 
+The read-only CNPG operator observer admits the fixed 1.25.1 command, environment,
+security context, volume projections and absent configuration overrides. It brackets
+a host-process observation with unchanged Kubernetes inputs. The host reader binds
+CRI labels/container ID, PID/start time and namespaces, requires a single operator
+process and an actual read-only root mount, and compares the running and stored
+executable inodes and independently pinned bytes. Nanosecond timestamps detect
+same-size changes during hashing. It accepts a terminal Pod record only when all
+reported containers have terminated. A trusted installed host transport and the
+enclosing administrator/storage writer exclusion remain required; this observer
+does not create a privileged inspection workload or establish that exclusion.
+
 The read-only restoration observer combines the exact replacement runtime,
 original credential/configuration bindings, PostgreSQL's restored login/schema
 state and the complete saved workload inventory at its original ready endpoints.
