@@ -23,7 +23,9 @@ def _ca():
 
 @pytest.mark.parametrize("drift", [None, "cluster", "name", "owner", "certificate", "racing-secret"])
 def test_migration_ca_requires_unchanged_fixed_cluster_certificate(drift):
-    from loom_cli.rollout.operator.protected_application_migration_ca import observe_application_migration_ca
+    from loom_cli.rollout.operator.protected_application_migration_ca import (
+        observe_application_migration_ca,
+    )
 
     ca = _ca()
     uid = "11111111-1111-4111-8111-111111111111"
