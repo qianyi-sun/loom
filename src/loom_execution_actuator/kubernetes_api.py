@@ -104,14 +104,28 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
         started_at = getattr(
             getattr(execution_state, "running", None), "started_at", None
         ) or getattr(execution_terminated, "started_at", None)
-        if pod.metadata.deletion_timestamp is not None:
-            state = NormalizedJobState.TERMINATING
         pod_reason = getattr(pod.status, "reason", None)
+        disruption = _condition(getattr(pod.status, "conditions", None), "DisruptionTarget")
         pod_message = getattr(pod.status, "message", None)
         if pod_reason == "Evicted":
             state, reason, message = NormalizedJobState.EVICTED, pod_reason, pod_message
+        elif (
+            pod_uid is not None
+            and getattr(disruption, "status", None) == "True"
+            and getattr(disruption, "reason", None) == "DeletionByTaintManager"
+        ):
+            # This condition belongs to the UID-bound Pod observation. Keep
+            # its eviction cause while deletion and generic Job backoff status
+            # arrive; do not infer it from unbound Events or other disruptions.
+            state, reason, message = (
+                NormalizedJobState.EVICTED,
+                "DeletionByTaintManager",
+                getattr(disruption, "message", None),
+            )
         elif pod_reason in {"NodeLost", "Shutdown"}:
             state, reason, message = NormalizedJobState.NODE_LOST, pod_reason, pod_message
+        elif pod.metadata.deletion_timestamp is not None or metadata.deletion_timestamp is not None:
+            state = NormalizedJobState.TERMINATING
         else:
             terminated = [
                 status.state.terminated
