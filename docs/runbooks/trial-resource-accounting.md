@@ -27,6 +27,13 @@ stable CPU/RSS/PID/I/O contract. Adding provider telemetry requires a new typed
 adapter implementation and contract tests; it must not map billing duration to
 resource use.
 
+Native Kubernetes executions use the actuator's
+[kubelet sampling adapter](nebius-platform.md#native-trial-resource-observations).
+Their sampled maxima are not kernel peaks, and finalized rows remain `partial`
+when the backend cannot supply the full counter contract. Native sampling writes
+directly to the durable ledger; the worker outbox described below applies to
+worker-backed executions.
+
 ## Durability and recovery
 
 Each active execution checkpoints its latest report under the worker's private
