@@ -2342,6 +2342,17 @@ orphans without committed preparation remain retained, not adopted from their
 adjacent local locator. This history extension does not enable intake or add
 another capacity ledger.
 
+The root-private quarantine journal now serializes each authenticated-history
+key and records `quarantining -> quarantined -> pruned -> removing -> completed`
+with atomic publication and directory fsync. It renames only the exact retained
+attempt inode into a protected same-mount directory, prunes there, and removes
+the locator last. Interrupted calls resume from the retained transition; missing
+data alone is never completion. Owner teardown may remove the old scratch parent
+after quarantine without preventing cleanup or replay of a completed result.
+The journal remains an internal primitive: its caller must authenticate history
+and establish stable no-writer exclusion. It is not yet an installed node helper
+or capacity-release authority.
+
 The versioned client policy is
 `deploy/personal-dev-builder/client-seccomp-v1.json`. It permits ordinary
 Python/buildctl file IO, read-only extended-attribute inspection, constrained

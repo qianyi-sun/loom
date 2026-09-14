@@ -17,10 +17,10 @@ import os
 import stat
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal, Self
 from uuid import UUID, uuid4
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom_capacity_agent.native_recovery import (
@@ -33,6 +33,7 @@ from loom_capacity_build_guard.native_terminal_recovery import (
     NativeTerminalRecoveryStore,
     NativeTerminalRecoveryV1,
 )
+from loom_capacity_executor.native_installed_release import _Observation
 from loom_capacity_executor.native_outer_build import _join, _stop_process
 from loom_capacity_manager.contracts import (
     Digest,
@@ -82,6 +83,37 @@ class NativeNodeRecoveryRequestV1(StrictV1Model):
     operation: Literal["reconcile"] = "reconcile"
     invocation_id: UUID
     history: NativeTerminalRecoveryV1
+
+
+class NativeRecoveryInventoryV1(StrictV1Model):
+    """Retained root-owned transport inventory, independent of live membership."""
+
+    targets: Annotated[tuple[NativeRecoveryTargetV1, ...], Field(min_length=1, max_length=4096)]
+
+    @model_validator(mode="after")
+    def _unique(self) -> Self:
+        keys = [(item.installation_id, item.pool_id, item.node_id, item.host_sha256) for item in self.targets]
+        if len(set(keys)) != len(keys):
+            raise ValueError("recovery inventory requires unique protected targets")
+        return self
+
+
+def read_native_recovery_inventory(path: Path, *, expected_sha256: str) -> NativeRecoveryInventoryV1:
+    """Read exact protected bootstrap bytes, never worker-selected inventory.
+
+    Old installation entries must remain while their attempts need recovery.
+    Credentials are still separately snapshotted and checked by each exchange.
+    The installed management entrypoint owns this path/digest, not request JSON.
+    """
+    _path(str(path))
+    observation = _Observation()
+    wire = observation.read(path, digest=expected_sha256, size=None, mode=0o444,
+        bound=4 * 1024**2, collect=True)
+    inventory = NativeRecoveryInventoryV1.model_validate_json(wire)
+    if canonical_bytes(inventory) != wire:
+        raise ValueError("recovery inventory must be canonical")
+    observation.finish()
+    return inventory
 
 
 class NativeNodeRecoveryResultV1(StrictV1Model):
@@ -226,10 +258,15 @@ class NativeRecoverySender:
     ) -> None:
         self._sessions = session_factory
         self._installation = installation
-        self._targets = tuple(NativeRecoveryTargetV1.model_validate_json(canonical_bytes(item)) for item in targets)
-        keys = [(item.installation_id, item.pool_id, item.node_id, item.host_sha256) for item in self._targets]
-        if not 1 <= len(keys) <= 4096 or len(set(keys)) != len(keys):
-            raise ValueError("recovery sender requires bounded, unique protected targets")
+        self._targets = NativeRecoveryInventoryV1.model_validate_json(
+            canonical_bytes(NativeRecoveryInventoryV1(targets=targets))).targets
+
+    @classmethod
+    def from_installed_inventory(cls, *, session_factory: async_sessionmaker[AsyncSession],
+        installation: RetainedBuildInstallation, inventory_path: Path, inventory_sha256: str,
+    ) -> Self:
+        inventory = read_native_recovery_inventory(inventory_path, expected_sha256=inventory_sha256)
+        return cls(session_factory=session_factory, installation=installation, targets=inventory.targets)
 
     async def reconcile(self, claim_operation_id: UUID) -> NativeNodeRecoveryResultV1 | None:
         async with asyncio.timeout(10):
