@@ -80,7 +80,10 @@ class NativeMappedScratch:
 
 
 def capture_native_mapped_scratch(spec: NativeRootlessSpecV2) -> NativeMappedScratch:
-    from loom_capacity_executor.native_rootless_runtime import NativeRootlessSpecV2, NativeRootlessSpecV3
+    from loom_capacity_executor.native_rootless_runtime import (
+        NativeRootlessSpecV2,
+        NativeRootlessSpecV3,
+    )
 
     _require_mapped_root()
     # Revalidate even a caller-created model_copy before deriving deletion paths.

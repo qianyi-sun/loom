@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Literal
 from loom_capacity_agent.build_admission import BuildClaimRequestV1
 from loom_capacity_agent.native_recovery import (
     NativeInstalledAttemptV2,
+    NativeRecoveryMappingRange,
     NativeRecoveryPreparationV1,
 )
 from loom_capacity_agent.native_recovery_publication import (
@@ -54,8 +55,8 @@ def acknowledge_mapped_recovery(channel: socket.socket, *, spec: NativeRootlessS
             raise ValueError("native mapped recovery attempt identity changed")
         actual = observe_native_mapped_identity()
         record = NativeInstalledAttemptV2(preparation=preparation, runtime_spec_sha256=runtime_spec_sha256,
-            uid_map=tuple(asdict(item) for item in actual.uid_ranges),
-            gid_map=tuple(asdict(item) for item in actual.gid_ranges))
+            uid_map=tuple(NativeRecoveryMappingRange(**asdict(item)) for item in actual.uid_ranges),
+            gid_map=tuple(NativeRecoveryMappingRange(**asdict(item)) for item in actual.gid_ranges))
         request = NativeRecoveryPublicationV1(claim=spec.claim, record=record)
         _configure(channel)
         _send(channel, NativeRecoveryFinalize(request=request))

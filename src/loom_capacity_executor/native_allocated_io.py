@@ -18,7 +18,10 @@ from loom_capacity_agent.build_admission import (
 )
 from loom_capacity_agent.build_artifact_stream import BuildArtifactUploadReceiptV1
 from loom_capacity_agent.native_recovery import NativeRecoveryPreparationV1
-from loom_capacity_agent.native_recovery_publication import NativeRecoveryPublicationV1, NativeRecoveryReceiptV1
+from loom_capacity_agent.native_recovery_publication import (
+    NativeRecoveryPublicationV1,
+    NativeRecoveryReceiptV1,
+)
 from loom_capacity_executor.native_authority_bridge import (
     NativeExecutionAuthorityClient,
     serve_native_execution_authority,
