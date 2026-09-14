@@ -563,9 +563,16 @@ CRI labels/container ID, PID/start time and namespaces, requires a single operat
 process and an actual read-only root mount, and compares the running and stored
 executable inodes and independently pinned bytes. Nanosecond timestamps detect
 same-size changes during hashing. It accepts a terminal Pod record only when all
-reported containers have terminated. A trusted installed host transport and the
-enclosing administrator/storage writer exclusion remain required; this observer
-does not create a privileged inspection workload or establish that exclusion.
+reported containers have terminated. The command runner uses a dedicated SSH observation transport with fixed key,
+root-owned endpoint/host-key files and a forced-command remote observer. Only
+literal host/port mappings are admitted; inherited agents, forwarding and
+connection sharing are disabled. A fresh challenge binds each result to the
+original identity and exact installed observer source, and trust-file identity,
+ACL and content are checked again after the call. The bounded host protocol
+refuses duplicate fields and arbitrary commands. Trusted installation of that
+endpoint and the enclosing administrator/storage writer exclusion remain
+required; this observer does not provision access, create a privileged inspection
+workload or establish that exclusion.
 
 The read-only restoration observer combines the exact replacement runtime,
 original credential/configuration bindings, PostgreSQL's restored login/schema

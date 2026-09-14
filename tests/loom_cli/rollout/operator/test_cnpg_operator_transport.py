@@ -109,7 +109,9 @@ def test_host_protocol_admits_only_current_program_and_bounded_identity(monkeypa
 
 def test_installed_command_runner_uses_fixed_cnpg_observer(monkeypatch):
     from loom_cli.rollout.operator import protected_cnpg_operator_transport as module
-    from loom_cli.rollout.operator.protected_apply_executor import SubprocessProtectedApplyCommandRunner
+    from loom_cli.rollout.operator.protected_apply_executor import (
+        SubprocessProtectedApplyCommandRunner,
+    )
     from loom_cli.rollout.operator.protected_cnpg_operator_admission import select_cnpg_operator
 
     identity = select_cnpg_operator([_pod()])

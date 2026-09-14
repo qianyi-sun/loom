@@ -45,6 +45,7 @@ from .protected_apply_journal import (
     ProtectedApplyComponent,
     ProtectedApplyJournal,
 )
+from .protected_cnpg_operator_admission import CNPGOperatorIdentity
 from .protected_environment_state_component import (
     ProtectedEnvironmentStateComponent,
     ProtectedEnvironmentStateTransport,
@@ -230,6 +231,12 @@ class SubprocessProtectedApplyCommandRunner:
             "PYTHONDONTWRITEBYTECODE": "1",
             "XDG_RUNTIME_DIR": f"/run/user/{uid}",
         }
+
+    def inspect_staging_cnpg_operator(self, identity: CNPGOperatorIdentity) -> Mapping[str, object]:
+        """Use only the installed dedicated host observer, with no personal-key fallback."""
+        from .protected_cnpg_operator_transport import inspect_staging_cnpg_operator
+
+        return inspect_staging_cnpg_operator(identity)
 
     def open_staging_peer_database(self) -> PeerDatabaseConnection:
         """Open the fixed bounded peer channel for admitted installed code only.
