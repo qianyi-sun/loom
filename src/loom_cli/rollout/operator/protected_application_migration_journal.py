@@ -244,7 +244,7 @@ def _validate_history(plan: FinalGatePlan, events: Sequence[ApplicationMigration
             _fields(payload, set())
         elif phase == "noop":
             _fields(payload, {"revision"})
-            if previous != "authority" or payload["revision"] != plan.migration_target_revision:
+            if previous not in {"authority", "abandoned", "complete"} or payload["revision"] != plan.migration_target_revision:
                 raise ValueError("application migration no-op binding changed")
         else:
             if _NEXT.get(phase) != previous:
