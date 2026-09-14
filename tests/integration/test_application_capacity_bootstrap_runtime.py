@@ -68,7 +68,7 @@ async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_ru
                 args["schema_acl_profile"] = "cnpg-staging"
                 try:
                     complete_application_handoff_database(peer, maintenance=maintenance, **args)
-                except psycopg.errors.ObjectNotInPrerequisiteState as exc:
+                except (psycopg.errors.ObjectNotInPrerequisiteState, RuntimeError) as exc:
                     activity = maintenance.execute("SELECT pid,backend_type,usename,state,wait_event_type "
                         "FROM pg_stat_activity WHERE datname='loom' ORDER BY pid").fetchall()
                     raise AssertionError(f"handoff quiescence refusal; backend inventory={activity!r}") from exc
