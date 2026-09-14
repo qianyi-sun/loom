@@ -912,6 +912,7 @@ class ApplicationRecoveryView:
     cnpg_configuration: CNPGWriterConfigurationBinding | None = None
     restoration: ApplicationRestorationEvidence | None = None
     fences_retiring: bool = False
+    external_authority_sha256: str | None = None
 
 
 class ProtectedApplyJournal:
@@ -1074,7 +1075,9 @@ class ProtectedApplyJournal:
             raise ProtectedApplyJournalError("application recovery CNPG Cluster changed")
         if names != {path.name for path in root.iterdir() if path.name.startswith("application-")}:
             raise ProtectedApplyJournalError("application recovery view changed during source read")
-        view = ApplicationRecoveryView(expected, admission, recoveries, manager, workloads, restoring, owners, runtime, binding, cnpg)
+        external = self._read_application_external_authority(root, expected)
+        view = ApplicationRecoveryView(expected, admission, recoveries, manager, workloads, restoring, owners, runtime, binding, cnpg,
+                                       external_authority_sha256=external)
         try:
             record = self._read(root / "application-restoration.json")
         except FileNotFoundError:
@@ -1213,6 +1216,39 @@ class ProtectedApplyJournal:
                 or record["intent_digest"] != intent.intent_digest or not isinstance(record["binding"], dict)):
             raise ProtectedApplyJournalError("application recovery source binding changed")
         return record["binding"]
+
+    def _read_application_external_authority(self, root: Path, intent: ComponentIntent) -> str | None:
+        try:
+            record = self._read(root / "application-external-authority.json")
+        except FileNotFoundError:
+            return None
+        sha256 = record.get("sha256")
+        if (set(record) != {"schema_version", "intent_digest", "sha256"}
+                or type(record["schema_version"]) is not int or record["schema_version"] != 1
+                or record["intent_digest"] != intent.intent_digest
+                or not isinstance(sha256, str) or _SHA256_RE.fullmatch(sha256) is None):
+            raise ProtectedApplyJournalError("application external authority binding changed")
+        return sha256
+
+    def record_application_external_authority(self, plan: FinalGatePlan, *, sha256: str) -> None:
+        """Bind the enclosing operator/process/volume observer before initial SQL.
+
+        This record is not a substitute for that observer or administrator writer
+        exclusion. The component repeats the admitted observation on every entry.
+        """
+        self.require_application_credential_context(plan)
+        root, intent = self._application_admission_context()
+        if intent.component_id != "application-ownership-handoff" or not isinstance(sha256, str) or _SHA256_RE.fullmatch(sha256) is None:
+            raise ProtectedApplyJournalError("application external authority input is invalid")
+        if self._read_application_external_authority(root, intent) is None and (
+            self.read_application_admission_recovery() is not None or self.read_application_owner_creations(plan)
+        ):
+            raise ProtectedApplyJournalError("application external authority must precede SQL mutation")
+        path = root / "application-external-authority.json"
+        self._publish_or_match(path, {"schema_version": 1, "intent_digest": intent.intent_digest, "sha256": sha256})
+        if self._read_application_external_authority(root, intent) != sha256:
+            raise ProtectedApplyJournalError("application external authority readback changed")
+        self._sync_application_recovery(root, path.name)
 
     def _sync_application_recovery(self, root: Path, filename: str) -> None:
         # A prior publisher can exit after making its link visible but BEFORE
@@ -1461,10 +1497,11 @@ class ProtectedApplyJournal:
         return self._read_workload_restoration(root, intent, workloads, durable=True)
 
     def begin_application_workload_restoration(self, plan: FinalGatePlan) -> None:
-        """Publish recovery direction before restoring the first owned workload.
+        """Publish forward direction before database completion and workload recovery.
 
-        The installed caller first repeats real database completion. This record
-        prevents re-pausing on retry; it is not a cached database safe-outcome.
+        The installed caller then repeats real database completion before any
+        workload patch. This record prevents re-pausing or re-entering sealed
+        peer preparation on retry; it is not a cached database safe-outcome.
         """
         self.require_application_credential_context(plan)
         root, intent = self._application_admission_context()

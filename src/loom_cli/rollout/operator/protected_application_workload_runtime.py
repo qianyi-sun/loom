@@ -355,12 +355,15 @@ def restore_application_workloads(plan: FinalGatePlan, *, journal: ProtectedAppl
     if not saved:
         raise RuntimeError("application workload recovery lacks its original inventory")
     _require_saved_guard_cron(saved, guard)
+    # Completion can commit before its reply reaches us. Persist the forward
+    # direction before that call so resume cannot re-enter the sealed-peer phase.
+    # This intent never permits a workload patch without fresh SQL completion.
+    journal.begin_application_workload_restoration(plan)
     outcome = runner.recover_and_complete_staging_application_database(plan, journal=journal, guard=guard)
     original = journal.read_application_admission_recovery()
     if (original is None or type(outcome) is not ApplicationHandoffDatabaseOutcome
             or outcome.target != original.target or outcome.coordination_guard != original.coordination_guard):
         raise RuntimeError("application workload database completion identity changed")
-    journal.begin_application_workload_restoration(plan)
     deadline = time.monotonic() + _SECONDS
     while True:
         _live_guard(plan, journal, runner, guard)
