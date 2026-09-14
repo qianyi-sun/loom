@@ -2783,7 +2783,8 @@ class TaskImageBuildGrant(Base):
             "AND released_at IS NOT NULL AND revoked_at IS NULL "
             "AND revoke_reason IS NULL) OR "
             "(state = 'revoked' AND ambiguity_settle_until IS NOT NULL "
-            "AND released_at IS NULL "
+            "AND (released_at IS NULL OR (invocation_started_at IS NOT NULL "
+            "AND slurm_job_id IS NOT NULL AND bound_at IS NOT NULL)) "
             "AND revoked_at IS NOT NULL AND revoke_reason IS NOT NULL)",
             name="task_image_build_grants_state_fields_check",
         ),

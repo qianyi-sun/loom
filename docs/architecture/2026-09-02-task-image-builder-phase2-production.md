@@ -216,6 +216,24 @@ provider is disabled and no production composition can issue a grant, a nonempty
 grant table at migration time is unexpected authority and fails the migration
 closed for operator investigation.
 
+Submission protocol violations durably revoke the grant before cancellation
+intent is returned. A shrinking or replayed inventory cannot restore binding
+eligibility. Both normal and revoked reconciliation reject mixed/foreign grant
+comments, submission identities, or clusters without returning mutation targets;
+owned request drift is distinct from foreign ownership. The production runner
+must independently establish that ownership and recheck it before mutation.
+
+Expired grants cannot submit, bind, or release. A separate cleanup-only
+reconciliation validates their stored authority and retires expired submitting,
+bound, or released grants while retaining the original job/binding/release
+history. Migration `0143` permits this retained released-grant revocation and
+refuses a downgrade that would discard it. Revoked grants remain eligible for
+fresh ownership-checked cleanup after expiry. These transitions require the
+caller to commit before invoking Slurm. Empty or terminal inventory alone does
+not discharge delayed-submission or guard/epilog cleanup obligations. The
+transaction-owning production runner and these final cleanup proofs remain
+required before activation.
+
 `TaskImageBuildProjection` has one row per grant and a state of
 `challenged`, `projected`, `exchanged`, `revoked`, or `expired`. It binds the
 node principal, node boot ID, Slurm job, peer PID/executable, cgroup path/inode,
