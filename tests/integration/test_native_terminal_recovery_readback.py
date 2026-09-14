@@ -85,10 +85,18 @@ async def test_management_readback_survives_lost_worker_and_retired_hold(
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.request_holds")) == 0
     async with factory.begin() as session:
-        result = await module.NativeTerminalRecoveryStore(session, installation=installation).read(claim.operation_id)
+        reader = module.NativeTerminalRecoveryStore(session, installation=installation)
+        page = await reader.discover(limit=1)
+        result = await reader.read(claim.operation_id)
     if boundary == "not-terminal":
-        assert result is None
+        assert result is None and page.attempts == ()
         return
+    assert page.installation_id == installation.id and len(page.attempts) == 1
+    assert page.attempts[0].claim_id == claim.operation_id and not page.executable
+    async with factory.begin() as session:
+        following = await module.NativeTerminalRecoveryStore(session, installation=installation).discover(
+            after_event_id=page.attempts[0].event_id, through_event_id=page.through_event_id, limit=1)
+        assert following.attempts == () and following.through_event_id == page.through_event_id
     assert result.preparation == prepared and result.finalization == final
     assert result.profile == profile and result.host.boot_id == prepared.request.record.boot_id
     assert result.terminal.binding == claim.binding and result.release.binding == claim.binding
@@ -143,6 +151,8 @@ async def test_terminal_readback_requires_committed_exact_scope(prepared_input, 
         else:
             with pytest.raises(DBAPIError, match=r"committed|installation binding"):
                 await reader.read(claim.operation_id)
+            with pytest.raises(DBAPIError, match=r"committed|installation binding"):
+                await reader.discover()
     # The failure did not roll back the caller's unrelated terminal/release work.
     async with factory.begin() as session:
         assert await NativeTerminalRecoveryStore(session, installation=installation).read(claim.operation_id) is not None
