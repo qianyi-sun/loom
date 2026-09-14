@@ -37,7 +37,10 @@ from loom_capacity_agent.build_artifact_stream import (
     decode_artifact_stream,
 )
 from loom_capacity_agent.native_recovery_execution import BuildExecutionExchangeV2
-from loom_capacity_agent.native_recovery_publication import NativeRecoveryAdmissionExchangeV1, NativeRecoveryExchangeV1
+from loom_capacity_agent.native_recovery_publication import (
+    NativeRecoveryAdmissionExchangeV1,
+    NativeRecoveryExchangeV1,
+)
 from loom_capacity_build_guard.artifact_writer import BuildArtifactWriter
 from loom_capacity_build_guard.execution_store import BuildGuardExecutionStore
 from loom_capacity_build_guard.source_reader import BuildSourceReader

@@ -53,7 +53,13 @@ from loom_capacity_executor.native_worker_handoff import (
     NativeWorkerHandoffV1,
     consume_native_worker_handoff,
 )
-from loom_capacity_manager.contracts import Digest, Identifier, StrictV1Model, canonical_bytes, canonical_digest
+from loom_capacity_manager.contracts import (
+    Digest,
+    Identifier,
+    StrictV1Model,
+    canonical_bytes,
+    canonical_digest,
+)
 from loom_capacity_manager.executable_contracts import canonical_executable_bytes
 
 

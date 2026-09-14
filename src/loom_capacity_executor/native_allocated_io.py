@@ -71,6 +71,8 @@ class NativeAllocatedIO:
         self._operations: set[asyncio.Task[object]] = set()
         self._preparation: NativeRecoveryReceiptV1 | None = None
         self._finalization: str | None = None
+        self._preparation_started = False
+        self._finalization_started = False
 
     @property
     def claim(self) -> BuildClaimRequestV1:
@@ -107,9 +109,10 @@ class NativeAllocatedIO:
     async def prepare_recovery(self, preparation: NativeRecoveryPreparationV1) -> NativeRecoveryReceiptV1:
         """Publish once; uncertainty never permits mapped startup."""
         with self._operation() as credential:
-            if self._preparation is not None:
-                raise ValueError("native recovery preparation already committed")
+            if self._preparation_started:
+                raise ValueError("native recovery preparation already attempted")
             request = NativeRecoveryPublicationV1(claim=self.claim, record=preparation)
+            self._preparation_started = True
             receipt = await self._publish_recovery(request, credential)
             self._preparation = receipt
             return receipt
@@ -135,8 +138,9 @@ class NativeAllocatedIO:
     ) -> str:
         with self._operation() as credential:
             self.require_recovery_preparation(preparation)
-            if self._finalization is not None:
-                raise ValueError("native recovery finalization already committed")
+            if self._finalization_started:
+                raise ValueError("native recovery finalization already attempted")
+            self._finalization_started = True
 
             async def publish(request: NativeRecoveryPublicationV1) -> NativeRecoveryReceiptV1:
                 return await self._publish_recovery(request, credential)
@@ -149,7 +153,7 @@ class NativeAllocatedIO:
         """Channel ownership remains with the outer process; no cached permits."""
         with self._operation() as credential:
             if (recovery_finalization_sha256 != self._finalization
-                or (self._preparation is not None and self._finalization is None)):
+                or (self._preparation_started and self._finalization is None)):
                 raise ValueError("native recovery execution finalization is not acknowledged")
             await serve_native_execution_authority(channel, claim=self.claim,
                 source_binding_sha256=self.source.context.source_binding_sha256,
