@@ -105,3 +105,19 @@ def test_host_protocol_admits_only_current_program_and_bounded_identity(monkeypa
         reply = host.handle_request(payload)
         assert reply == {**request, 'observation': {'observed': 'fixture'}}
         assert calls == [identity]
+
+
+def test_installed_command_runner_uses_fixed_cnpg_observer(monkeypatch):
+    from loom_cli.rollout.operator import protected_cnpg_operator_transport as module
+    from loom_cli.rollout.operator.protected_apply_executor import SubprocessProtectedApplyCommandRunner
+    from loom_cli.rollout.operator.protected_cnpg_operator_admission import select_cnpg_operator
+
+    identity = select_cnpg_operator([_pod()])
+    expected = Runner().inspect_staging_cnpg_operator(identity)
+    calls = []
+    def inspect(value):
+        calls.append(value)
+        return expected
+    monkeypatch.setattr(module, 'inspect_staging_cnpg_operator', inspect)
+    assert SubprocessProtectedApplyCommandRunner().inspect_staging_cnpg_operator(identity) == expected
+    assert calls == [identity]
