@@ -53,7 +53,8 @@ def _setup(tmp_path):
     return plan, journal
 
 
-def test_no_database_mutation_authority_before_guard_acknowledges_retention(tmp_path):
+@pytest.mark.parametrize("component_id", ["application-ownership-handoff", "database-migration"])
+def test_no_database_mutation_authority_before_guard_acknowledges_retention(tmp_path, component_id):
     plan, journal = _setup(tmp_path)
     guard = _guard(plan)
     with pytest.raises(RuntimeError, match="active component"):
@@ -74,13 +75,42 @@ def test_no_database_mutation_authority_before_guard_acknowledges_retention(tmp_
         raise RuntimeError("interrupted after acknowledgement")
 
     with pytest.raises(RuntimeError, match="interrupted after acknowledgement"):
-        journal.execute(plan, [_component(apply)])
+        journal.execute(plan, [replace(_component(apply), component_id=component_id)])
     assert application_guard_is_retained(
         tmp_path / "state",
         request_id=plan.request_id,
         service_uid=os.getuid(),
         guard=guard,
     )
+
+
+def test_completed_handoff_cannot_hide_deleted_pending_migration_retention(tmp_path):
+    plan, journal = _setup(tmp_path)
+    guard = _guard(plan)
+    completed = set()
+    seen = set()
+    def retained():
+        return application_guard_is_retained(tmp_path / "state", request_id=plan.request_id,
+            service_uid=os.getuid(), guard=guard, acknowledge=True, observed_components=seen)
+    def component(name):
+        def apply(_):
+            journal.retain_application_guard(plan, guard=guard)
+            assert retained()
+            journal.require_application_guard_retained(plan, guard=guard)
+            if name == "database-migration":
+                raise RuntimeError("migration interrupted")
+            completed.add(name)
+        return replace(_component(apply), component_id=name, classify=lambda _: ComponentObservation(
+            ComponentState.EXACT if name in completed else ComponentState.READY,
+            "3" * 64, plan.starting_mutation_epoch + 1))
+    with pytest.raises(RuntimeError, match="migration interrupted"):
+        journal.execute(plan, [component("application-ownership-handoff"), component("database-migration")])
+    assert seen == {"application-ownership-handoff", "database-migration"}
+    root = journal.attempt_root.parent.parent
+    (root / "application-migration-guard-retention.json").unlink()
+    (root / "application-migration-guard-retention-ack.json").unlink()
+    with pytest.raises(RuntimeError, match="retention.*disappeared"):
+        retained()
 
 
 @pytest.mark.parametrize(
