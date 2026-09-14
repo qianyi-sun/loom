@@ -14,11 +14,24 @@ def fixture(tmp_path, monkeypatch):
     root.mkdir(mode=0o700)
     (root / "recovery.json").write_bytes(b"retained-locator")
     monkeypatch.setattr(module, "_require_initial_root", lambda: None)
+    uid, gid = os.getuid() or 24850, os.getgid() or 24851
+    if os.getuid() == 0 or os.getgid() == 0:
+        from types import SimpleNamespace
+
+        actual_stat, actual_fstat = os.stat, os.fstat
+
+        def mapped(metadata):
+            fields = {name: getattr(metadata, name) for name in dir(metadata) if name.startswith("st_")}
+            fields["st_uid"] = uid if metadata.st_uid == 0 else metadata.st_uid
+            fields["st_gid"] = gid if metadata.st_gid == 0 else metadata.st_gid
+            return SimpleNamespace(**fields)
+        monkeypatch.setattr(module.os, "stat", lambda *args, **kwargs: mapped(actual_stat(*args, **kwargs)))
+        monkeypatch.setattr(module.os, "fstat", lambda *args, **kwargs: mapped(actual_fstat(*args, **kwargs)))
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         metadata = os.fstat(fd)
         identity = module.NativeQuarantineIdentity(device=metadata.st_dev, inode=metadata.st_ino,
-            mount_id=module._mount_id(fd), uid_ranges=((os.getuid(), 1),), gid_ranges=((os.getgid(), 1),))
+            mount_id=module._mount_id(fd), uid_ranges=((uid, 1),), gid_ranges=((gid, 1),))
         yield module, root, fd, identity
     finally:
         os.close(fd)
@@ -88,10 +101,11 @@ def test_prune_budget_retains_locator_and_can_resume(tmp_path, monkeypatch):
     with fixture(tmp_path, monkeypatch) as (module, root, fd, identity):
         for index in range(5):
             (root / str(index)).write_bytes(b"data")
-        with monkeypatch.context() as bounded:
-            bounded.setattr(module, "_MAX_ENTRIES", 2)
+        monkeypatch.setattr(module, "_MAX_ENTRIES", 2)
+        for expected_remaining in (3, 1):
             with pytest.raises(ValueError, match="bound"):
                 module.prune_native_quarantine(fd, identity=identity)
+            assert len(list(root.iterdir())) == expected_remaining + 1
         assert (root / "recovery.json").read_bytes() == b"retained-locator"
         module.prune_native_quarantine(fd, identity=identity)
         assert [item.name for item in root.iterdir()] == ["recovery.json"]
