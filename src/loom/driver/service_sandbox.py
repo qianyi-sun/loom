@@ -32,6 +32,29 @@ from loom.models.healthcheck import HealthcheckSpec
 from loom.models.networking import NetworkPolicy
 from loom.models.types import OS
 
+_RPC_OPERATIONS = {"/health": "health", "/exec": "exec", "/file": "file_transfer",
+                   "/stop-processes": "stop_processes"}
+_CLEANUP_REASONS = frozenset({
+    "pid_namespace_invalid", "process_owner_mismatch", "process_inspection_failed",
+    "cleanup_timeout", "cleanup_cancelled", "cleanup_failed",
+})
+
+
+class SandboxRPCError(DriverError):
+    """Only fixed operation/reason codes and HTTP status are safe to publish."""
+
+    def __init__(self, path: str, exc: httpx.HTTPError) -> None:
+        operation = _RPC_OPERATIONS.get(path, "request")
+        if isinstance(exc, httpx.HTTPStatusError):
+            status = exc.response.status_code
+            reason = exc.response.headers.get("X-Loom-Sandbox-Error", "")
+            if path != "/stop-processes" or reason not in _CLEANUP_REASONS:
+                reason = "http_error"
+            detail = f"HTTP {status}; {reason}"
+        else:
+            detail = "transport_timeout" if isinstance(exc, httpx.TimeoutException) else "transport_error"
+        super().__init__(f"sandbox {operation} failed ({detail})")
+
 
 class ServiceSandboxDriver:
     """Connect to one native sidecar; never create Pods or host containers."""
@@ -108,7 +131,7 @@ class ServiceSandboxDriver:
             return response
         except httpx.HTTPError as exc:
             # Do not attach request bodies (commands/env may contain secrets).
-            raise DriverError("sandbox RPC failed") from exc
+            raise SandboxRPCError(path, exc) from exc
         finally:
             self._requests.discard(task)
 

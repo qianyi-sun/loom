@@ -25,6 +25,35 @@ import (
 
 const maxOutput = 10 * 1024 * 1024
 
+var (
+	errCleanupPIDNamespace = errors.New("sandbox runtime must be Linux PID 1")
+	errCleanupProcessOwner = errors.New("unexpected sandbox process owner")
+	errCleanupProcRead     = errors.New("cannot inspect sandbox processes")
+)
+
+// These fixed codes carry no process, command, environment, or filesystem data.
+func cleanupErrorCode(err error) string {
+	switch {
+	case errors.Is(err, errCleanupPIDNamespace):
+		return "pid_namespace_invalid"
+	case errors.Is(err, errCleanupProcessOwner):
+		return "process_owner_mismatch"
+	case errors.Is(err, errCleanupProcRead):
+		return "process_inspection_failed"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "cleanup_timeout"
+	case errors.Is(err, context.Canceled):
+		return "cleanup_cancelled"
+	default:
+		return "cleanup_failed"
+	}
+}
+
+func writeCleanupFailure(w http.ResponseWriter, err error) {
+	w.Header().Set("X-Loom-Sandbox-Error", cleanupErrorCode(err))
+	http.Error(w, "sandbox process cleanup failed", http.StatusConflict)
+}
+
 type runtimeServer struct {
 	maxTransfer int64
 	maxTimeout  time.Duration
@@ -73,7 +102,7 @@ func (s runtimeServer) handler() http.Handler {
 	mux.HandleFunc("GET /file", s.download)
 	mux.HandleFunc("POST /stop-processes", func(w http.ResponseWriter, r *http.Request) {
 		if err := stopProcesses(r.Context()); err != nil {
-			http.Error(w, "sandbox process cleanup failed", 409)
+			writeCleanupFailure(w, err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)

@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,14 +16,14 @@ func stopProcesses(ctx context.Context) error {
 	// The runtime must be PID 1 of its own container. Never run this operation
 	// from a host process or a Pod that shares the trusted agent's PID namespace.
 	if os.Getpid() != 1 {
-		return errors.New("sandbox runtime must be PID 1")
+		return errCleanupPIDNamespace
 	}
 	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	for {
 		entries, err := os.ReadDir("/proc")
 		if err != nil {
-			return err
+			return errCleanupProcRead
 		}
 		alive := false
 		for _, entry := range entries {
@@ -38,7 +37,7 @@ func stopProcesses(ctx context.Context) error {
 			}
 			owner, ok := info.Sys().(*syscall.Stat_t)
 			if !ok || int(owner.Uid) != os.Geteuid() {
-				return errors.New("unexpected sandbox process owner")
+				return errCleanupProcessOwner
 			}
 			status, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "status"))
 			if err != nil {
