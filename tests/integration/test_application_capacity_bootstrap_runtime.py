@@ -11,7 +11,9 @@ from psycopg import sql
 
 from loom.application_completed_authority import ApplicationGuardOwner, ApplicationOwnerSuccessor
 from loom.application_handoff_completion import complete_application_handoff_database
-from loom_cli.rollout.operator.protected_application_migration_journal import ApplicationMigrationEvent
+from loom_cli.rollout.operator.protected_application_migration_journal import (
+    ApplicationMigrationEvent,
+)
 from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
     KubernetesProtectedStagingCapacityDatabaseComponent,
     _DatabaseState,
@@ -24,8 +26,12 @@ from tests.integration.test_application_ownership_transfer import (
     transfer_postgres_url,  # noqa: F401
 )
 from tests.loom_cli.rollout.operator.test_application_guard_retention import _guard
-from tests.loom_cli.rollout.operator.test_application_migration_resources import Runner as ResourceRunner
-from tests.loom_cli.rollout.operator.test_protected_staging_capacity_runtime import _database_component
+from tests.loom_cli.rollout.operator.test_application_migration_resources import (
+    Runner as ResourceRunner,
+)
+from tests.loom_cli.rollout.operator.test_protected_staging_capacity_runtime import (
+    _database_component,
+)
 
 pytestmark = [pytest.mark.parametrize("transfer_postgres", [16, 17], indirect=True),
     pytest.mark.parametrize("transfer_database", ["protected-staging"], indirect=True)]
@@ -33,15 +39,18 @@ pytestmark = [pytest.mark.parametrize("transfer_postgres", [16, 17], indirect=Tr
 
 @pytest.mark.asyncio
 async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_runtime(transfer_database, tmp_path, monkeypatch):  # noqa: F811
-    from loom_cli.rollout.operator.protected_capacity_bootstrap_runtime import ProtectedCapacityBootstrapRuntime
+    from loom_cli.rollout.operator.protected_capacity_bootstrap_runtime import (
+        ProtectedCapacityBootstrapRuntime,
+    )
 
     plan, source, _ = _database_component(tmp_path, database_state="needs-convergence")
     evidence = _guard(plan)
     request = dict(request_id=plan.request_id, candidate_sha=plan.candidate_sha,
         candidate_tree=plan.candidate_tree, generation=evidence.generation)
     url, previous_owner, bindings = transfer_database
-    with psycopg.connect(url, autocommit=True) as admin:
+    with psycopg.connect(url, dbname="postgres", autocommit=True) as admin:
         admin.execute(sql.SQL("ALTER ROLE {} RENAME TO loom_app_staging_owner").format(sql.Identifier(previous_owner)))
+        admin.close()
         try:
             with _closed((url, "loom_app_staging_owner", bindings), request=request) as (peer, maintenance, db_guard, args):
                 args["schema_acl_profile"] = "cnpg-staging"
@@ -80,7 +89,7 @@ async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_ru
                         coordination_guard=args["coordination_guard"], runner=runner, template=base._manifest(plan, source.seed),
                         ca_certificate=b"disposable-public-ca" * 8, runtime_password=args["password"],
                         container_registry=base.container_registry, assert_guard=lambda: evidence, assert_inputs=lambda: None,
-                        intent_digest="1" * 64, base=base, seed=source.seed, identity=identity, runtime_role_oids=runtime_oids) as runtime:
+                        intent_digest="1" * 64, provisioner_role=peer.info.user, base=base, seed=source.seed, identity=identity, runtime_role_oids=runtime_oids) as runtime:
                     assert runtime.read_revision() == "pending"
                     generation = ApplicationMigrationEvent.build(sequence=1, phase="generation", payload=runtime.prepare_generation(1),
                         intent_digest="1" * 64, guard_digest=evidence.evidence_digest, previous_digest="2" * 64)
@@ -109,4 +118,5 @@ async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_ru
                     assert runtime.role_exists(generation, identity.role_oid)
                     assert db_guard.execute("SELECT 1").fetchone() == (1,)
         finally:
-            admin.execute(sql.SQL("ALTER ROLE loom_app_staging_owner RENAME TO {}").format(sql.Identifier(previous_owner)))
+            with psycopg.connect(url, dbname="postgres", autocommit=True) as cleanup:
+                cleanup.execute(sql.SQL("ALTER ROLE loom_app_staging_owner RENAME TO {}").format(sql.Identifier(previous_owner)))
