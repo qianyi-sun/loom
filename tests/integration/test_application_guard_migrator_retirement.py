@@ -73,7 +73,7 @@ async def test_guard_migrator_retires_both_owner_sessions_without_dropping_guard
                     reopen_application_guard_migrator_admission(LoseCommit(maintenance), **authority, runtime_password=args["password"])
             for _ in range(2):
                 reopen_application_guard_migrator_admission(maintenance, **authority, runtime_password=args["password"])
-            assert peer.execute("SELECT oid,rolcanlogin,rolpassword,rolinherit FROM pg_authid WHERE rolname=%s", (migrator,)).fetchone() == (migrator_oid, False, None, True)
+            assert peer.execute("SELECT oid,rolcanlogin,rolpassword,rolinherit,rolvaliduntil='infinity'::timestamptz FROM pg_authid WHERE rolname=%s", (migrator,)).fetchone() == (migrator_oid, False, None, True, True)
             assert peer.execute("SELECT nspowner FROM pg_namespace WHERE nspname='loom_capacity_guard'").fetchone() == (owner_oid,)
             assert active_guard.execute("SELECT 1").fetchone() == (1,)
         finally:
