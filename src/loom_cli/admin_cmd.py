@@ -1948,13 +1948,40 @@ def _admin_submit_batch_on_behalf(args: argparse.Namespace) -> int:
                 if args.task_filter is not None
                 else {"benchmark_id": args.benchmark}
             )
+            if args.purpose == "evaluation" and (
+                (
+                    isinstance(task_filter.get("task_set_id"), str)
+                    and task_filter.get("task_set_id")
+                )
+                or (
+                    isinstance(task_filter.get("task_set_ids"), (list, tuple))
+                    and any(
+                        isinstance(item, str) and item
+                        for item in task_filter.get("task_set_ids", [])
+                    )
+                )
+            ):
+                sys.stderr.write(
+                    "error: --purpose evaluation only allows native "
+                    "benchmarks (no TaskSet selectors).\n",
+                )
+                return 2
             trial_config: dict[str, Any] = {
                 "agent_name": args.agent,
                 "agent_model": None,
             }
+            if getattr(args, "skip_verifier", False):
+                if args.purpose != "trajectory_generation":
+                    sys.stderr.write(
+                        "error: --skip-verifier is only allowed with "
+                        "--purpose trajectory_generation.\n",
+                    )
+                    return 2
+                trial_config["skip_verifier"] = True
             payload: dict[str, Any] = {
                 "represented_username": args.represented_username,
                 "team_id": args.team_id,
+                "purpose": args.purpose,
                 "task_filter": task_filter,
                 "trial_config": trial_config,
             }
@@ -2886,6 +2913,24 @@ def dispatch(argv: list[str]) -> int:
         dest="agent_provider",
         default=None,
         help="Override the agent model provider field for pricing/adapter compatibility.",
+    )
+    p_submit_on_behalf.add_argument(
+        "--purpose",
+        choices=("evaluation", "trajectory_generation"),
+        required=True,
+        help=(
+            "Batch purpose. evaluation = native benchmarks with verification; "
+            "trajectory_generation = TaskSets and/or benchmarks (transition)."
+        ),
+    )
+    p_submit_on_behalf.add_argument(
+        "--skip-verifier",
+        dest="skip_verifier",
+        action="store_true",
+        help=(
+            "Skip the verifier phase (trajectory_generation only). "
+            "Rejected with --purpose evaluation."
+        ),
     )
     p_submit_on_behalf.add_argument(
         "--benchmark",

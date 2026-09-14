@@ -4657,6 +4657,10 @@ class Batch(Base):
             "budget_usd IS NULL OR budget_usd >= 0",
             name="batches_budget_usd_nonnegative_check",
         ),
+        CheckConstraint(
+            "purpose IN ('evaluation', 'trajectory_generation')",
+            name="batches_purpose_check",
+        ),
     )
     id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
@@ -4670,6 +4674,14 @@ class Batch(Base):
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # evaluation = native benchmarks, verification required;
+    # trajectory_generation = TaskSets and/or benchmarks (transition),
+    # verifier optional. Same trial harness either way.
+    purpose: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="trajectory_generation",
+    )
     task_filter: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     trial_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     state: Mapped[str] = mapped_column(

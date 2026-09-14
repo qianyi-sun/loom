@@ -269,6 +269,8 @@ def test_batch_create_team_id_filters_provider_lookup_and_payload(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--team-id",
             "team-b",
             "--provider",
@@ -362,6 +364,8 @@ def test_batch_create_agent_provider_override(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--provider",
             "fireworks-prod",
             "--model",
@@ -467,6 +471,8 @@ def test_batch_create_with_benchmark_shortcut(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--provider",
             "openai-prod",
             "--model",
@@ -484,6 +490,7 @@ def test_batch_create_with_benchmark_shortcut(
 
     body = json.loads(mock_server[1].content)
     assert body["name"] == "smoke-run"
+    assert body["purpose"] == "evaluation"
     assert body["task_filter"] == {"benchmark_id": "humaneval"}
     assert body["trial_config"] == {
         "agent_name": "litellm",
@@ -520,6 +527,8 @@ def test_batch_create_workspace_staging_policy_tb21(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--provider",
             "openai-prod",
             "--model",
@@ -562,6 +571,8 @@ def test_batch_create_multi_model_default_off_omits_block(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--provider",
             "openai-prod",
             "--model",
@@ -601,6 +612,8 @@ def test_batch_create_multi_model_flag_builds_trial_config(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--provider",
             "openai-prod",
             "--model",
@@ -653,6 +666,8 @@ def test_batch_create_multi_model_beta_builds_trial_config(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--provider",
             "openai-prod",
             "--model",
@@ -687,6 +702,66 @@ def test_batch_create_multi_model_beta_builds_trial_config(
     }
 
 
+def test_batch_create_multi_model_turn_schedule_builds_trial_config(
+    mock_server: MockServer,
+) -> None:
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 1,
+            "n_per_task": 1,
+            "backend": "docker",
+            "combinations": [],
+            "state": "submitted",
+            "created_at": "2026-06-16T00:00:00Z",
+        },
+    )
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--purpose",
+            "evaluation",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "glm-5.1",
+            "--agent",
+            "terminus-2",
+            "--benchmark",
+            "strict-pass-39",
+            "--multi-model",
+            "--multi-model-secondary",
+            "qwen-test",
+            "--multi-model-step-start",
+            "2",
+            "--multi-model-step-end",
+            "9",
+            "--multi-model-seed",
+            "turn-42",
+            "--name",
+            "turn-mix",
+        ]
+    )
+    assert rc == 0
+    body = json.loads(mock_server[1].content)
+    assert body["trial_config"]["multi_model"] == {
+        "enabled": True,
+        "policy": "student_to_teacher_turns",
+        "step_start": 2,
+        "step_end": 9,
+        "mix_seed": "turn-42",
+        "secondary_model": {
+            "provider": "openai",
+            "name": "qwen-test",
+            "source": "api",
+        },
+    }
+
+
 def test_batch_create_multi_model_beta_rejects_k1(
     mock_server: MockServer,
     capsys: pytest.CaptureFixture[str],
@@ -697,6 +772,8 @@ def test_batch_create_multi_model_beta_rejects_k1(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--provider",
             "openai-prod",
             "--model",
@@ -728,6 +805,8 @@ def test_batch_create_multi_model_rejects_non_terminus(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--provider",
             "openai-prod",
             "--model",
@@ -794,6 +873,8 @@ def test_batch_create_with_combinations_json_routes_provider_per_combo(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--combinations-json",
             json.dumps(combinations),
             "--benchmark",
@@ -811,6 +892,7 @@ def test_batch_create_with_combinations_json_routes_provider_per_combo(
     assert req.url.path == "/api/v1/batches"
     body = json.loads(req.content)
     assert body["trial_config"] == {}
+    assert body["purpose"] == "trajectory_generation"
     assert body["task_filter"] == {"benchmark_id": "source-useful-frontier-5003"}
     assert body["combinations"] == combinations
     assert "provider_connection_id" not in body
@@ -840,6 +922,8 @@ def test_batch_create_with_task_set_shortcut(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "trajectory_generation",
             "--provider",
             "openai-prod",
             "--model",
@@ -857,6 +941,7 @@ def test_batch_create_with_task_set_shortcut(
 
     body = json.loads(mock_server[1].content)
     assert body["name"] == "taskset-run"
+    assert body["purpose"] == "trajectory_generation"
     assert body["task_filter"] == {"task_set_id": task_set_id}
 
 
@@ -886,6 +971,8 @@ def test_batch_create_refuses_stopped_storage_preflight_without_override(
         "eval",
         "batch",
         "create",
+        "--purpose",
+        "evaluation",
         "--agent",
         "oracle",
         "--benchmark",
@@ -933,6 +1020,8 @@ def test_batch_create_allows_explicit_storage_preflight_override(
         "eval",
         "batch",
         "create",
+        "--purpose",
+        "evaluation",
         "--agent",
         "oracle",
         "--benchmark",
@@ -971,6 +1060,8 @@ def test_batch_create_oracle_does_not_require_provider_or_model(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--agent",
             "oracle",
             "--benchmark",
@@ -991,6 +1082,7 @@ def test_batch_create_oracle_does_not_require_provider_or_model(
     body = json.loads(request.content)
     assert body == {
         "name": "oracle-smoke",
+        "purpose": "evaluation",
         "task_filter": {"benchmark_id": "qa275-custom"},
         "trial_config": {"agent_name": "oracle", "agent_model": None},
     }
@@ -1005,6 +1097,8 @@ def test_batch_create_model_agent_requires_provider_and_model(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--agent",
             "litellm",
             "--benchmark",
@@ -1057,6 +1151,8 @@ def test_batch_create_resolves_agent_from_server_when_local_launcher_missing(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--provider",
             "openai-prod",
             "--model",
@@ -1104,6 +1200,8 @@ def test_batch_create_summary_uses_submitted_name_when_response_omits_name(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--provider",
             "openai-prod",
             "--model",
@@ -1147,6 +1245,8 @@ def test_batch_create_allows_omitted_name_and_prints_generated_name(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--provider",
             "openai-prod",
             "--model",
@@ -1188,6 +1288,8 @@ def test_batch_create_task_filter_json(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--provider",
             "openai-prod",
             "--model",
@@ -1202,6 +1304,7 @@ def test_batch_create_task_filter_json(
     )
     assert rc == 0
     body = json.loads(mock_server[1].content)
+    assert body["purpose"] == "evaluation"
     assert body["task_filter"] == {
         "benchmark_id": "humaneval",
         "subset_kind": "first_n",
@@ -1234,6 +1337,8 @@ def test_batch_create_task_filter_at_path(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--provider",
             "openai-prod",
             "--model",
@@ -1289,6 +1394,8 @@ def test_batch_create_benchmark_and_task_filter_mutually_exclusive(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--provider",
             "openai-prod",
             "--model",
@@ -1310,6 +1417,67 @@ def test_batch_create_benchmark_and_task_filter_mutually_exclusive(
     assert ("POST", "/api/v1/batches") not in paths
 
 
+def test_batch_create_evaluation_rejects_task_set(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_connection_lookup(mock_server)
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--purpose",
+            "evaluation",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "litellm",
+            "--task-set",
+            "ts/team-uuid/sample-tasks",
+            "--name",
+            "n",
+        ]
+    )
+    assert rc == 2
+    assert "native benchmarks" in capsys.readouterr().err
+    paths = [(r.method, r.url.path) for r in mock_server.requests]
+    assert ("POST", "/api/v1/batches") not in paths
+
+
+def test_batch_create_evaluation_rejects_skip_verifier(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_connection_lookup(mock_server)
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--purpose",
+            "evaluation",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "litellm",
+            "--benchmark",
+            "humaneval",
+            "--skip-verifier",
+            "--name",
+            "n",
+        ]
+    )
+    assert rc == 2
+    assert "skip-verifier" in capsys.readouterr().err.lower()
+    paths = [(r.method, r.url.path) for r in mock_server.requests]
+    assert ("POST", "/api/v1/batches") not in paths
+
+
 def test_batch_create_task_set_and_benchmark_mutually_exclusive(
     mock_server: MockServer,
     capsys: pytest.CaptureFixture[str],
@@ -1320,6 +1488,8 @@ def test_batch_create_task_set_and_benchmark_mutually_exclusive(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "trajectory_generation",
             "--provider",
             "openai-prod",
             "--model",
@@ -1350,6 +1520,8 @@ def test_batch_create_requires_benchmark_or_filter(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--provider",
             "openai-prod",
             "--model",
@@ -1376,6 +1548,8 @@ def test_batch_create_invalid_task_filter_json_rejected_at_argparse(
                 "eval",
                 "batch",
                 "create",
+                "--purpose",
+                "evaluation",
                 "--provider",
                 "openai-prod",
                 "--model",
@@ -1413,6 +1587,8 @@ def test_batch_create_forwards_optional_fields(
             "eval",
             "batch",
             "create",
+            "--purpose",
+            "evaluation",
             "--provider",
             "openai-prod",
             "--model",
@@ -1460,7 +1636,9 @@ def test_batch_create_has_no_required_worker_pool_flag(
 ) -> None:
     """#1109: pool coverage is operator-only; not on user eval create."""
     with pytest.raises(SystemExit) as excinfo:
-        main(["eval", "batch", "create", "--help"])
+        main(["eval", "batch", "create",
+            "--purpose",
+            "evaluation", "--help"])
     assert excinfo.value.code in (0, None)
     help_text = capsys.readouterr().out
     assert "--required-worker-pool" not in help_text
@@ -1497,6 +1675,7 @@ def test_batch_list_table_and_state_filter_param(
                     "team_id": "x",
                     "name": "b1",
                     "description": None,
+                    "purpose": "evaluation",
                     "task_filter": {},
                     "trial_config": {},
                     "state": "running",
@@ -1586,6 +1765,7 @@ def test_batch_list_warns_on_truncation(
                     "team_id": "x",
                     "name": "b1",
                     "description": None,
+                    "purpose": "evaluation",
                     "task_filter": {},
                     "trial_config": {},
                     "state": "running",
@@ -1625,6 +1805,7 @@ def test_batch_list_no_warning_when_not_truncated(
                     "team_id": "x",
                     "name": "b1",
                     "description": None,
+                    "purpose": "evaluation",
                     "task_filter": {},
                     "trial_config": {},
                     "state": "running",
@@ -1695,6 +1876,7 @@ def test_batch_show_renders_rollup(
             "team_id": "x",
             "name": "b1",
             "description": None,
+            "purpose": "evaluation",
             "task_filter": {},
             "trial_config": {},
             "state": "succeeded",
@@ -1747,6 +1929,7 @@ def test_batch_show_formats_timestamps_in_local_timezone(
                 "team_id": "x",
                 "name": "local-time-batch",
                 "description": None,
+                "purpose": "evaluation",
                 "task_filter": {},
                 "trial_config": {},
                 "state": "finished",
@@ -1788,6 +1971,7 @@ def test_batch_show_warns_on_zero_call_real_provider_evidence(
             "team_id": "x",
             "name": "zero-call",
             "description": None,
+            "purpose": "evaluation",
             "task_filter": {},
             "trial_config": {
                 "agent_name": "codex",
@@ -1837,6 +2021,7 @@ def test_batch_show_renders_fanout_failure(
             "team_id": "x",
             "name": "b1",
             "description": None,
+            "purpose": "evaluation",
             "task_filter": {},
             "trial_config": {},
             "state": "finished",
