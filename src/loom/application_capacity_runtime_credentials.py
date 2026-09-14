@@ -46,7 +46,12 @@ def arm_application_capacity_runtime_credentials(
         _credentials(rows, passwords, require_login=False)
         connection.execute("SET LOCAL password_encryption='scram-sha-256'")
         for _oid, role, login, _password, infinite, exact_expiry in rows:
-            if role == _EXECUTOR or (login and (infinite or datetime.fromisoformat(str(exact_expiry)) == expires_at)):
+            if role == _EXECUTOR:
+                # This saved role is sealed and carries no credential. Match
+                # the permanent staging profile without issuing a new login.
+                connection.execute(sql.SQL("ALTER ROLE {} VALID UNTIL 'infinity'").format(sql.Identifier(str(role))))
+                continue
+            if login and (infinite or datetime.fromisoformat(str(exact_expiry)) == expires_at):
                 continue
             if login:
                 connection.execute(sql.SQL("ALTER ROLE {} VALID UNTIL {}").format(sql.Identifier(str(role)), sql.Literal(expiry)))
