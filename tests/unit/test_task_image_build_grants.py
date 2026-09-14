@@ -232,3 +232,33 @@ def test_terminal_inventory_revokes_without_cancelling_or_binding() -> None:
     assert decision.reason == "terminal_submission_observed"
     assert decision.bind_job_id is None
     assert decision.cancel_job_ids == ()
+
+
+@pytest.mark.parametrize("foreign_field", ["comment", "submitting_identity", "slurm_cluster_id"])
+def test_foreign_inventory_never_authorizes_mutation(foreign_field: str) -> None:
+    foreign = _job("98765")
+    if foreign_field == "slurm_cluster_id":
+        foreign = foreign.model_copy(
+            update={
+                "request": foreign.request.model_copy(
+                    update={
+                        "slurm_cluster_id": "oldlab",
+                        "cpu_arch": "x86_64",
+                        "qos": "loom-task-image-builder-rootless-oldlab",
+                    }
+                )
+            }
+        )
+    else:
+        foreign = foreign.model_copy(update={foreign_field: "foreign-work"})
+    decision = classify_task_image_build_inventory(
+        _grant(),
+        _inventory(foreign),
+        invocation_started_at=_NOW - timedelta(seconds=2),
+        ambiguity_settle_until=_NOW - timedelta(seconds=1),
+        now=_NOW,
+    )
+    assert decision.action == "wait"
+    assert decision.reason == "inventory_ownership_mismatch"
+    assert decision.bind_job_id is None
+    assert decision.cancel_job_ids == ()

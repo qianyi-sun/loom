@@ -511,7 +511,7 @@ async def test_reconciliation_revokes_terminal_or_zero_and_journals_cancellation
         }
         assert rows[empty_grant.grant_id].state == "revoked"
         assert rows[terminal_grant.grant_id].state == "revoked"
-        assert rows[cancel_grant.grant_id].state == "submitting"
+        assert rows[cancel_grant.grant_id].state == "revoked"
         cancellation_events = list(
             (
                 await session.scalars(
@@ -524,6 +524,96 @@ async def test_reconciliation_revokes_terminal_or_zero_and_journals_cancellation
         )
         assert len(cancellation_events) == 1
         assert cancellation_events[0].payload == {"job_ids": ["33333"]}
+
+
+async def test_protocol_violation_cannot_bind_after_partial_cancellation(
+    grant_session: async_sessionmaker[AsyncSession],
+) -> None:
+    grant = _grant()
+    async with grant_session() as session:
+        await issue_task_image_build_grant(
+            session,
+            environment="staging",
+            grant=grant,
+            ambiguity_settle_seconds=1,
+            now=_NOW,
+        )
+        await begin_task_image_build_submission(session, grant_id=grant.grant_id, now=_NOW)
+        await session.commit()
+        first = _inventory(grant, job_id="10", state="pending", held=True)
+        second = _inventory(grant, job_id="11", state="pending", held=True)
+        duplicate = first.model_copy(update={"jobs": first.jobs + second.jobs})
+        decision = await reconcile_task_image_build_submission(
+            session,
+            grant_id=grant.grant_id,
+            inventory=duplicate,
+            now=_NOW,
+        )
+        assert decision.cancel_job_ids == ("10", "11")
+        await session.commit()
+    # Restart after only one cancellation becomes visible. No resurrection.
+    async with grant_session() as session:
+        decision = await reconcile_task_image_build_submission(
+            session,
+            grant_id=grant.grant_id,
+            inventory=first,
+            now=_NOW,
+        )
+        assert decision.action == "cancel_then_reconcile"
+        assert decision.bind_job_id is None
+        assert decision.cancel_job_ids == ("10",)
+        row = await session.get(TaskImageBuildGrant, grant.grant_id)
+        assert row is not None and row.state == "revoked"
+        assert row.bound_at is None and row.slurm_job_id is None
+
+
+async def test_revoked_grant_does_not_cancel_foreign_inventory(
+    grant_session: async_sessionmaker[AsyncSession],
+) -> None:
+    grant = _grant()
+    async with grant_session() as session:
+        await issue_task_image_build_grant(
+            session,
+            environment="staging",
+            grant=grant,
+            ambiguity_settle_seconds=1,
+            now=_NOW,
+        )
+        await begin_task_image_build_submission(session, grant_id=grant.grant_id, now=_NOW)
+        empty = SlurmBuildInventoryV1(
+            controller_authoritative=True,
+            accounting_authoritative=True,
+            observed_at=_NOW + timedelta(seconds=2),
+            jobs=(),
+        )
+        await reconcile_task_image_build_submission(
+            session,
+            grant_id=grant.grant_id,
+            inventory=empty,
+            now=empty.observed_at,
+        )
+        await session.commit()
+        observed = _inventory(
+            grant, job_id="98765", state="running", held=False, observed_at=empty.observed_at
+        )
+        observed = observed.model_copy(
+            update={
+                "jobs": (
+                    observed.jobs[0].model_copy(
+                        update={"comment": "foreign-work", "submitting_identity": "other-owner"}
+                    ),
+                )
+            }
+        )
+        decision = await reconcile_task_image_build_submission(
+            session,
+            grant_id=grant.grant_id,
+            inventory=observed,
+            now=observed.observed_at,
+        )
+        assert decision.action == "wait"
+        assert decision.reason == "inventory_ownership_mismatch"
+        assert decision.cancel_job_ids == ()
 
 
 async def test_revoked_grant_cancels_a_late_live_job_without_becoming_bindable(
