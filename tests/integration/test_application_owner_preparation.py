@@ -121,7 +121,7 @@ async def test_staging_owner_creation_recovers_only_its_saved_oid(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transfer_postgres", [17], indirect=True)
 @pytest.mark.parametrize("transfer_database", ["protected-staging"], indirect=True)
-@pytest.mark.parametrize("interruption", [None, "owner", "seal", "admission-record", "close"])
+@pytest.mark.parametrize("interruption", [None, "owner", "seal", "admission-record", "close", "schema-drift"])
 @pytest.mark.parametrize("transport", ["psycopg", "installed-peer"])
 async def test_initial_database_phase_recovers_each_commit_without_recapturing_closed_target(
     transfer_database, transfer_postgres, tmp_path, monkeypatch, interruption, transport,  # noqa: F811
@@ -213,6 +213,15 @@ async def test_initial_database_phase_recovers_each_commit_without_recapturing_c
                 plan, journal=journal, connection=wrapped_peer, guard=evidence))
             raise RuntimeError("initial database phase verified")
         try:
+            if interruption == "schema-drift":
+                peer.execute("ALTER TABLE public.teams ADD COLUMN unadmitted integer")
+                original_login = peer.execute("SELECT rolcanlogin,rolinherit,rolpassword FROM pg_authid WHERE rolname='loom'").fetchone()
+                with pytest.raises(RuntimeError, match="schema"):
+                    journal.execute(plan, [_component(apply)])
+                assert mutations == [] and publications == []
+                assert peer.execute("SELECT rolcanlogin,rolinherit,rolpassword FROM pg_authid WHERE rolname='loom'").fetchone() == original_login
+                assert peer.execute("SELECT datallowconn FROM pg_database WHERE datname='loom'").fetchone() == (True,)
+                return
             if interruption:
                 with pytest.raises(RuntimeError, match="acknowledgement lost"):
                     journal.execute(plan, [_component(apply)])
