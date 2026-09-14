@@ -413,11 +413,12 @@ def test_classification_observes_original_credentials_without_publishing(tmp_pat
     assert observed.credential.password == _PASSWORD
     assert _PASSWORD not in repr(observed)
     assert observed.binding.manifest_sha256 == plan.backup_manifest_sha256
-    assert observed.configuration.cluster_uid == '11111111-1111-4111-8111-111111111111'
+    assert observed.configuration.cluster_uid == '22222222-2222-4222-8222-222222222222'
     assert {p: p.read_bytes() for p in tmp_path.rglob('*') if p.is_file()} == before
 
 
-def test_saved_credential_and_writer_bindings_are_available_without_apply_authority(tmp_path, monkeypatch):
+@pytest.mark.parametrize('corruption', [None, 'credentials-version', 'credentials-source', 'config-generation', 'config-unknown'])
+def test_saved_credential_and_writer_bindings_are_available_without_apply_authority(tmp_path, monkeypatch, corruption):
     from dataclasses import asdict
 
     plan, live = _sources(tmp_path)
@@ -428,11 +429,28 @@ def test_saved_credential_and_writer_bindings_are_available_without_apply_author
     component = _component(apply)
     with pytest.raises(RuntimeError, match='saved original'):
         journal.execute(plan, [component])
+    if corruption:
+        path = journal.root / '00-application-ownership-handoff' / (
+            'application-credentials.json' if corruption.startswith('credentials') else 'application-cnpg-configuration.json')
+        value = json.loads(path.read_text())
+        if corruption == 'credentials-version':
+            value['schema_version'] = True
+        elif corruption == 'credentials-source':
+            value['binding']['component_sha256'] = '0' * 64
+        elif corruption == 'config-generation':
+            value['binding']['cluster_generation'] = True
+        else:
+            value['binding']['unknown'] = 'field'
+        path.write_text(json.dumps(value))
     def forbid(*args, **kwargs):
         pytest.fail('classification cannot publish or sync')
     monkeypatch.setattr(journal, '_sync_application_recovery', forbid)
     monkeypatch.setattr(journal, '_publish_or_match', forbid)
+    if corruption:
+        with pytest.raises((ValueError, RuntimeError), match=r'application recovery|configuration binding'):
+            journal.read_application_recovery_view(plan, component, ordinal=0)
+        return
     view = journal.read_application_recovery_view(plan, component, ordinal=0)
     assert view.credential_binding.manifest_sha256 == plan.backup_manifest_sha256
-    assert view.cnpg_configuration.cluster_uid == '11111111-1111-4111-8111-111111111111'
+    assert view.cnpg_configuration.cluster_uid == '22222222-2222-4222-8222-222222222222'
     assert _PASSWORD not in json.dumps(asdict(view))

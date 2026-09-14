@@ -1062,6 +1062,12 @@ and accepts only its already-issued manager executable transition. A changed
 postmaster or input is refused before a receipt is published. An unchanged
 manager after dispatch remains pending. Read-only classification can inspect
 this original binding without publishing or flushing records.
+Credential and declared-writer observations are also available without journal
+mutation. They read the same verified backup, compare live Secrets twice, and
+validate CNPG configuration twice. Their results expose only non-secret bindings
+in the recovery view; the recovered password remains excluded from diagnostic
+representations. Active recovery separately publishes both immutable bindings
+before any use of the credential for SQL mutation.
 
 Effective SQL admission separately checks each supported connectable database
 (`loom`, `postgres`, `template1`) against the original PostgreSQL 17.4 server.
