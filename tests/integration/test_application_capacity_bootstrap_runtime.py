@@ -8,6 +8,8 @@ installed authority chain and actual container image need separate proof.
 
 import base64
 import json
+from contextlib import ExitStack
+from dataclasses import replace
 
 import psycopg
 import pytest
@@ -44,7 +46,8 @@ pytestmark = [pytest.mark.parametrize("transfer_postgres", [16, 17], indirect=Tr
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bootstrap,durable_agent", [(False, False), (True, False), (True, True)])
-async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_runtime(transfer_database, tmp_path, monkeypatch, bootstrap, durable_agent):  # noqa: F811
+@pytest.mark.parametrize("interruption", [None, "close", "reopen"])
+async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_runtime(transfer_database, tmp_path, monkeypatch, bootstrap, durable_agent, interruption):  # noqa: F811
     from loom_cli.rollout.operator.protected_capacity_bootstrap_runtime import (
         ProtectedCapacityBootstrapRuntime,
     )
@@ -108,7 +111,7 @@ async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_ru
                         ([n for n in runtime_oids if not n.endswith("executor")],)).fetchone()[0]
                     return _DatabaseState.EXACT if durable == durable_runtime_credentials else _DatabaseState.NEEDS_CONVERGENCE
                 monkeypatch.setattr(KubernetesProtectedStagingCapacityDatabaseComponent, "_database_state", state)
-                with ProtectedCapacityBootstrapRuntime(plan=plan, guard=evidence, target=args["target"],
+                with ExitStack() as recovery_stack, ProtectedCapacityBootstrapRuntime(plan=plan, guard=evidence, target=args["target"],
                         coordination_guard=args["coordination_guard"], runner=runner, template=base._manifest(plan, source.seed),
                         ca_certificate=b"disposable-public-ca" * 8, runtime_password=args["password"],
                         container_registry=base.container_registry, assert_guard=lambda: evidence, assert_inputs=lambda: None,
@@ -151,16 +154,32 @@ async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_ru
                         session.execute("SET ROLE loom_app_staging_owner")
                         configured[0] = True
                         runtime.release_creator()
-                        runtime.begin_retirement(generation, [])
+                        retirement_backend = runtime.begin_retirement(generation, [])
                         runtime.seal(generation, identity.role_oid)
                         resources.delete_job(expected_uid=job.uid)
                         runtime.close(generation, identity.role_oid)
+                        if interruption == "close":
+                            # Lose all privileged runtime peers after closure,
+                            # retaining only the independently supervised guard.
+                            previous = runtime
+                            previous.__exit__(None, None, None)
+                            runtime = recovery_stack.enter_context(replace(previous))
+                            retirement_backend = runtime.begin_retirement(generation, [retirement_backend])
+                            runtime.seal(generation, identity.role_oid)
+                            runtime.close(generation, identity.role_oid)
                         runtime.retire(generation, identity.role_oid)
                         with pytest.raises(psycopg.OperationalError):
                             session.execute("SELECT 1")
                     runtime.require_role_retired(generation, identity.role_oid)
                     resources.delete_secret(expected_uid=secret.uid)
                     runtime.reopen(generation, identity.role_oid)
+                    if interruption == "reopen":
+                        previous = runtime
+                        previous.__exit__(None, None, None)
+                        runtime = recovery_stack.enter_context(replace(previous))
+                        runtime.begin_retirement(generation, [retirement_backend])
+                        runtime.require_role_retired(generation, identity.role_oid)
+                        runtime.reopen(generation, identity.role_oid)
                     assert runtime.read_revision() == "exact"
                     assert runtime.role_exists(generation, identity.role_oid)
                     assert db_guard.execute("SELECT 1").fetchone() == (1,)

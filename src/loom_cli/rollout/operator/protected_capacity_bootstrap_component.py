@@ -11,6 +11,7 @@ import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 
+from loom.application_capacity_runtime_credentials import _credentials, _roles
 from loom.application_completed_authority import (
     ApplicationGuardOwner,
     ApplicationOwnerSuccessor,
@@ -40,6 +41,7 @@ from .protected_cnpg_writer_configuration import _mapping
 from .protected_staging_capacity_database_component import (
     KubernetesProtectedStagingCapacityDatabaseComponent,
     _DatabaseState,
+    _seed_credential,
 )
 from .staging_mutation_guard import MutationGuardEvidence
 
@@ -155,7 +157,7 @@ class ProtectedCapacityBootstrapComponent(ProtectedApplicationMigrationComponent
                            inputs: ApplicationMigrationInputs) -> None:
         original = ApplicationAdmissionRecoveryRecord.from_dict(_mapping(events[0].payload["admission"]))
         historical_guard = MutationGuardEvidence.from_dict(_mapping(events[0].payload["guard"]))
-        identity, _ = _identities(events[0].payload)
+        identity, runtime_oids = _identities(events[0].payload)
         seed = dict(self.seed_source())
         with self.runner.open_staging_peer_database() as peer:
             _admit_sql_profiles(self.runner, peer, guard, separated_owner=True)
@@ -164,6 +166,11 @@ class ProtectedCapacityBootstrapComponent(ProtectedApplicationMigrationComponent
                 runtime_password=inputs.credential.credential.password)
             require_application_guard_migrator_retired(peer, target=original.target, coordination_guard=coordination,
                 provisioner_role="postgres", identity=identity)
+            with peer.transaction():
+                peer.execute("SET TRANSACTION READ ONLY")
+                _credentials(_roles(peer, runtime_oids),
+                    {f"loom_cap_staging_{role}": _seed_credential(seed, f"{role}_database_password")
+                        for role in ("agent", "observer", "runtime")}, require_login=True)
         for generation in (event for event in events if event.phase == "generation"):
             capacity_bootstrap_resources(base=self.base, plan=self.plan, seed=seed, generation=generation,
                 guard=historical_guard, assert_guard=lambda: historical_guard if self._guard() == guard else self._guard()).require_retired()
