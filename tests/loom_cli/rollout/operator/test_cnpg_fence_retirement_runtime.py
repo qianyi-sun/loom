@@ -11,7 +11,9 @@ from loom_cli.rollout.operator.protected_cnpg_fence_acquisition import acquire_c
 from tests.loom_cli.rollout.operator.test_application_admission_recovery import _component
 from tests.loom_cli.rollout.operator.test_application_restoration import _inputs
 from tests.loom_cli.rollout.operator.test_application_restoration_journal import _seed
-from tests.loom_cli.rollout.operator.test_application_workload_runtime import Runner as WorkloadRunner
+from tests.loom_cli.rollout.operator.test_application_workload_runtime import (
+    Runner as WorkloadRunner,
+)
 from tests.loom_cli.rollout.operator.test_cnpg_fence_acquisition import FenceRunner
 
 
@@ -23,16 +25,29 @@ class RetirementRunner(FenceRunner):
         self.patches = []
         self.fail_after = None
         self.before_patch = lambda: None
+        self.probes = []
+        self.propagated = True
+
+    def capture_stdout(self, argv, *, env, timeout_seconds):
+        if '--dry-run=server' in argv:
+            self.probes.append(tuple(argv))
+            if not self.propagated:
+                raise RuntimeError('retirement has not propagated')
+            return b'{}'
+        return super().capture_stdout(argv, env=env, timeout_seconds=timeout_seconds)
 
     def open_staging_peer_maintenance_database(self):
         return self.peer.open_staging_peer_maintenance_database()
 
     def capture_stdout_with_input(self, argv, *, env, input_payload, timeout_seconds):
+        if '--dry-run=server' in argv:
+            return self.capture_stdout(argv, env=env, timeout_seconds=timeout_seconds)
         if argv[1] == 'create':
             return super().capture_stdout_with_input(argv, env=env, input_payload=input_payload, timeout_seconds=timeout_seconds)
         assert argv[1] == 'patch' and '--patch-file=/dev/stdin' in argv
         assert '--field-manager=loom-cnpg-fence' in argv and '--type=json' in argv
         assert self.journal.read_active_application_recovery_view(self.plan).restoration is not None
+        assert self.journal.read_active_application_recovery_view(self.plan).fences_retiring
         self.before_patch()
         value = self.objects[argv[2], argv[3]]
         patch = json.loads(input_payload)
@@ -87,6 +102,7 @@ def test_retirement_retains_every_uid_and_resumes_exact_partial_state(tmp_path, 
     assert len(results) == 1 and len(results[0]) == len(original)
     assert len(runner.patches) == len(set(runner.patches)) == 5
     assert len(runner.creates) == len(original) == 10
+    assert len(runner.probes) == 6
     for key, value in original.items():
         current = runner.objects[key]
         assert current['metadata']['uid'] == value['metadata']['uid']
@@ -114,3 +130,34 @@ def test_retirement_refuses_before_patch_when_live_authority_or_complete_invento
     with pytest.raises((ValueError, RuntimeError)):
         journal.execute(plan, [_component(lambda _: retire_cnpg_input_fence(plan, journal=journal, runner=runner, guard=guard))])
     assert runner.patches == []
+
+
+def test_durable_retirement_decision_prevents_acquisition_before_first_patch(tmp_path, monkeypatch):
+    from loom_cli.rollout.operator.protected_cnpg_fence_retirement import retire_cnpg_input_fence
+    plan, journal, guard, runner = _case(tmp_path, monkeypatch)
+    def crash():
+        raise RuntimeError('before first patch')
+    runner.before_patch = crash
+    with pytest.raises(RuntimeError, match='before first patch'):
+        journal.execute(plan, [_component(lambda _: retire_cnpg_input_fence(plan, journal=journal, runner=runner, guard=guard))])
+    assert runner.patches == []
+    calls = len(runner.calls)
+    with pytest.raises(RuntimeError, match='retir'):
+        journal.execute(plan, [_component(lambda _: acquire_cnpg_input_fence(plan, journal=journal, runner=runner))])
+    assert len(runner.calls) == calls
+
+
+def test_retirement_requires_all_scope_propagation_and_retries_without_repatching(tmp_path, monkeypatch):
+    from loom_cli.rollout.operator.protected_cnpg_fence_retirement import retire_cnpg_input_fence
+    plan, journal, guard, runner = _case(tmp_path, monkeypatch)
+    runner.propagated = False
+    def apply(_):
+        retire_cnpg_input_fence(plan, journal=journal, runner=runner, guard=guard)
+        raise RuntimeError('retired')
+    with pytest.raises(RuntimeError, match='not propagated'):
+        journal.execute(plan, [_component(apply)])
+    assert len(runner.patches) == 5
+    runner.propagated = True
+    with pytest.raises(RuntimeError, match='retired'):
+        journal.execute(plan, [_component(apply)])
+    assert len(runner.patches) == 5 and len(runner.probes) == 7
