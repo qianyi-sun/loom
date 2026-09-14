@@ -48,13 +48,13 @@ from loom_control_plane.service_execution_output import (
     ServiceExecutionOutputRouteService,
     ServiceExecutionPeerV1,
 )
+from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 from tests.integration.test_service_execution_leases import (
     _complete_output_contract,
     _reserve,
     _runtime_result_payload,
     _seed_ready_trial,
 )
-from tests.support.minio import MINIO_TEST_IMAGE
 
 
 @pytest.fixture

@@ -51,9 +51,9 @@ from loom.db.schema import (
 )
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 from tests.integration.pipeline_orchestrator_fixtures import orchestrator_seed  # noqa: F401
 from tests.integration.taskset_fixtures import tasksets_minio, tasksets_setup  # noqa: F401
-from tests.support.minio import MINIO_TEST_IMAGE
 
 
 @pytest.fixture(autouse=True)
