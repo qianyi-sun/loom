@@ -335,12 +335,17 @@ def test_pending_handoff_cannot_be_discarded_by_normal_cleanup(tmp_path, monkeyp
             )
 
 
-def _pending_resume(tmp_path, *, acknowledge=True, claim_epoch=True):
+def _pending_resume(tmp_path, *, acknowledge=True, claim_epoch=True,
+                    component_id="application-ownership-handoff", advanced_guard=False):
     from loom_cli.rollout.operator.final_gate_plan import FinalGatePlanStore
     from tests.loom_cli.rollout.operator.test_protected_apply_journal import _Backend
 
     plan, journal = _setup(tmp_path)
     guard = _guard(plan)
+    if advanced_guard:
+        guard = MutationGuardEvidence.build(**{
+            k: v for k, v in guard.to_dict().items() if k not in {"schema_version", "evidence_digest", "mutation_epoch"}
+        }, mutation_epoch=plan.starting_mutation_epoch + 1)
     FinalGatePlanStore(
         tmp_path / "state", request_id=plan.request_id, attempt_number=plan.attempt_number
     ).publish(plan)
@@ -357,7 +362,7 @@ def _pending_resume(tmp_path, *, acknowledge=True, claim_epoch=True):
             )
         raise RuntimeError("interrupted")
 
-    components = [_component(apply)]
+    components = [replace(_component(apply), component_id=component_id)]
     if claim_epoch:
         components.insert(0, _Backend().component("mutation-epoch-claim", 0))
     with pytest.raises(RuntimeError, match="interrupted"):
@@ -673,6 +678,43 @@ def test_early_handoff_recovery_preserves_original_ordinal_and_skips_other_compo
     assert {p.name: p.read_bytes() for p in (journal.root / "00-mutation-epoch-claim").iterdir()} == epoch_bytes
     assert journal.recover_pending_application_handoff(plan, [before, component, after], guard=guard) is None
     assert completed == [True]
+
+
+@pytest.mark.parametrize("advanced_guard", [False, True])
+@pytest.mark.parametrize("drift", [None, "moved", "guard", "intent"])
+def test_early_migration_recovery_uses_only_its_saved_operation(tmp_path, advanced_guard, drift):
+    from tests.loom_cli.rollout.operator.test_protected_apply_journal import _Backend
+
+    plan, journal, guard = _pending_resume(tmp_path, component_id="database-migration", advanced_guard=advanced_guard)
+    assert _resume_guard(tmp_path, plan) == guard
+    completed = []
+    def forbidden(_):
+        pytest.fail("ordinary component ran before migration recovery")
+    def recover(_):
+        journal.require_application_guard_retained(plan, guard=guard)
+        completed.append(True)
+    component = replace(_component(recover), component_id="database-migration", classify=lambda _: ComponentObservation(
+        ComponentState.EXACT if completed else ComponentState.READY, "3" * 64, plan.starting_mutation_epoch + 1))
+    epoch = replace(_Backend().component("mutation-epoch-claim", 0), classify=forbidden, apply=forbidden)
+    after = replace(_Backend().component("later-manifests", 2), classify=forbidden, apply=forbidden)
+    components = [epoch, component, after]
+    if drift == "moved":
+        components = [component, epoch, after]
+    elif drift == "guard":
+        guard = MutationGuardEvidence.build(**{
+            k: v for k, v in guard.to_dict().items() if k not in {"schema_version", "evidence_digest", "database_backend_pid"}
+        }, database_backend_pid=guard.database_backend_pid + 1)
+    elif drift == "intent":
+        components[1] = replace(component, input_fingerprint="f" * 64)
+    if drift:
+        with pytest.raises((RuntimeError, ValueError)):
+            journal.recover_pending_application_operation(plan, components, guard=guard)
+        assert completed == []
+    else:
+        terminal = journal.recover_pending_application_operation(plan, components, guard=guard)
+        assert terminal.component_id == "database-migration" and completed == [True]
+        assert journal.recover_pending_application_operation(plan, components, guard=guard) is None
+        assert not (journal.root / "02-later-manifests").exists()
 
 
 @pytest.mark.parametrize("change", ["no-ack", "no-epoch", "moved", "implementation", "input", "guard", "missing-lock", "prefix-intent"])
