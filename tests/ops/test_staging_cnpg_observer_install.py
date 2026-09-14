@@ -115,3 +115,32 @@ def test_endpoint_upgrade_keeps_candidate_rollback_material_and_refuses_local_dr
         module.install_node(**arguments)
     assert module.WRAPPER.read_bytes() == b'foreign replacement'
     assert sum(call[0] == '/usr/sbin/useradd' for call in calls) == 1
+
+
+@pytest.mark.parametrize('drift', ['mode', 'home', 'source-copy'])
+def test_successful_replay_rechecks_permissions_and_immutable_observer_bytes(tmp_path, monkeypatch, drift):
+    module, arguments, _users, calls, _ = _context(tmp_path, monkeypatch)
+    receipt = module.install_node(**arguments)
+    if drift == 'mode':
+        module.WRAPPER.chmod(0o600)
+    elif drift == 'home':
+        module.ACCOUNT_HOME.chmod(0o700)
+    else:
+        source = module.STATE / 'candidates' / receipt['observer_sha256'] / 'observer.py'
+        source.chmod(0o600)
+        source.write_bytes(b'foreign executable')
+    before = len(calls)
+    with pytest.raises(ValueError, match='CNPG observer'):
+        module.install_node(**arguments)
+    assert len(calls) == before
+
+
+def test_endpoint_public_key_remains_readable_under_private_installer_umask(tmp_path, monkeypatch):
+    module, arguments, *_ = _context(tmp_path, monkeypatch)
+    old_umask = os.umask(0o077)
+    try:
+        module.install_node(**arguments)
+    finally:
+        os.umask(old_umask)
+    assert module.ACCOUNT_HOME.stat().st_mode & 0o777 == 0o755
+    assert (module.ACCOUNT_HOME / '.ssh').stat().st_mode & 0o777 == 0o755
