@@ -102,3 +102,29 @@ def test_protected_preparation_drift_is_not_overridden_by_local_digest(field, va
     with pytest.raises(ValueError, match="preparation"):
         module.read_final_native_recovery(wire, expected_sha256=hashlib.sha256(wire).hexdigest(),
             expected_preparation=expected)
+
+
+@pytest.mark.parametrize("scope", ["job_101", "job_101_7"])
+def test_array_job_accepts_exact_task_or_parent_job_scope(scope):
+    module, record = observation()
+    document = json.loads(record.model_dump_json())
+    document["preparation"]["locator"]["physical"]["slurm_job_id"] = "101_7"
+    document["preparation"]["cgroup_path"] = f"/slurm/{scope}"
+    wire = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+    assert module.parse_native_recovery_locator(wire).preparation.cgroup_path == f"/slurm/{scope}"
+
+
+@pytest.mark.parametrize("count", [340, 341])
+def test_final_record_bounds_mapping_extents(count):
+    module, record = observation()
+    document = json.loads(record.model_dump_json())
+    for name in ("uid_map", "gid_map"):
+        document[name] = document[name][:1] + [
+            {"inside": i, "outside": 100000 + i, "count": 1} for i in range(1, count)]
+    wire = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+    if count == 340:
+        result = module.parse_native_recovery_locator(wire)
+        assert len(result.uid_map) == len(result.gid_map) == count
+    else:
+        with pytest.raises(ValueError):
+            module.parse_native_recovery_locator(wire)

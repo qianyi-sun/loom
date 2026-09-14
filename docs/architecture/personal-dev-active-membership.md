@@ -2214,6 +2214,16 @@ to the parent user namespace, not authenticated host IDs. This observation is
 not yet persisted in the V1 locator or bound to protected executor evidence, and
 does not authorize interrupted-attempt deletion or certify subid retention.
 
+`loom_capacity_agent.native_recovery` defines bounded canonical preparation and
+final V2 observation records. Preparation binds the original locator, admitted
+launch-profile/node-configuration digests, allocated node, boot, original UID/GID
+and exact job-cgroup identity. Finalization additionally binds the runtime spec
+and complete UID/GID maps. The strict final reader requires externally retained
+preparation and digest; its legacy reader keeps V1 inspection compatibility but
+V1 cannot satisfy finalized recovery. The installed worker still writes only its
+unchanged V1 locator. These contracts do not yet capture or publish host facts,
+admit a recovery-capable launch profile, or supply terminal/deletion authority.
+
 The versioned client policy is
 `deploy/personal-dev-builder/client-seccomp-v1.json`. It permits ordinary
 Python/buildctl file IO, read-only extended-attribute inspection, constrained

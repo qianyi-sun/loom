@@ -17,12 +17,11 @@ from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Annotated, Literal, Self
-from uuid import UUID
 
 from pydantic import Field, model_validator
 
-from loom_capacity_agent.admission import PhysicalJobBindingV2
 from loom_capacity_agent.build_admission import BuildOutcomeReceiptV1
+from loom_capacity_agent.native_recovery import NativeInstalledAttemptV1 as NativeInstalledAttemptV1
 from loom_capacity_executor.native_allocated_worker import (
     allocated_claim_request,
     allocated_native_packet_io,
@@ -76,19 +75,6 @@ class NativeInstalledWorkerConfigV1(StrictV1Model):
         if self.max_image_archive_bytes > self.max_artifact_bytes:
             raise ValueError("native installed image archive bound exceeds artifact bound")
         return self
-
-
-class NativeInstalledAttemptV1(StrictV1Model):
-    """Local recovery locator, never a second allocation/claim authority."""
-
-    physical: PhysicalJobBindingV2
-    worker_id: UUID
-    worker_incarnation: UUID
-    config_sha256: Digest
-    release_manifest_sha256: Digest
-    directory: str
-    device: int = Field(ge=0)
-    inode: int = Field(gt=0)
 
 
 def read_installed_worker_config(path: Path, *, expected_sha256: str) -> NativeInstalledWorkerConfigV1:
