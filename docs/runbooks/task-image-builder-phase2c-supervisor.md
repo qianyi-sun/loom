@@ -28,6 +28,18 @@ naming the same release. Staging must not create that file; offline conformance
 rejects it as a live surface. Installer hash checks and the guard's independent
 ELF/grant checks remain mandatory.
 
+The later publication composition accepts an optional closed `publication`
+group in that file. Its fields are `origin`, `service`, `server_name`, `issuer`,
+`key_id` (the 43-character registry JWK thumbprint), and `ca` with an exact
+release-member `path` and `sha256`. Only public CA certificates belong there;
+tokens and signing keys do not. The CA file must be root-owned 0444 beneath
+immutable 0555 release directories. Trust is loaded once, without ambient
+roots. Absent configuration keeps publication disabled; invalid configuration
+fails before guard projection or environment changes. Staging still must not
+create live configuration. See the
+[production design](../architecture/2026-09-02-task-image-builder-phase2-production.md#credentials-publication-and-trial-start)
+for the publication lifecycle and remaining acceptance boundaries.
+
 ## Assemble an offline provider release
 
 Build the guard bundles and rootless runtimes through their pinned release

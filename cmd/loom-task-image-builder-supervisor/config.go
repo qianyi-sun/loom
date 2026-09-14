@@ -33,7 +33,8 @@ type Config struct {
 	CPUArch       string
 	Guard         GuardConfig
 	Runtime       RuntimeConfig
-	Bundle        *BundleDownloadTrust // Absent means native registered downloads are unavailable.
+	Bundle        *BundleDownloadTrust        // Absent means native registered downloads are unavailable.
+	Publication   *RegistryPublicationHandoff // Absent keeps publication disabled.
 }
 
 type GuardConfig struct {
@@ -64,6 +65,7 @@ type configDisk struct {
 	Guard         guardDiskConfig        `json:"guard"`
 	Runtime       runtimeDiskConfig      `json:"runtime"`
 	Bundle        *bundleTrustDiskConfig `json:"bundle,omitempty"`
+	Publication   *publicationDiskConfig `json:"publication,omitempty"`
 }
 
 type bundleTrustDiskConfig struct {
@@ -183,6 +185,9 @@ func LoadConfig(path string, expectedRelease string) (Config, error) {
 	if err := validateBundleConfigFields(payload); err != nil {
 		return Config{}, err
 	}
+	if err := validatePublicationConfigFields(payload); err != nil {
+		return Config{}, err
+	}
 	if disk.Schema != configSchema {
 		return Config{}, errors.New("config schema invalid")
 	}
@@ -257,6 +262,13 @@ func LoadConfig(path string, expectedRelease string) (Config, error) {
 			return Config{}, err
 		}
 		cfg.Bundle = &trust
+	}
+	if disk.Publication != nil {
+		handoff, err := loadPublicationHandoff(*disk.Publication, releaseRoot)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.Publication = handoff
 	}
 	return cfg, nil
 }
