@@ -136,7 +136,8 @@ async def test_migrator_creation_never_adopts_ambient_role_or_outlives_failed_jo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transfer_database", ["baseline"], indirect=True)
-async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(transfer_database, monkeypatch):  # noqa: F811
+@pytest.mark.parametrize("target_revision", ["0142", "0146"])
+async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(transfer_database, monkeypatch, target_revision):  # noqa: F811
     from pathlib import Path
 
     from alembic import command
@@ -173,8 +174,8 @@ async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(tra
         config.set_main_option("sqlalchemy.url", url.render_as_string(hide_password=False).replace("%", "%%"))
         monkeypatch.setenv("LOOM_DB_OWNER_ROLE", target.successor_role)
         try:
-            command.upgrade(config, "0142")
-            assert peer.execute("SELECT version_num FROM public.alembic_version").fetchone() == ("0142",)
+            command.upgrade(config, target_revision)
+            assert peer.execute("SELECT version_num FROM public.alembic_version").fetchone() == (target_revision,)
             observe_completed_application_authority(peer, target=target, runtime_password=args["password"], successor=identity)
         finally:
             seal_application_migrator(maintenance, **authority, identity=identity)
