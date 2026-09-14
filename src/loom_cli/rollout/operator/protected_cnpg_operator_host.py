@@ -25,6 +25,12 @@ _COMMAND = ['/manager', 'controller', '--leader-elect', '--max-concurrent-reconc
 _PROC = Path('/proc')
 
 
+def _file_identity(value: os.stat_result) -> tuple[int, ...]:
+    # Reads may update access time; it is not evidence of a changed executable.
+    return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+            value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
 def _refuse() -> RuntimeError:
     return RuntimeError('CNPG operator host process observation refused')
 
@@ -78,8 +84,7 @@ def _binary(path: Path) -> tuple[int, int, str]:
             raise _refuse()
         digest = hashlib.file_digest(stream, 'sha256').hexdigest()
         after = os.fstat(stream.fileno())
-        if (before != after or before.st_mtime_ns != after.st_mtime_ns
-                or before.st_ctime_ns != after.st_ctime_ns or digest != _BINARY_SHA256):
+        if (_file_identity(before) != _file_identity(after) or digest != _BINARY_SHA256):
             raise _refuse()
     return before.st_dev, before.st_ino, digest
 
