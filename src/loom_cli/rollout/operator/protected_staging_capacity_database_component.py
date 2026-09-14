@@ -1201,6 +1201,18 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             ),
             "runtime_role": "loom_cap_staging_runtime",
         }
+        if not durable_runtime_credentials and self.application_owner_role:
+            # A retained retry preserves already durable ordinary credentials.
+            # Admit either live lifetime for these three unprivileged logins;
+            # elevated migrator credentials must still have retired entirely.
+            observed_roles = details.get("roles")
+            expected_roles = expected_details["roles"]
+            assert isinstance(expected_roles, dict)
+            if isinstance(observed_roles, dict):
+                for role in ("loom_cap_staging_agent", "loom_cap_staging_observer", "loom_cap_staging_runtime"):
+                    observed_role = observed_roles.get(role)
+                    if isinstance(observed_role, dict) and observed_role.get("credential_validity") == "infinite":
+                        expected_roles[role]["credential_validity"] = "infinite"
         sealed_details = dict(expected_details)
         sealed_details["active_protected_sessions"] = {name: 0 for name in protected_role_names}
         sealed_roles = _expected_roles(sealed=True)
