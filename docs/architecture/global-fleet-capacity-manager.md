@@ -785,6 +785,20 @@ validated terminal at the expected mutation epoch restores ordinary release
 semantics. The terminal must represent the complete database, credential,
 workload and input-fence outcome; retention itself supplies none of that evidence.
 
+The initial database phase composes original backup credential recovery, journaled
+owner creation, guarded login sealing, immutable admission capture and guarded
+closure. Login sealing compares the current SCRAM credential with the recovered
+original before altering the role. Both sealing and closure check the exact
+original peer and coordination guard inside their SQL transactions, including
+after mutation; detected authority loss rolls that transaction back. Closure
+replay checks the guard even when the database is already closed. A committed
+owner or seal with a lost acknowledgement can recover before admission capture.
+After the target is recorded, preparation never recaptures a closed database or
+adopts a different peer. It refuses re-entry after manager replacement, peer
+recovery or workload restoration has begun. This phase still relies on enclosing
+process/input/writer admission and supplies no client-drain, ownership-transfer,
+workload-recovery or terminal fence-release evidence.
+
 Broker and worker resume can select that same original guard only when the
 acknowledged pending component matches the exact advanced-epoch recovery plan,
 attempt, candidate, tree and original starting epoch. They compare the full live
