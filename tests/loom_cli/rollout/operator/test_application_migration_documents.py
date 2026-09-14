@@ -9,7 +9,9 @@ import yaml
 from sqlalchemy.engine import make_url
 
 from loom_cli.cluster_migration import render_migration_manifest
-from loom_cli.rollout.operator.protected_application_migration_journal import ApplicationMigrationEvent
+from loom_cli.rollout.operator.protected_application_migration_journal import (
+    ApplicationMigrationEvent,
+)
 from tests.loom_cli.rollout.operator.test_application_guard_retention import _guard, _setup
 from tests.loom_cli.rollout.operator.test_application_migration_journal import _generation
 
@@ -28,7 +30,9 @@ def _inputs(tmp_path):
 
 
 def test_generation_documents_deliver_only_bounded_credential_and_original_ca(tmp_path):
-    from loom_cli.rollout.operator.protected_application_migration_documents import application_migration_documents
+    from loom_cli.rollout.operator.protected_application_migration_documents import (
+        application_migration_documents,
+    )
 
     plan, payload, guard, generation = _inputs(tmp_path)
     job, secret = application_migration_documents(plan, template=payload, generation=generation, guard=guard,
@@ -55,7 +59,9 @@ def test_generation_documents_deliver_only_bounded_credential_and_original_ca(tm
 
 @pytest.mark.parametrize("drift", ["artifact", "guard", "candidate", "owner"])
 def test_generation_documents_refuse_changed_attested_inputs(tmp_path, drift):
-    from loom_cli.rollout.operator.protected_application_migration_documents import application_migration_documents
+    from loom_cli.rollout.operator.protected_application_migration_documents import (
+        application_migration_documents,
+    )
 
     plan, payload, guard, generation = _inputs(tmp_path)
     if drift == "artifact":
