@@ -108,12 +108,13 @@ def _run_converger(
     partition_state_before_reconfigure: str = "",
     config_mode: int = 0o664,
     retained_writer: bool = False,
+    config_parent_mode: int = 0o755,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
     fake_bin = tmp_path / "bin"
     _fake_scontrol(fake_bin)
     config = tmp_path / "etc" / "slurm.conf"
     config.parent.mkdir()
-    config.parent.chmod(0o755)
+    config.parent.chmod(config_parent_mode)
     config.write_text(config_text, encoding="utf-8")
     config.chmod(config_mode)
     authority = tmp_path / "authority"
@@ -214,6 +215,30 @@ def test_hardened_configuration_is_accepted_without_reload_or_new_snapshot(tmp_p
     assert stat.S_IMODE(config.stat().st_mode) == 0o644
     assert not authority.exists()
     assert not reload_count.exists()
+
+
+@pytest.mark.parametrize("config_mode", [0o664, 0o644])
+def test_writable_authority_parent_is_refused_before_partition_mutation(
+    tmp_path: Path, config_mode: int,
+) -> None:
+    result, config, authority, reload_count = _run_converger(
+        tmp_path, config_mode=config_mode, config_parent_mode=0o775,
+    )
+    assert result.returncode == 1
+    assert config.read_text() == INITIAL_CONFIG
+    assert not authority.exists()
+    assert not reload_count.exists()
+
+
+def test_hardened_input_stays_hardened_on_reconfigure_rollback(tmp_path: Path) -> None:
+    result, config, authority, reload_count = _run_converger(
+        tmp_path, config_mode=0o644, reconfigure_fail_at="1",
+    )
+    assert result.returncode == 1
+    assert config.read_text() == INITIAL_CONFIG
+    assert stat.S_IMODE(config.stat().st_mode) == 0o644
+    assert (authority / "slurm.conf.before-loom-staging-partition").read_text() == INITIAL_CONFIG
+    assert reload_count.read_text() == "2\n"
 
 
 def test_first_convergence_inserts_partition_and_preserves_exact_backup(
