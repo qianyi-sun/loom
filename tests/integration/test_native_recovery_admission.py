@@ -84,3 +84,35 @@ async def test_installed_admission_client_uses_authenticated_no_store_readback(p
 
             with pytest.raises(BuildAdmissionTransportError):
                 await client.read_recovery_admission(request, worker_credential="x" * 43 if boundary == "credential" else CREDENTIAL)
+
+
+@pytest.mark.parametrize("boundary", ["reboot", "uncommitted", "ambiguous"])
+async def test_reboot_admission_preserves_static_config_and_rejects_ambiguous_or_uncommitted_host(
+    prepared_input, owner_sessions, monkeypatch, boundary,
+):
+    from loom_capacity_build_guard.native_recovery_store import NativeRecoveryInstallationStore
+
+    contracts, claim, profile, prepared, _final = await recovery_input(prepared_input, owner_sessions, monkeypatch)
+    factory, _engine, installation, *_ = prepared_input
+    owner_factory, owner_role = owner_sessions
+    host = contracts.NativeRecoveryHostIdentityV1(node_id=prepared.node_id, boot_id=uuid4(), original_uid=24850,
+        original_gid=24851, cgroup_namespace_device=4, cgroup_namespace_inode=201)
+    request = contracts.NativeRecoveryAdmissionRequestV1(claim=claim, node_id=host.node_id, boot_id=host.boot_id)
+    async with owner_factory.begin() as session:
+        await session.execute(text(f"SET LOCAL ROLE {owner_role}"))
+        retained = NativeRecoveryInstallationStore(session, expected_owner_role=owner_role)
+        assert await retained.retain_recovery(profile, hosts=(host,)) == profile
+        if boundary == "ambiguous":
+            await retained.retain_recovery(profile, hosts=(host.model_copy(update={"original_uid": 24852}),))
+        if boundary == "uncommitted":
+            with pytest.raises((ValueError, DBAPIError), match="committed"):
+                await store(session, installation).read_recovery_admission(request, worker_credential=CREDENTIAL)
+    async with factory.begin() as session:
+        if boundary == "ambiguous":
+            with pytest.raises((ValueError, DBAPIError)):
+                await store(session, installation).read_recovery_admission(request, worker_credential=CREDENTIAL)
+        else:
+            result = await store(session, installation).read_recovery_admission(request, worker_credential=CREDENTIAL)
+            assert result.profile == profile and result.host == host
+            original = request.model_copy(update={"boot_id": prepared.boot_id})
+            assert (await store(session, installation).read_recovery_admission(original, worker_credential=CREDENTIAL)).profile == profile
