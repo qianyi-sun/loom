@@ -127,3 +127,47 @@ def inspect_cnpg_operator_host(value: object) -> dict[str, object]:
         'mount_namespace': before[1], 'pid_namespace': before[2], 'executable_device': executable[0],
         'executable_inode': executable[1], 'executable_sha256': executable[2], 'stored_sha256': stored[2],
         'root_readonly': True, 'namespace_pid': 1}
+
+
+def handle_request(payload: bytes) -> dict[str, object]:
+    """Serve one fixed typed request for this exact independently installed source."""
+    if not 0 < len(payload) <= 8192:
+        raise _refuse()
+    def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, item in pairs:
+            if key in result:
+                raise _refuse()
+            result[key] = item
+        return result
+    request = json.loads(payload, object_pairs_hook=unique)
+    source = Path(__file__).read_bytes()
+    if (not isinstance(request, dict) or set(request) != {'schema_version', 'nonce', 'observer_sha256', 'identity'}
+            or type(request['schema_version']) is not int or request['schema_version'] != 1
+            or not isinstance(request['nonce'], str) or re.fullmatch(r'[0-9a-f]{32}', request['nonce']) is None
+            or request['observer_sha256'] != hashlib.sha256(source).hexdigest()):
+        raise _refuse()
+    identity = _request(request['identity'])
+    observation = inspect_cnpg_operator_host(identity)
+    if Path(__file__).read_bytes() != source:
+        raise _refuse()
+    return {**request, 'observation': observation}
+
+
+def main() -> int:
+    import sys
+
+    try:
+        if len(sys.argv) != 1 or os.geteuid() != 0:
+            raise _refuse()
+        result = handle_request(sys.stdin.buffer.read(8193))
+        sys.stdout.write(json.dumps(result, sort_keys=True, separators=(',', ':')) + '\n')
+        return 0
+    except Exception:
+        # Do not echo runtime commands, CRI contents, host paths or untrusted input.
+        sys.stderr.write('CNPG operator host process observation refused\n')
+        return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
