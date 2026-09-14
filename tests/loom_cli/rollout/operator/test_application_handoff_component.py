@@ -122,3 +122,34 @@ def test_handoff_component_resumes_original_phases_without_resealing_or_redispat
     before = list(events)
     assert journal.execute(plan, [epoch, component]) == result
     assert events == before
+
+
+@pytest.mark.parametrize('boundary', ['classify', 'checkpoint'])
+@pytest.mark.parametrize('drift', ['guard', 'epoch'])
+def test_observation_cannot_hide_original_guard_or_epoch_loss(tmp_path, monkeypatch, boundary, drift):
+    from loom_cli.rollout.operator import protected_application_handoff_component as module
+
+    plan, baseline, guard, _, credential, _ = _inputs(tmp_path)
+    journal = ProtectedApplyJournal(tmp_path / 'state', request_id=plan.request_id, attempt_number=plan.attempt_number)
+    lost = [False]
+    def guard_source(_):
+        if lost[0] and drift == 'guard':
+            raise RuntimeError('supervised guard lost')
+        return guard
+    def epoch_source(_):
+        return plan.starting_mutation_epoch + (2 if lost[0] and drift == 'epoch' else 1)
+    def observe(*args):
+        lost[0] = True
+        return credential, baseline.cnpg_runtime, 'e' * 64
+    component = module.ProtectedApplicationAuthorityHandoffComponent(
+        journal=journal, runner=object(), ordinal=1, guard_source=guard_source,
+        epoch_source=epoch_source, observe_external_authority=lambda *args: 'e' * 64,
+    )
+    monkeypatch.setattr(type(component), '_inputs', observe)
+    monkeypatch.setattr(journal, 'read_active_application_recovery_view', lambda _: baseline)
+    with pytest.raises(RuntimeError, match='guard|epoch'):
+        if boundary == 'classify':
+            component.classify(plan)
+        else:
+            component._checkpoint(plan, guard)
+    assert not journal.root.exists()
