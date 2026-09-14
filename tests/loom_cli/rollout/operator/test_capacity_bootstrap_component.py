@@ -77,3 +77,24 @@ def test_pending_capacity_classifies_without_application_database_reads(tmp_path
             component.classify(plan)
     else:
         assert component.classify(plan).state is ComponentState.READY
+
+
+def test_capacity_initial_admission_rejects_legacy_bootstrap_resources_before_sql(tmp_path, monkeypatch):
+    from loom_cli.rollout.operator.protected_capacity_bootstrap_component import ProtectedCapacityBootstrapComponent
+    from loom_cli.rollout.operator.protected_staging_capacity_database_component import _ResourceState
+
+    plan, journal = _setup(tmp_path)
+    guard = _guard(plan)
+    runner = object()
+    base = SimpleNamespace(application_owner_role="loom_app_staging_owner", runner=runner, container_registry="registry.example",
+        _manifest=lambda *args: b"template", _resource_state=lambda *args: (_ResourceState.EXACT, "f" * 64),
+        _database_state=lambda *args: pytest.fail("database read while old bootstrap resources survive"))
+    owner = ProtectedCapacityBootstrapComponent(plan=plan, journal=journal, runner=runner, ordinal=1,
+        guard_source=lambda: guard, epoch_source=lambda: plan.starting_mutation_epoch + 1,
+        inputs_source=lambda: None, handoff_source=lambda: None, successor_source=lambda: None,
+        container_registry="registry.example", base=base, seed_source=lambda: {}, migration_source=lambda: None)
+    monkeypatch.setattr(type(owner), "_context", lambda *args: (guard, None))
+    monkeypatch.setattr(type(owner), "_retain", lambda *args: None)
+    monkeypatch.setattr(type(owner), "_handoff", lambda *args: (SimpleNamespace(admission=object()), None))
+    with pytest.raises(RuntimeError, match="legacy bootstrap resources"):
+        owner.apply(plan)
