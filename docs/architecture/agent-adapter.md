@@ -86,7 +86,7 @@ adapters compose one of them:
 
 | Helper | When agents emit | Used by |
 |---|---|---|
-| `stream_stdout_jsonl` | Each event as a JSON line on stdout | claude-code, codex, gemini-cli, mini-swe-agent, opencode, openhands, openhands-sdk, hello |
+| `stream_stdout_jsonl` | Each event as a JSON line on stdout | claude-code, codex, gemini-cli, mini-swe-agent, opencode, openhands, openhands-sdk, hermes, hello |
 | `tail_log_file` | Events to a file path, tailed | aider, swe-agent |
 | `poll_local_http` | HTTP `/events?since=N` (curl in-sandbox) | reserved for server-mode adapters |
 | `tail_pty` | ANSI terminal output (parsed) | qwen-cli, kimi-cli |
@@ -109,7 +109,7 @@ bridge, gateway ledger, staging smoke, and export status.
 
 ## Launcher adapters
 
-`packages/loom-launcher/loom_launcher/adapters/` (11 production +
+`packages/loom-launcher/loom_launcher/adapters/` (12 production +
 `hello` test reference):
 
 | Slug | Capture | Notes |
@@ -118,6 +118,7 @@ bridge, gateway ledger, staging smoke, and export status.
 | claude-code | stdout_jsonl | Anthropic's CLI |
 | codex | stdout_jsonl | OpenAI Codex CLI |
 | gemini-cli | stdout_jsonl | Google Gemini CLI |
+| hermes | stdout_jsonl | Thin `uv pip` of pinned hermes-agent (toolsets `terminal`+`file` only; not Harbor/`install.sh`); Loom-owned `hermes_runner` |
 | kimi-cli | tail_pty | Moonshot Kimi CLI |
 | mini-swe-agent | stdout_jsonl | |
 | opencode | stdout_jsonl | Custom OpenAI-compatible provider id; uses the `/openai/v1/chat/completions` provider facade, not Responses API; the facade accepts the CLI's streaming request by returning synthetic OpenAI SSE from a cost-attributed non-streaming upstream call |
@@ -373,10 +374,16 @@ loom agents smoke-runtime --image loom-agent-sandbox:dev --json
 
 The image provisions Node 22 CLI adapters (`claude`, `codex`, `gemini`,
 `kimi`, `opencode`, `qwen`) and Python runtimes for `aider`,
-`mini-swe-agent`, `openhands`, `openhands-sdk`, and `swe-agent`. `aider`
+`mini-swe-agent`, `openhands`, `openhands-sdk`, `hermes`, and `swe-agent`. `aider`
 and `mini-swe-agent` live in isolated virtual environments with PATH
 shims. In the all-agent sandbox image, OpenHands, the Loom-owned OpenHands SDK
-runner, and SWE-agent stay importable from the main Python 3.12 runtime. When
+runner, and SWE-agent stay importable from the main Python 3.12 runtime. Hermes
+is baked into `/opt/loom-agents/hermes` via thin `uv pip install` of pinned
+`hermes-agent` (core deps only; never Nous `install.sh` / Node). Populate
+`third_party/hermes-agent` to bake from a local tree and avoid GitHub 429s.
+When Hermes is installed dynamically on a thin task image, the adapter's
+`install_script` no-ops if that venv already exists, otherwise creates it with
+the same pin. When
 OpenHands is installed dynamically on top of a benchmark task image, the
 adapter instead creates `/opt/loom-agents/openhands-sdk` with pinned `uv` and
 Python 3.12, installs `loom-launcher` from a pinned repository subdirectory ref,

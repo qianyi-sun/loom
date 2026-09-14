@@ -71,6 +71,9 @@ class EventKind(StrEnum):
     # OpenHands SDK native runtime (#1590)
     OPENHANDS_SDK_RUNTIME_PROVENANCE = "openhands_sdk_runtime_provenance"
     OPENHANDS_SDK_ARTIFACT_REF = "openhands_sdk_artifact_ref"
+    # Hermes launcher native runtime
+    HERMES_RUNTIME_PROVENANCE = "hermes_runtime_provenance"
+    HERMES_ARTIFACT_REF = "hermes_artifact_ref"
 
 
 class _EventBase(BaseModel):
@@ -546,6 +549,26 @@ class OpenHandsSdkArtifactRefEvent(_EventBase):
     share_policy: Literal["restricted", "shared"]
 
 
+# Hermes launcher native runtime ───────────────────────────────────────────────
+
+
+class HermesRuntimeProvenanceEvent(_EventBase):
+    kind: Literal[EventKind.HERMES_RUNTIME_PROVENANCE] = EventKind.HERMES_RUNTIME_PROVENANCE
+    hermes_version: str
+    hermes_agent_ref: str
+    loom_bridge_revision: str
+    enabled_toolsets: list[str] = Field(default_factory=lambda: ["terminal", "file"])
+
+
+class HermesArtifactRefEvent(_EventBase):
+    kind: Literal[EventKind.HERMES_ARTIFACT_REF] = EventKind.HERMES_ARTIFACT_REF
+    artifact_kind: Literal["hermes.session"]
+    sandbox_path: str
+    content_hash: str
+    size_bytes: int = Field(ge=0)
+    share_policy: Literal["restricted", "shared"]
+
+
 TrajectoryEvent = Annotated[
     TrialStartEvent
     | TrialEndEvent
@@ -589,6 +612,8 @@ TrajectoryEvent = Annotated[
     | Terminus2EpisodeCheckpointEvent
     | Terminus2RecoveryFailedEvent
     | OpenHandsSdkRuntimeProvenanceEvent
-    | OpenHandsSdkArtifactRefEvent,
+    | OpenHandsSdkArtifactRefEvent
+    | HermesRuntimeProvenanceEvent
+    | HermesArtifactRefEvent,
     Field(discriminator="kind"),
 ]

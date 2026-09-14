@@ -242,6 +242,7 @@ _ADAPTER_OVERRIDES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "aider": (("*",), ("api", "local-server", "hf")),
     "openhands": (("*",), ("api", "local-server", "hf")),
     "openhands-sdk": (("*",), ("api", "local-server", "hf")),
+    "hermes": (("*",), ("api", "local-server", "hf")),
     "opencode": (("*",), ("api", "local-server", "hf")),
     "swe-agent": (("*",), ("api", "local-server", "hf")),
     "mini-swe-agent": (("*",), ("api", "local-server", "hf")),
@@ -266,6 +267,7 @@ _ADAPTER_CAPTURE: dict[str, str] = {
     "opencode": "stdout_jsonl",
     "openhands": "stdout_jsonl",
     "openhands-sdk": "stdout_jsonl",
+    "hermes": "stdout_jsonl",
     "qwen-cli": "pty",
     "swe-agent": "log_file",
     # terminus-2: builtin Harbor-embedded runtime — see _BUILTIN.
@@ -298,6 +300,10 @@ _ADAPTER_REQUIRED_PYTHON_MODULES: dict[str, tuple[str, ...]] = {
         "openhands.sdk",
         "openhands.tools.terminal",
     ),
+    "hermes": (
+        "loom_launcher.hermes_runner",
+        "run_agent",
+    ),
     "swe-agent": ("sweagent.run.run_single",),
 }
 
@@ -312,6 +318,7 @@ _ADAPTER_REQUIRED_PACKAGES: dict[str, tuple[str, ...]] = {
     "opencode": ("opencode-ai",),
     "openhands": ("openhands-sdk", "openhands-tools"),
     "openhands-sdk": ("openhands-sdk", "openhands-tools"),
+    "hermes": ("hermes-agent",),
     "qwen-cli": ("@qwen-code/qwen-code",),
     "swe-agent": ("git+https://github.com/SWE-agent/SWE-agent",),
 }
@@ -328,6 +335,7 @@ _ADAPTER_RUNTIME_READY: dict[str, bool] = {
     "opencode": True,
     "openhands": True,
     "openhands-sdk": True,
+    "hermes": True,
     "qwen-cli": True,
     "swe-agent": True,
 }

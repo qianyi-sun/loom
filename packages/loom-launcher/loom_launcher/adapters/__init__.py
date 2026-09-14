@@ -10,6 +10,7 @@ from loom_launcher.adapters import (
     codex,  # noqa: F401 — self-registers
     gemini_cli,  # noqa: F401 — self-registers
     hello,  # noqa: F401 — self-registers
+    hermes,  # noqa: F401 — self-registers
     kimi_cli,  # noqa: F401 — self-registers
     mini_swe_agent,  # noqa: F401 — self-registers
     opencode,  # noqa: F401 — self-registers

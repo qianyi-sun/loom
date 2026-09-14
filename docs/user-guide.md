@@ -430,6 +430,21 @@ loom eval batch delivery-bundle <batch-id> \
   --output openhands-export-delivery.tar.gz
 ```
 
+Use `--mode hermes-export` when selected trials ran with the `hermes` agent
+and the trajectory contains `hermes_runtime_provenance` plus a hash-verified
+native session at `native/hermes_session.json`. This mode projects execution
+history from the Hermes session message list (prompts, reasoning, tool calls,
+observations), keeps model input in `model_input_trajectory.json`, and
+preserves the live audit spine as `loom_trajectory.jsonl`. Like
+`openhands-export`, it may pack `share_policy: restricted` natives; plain
+`raw-harbor` still omits them:
+
+```bash
+loom eval batch delivery-bundle <batch-id> \
+  --mode hermes-export \
+  --output hermes-export-delivery.tar.gz
+```
+
 `delivery-bundle` asks the service to choose the final trial for each
 task/sample/combination coordinate across the main batch and any explicit
 supplemental rerun batches. Later linked reruns replace earlier failed attempts

@@ -47,9 +47,14 @@ RUN set -eux; \
 
 RUN set -eux; \
     python -m pip install --upgrade pip setuptools wheel; \
-    python -m pip install -r /tmp/agent-sandbox/python-requirements.txt
+    grep -vE '^\s*hermes-agent(@|\s|$)' /tmp/agent-sandbox/python-requirements.txt \
+      > /tmp/agent-sandbox/python-requirements-no-hermes.txt; \
+    python -m pip install -r /tmp/agent-sandbox/python-requirements-no-hermes.txt
 
 COPY packages/loom-launcher /tmp/agent-sandbox/loom-launcher
+# Baked launcher source for hermes (and other) dedicated venvs — avoids cold
+# git installs of loom-launcher when the image already ships the runner.
+COPY packages/loom-launcher /opt/loom-src/loom-launcher
 
 RUN set -eux; \
     python -m pip install -e /tmp/agent-sandbox/loom-launcher
@@ -64,6 +69,30 @@ RUN set -eux; \
     /opt/agent-runtimes/python-cli/mini-swe-agent/bin/python -m pip install "$(grep ^mini-swe-agent== /tmp/agent-sandbox/python-cli-requirements.txt)"; \
     ln -sf /opt/agent-runtimes/python-cli/mini-swe-agent/bin/mini-swe-agent /usr/local/bin/mini-swe-agent
 
+# Optional vendored Hermes tree (populate third_party/hermes-agent to skip GitHub).
+COPY third_party/hermes-agent /opt/src/hermes-agent-candidate/
+
+# Bake Hermes into /opt/loom-agents/hermes (thin uv pip; never Nous install.sh).
+RUN set -eux; \
+    curl -LsSf https://astral.sh/uv/0.11.21/install.sh | env UV_INSTALL_DIR=/opt/loom-agents/bin sh; \
+    ln -sf /opt/loom-agents/bin/uv /usr/local/bin/uv; \
+    export UV_PYTHON_INSTALL_DIR=/opt/loom-agents/python; \
+    export UV_CACHE_DIR=/opt/loom-agents/uv-cache; \
+    mkdir -p "$UV_PYTHON_INSTALL_DIR" "$UV_CACHE_DIR"; \
+    uv python install 3.12; \
+    uv venv --python 3.12 /opt/loom-agents/hermes; \
+    if [ -f /opt/src/hermes-agent-candidate/pyproject.toml ]; then \
+      rm -rf /opt/src/hermes-agent; \
+      mv /opt/src/hermes-agent-candidate /opt/src/hermes-agent; \
+      uv pip install --python /opt/loom-agents/hermes/bin/python --no-cache-dir /opt/src/hermes-agent; \
+    else \
+      rm -rf /opt/src/hermes-agent-candidate; \
+      HERMES_REQ="$(grep -E '^hermes-agent@' /tmp/agent-sandbox/python-requirements.txt | head -n1)"; \
+      uv pip install --python /opt/loom-agents/hermes/bin/python --no-cache-dir "$HERMES_REQ"; \
+    fi; \
+    uv pip install --python /opt/loom-agents/hermes/bin/python --no-cache-dir /opt/loom-src/loom-launcher; \
+    /opt/loom-agents/hermes/bin/python -c "from run_agent import AIAgent; import loom_launcher.hermes_runner"
+
 RUN set -eux; \
     command -v claude; \
     command -v codex; \
@@ -76,6 +105,9 @@ RUN set -eux; \
     python -c 'import importlib; importlib.import_module("openhands.sdk")'; \
     python -c 'import importlib; importlib.import_module("openhands.tools.terminal")'; \
     python -c 'import importlib; importlib.import_module("loom_launcher.openhands_sdk_runner")'; \
+    test -x /opt/loom-agents/hermes/bin/python; \
+    /opt/loom-agents/hermes/bin/python -c 'from run_agent import AIAgent'; \
+    /opt/loom-agents/hermes/bin/python -c 'import importlib; importlib.import_module("loom_launcher.hermes_runner")'; \
     command -v tmux; \
     python -c 'import importlib; importlib.import_module("sweagent.run.run_single")'
 

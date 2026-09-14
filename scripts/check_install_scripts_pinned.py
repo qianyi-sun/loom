@@ -65,7 +65,16 @@ _PIP_FLAGS_TO_SKIP = frozenset({
 
 def _looks_pinned_pip(token: str) -> bool:
     """A pip package spec is acceptable if it contains `==` (pinned
-    version), `@` (URL/git spec), or `-r` (requirements file)."""
+    version), `@` (URL/git spec), or `-r` (requirements file).
+
+    Absolute / env-expanded filesystem paths are also allowed: adapters may
+    install from a vendored tree baked into the sandbox image (e.g. Hermes
+    at ``/opt/src/hermes-agent``) to avoid GitHub rate limits. The tree itself
+    is locked by the image bake / SHA pin documented beside the adapter.
+    """
+    stripped = token.strip().strip("'\"")
+    if stripped.startswith("/") or stripped.startswith("$"):
+        return True
     return "==" in token or "@" in token or token.startswith("-")
 
 

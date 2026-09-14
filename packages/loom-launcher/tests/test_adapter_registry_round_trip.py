@@ -23,6 +23,7 @@ _TABLE: list[tuple[str, str, str, str, str, bool]] = [
     ("aider", "openai_chat", "OPENAI_API_KEY", "OPENAI_API_BASE", "openai/{model_id}", True),
     ("openhands", "openai_chat", "LLM_API_KEY", "LLM_BASE_URL", "openai/{model_id}", False),
     ("openhands-sdk", "openai_chat", "LLM_API_KEY", "LLM_BASE_URL", "openai/{model_id}", False),
+    ("hermes", "openai_chat", "OPENAI_API_KEY", "OPENAI_BASE_URL", "{model_id}", False),
     ("swe-agent", "openai_chat", "OPENAI_API_KEY", "OPENAI_API_BASE", "openai/{model_id}", False),
     (
         "mini-swe-agent",

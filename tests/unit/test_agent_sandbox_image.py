@@ -50,8 +50,15 @@ def test_agent_sandbox_image_files_exist_and_are_used_by_dockerfile() -> None:
     assert 'importlib.import_module("openhands.sdk")' in dockerfile
     assert 'importlib.import_module("openhands.tools.terminal")' in dockerfile
     assert 'importlib.import_module("loom_launcher.openhands_sdk_runner")' in dockerfile
+    assert "/opt/loom-agents/hermes" in dockerfile
+    assert "hermes-agent" in dockerfile or "hermes" in dockerfile.lower()
+    assert 'from run_agent import AIAgent' in dockerfile
+    assert 'importlib.import_module("loom_launcher.hermes_runner")' in dockerfile
     assert "command -v tmux" in dockerfile
     assert "openhands_sdk.run" not in dockerfile
+    assert "hermes-agent.nousresearch.com/install.sh" not in dockerfile
+    assert "install.sh" in dockerfile  # astral uv only; guarded above against Nous
+    assert "astral.sh/uv" in dockerfile
 
 
 def test_agent_sandbox_renders_and_executes_the_shared_aider_installer() -> None:

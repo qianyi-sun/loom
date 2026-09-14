@@ -538,7 +538,7 @@ def _artifact_patterns(ctx: TrialContext, step: StepConfig) -> list[str]:
     # that namespace, including broad globs and normalized traversal aliases;
     # only the exact names selected below may reach ArtifactCollector.
     patterns = [pattern for pattern in step.artifacts if not _is_reserved_verifier_pattern(pattern)]
-    if ctx.agent.name in {"terminus-2", "openhands-sdk"}:
+    if ctx.agent.name in {"terminus-2", "openhands-sdk", "hermes"}:
         loom_agent = ".loom/agent/**"
         if loom_agent not in patterns:
             patterns.append(loom_agent)

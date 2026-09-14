@@ -122,12 +122,12 @@ def test_displayed_agent_catalog_returns_expected_count() -> None:
     # Launcher adapters (production only; hello is an internal fixture).
     assert {
         "aider", "claude-code", "codex", "gemini-cli",
-        "kimi-cli", "mini-swe-agent", "opencode", "openhands",
+        "hermes", "kimi-cli", "mini-swe-agent", "opencode", "openhands",
         "openhands-sdk", "qwen-cli", "swe-agent", "terminus-2",
     }.issubset(names)
     assert "hello" not in names
     # Total catalog cardinality — bump intentionally when adding agents.
-    assert len(agents) == 14, sorted(names)
+    assert len(agents) == 15, sorted(names)
 
 
 def test_every_displayed_agent_is_service_mode_ready() -> None:

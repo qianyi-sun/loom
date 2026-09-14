@@ -1810,6 +1810,7 @@ def dispatch(argv: list[str]) -> int:
             "raw-harbor-tb2-v1",
             "raw-harbor-tb2-v2",
             "openhands-export",
+            "hermes-export",
         ],
         default="lightweight",
         help=(
@@ -1819,7 +1820,8 @@ def dispatch(argv: list[str]) -> int:
             "versioned TB2-facing delivery profile; raw-harbor-tb2-v2 "
             "projects execution from typed terminus2 events and native Harbor "
             "artifacts; openhands-export projects execution from native "
-            "OpenHands SDK events and provider logs."
+            "OpenHands SDK events and provider logs; hermes-export projects "
+            "execution from native Hermes session messages and provider logs."
         ),
     )
     p_bdel.add_argument(

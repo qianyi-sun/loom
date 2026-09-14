@@ -177,6 +177,7 @@ def test_catalog_entries_include_service_mode_runtime_contract() -> None:
         "opencode",
         "openhands",
         "openhands-sdk",
+        "hermes",
         "qwen-cli",
         "swe-agent",
     }
@@ -247,6 +248,15 @@ def test_catalog_package_hints_use_verified_install_sources() -> None:
     assert by_name["openhands"]["runtime_contract"]["required_executables"] == [
         "tmux",
     ]
+    assert by_name["hermes"]["runtime_contract"]["required_python_modules"] == [
+        "loom_launcher.hermes_runner",
+        "run_agent",
+    ]
+    assert by_name["hermes"]["runtime_contract"]["required_packages"] == [
+        "hermes-agent",
+    ]
+    assert by_name["hermes"]["runtime_contract"]["required_executables"] == []
+    assert by_name["hermes"]["runtime_contract"]["capture"] == "stdout_jsonl"
 
 
 def test_opencode_runtime_ready_allows_compatible_model() -> None:

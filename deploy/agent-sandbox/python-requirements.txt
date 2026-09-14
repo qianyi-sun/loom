@@ -3,3 +3,7 @@
 openhands-sdk==1.34.0
 openhands-tools==1.34.0
 -e git+https://github.com/SWE-agent/SWE-agent@v1.1.0#egg=sweagent
+# Hermes is baked into /opt/loom-agents/hermes (see Dockerfile.agent-sandbox),
+# not the system interpreter. Pin declared here for catalog contract matching;
+# the Dockerfile filters this line out of `pip install -r` for system Python.
+hermes-agent@git+https://github.com/NousResearch/hermes-agent.git@c8aa5608c24e3636e77c267650c0f1f52e44adb0

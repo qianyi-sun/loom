@@ -20,6 +20,7 @@ from loom_service.delivery_export import (
     latest_delivery_export,
     load_delivery_artifact,
 )
+from loom_service.delivery_export_hermes import HermesExportError
 from loom_service.delivery_export_openhands import OpenHandsExportError
 from loom_service.delivery_export_tb2_v2 import Tb2V2ExportError
 from loom_service.dependencies import SessionAndCtx
@@ -36,6 +37,7 @@ class _DeliveryExportRequest(BaseModel):
         "raw-harbor-tb2-v1",
         "raw-harbor-tb2-v2",
         "openhands-export",
+        "hermes-export",
     ] = Field(
         default="lightweight",
         description=(
@@ -47,7 +49,9 @@ class _DeliveryExportRequest(BaseModel):
             "`raw-harbor-tb2-v2` projects execution from typed terminus2 events "
             "and native Harbor artifacts. "
             "`openhands-export` projects execution from native OpenHands SDK "
-            "events and provider logs."
+            "events and provider logs. "
+            "`hermes-export` projects execution from native Hermes session "
+            "messages and provider logs."
         ),
     )
     supplemental_batch_ids: list[UUID] | None = Field(
@@ -113,7 +117,7 @@ async def create_batch_delivery_export(
             mode=mode,
             public_base_url=public_base_url(request),
         )
-    except (DeliveryExportError, Tb2V2ExportError, OpenHandsExportError) as exc:
+    except (DeliveryExportError, Tb2V2ExportError, OpenHandsExportError, HermesExportError) as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
@@ -133,7 +137,7 @@ async def download_delivery_export(
             artifact_id=artifact_id,
         )
         bucket, key, filename = artifact_storage_for_download(artifact)
-    except (DeliveryExportError, Tb2V2ExportError, OpenHandsExportError) as exc:
+    except (DeliveryExportError, Tb2V2ExportError, OpenHandsExportError, HermesExportError) as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     return stream_object_response(
         client=request.app.state.minio_client,
