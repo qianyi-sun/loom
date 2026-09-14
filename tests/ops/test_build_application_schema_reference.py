@@ -144,3 +144,14 @@ async def test_reference_cancellation_reaps_real_migration_child_before_database
         if child is not None and child.returncode is None:
             child.kill()
             await child.wait()
+
+
+def test_script_path_entrypoint_rejects_arguments_without_provisioning():
+    import subprocess
+    result = subprocess.run(
+        [builder.sys.executable, str(builder._ROOT / "scripts/build_application_schema_reference.py"), "invalid"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert result.stderr.strip() == "reference builder accepts no arguments or database address"
