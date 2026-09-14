@@ -75,7 +75,7 @@ class LostAcknowledgementError(RuntimeError):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("autovacuum", [False, True])
-async def test_handoff_retries_rolled_back_quiescence_only_for_autovacuum(transfer_database, monkeypatch, autovacuum):
+async def test_handoff_retries_rolled_back_quiescence_only_for_autovacuum(transfer_database, monkeypatch, autovacuum):  # noqa: F811
     from loom import application_handoff_completion as module
 
     transfer = module.transfer_application_ownership

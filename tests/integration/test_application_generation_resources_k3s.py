@@ -1,6 +1,5 @@
 """Real API defaulting and lost-reply retirement for protected generations."""
 
-import os
 import shutil
 import subprocess
 from dataclasses import replace
@@ -26,12 +25,13 @@ from tests.loom_cli.rollout.operator.test_protected_staging_capacity_runtime imp
     _database_component,
 )
 
-pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1",
-    reason="set LOOM_RUN_DISPOSABLE_K3S=1 for disposable Kubernetes conformance")
 
-
+@pytest.mark.timeout(240)
 @pytest.mark.parametrize("capacity", [False, True])
 def test_generation_lost_creation_reply_and_exact_retirement(tmp_path, monkeypatch, capacity):
+    from kubernetes import client
+
+    original_configuration = client.Configuration.get_default_copy()
     kubectl = shutil.which("kubectl")
     assert kubectl is not None
     container = _start_k3s()
@@ -88,4 +88,5 @@ def test_generation_lost_creation_reply_and_exact_retirement(tmp_path, monkeypat
             assert len(creations) == 2
         assert core.list_namespaced_secret("loom-staging").items == []
     finally:
+        client.Configuration.set_default(original_configuration)
         container.stop()

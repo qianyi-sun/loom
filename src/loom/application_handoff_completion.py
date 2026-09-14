@@ -9,12 +9,15 @@ a component terminal or authority to retire the CNPG input fence.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from psycopg.errors import ObjectNotInPrerequisiteState
 from psycopg.pq import TransactionStatus
 
 from loom.application_database_admission import (
+    ApplicationDatabaseAdmissionError,
     ApplicationDatabaseAdmissionTarget,
     ApplicationDatabaseCoordinationGuard,
     ApplicationDatabaseHandoffBackend,
@@ -129,26 +132,42 @@ def complete_application_handoff_database(
 
     login = login_enabled()
     if not login:
-        reclose_application_database_for_handoff_recovery(
-            maintenance, target=target, provisioner_role=provisioner,
-            handoff_backend=handoff_backend, coordination_guard=coordination_guard,
-            runtime_password=password,
-        )
-        require_application_database_drained(
-            maintenance, target=target, provisioner_role=provisioner,
-            handoff_backend=handoff_backend, coordination_guard=coordination_guard,
-            runtime_password=password,
-        )
-        _require_retired_client_work(
-            maintenance, target=target, handoff_backend=handoff_backend,
-            coordination_guard=coordination_guard, provisioner=provisioner,
-        )
-        with connection.transaction():
-            transfer_application_ownership(
-                connection, owner_role=target.successor_role, role_bindings=bindings,
-                runtime_password=password, admission_target=target,
-                coordination_guard=coordination_guard, schema_acl_profile=schema_acl_profile, schema_revision=schema_revision,
-            )
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                reclose_application_database_for_handoff_recovery(
+                    maintenance, target=target, provisioner_role=provisioner,
+                    handoff_backend=handoff_backend, coordination_guard=coordination_guard,
+                    runtime_password=password,
+                )
+                require_application_database_drained(
+                    maintenance, target=target, provisioner_role=provisioner,
+                    handoff_backend=handoff_backend, coordination_guard=coordination_guard,
+                    runtime_password=password,
+                )
+                _require_retired_client_work(
+                    maintenance, target=target, handoff_backend=handoff_backend,
+                    coordination_guard=coordination_guard, provisioner=provisioner,
+                )
+                with connection.transaction():
+                    transfer_application_ownership(
+                        connection, owner_role=target.successor_role, role_bindings=bindings,
+                        runtime_password=password, admission_target=target,
+                        coordination_guard=coordination_guard, schema_acl_profile=schema_acl_profile, schema_revision=schema_revision,
+                    )
+                break
+            except (ApplicationDatabaseAdmissionError, ObjectNotInPrerequisiteState) as exc:
+                message = exc.diag.message_primary if isinstance(exc, ObjectNotInPrerequisiteState) else str(exc)
+                if (message not in {"application database sessions are not drained",
+                        "application trigger handoff requires quiescent legacy authority"}
+                        or time.monotonic() >= deadline
+                        or not _autovacuum_active(maintenance, target=target, handoff_backend=handoff_backend,
+                            coordination_guard=coordination_guard, provisioner=provisioner)):
+                    raise
+                # ALLOW_CONNECTIONS does not exclude autovacuum. A refused SQL
+                # transaction has rolled back; retry only under the same original
+                # authority, repeating all closure, drainage and schema checks.
+                time.sleep(0.1)
         reopen_application_database_after_handoff(
             maintenance, target=target, provisioner_role=provisioner,
             handoff_backend=handoff_backend, coordination_guard=coordination_guard,
@@ -168,6 +187,24 @@ def complete_application_handoff_database(
     if not login_enabled():
         raise RuntimeError("application handoff completion login changed")
     return ApplicationHandoffDatabaseOutcome(target, coordination_guard)
+
+
+def _autovacuum_active(
+    maintenance: ApplicationDatabaseConnection, *, target: ApplicationDatabaseAdmissionTarget,
+    handoff_backend: ApplicationDatabaseHandoffBackend,
+    coordination_guard: ApplicationDatabaseCoordinationGuard, provisioner: str,
+) -> bool:
+    _require_retired_client_work(maintenance, target=target, handoff_backend=handoff_backend,
+        coordination_guard=coordination_guard, provisioner=provisioner)
+    with _maintenance_transaction(maintenance, database=target.database, provisioner_role=provisioner):
+        maintenance.execute("SET TRANSACTION READ ONLY")
+        _require_handoff_identity(maintenance, target, handoff_backend)
+        _require_coordination_guard(maintenance, target, coordination_guard)
+        maintenance.execute("SELECT pg_catalog.pg_stat_clear_snapshot()")
+        return maintenance.execute(application_sql(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE datid={} "
+            "AND backend_type='autovacuum worker')", target.database_oid,
+        )).fetchone() == (True,)
 
 
 def _require_retired_client_work(

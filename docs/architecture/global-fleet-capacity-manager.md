@@ -700,6 +700,12 @@ observational terminal at ordinal two. Migration and capacity require that curre
 terminal before consuming the original handoff evidence. Historical observations
 cannot authorize another ownership transfer or replace current operation guards.
 
+PostgreSQL can launch autovacuum while database admission is closed. A quiescence
+refusal rolls back the ownership transaction; completion may wait up to thirty
+seconds when a current autovacuum worker is observed. Each retry retains the
+original peer and guard and repeats closure, complete drainage and schema checks.
+Other refusals and surviving client writers remain errors.
+
 Capacity bootstrap uses a permanent migrator with exactly the application owner
 and guard owner memberships. Its SQL helpers retain both owner identities, keep
 the permanent roles sealed after session retirement and verify the original
