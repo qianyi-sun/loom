@@ -823,7 +823,7 @@ async def test_reservation_persists_trial_lease_command_and_history_atomically(
             assert cost_reservation.estimated_cost_microusd == 3_600_000
             assert cost_reservation.requested_cpu_millis == 1_000
             assert cost_reservation.requested_memory_mib == 1_024
-            assert cost_reservation.requested_ephemeral_storage_mib == 4_148
+            assert cost_reservation.requested_ephemeral_storage_mib == 2_048
             assert history.snapshot_json["selected_pool_id"] == "nebius-cpu"
             projection = execution_lease_projection(persisted)
             assert projection["selected_pool_id"] == "nebius-cpu"
@@ -4098,12 +4098,14 @@ async def test_actuator_records_unavailable_before_accepting_an_already_absent_j
         await engine.dispose()
 
 
-@pytest.mark.parametrize("class_cpu_limit", [None, 5_000])
+@pytest.mark.parametrize("class_cpu_limit", [None, 4_500])
+@pytest.mark.parametrize("independent_controller", [False, True])
 async def test_private_terminus_sandboxes_reserve_full_pod_resources(
     postgres_url: str,
     class_cpu_limit: int | None,
+    independent_controller: bool,
 ) -> None:
-    """Three 2 CPU / 4 GiB containers must reserve/admit 6 CPU / 12 GiB."""
+    """Admission and both reservations include the controller and private sandboxes."""
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)
@@ -4140,6 +4142,13 @@ async def test_private_terminus_sandboxes_reserve_full_pod_resources(
             ),
         }
     )
+    if independent_controller:
+        plan = ExecutionRuntimePlanV1.model_validate({
+            **plan.canonical_payload(),
+            "controller_resources": resources.model_copy(
+                update={"cpu_millis": 1_000, "memory_mib": 2_048}
+            ),
+        })
     requirements = _requirements().model_copy(update={"cpu_millis": 2_000, "memory_mib": 4_096})
     try:
         async with sessions() as session:
@@ -4164,7 +4173,7 @@ async def test_private_terminus_sandboxes_reserve_full_pod_resources(
         async with sessions() as session:
             if class_cpu_limit is not None:
                 # The task's own 2 CPU declaration fits this class; its complete
-                # 6 CPU Pod does not. No lease or reservation may survive.
+                # 5 or 6 CPU Pod does not. No lease or reservation may survive.
                 with pytest.raises(ServiceExecutionConflict, match="cpu_limit_exceeded"):
                     async with session.begin_nested():
                         await _reserve(
@@ -4227,9 +4236,9 @@ async def test_private_terminus_sandboxes_reserve_full_pod_resources(
                 )
             ).scalar_one()
             for reserved in (cost, capacity):
-                assert reserved.requested_cpu_millis == 6_000
-                assert reserved.requested_memory_mib == 12_288
-            assert cost.requested_ephemeral_storage_mib == 8_244
+                assert reserved.requested_cpu_millis == (5_000 if independent_controller else 6_000)
+                assert reserved.requested_memory_mib == (10_240 if independent_controller else 12_288)
+            assert cost.requested_ephemeral_storage_mib == 6_144
             assert capacity.requested_storage_mib == cost.requested_ephemeral_storage_mib
             trial = await session.get(Trial, trial_id)
             assert trial is not None and (trial.state, trial.attempt_count) == ("claimed", 1)

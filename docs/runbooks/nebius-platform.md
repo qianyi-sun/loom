@@ -777,6 +777,18 @@ configuration; omission leaves native building disabled:
 
 `cache_bucket` is optional. When absent, cache credentials and import/export are
 omitted. Source, backup and trajectory buckets cannot be used as build cache.
+`max_concurrent` bounds unfinished builds, including cleanup, and renders the
+matching build-namespace quota. For a batch of uncached task environments, start
+with two concurrent builds if the shared execution pool has room for their
+CPU, memory and temporary storage. Apply the operator configuration through the
+normal renderer/deployer; changing only the actuator environment or namespace
+quota leaves the two limits inconsistent. Builds still compete with executions
+through shared capacity admission. Image-unready Trials have no execution Pods,
+so increasing a node-group ceiling alone does not parallelize their preparation.
+Verify overlapping build attempts and resource release with disposable no-model
+fixtures before increasing concurrency further; retained image cache avoids
+repeating this cold-build cost.
+
 Before activation, provision these Secrets through the same protected operator
 path as the other platform credentials in `<execution_namespace>-build`:
 

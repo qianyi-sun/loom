@@ -223,6 +223,7 @@ class ExecutionRuntimePlanV1(_Strict):
     run_as_group: int = Field(default=65532, gt=0, le=2_147_483_647)
     fs_group: int = Field(default=65532, gt=0, le=2_147_483_647)
     task_resources: ContainerResourcesV1
+    controller_resources: ContainerResourcesV1 | None = None
     workspace_mib: int = Field(gt=0, le=1_048_576)
     runtime_volume_mib: int = Field(gt=0, le=4096)
     termination_grace_seconds: int = Field(default=30, ge=1, le=300)
@@ -303,6 +304,21 @@ class ExecutionRuntimePlanV1(_Strict):
             if any(item not in known for item in sidecar.depends_on):
                 raise ValueError("sidecar dependencies must reference earlier sidecars")
             known.add(sidecar.role_name)
+        if self.controller_resources is not None:
+            sandboxes = [sidecar for sidecar in self.sidecars if sidecar.private_sandbox]
+            if (
+                self.agent_image_ref is None
+                or self.execution_role != "attempt"
+                or self.composition != RuntimeComposition.INIT_PAYLOAD
+                or {sidecar.role_name for sidecar in sandboxes}
+                != {"task-sandbox", "verifier-sandbox"}
+            ):
+                raise ValueError("controller resources require an isolated attempt controller")
+            if any(sidecar.resources != self.task_resources for sidecar in sandboxes):
+                raise ValueError("controller sizing must preserve task and verifier resources")
+            if (self.controller_resources.ephemeral_storage_mib
+                    != self.task_resources.ephemeral_storage_mib):
+                raise ValueError("controller sizing must preserve task-derived storage")
         source_paths = [item.source_path for item in self.output_declarations]
         bundle_paths = [item.relative_path for item in self.output_declarations]
         if len(source_paths) != len(set(source_paths)) or len(bundle_paths) != len(
@@ -314,6 +330,8 @@ class ExecutionRuntimePlanV1(_Strict):
     def canonical_payload(self) -> dict[str, object]:
         payload = self.model_dump(mode="json")
         # Keep existing published plans byte-compatible when new fields are unused.
+        if self.controller_resources is None:
+            payload.pop("controller_resources")
         if self.agent_image_ref is None:
             payload.pop("agent_image_ref")
         if self.task_image_materialization_id is None:
@@ -322,6 +340,10 @@ class ExecutionRuntimePlanV1(_Strict):
             if not sidecar["private_sandbox"]:
                 sidecar.pop("private_sandbox")
         return payload
+
+    @property
+    def execution_resources(self) -> ContainerResourcesV1:
+        return self.controller_resources or self.task_resources
 
     def published_image_refs(self) -> tuple[str, ...]:
         """Images executed with platform trust, separate from prepared task sandboxes.
@@ -349,14 +371,14 @@ def runtime_pod_resources(plan: ExecutionRuntimePlanV1) -> ContainerResourcesV1:
 
     return ContainerResourcesV1(
         cpu_millis=max(
-            50, plan.task_resources.cpu_millis + sum(s.resources.cpu_millis for s in plan.sidecars)
+            50, plan.execution_resources.cpu_millis + sum(s.resources.cpu_millis for s in plan.sidecars)
         ),
         memory_mib=max(
-            64, plan.task_resources.memory_mib + sum(s.resources.memory_mib for s in plan.sidecars)
+            64, plan.execution_resources.memory_mib + sum(s.resources.memory_mib for s in plan.sidecars)
         ),
         ephemeral_storage_mib=max(
             32,
-            plan.task_resources.ephemeral_storage_mib
+            plan.execution_resources.ephemeral_storage_mib
             + sum(s.resources.ephemeral_storage_mib for s in plan.sidecars),
         ),
     )

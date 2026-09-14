@@ -9,6 +9,7 @@ from loom.models.batch import Combination
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 from loom.service_execution_materialization import (
+    ControllerComputeResourcesV1,
     compile_service_execution_plan,
     freeze_agent_runtime_releases,
     runtime_profile_rejections,
@@ -20,9 +21,17 @@ from tests.support.execution_image_admission import signed_image_admission_bundl
 from tests.unit.test_service_execution_materialization import _profile, _provenance, _task, _trial
 
 
-def test_versions_select_exact_controller_and_frozen_trial_json() -> None:
+@pytest.mark.parametrize("independent_controller", [False, True])
+def test_versions_select_exact_controller_and_frozen_trial_json(
+    independent_controller: bool,
+) -> None:
     a, b = release(), release("harbor-b", "9")
     profile = freeze_agent_runtime_releases(_profile(), (a, b))
+    legacy_profile = profile
+    if independent_controller:
+        profile = profile.model_copy(update={
+            "controller_resources": ControllerComputeResourcesV1(cpu_millis=1000, memory_mib=2048),
+        })
     plans = []
     for runtime in (a, b):
         combo = Combination(
@@ -39,6 +48,18 @@ def test_versions_select_exact_controller_and_frozen_trial_json() -> None:
             profile=profile,
         )
         assert plan.agent_image_ref == runtime.agent_image_ref
+        assert plan.runtime_image_ref == profile.runtime_image_ref
+        assert (plan.controller_resources is not None) == independent_controller
+        old_plan = compile_service_execution_plan(
+            task=_task(), trial=trial, task_revision_sha256="sha256:" + "c" * 64,
+            source_provenance=_provenance(), profile=legacy_profile,
+        )
+        # The runtime image supplies the Go plan reader. An older, explicitly
+        # selected Harbor image receives the same Python argv/task/trial inputs;
+        # controller_resources is never injected into those versioned inputs.
+        assert plan.main == old_plan.main
+        assert plan.verifier == old_plan.verifier
+        assert plan.task_input == old_plan.task_input
         assert plan.task_image_ref == _task().environment.docker_image
         assert all(sidecar.image_ref == plan.task_image_ref for sidecar in plan.sidecars)
         assert trial.agent_version in plan.main.environment["LOOM_TASK_TRIAL_JSON"]
