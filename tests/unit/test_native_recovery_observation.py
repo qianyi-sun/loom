@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 
+from loom_capacity_manager.contracts import canonical_digest
 from tests.unit.test_native_recovery_contracts import observation
 
 
@@ -28,11 +29,14 @@ def host(tmp_path, monkeypatch):
         "/proc/sys/kernel/random/boot_id": f"{boot}\n"}
     monkeypatch.setattr(module, "_CGROUP_ROOT", root)
     monkeypatch.setattr(module, "_require_original_identity", lambda: None)
-    monkeypatch.setattr(module, "_require_host_cgroup_namespace", lambda: None)
     monkeypatch.setattr(module, "_read_kernel_text", lambda path, bound: kernel[str(path)])
     monkeypatch.setattr(module, "_require_cgroup_mount", lambda descriptor: module._mount_id(descriptor))
-    kwargs = dict(launch_profile_sha256="c" * 64, node_configuration_sha256="d" * 64,
-        node_id=locator.physical.binding.node_ids[0])
+    namespace = os.stat("/proc/self/ns/cgroup")
+    host_identity = module.NativeRecoveryHostIdentityV1(node_id=locator.physical.binding.node_ids[0],
+        boot_id=boot, original_uid=os.getuid(), original_gid=os.getgid(),
+        cgroup_namespace_device=namespace.st_dev, cgroup_namespace_inode=namespace.st_ino)
+    kwargs = dict(launch_profile_sha256="c" * 64, node_configuration_sha256=canonical_digest(host_identity),
+        host_identity=host_identity)
     return module, locator, kwargs, kernel, root, boot
 
 
@@ -69,7 +73,8 @@ def test_capture_rejects_foreign_or_unsafe_host_scope(host, fault):
     elif fault == "boot":
         kernel["/proc/sys/kernel/random/boot_id"] = "not-a-boot-id\n"
     elif fault == "node":
-        kwargs["node_id"] = "foreign-node"
+        kwargs["host_identity"] = kwargs["host_identity"].model_copy(update={"node_id": "foreign-node"})
+        kwargs["node_configuration_sha256"] = canonical_digest(kwargs["host_identity"])
     elif fault == "locator":
         locator = locator.model_copy(update={"inode": locator.inode + 1})
     elif fault == "private":
@@ -140,3 +145,61 @@ def test_mount_observation_requires_exact_full_cgroup2_mount(tmp_path, monkeypat
         else:
             with pytest.raises(ValueError, match="mount"):
                 module._require_cgroup_mount(fd)
+
+
+@pytest.mark.parametrize("fault", ["exact", "overflow", "symlink", "fifo", "directory", "non-ascii"])
+def test_kernel_reads_are_bounded_nofollow_and_nonblocking(tmp_path, fault):
+    module = import_module("loom_capacity_executor.native_recovery_observation")
+    path = tmp_path / "kernel-file"
+    if fault == "fifo":
+        os.mkfifo(path)
+    elif fault == "directory":
+        path.mkdir()
+    else:
+        path.write_bytes(b"\xff" if fault == "non-ascii" else b"abcde" if fault == "overflow" else b"abcd")
+        if fault == "symlink":
+            target = path.with_name("original")
+            path.rename(target)
+            path.symlink_to(target)
+    if fault == "exact":
+        assert module._read_kernel_text(path, 4) == "abcd"
+    else:
+        with pytest.raises((ValueError, OSError)):
+            module._read_kernel_text(path, 4)
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_cgroup_namespace_must_match_host_proc_init(monkeypatch, changed):
+    from types import SimpleNamespace
+
+    module = import_module("loom_capacity_executor.native_recovery_observation")
+    original_stat = module.os.stat
+
+    def metadata(path, *args, **kwargs):
+        assert path != "/proc/1/ns/cgroup", "unprivileged workers cannot inspect root PID1 namespaces"
+        if path == "/proc/self/ns/cgroup":
+            return SimpleNamespace(st_dev=4, st_ino=100 + int(changed))
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "stat", metadata)
+    host_identity = module.NativeRecoveryHostIdentityV1(node_id="node-a", boot_id=uuid4(),
+        original_uid=1000, original_gid=1000, cgroup_namespace_device=4, cgroup_namespace_inode=100)
+    if changed:
+        with pytest.raises(ValueError, match="namespace"):
+            module._require_host_cgroup_namespace(host_identity)
+    else:
+        module._require_host_cgroup_namespace(host_identity)
+
+
+@pytest.mark.parametrize("field", ["boot_id", "original_uid", "original_gid", "cgroup_namespace_inode", "digest"])
+def test_capture_rejects_stale_or_foreign_installer_identity(host, field):
+    module, locator, kwargs, _, _, _ = host
+    if field == "digest":
+        kwargs["node_configuration_sha256"] = "f" * 64
+    else:
+        original = kwargs["host_identity"]
+        value = uuid4() if field == "boot_id" else getattr(original, field) + 1
+        kwargs["host_identity"] = original.model_copy(update={field: value})
+        kwargs["node_configuration_sha256"] = canonical_digest(kwargs["host_identity"])
+    with pytest.raises(ValueError):
+        module.capture_native_recovery_preparation(locator, **kwargs)
