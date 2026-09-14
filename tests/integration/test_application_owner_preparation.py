@@ -116,3 +116,104 @@ async def test_staging_owner_creation_recovers_only_its_saved_oid(
             assert not list(journal.root.rglob("terminal.json"))
         finally:
             peer.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(role))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transfer_postgres", [17], indirect=True)
+@pytest.mark.parametrize("transfer_database", ["protected-staging"], indirect=True)
+@pytest.mark.parametrize("interruption", [None, "owner", "seal", "admission-record", "close"])
+async def test_initial_database_phase_recovers_each_commit_without_recapturing_closed_target(
+    transfer_database, tmp_path, monkeypatch, interruption,  # noqa: F811
+):
+    from contextlib import nullcontext
+
+    from loom_cli.rollout.operator.protected_application_database_preparation import prepare_protected_application_database
+    from loom_cli.rollout.operator.protected_application_owner_preparation import APPLICATION_OWNER_ROLE
+    from tests.loom_cli.rollout.operator.test_application_credential_recovery import _Runner, _sources
+
+    _, journal = _setup(tmp_path)
+    password = "the-original-runtime-password"
+    plan, live = _sources(tmp_path, password=password)
+    evidence = _guard(plan)
+    request = dict(request_id=plan.request_id, candidate_sha=plan.candidate_sha,
+                   candidate_tree=plan.candidate_tree, generation=evidence.generation)
+    with _closed(transfer_database, request=request) as (peer, maintenance, db_guard, _arguments):
+        maintenance.execute("ALTER DATABASE loom ALLOW_CONNECTIONS true")
+        peer.execute(sql.SQL("ALTER ROLE loom LOGIN INHERIT PASSWORD {}").format(sql.Literal(password)))
+        evidence = MutationGuardEvidence.build(**{
+            k: v for k, v in evidence.to_dict().items()
+            if k not in {"schema_version", "evidence_digest", "database_backend_pid"}
+        }, database_backend_pid=db_guard.info.backend_pid)
+        interrupted = []
+        mutations = []
+
+        class InterruptCommit:
+            def __init__(self, connection):
+                self.connection, self.armed = connection, None
+                self.info = connection.info
+            def execute(self, query):
+                text = query if isinstance(query, str) else query.as_string(self.connection)
+                result = self.connection.execute(query)
+                phase = None
+                if text.startswith("CREATE ROLE "):
+                    phase = "owner"
+                elif text.startswith("ALTER ROLE "):
+                    phase = "seal"
+                elif text.startswith("ALTER DATABASE "):
+                    phase = "close"
+                if phase:
+                    mutations.append(phase)
+                    self.armed = phase
+                return result
+            @contextmanager
+            def transaction(self):
+                with self.connection.transaction():
+                    yield
+                phase, self.armed = self.armed, None
+                if phase == interruption and not interrupted:
+                    interrupted.append(phase)
+                    raise RuntimeError("phase acknowledgement lost")
+
+        wrapped_peer, wrapped_maintenance = InterruptCommit(peer), InterruptCommit(maintenance)
+        class Runner(_Runner):
+            def open_staging_peer_maintenance_database(self):
+                return nullcontext(wrapped_maintenance)
+        runner = Runner(live)
+        record = journal.record_application_admission_recovery
+        publications = []
+        def publish(**kwargs):
+            result = record(**kwargs)
+            publications.append(result)
+            if interruption == "admission-record" and not interrupted:
+                interrupted.append(interruption)
+                raise RuntimeError("phase acknowledgement lost")
+            return result
+        monkeypatch.setattr(journal, "record_application_admission_recovery", publish)
+        outcomes = []
+        def apply(_):
+            journal.retain_application_guard(plan, guard=evidence)
+            assert application_guard_is_retained(tmp_path / "state", request_id=plan.request_id,
+                                                service_uid=os.getuid(), guard=evidence, acknowledge=True)
+            outcomes.append(prepare_protected_application_database(
+                plan, journal=journal, runner=runner, connection=wrapped_peer, guard=evidence))
+            raise RuntimeError("initial database phase verified")
+        try:
+            if interruption:
+                with pytest.raises(RuntimeError, match="acknowledgement lost"):
+                    journal.execute(plan, [_component(apply)])
+            for _ in range(2):
+                with pytest.raises(RuntimeError, match="initial database phase verified"):
+                    journal.execute(plan, [_component(apply)])
+            assert outcomes[0] == outcomes[1] == publications[0]
+            assert len(publications) == 1
+            assert mutations.count("owner") == 1
+            assert mutations.count("close") == 1
+            assert mutations.count("seal") == (2 if interruption == "seal" else 1)
+            assert peer.execute("SELECT rolcanlogin,rolinherit,rolpassword FROM pg_authid WHERE rolname='loom'").fetchone() == (False, False, None)
+            assert peer.execute("SELECT datallowconn,pg_get_userbyid(datdba) FROM pg_database WHERE datname='loom'").fetchone() == (False, "loom")
+            assert outcomes[0].target.successor_role == APPLICATION_OWNER_ROLE
+            assert outcomes[0].coordination_guard.backend.pid == db_guard.info.backend_pid
+            assert not list(journal.root.rglob("terminal.json"))
+        finally:
+            maintenance.execute("ALTER DATABASE loom ALLOW_CONNECTIONS true")
+            peer.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(APPLICATION_OWNER_ROLE)))
