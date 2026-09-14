@@ -585,7 +585,12 @@ bodies. An unknown or modified trigger definer is rejected even when runtime
 EXECUTE privileges are absent, because trigger invocation bypasses that ACL.
 
 The optional successor identity constrains one exact application migrator with
-non-inheriting SET membership in the application owner. It does not authorize a
+non-inheriting SET membership in the application owner. A separately recorded
+capacity guard owner selects the distinct capacity migrator envelope: exactly
+two non-admin inheriting SET memberships, in that guard owner and the application
+owner. The observer verifies the guard owner's saved OID, sealed attributes,
+schema ownership and database scope, and rejects additional memberships and role
+settings in either envelope. It does not authorize a
 role discovered in the live catalog or replace successor credential, Job and
 retirement evidence. Completed replay preserves the historical terminal only
 after these fresh checks; later components certify their own schema and workload
