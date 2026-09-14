@@ -149,3 +149,49 @@ def test_lost_publish_ack_recovers_original_key_and_exact_inventory(tmp_path, mo
     assert module.prepare_controller(**args)["status"] == "prepared-not-observed"
     assert module.IDENTITY.read_bytes() == key
     assert not (module.STATE / "pending.json").exists()
+
+
+def test_output_change_between_validation_and_write_is_not_overwritten(tmp_path, monkeypatch):
+    module, args = _context(tmp_path, monkeypatch)
+    module.prepare_controller(**args)
+    write = module._write
+
+    def race(path, payload, **kwargs):
+        if path == module.IDENTITY:
+            path.write_bytes(b"concurrent change\n")
+        write(path, payload, **kwargs)
+
+    monkeypatch.setattr(module, "_write", race)
+    with pytest.raises(ValueError):
+        module.prepare_controller(**args)
+    assert module.IDENTITY.read_bytes() == b"concurrent change\n"
+
+
+def test_orphan_public_key_symlink_is_rejected_before_keygen(tmp_path, monkeypatch):
+    module, args = _context(tmp_path, monkeypatch)
+    foreign = tmp_path / "foreign"
+    foreign.write_bytes(b"preserve\n")
+    write = module._root_write
+
+    def orphan(path, value):
+        write(path, value)
+        if path == module.STATE / "pending.json":
+            (module.STATE / "identity.pub").symlink_to(foreign)
+
+    monkeypatch.setattr(module, "_root_write", orphan)
+    with pytest.raises(ValueError):
+        module.prepare_controller(**args)
+    assert foreign.read_bytes() == b"preserve\n"
+    assert not (module.STATE / "identity").exists()
+
+
+def test_pending_record_with_extra_authority_fields_is_rejected(tmp_path, monkeypatch):
+    module, args = _context(tmp_path, monkeypatch)
+    module.STATE.mkdir(mode=0o700)
+    (module.STATE / "pending.json").write_bytes(_json({"schema_version": 1,
+        "inventory_sha256": args["inventory_sha256"], "source_sha": "a" * 40,
+        "unexpected": "authority"}))
+    (module.STATE / "pending.json").chmod(0o600)
+    with pytest.raises(ValueError):
+        module.prepare_controller(**args)
+    assert not module.IDENTITY.exists()
