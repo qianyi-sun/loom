@@ -28,6 +28,10 @@ from loom_capacity_agent.build_admission import (
 )
 from loom_capacity_executor.native_artifact_transfer import send_native_artifact
 from loom_capacity_executor.native_build_session import execute_native_build_session
+from loom_capacity_executor.native_mapped_scratch import (
+    capture_native_mapped_scratch,
+    clean_native_mapped_scratch,
+)
 from loom_capacity_executor.native_parent_death import bind_native_parent_death
 from loom_capacity_executor.native_rootless_material import (
     NativeRootlessMaterialV1,
@@ -229,8 +233,13 @@ def run_native_mapped_runtime(spec_path: Path, *, expected_sha256: str,
     spec = read_native_rootless_spec(spec_path, expected_sha256=expected_sha256)
     authority, artifact_channel = _activation_channels()
     with authority, artifact_channel:
+        scratch = None
         if isinstance(spec, NativeRootlessSpecV2):
             prepare_native_rootless_material(spec)
+            # Fail on reused state before feature execution. This root retains
+            # runsc's namespace mount and is not a mapped pruning target.
+            Path(spec.state_root).mkdir(mode=0o700)
+            scratch = capture_native_mapped_scratch(spec)
         result = execute_native_build_session(claim=spec.claim, context=spec.context, layout=spec.layout(),
             workspace=Path(spec.workspace), authority=authority, expected_parent_pid=parent,
             max_artifact_bytes=spec.max_artifact_bytes, max_image_archive_bytes=spec.max_image_archive_bytes)
@@ -241,7 +250,9 @@ def run_native_mapped_runtime(spec_path: Path, *, expected_sha256: str,
             artifact = asyncio.run(send_native_artifact(artifact_channel,
                 archive=Path(spec.workspace) / "output/build/artifacts.tar",
                 claim_digest=spec.context.claim_digest, source_binding_sha256=spec.context.source_binding_sha256,
-                max_artifact_bytes=spec.max_artifact_bytes))
+                max_artifact_bytes=spec.max_artifact_bytes, require_ack=scratch is not None))
+        if scratch is not None and result.supervision.broker_reaped and result.cleanup.confirmed:
+            clean_native_mapped_scratch(scratch)
         return NativeRootlessResultV1(claim_digest=spec.context.claim_digest,
             source_binding_sha256=spec.context.source_binding_sha256,
             client_succeeded=result.supervision.client_succeeded, broker_reaped=result.supervision.broker_reaped,

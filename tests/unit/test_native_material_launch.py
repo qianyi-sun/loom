@@ -66,7 +66,7 @@ def test_versioned_material_spec_is_canonical_fixed_and_disjoint(tmp_path, fault
             module.read_native_rootless_spec(path, expected_sha256=hashlib.sha256(wire).hexdigest())
 
 
-@pytest.mark.parametrize("fail_at", [None, "prepare"])
+@pytest.mark.parametrize("fail_at", [None, "prepare", "capture", "reused-state"])
 def test_mapped_v2_prepares_after_parent_binding_before_any_session(tmp_path, monkeypatch, fail_at):
     from loom_capacity_executor.native_build_session import NativeBuildSessionResult
     from loom_capacity_executor.native_runtime_cleanup import NativeRuntimeCleanupResult
@@ -86,6 +86,9 @@ def test_mapped_v2_prepares_after_parent_binding_before_any_session(tmp_path, mo
         events.append("prepare")
         if fail_at == "prepare":
             raise ValueError("fixture invalid material")
+        if fail_at == "reused-state":
+            (tmp_path / "runsc").mkdir(mode=0o700)
+            (tmp_path / "runsc/foreign").write_text("preserve")
 
     def execute(**kwargs):
         assert events == ["parent", "prepare", "capture"]
@@ -100,6 +103,8 @@ def test_mapped_v2_prepares_after_parent_binding_before_any_session(tmp_path, mo
         assert observed == spec and events == ["parent", "prepare"]
         assert (tmp_path / "runsc").is_dir()
         events.append("capture")
+        if fail_at == "capture":
+            raise ValueError("fixture capture failed")
         return snapshot
 
     def clean(observed):
@@ -116,9 +121,11 @@ def test_mapped_v2_prepares_after_parent_binding_before_any_session(tmp_path, mo
     monkeypatch.setattr(module, "clean_native_mapped_scratch", clean)
     try:
         if fail_at:
-            with pytest.raises(ValueError, match="fixture invalid material"):
+            with pytest.raises((ValueError, FileExistsError)):
                 module.run_native_mapped_runtime(path, expected_sha256=digest, expected_rootless_pid=123)
-            assert events == ["parent", "prepare"]
+            assert events == ["parent", "prepare"] + (["capture"] if fail_at == "capture" else [])
+            if fail_at == "reused-state":
+                assert (tmp_path / "runsc/foreign").read_text() == "preserve"
         else:
             result = module.run_native_mapped_runtime(path, expected_sha256=digest, expected_rootless_pid=123)
             assert result.artifact is None and events == ["parent", "prepare", "capture", "execute", "clean"]
@@ -128,13 +135,14 @@ def test_mapped_v2_prepares_after_parent_binding_before_any_session(tmp_path, mo
             channel.close()
 
 
-@pytest.mark.parametrize("boundary", ["success", "unreaped", "uncertain", "send", "clean"])
+@pytest.mark.parametrize("boundary", ["success", "unreaped", "uncertain", "send", "clean",
+    "unreaped-no-artifact", "uncertain-no-artifact"])
 def test_v2_pruning_requires_confirmed_runtime_and_acknowledged_transfer(tmp_path, monkeypatch, boundary):
     from types import SimpleNamespace
 
     from loom_capacity_agent.build_admission import BuildArtifactV1
 
-    module, spec, path, digest = material_spec(tmp_path)
+    module, _spec, path, digest = material_spec(tmp_path)
     authority, peer = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     artifact, artifact_peer = socket.socketpair()
     events = []
@@ -143,9 +151,9 @@ def test_v2_pruning_requires_confirmed_runtime_and_acknowledged_transfer(tmp_pat
 
     def execute(**kwargs):
         events.append("execute")
-        return SimpleNamespace(artifact=object(),
-            supervision=SimpleNamespace(client_succeeded=True, broker_reaped=boundary != "unreaped"),
-            cleanup=SimpleNamespace(confirmed=boundary != "uncertain"))
+        return SimpleNamespace(artifact=None if boundary.endswith("-no-artifact") else object(),
+            supervision=SimpleNamespace(client_succeeded=True, broker_reaped=not boundary.startswith("unreaped")),
+            cleanup=SimpleNamespace(confirmed=not boundary.startswith("uncertain")))
 
     async def send(*args, **kwargs):
         assert kwargs["require_ack"] is True
@@ -170,13 +178,13 @@ def test_v2_pruning_requires_confirmed_runtime_and_acknowledged_transfer(tmp_pat
     monkeypatch.setattr(module, "send_native_artifact", send)
     monkeypatch.setattr(module, "clean_native_mapped_scratch", clean)
     try:
-        if boundary == "success":
+        if boundary == "success" or boundary.endswith("-no-artifact"):
             result = module.run_native_mapped_runtime(path, expected_sha256=digest, expected_rootless_pid=123)
-            assert result.artifact == value
+            assert result.artifact == (value if boundary == "success" else None)
         else:
             with pytest.raises(ValueError):
                 module.run_native_mapped_runtime(path, expected_sha256=digest, expected_rootless_pid=123)
-        assert events == (["execute"] if boundary in {"unreaped", "uncertain"} else
+        assert events == (["execute"] if boundary.startswith(("unreaped", "uncertain")) else
             ["execute", "ack"] if boundary == "send" else ["execute", "ack", "clean"])
         assert authority.fileno() == artifact.fileno() == -1
     finally:

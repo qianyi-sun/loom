@@ -2134,10 +2134,38 @@ cannot establish host-root trust. V2 alone does not enable installed intake.
 The V2 KVM fixture exercises the unchanged production client for both successful
 builds and expiry during a long-lived feature Dockerfile `RUN`. A read-only
 original-UID fixture observer confirms the guest step in the exact sidecar before
-synthetic authority withholds renewal. Post-run readback verifies exact rendered
-configs, empty runtime inventory, rejected late launch and no artifact publication
+synthetic authority withholds renewal. Post-execution, pre-prune readback verifies
+exact rendered configs, empty runtime inventory, rejected late launch and no artifact publication
 on expiry. This establishes offline runtime behavior, not Slurm death-chain or
 multi-owner installed acceptance.
+
+The V2 mapped runtime creates exclusive runsc state and captures material,
+output and BuildKit mountpoint directory identities before feature execution.
+After broker reap and confirmed runtime cleanup, a successful artifact export
+requires an exact claim/source/header-bound receiver acknowledgment following
+file-mode/file-data and both directory fsyncs. V1 transport remains unchanged;
+V1/V2 mode mismatches fail rather than silently downgrading. This acknowledgment
+proves scoped spool durability, not object publication or retention beyond the
+outer receiver's context lifetime. Timeout, cancellation and missing/mismatched
+acknowledgments cannot authorize pruning.
+
+`clean_native_mapped_scratch` then prunes only the captured fixed roots as mapped
+root. It rechecks private attempt/work ownership and modes and exact captured
+root identities at traversal, uses non-following descriptor-anchored traversal,
+rejects every mount crossing (including same-device bind mounts), and bounds
+entries, depth and elapsed time. It unlinks symlinks themselves and changes modes
+only inside those scratch roots. Errors retain remaining scratch and prevent a
+successful mapped result; absent-at-capture roots are never adopted later.
+Runsc state is deliberately retained: its pinned `null-netns` namespace bind mount
+survives container deletion and belongs to RootlessKit's mount namespace until
+that namespace exits. Mapped pruning never unmounts or traverses it. The real
+fixture waits for the exact launcher and verifies retained-file accessibility in
+the original namespace; that readback is not proof of destruction of every
+namespace reference. Retained state still requires allocation-owned finalization.
+No helper supplies physical release authority or replaces the caller's stopped
+runtime prerequisite. A disposable test-only startup hook checks lifecycle
+fencing before pruning and writes separately bound evidence; missing bundles
+cannot be accepted as proof that late execution was fenced.
 
 `verify_native_installed_release` provides the original-UID, read-only material
 check for the installed entrypoint. A protected manifest digest binds
@@ -2168,10 +2196,13 @@ reads back a canonical V2 spec, and calls `run_native_outer_build`; it neither
 creates another capacity authority nor retries ambiguous upload/outcome writes.
 Before mapped scratch exists, a fresh attempt directory retains an fsynced,
 credential-free `recovery.json` with physical worker/config/release and directory
-inode identity. Replays cannot reuse that directory. Errors, cancellation and
-successful outcomes retain the locator and scratch for allocation recovery;
-the original UID cannot safely recursively remove subordinate-owned private
-output. The executable is not wired into fleet intake yet. Actual immutable
+inode identity. Replays cannot reuse that directory. Normal confirmed V2
+completion removes mapped scratch as described above; it retains the locator,
+runsc state, specification, input and original-UID verification files for allocation recovery.
+Errors or process death may retain subordinate-owned scratch that the original
+UID cannot safely recursively remove. SIGKILL recovery still requires protected
+historical job/node/boot/cgroup terminal authority and same-subid cleanup; normal
+pruning does not provide it. The executable is not wired into fleet intake yet. Actual immutable
 release publication/retention, scratch recovery after process death, restricted
 networking and installed Slurm/concurrent-owner acceptance still gate activation.
 

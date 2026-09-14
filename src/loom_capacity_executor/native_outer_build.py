@@ -25,6 +25,7 @@ from loom_capacity_executor.native_build_source import _settled_io
 from loom_capacity_executor.native_rootless_runtime import (
     NativeRootlessResultV1,
     NativeRootlessSpec,
+    NativeRootlessSpecV2,
     read_native_rootless_spec,
 )
 from loom_capacity_executor.native_runtime_input import prepare_native_runtime_input
@@ -138,7 +139,8 @@ async def _receive(stack: AsyncExitStack, channel: socket.socket, spec: NativeRo
             return None  # Valid only when matching completed result also has no artifact.
         return await stack.enter_async_context(receive_native_artifact(channel, workspace=workspace,
             claim_digest=spec.context.claim_digest, source_binding_sha256=spec.context.source_binding_sha256,
-            max_artifact_bytes=spec.max_artifact_bytes, timeout_seconds=min(timeout_seconds, 1800)))
+            max_artifact_bytes=spec.max_artifact_bytes, timeout_seconds=min(timeout_seconds, 1800),
+            acknowledge=isinstance(spec, NativeRootlessSpecV2)))
 
 
 class _UploadBody:

@@ -12,7 +12,9 @@ def prepared(tmp_path, monkeypatch):
     module = import_module("loom_capacity_executor.native_mapped_scratch")
     _runtime, spec, path, _digest = material_spec(tmp_path)
     monkeypatch.setattr(module, "_require_mapped_root", lambda: None)
-    roots = [tmp_path / "material", tmp_path / "runsc", path.parent / "output", path.parent / "buildkit-run"]
+    roots = [tmp_path / "material", path.parent / "output", path.parent / "buildkit-run"]
+    (tmp_path / "runsc").mkdir(mode=0o700)
+    (tmp_path / "runsc/null-netns").write_text("retained until mapping exits")
     for root in roots:
         root.mkdir(mode=0o700)
         (root / "nested").mkdir(mode=0o700)
@@ -34,6 +36,7 @@ def test_only_fixed_scratch_removed_and_symlinks_never_followed(tmp_path, monkey
 
     assert all(not root.exists() for root in roots)
     assert keep.read_text() == "locator" and (state / "keep").read_text() == "active mapper"
+    assert (tmp_path / "runsc/null-netns").read_text() == "retained until mapping exits"
     assert (tmp_path / "work/runtime-spec.json").is_file()
 
 
@@ -133,3 +136,15 @@ def test_depth_and_time_bound_retain_unvisited_content(tmp_path, monkeypatch, bo
     with pytest.raises(ValueError, match="bound"):
         module.clean_native_mapped_scratch(snapshot)
     assert all((root / "nested/data").read_text() == "scratch" for root in roots)
+
+
+def test_root_absent_at_capture_is_never_adopted_later(tmp_path, monkeypatch):
+    module = import_module("loom_capacity_executor.native_mapped_scratch")
+    _runtime, spec, path, _digest = material_spec(tmp_path)
+    monkeypatch.setattr(module, "_require_mapped_root", lambda: None)
+    snapshot = module.capture_native_mapped_scratch(spec)
+    output = path.parent / "output"
+    output.mkdir(mode=0o700)
+    (output / "foreign").write_text("preserve")
+    module.clean_native_mapped_scratch(snapshot)
+    assert (output / "foreign").read_text() == "preserve"

@@ -163,12 +163,15 @@ async def main():
                     digest.update(chunk)
                     observed_size += len(chunk)
             assert observed_size == artifact.archive_size_bytes and digest.hexdigest() == artifact.archive_sha256
-            try:
-                (runtime_workspace / "output/build/artifacts.tar").read_bytes()
-            except PermissionError:
-                pass
+            if material_v2:
+                assert not (runtime_workspace / "output").exists()
             else:
-                raise AssertionError("outer IO directly read private mapped output")
+                try:
+                    (runtime_workspace / "output/build/artifacts.tar").read_bytes()
+                except PermissionError:
+                    pass
+                else:
+                    raise AssertionError("outer IO directly read private mapped output")
             print("native-outer-io-received-private-artifact", flush=True)
             return BuildArtifactUploadReceiptV1(claim_digest=context.claim_digest, artifact=artifact)
 
@@ -199,8 +202,30 @@ async def main():
         assert not Path("/tmp/rootless-preparation").exists()
         print("native-v2-one-launch-session-settled", flush=True)
     print("native-supervised-cleanup-confirmed", flush=True)
-    subprocess.run(["/usr/bin/rootlesskit", "--net=none", "--subid-source=static",
-        "--state-dir=/tmp/rootless-verification", sys.executable, __file__, "verify"], check=True, timeout=30)
+    if material_v2:
+        evidence = json.loads(Path("/result/native-pre-prune.json").read_bytes())
+        assert evidence["spec_sha256"] == hashlib.sha256(wire).hexdigest()
+        assert evidence["pruned"] is True
+        for scratch in (bundles.parent, runtime_workspace / "output", runtime_workspace / "buildkit-run"):
+            assert not scratch.exists() and not scratch.is_symlink()
+        # The exact launcher has exited through the outer result/wait path.
+        # Check retained-file accessibility in the original namespace only;
+        # this does not prove every namespace reference or Slurm process died.
+        from loom_capacity_executor.native_mapped_scratch import _mount_id
+
+        attempt_fd = os.open(runtime_workspace.parent, os.O_PATH | os.O_NOFOLLOW)
+        namespace_fd = os.open(state / "null-netns", os.O_PATH | os.O_NOFOLLOW)
+        try:
+            assert _mount_id(attempt_fd) == _mount_id(namespace_fd)
+            assert os.fstat(namespace_fd).st_uid == os.getuid()
+        finally:
+            os.close(attempt_fd)
+            os.close(namespace_fd)
+        print(evidence["observations"], end="", flush=True)
+        print("native-v2-mapped-scratch-pruned", flush=True)
+    else:
+        subprocess.run(["/usr/bin/rootlesskit", "--net=none", "--subid-source=static",
+            "--state-dir=/tmp/rootless-verification", sys.executable, __file__, "verify"], check=True, timeout=30)
     assert list(workspace.iterdir()) == []
     print("native-outer-io-session-settled", flush=True)
 

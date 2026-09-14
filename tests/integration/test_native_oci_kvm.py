@@ -106,6 +106,43 @@ def test_rootless_activation_channels_transfer_private_artifact_and_observe_pare
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
 
 
+@pytest.mark.parametrize("mode", ["clean", "mounted"])
+def test_mapped_scratch_pruning_preserves_recovery_and_mount_boundaries(tmp_path, mode):
+    from tests.unit.test_native_material_launch import material_spec
+
+    if platform.machine() != "x86_64":
+        pytest.skip("mapped scratch fixture currently has AMD64-only dependencies")
+    _module, spec, _path, _digest = material_spec(tmp_path)
+    spec = spec.model_copy(update={"workspace": "/tmp/native-attempt/work",
+        "state_root": "/tmp/native-attempt/runsc", "bundle_root": "/tmp/native-attempt/material/bundles"})
+    fixture = tmp_path / "fixture"
+    fixture.mkdir(mode=0o755)
+    (fixture / "spec.json").write_text(spec.model_dump_json())
+    (fixture / "spec.json").chmod(0o444)
+    built = checked("docker", "build", "--quiet", "-f", str(ROOT / "tests/support/native_kvm/Dockerfile.rootless"),
+        "--build-context", f"trusted-src={ROOT / 'src'}", str(ROOT / "tests/support/native_kvm"),
+        capture_output=True, text=True)
+    fixture_image = built.stdout.strip().splitlines()[-1]
+    assert fixture_image.startswith("sha256:")
+    name = "loom-mapped-scratch-" + uuid4().hex
+    try:
+        result = checked("docker", "run", "--rm", "--init", "--name", name,
+            "--network=none", "--cpus=1", "--memory=256m", "--pids-limit=64",
+            "--user=1000:1000", "--cap-drop=ALL", "--cap-add=SETUID", "--cap-add=SETGID",
+            "--security-opt=apparmor=unconfined", "--security-opt=seccomp=unconfined", "--read-only",
+            "--tmpfs=/tmp:rw,nodev,size=16m,mode=1777",
+            "--mount", f"type=bind,src={fixture},dst=/fixture,readonly",
+            "--mount", f"type=bind,src={ROOT / 'tests/support/native_kvm'},dst=/test-support,readonly",
+            fixture_image, "python3", "-I", "/test-support/mapped_scratch.py", "outer", mode,
+            capture_output=True, text=True)
+        expected = "subordinate-private-scratch-pruned" if mode == "clean" else "same-device-bind-mount-preserved"
+        assert expected in result.stdout
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(f"mapped scratch fixture failed:\n{exc.stdout}\n{exc.stderr}")
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
+
+
 def test_rootless_private_output_requires_mapped_reader():
     """Mode-0700 mapped output is not readable by the original outer UID."""
     if platform.machine() != "x86_64":
@@ -348,13 +385,17 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
             "--mount", f"type=bind,src={ROOT / 'src'},dst=/trusted-src,readonly",
             *fixture_command, capture_output=True, text=True)
     except subprocess.CalledProcessError as exc:
-        pytest.fail(f"rendered native KVM fixture failed:\n{exc.stdout}\n{exc.stderr}")
+        error_path = result_dir / "native-mapped-error.txt"
+        with error_path.open("rb") if error_path.exists() else io.BytesIO() as error:
+            mapped_error = error.read(8192).decode("utf-8", errors="replace")
+        pytest.fail(f"rendered native KVM fixture failed:\n{exc.stdout}\n{exc.stderr}\n{mapped_error}")
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
     assert "native-allocated-runtime-cleanup-ok" in output.stdout
     if "-outer" in root_stop:
         if material_v2:
             assert "native-v2-one-launch-session-settled" in output.stdout
+            assert "native-v2-mapped-scratch-pruned" in output.stdout
         else:
             assert "native-production-oci-material-ready" in output.stdout
         assert "native-outer-io-session-settled" in output.stdout

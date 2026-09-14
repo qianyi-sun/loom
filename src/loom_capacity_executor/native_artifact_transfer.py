@@ -23,6 +23,8 @@ from loom_capacity_executor.native_build_source import _settled_io, _write_all
 from loom_capacity_manager.contracts import Digest, StrictV1Model, canonical_bytes
 
 _MAGIC = b"LOOMNAT1"
+_ACKNOWLEDGED_MAGIC = b"LOOMNAT2"
+_ACK_MAGIC = b"LOOMACK2"
 _MAX_HEADER = 4096
 _CHUNK = 1024 * 1024
 
@@ -80,9 +82,12 @@ async def _exact(channel: socket.socket, count: int) -> bytes:
 async def send_native_artifact(channel: socket.socket, *, archive: Path,
     claim_digest: str, source_binding_sha256: str, max_artifact_bytes: int,
     timeout_seconds: int = 1800,
+    require_ack: bool = False,
 ) -> BuildArtifactV1:
     """Send one already-verified, stopped-runtime artifact; never a path RPC."""
     _configure(channel, claim_digest, source_binding_sha256, max_artifact_bytes, timeout_seconds)
+    if type(require_ack) is not bool:
+        raise ValueError("native artifact acknowledgment mode is invalid")
     descriptor = os.open(archive, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         metadata = os.fstat(descriptor)
@@ -105,7 +110,8 @@ async def send_native_artifact(channel: socket.socket, *, archive: Path,
                 raise ValueError("native artifact transfer header exceeds bound")
             os.lseek(descriptor, 0, os.SEEK_SET)
             loop = asyncio.get_running_loop()
-            await loop.sock_sendall(channel, _MAGIC + len(header).to_bytes(4, "big") + header)
+            magic = _ACKNOWLEDGED_MAGIC if require_ack else _MAGIC
+            await loop.sock_sendall(channel, magic + len(header).to_bytes(4, "big") + header)
             sent = 0
             observed = hashlib.sha256()
             while chunk := await _settled_io(os.read, descriptor, _CHUNK):
@@ -117,6 +123,10 @@ async def send_native_artifact(channel: socket.socket, *, archive: Path,
             if sent != size or observed.hexdigest() != artifact.archive_sha256:
                 raise ValueError("native artifact changed during export")
             channel.shutdown(socket.SHUT_WR)
+            if require_ack:
+                expected = _ACK_MAGIC + hashlib.sha256(header).digest()
+                if await _exact(channel, len(expected)) != expected or await _recv(channel, 1):
+                    raise ValueError("native artifact receiver acknowledgment differs")
             return artifact
     finally:
         os.close(descriptor)
@@ -126,6 +136,7 @@ async def send_native_artifact(channel: socket.socket, *, archive: Path,
 async def receive_native_artifact(channel: socket.socket, *, workspace: Path,
     claim_digest: str, source_binding_sha256: str, max_artifact_bytes: int,
     timeout_seconds: int = 1800,
+    acknowledge: bool = False,
 ) -> AsyncIterator[NativeReceivedArtifact]:
     """Validate the entire byte stream before yielding a private scoped spool.
 
@@ -134,6 +145,8 @@ async def receive_native_artifact(channel: socket.socket, *, workspace: Path,
     Socket closure and exact child settlement remain the outer caller's duties.
     """
     _configure(channel, claim_digest, source_binding_sha256, max_artifact_bytes, timeout_seconds)
+    if type(acknowledge) is not bool:
+        raise ValueError("native artifact acknowledgment mode is invalid")
     if not workspace.is_absolute() or workspace == Path("/") or ".." in workspace.parts:
         raise ValueError("native artifact workspace must be absolute and private")
     directory = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
@@ -146,7 +159,8 @@ async def receive_native_artifact(channel: socket.socket, *, workspace: Path,
             async with asyncio.timeout(timeout_seconds):
                 prefix = await _exact(channel, 12)
                 count = int.from_bytes(prefix[8:], "big")
-                if prefix[:8] != _MAGIC or not 1 <= count <= _MAX_HEADER:
+                magic = _ACKNOWLEDGED_MAGIC if acknowledge else _MAGIC
+                if prefix[:8] != magic or not 1 <= count <= _MAX_HEADER:
                     raise ValueError("native artifact stream header is invalid")
                 wire = await _exact(channel, count)
                 envelope = NativeArtifactTransferV1.model_validate_json(wire)
@@ -166,10 +180,24 @@ async def receive_native_artifact(channel: socket.socket, *, workspace: Path,
                         await _settled_io(_write_all, descriptor, chunk)
                     if size != envelope.artifact.archive_size_bytes or digest.hexdigest() != envelope.artifact.archive_sha256:
                         raise ValueError("native artifact stream content changed")
-                    await _settled_io(os.fsync, descriptor)
                     os.fchmod(descriptor, 0o400)
+                    await _settled_io(os.fsync, descriptor)
                 finally:
                     os.close(descriptor)
+                if acknowledge:
+                    # Confirm both exact file bytes/mode and their directory
+                    # entries before the mapped sender may prune its copy. This
+                    # is a scoped durable spool, never publication or retention
+                    # beyond this context's existing lifetime.
+                    parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                    try:
+                        await _settled_io(os.fsync, parent)
+                        await _settled_io(os.fsync, directory)
+                    finally:
+                        os.close(parent)
+                    await asyncio.get_running_loop().sock_sendall(channel,
+                        _ACK_MAGIC + hashlib.sha256(wire).digest())
+                    channel.shutdown(socket.SHUT_WR)
             yield NativeReceivedArtifact(path, envelope.artifact)
     finally:
         os.close(directory)
