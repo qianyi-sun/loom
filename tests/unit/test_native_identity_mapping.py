@@ -68,3 +68,26 @@ def test_root_only_and_highest_valid_subordinate_id_are_recorded(monkeypatch):
     observed = module.observe_native_mapped_identity()
     assert len(observed.uid_ranges) == 1
     assert observed.gid_ranges[-1].outside == 4294967294
+
+
+@pytest.mark.parametrize("count", [340, 341])
+def test_kernel_extent_limit(monkeypatch, count):
+    module = import_module("loom_capacity_executor.native_identity_mapping")
+    wire = b"0 24850 1\n" + b"".join(f"{i} {100000 + i} 1\n".encode() for i in range(1, count))
+    _kernel(monkeypatch, wire)
+    if count == 340:
+        assert len(module.observe_native_mapped_identity().uid_ranges) == count
+    else:
+        with pytest.raises(RuntimeError, match="bounds"):
+            module.observe_native_mapped_identity()
+
+
+def test_bad_gid_mapping_prevents_material_creation(tmp_path, monkeypatch):
+    from tests.unit.test_native_material_launch import material_spec
+
+    module = import_module("loom_capacity_executor.native_rootless_material")
+    _runtime, spec, _path, _digest = material_spec(tmp_path)
+    _kernel(monkeypatch, b"0 24850 1\n1 100000 65536\n", b"0 24850 1\n1 0 1\n")
+    with pytest.raises(RuntimeError, match="mapping"):
+        module.prepare_native_rootless_material(spec)
+    assert not (tmp_path / "material").exists()

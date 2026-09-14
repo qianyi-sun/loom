@@ -12,6 +12,8 @@ import stat
 from contextlib import ExitStack
 from pathlib import Path
 
+from loom_capacity_executor.native_identity_mapping import observe_native_mapped_identity
+
 _CAPABILITIES = {
     "newuidmap": bytes.fromhex("0100000280000000000000000000000000000000"),
     "newgidmap": bytes.fromhex("0100000240000000000000000000000000000000"),
@@ -20,19 +22,7 @@ _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
 
 
 def _require_mapped_root() -> None:
-    if os.geteuid() != 0 or os.getegid() != 0:
-        raise RuntimeError("native capability restoration requires mapped root")
-    for name in ("uid_map", "gid_map"):
-        with Path("/proc/self", name).open("rb") as stream:
-            wire = stream.read(4097)
-        if not wire or len(wire) > 4096:
-            raise RuntimeError("native root mapping is invalid")
-        fields = wire.splitlines()[0].split()
-        if len(fields) != 3 or not all(value.isdigit() for value in fields):
-            raise RuntimeError("native root mapping is invalid")
-        inside, outside, count = map(int, fields)
-        if inside != 0 or outside == 0 or count != 1:
-            raise RuntimeError("native capability restoration refuses initial root")
+    observe_native_mapped_identity()
 
 
 def _owned_directory(descriptor: int) -> None:

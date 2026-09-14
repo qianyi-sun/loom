@@ -2206,6 +2206,14 @@ pruning does not provide it. The executable is not wired into fleet intake yet. 
 release publication/retention, scratch recovery after process death, restricted
 networking and installed Slurm/concurrent-owner acceptance still gate activation.
 
+The mapped-root guard observes every actual UID and GID extent before material
+creation, capability restoration or mapped pruning. The bounded immutable
+observation rejects parent-root mappings, invalid ranges and overlaps in either
+coordinate; UID and GID ranges remain separate. These outside IDs are relative
+to the parent user namespace, not authenticated host IDs. This observation is
+not yet persisted in the V1 locator or bound to protected executor evidence, and
+does not authorize interrupted-attempt deletion or certify subid retention.
+
 The versioned client policy is
 `deploy/personal-dev-builder/client-seccomp-v1.json`. It permits ordinary
 Python/buildctl file IO, read-only extended-attribute inspection, constrained
