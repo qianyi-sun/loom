@@ -647,6 +647,16 @@ rejects a runtime credential substitution, changed owner, extra environment
 authority or automatic deletion. The existing default renderer remains available
 for legacy environments; installed selection requires the complete owner lifecycle.
 
+The Kubernetes migration resource adapter requires recorded creation dispatch and
+the generation-bound desired objects under the same guard. A lost creation reply
+may reconcile only that exact object; a recorded UID that disappears is never
+silently recreated. New credential delivery refuses existing Jobs or Pods waiting
+on the Secret. Job creation checks the recorded Secret UID before and after use.
+Cleanup sends UID/resourceVersion-preconditioned foreground deletion and refuses
+to remove credentials while a Job or Pod still consumes them. These effects are
+subordinate to the migration journal and SQL retirement phases, not standalone
+rollout or credential authority.
+
 The read-only CNPG operator observer admits the fixed 1.25.1 command, environment,
 security context, volume projections and absent configuration overrides. It brackets
 a host-process observation with unchanged Kubernetes inputs. The host reader binds

@@ -77,7 +77,7 @@ def test_lost_create_reply_reuses_only_bound_resources_and_deletes_with_precondi
             resources.ensure_secret(creation_dispatched=True)
     secret = resources.ensure_secret(creation_dispatched=True)
     assert resources.ensure_secret(creation_dispatched=True, expected_uid=secret.uid) == secret
-    job = resources.ensure_job(creation_dispatched=True)
+    job = resources.ensure_job(creation_dispatched=True, expected_secret_uid=secret.uid)
     runner.objects["Job"]["status"] = {"conditions": [{"type": "Complete", "status": "True"}], "succeeded": 1}
     assert resources.job_complete(expected_uid=job.uid)
     resources.delete_job(expected_uid=job.uid)

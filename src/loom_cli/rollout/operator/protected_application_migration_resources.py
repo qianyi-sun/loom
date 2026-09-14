@@ -114,10 +114,15 @@ class ProtectedApplicationMigrationResources:
         return self._ensure("Secret", creation_dispatched=creation_dispatched, expected_uid=expected_uid)
 
     def ensure_job(self, *, creation_dispatched: bool, expected_uid: str | None = None,
+                   expected_secret_uid: str,
                    ) -> ApplicationMigrationResourceIdentity:
-        if self._read("Secret") is None:
+        secret = self._read("Secret", expected_uid=expected_secret_uid)
+        if secret is None:
             raise RuntimeError("application migration credential Secret is absent")
-        return self._ensure("Job", creation_dispatched=creation_dispatched, expected_uid=expected_uid)
+        job = self._ensure("Job", creation_dispatched=creation_dispatched, expected_uid=expected_uid)
+        if self._read("Secret", expected_uid=expected_secret_uid) != secret:
+            raise RuntimeError("application migration credential Secret changed during Job creation")
+        return job
 
     def _ensure(self, kind: str, *, creation_dispatched: bool, expected_uid: str | None,
                 ) -> ApplicationMigrationResourceIdentity:
@@ -129,6 +134,10 @@ class ProtectedApplicationMigrationResources:
             return observed[0]
         if expected_uid is not None:
             raise RuntimeError("application migration recorded resource disappeared")
+        if kind == "Secret":
+            if self._read("Job", deleting=True) is not None:
+                raise RuntimeError("application migration Job exists before credential creation")
+            self._require_no_consumers()
         desired = self.job if kind == "Job" else self.secret
         self._check()
         self.runner.run_checked(("kubectl", "--namespace", "loom-staging", "create", "--validate=strict",
