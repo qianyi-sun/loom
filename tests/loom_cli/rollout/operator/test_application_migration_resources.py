@@ -106,3 +106,21 @@ def test_migration_resource_drift_never_deletes_or_overwrites_unrelated_objects(
         else:
             resources.delete_secret(expected_uid=secret.uid)
     assert runner.events == before and "Secret" in runner.objects
+
+
+def test_job_creation_requires_the_recorded_secret_uid(tmp_path):
+    resources, runner = _resources(tmp_path)
+    secret = resources.ensure_secret(creation_dispatched=True)
+    runner.objects["Secret"]["metadata"]["uid"] = "33333333-3333-4333-8333-333333333333"
+    with pytest.raises(RuntimeError, match="drifted"):
+        resources.ensure_job(creation_dispatched=True, expected_secret_uid=secret.uid)
+    assert runner.events == [("create", "Secret")]
+
+
+def test_waiting_foreign_pod_cannot_receive_a_new_migration_credential(tmp_path):
+    resources, runner = _resources(tmp_path)
+    runner.pods = [{"metadata": {"name": "foreign"}, "spec": {"containers": [{"envFrom": [{"secretRef": {
+        "name": resources.secret["metadata"]["name"]}}]}]}}]
+    with pytest.raises(RuntimeError, match="consumer"):
+        resources.ensure_secret(creation_dispatched=True)
+    assert runner.events == []
