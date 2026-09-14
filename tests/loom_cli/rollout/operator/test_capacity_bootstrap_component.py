@@ -80,8 +80,12 @@ def test_pending_capacity_classifies_without_application_database_reads(tmp_path
 
 
 def test_capacity_initial_admission_rejects_legacy_bootstrap_resources_before_sql(tmp_path, monkeypatch):
-    from loom_cli.rollout.operator.protected_capacity_bootstrap_component import ProtectedCapacityBootstrapComponent
-    from loom_cli.rollout.operator.protected_staging_capacity_database_component import _ResourceState
+    from loom_cli.rollout.operator.protected_capacity_bootstrap_component import (
+        ProtectedCapacityBootstrapComponent,
+    )
+    from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
+        _ResourceState,
+    )
 
     plan, journal = _setup(tmp_path)
     guard = _guard(plan)

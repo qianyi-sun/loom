@@ -7,9 +7,12 @@ once the independently observed desired database configuration is exact.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+
+from psycopg import sql
 
 from loom.application_capacity_runtime_credentials import (
     _credentials,
@@ -50,6 +53,8 @@ class ProtectedCapacityBootstrapRuntime(ProtectedApplicationMigrationRuntime):
     seed: Mapping[str, object] = field(repr=False)
     identity: ApplicationOwnerSuccessor
     runtime_role_oids: Mapping[str, int]
+    initial_database_state: _DatabaseState = _DatabaseState.NEEDS_CONVERGENCE
+    rebind_sha256: str | None = None
 
     def _identity(self, generation: ApplicationMigrationEvent, oid: int | None) -> None:
         self._generation(generation)
@@ -75,6 +80,7 @@ class ProtectedCapacityBootstrapRuntime(ProtectedApplicationMigrationRuntime):
     def arm(self, generation: ApplicationMigrationEvent, oid: int) -> None:
         self._identity(generation, oid)
         peer = self._creation_peer(generation)
+        self._rebind(generation)
         expiry = datetime.fromisoformat(_string(generation.payload, "expires_at"))
         arm_application_capacity_runtime_credentials(peer, target=self.target,
             coordination_guard=self.coordination_guard, provisioner_role=self.provisioner_role,
@@ -83,6 +89,29 @@ class ProtectedCapacityBootstrapRuntime(ProtectedApplicationMigrationRuntime):
         arm_application_guard_migrator(peer, target=self.target, coordination_guard=self.coordination_guard,
             provisioner_role=self.provisioner_role, identity=self.identity,
             password=_string(generation.payload, "password"), expires_at=expiry)
+        self.checkpoint()
+
+    def _rebind(self, generation: ApplicationMigrationEvent) -> None:
+        states = {_DatabaseState.AUTHORITY_REBIND_REQUIRED, _DatabaseState.AUTHORITY_REBIND_RECOVERY_REQUIRED}
+        state = self.base._database_state(self.plan, dict(self.seed))
+        if state in states and self.initial_database_state not in states:
+            raise RuntimeError("application capacity rebind was not originally admitted")
+        if state == _DatabaseState.AUTHORITY_REBIND_REQUIRED:
+            if self.initial_database_state != state or self.rebind_sha256 is None:
+                raise RuntimeError("application capacity rebind original source changed")
+            payload = self.base._legacy_authority_rebind_payload(self.plan, self.seed)
+            if hashlib.sha256(payload).hexdigest() != self.rebind_sha256:
+                raise RuntimeError("application capacity original rebind payload changed")
+            # The creator identity and credential generation are durable already.
+            # The unchanged certified transaction validates and locks all source
+            # rows; a lost reply recovers its committed target before any rearm.
+            self._creation_peer(generation).execute(sql.SQL(payload.decode("ascii")))
+            self.checkpoint()
+            state = self.base._database_state(self.plan, dict(self.seed))
+            if state not in {_DatabaseState.EXACT, _DatabaseState.AUTHORITY_REBIND_RECOVERY_REQUIRED}:
+                raise RuntimeError("application capacity rebind target was not certified")
+        elif state not in {_DatabaseState.EXACT, _DatabaseState.NEEDS_CONVERGENCE, _DatabaseState.AUTHORITY_REBIND_RECOVERY_REQUIRED}:
+            raise RuntimeError("application capacity rebind configuration drifted")
         self.checkpoint()
 
     def resources(self, generation: ApplicationMigrationEvent) -> ProtectedApplicationMigrationResources:
@@ -153,5 +182,8 @@ class ProtectedCapacityBootstrapRuntime(ProtectedApplicationMigrationRuntime):
             _credentials(roles, self._passwords(), require_login=True)
             return "exact"
         if state == _DatabaseState.NEEDS_CONVERGENCE:
+            return "pending"
+        if (state in {_DatabaseState.AUTHORITY_REBIND_REQUIRED, _DatabaseState.AUTHORITY_REBIND_RECOVERY_REQUIRED}
+                and self.initial_database_state in {_DatabaseState.AUTHORITY_REBIND_REQUIRED, _DatabaseState.AUTHORITY_REBIND_RECOVERY_REQUIRED}):
             return "pending"
         raise RuntimeError("application capacity configuration drifted outside admitted bootstrap")

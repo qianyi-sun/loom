@@ -7,6 +7,7 @@ installed authority chain and actual container image need separate proof.
 
 
 import base64
+import hashlib
 import json
 from contextlib import ExitStack
 from dataclasses import replace
@@ -25,7 +26,6 @@ from loom_cli.rollout.operator.protected_staging_capacity_database_component imp
     KubernetesProtectedStagingCapacityDatabaseComponent,
     _DatabaseState,
 )
-from tests.integration.test_application_database_admission import _maintenance
 from tests.integration.test_application_handoff_completion import _closed
 from tests.integration.test_application_ownership_transfer import (
     transfer_database,  # noqa: F401
@@ -45,9 +45,12 @@ pytestmark = [pytest.mark.parametrize("transfer_postgres", [16, 17], indirect=Tr
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bootstrap,durable_agent", [(False, False), (True, False), (True, True)])
-@pytest.mark.parametrize("interruption", [None, "close", "reopen"])
-async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_runtime(transfer_database, tmp_path, monkeypatch, bootstrap, durable_agent, interruption):  # noqa: F811
+@pytest.mark.parametrize("bootstrap,durable_agent,rebind,interruption", [
+    (bootstrap, durable, rebind, interruption)
+    for bootstrap, durable, rebind in [(False, False, False), (True, False, False), (True, True, False), (True, True, True)]
+    for interruption in (None, "close", "reopen")
+] + [(True, True, True, "rebind")])
+async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_runtime(transfer_database, tmp_path, monkeypatch, bootstrap, durable_agent, rebind, interruption):  # noqa: F811
     from loom_cli.rollout.operator.protected_capacity_bootstrap_runtime import (
         ProtectedCapacityBootstrapRuntime,
     )
@@ -63,7 +66,12 @@ async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_ru
         try:
             with _closed((url, "loom_app_staging_owner", bindings), request=request) as (peer, maintenance, db_guard, args):
                 args["schema_acl_profile"] = "cnpg-staging"
-                complete_application_handoff_database(peer, maintenance=maintenance, **args)
+                try:
+                    complete_application_handoff_database(peer, maintenance=maintenance, **args)
+                except psycopg.errors.ObjectNotInPrerequisiteState as exc:
+                    activity = maintenance.execute("SELECT pid,backend_type,usename,state,wait_event_type "
+                        "FROM pg_stat_activity WHERE datname='loom' ORDER BY pid").fetchall()
+                    raise AssertionError(f"handoff quiescence refusal; backend inventory={activity!r}") from exc
                 oids = {name: peer.execute("SELECT oid FROM pg_roles WHERE rolname=%s", (name,)).fetchone()[0]
                     for name in bindings if name.startswith("loom_cap_staging_")}
                 runtime_oids = {name: oid for name, oid in oids.items() if not name.endswith(("owner", "migrator"))}
@@ -76,8 +84,62 @@ async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_ru
                     ApplicationGuardOwner("loom_cap_staging_owner", oids["loom_cap_staging_owner"]))
                 evidence = type(evidence).build(**{k: v for k, v in evidence.to_dict().items()
                     if k not in {"schema_version", "evidence_digest", "database_backend_pid"}}, database_backend_pid=db_guard.info.backend_pid)
-                configured = [False]
+                configured = [rebind]
+                provisioner = peer.info.user
+                provisioner_password = make_url(url).password
+                if rebind:
+                    from uuid import UUID, uuid4
 
+                    from loom.personal_dev_capacity_runtime import (
+                        ApplicationOwnerBinding,
+                        PsycopgPersonalDevCapacityDatabase,
+                    )
+                    from loom.staging_capacity_database_bootstrap import (
+                        _parse_seed,
+                        staging_capacity_identity,
+                    )
+                    from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
+                        build_staging_reporter_configuration,
+                    )
+                    configuration = build_staging_reporter_configuration(plan, source.seed).model_copy(
+                        update={"authority_incarnation": UUID("558afea6-2a37-55a1-9f7c-3399695da966")})
+                    effective_seed = {**source.seed, "reporter_incarnation": str(configuration.reporter_incarnation)}
+                    # Seed only this disposable fixture with the exact unused
+                    # legacy authority that the production migration certifies.
+                    fixture_database = PsycopgPersonalDevCapacityDatabase(url, application_owner_binding=ApplicationOwnerBinding(
+                        database="loom", runtime_role="loom", owner_role="loom_app_staging_owner"))
+                    initial = configuration.model_copy(update={"configuration_generation": configuration.configuration_generation - 1,
+                        "deployment_generation": configuration.deployment_generation - 1, "candidate_digest": "d" * 64,
+                        "candidate_identity": "f" * 40, "candidate_publication_sha256": "d" * 64,
+                        "reporter_incarnation": uuid4()})
+                    for legacy_configuration in (initial, configuration):
+                        effective_seed["reporter_incarnation"] = str(legacy_configuration.reporter_incarnation)
+                        await fixture_database.converge_protected(identity=staging_capacity_identity(),
+                            credentials=_parse_seed(json.dumps(effective_seed).encode()).credentials,
+                            configuration=legacy_configuration)
+                    for role in oids:
+                        peer.execute(sql.SQL("ALTER ROLE {} VALID UNTIL 'infinity'").format(sql.Identifier(role)))
+                    provisioner = "postgres"
+                    peer.execute(sql.SQL("CREATE ROLE postgres LOGIN SUPERUSER PASSWORD {}").format(sql.Literal(provisioner_password)))
+
+                lost_rebind = [False]
+                class CreationPeer:
+                    def __init__(self, connection):
+                        self.connection = connection
+                    def __getattr__(self, name):
+                        return getattr(self.connection, name)
+                    def __enter__(self):
+                        return self
+                    def __exit__(self, *args):
+                        self.connection.close()
+                    def execute(self, statement, *args):
+                        result = self.connection.execute(statement, *args)
+                        rendered = statement if isinstance(statement, str) else statement.as_string()
+                        if (interruption == "rebind" and not lost_rebind[0]
+                                and "ALTER TABLE loom_capacity_guard.authority_state" in rendered):
+                            lost_rebind[0] = True
+                            raise RuntimeError("lost committed rebind reply")
+                        return result
                 class Runner(ResourceRunner):
                     def capture_stdout(self, argv, **kwargs):
                         if argv[0] == "kubectl" and "exec" in argv:
@@ -91,9 +153,9 @@ async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_ru
                                 return (json.dumps(value) if isinstance(value, (dict, list)) else str(value)).encode()
                         return super().capture_stdout(argv, **kwargs)
                     def open_staging_peer_database(self):
-                        return psycopg.connect(url, autocommit=True)
+                        return CreationPeer(psycopg.connect(url, user=provisioner, password=provisioner_password, autocommit=True))
                     def open_staging_peer_maintenance_database(self):
-                        return _maintenance(peer)
+                        return psycopg.connect(url, user=provisioner, password=provisioner_password, dbname="postgres", autocommit=True)
 
                 runner = Runner()
                 base = KubernetesProtectedStagingCapacityDatabaseComponent(runner, "registry.example.test/loom", lambda: source.seed,
@@ -115,13 +177,31 @@ async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_ru
                         coordination_guard=args["coordination_guard"], runner=runner, template=base._manifest(plan, source.seed),
                         ca_certificate=b"disposable-public-ca" * 8, runtime_password=args["password"],
                         container_registry=base.container_registry, assert_guard=lambda: evidence, assert_inputs=lambda: None,
-                        intent_digest="1" * 64, provisioner_role=peer.info.user, base=base, seed=source.seed, identity=identity, runtime_role_oids=runtime_oids) as runtime:
+                        intent_digest="1" * 64, provisioner_role=provisioner, base=base, seed=source.seed, identity=identity, runtime_role_oids=runtime_oids,
+                        initial_database_state=_DatabaseState.AUTHORITY_REBIND_REQUIRED if rebind else _DatabaseState.NEEDS_CONVERGENCE,
+                        rebind_sha256=hashlib.sha256(base._legacy_authority_rebind_payload(plan, source.seed)).hexdigest() if rebind else None) as runtime:
                     assert runtime.read_revision() == "pending"
                     generation = ApplicationMigrationEvent.build(sequence=1, phase="generation", payload=runtime.prepare_generation(1),
                         intent_digest="1" * 64, guard_digest=evidence.evidence_digest, previous_digest="2" * 64)
                     recorded = []
                     runtime.create(generation, recorded.append)
                     assert recorded == [identity.role_oid]
+                    if interruption == "rebind":
+                        with pytest.raises(RuntimeError, match="lost committed rebind reply"):
+                            runtime.arm(generation, identity.role_oid)
+                        previous = runtime
+                        previous.__exit__(None, None, None)
+                        runtime = recovery_stack.enter_context(replace(previous))
+                        runtime.begin_retirement(generation, [])
+                        runtime.resources(generation).require_retired()
+                        runtime.seal(generation, identity.role_oid)
+                        runtime.close(generation, identity.role_oid)
+                        runtime.retire(generation, identity.role_oid)
+                        runtime.require_role_retired(generation, identity.role_oid)
+                        runtime.reopen(generation, identity.role_oid)
+                        assert runtime.read_revision() == "exact"
+                        assert lost_rebind == [True] and not runner.objects
+                        return
                     runtime.arm(generation, identity.role_oid)
                     if durable_agent:
                         assert peer.execute("SELECT rolvaliduntil='infinity'::timestamptz FROM pg_authid WHERE rolname='loom_cap_staging_agent'").fetchone() == (True,)
@@ -194,4 +274,6 @@ async def test_capacity_runtime_retires_original_owner_sessions_and_preserves_ru
                             peer.execute("ALTER ROLE saved_capacity_executor RENAME TO loom_cap_staging_executor")
         finally:
             with psycopg.connect(url, dbname="postgres", autocommit=True) as cleanup:
+                if rebind:
+                    cleanup.execute("DROP ROLE IF EXISTS postgres")
                 cleanup.execute(sql.SQL("ALTER ROLE loom_app_staging_owner RENAME TO {}").format(sql.Identifier(previous_owner)))

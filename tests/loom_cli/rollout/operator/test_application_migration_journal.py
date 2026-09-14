@@ -37,7 +37,7 @@ def _authority(plan, component, guard):
             guard_migrator={"role_name": "loom_cap_staging_migrator", "role_oid": 91},
             runtime_role_oids={"loom_cap_staging_agent": 92, "loom_cap_staging_executor": 93,
                 "loom_cap_staging_observer": 94, "loom_cap_staging_runtime": 95},
-            seed_digest="d" * 64, migration_digest="e" * 64)
+            seed_digest="d" * 64, migration_digest="e" * 64, initial_database_state="needs-convergence", rebind_sha256=None)
     return authority
 
 

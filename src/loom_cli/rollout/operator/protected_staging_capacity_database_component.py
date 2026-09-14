@@ -2366,10 +2366,13 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         """
 
     def _rebind_legacy_authority(
-        self,
-        plan: FinalGatePlan,
-        seed: Mapping[str, object],
+        self, plan: FinalGatePlan, seed: Mapping[str, object],
     ) -> None:
+        self._run_peer_payload(self._legacy_authority_rebind_payload(plan, seed))
+
+    def _legacy_authority_rebind_payload(
+        self, plan: FinalGatePlan, seed: Mapping[str, object],
+    ) -> bytes:
         target_fence, target_registration, legacy_fence, legacy_registration = (
             self._authority_rebind_bindings(plan, seed)
         )
@@ -2409,6 +2412,8 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         repaired_authority = sql.Literal(str(target_authority)).as_string()
         payload = f"""\
 BEGIN;
+SET LOCAL lock_timeout='1s';
+SET LOCAL statement_timeout='30s';
 {_AUTHORITY_REBIND_LOCK_STATEMENT}
 DO $loom$
 BEGIN
@@ -2485,7 +2490,7 @@ END
 $loom$;
 COMMIT;
 """.encode("ascii")
-        self._run_peer_payload(payload)
+        return payload
 
     def _restore_runtime_credentials(
         self,
