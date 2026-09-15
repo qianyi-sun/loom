@@ -185,7 +185,11 @@ class LegacyWriterFreezeCeremony:
 
     async def execute(self) -> InstalledExecutionAuthorityPublication:
         before = self._capture()
-        self._freeze_runtime(before)
+        # A published authority may already have admitted protected successors.
+        # Complete frozen evidence needs observation and exact persistence only;
+        # replaying its shutdown could retire those legitimate new processes.
+        if any(item.runtime_state != "frozen" for item in before.observations):
+            self._freeze_runtime(before)
         frozen = self._capture()
         self._assert_freeze_transition(before, frozen)
 
