@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import hashlib
 import json
 from datetime import timedelta
 from unittest.mock import AsyncMock
@@ -47,25 +48,32 @@ def evidence(tmp_path):
     return payload, kwargs
 
 
-def refreshed(payload, private, kwargs, now, **changes):
+def refreshed(payload, private, kwargs, now, *, rollover=False, **changes):
     from loom_task_image_authority.execution_delivery import TaskImageExecutionDelivery
     from tests.unit.test_task_image_execution_grant import sign_grant
-    from tests.unit.test_task_image_publication_keyset import _time
+    from tests.unit.test_task_image_publication_keyset import _sign, _time
+
+    keyset = kwargs["keyset_wire"]
+    if rollover:
+        raw = json.loads(json.loads(keyset)["canonical_keyset"])
+        raw.update(keyset_version=raw["keyset_version"] + 1, issued_at=_time(now), expires_at=_time(now + timedelta(minutes=5)))
+        keyset = _sign(raw, private)
+        changes.update(keyset_sha256=hashlib.sha256(keyset).hexdigest(), keyset_version=raw["keyset_version"])
 
     current = dict(payload, revision=payload["revision"] + 1,
                    issued_at=_time(now), expires_at=_time(now + timedelta(seconds=120)), **changes)
     return TaskImageExecutionDelivery.model_validate(dict(
         schema="loom.task-image-execution-delivery/v2", claim=kwargs["expected_claim"],
         grant_envelope=sign_grant(current, private).decode(), frozen_plan=kwargs["plan_wire"].decode(),
-        publications=tuple(item.decode() for item in kwargs["publication_wires"]), keyset=kwargs["keyset_wire"].decode(),
+        publications=tuple(item.decode() for item in kwargs["publication_wires"]), keyset=keyset.decode(),
     ))
 
 
-@pytest.mark.parametrize("change", ["valid", "claim", "source", "publication", "lost-start"])
+@pytest.mark.parametrize("change", ["valid", "early-rollover", "claim", "source", "publication", "lost-start"])
 async def test_expired_preparation_refreshes_fresh_authority_without_retrying_start(tmp_path, change):
     payload, private, kwargs = signed_evidence(tmp_path)
-    now = NOW + timedelta(seconds=121)
-    delivery = refreshed(payload, private, kwargs, now,
+    now = NOW + timedelta(seconds=5 if change == "early-rollover" else 121)
+    delivery = refreshed(payload, private, kwargs, now, rollover=change == "early-rollover",
                          **({"task_source": "s3://another/source"} if change == "source" else {}))
     if change == "claim":
         delivery = delivery.model_copy(update={"claim": delivery.claim.model_copy(update={"claim_id": "9" * 36})})
@@ -84,7 +92,7 @@ async def test_expired_preparation_refreshes_fresh_authority_without_retrying_st
     consume = AsyncMock(side_effect=accept)
     subject = consumer(tmp_path, payload, kwargs, consume, clock=lambda: now)
     subject.refresh = AsyncMock(return_value=delivery)
-    if change == "valid":
+    if change in {"valid", "early-rollover"}:
         assert await subject.authorize()
         assert consume.call_args.args[0].revision == 2
     else:
@@ -95,7 +103,7 @@ async def test_expired_preparation_refreshes_fresh_authority_without_retrying_st
         await subject.authorize()
     with pytest.raises(RuntimeError, match="already attempted"):
         await subject.prepare()
-    assert consume.await_count == (1 if change in {"valid", "lost-start"} else 0)
+    assert consume.await_count == (1 if change in {"valid", "early-rollover", "lost-start"} else 0)
 
 
 def consumer(tmp_path, payload, kwargs, consume, *, clock=lambda: NOW):
