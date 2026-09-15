@@ -14,6 +14,7 @@ from .final_gate_plan import FinalGatePlan
 from .installed_application_migration import InstalledApplicationMigrationFactory
 from .protected_active_controller import ActiveControllerRequest
 from .protected_apply_journal import ComponentState
+from .protected_native_delivery_material import NativeDeliveryMaterial
 from .protected_execution_activation import (
     ActivationManagerClient,
     ActivationPreparedTransport,
@@ -40,7 +41,8 @@ class InstalledExecutionActivation:
     checkpoint_guard: Callable[[], None]
 
     def execute(self, plan: FinalGatePlan, *,
-                documents: Mapping[str, ActivationRuntimeDocumentV2] | None = None) -> ExecutionContextV2:
+                documents: Mapping[str, ActivationRuntimeDocumentV2] | None = None,
+                native_material: Mapping[str, NativeDeliveryMaterial] | None = None) -> ExecutionContextV2:
         """Use owner-bound portable launch inputs only for the first preparation.
 
         Recovery reads the retained private inputs before touching issuance,
@@ -76,13 +78,22 @@ class InstalledExecutionActivation:
                 if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest) or digest == "0" * 64:
                     raise RuntimeError("installed activation external authority is invalid")
             if journal.read("inputs.intent.json") is not None:
-                if documents is not None:
+                if documents is not None or native_material is not None:
                     raise ValueError("activation recovery must use its retained inputs")
                 owner = ProtectedExecutionActivation.resume(plan=plan, artifact=artifact, journal=journal,
                     manager=manager, prepared=prepared, active=self.active, dependency_guard=guard)
                 return owner.execute()
             if documents is None or set(documents) != {"gb10", "oldlab"}:
                 raise ValueError("initial activation requires both bound launch documents")
+            documents = {pool: ActivationRuntimeDocumentV2.model_validate_json(document.model_dump_json())
+                for pool, document in documents.items()}
+            material = dict(native_material or {})
+            if set(material) != {pool for pool, document in documents.items() if document.native_delivery is not None}:
+                raise ValueError("installed activation native material does not cover its native pools")
+            for pool, value in material.items():
+                if not isinstance(value, NativeDeliveryMaterial):
+                    raise ValueError("installed activation native material is invalid")
+                value.files(documents[pool])
             preparation = runtime._execution_preparation_component()
             if preparation._operation_journal(plan).recovery_state(plan, artifact_sha256=artifact.artifact_sha256) is not ExecutionPreparationRecoveryState.FORWARD_COMPLETE:
                 raise RuntimeError("installed activation requires completed preparation journal")
@@ -110,7 +121,7 @@ class InstalledExecutionActivation:
                     protected_admission_sha256=artifact.subject_protected_admission_sha256[str(subject.subject_id)])
                 document = documents[pool].model_copy(update={"admission_directory_sha256": admission.directory_sha256})
                 active_requests[pool] = ActiveControllerRequest(uuid5(NAMESPACE_URL, f"loom:installed-activation:{plan.plan_digest}:{pool}"),
-                    requests[pool], profile, document, admission)
+                    requests[pool], profile, document, admission, material.get(pool))
             owner = ProtectedExecutionActivation(plan, artifact, active_requests, journal, manager,
                 prepared, self.active, guard, subject)
             return owner.execute()
