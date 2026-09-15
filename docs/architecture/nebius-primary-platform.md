@@ -44,8 +44,9 @@ through that single chain.
 An existing isolated-branch Nebius database at `0133`, `0134` or `0135` is **not**
 a database at the corresponding `dev` revision. Do not run this checkout's
 normal upgrade against it or stamp it to a `dev` revision: that could skip
-required schema changes. Moving an existing Nebius deployment requires a
-separately prepared and tested lineage conversion, with backup/restore evidence,
+required schema changes. Moving an existing Nebius deployment requires
+the [qualified lineage conversion](../ops/nebius-lineage-conversion.md), with
+backup/restore evidence,
 before selecting this `dev` candidate for deployment. Keep the previous
 branch-bound candidate for that deployment until the conversion is qualified.
 
