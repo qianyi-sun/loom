@@ -133,6 +133,14 @@ but short-task throughput still depends on this ramp rate; deliberately adjust
 the existing operator policy when planning a larger bounded acceptance run.
 
 The example `max_concurrent: null` creates no global or pool concurrency policy.
+The optional `service_execution_scheduler_max_deadline_sec` passes through the
+existing control-plane admission deadline setting (default `7200`). Set this
+environment bound high enough to cover the selected tasks' setup, agent and
+verifier timeouts, termination grace and the 600-second result-commit allowance.
+For example, `14400` admits a task with separate one-hour agent and verifier
+phases plus setup and finalization. It does not extend individual phase timeouts
+or change an existing Trial's runtime profile.
+
 Upgrade bootstrap disables only the exact old enabled four-task rows bearing
 `Nebius integration environment capacity`; other operator rows remain intact.
 A positive explicit value still installs global and pool admission limits. The
