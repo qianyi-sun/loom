@@ -26,6 +26,7 @@ from functools import wraps
 from pathlib import Path, PurePosixPath
 from typing import IO, TYPE_CHECKING, Concatenate, ParamSpec, Protocol, TypeVar
 
+from loom_capacity_pool_executor.slurm_inventory import require_slurm_job_visibility
 from loom_cli.rollout.operator.installed_execution_authority import (
     _publish_authority_without_replace,
 )
@@ -815,7 +816,12 @@ class ControllerInstaller:
         *,
         pool_id: str,
         partition_fields: dict[str, str],
+        configuration: str,
     ) -> str:
+        try:
+            require_slurm_job_visibility(configuration.encode("utf-8"), expected_cluster=_CONTROLLER_CLUSTERS[pool_id])
+        except ValueError as exc:
+            raise CapacityExecutorInstallError("controller Slurm job visibility is incomplete") from exc
         association_fields: tuple[str, ...] = ()
         if pool_id == "gb10":
             association_output = self._bounded_stdout(
@@ -840,6 +846,7 @@ class ControllerInstaller:
         try:
             return controller_job_visibility_evidence_sha256(
                 pool_id=pool_id,
+                private_data="none",
                 partition_fields=partition_fields,
                 association_fields=association_fields,
             )
@@ -966,6 +973,7 @@ class ControllerInstaller:
             raise CapacityExecutorInstallError("controller prerequisite Slurm authority drifted")
         job_visibility_evidence_sha256 = self._job_visibility_evidence(
             pool_id=request.pool_id,
+            configuration=cluster_output,
             partition_fields=fields,
         )
         if (
@@ -1072,6 +1080,7 @@ class ControllerInstaller:
             raise CapacityExecutorInstallError("controller discovery Slurm authority drifted")
         job_visibility_evidence_sha256 = self._job_visibility_evidence(
             pool_id=request.pool_id,
+            configuration=cluster_output,
             partition_fields=partition_fields,
         )
         version_output = self._bounded_stdout(

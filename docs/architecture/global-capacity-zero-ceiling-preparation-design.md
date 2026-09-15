@@ -144,7 +144,9 @@ Each controller receives two separate artifacts:
 Both artifacts are regular current-service-UID-owned mode-0600 files and are
 independently digest-pinned in the systemd environment. The inventory policy
 contains no credential and no command line. It can select only the existing
-typed `scontrol show nodes --json` and `squeue --json` runner.
+typed read-only `scontrol show nodes --json`, `squeue --json`, and
+`scontrol show config` runner. Configuration reads around each snapshot require
+the exact cluster and unambiguous `PrivateData=none`.
 
 While the manager context is `prepared`, the executor:
 

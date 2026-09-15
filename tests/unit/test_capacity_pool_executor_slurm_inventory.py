@@ -753,6 +753,8 @@ async def test_capture_retries_a_mixed_update_without_adding_mutation_commands()
     class Runner:
         async def run(self, command: str) -> bytes:
             commands.append(command)
+            if command == "config":
+                return b"ClusterName = trt-gb10\nPrivateData = none\n"
             return next(outputs)
 
     reports = await capture_slurm_capacity_reports(
@@ -765,12 +767,16 @@ async def test_capture_retries_a_mixed_update_without_adding_mutation_commands()
 
     assert reports.controller_last_update == 77
     assert commands == [
+        "config",
         "jobs",
         "nodes",
         "jobs",
+        "config",
+        "config",
         "jobs",
         "nodes",
         "jobs",
+        "config",
     ]
 
 
@@ -804,6 +810,8 @@ async def test_subprocess_runner_owns_fixed_commands_and_minimal_environment(
 
     async def create_subprocess_exec(*argv: object, **kwargs: object) -> Process:
         calls.append((argv, kwargs))
+        if argv == ("/usr/bin/scontrol", "show", "config"):
+            return Process(b"ClusterName = trt-gb10\nPrivateData = none\n")
         document = node_document if argv[0] == "/usr/bin/scontrol" else job_document
         return Process(json.dumps(document).encode("utf-8"))
 
@@ -824,9 +832,11 @@ async def test_subprocess_runner_owns_fixed_commands_and_minimal_environment(
     assert reports.controller_last_update == 77
     assert len(reports.executable_inventory.records) == 1
     assert [call[0] for call in calls] == [
+        ("/usr/bin/scontrol", "show", "config"),
         ("/usr/bin/squeue", "--json"),
         ("/usr/bin/scontrol", "show", "nodes", "--json"),
         ("/usr/bin/squeue", "--json"),
+        ("/usr/bin/scontrol", "show", "config"),
     ]
     assert all(
         call[1]["env"]
@@ -1358,6 +1368,8 @@ async def test_same_second_queue_change_is_rejected() -> None:
 
     class Runner:
         async def run(self, command: str) -> bytes:
+            if command == "config":
+                return b"ClusterName = trt-gb10\nPrivateData = none\n"
             document = node_document if command == "nodes" else next(queue_reads)
             return json.dumps(document).encode("utf-8")
 

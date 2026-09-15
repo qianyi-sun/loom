@@ -314,6 +314,7 @@ def _installed_source_inputs(tmp_path: Path):
             else tuple(f"trt-eai-oldlab-{index}" for index in range(3, 6))
         )
         visibility = controller_job_visibility_evidence_sha256(
+            private_data="none",
             pool_id=pool_id,
             partition_fields=partition_fields,
             association_fields=association_fields,

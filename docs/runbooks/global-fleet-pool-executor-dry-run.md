@@ -210,8 +210,9 @@ permission to launch, cancel, signal, or release physical capacity.
 
 The controller-local read-only observer is the separate
 `loom_capacity_pool_executor` namespace in the Loom wheel. It may use only
-`scontrol show nodes --json` and `squeue --json`; the latter brackets the node
-read. The exact queue argv must run with protected `SQUEUE_ALL=1` under the
+`scontrol show nodes --json`, `squeue --json`, and `scontrol show config`.
+Two queue reads bracket the node read; configuration reads bracket the entire
+snapshot and require the exact cluster and unambiguous `PrivateData=none`. The exact queue argv must run with protected `SQUEUE_ALL=1` under the
 dedicated non-root query UID. Before rehearsal, retain reviewed evidence that
 the named query principal has complete job visibility under the controller's
 `PrivateData` policy, place that evidence digest in the protected inventory

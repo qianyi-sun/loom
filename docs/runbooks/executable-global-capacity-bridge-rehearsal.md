@@ -414,8 +414,9 @@ sudo journalctl -u loom-capacity-pool-executor-prepared.service \
 ```
 
 One successful oneshot validates the exact local config, digest, EUID,
-controller, partition, fixed `scontrol show nodes --json` and `squeue --json`
-binaries, then registers, heartbeats, captures, journals, publishes, confirms,
+controller, partition, and fixed `scontrol`/`squeue` binaries. It requires
+`PrivateData=none` from `scontrol show config` before and after the paired
+`squeue --json` and `scontrol show nodes --json` snapshot, then registers, heartbeats, captures, journals, publishes, confirms,
 heartbeats, and exits. Registration is deterministic and automatic; there is
 no operator-created registration body. The timer repeats no sooner than 30
 seconds after the previous oneshot becomes inactive. Prepared-only mode cannot

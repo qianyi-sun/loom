@@ -439,7 +439,7 @@ class FakeHostRunner:
             runtime.chmod(0o700)
             result = CommandResult(0)
         elif command == "scontrol" and service_call[1:] == ("show", "config"):
-            result = CommandResult(0, f"ClusterName = {self.slurm_cluster}\n")
+            result = CommandResult(0, f"ClusterName = {self.slurm_cluster}\nPrivateData = none\n")
         elif command == "scontrol" and service_call[1:] == ("--version",):
             result = CommandResult(0, "slurm-wlm " + ".".join(map(str, self.slurm_version)) + "\n")
         elif command == "scontrol" and service_call[1:] == (
@@ -614,6 +614,7 @@ def _controller_request(tmp_path: Path, pool_id: str = "oldlab") -> ControllerPr
             "slurm_conf_sha256": configuration_sha256["slurm.conf"],
             "job_visibility_evidence_sha256": (
                 controller_job_visibility_evidence_sha256(
+                    private_data="none",
                     pool_id=pool_id,
                     partition_fields={
                         "AllowGroups": "loom-rollout",
@@ -1887,6 +1888,7 @@ def test_gb10_discovery_accepts_exact_executor_account_partition_and_qos(
     assert evidence.manager_client_cidr == "192.168.60.11/32"
     assert evidence.job_visibility_evidence_sha256 == (
         controller_job_visibility_evidence_sha256(
+            private_data="none",
             pool_id="gb10",
             partition_fields={
                 "AllowAccounts": "loom-staging",

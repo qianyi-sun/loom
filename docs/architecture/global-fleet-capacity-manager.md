@@ -240,8 +240,12 @@ authority-file validator.
 
 The separate `loom_capacity_pool_executor` namespace in the Loom wheel can
 capture one controller-local Slurm 23.11 snapshot with only `scontrol show
-nodes --json` and `squeue --json`. It brackets the node read with two queue
-reads. The fixed queue argv runs with protected `SQUEUE_ALL=1`; the runner
+nodes --json`, `squeue --json`, and `scontrol show config`. It brackets the
+node read with two queue reads, then brackets that sequence with configuration
+reads requiring the exact cluster and one unambiguous `PrivateData=none`.
+Controller discovery and prerequisite admission require the same visibility
+policy and bind it into their evidence digest. Partition or account membership
+alone cannot prove that foreign jobs are visible. The fixed queue argv runs with protected `SQUEUE_ALL=1`; the runner
 requires its effective UID to equal the dedicated non-root query UID. The
 protected policy binds that UID, its query-principal identity, and a nonzero
 evidence digest proving that the principal has complete job visibility under

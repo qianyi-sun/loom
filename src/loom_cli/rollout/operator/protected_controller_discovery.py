@@ -123,11 +123,14 @@ def _string_map(value: object) -> dict[str, str]:
 def controller_job_visibility_evidence_sha256(
     *,
     pool_id: str,
+    private_data: str,
     partition_fields: Mapping[str, str],
     association_fields: tuple[str, ...],
 ) -> str:
     """Bind the exact scheduler admission observed as the executor principal."""
 
+    if private_data != "none":
+        raise ValueError("controller discovery Slurm job visibility is incomplete")
     if pool_id == "oldlab":
         admission = {
             "allow_groups": partition_fields.get("AllowGroups"),
@@ -161,6 +164,7 @@ def controller_job_visibility_evidence_sha256(
         _canonical_json(
             {
                 "admission": admission,
+                "private_data": private_data,
                 "association_fields": list(association_fields),
                 "partition": "loom-staging",
                 "pool_id": pool_id,

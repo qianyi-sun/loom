@@ -220,6 +220,8 @@ class FixedReadOnlyInventoryRunner:
 
     async def run(self, command: str) -> bytes:
         self.events.append(("query", command))
+        if command == "config":
+            return f"ClusterName = {self.policy.controller_cluster}\nPrivateData = none\n".encode()
         common: dict[str, object] = {
             "errors": [],
             "warnings": [],
@@ -285,9 +287,11 @@ async def test_prepared_inventory_registers_and_journals_complete_physical_snaps
         ("registration", registration_key),
         ("heartbeat", 1),
         ("checkpoint", 0),
+        ("query", "config"),
         ("query", "jobs"),
         ("query", "nodes"),
         ("query", "jobs"),
+        ("query", "config"),
         ("inventory", 1),
         ("checkpoint", 1),
         ("heartbeat", 2),
@@ -465,6 +469,8 @@ async def test_prepared_inventory_rejects_incomplete_or_unstable_controller_snap
                 self.events.append(("query", command))
                 return b"x" * (8 * 1024 * 1024 + 1)
             encoded = await super().run(command)
+            if command == "config":
+                return encoded
             document = json.loads(encoded)
             if failure == "warning":
                 document["warnings"] = ["controller visibility warning"]
@@ -803,6 +809,8 @@ async def test_prepared_inventory_rejects_divergent_manager_inventory_high_water
         "query-1",
         "query-2",
         "query-3",
+        "query-4",
+        "query-5",
         "inventory",
         "checkpoint-2",
         "heartbeat-2",
