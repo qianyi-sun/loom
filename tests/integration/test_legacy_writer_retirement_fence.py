@@ -157,3 +157,101 @@ def test_old_writers_cannot_resume_but_exact_successor_can_run(tmp_path):
     finally:
         client.Configuration.set_default(original)
         container.stop()
+
+
+@pytest.mark.timeout(300)
+def test_separate_cutover_retires_real_pods_and_recovers_a_lost_patch(tmp_path):
+    """Actual Kubernetes retirement; the SQL guard remains an outer prerequisite."""
+    from kubernetes import client
+
+    from loom_cli.rollout.operator.protected_application_workloads import APPLICATION_DEPLOYMENTS
+    from loom_cli.rollout.operator.protected_apply_executor import (
+        SubprocessProtectedApplyCommandRunner,
+    )
+    from loom_cli.rollout.operator.protected_legacy_workload_cutover import (
+        LegacyWorkloadCutover,
+        LegacyWorkloadCutoverJournal,
+    )
+    from loom_cli.rollout.operator.protected_legacy_writer_fence_installation import (
+        LegacyWriterFenceInstallation,
+        LegacyWriterFenceJournal,
+    )
+    from loom_cli.rollout.operator.staging_mutation_guard import MutationGuardEvidence
+    from tests.loom_cli.rollout.operator.test_application_guard_retention import _setup
+
+    original_configuration = client.Configuration.get_default_copy()
+    container = _start_k3s(ephemeral_storage_floor="2Gi")
+    try:
+        _, core, _ = _load_client(container)
+        apps, batch = client.AppsV1Api(), client.BatchV1Api()
+        core.create_namespace({"metadata": {"name": "loom-staging"}})
+        pod = {"terminationGracePeriodSeconds": 1, "containers": [{"name": "old-writer",
+            "image": "docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616",
+            "command": ["sh", "-c", "exec sleep 3600"]}]}
+        for name in sorted(APPLICATION_DEPLOYMENTS):
+            document = _deployment(name)
+            document["spec"]["template"]["spec"] = copy.deepcopy(pod)
+            apps.create_namespaced_deployment("loom-staging", document)
+        cron = batch.create_namespaced_cron_job("loom-staging", {"apiVersion": "batch/v1", "kind": "CronJob",
+            "metadata": {"name": "loom-staging-data-lifecycle"}, "spec": {"suspend": True, "schedule": "0 0 * * *",
+                "jobTemplate": {"spec": {"template": {"spec": {**pod, "restartPolicy": "Never"}}}}}})
+        deadline = time.monotonic() + 90
+        while True:
+            old_pods = core.list_namespaced_pod("loom-staging").items
+            if len(old_pods) == 7 and all(value.status.phase == "Running" for value in old_pods):
+                break
+            assert time.monotonic() < deadline, "disposable old writers did not start"
+            time.sleep(0.2)
+        old_uids = {value.metadata.uid for value in old_pods}
+        rs = apps.list_namespaced_replica_set("loom-staging", label_selector="app=loom-service").items
+        assert len(rs) == 1
+        result = container.exec(["cat", "/etc/rancher/k3s/k3s.yaml"])
+        assert result.exit_code == 0
+        kubeconfig = tmp_path / "cutover-kubeconfig"
+        kubeconfig.write_text(result.output.decode().replace("https://127.0.0.1:6443",
+            f"https://127.0.0.1:{container.get_exposed_port(6443)}"))
+        kubeconfig.chmod(0o600)
+        failure = [True]
+        class Runner(SubprocessProtectedApplyCommandRunner):
+            @property
+            def environment(self):
+                return {**super().environment, "KUBECONFIG": str(kubeconfig)}
+            def capture_stdout_with_input(self, argv, **kwargs):
+                payload = super().capture_stdout_with_input(argv, **kwargs)
+                if "patch" in argv and failure[0]:
+                    failure[0] = False
+                    raise RuntimeError("lost real patch acknowledgement")
+                return payload
+        plan, _ = _setup(tmp_path)
+        runner = Runner()
+        state = tmp_path / "state"
+        policies = LegacyWriterFenceInstallation(LegacyWriterFenceJournal(state, plan.request_id, plan.attempt_number, os.geteuid()),
+            runner, plan.plan_digest, _CP_IMAGE, lambda: None)
+        retained = policies.install()
+        deadline = time.monotonic() + 30
+        while not runner.probe_legacy_writer_fence(intent_digest=plan.plan_digest, replica_set_name=rs[0].metadata.name):
+            assert time.monotonic() < deadline, "permanent retirement fence did not enforce"
+            time.sleep(0.1)
+        def fence_check():
+            assert policies.observe() == retained
+            assert runner.probe_legacy_writer_fence(intent_digest=plan.plan_digest, replica_set_name=rs[0].metadata.name)
+            return "d" * 64
+        guard = MutationGuardEvidence.build(request_id=plan.request_id, candidate_sha=plan.candidate_sha,
+            candidate_tree=plan.candidate_tree, generation="a" * 32, mutation_epoch=plan.starting_mutation_epoch,
+            guard_pid=os.getpid(), database_backend_pid=4321, deadline_unix_seconds=2_000_000_000,
+            cronjob_uid=cron.metadata.uid, suspended_resource_version=cron.metadata.resource_version, state="ready")
+        def guard_check():
+            current = batch.read_namespaced_cron_job("loom-staging-data-lifecycle", "loom-staging")
+            assert current.metadata.uid == guard.cronjob_uid and current.spec.suspend
+        cutover = LegacyWorkloadCutover(plan, LegacyWorkloadCutoverJournal(state, plan.request_id, plan.attempt_number, os.geteuid()),
+            runner, guard, guard_check, fence_check)
+        with pytest.raises(RuntimeError, match="lost real patch"):
+            cutover.retire()
+        evidence = cutover.retire()
+        assert len(evidence["workloads"]) == 8
+        assert not old_uids & {value.metadata.uid for value in core.list_namespaced_pod("loom-staging").items}
+        assert all(value.spec.replicas == 0 for value in apps.list_namespaced_deployment("loom-staging").items)
+        assert cutover.retire() == evidence
+    finally:
+        client.Configuration.set_default(original_configuration)
+        container.stop()

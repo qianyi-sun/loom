@@ -15,7 +15,7 @@ from tests.loom_cli.rollout.operator.test_application_workload_runtime import _c
 
 def fixture(tmp_path):
     plan, handoff, guard, _, runner, _ = _context(tmp_path)
-    journal = LegacyWorkloadCutoverJournal(handoff.state_root, plan.request_id, plan.attempt_number, os.geteuid())
+    journal = LegacyWorkloadCutoverJournal(tmp_path / "state", plan.request_id, plan.attempt_number, os.geteuid())
     checks = []
     def fence():
         checks.append("fence")
@@ -28,13 +28,14 @@ def fixture(tmp_path):
 def test_retirement_has_its_own_journal_and_reconciles_partial_shutdown(tmp_path, lost_reply):
     owner, handoff, runner, checks = fixture(tmp_path)
     original = copy.deepcopy(runner.objects)
+    handoff_files = {str(path): path.read_bytes() for path in handoff.attempt_root.rglob("*") if path.is_file()}
     if lost_reply:
         runner.fail_after = 2
         with pytest.raises(RuntimeError, match="lost workload patch"):
             owner.retire()
     evidence = owner.retire()
     assert len(evidence["workloads"]) == 8
-    assert handoff.read_application_workloads(owner.plan) == ()
+    assert {str(path): path.read_bytes() for path in handoff.attempt_root.rglob("*") if path.is_file()} == handoff_files
     assert all(obj["spec"].get("replicas", 0) == 0 for obj in runner.objects if obj["kind"] == "Deployment")
     assert next(obj for obj in runner.objects if obj["kind"] == "CronJob")["metadata"]["annotations"]["loom.dev/legacy-writer-retirement"] == owner.plan.plan_digest
     count = len(runner.patch_calls)
@@ -76,3 +77,20 @@ def test_changed_saved_spec_is_not_adopted_after_lost_reply(tmp_path):
     with pytest.raises(ValueError, match="saved identity or spec"):
         owner.retire()
     assert len(runner.patch_calls) == calls
+
+
+def test_latent_unowned_replica_set_with_database_credentials_blocks_cutover(tmp_path):
+    owner, _, runner, _ = fixture(tmp_path)
+    latent = copy.deepcopy(runner.objects[0])
+    latent["kind"] = "ReplicaSet"
+    latent["metadata"]["name"] = "foreign-latent-writer"
+    from uuid import uuid4
+    latent["metadata"]["uid"] = str(uuid4())
+    latent["spec"]["replicas"] = 0
+    latent["spec"]["template"]["spec"]["containers"][0]["envFrom"] = [
+        {"secretRef": {"name": "loom-secrets"}},
+    ]
+    runner.objects.append(latent)
+    with pytest.raises(RuntimeError, match=r"unowned.*ReplicaSet"):
+        owner.retire()
+    assert runner.patch_calls == []
