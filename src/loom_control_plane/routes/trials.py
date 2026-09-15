@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
@@ -740,6 +740,84 @@ SELECT team_id
  WHERE id = (:trial_id)::uuid
    AND batch_id IS NOT NULL;
 """)
+
+
+class _AdoptProtectedTrialRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    operation_id: UUID
+
+
+@router.post("/trials/{trial_id}/adopt-protected")
+async def adopt_protected_trial(
+    trial_id: UUID, request: Request, payload: _AdoptProtectedTrialRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Preserve an existing trial while admitting its protected execution origin."""
+    async with request.app.state.session_factory() as session:
+        ctx = await verify_bearer_token(
+            session, authorization,
+            admin_verifier=getattr(request.app.state, "admin_secret_verifier", None),
+        )
+        if ctx is None:
+            raise HTTPException(status_code=401, detail="not authorized")
+        require_scope(ctx, "submit")
+        found = (await session.execute(
+            select(TrialRow, TaskRow).join(TaskRow, TaskRow.id == TrialRow.task_id)
+            .where(TrialRow.id == trial_id)
+        )).one_or_none()
+        if found is None:
+            raise HTTPException(status_code=404, detail="trial not found")
+        row, task = found
+        if not is_admin(ctx) and (ctx.team_id is None or ctx.team_id != row.team_id):
+            raise HTTPException(status_code=403, detail="trial belongs to another team")
+    store = getattr(request.app.state, "protected_worker_session_store", None)
+    if store is None:
+        raise HTTPException(status_code=503, detail="protected trial adoption unavailable")
+    if payload.operation_id.int == 0 or row.lifecycle_authority_id is None:
+        raise HTTPException(status_code=409, detail="original trial adoption identity is incomplete")
+    caps = row.requires_caps
+    if not isinstance(caps, dict) or caps.get("backend") != "docker":
+        raise HTTPException(status_code=409, detail="trial does not have protected Docker requirements")
+    pool = caps.get("worker_pool")
+    if pool is not None and not isinstance(pool, str):
+        raise HTTPException(status_code=409, detail="trial worker pool is invalid")
+    try:
+        requirements = SealedRequirementsV1.model_validate({
+            "os": caps.get("os"), "cpu_arch": caps.get("cpu_arch"), "gpu_vendor": caps.get("gpu_vendor"),
+            "network_policies": caps.get("network_policies"), "required_pool": _protected_physical_pool(pool),
+        })
+        registration = await store.current_registration()
+        submission = AtomicTrialSubmissionV1(
+            **registration.model_dump(mode="python"), trial_id=row.id,
+            protected_attempt_id=uuid5(payload.operation_id, str(row.id)),
+            execution_generation=registration.deployment_generation,
+            requirements=requirements, requirements_digest=canonical_digest(requirements),
+            team_id=row.team_id, task_id=row.task_id, config=row.config, submit_priority=row.submit_priority,
+            batch_id=row.batch_id, idempotency_key=row.idempotency_key, sample_idx=row.sample_idx,
+            combination_idx=row.combination_idx, provider_connection_id=row.provider_connection_id,
+            provider_model_id=row.provider_model_id, submitted_by_user_id=row.submitted_by_user_id,
+            usage_attributed_user_id=row.usage_attributed_user_id, usage_attributed_actor=row.usage_attributed_actor,
+            family_key=row.family_key,
+        )
+        receipt = await store.adopt_legacy_trial(
+            registration=registration, submission=submission, public_requires_caps=caps,
+            expected_submitted_at=row.submitted_at, expected_lifecycle_authority_id=row.lifecycle_authority_id,
+            operation_id=payload.operation_id,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail="original trial cannot be represented by protected execution") from exc
+    except ProtectedTrialSubmissionError as exc:
+        raise HTTPException(status_code=503, detail="protected trial adoption rejected") from exc
+    async with request.app.state.session_factory() as session:
+        await _ensure_trial_task_image_links(session, trial_id=trial_id, task_row=task)
+        await session.commit()
+    try:
+        await store.publish_trial_readiness(trial_id=trial_id, protected_attempt_id=receipt.protected_attempt_id)
+    except ProtectedTrialSubmissionError as exc:
+        raise HTTPException(status_code=503, detail="adopted trial prerequisites are not ready") from exc
+    return {"trial_id": str(trial_id), "protected_attempt_id": str(receipt.protected_attempt_id),
+            "submitted_at": receipt.submitted_at.isoformat(), "state": "protected-pending",
+            "replayed": receipt.replayed, "ready": True}
 
 
 @router.post("/trials/{trial_id}/cancel")

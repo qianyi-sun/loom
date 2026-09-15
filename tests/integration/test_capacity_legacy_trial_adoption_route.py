@@ -12,7 +12,10 @@ from loom.db.schema import DataLifecycleAuthority, Task, Token, Trial, User
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 from tests.integration.test_capacity_agent_store import _value
-from tests.integration.test_capacity_protected_trial_submission_route import _initialize_guard, _write_runtime_url
+from tests.integration.test_capacity_protected_trial_submission_route import (
+    _initialize_guard,
+    _write_runtime_url,
+)
 from tests.integration.test_capacity_submission_store import _seed_trial_inputs
 from tests.integration.test_capacity_trial_writer_fence import _freeze, _initialize
 

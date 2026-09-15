@@ -469,9 +469,9 @@ def downgrade() -> None:
     )
     if retained:
         raise RuntimeError("frozen retry permission evidence requires protected retirement")
+    from capacity_guard_migrations.trial_adoption import uninstall_trial_adoption
     from capacity_guard_migrations.trial_output import uninstall_output_reporting
     from capacity_guard_migrations.trial_state import uninstall_state_reporting
-    from capacity_guard_migrations.trial_adoption import uninstall_trial_adoption
 
     uninstall_trial_adoption(_rewrite)
     uninstall_pending_cancellation(_rewrite)

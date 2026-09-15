@@ -10,7 +10,10 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import Batch, DataLifecycleAuthority, Trial
-from loom_control_plane.protected_worker_session import ProtectedTrialSubmissionError, ProtectedWorkerSessionStore
+from loom_control_plane.protected_worker_session import (
+    ProtectedTrialSubmissionError,
+    ProtectedWorkerSessionStore,
+)
 from tests.integration.test_capacity_agent_store import _value
 from tests.integration.test_capacity_protected_trial_submission_route import _initialize_guard
 from tests.integration.test_capacity_submission_store import _atomic_submission, _seed_trial_inputs

@@ -484,13 +484,13 @@ original role-convergence recipe in `scripts/application_schema_trial_writer_bas
 current grants cannot silently change a rollback reference.
 
 After the legacy trial writer is frozen, only the credential-validated protected
-claim, retry, state/output and pending-cancellation functions can issue private,
+claim, retry, state/output, pending-cancellation and legacy-adoption functions can issue private,
 one-use mutation permissions. They bind the
 transaction/backend, frozen writer/epoch/operation, registration/authority,
 trial/attempt/generation and exact worker/claim. Pending cancellation instead
 requires an unclaimed protected attempt and records absent worker/claim identities
 explicitly, alongside its actual cancellation lifecycle transition ID; only that
-operation permits those identity columns to be null. Its private issuer runs after
+operation and legacy adoption permit those identity columns to be null. Its private issuer runs after
 the cancel lifecycle event is inserted and verifies that exact current head, team,
 attempt and absence of an executable claim before permitting the public update. The existing statement trigger
 requires that permission for UPDATE; the existing AFTER-row accounting trigger
@@ -514,10 +514,30 @@ These consumed permissions remain private evidence; they do not advance the
 frozen legacy mutation ledger. Authority reassignment locks and inventories the
 permission table, and downgrade refuses retained evidence. There is no broad
 role exemption, caller-set session flag or new public trigger authority. This
-covers protected claim/retry, state reports, output publication and unclaimed
-cancellation. It does not authorize ordinary writers or frozen submissions,
+covers protected claim/retry, state reports, output publication, unclaimed
+cancellation and explicit adoption of untouched legacy trials. It does not authorize ordinary writers or frozen submissions,
 demand projection or recovery, and does not by itself make the fleet ready for
 activation.
+
+An authenticated `POST /api/v1/trials/{trial_id}/adopt-protected` accepts an
+`operation_id` UUID and requires an administrator or a same-team bearer token
+with `submit` scope. The control plane reads the existing projection and passes
+its exact configuration, timestamps, ownership, provider and batch fields to the
+runtime definer. SQL rechecks these inputs in the mutation transaction. Only an
+untouched queued trial with an active original seven-day lifecycle authority can
+be adopted. The original trial and batch IDs, submission time and expiration
+remain unchanged. Ordinary submission still rejects an unproven ID collision.
+
+The append-only adoption record binds the operation, original trial and lifecycle
+identities, canonical inputs and protected attempt. An exact replay returns the
+original receipt; a conflicting operation or projection fails. The frozen update
+permission names this real adoption operation and permits only the state change
+to `protected-pending`. Failed updates roll back the adoption record and every
+protected projection. The guard owner gains only the three additional inspection
+columns needed to reject prior claim/heartbeat/failure history. Runtime credentials
+receive only the named adoption function. Existing task-image preparation and
+guard-owned readiness validation run before the endpoint reports readiness;
+adoption itself does not bypass prerequisite validation or activate capacity.
 
 State reports validate the executor credential and exact live claim inside the
 same serializable transaction as the public transition. Terminal-result and
