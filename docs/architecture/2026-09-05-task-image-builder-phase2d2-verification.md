@@ -1616,7 +1616,10 @@ second worker registration or trial start. This adapter is still required before
 host launch acceptance; neither the signed ownership
 comment nor the legacy guard's opt-in format may be silently replaced.
 
-`guard_0033` adds an executor-only unused-bootstrap observation. It matches the
+`guard_0034` follows the refundable-admission compatibility migration
+`guard_0033` and adds an executor-only unused-bootstrap observation. Upgrading
+or rolling back this observation preserves the compatible claim function and
+its ownership and privileges. It matches the
 entire persisted physical request, current local agent/candidate binding, prepared
 bootstrap and latest protected bootstrap epoch, checks the database clock against
 the original expiry, and refuses every later registration or terminal admission

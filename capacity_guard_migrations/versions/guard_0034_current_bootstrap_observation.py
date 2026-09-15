@@ -1,7 +1,7 @@
 """Expose fresh unused-bootstrap evidence without changing historical replay.
 
-Revision ID: guard_0033
-Revises: guard_0032
+Revision ID: guard_0034
+Revises: guard_0033
 
 This executor-only observation is not a lease, registration, or runtime admission.
 Its caller must commit and compose current manager/scheduler authority separately.
@@ -11,8 +11,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "guard_0033"
-down_revision: str | Sequence[str] | None = "guard_0032"
+revision: str = "guard_0034"
+down_revision: str | Sequence[str] | None = "guard_0033"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

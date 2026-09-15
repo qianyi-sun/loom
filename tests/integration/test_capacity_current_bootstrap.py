@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from alembic import command
 from pydantic import ValidationError
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
@@ -30,6 +31,7 @@ from tests.integration.test_capacity_agent_executable_admission import (
     _withdrawal,
     _worker,
 )
+from tests.integration.test_capacity_guard_migrations import _guard_config
 
 _CAPABILITY = "current-bootstrap-test-capability"
 _DIGEST = hashlib.sha256(_CAPABILITY.encode()).hexdigest()
@@ -248,3 +250,40 @@ async def test_sql_observation_never_refreshes_transaction_snapshot_age(capacity
     # The supported API owns a fresh snapshot and must see that replacement.
     with pytest.raises(DBAPIError, match="current unused bootstrap"):
         await _observe(capacity_guard_database, registration, physical)
+
+
+def test_observation_upgrade_and_rollback_preserve_refundable_claim_authority(
+    capacity_guard_database,
+):
+    config = _guard_config(capacity_guard_database)
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    claim = "loom_capacity_guard.claim_staging_assigned_trial(uuid,text,jsonb)"
+    observation = (
+        "loom_capacity_guard.observe_current_executable_bootstrap(uuid,uuid,jsonb,bytea,text)"
+    )
+    definition = text(
+        "SELECT pg_get_functiondef(oid), proowner, proacl, prosecdef, proconfig "
+        "FROM pg_proc WHERE oid=CAST(:signature AS regprocedure)"
+    )
+    try:
+        with engine.connect() as connection:
+            retained = connection.execute(definition, {"signature": claim}).one()
+            assert "-- guard_0033: refundable admission compatibility" in retained[0]
+            assert "ON CONFLICT DO NOTHING" in retained[0]
+            assert "ON CONFLICT (trial_id, attempt, execution_role)" not in retained[0]
+        for target in ("guard_0033", "guard_0034", "guard_0033", "guard_0034"):
+            if target == "guard_0033":
+                command.downgrade(config, target)
+            else:
+                command.upgrade(config, target)
+            with engine.connect() as connection:
+                assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0147"
+                assert connection.scalar(text(
+                    "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                )) == target
+                assert connection.execute(definition, {"signature": claim}).one() == retained
+                installed = connection.scalar(text("SELECT to_regprocedure(:signature)"),
+                                              {"signature": observation})
+                assert (installed is not None) == (target == "guard_0034")
+    finally:
+        engine.dispose()
