@@ -5310,11 +5310,16 @@ class ExecutionAdmissionReservation(Base):
             "AND length(trim(release_reason)) > 0)",
             name="execution_admission_reservations_release_group_check",
         ),
-        UniqueConstraint(
+        Index(
+            "execution_admission_reservations_trial_attempt_role_uidx",
             "trial_id",
             "attempt",
             "execution_role",
-            name="execution_admission_reservations_trial_attempt_role_uidx",
+            unique=True,
+            postgresql_where=text(
+                "state = 'active' OR owner_kind <> 'legacy_worker_claim' "
+                "OR release_reason IS DISTINCT FROM 'trial_setup_refund'"
+            ),
         ),
         Index(
             "execution_admission_reservations_active_scope_idx",
@@ -5605,6 +5610,17 @@ class Batch(Base):
 class Trial(Base):
     __tablename__ = "trials"
     __table_args__ = (
+        CheckConstraint(
+            "legacy_claim_id IS NULL OR "
+            "legacy_claim_id <> '00000000-0000-0000-0000-000000000000'::uuid",
+            name="trials_legacy_claim_id_nonzero",
+        ),
+        Index(
+            "trials_legacy_claim_id_uidx",
+            "legacy_claim_id",
+            unique=True,
+            postgresql_where=text("legacy_claim_id IS NOT NULL"),
+        ),
         # #416 Slice 4: a terminal-successful trial must carry its
         # TrialResult. Writeback in `loom_worker.trial_runner` already
         # patches `result` before the `state='succeeded'` transition;
@@ -5679,6 +5695,11 @@ class Trial(Base):
         nullable=False,
     )
     claimed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    # Last identity minted by the legacy scheduler's atomic claim transaction.
+    # Attempt counts can be refunded; every new claim replaces this UUID.
+    # NULL historical claims cannot be upgraded into signed execution authority.
+    # This retained identity alone proves neither current ownership nor a start.
+    legacy_claim_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     pre_start_heartbeat_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True
     )

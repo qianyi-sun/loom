@@ -27,7 +27,7 @@ def _json_bytes(value):
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
-def _sources(tmp_path, *, password=_PASSWORD, pools=True, change=None, schema=2, schema_revision="0142/guard_0033"):
+def _sources(tmp_path, *, password=_PASSWORD, pools=True, change=None, schema=2, schema_revision="0142/guard_0034"):
     manifest_path = _checkpoint(tmp_path, optional_protected_present=True, inventory_schema=schema)
     root = manifest_path.parent / "secrets"
     app_path = root / "loom-secrets.yaml"

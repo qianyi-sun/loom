@@ -1,8 +1,8 @@
-"""Disposable historical guard_0033 role provisioning; never a live installer.
+"""Disposable historical trial-interception role provisioning; never a live installer.
 
 Preserved verbatim from PR1960 source fa2320a9edb7f27087fc9498b5e0876e5e0d01c2.
 The method SHA-256 is 77c4b006228ae9037cb444d9369a1a9d2cdce965ecde83b281942f377c3a6141.
-Current state/output grants must not change the retained 0142/0146 guard_0033 pins.
+Current state/output grants must not change the retained 0142/0147 guard_0034 pins.
 """
 
 from __future__ import annotations

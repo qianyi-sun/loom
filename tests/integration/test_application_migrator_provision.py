@@ -136,7 +136,7 @@ async def test_migrator_creation_never_adopts_ambient_role_or_outlives_failed_jo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transfer_database", ["baseline"], indirect=True)
-@pytest.mark.parametrize("target_revision", ["0142", "0146"])
+@pytest.mark.parametrize("target_revision", ["0142", "0146", "0147"])
 async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(transfer_database, monkeypatch, target_revision):  # noqa: F811
     from pathlib import Path
 
@@ -169,6 +169,22 @@ async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(tra
         target = args["target"]
         authority = dict(target=target, coordination_guard=args["coordination_guard"],
             provisioner_role=next(n for n, a in args["role_bindings"].items() if a == "provisioner"))
+        if target_revision == "0147":
+            from loom.application_guard_claim_compatibility import ensure_guard_claim_compatibility
+            guard_owner = next(name for name, binding in args["role_bindings"].items() if binding == "guard-owner")
+            metadata_query = """SELECT p.oid,p.proowner,p.proacl,p.prosecdef,p.proconfig,
+                r.rolcanlogin,r.rolinherit,r.rolsuper,r.rolcreatedb,r.rolcreaterole,
+                r.rolreplication,r.rolbypassrls,r.rolpassword
+                FROM pg_proc p JOIN pg_authid r ON r.oid=p.proowner
+                WHERE p.oid='loom_capacity_guard.claim_staging_assigned_trial(uuid,text,jsonb)'::regprocedure"""
+            original_metadata = peer.execute(metadata_query).fetchone()
+            retained = []
+            ensure_guard_claim_compatibility(peer, **authority, guard_owner=guard_owner,
+                retained=None, persist=lambda value: retained.append(dict(value)))
+            ensure_guard_claim_compatibility(peer, **authority, guard_owner=guard_owner,
+                retained=retained[0], persist=lambda _: pytest.fail("replay must retain original inputs"))
+            assert peer.execute(metadata_query).fetchone() == original_metadata
+            assert peer.execute("SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version").fetchone() == ("guard_0030",)
         identity = create_application_migrator(peer, **authority, migrator_role="app_migrator_" + uuid4().hex,
             persist_identity=lambda _: None)
         password = uuid4().hex
@@ -184,7 +200,7 @@ async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(tra
             command.upgrade(config, target_revision)
             assert peer.execute("SELECT version_num FROM public.alembic_version").fetchone() == (target_revision,)
             assert peer.execute("SELECT result->>'aggregate_reward' FROM trials WHERE id=%s", (trial,)).fetchone() == (
-                "1.0" if target_revision == "0146" else None,)
+                "1.0" if target_revision in {"0146", "0147"} else None,)
             observe_completed_application_authority(peer, target=target, runtime_password=args["password"], successor=identity)
         finally:
             seal_application_migrator(maintenance, **authority, identity=identity)
@@ -275,3 +291,78 @@ async def test_protected_migration_runtime_connects_actual_sql_lifecycle(transfe
             assert not runtime.role_exists(generation, oid)
         assert len(observed) >= 10
         assert peer.execute("SELECT datallowconn FROM pg_database WHERE oid=%s", (args["target"].database_oid,)).fetchone() == (True,)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transfer_database", ["baseline"], indirect=True)
+@pytest.mark.parametrize("failure", ["journal", "readback", "guard"])
+async def test_claim_compatibility_failure_keeps_replay_bound_to_original_function(transfer_database, failure):  # noqa: F811
+    from loom.application_guard_claim_compatibility import ensure_guard_claim_compatibility
+
+    with _closed(transfer_database) as (peer, maintenance, guard, args):
+        args.update(schema_revision="0134/guard_0030", schema_acl_profile="cnpg-staging")
+        complete_application_handoff_database(peer, maintenance=maintenance, **args)
+        authority = dict(target=args["target"], coordination_guard=args["coordination_guard"],
+            provisioner_role=next(n for n, a in args["role_bindings"].items() if a == "provisioner"),
+            guard_owner=next(n for n, a in args["role_bindings"].items() if a == "guard-owner"))
+        query = "SELECT pg_get_functiondef('loom_capacity_guard.claim_staging_assigned_trial(uuid,text,jsonb)'::regprocedure)"
+        before = peer.execute(query).fetchone()
+        retained = []
+        def persist(binding):
+            retained.append(dict(binding))
+            assert peer.execute(query).fetchone() == before
+            if failure == "journal":
+                raise RuntimeError("durable journal failed")
+            if failure == "guard":
+                guard.execute("SELECT pg_advisory_unlock_all()")
+        class LostReadback:
+            def __getattr__(self, name):
+                return getattr(peer, name)
+            def execute(self, statement, *args, **kwargs):
+                rendered = statement.as_string(peer) if isinstance(statement, sql.Composable) else statement
+                if rendered.startswith("SELECT pg_catalog.pg_get_functiondef(oid),"):
+                    raise RuntimeError("rewrite readback lost")
+                return peer.execute(statement, *args, **kwargs)
+        with pytest.raises(RuntimeError):
+            ensure_guard_claim_compatibility(LostReadback() if failure == "readback" else peer,
+                **authority, retained=None, persist=persist)
+        assert peer.execute(query).fetchone() == before
+        assert len(retained) == 1
+        if failure != "guard":
+            for _ in range(2):
+                ensure_guard_claim_compatibility(peer, **authority, retained=retained[0],
+                    persist=lambda _: pytest.fail("must not replace retained binding"))
+            assert "guard_0033: refundable admission compatibility" in peer.execute(query).fetchone()[0]
+        assert peer.execute("SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version").fetchone() == ("guard_0030",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transfer_database", ["baseline"], indirect=True)
+@pytest.mark.parametrize("drift", ["owner", "security", "search-path", "identity", "digest", "malformed-digest"])
+async def test_claim_compatibility_refuses_changed_private_authority(transfer_database, drift):  # noqa: F811
+    from loom.application_guard_claim_compatibility import ensure_guard_claim_compatibility
+
+    with _closed(transfer_database) as (peer, maintenance, _guard, args):
+        args.update(schema_revision="0134/guard_0030", schema_acl_profile="cnpg-staging")
+        complete_application_handoff_database(peer, maintenance=maintenance, **args)
+        authority = dict(target=args["target"], coordination_guard=args["coordination_guard"],
+            provisioner_role=next(n for n, a in args["role_bindings"].items() if a == "provisioner"),
+            guard_owner=next(n for n, a in args["role_bindings"].items() if a == "guard-owner"))
+        retained = []
+        ensure_guard_claim_compatibility(peer, **authority, retained=None, persist=lambda value: retained.append(dict(value)))
+        function = "loom_capacity_guard.claim_staging_assigned_trial(uuid,text,jsonb)"
+        if drift == "owner":
+            authority["guard_owner"] = "unrelated_guard_owner"
+        elif drift == "security":
+            peer.execute(sql.SQL("ALTER FUNCTION " + function + " SECURITY INVOKER"))
+        elif drift == "search-path":
+            peer.execute(sql.SQL("ALTER FUNCTION " + function + " SET search_path=public"))
+        elif drift == "identity":
+            retained[0]["function_oid"] += 1
+        elif drift == "digest":
+            retained[0]["after_sha256"] = "0" * 64
+        elif drift == "malformed-digest":
+            retained[0]["before_sha256"] = []
+        with pytest.raises(RuntimeError, match="guard compatibility"):
+            ensure_guard_claim_compatibility(peer, **authority, retained=retained[0],
+                persist=lambda _: pytest.fail("refusal must not rewrite saved authority"))

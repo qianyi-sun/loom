@@ -75,6 +75,7 @@ class ProtectedApplicationMigrationRuntime:
     assert_inputs: Callable[[], None]
     intent_digest: str
     provisioner_role: str = "postgres"
+    before_generation: Callable[[ApplicationDatabaseConnection], None] | None = field(default=None, kw_only=True)
     _creator_stack: ExitStack = field(default_factory=ExitStack, init=False, repr=False)
     _maintenance_stack: ExitStack = field(default_factory=ExitStack, init=False, repr=False)
     _creator: ApplicationDatabaseConnection | None = field(default=None, init=False, repr=False)
@@ -99,6 +100,9 @@ class ProtectedApplicationMigrationRuntime:
         backend = observe_application_migration_backend(self._creator, target=self.target,
             coordination_guard=self.coordination_guard, provisioner_role=self.provisioner_role, maintenance=False)
         self.checkpoint()
+        if self.before_generation is not None:
+            self.before_generation(self._creator)
+            self.checkpoint()
         return {"ordinal": ordinal, "nonce": secrets.token_hex(16), "password": secrets.token_urlsafe(48),
             "expires_at": (datetime.now(UTC) + timedelta(minutes=45)).isoformat(),
             "creation_backend": asdict(backend), "ca_certificate": base64.b64encode(self.ca_certificate).decode()}

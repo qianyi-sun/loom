@@ -1,7 +1,7 @@
 """Permit authenticated, transaction-bound claim and retry through a frozen fence.
 
 Revision ID: guard_0035
-Revises: guard_0033
+Revises: guard_0034
 """
 
 from __future__ import annotations
