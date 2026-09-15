@@ -44,7 +44,10 @@ async def test_start_response_requires_exact_created_receipt(tmp_path, status):
     assert seen[0].headers["authorization"] == "Bearer worker-token"
 
 
-@pytest.mark.parametrize("reply", [b"{}", b"x" * 8193, b'{"schema":null,"schema":null}'])
+@pytest.mark.parametrize(
+    "reply", [b"{}", b"x" * 8193, b'{"schema":null,"schema":null}'],
+    ids=["empty", "oversized", "duplicate"],
+)
 async def test_malformed_or_oversized_receipt_fails_closed(tmp_path, reply):
     payload, kwargs = evidence(tmp_path)
     async with httpx.AsyncClient(

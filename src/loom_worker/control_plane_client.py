@@ -26,6 +26,8 @@ import jwt
 
 from loom.models.resource_usage import TrialResourceUsageReport
 from loom.pipeline.live_preview import LivePreviewRecordV1, validate_preview_jpeg
+from loom_task_image_authority.execution_grant import _canonical_object
+from loom_task_image_authority.execution_start import ExecutionStartReceipt, ExecutionStartRequest
 from loom_worker.trial_cancellation_watchdog import TrialOwnershipSnapshot
 
 EXECUTOR_WORKER_CREDENTIAL_HEADER = "X-Loom-Executor-Worker-Credential"
@@ -403,6 +405,37 @@ class HttpControlPlaneClient:
                 return None
             r.raise_for_status()
             return r.json()  # type: ignore[no-any-return]
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def consume_task_image_execution_start(
+        self, request: ExecutionStartRequest,
+    ) -> ExecutionStartReceipt:
+        """Single authenticated attempt; a missing acknowledgement is not replayable.
+
+        The caller owns the end-to-end start deadline, including local evidence
+        verification. A receipt is returned only for a fresh committed consume,
+        never a generic 200/idempotency replay. No redirect can select an issuer.
+        """
+        _ = request.digest
+        client, owned = self._http()
+        try:
+            async with client.stream(
+                "POST", f"/trials/{request.claim.trial_id}/task-image/start",
+                headers=self.request_headers,
+                json=request.model_dump(mode="json", by_alias=True, exclude_none=True),
+                follow_redirects=False,
+            ) as response:
+                response.raise_for_status()
+                if response.status_code != 201:
+                    raise ValueError("online start did not acknowledge a fresh consume")
+                chunks = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(chunks) + len(chunk) > 8192:
+                        raise ValueError("execution start receipt exceeds byte ceiling")
+                    chunks.extend(chunk)
+                return ExecutionStartReceipt.model_validate(_canonical_object(bytes(chunks), 8192))
         finally:
             if owned:
                 await client.aclose()
