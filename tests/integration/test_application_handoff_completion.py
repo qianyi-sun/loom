@@ -62,7 +62,10 @@ def _closed(database_fixture, *, request=None):
                     )
                 finally:
                     # Disposable fixture cleanup, including intentionally lost guard cases.
-                    maintenance.execute(sql.SQL("ALTER DATABASE {} ALLOW_CONNECTIONS true").format(sql.Identifier(database)))
+                    # Recovery may retire the original maintenance peer before
+                    # handing authority to its own fixed transport.
+                    with psycopg.connect(url, dbname="postgres", autocommit=True) as cleanup:
+                        cleanup.execute(sql.SQL("ALTER DATABASE {} ALLOW_CONNECTIONS true").format(sql.Identifier(database)))
         finally:
             with psycopg.connect(url, autocommit=True) as cleanup:
                 cleanup.execute("DROP OWNED BY loom_rollout_readonly")
