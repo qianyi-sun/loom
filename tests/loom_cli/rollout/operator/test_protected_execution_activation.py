@@ -92,6 +92,8 @@ class Manager(_Manager):
         return self._abort_result
 
     def activate_execution(self, request, key):
+        assert request.executable_new_capacity_ceiling == self.artifact.execution_policy.executable_new_capacity_ceiling
+        assert request.executable_new_capacity_rate_per_minute == self.artifact.execution_policy.executable_new_capacity_rate_per_minute
         self.calls.append(("manager", "activate"))
         value = (request, key)
         if self.activations:
@@ -113,7 +115,7 @@ class Manager(_Manager):
         return ExecutionAuthorityV2.model_validate_json(self.execution.model_dump_json())
 
 
-def fixture(tmp_path):
+def fixture(tmp_path, *, policy_ceiling=1, policy_rate=1):
     requests, controls, calls = {}, {}, []
     ca = None
     for pool in ("gb10", "oldlab"):
@@ -137,7 +139,9 @@ def fixture(tmp_path):
         "deployment_generation": entry.deployment_generation, "candidate_generation": entry.candidate_generation})
     def compose(original):
         seed = CapacityPoolExecutorProfileSeed.from_profile(profile)
-        policy = _policy(seed, core_bundle_sha256=original.core_artifact_bundle_sha256)
+        policy = _policy(seed, core_bundle_sha256=original.core_artifact_bundle_sha256).model_copy(update={
+            "executable_new_capacity_ceiling": policy_ceiling,
+            "executable_new_capacity_rate_per_minute": policy_rate})
         ack = policy.subject_acknowledgements[0].model_copy(update={
             "subject_id": subject.subject_id, "subject_incarnation": subject.subject_incarnation,
             "configuration_generation": subject.configuration_generation,
@@ -184,6 +188,12 @@ def test_activation_stages_both_pools_before_manager_and_enables_after(tmp_path)
     assert owner.execute() == manager.expected
     assert calls.count(("gb10", "stage")) == 1
     assert owner.journal.read("activation.terminal.json") is not None
+
+
+@pytest.mark.parametrize("limits", [{"policy_ceiling": 2}, {"policy_ceiling": 158}, {"policy_rate": 2}])
+def test_activation_refuses_policy_capacity_mismatch_before_effects(tmp_path, limits):
+    with pytest.raises(ValueError, match="activation policy capacity"):
+        fixture(tmp_path, **limits)
 
 
 def test_lost_activation_reply_reuses_exact_retained_readiness_and_key(tmp_path):
