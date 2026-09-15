@@ -479,6 +479,7 @@ async def _record_failed_message_call(
     async with request.app.state.session_factory() as session:
         await record_failed_call(
             session,
+            auth_context=ctx,
             team_id=ctx.team_id,
             trial_id=ctx.trial_id,
             execution_attempt_id=ctx.execution_attempt_id,

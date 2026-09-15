@@ -631,6 +631,7 @@ async def record_facade_failed_call(
     async with request.app.state.session_factory() as audit_session:
         await record_failed_call(
             audit_session,
+            auth_context=ctx,
             team_id=ctx.team_id,
             trial_id=ctx.trial_id,
             step_id=ctx.step_id,

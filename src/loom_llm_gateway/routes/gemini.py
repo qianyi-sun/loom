@@ -213,6 +213,7 @@ async def _record_failed_gemini_call(
     async with request.app.state.session_factory() as session:
         await record_failed_call(
             session,
+            auth_context=ctx,
             team_id=ctx.team_id,
             trial_id=ctx.trial_id,
             step_id=ctx.step_id,

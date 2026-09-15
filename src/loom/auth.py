@@ -226,7 +226,12 @@ def mint_step_jwt(
         attempt_deadline_wall_clock = attempt_deadline_wall_clock.astimezone(UTC)
         if attempt_deadline_wall_clock <= now:
             raise ValueError("attempt deadline has already elapsed")
-        if expires_at < attempt_deadline_wall_clock + timedelta(seconds=300):
+        # Native Pod credentials rotate independently of the admitted phase.
+        # Their complete authority and 600s TTL are validated below.
+        if (
+            service_execution_lease_id is None
+            and expires_at < attempt_deadline_wall_clock + timedelta(seconds=300)
+        ):
             raise ValueError("step JWT expiry must cover attempt deadline plus 300 seconds")
         if ttl_sec > 30_000:
             raise ValueError("attempt-bound step JWT TTL exceeds 30000 seconds")
@@ -376,8 +381,11 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
                 or isinstance(expires_at, bool)
                 or attempt_deadline_wall_clock.timestamp() <= issued_at
                 or expires_at - issued_at > 30_000
-                or expires_at
-                < (attempt_deadline_wall_clock + timedelta(seconds=300)).timestamp()
+                or (
+                    not isinstance(payload.get("service_execution_lease_id"), str)
+                    and expires_at
+                    < (attempt_deadline_wall_clock + timedelta(seconds=300)).timestamp()
+                )
             ):
                 raise ValueError("invalid attempt deadline lifetime")
         step_jwt_id = UUID(payload["jti"]) if isinstance(payload.get("jti"), str) else None

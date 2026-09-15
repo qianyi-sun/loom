@@ -76,6 +76,19 @@ def serialize_execution_accounting_call(row: LlmCall) -> dict[str, Any]:
     payload["call_status"] = "failed" if extras.get("_loom_call_status") == "failed" else "completed"
     if payload["call_status"] == "failed":
         payload["provider_extras"]["_loom_call_status"] = "failed"
+    # Zero numeric placeholders on failed or partial calls are not measured
+    # zero usage. Retain only the Gateway's bounded diagnostic vocabulary;
+    # arbitrary upstream strings and request/response bodies stay private.
+    for key, allowed in {
+        "_loom_usage_status": {"missing", "partial"},
+        "_loom_failure_category": {
+            "upstream_timeout", "upstream_transport", "upstream_http_4xx",
+            "upstream_http_5xx", "upstream_http_error", "attempt_deadline_reached",
+        },
+    }.items():
+        value = extras.get(key)
+        if isinstance(value, str) and value in allowed:
+            payload["provider_extras"][key] = value
     raw = extras.get("_loom_raw_provider_log")
     response = raw.get("response") if isinstance(raw, dict) else None
     body = response.get("body") if isinstance(response, dict) else None

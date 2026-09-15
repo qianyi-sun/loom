@@ -212,6 +212,15 @@ class LLMCallEvent(_EventBase):
     response: ChatMessage
     finish_reason: str
 
+    # Explicit audit state keeps missing usage distinct from numeric placeholders.
+    # None preserves legacy records whose usage completeness was not classified.
+    call_status: Literal["completed", "failed"] = "completed"
+    usage_status: Literal["missing", "partial"] | None = None
+    failure_category: Literal[
+        "upstream_timeout", "upstream_transport", "upstream_http_4xx",
+        "upstream_http_5xx", "upstream_http_error", "attempt_deadline_reached",
+    ] | None = None
+
     # Usage — RAW, NOT derived (spec H5)
     input_tokens: int = Field(ge=0)
     cached_input_tokens: int = Field(ge=0)

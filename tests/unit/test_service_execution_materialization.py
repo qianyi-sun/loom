@@ -375,6 +375,9 @@ async def test_materializer_loop_recovers_after_control_database_outage() -> Non
             self.cleanup_calls += 1
             return False
 
+        async def reconcile_accounting_once(self) -> bool:
+            return False
+
         async def refresh_metrics(self) -> None:
             self.metric_calls += 1
             recovered.set()
@@ -412,6 +415,9 @@ async def test_materializer_loop_does_not_retry_an_error_after_shutdown() -> Non
 
         async def cleanup_source_once(self) -> bool:
             raise AssertionError("shutdown must stop before source cleanup")
+
+        async def reconcile_accounting_once(self) -> bool:
+            return False
 
         async def refresh_metrics(self) -> None:
             raise AssertionError("shutdown must stop before metrics refresh")
@@ -453,6 +459,9 @@ async def test_materializer_loop_preserves_translated_worker_cancellation() -> N
 
         async def cleanup_source_once(self) -> bool:
             raise AssertionError("cancelled worker must not start source cleanup")
+
+        async def reconcile_accounting_once(self) -> bool:
+            return False
 
         async def refresh_metrics(self) -> None:
             raise AssertionError("cancelled worker must not refresh metrics")
@@ -517,6 +526,9 @@ async def test_materializer_loop_does_not_finish_before_workers_are_drained() ->
         async def cleanup_source_once(self) -> bool:
             raise AssertionError("cancelled worker must not start source cleanup")
 
+        async def reconcile_accounting_once(self) -> bool:
+            return False
+
         async def refresh_metrics(self) -> None:
             raise AssertionError("cancelled worker must not refresh metrics")
 
@@ -558,6 +570,9 @@ async def test_materializer_loop_wakes_idle_workers_when_stopped() -> None:
         async def cleanup_source_once(self) -> bool:
             return False
 
+        async def reconcile_accounting_once(self) -> bool:
+            return False
+
         async def refresh_metrics(self) -> None:
             idle_cycle_finished.set()
 
@@ -574,6 +589,35 @@ async def test_materializer_loop_wakes_idle_workers_when_stopped() -> None:
 
     await asyncio.wait_for(loop_task, timeout=0.5)
     assert materializer.run_calls == 1
+
+
+async def test_busy_materializer_still_reconciles_late_accounting() -> None:
+    stop = asyncio.Event()
+    operations: list[str] = []
+
+    class BusyMaterializer:
+        async def run_once(self) -> bool:
+            operations.append("materialize")
+            return True
+
+        async def cleanup_source_once(self) -> bool:
+            operations.append("cleanup")
+            return False
+
+        async def refresh_metrics(self) -> None:
+            operations.append("metrics")
+
+        async def reconcile_accounting_once(self) -> bool:
+            operations.append("accounting")
+            stop.set()
+            return True
+
+    await asyncio.wait_for(run_service_execution_materializer_loop(
+        materializer=BusyMaterializer(),  # type: ignore[arg-type]
+        interval_seconds=60,
+        stop_event=stop,
+    ), timeout=0.5)
+    assert operations == ["materialize", "cleanup", "metrics", "accounting"]
 
 
 async def test_materializer_run_does_not_retry_a_translated_cancellation(
@@ -658,3 +702,49 @@ async def test_source_cleanup_does_not_retry_a_translated_cancellation(
     with pytest.raises(asyncio.CancelledError):
         await operation
     assert not retry_called
+
+
+async def test_accounting_refresh_defers_bad_archive_and_preserves_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_control_plane import service_execution_accounting_repair as repair
+
+    lease_id, team_id = uuid4(), uuid4()
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        async def execute(self, _statement):
+            return self
+
+        def one_or_none(self):
+            return lease_id, team_id
+
+    store = FakeObjectStore(objects={})
+    materializer = ServiceExecutionMaterializer(
+        session_factory=Session,  # type: ignore[arg-type]
+        source_store=store, source_bucket="source", canonical_store=store,
+        artifacts_bucket="canonical", trajectories_bucket="trajectories",
+        retry_max_seconds=60,
+    )
+    now = datetime.now(UTC)
+
+    async def unavailable(**_):
+        raise OSError("unavailable object store")
+
+    monkeypatch.setattr(repair, "repair_accounting", unavailable)
+    assert not await materializer.reconcile_accounting_once(now=now)
+    assert materializer._accounting_retry_after == {lease_id: now + timedelta(seconds=60)}
+    assert store.objects == {}
+
+    async def cancelled(**_):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(repair, "repair_accounting", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await materializer.reconcile_accounting_once(now=now + timedelta(seconds=61))
+    assert materializer._accounting_retry_after == {}

@@ -28,6 +28,7 @@ import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from loom.auth import AuthContext
 from loom.models.types import ModelSpec
 from loom_llm_gateway import litellm_wrapper
 from loom_llm_gateway.attempt_deadline import (
@@ -403,6 +404,7 @@ async def chat_completions(
             provider_label=byo_row.provider_type,
             request_params=normalize_request_params(raw_body),
             attempt_deadline=request_attempt_deadline(request),
+            auth_context=ctx,
         )
     else:
         acompletion_kwargs = dict(
@@ -432,6 +434,7 @@ async def chat_completions(
             async with request.app.state.session_factory() as audit_session:
                 await record_failed_call(
                     audit_session,
+                    auth_context=ctx,
                     team_id=audit_team_id,
                     trial_id=audit_trial_id,
                     step_id=audit_step_id,
@@ -585,6 +588,7 @@ async def _forward_openai_compatible_byo_chat(
     provider_label: str,
     request_params: dict[str, Any],
     attempt_deadline: GatewayAttemptDeadline | None = None,
+    auth_context: AuthContext | None = None,
 ) -> tuple[dict[str, Any], int]:
     """Forward BYO OpenAI-compatible chat through the egress client pool.
 
@@ -631,6 +635,7 @@ async def _forward_openai_compatible_byo_chat(
         async with session_factory() as audit_session:
             await record_failed_call(
                 audit_session,
+                auth_context=auth_context,
                 team_id=audit_team_id,
                 trial_id=audit_trial_id,
                 step_id=audit_step_id,
@@ -650,6 +655,7 @@ async def _forward_openai_compatible_byo_chat(
         async with session_factory() as audit_session:
             await record_failed_call(
                 audit_session,
+                auth_context=auth_context,
                 team_id=audit_team_id,
                 trial_id=audit_trial_id,
                 step_id=audit_step_id,
@@ -673,6 +679,7 @@ async def _forward_openai_compatible_byo_chat(
         async with session_factory() as audit_session:
             await record_failed_call(
                 audit_session,
+                auth_context=auth_context,
                 team_id=audit_team_id,
                 trial_id=audit_trial_id,
                 step_id=audit_step_id,

@@ -7,6 +7,7 @@ wiring. Only disposable testcontainers are stopped; no shared service is used.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import tarfile
 from collections.abc import Iterator
@@ -27,6 +28,7 @@ from loom.db.schema import (
     ServiceExecutionLease,
     Task,
     TaskImageMaterialization,
+    Team,
     Trial,
     TrialEvent,
     TrialTaskImageMaterialization,
@@ -41,7 +43,10 @@ from loom_control_plane.service_execution import (
     finalize_committed_service_execution,
     record_execution_event,
 )
-from loom_control_plane.service_execution_materializer import ServiceExecutionMaterializer
+from loom_control_plane.service_execution_materializer import (
+    ServiceExecutionMaterializer,
+    run_service_execution_materializer_loop,
+)
 from loom_control_plane.service_execution_output import (
     ServiceExecutionOutputFileV1,
     ServiceExecutionOutputPrepareV1,
@@ -615,5 +620,121 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
         async with sessions() as session:
             current = await session.get(ServiceExecutionLease, lease.id)
             assert current is not None and current.source_cleanup_state == "complete"
+
+        if terminus and not legacy_repair:
+            from loom_service.delivery_export import (
+                build_canonical_trial_bundle_archive,
+                canonical_bundle_from_artifact,
+            )
+
+            # Exercise the actual SQL selector and MinIO-backed repair after
+            # source GC. The request started before materialization but its
+            # immutable Gateway row commits later; timestamps cannot detect it.
+            preserved = (trial.state, trial.finished_at, copy.deepcopy(trial.result), trial.attempt_count,
+                         current.materialization_state, current.materialization_committed_at,
+                         current.source_retain_until, current.output_manifest_sha256,
+                         current.canonical_trajectory_sha256, current.canonical_atif_sha256,
+                         current.source_cleanup_state, current.desired_state, current.observed_state)
+            original_evidence = copy.deepcopy(evidence)
+            original_index = copy.deepcopy(trajectory_index)
+            old_objects = {
+                (item["bucket"], item["key"]): await canonical_store.get_object(bucket=item["bucket"], key=item["key"])
+                for item in [*files, *evidence]
+            }
+            assert not await restarted.reconcile_accounting_once()
+
+            def late_call(*, team_id=lease.team_id, generation=1, step_id="agent"):
+                return LlmCall(
+                    id=uuid4(), team_id=team_id, trial_id=trial_id, step_id=step_id,
+                    model=ledger[0]["model"], dialect=ledger[0]["dialect"],
+                    input_tokens=999, output_tokens=8192, cost_usd=0.01,
+                    rate_card_hash="test-rate", captured_at=now - timedelta(days=1), attempt=1,
+                    provider_extras={"_loom_raw_provider_log": {
+                        "service_execution": {"lease_id": str(lease.id), "generation": generation},
+                        "response": {"body": {"choices": [{"finish_reason": "length"}]}},
+                    }},
+                )
+
+            # Foreign team/generation/role rows must neither select the archive
+            # for correction nor contaminate its exported accounting.
+            foreign_team = uuid4()
+            async with sessions() as session:
+                session.add(Team(id=foreign_team, name="foreign-accounting-" + foreign_team.hex))
+                await session.flush()
+                excluded = [late_call(team_id=foreign_team), late_call(generation=2), late_call(step_id="verifier")]
+                session.add_all(excluded)
+                await session.commit()
+            assert not await restarted.reconcile_accounting_once()
+            included = late_call()
+            async with sessions() as session:
+                session.add(included)
+                await session.commit()
+            # The prior materialization is still committed, so its ordinary
+            # pending-materialization pass cannot discover the newly bound row.
+            assert not await restarted.run_once()
+            async with sessions() as session:
+                unchanged = await session.get(Artifact, artifact.id)
+                assert unchanged.artifact_metadata["accounting_call_count"] == 6
+            stop = asyncio.Event()
+            loop = asyncio.create_task(run_service_execution_materializer_loop(
+                materializer=restarted, interval_seconds=0.01, stop_event=stop,
+            ))
+            try:
+                async with asyncio.timeout(10):
+                    while True:
+                        async with sessions() as session:
+                            updated = await session.get(Artifact, artifact.id)
+                            if updated.artifact_metadata["accounting_call_count"] == 7:
+                                break
+                        await asyncio.sleep(0.01)
+            finally:
+                stop.set()
+                await asyncio.wait_for(loop, timeout=10)
+            assert not await restarted.reconcile_accounting_once()
+            async with sessions() as session:
+                trial = await session.get(Trial, trial_id)
+                current = await session.get(ServiceExecutionLease, lease.id)
+                artifact = await session.get(Artifact, artifact.id)
+                assert trial is not None and current is not None and artifact is not None
+                assert preserved == (trial.state, trial.finished_at, trial.result, trial.attempt_count,
+                                     current.materialization_state, current.materialization_committed_at,
+                                     current.source_retain_until, current.output_manifest_sha256,
+                                     current.canonical_trajectory_sha256, current.canonical_atif_sha256,
+                                     current.source_cleanup_state, current.desired_state, current.observed_state)
+                assert artifact.artifact_metadata["accounting_call_count"] == 7
+                assert artifact.storage["source_evidence"] == original_evidence
+                assert trial.trajectory_index != original_index
+                corrected_events = list((await session.scalars(select(TrialEvent).where(TrialEvent.trial_id == trial_id))).all())
+                assert len(corrected_events) == 29
+                assert sum(event.kind == "llm_call" for event in corrected_events) == 7
+                published_index = copy.deepcopy(trial.trajectory_index)
+                bundle = canonical_bundle_from_artifact(artifact, trial=trial)
+                assert bundle is not None
+            archive = build_canonical_trial_bundle_archive(client=canonical_store._client, bundle=bundle)
+            try:
+                with tarfile.open(fileobj=archive.body, mode="r:gz") as tar:
+                    archived_usage = json.load(tar.extractfile("files/accounting/usage.json"))
+                    assert archived_usage["call_count"] == 7
+                    assert sum(archived_usage["totals"][key] for key in ("input_tokens", "output_tokens")) == 34572
+                    calls = json.load(tar.extractfile("files/accounting/gateway-calls.json"))["calls"]
+                    assert {row["id"] for row in calls} == {row["id"] for row in ledger} | {str(included.id)}
+                    assert not any("_loom_raw_provider_log" in row["provider_extras"] for row in calls)
+                    assert json.load(tar.extractfile("source/accounting/usage.json"))["call_count"] == 5
+                    assert tar.extractfile("source/trajectory/events.jsonl").read() == payloads["trajectory/events.jsonl"]
+                    names = tar.getnames()
+                    assert len(names) == len(set(names))
+            finally:
+                archive.body.close()
+            atif_key = published_index["atif_uri"].removeprefix("s3://trajectories/")
+            atif = json.loads(await canonical_store.get_object(bucket="trajectories", key=atif_key))
+            assert atif["accounting"] == archived_usage
+            assert len(atif["steps"]) == 6
+            for (bucket, key), body in old_objects.items():
+                assert await canonical_store.get_object(bucket=bucket, key=key) == body
+            # A fresh process uses durable published count, not in-memory state.
+            assert not await materializer().reconcile_accounting_once()
+            async with sessions() as session:
+                trial = await session.get(Trial, trial_id)
+                assert trial.trajectory_index == published_index
     finally:
         await engine.dispose()
