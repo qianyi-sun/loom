@@ -347,6 +347,10 @@ class SubprocessProtectedApplyCommandRunner:
                             handoff_backend=backend, coordination_guard=original.coordination_guard,
                             runtime_password=credential.password,
                         )
+                    # Completion owns a fresh maintenance transport and requires
+                    # cluster-wide client retirement. Retire this recovery peer
+                    # before opening that transport, retaining the handoff/guard.
+                    maintenance.close()
                     outcome = self.complete_staging_application_database(
                         plan, journal=journal, connection=peer, guard=guard,
                     )
