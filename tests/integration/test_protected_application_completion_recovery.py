@@ -54,6 +54,7 @@ async def test_recovery_completes_without_reclosing_a_restored_database(
                    candidate_tree=plan.candidate_tree, generation=evidence.generation)
     with _closed(transfer_database, request=request) as (original_peer, maintenance, database_guard, arguments):
         arguments["password"] = password
+        arguments["schema_acl_profile"] = "cnpg-staging"
         values = evidence.to_dict()
         values.pop("schema_version")
         values.pop("evidence_digest")
@@ -61,6 +62,9 @@ async def test_recovery_completes_without_reclosing_a_restored_database(
         evidence = MutationGuardEvidence.build(**values)
         if interruption == "restored":
             complete_application_handoff_database(original_peer, maintenance=maintenance, **arguments)
+        # The installed recovery owns its maintenance transport. A fixture
+        # inspection connection must not survive its cluster-wide retirement.
+        maintenance.close()
         if interruption != "live-old-peer":
             original_peer.close()
         if interruption == "guard-loss":
@@ -108,7 +112,8 @@ async def test_recovery_completes_without_reclosing_a_restored_database(
                 journal.execute(plan, [_component(apply)])
             assert outcomes == []
             assert not list(journal.root.rglob("application-handoff-*-peer.json"))
-            assert maintenance.execute("SELECT datallowconn FROM pg_database WHERE datname='loom'").fetchone() == (False,)
+            with psycopg.connect(transfer_database[0], dbname="postgres", autocommit=True) as inspection:
+                assert inspection.execute("SELECT datallowconn FROM pg_database WHERE datname='loom'").fetchone() == (False,)
             return
         if interruption in {"peer-publication", "login-ack"}:
             with pytest.raises(RuntimeError):
