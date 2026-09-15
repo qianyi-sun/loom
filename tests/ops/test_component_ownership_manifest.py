@@ -15,6 +15,12 @@ import scripts.component_ownership as component_ownership
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize("path", ["src/loom_control_plane/__init__.py", "src/loom_control_plane/slurm_job_cgroup.py"])
+def test_native_worker_cgroup_utility_changes_select_executor_image(path: str) -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    assert "capacity-executor" in {owner.id for owner in manifest.component_owners_for_path(path)}
+
+
 def test_component_ownership_authority_files_exist() -> None:
     assert (REPO_ROOT / "config/component-ownership.toml").is_file()
     assert (REPO_ROOT / "scripts/component_ownership.py").is_file()
