@@ -71,14 +71,16 @@ async def _observe_fresh_database(
         TrialWriterBaselineReferenceDatabase,
     )
 
+    if profile == "cnpg-staging-executor-admission" and revision != "0146/guard_0034":
+        raise ValueError("executor admission reference requires its reviewed current revision")
     application_head, guard_head = application_schema_revisions(revision)
     factory = (
         BaselineReferenceDatabase if revision == "0134/guard_0030" else
         TrialWriterBaselineReferenceDatabase if revision in {"0142/guard_0033", "0146/guard_0033"} else
         PsycopgPersonalDevCapacityDatabase
     )
-    sealed = profile in {"sealed-owner", "staging-readonly-sealed-owner", "cnpg-staging-sealed-owner"}
-    staging_readonly = profile in {"staging-readonly-legacy-owner", "staging-readonly-sealed-owner", "cnpg-staging-legacy-owner", "cnpg-staging-sealed-owner"}
+    sealed = profile in {"sealed-owner", "staging-readonly-sealed-owner", "cnpg-staging-sealed-owner", "cnpg-staging-executor-admission"}
+    staging_readonly = profile in {"staging-readonly-legacy-owner", "staging-readonly-sealed-owner", "cnpg-staging-legacy-owner", "cnpg-staging-sealed-owner", "cnpg-staging-executor-admission"}
     password = uuid4().hex
     bootstrap = PsycopgSharedFixtureSqlExecutor(admin_url)
     database = factory(admin_url)
@@ -199,6 +201,14 @@ async def _observe_fresh_database(
                 connection.execute(psycopg.sql.SQL(
                     "REVOKE ALL PRIVILEGES ON DATABASE {} FROM PUBLIC"
                 ).format(psycopg.sql.Identifier(identity.database)))
+            if profile == "cnpg-staging-executor-admission":
+                # Successor recipe adds only the executor's CONNECT ACL. The
+                # existing role and its protected routine grants are retained.
+                with connection.transaction():
+                    connection.execute(psycopg.sql.SQL("SET LOCAL ROLE {}").format(psycopg.sql.Identifier(application_owner)))
+                    connection.execute(psycopg.sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
+                        psycopg.sql.Identifier(identity.database), psycopg.sql.Identifier(executor)))
+                    connection.execute("RESET ROLE")
             with connection.transaction():
                 connection.execute("SET TRANSACTION READ ONLY")
                 return read_application_schema_inventory(connection, role_bindings=bindings)
@@ -318,8 +328,11 @@ async def build_application_schema_reference(
         "staging-readonly-sealed-owner",
         "cnpg-staging-legacy-owner",
         "cnpg-staging-sealed-owner",
+        "cnpg-staging-executor-admission",
     }:
         raise ValueError("application schema reference profile is invalid")
+    if profile == "cnpg-staging-executor-admission" and revision != "0146/guard_0034":
+        raise ValueError("executor admission reference requires its reviewed current revision")
     application_head, guard_head = application_schema_revisions(revision)
     if revision == "0146/guard_0034" and (application_head, guard_head) != (_head("migrations"), _head("capacity_guard_migrations")):
         raise RuntimeError("current application schema reference revisions require review")
@@ -375,6 +388,7 @@ async def _build_profiles() -> dict[str, object]:
         "staging-readonly-sealed-owner",
         "cnpg-staging-legacy-owner",
         "cnpg-staging-sealed-owner",
+        "cnpg-staging-executor-admission",
     )
     revisions: tuple[ApplicationSchemaRevision, ...] = ("0146/guard_0034", "0146/guard_0033", "0142/guard_0033", "0134/guard_0030")
     for major in (16, 17):
@@ -382,7 +396,7 @@ async def _build_profiles() -> dict[str, object]:
             revision: {
                 profile: asdict(await build_application_schema_reference(
                     profile=profile, postgres_major=major, revision=revision,
-                )) for profile in profiles
+                )) for profile in profiles if profile != "cnpg-staging-executor-admission" or revision == "0146/guard_0034"
             } for revision in revisions
         }
     return result

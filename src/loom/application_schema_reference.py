@@ -36,6 +36,7 @@ ApplicationSchemaProfile = Literal[
     "staging-readonly-sealed-owner",
     "cnpg-staging-legacy-owner",
     "cnpg-staging-sealed-owner",
+    "cnpg-staging-executor-admission",
 ]
 ApplicationSchemaRevision = Literal["0146/guard_0034", "0146/guard_0033", "0142/guard_0033", "0134/guard_0030"]
 
@@ -86,6 +87,18 @@ def application_schema_reference(
     revision: ApplicationSchemaRevision = "0146/guard_0034",
 ) -> ApplicationSchemaReference:
     """Select one bundled profile, never a caller-selected digest."""
+    if profile == "cnpg-staging-executor-admission":
+        if revision != "0146/guard_0034":
+            raise ApplicationSchemaReferenceError("executor admission reference revision is unsupported")
+        image = application_reference_postgres_image(postgres_major=postgres_major)
+        return ApplicationSchemaReference(
+            format_version=1, profile=profile, application_head="0146", guard_head="guard_0034",
+            postgres_image=image, postgres_major=postgres_major, object_count=7230,
+            inventory_sha256={
+                16: "f726c37671efa7510e921c438de58fe41c655c271cf1f18e55e459289e07e476",
+                17: "1450b00e6333677dc3a1387a8904d69f4c4f344b5ad2f6181626aac49a754db1",
+            }[postgres_major],
+        )
     profiles: tuple[ApplicationSchemaProfile, ...] = (
         "legacy-owner",
         "sealed-owner",

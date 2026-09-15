@@ -85,3 +85,16 @@ def test_bundled_reference_pins_actual_release_image_and_migration_heads() -> No
         config = Config(str(root / directory / "alembic.ini"))
         config.set_main_option("script_location", str(root / directory))
         assert ScriptDirectory.from_config(config).get_heads() == [head]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("postgres_major", [16, 17])
+async def test_executor_admission_reference_matches_two_fresh_databases(monkeypatch, postgres_major):
+    await test_bundled_reference_matches_independent_actual_provisioning(
+        monkeypatch, "cnpg-staging-executor-admission", postgres_major, "0146/guard_0034")
+
+
+@pytest.mark.parametrize("revision", ["0134/guard_0030", "0142/guard_0033", "0146/guard_0033"])
+def test_executor_admission_profile_cannot_select_a_historical_bootstrap(revision):
+    with pytest.raises(ApplicationSchemaReferenceError, match="revision"):
+        application_schema_reference(profile="cnpg-staging-executor-admission", revision=revision)
