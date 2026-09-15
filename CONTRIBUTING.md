@@ -105,6 +105,12 @@ Feature branches, including Nebius work, cut from `dev`. PRs target `dev`.
 `codex/nebius-main` records the earlier isolated integration series. `main` is reserved
 for release promotion PRs from `dev`.
 
+The [Nebius CI integration](docs/ops/nebius-ci.md) retains `dev`'s four protected
+checks, existing platform tests and native AMD64/ARM64 builds. Python root/package
+coverage still enforces its 70% floor. Integration coverage is an optional diagnostic:
+use `ci:coverage-summary` or the CI dispatch input `coverage_summary`. The
+`ci:integration` label requests functional integration tests without that diagnostic.
+
 Deployment environments are separated from branch workflow: `development`
 uses `https://yylx.world/dev`, `staging` uses
 `https://yylx.world/staging`, and `production` follows `main` or

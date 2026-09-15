@@ -375,9 +375,11 @@ trusted post-merge/release workflow rather than the required PR context.
   non-document changes. `fast-checks` also writes the default fast-tier
   coverage summary to the GitHub Actions step summary; docs-only PRs skip it
   because they produce no coverage inputs.
-- **Combined fast + integration:** measured and posted to the GitHub Actions
-  step summary only on PRs labelled `ci:integration` or
-  `ci:coverage-summary`. It is reported but is not a required threshold.
+- **Combined fast + integration:** collected on request with the PR label
+  `ci:coverage-summary` or the CI dispatch input `coverage_summary=true`.
+  Either request selects integration tests and their coverage instrumentation.
+  `ci:integration` runs the functional tests without this diagnostic.
+  The combined report has no coverage threshold; the fast-tier 70% floor remains.
 - `coverage.xml` ships as a workflow artifact for external tools.
 
 To reproduce the protected fast coverage gate locally, run the equivalent
