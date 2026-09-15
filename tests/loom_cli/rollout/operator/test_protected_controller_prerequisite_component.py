@@ -89,7 +89,7 @@ def _local_authority(
     )
 
 
-def _plan_and_artifact(tmp_path: Path):  # type: ignore[no-untyped-def]
+def _plan_and_artifact(tmp_path: Path, *, transform=None):  # type: ignore[no-untyped-def]
     artifacts = _artifacts(tmp_path)
     lease = _lease()
     original = execution_prerequisite_artifact(
@@ -167,6 +167,8 @@ def _plan_and_artifact(tmp_path: Path):  # type: ignore[no-untyped-def]
         executor_profile_seed=seed,
         execution_policy=policy,
     )
+    if transform is not None:
+        artifact = transform(artifact)
     store = ProtectedExecutionPrerequisiteStore(
         tmp_path / "execution-authority",
         service_uid=tmp_path.stat().st_uid,

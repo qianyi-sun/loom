@@ -25,12 +25,22 @@ This renderer emits a Job with:
 
 The renderer is a plain string emission (Jinja2 template lives beside
 the cluster manifests); the CLI shim is a thin argparse wrapper.
+
+The protected operator can instead select the fixed separated staging owner.
+That profile uses a dedicated per-Job credential/CA Secret, explicit SET ROLE,
+no service-account token, and lifecycle-controlled Job cleanup. Rendering does
+not create the role or Secret and does not authorize migration execution.
 """
 
 from __future__ import annotations
 
 import re
 from importlib import resources
+
+from loom_cli.rollout.application_migration_contract import (
+    APPLICATION_OWNER_ROLE,
+    application_migration_authority,
+)
 
 _DEFAULT_JOB_SUFFIX = "0"
 
@@ -56,6 +66,7 @@ def render_migration_manifest(
     job_suffix: str = _DEFAULT_JOB_SUFFIX,
     container_registry: str = "",
     registry_digest: str = "",
+    application_owner_role: str = "",
 ) -> str:
     """Render the migration Job manifest to a YAML string.
 
@@ -75,6 +86,8 @@ def render_migration_manifest(
     Returns:
         YAML text ready to pipe to ``kubectl apply -f -``.
     """
+    if application_owner_role and (application_owner_role != APPLICATION_OWNER_ROLE or namespace != "loom-staging"):
+        raise ValueError("application migration owner scope is invalid")
     try:
         from jinja2 import Environment, FileSystemLoader, StrictUndefined
     except ModuleNotFoundError as exc:  # pragma: no cover — dep gate
@@ -95,6 +108,7 @@ def render_migration_manifest(
     template = env.get_template("migration-job.yaml.j2")
     prefix = f"{container_registry}/" if container_registry else ""
     suffix = f"@{registry_digest}" if registry_digest else f":{image_tag}"
+    job_name = f"loom-migrate-{_normalise_dns_component(image_tag)}-{_normalise_dns_component(job_suffix)}"
     return template.render(
         # The image reference and the `loom.image-tag` label must carry the
         # *literal* release tag — that names a real pushed image. Dotted or
@@ -109,4 +123,6 @@ def render_migration_manifest(
         container_registry=container_registry,
         registry_digest=registry_digest,
         image_reference=f"{prefix}loom-control-plane{suffix}",
+        application_owner_role=application_owner_role,
+        application_authority=application_migration_authority(job_name) if application_owner_role else None,
     )

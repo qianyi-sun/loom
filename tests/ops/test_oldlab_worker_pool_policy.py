@@ -38,7 +38,8 @@ def test_oldlab_current_policy_uses_the_declared_staging_nodes() -> None:
     policy = _policy()
     actuator = policy["actuator_config"]
 
-    assert policy["enabled"] is True
+    assert policy["enabled"] is False
+    assert policy["disabled_reason"] == "protected_global_trial_cutover"
     assert policy["actuator"] == "slurm"
     assert tuple(actuator["allowed_nodes"]) == _EXPECTED_NODES
     assert actuator["partition"] == "loom-staging"
@@ -84,15 +85,15 @@ def test_oldlab_current_policy_uses_candidate_bound_shared_paths() -> None:
     assert actuator["job_output_dir"].startswith("/shared_work/loom/staging-rollout/")
 
 
-def test_oldlab_core_supervisor_is_enabled_and_active() -> None:
+def test_oldlab_legacy_trial_supervisor_is_disabled_and_inactive() -> None:
     supervisor = _supervisor()
 
     assert supervisor["name"] == "oldlab-staging"
     assert supervisor["execution_host"] == "TRT-EAI-OLDLAB-1"
     assert supervisor["service_name"] == "loom-autoscaler-oldlab-staging.service"
     assert supervisor["timer_name"] == "loom-autoscaler-oldlab-staging.timer"
-    assert supervisor["enabled"] is True
-    assert supervisor["active"] is True
+    assert supervisor["enabled"] is False
+    assert supervisor["active"] is False
     assert supervisor["args"][:4] == [
         "--environment",
         "staging",

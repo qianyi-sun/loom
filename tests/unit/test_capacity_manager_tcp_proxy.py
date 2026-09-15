@@ -88,3 +88,24 @@ def test_tcp_proxy_rejects_unreviewed_client_before_upstream_connection() -> Non
             await upstream_server.wait_closed()
 
     asyncio.run(scenario())
+
+
+def test_executor_admission_proxy_selects_only_fixed_tls_pass_through(monkeypatch):
+    from loom_capacity_manager import tcp_proxy as module
+
+    calls = []
+    class Server:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        async def serve_forever(self):
+            pass
+    async def start(**kwargs):
+        calls.append(kwargs)
+        return Server()
+    monkeypatch.setattr(module, "start_tcp_proxy", start)
+    module.main(["--purpose", "executor-admission", "--allowed-client-ip", "192.168.60.11"])
+    assert calls == [{"listen_host": "0.0.0.0", "listen_port": 31432,
+        "upstream_host": "loom-postgres-rw.loom-staging.svc.cluster.local", "upstream_port": 5432,
+        "allowed_client_ips": frozenset({ipaddress.ip_address("192.168.60.11")})}]

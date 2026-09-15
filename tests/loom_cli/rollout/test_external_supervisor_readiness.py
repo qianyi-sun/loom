@@ -547,7 +547,7 @@ def _committed_staging_candidate(tmp_path: Path) -> Path:
     return candidate
 
 
-def test_committed_active_gb10_artifact_stays_within_controller_authority(
+def test_committed_retired_gb10_artifact_stays_within_controller_authority(
     tmp_path: Path,
 ) -> None:
     candidate = _committed_staging_candidate(tmp_path)
@@ -565,8 +565,8 @@ def test_committed_active_gb10_artifact_stays_within_controller_authority(
         "task-image-builder-gb10",
     ]
     by_pool = {item.pool_name: item for item in artifact.supervisors}
-    assert by_pool["gb10"].enabled is True
-    assert by_pool["gb10"].active is True
+    assert by_pool["gb10"].enabled is False
+    assert by_pool["gb10"].active is False
     assert by_pool["task-image-builder-gb10"].enabled is True
     assert by_pool["task-image-builder-gb10"].active is True
 
@@ -589,8 +589,8 @@ def test_committed_active_profile_includes_active_oldlab_builder(
         "task-image-builder-oldlab",
     ]
     by_pool = {item.pool_name: item for item in artifact.supervisors}
-    assert by_pool["oldlab"].enabled is True
-    assert by_pool["oldlab"].active is True
+    assert by_pool["oldlab"].enabled is False
+    assert by_pool["oldlab"].active is False
     assert by_pool["task-image-builder-oldlab"].enabled is True
     assert by_pool["task-image-builder-oldlab"].active is True
 

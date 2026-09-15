@@ -157,7 +157,7 @@ async def test_pristine_current_guard_is_eligible_for_authority_rebind(
     # Only translate installation-specific role names to this isolated fixture;
     # execute the production predicate, including its unmodified revision check.
     statement = _AUTHORITY_REBIND_FOUNDATION_SQL
-    for kind in ("agent", "executor", "observer", "runtime"):
+    for kind in ("owner", "agent", "executor", "observer", "runtime"):
         statement = statement.replace(
             f"'loom_cap_staging_{kind}'",
             sql.Literal(_value(capacity_guard_database, f"{kind}_role")).as_string(),
@@ -166,10 +166,34 @@ async def test_pristine_current_guard_is_eligible_for_authority_rebind(
     try:
         with engine.connect() as connection:
             assert connection.exec_driver_sql(statement).scalar_one() == "exact"
+        # Isolate the retained-permission check from other activity ledgers.
+        # Synthetic evidence stays in this disposable transaction and is rolled
+        # back; a real retry's authenticated evidence is covered separately.
+        with engine.connect() as connection:
+            connection.exec_driver_sql("""
+                INSERT INTO loom_capacity_guard.trial_mutation_permits
+                  (permit_id, transaction_id, backend_pid, writer_incarnation,
+                   writer_epoch, freeze_operation_id, authority_binding, registration,
+                   trial_id, protected_attempt_id, execution_generation,
+                   worker_id, worker_incarnation, claim_operation_id,
+                   operation, old_binding, changes)
+                SELECT gen_random_uuid(), pg_current_xact_id(), pg_backend_pid(),
+                       gen_random_uuid(), 1, gen_random_uuid(), '{}'::jsonb, '{}'::jsonb,
+                       gen_random_uuid(), gen_random_uuid(), 1,
+                       gen_random_uuid(), gen_random_uuid(), gen_random_uuid(),
+                       'retry', '{}'::jsonb, '{}'::jsonb
+            """)
+            assert connection.exec_driver_sql(statement).scalar_one() == "drifted"
+            connection.rollback()
         cfg = _guard_config(capacity_guard_database)
         command.downgrade(cfg, "guard_0029")
         with engine.connect() as connection:
-            assert connection.exec_driver_sql(statement).scalar_one() == "drifted"
+            # The production caller checks migration head before issuing this
+            # current-schema query. PostgreSQL resolves missing relations before
+            # evaluating its revision predicate, so this direct probe must fail.
+            with pytest.raises(DBAPIError) as absent:
+                connection.exec_driver_sql(statement)
+            assert absent.value.orig.sqlstate == "42P01"
         command.upgrade(cfg, "head")
         with engine.connect() as connection:
             assert connection.exec_driver_sql(statement).scalar_one() == "exact"

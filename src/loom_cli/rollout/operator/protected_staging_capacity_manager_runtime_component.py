@@ -18,6 +18,7 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from loom_capacity_manager.auth import _RegistryDocument
+from loom_capacity_manager.executable_contracts import ExecutionContextV2
 from loom_cli.capacity_control_plane import (
     _manager_deployment_with_migration_init,
     load_capacity_control_plane_profile,
@@ -290,14 +291,22 @@ class KubernetesProtectedStagingCapacityManagerRuntimeComponent:
         if after.state is not ComponentState.EXACT:
             raise RuntimeError("protected capacity manager runtime did not converge")
 
+    def classify_execution(self, plan: FinalGatePlan, *, execution: ExecutionContextV2) -> tuple[ComponentState, str]:
+        if plan.schema_version != 7:
+            raise ValueError("execution runtime observation requires prepared authority")
+        return self._classify_policy_runtime(plan, execution=execution)
+
     def _classify_policy_runtime(
         self,
         plan: FinalGatePlan,
+        *, execution: ExecutionContextV2 | None = None,
     ) -> tuple[ComponentState, str]:
         try:
             seed = self._read_seed_snapshot()
             secret = self._read_secret(seed=seed, require_router_certificate=True)
-            policy_state, policy_evidence = self._policy_component().classify(plan)
+            policy = self._policy_component()
+            policy_state, policy_evidence = (policy.classify(plan) if execution is None
+                else policy.classify_execution(plan, execution=execution))
         except (OSError, RuntimeError, UnicodeError, ValueError, KeyError):
             return ComponentState.DRIFTED, _hash_json({"status": "observation-failed"})
         state = (

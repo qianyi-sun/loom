@@ -296,13 +296,19 @@ async def test_ceremony_rejects_progress_from_an_already_frozen_writer(tmp_path:
     runtime.state = "frozen"
     store = _FenceStore()
 
-    def invalid_freezer(_snapshot) -> None:
-        runtime.changed_field = ("high_water", 18)
+    class _DriftingSource:
+        calls = 0
+
+        def capture(self):
+            self.calls += 1
+            if self.calls > 1:
+                runtime.changed_field = ("high_water", 18)
+            return runtime.capture()
 
     ceremony = module.LegacyWriterFreezeCeremony(
         binding=_binding(module, base.subject_freezes[0]),
-        runtime_source=runtime,
-        runtime_freezer=invalid_freezer,
+        runtime_source=_DriftingSource(),
+        runtime_freezer=lambda _snapshot: None,
         fence_store=store,
         publication_factory=_publication_factory(module, base),
         publisher=lambda publication: publication,
@@ -404,3 +410,79 @@ async def test_ceremony_exact_replay_converges_without_replacing_publication(
 
     assert second == first
     assert authority_path.stat(follow_symlinks=False).st_ino == first_inode
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lost_publication_reply", [False, True])
+async def test_published_ceremony_replay_never_retires_successors(tmp_path, lost_publication_reply):
+    """A reply lost after publication can race an admitted successor starting."""
+    module = _ceremony_module()
+    base = _publication(tmp_path)
+    runtime = _Runtime(module, base.subject_freezes[0])
+    store = _FenceStore()
+    calls = []
+    published = []
+    successor_started = False
+
+    def retire(snapshot):
+        calls.append("retire")
+        assert not successor_started, "retirement was replayed after successor startup"
+        runtime.freeze(snapshot)
+
+    def publish(publication):
+        nonlocal successor_started
+        if not published:
+            published.append(publication)
+            successor_started = True
+            if lost_publication_reply:
+                raise RuntimeError("publication reply lost")
+        assert publication == published[0]
+        return publication
+
+    ceremony = module.LegacyWriterFreezeCeremony(
+        binding=_binding(module, base.subject_freezes[0]),
+        runtime_source=runtime,
+        runtime_freezer=retire,
+        fence_store=store,
+        publication_factory=_publication_factory(module, base),
+        publisher=publish,
+    )
+    if lost_publication_reply:
+        with pytest.raises(RuntimeError, match="publication reply lost"):
+            await ceremony.execute()
+    else:
+        await ceremony.execute()
+    assert successor_started
+    assert await ceremony.execute() == published[0]
+    assert calls == ["retire"]
+
+
+@pytest.mark.asyncio
+async def test_already_frozen_ceremony_still_recaptures_and_rejects_drift(tmp_path):
+    module = _ceremony_module()
+    base = _publication(tmp_path)
+    runtime = _Runtime(module, base.subject_freezes[0])
+    runtime.state = "frozen"
+    source_calls = []
+
+    class Source:
+        def capture(self):
+            source_calls.append("capture")
+            if len(source_calls) == 2:
+                runtime.state = "active"
+            return runtime.capture()
+
+    def retire(_snapshot):
+        pytest.fail("an already frozen runtime must not be retired again")
+
+    store = _FenceStore()
+    ceremony = module.LegacyWriterFreezeCeremony(
+        binding=_binding(module, base.subject_freezes[0]),
+        runtime_source=Source(), runtime_freezer=retire, fence_store=store,
+        publication_factory=_publication_factory(module, base),
+        publisher=lambda publication: publication,
+    )
+    with pytest.raises(ValueError, match="changed while freezing"):
+        await ceremony.execute()
+    assert store.preparation is None
+    assert source_calls == ["capture", "capture"]

@@ -3,9 +3,17 @@
 The staging OLDLAB pool is x86_64 Docker capacity allocated through Slurm. Its
 authoritative policy is the `oldlab` worker-pool entry in
 `deploy/environment-state/staging.toml`; the external autoscaler supervisor on
-`TRT-EAI-OLDLAB-1` is the capacity actuator.
+`TRT-EAI-OLDLAB-1` is the retired legacy capacity actuator.
 
-## Current staging policy
+## Retained legacy staging policy
+
+The committed staging profile disables this legacy trial policy and its
+supervisor for the protected global-execution cutover. The independent task-image
+builders remain enabled. Existing jobs and foreign allocations are preserved.
+The retained limits below describe the legacy boundary; new trial capacity
+requires completed writer retirement and the protected global executor's
+candidate-bound activation. Merged configuration alone does not prove live
+retirement or worker readiness.
 
 The policy scales from zero to 18 slots on `trt-eai-oldlab-3`,
 `trt-eai-oldlab-4`, and `trt-eai-oldlab-5`. Each non-exclusive job requests

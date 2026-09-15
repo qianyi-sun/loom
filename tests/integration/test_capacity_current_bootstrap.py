@@ -256,6 +256,9 @@ def test_observation_upgrade_and_rollback_preserve_refundable_claim_authority(
     capacity_guard_database,
 ):
     config = _guard_config(capacity_guard_database)
+    # Compare the published observation migration against its own predecessor.
+    # Later trial-writer permissions intentionally also rewrite the claim routine.
+    command.downgrade(config, "guard_0034")
     engine = create_engine(_value(capacity_guard_database, "admin_url"))
     claim = "loom_capacity_guard.claim_staging_assigned_trial(uuid,text,jsonb)"
     observation = (

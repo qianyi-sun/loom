@@ -408,3 +408,34 @@ async def test_client_total_pending_requests_are_bounded_before_enqueue(delivery
             first.cancel()
             await asyncio.gather(first, return_exceptions=True)
             await client.aclose()
+
+
+async def test_serialized_native_configuration_builds_real_tls_outbox_and_closes(delivery, monkeypatch, tmp_path):
+    from loom_capacity_executor.journal import ExecutorJournal
+    from loom_capacity_executor.native_bootstrap_configuration import (
+        NativeBootstrapConfigurationV1,
+        NativeBootstrapIdentityV1,
+        NativeDeliveryFileV1,
+    )
+
+    async with service(delivery, monkeypatch) as setup:
+        def portable(pin):
+            return NativeDeliveryFileV1(path=pin.path, sha256=pin.sha256)
+        config = NativeBootstrapConfigurationV1(executor_id=delivery.physical.binding.executor_id,
+            executor_incarnation=delivery.physical.binding.executor_incarnation,
+            identity=NativeBootstrapIdentityV1(ca=portable(setup.identity.ca), certificate=portable(setup.identity.certificate),
+                private_key=portable(setup.identity.private_key)), routes=(setup.route,))
+        config = NativeBootstrapConfigurationV1.model_validate_json(config.model_dump_json())
+        config.validate_local()
+        with ExecutorJournal(tmp_path / "native-configuration-journal") as journal:
+            outbox = config.build(journal, delivery.store)
+            # The fixture capability uses its historical test clock.
+            outbox._now = lambda: delivery.now
+            assert await outbox.deliver(delivery.physical) == setup.storage.expected_native_delivery_receipt(setup.payload)
+            assert setup.calls == ["deliver"]
+            clients = tuple(outbox._clients.values())
+            await outbox.aclose()
+            assert all(client._closed and client._transport._close_task.done() and not client._transport._tasks for client in clients)
+        setup.tls_paths[2].write_bytes(b"substituted key")
+        with pytest.raises(ValueError):
+            config.validate_local()

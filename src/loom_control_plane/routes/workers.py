@@ -55,7 +55,6 @@ from loom_control_plane.metrics import CLAIM_LATENCY_SEC
 from loom_control_plane.protected_worker_session import (
     EXECUTOR_WORKER_CREDENTIAL_HEADER,
     ProtectedBodyWorkerClaim,
-    ProtectedBodyWorkerSession,
     ProtectedPathWorkerSession,
     ProtectedWorkerSessionAuthenticationRejected,
     ProtectedWorkerSessionRejected,
@@ -963,7 +962,7 @@ async def pre_start_heartbeat(
     trial_id: UUID,
     request: Request,
     payload: dict[str, Any],
-    protected_worker_session: ProtectedBodyWorkerSession,
+    protected_worker_claim: ProtectedBodyWorkerClaim,
     authorization: str | None = Header(default=None),
     execution_lease_id: OptionalExecutionLeaseIdHeader = None,
     execution_generation: OptionalExecutionGenerationHeader = None,
@@ -980,6 +979,29 @@ async def pre_start_heartbeat(
             status_code=400,
             detail=f"worker_id required: {exc}",
         ) from exc
+
+    if protected_worker_claim is not None:
+        try:
+            heartbeat = await protected_worker_claim.store.report_trial_state(
+                worker_id=worker_id,
+                worker_credential=protected_worker_claim.worker_credential,
+                report={
+                    "trial_id": str(trial_id), "state": "pre-start-heartbeat",
+                    "result": None, "failure_reason": None, "failure_message": None,
+                    "execution_lease_id": str(execution_lease_id) if execution_lease_id else None,
+                    "execution_generation": execution_generation, "expected": None, "family": None,
+                },
+            )
+        except ProtectedWorkerSessionAuthenticationRejected as exc:
+            raise HTTPException(status_code=401, detail="protected worker session rejected") from exc
+        except ProtectedWorkerSessionRejected as exc:
+            raise HTTPException(status_code=409, detail="protected pre-start heartbeat rejected") from exc
+        if heartbeat is None:
+            raise HTTPException(status_code=409, detail="worker lost claim or trial has started")
+        if (heartbeat.get("trial_id") != str(trial_id)
+                or not isinstance(heartbeat.get("pre_start_heartbeat_at"), str)):
+            raise HTTPException(status_code=503, detail="protected pre-start heartbeat invalid")
+        return {"trial_id": str(trial_id), "pre_start_heartbeat_at": heartbeat["pre_start_heartbeat_at"]}
 
     async with request.app.state.session_factory() as session:
         await enforce_trial_execution_fence(

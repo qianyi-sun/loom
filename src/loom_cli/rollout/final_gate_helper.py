@@ -11,7 +11,10 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 
+from loom_capacity_executor.runtime import ActivationRuntimeDocumentV2
+from loom_capacity_manager.executable_contracts import ExecutionContextV2
 from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.final_gate_readiness import (
     FINAL_CHECK_IDS,
@@ -22,6 +25,7 @@ from loom_cli.rollout.operator.backup import VerifiedBackup
 from loom_cli.rollout.operator.checkpoint_lease import inspect_critical_checkpoint
 from loom_cli.rollout.operator.final_gate_plan import FinalGatePlan
 from loom_cli.rollout.operator.model import DriverEnvelope
+from loom_cli.rollout.operator.protected_native_delivery_material import NativeDeliveryMaterial
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_contract import CheckOperation
 
@@ -49,7 +53,7 @@ def _strict_json_object(payload: bytes) -> dict[str, object]:
     return value
 
 
-def _load_plan(path: Path, expected_digest: str) -> FinalGatePlan:
+def _load_plan(path: Path, expected_digest: str, *, verify_checkpoint: bool = True) -> FinalGatePlan:
     if _SHA256_RE.fullmatch(expected_digest) is None:
         raise ValueError("final gate helper plan digest is invalid")
     trusted = read_trusted_file(
@@ -71,7 +75,8 @@ def _load_plan(path: Path, expected_digest: str) -> FinalGatePlan:
     if path != expected_path or plan.plan_digest != expected_digest:
         raise ValueError("final gate helper plan path or identity drifted")
     _verify_artifacts(plan)
-    _verify_checkpoint(plan)
+    if verify_checkpoint:
+        _verify_checkpoint(plan)
     _verify_driver_envelope(plan)
     return plan
 
@@ -177,6 +182,79 @@ def _record(result: FinalGateResult) -> Mapping[str, object]:
     }
 
 
+class ActivationExecute(Protocol):
+    def __call__(self, plan: FinalGatePlan, *,
+                 documents: Mapping[str, ActivationRuntimeDocumentV2] | None = None,
+                 native_material: Mapping[str, NativeDeliveryMaterial] | None = None) -> ExecutionContextV2: ...
+
+
+def _load_activation_documents(path: Path | None, expected_digest: str | None, *,
+                               plan_path: Path) -> Mapping[str, ActivationRuntimeDocumentV2] | None:
+    if path is None and expected_digest is None:
+        return None
+    if (path != plan_path.with_name("execution-activation-documents.json")
+            or expected_digest is None or _SHA256_RE.fullmatch(expected_digest) is None):
+        raise ValueError("activation document path or digest is invalid")
+    assert path is not None
+    payload = read_trusted_file(path, service_uid=os.geteuid(), private=True,
+        max_bytes=256 * 1024, require_nonempty=True).payload
+    if hashlib.sha256(payload).hexdigest() != expected_digest:
+        raise ValueError("activation document digest changed")
+    documents = _strict_json_object(payload)
+    if set(documents) != {"gb10", "oldlab"}:
+        raise ValueError("activation documents must cover both pools")
+    return {pool: ActivationRuntimeDocumentV2.model_validate_json(json.dumps(value))
+        for pool, value in documents.items()}
+
+
+def _load_native_material(path: Path | None, expected_digest: str | None, *, plan_path: Path,
+                          documents: Mapping[str, ActivationRuntimeDocumentV2] | None,
+                          ) -> Mapping[str, NativeDeliveryMaterial] | None:
+    if path is None and expected_digest is None:
+        if documents is not None and any(document.native_delivery is not None for document in documents.values()):
+            raise ValueError("native activation requires bound private material")
+        return None
+    if (documents is None or path != plan_path.with_name("execution-activation-native-material.json")
+            or expected_digest is None or _SHA256_RE.fullmatch(expected_digest) is None):
+        raise ValueError("native material path or digest is invalid")
+    assert path is not None
+    payload = read_trusted_file(path, service_uid=os.geteuid(), private=True,
+        max_bytes=1024 * 1024, require_nonempty=True).payload
+    if hashlib.sha256(payload).hexdigest() != expected_digest:
+        raise ValueError("native material digest changed")
+    values = _strict_json_object(payload)
+    if not values or set(values) != {pool for pool, document in documents.items() if document.native_delivery is not None}:
+        raise ValueError("native material must cover exactly the native pools")
+    material = {pool: NativeDeliveryMaterial.from_dict(value) for pool, value in values.items()}
+    for pool, entry in material.items():
+        entry.files(documents[pool])
+    return material
+
+
+def _activate(args: argparse.Namespace, execute: ActivationExecute | None) -> int:
+    # The immutable plan/envelope/artifacts remain mandatory. Fresh checkpoint
+    # admission lives inside the installed forward guard, so its failure after
+    # activation cannot prevent compensation using the retained exact authority.
+    plan = _load_plan(args.plan, args.plan_sha256, verify_checkpoint=False)
+    documents = _load_activation_documents(args.documents, args.documents_sha256, plan_path=args.plan)
+    native_material = _load_native_material(args.native_material, args.native_material_sha256,
+        plan_path=args.plan, documents=documents)
+    if execute is None:
+        from loom_cli.rollout.operator.installed_final_gate_executor import (
+            build_installed_final_gate_executor,
+        )
+
+        execute = build_installed_final_gate_executor().activate_prepared_execution
+    result = (execute(plan, documents=documents, native_material=native_material)
+        if native_material is not None else execute(plan, documents=documents))
+    result = ExecutionContextV2.model_validate_json(result.model_dump_json())
+    if result.execution_state not in {"active", "drain-only"}:
+        raise ValueError("activation result is not a completed transition")
+    sys.stdout.write(json.dumps({"schema_version": 1, "plan_digest": plan.plan_digest,
+        "execution": result.model_dump(mode="json")}, sort_keys=True, separators=(",", ":")) + "\n")
+    return 0 if result.execution_state == "active" else 1
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="loom-staging-rollout-final-gate")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -185,6 +263,13 @@ def _parser() -> argparse.ArgumentParser:
     execute.add_argument("--operation", choices=("apply", "verify"), required=True)
     execute.add_argument("--plan", type=Path, required=True)
     execute.add_argument("--plan-sha256", required=True)
+    activation = commands.add_parser("activate-prepared")
+    activation.add_argument("--plan", type=Path, required=True)
+    activation.add_argument("--plan-sha256", required=True)
+    activation.add_argument("--documents", type=Path)
+    activation.add_argument("--documents-sha256")
+    activation.add_argument("--native-material", type=Path)
+    activation.add_argument("--native-material-sha256")
     return parser
 
 
@@ -192,9 +277,12 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     execute: FinalGateExecute | None = None,
+    activate: ActivationExecute | None = None,
 ) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.command == "activate-prepared":
+            return _activate(args, activate)
         operation = CheckOperation(args.operation)
         expected = (
             CheckOperation.APPLY

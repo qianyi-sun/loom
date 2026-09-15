@@ -2432,7 +2432,7 @@ def test_committed_development_profile_ships_fail_closed_supervisors() -> None:
     )
 
 
-def test_committed_staging_profile_activates_core_and_native_builder_supervisors() -> None:
+def test_committed_staging_profile_retires_trials_and_preserves_native_builder_supervisors() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables={
@@ -2452,14 +2452,14 @@ def test_committed_staging_profile_activates_core_and_native_builder_supervisors
         "task-image-builder-oldlab-staging",
     }
     assert "manager_witness_export_bootstrap" not in (profile.external_slurm_runner_prerequisites)
-    assert "retained_inactive_supervisor_pools" not in (profile.external_slurm_runner_prerequisites)
+    assert profile.external_slurm_runner_prerequisites["retained_inactive_supervisor_pools"] == ["gb10", "oldlab"]
 
     gb10 = by_name["gb10-staging"]
     assert gb10["pool_name"] == "gb10"
     assert gb10["service_name"] == "loom-autoscaler-gb10-staging.service"
     assert gb10["timer_name"] == "loom-autoscaler-gb10-staging.timer"
-    assert gb10["enabled"] is True
-    assert gb10["active"] is True
+    assert gb10["enabled"] is False
+    assert gb10["active"] is False
     assert "15451" in gb10["args"]
     assert "loom-external-slurm-autoscaler-db" in gb10["args"]
     _assert_manager_trust_arguments(gb10, pool_name="gb10")
@@ -2468,8 +2468,8 @@ def test_committed_staging_profile_activates_core_and_native_builder_supervisors
     assert oldlab["pool_name"] == "oldlab"
     assert oldlab["service_name"] == "loom-autoscaler-oldlab-staging.service"
     assert oldlab["timer_name"] == "loom-autoscaler-oldlab-staging.timer"
-    assert oldlab["enabled"] is True
-    assert oldlab["active"] is True
+    assert oldlab["enabled"] is False
+    assert oldlab["active"] is False
     assert "15448" in oldlab["args"]
     assert "service/loom-postgres-rw" in oldlab["args"]
     assert oldlab["working_directory"].startswith("/opt/loom-staging-runner/candidates/")
@@ -2870,7 +2870,8 @@ def test_staging_bootstrap_preserves_both_zero_minimum_slurm_pool_contracts() ->
     policies = {policy["pool_name"]: policy for policy in profile.autoscaler_policies}
     assert set(policies) == {"gb10", "oldlab"}
     gb10 = policies["gb10"]
-    assert gb10["enabled"] is True
+    assert gb10["enabled"] is False
+    assert gb10["disabled_reason"] == "protected_global_trial_cutover"
     assert gb10["min_slots"] == 0
     assert gb10["max_slots"] == 140
     assert gb10["actuator_config"]["candidate_sha"] == "a" * 40
@@ -2894,7 +2895,8 @@ def test_staging_bootstrap_preserves_both_zero_minimum_slurm_pool_contracts() ->
     ]
     assert gb10["actuator_config"]["max_jobs"] == 14
     oldlab = policies["oldlab"]
-    assert oldlab["enabled"] is True
+    assert oldlab["enabled"] is False
+    assert oldlab["disabled_reason"] == "protected_global_trial_cutover"
     assert oldlab["min_slots"] == 0
     assert oldlab["max_slots"] == 18
     assert oldlab["actuator_config"]["exclusive"] is False
@@ -2928,3 +2930,37 @@ def test_staging_bootstrap_preserves_both_zero_minimum_slurm_pool_contracts() ->
     assert gb10_state["target_slots"] == 0
     assert gb10_state["host_intents"]["trt-gb10-7"] == "stopped"
     assert sum(intent == "stopped" for intent in gb10_state["host_intents"].values()) == 15
+
+
+def test_staging_global_cutover_retires_only_legacy_trial_supervisors() -> None:
+    profile = load_environment_state_profile(
+        Path("deploy/environment-state/staging.toml"),
+        variables={"IMAGE_TAG": "staging-aaaaaaa", "ENV_CONFIG_VERSION": "staging-aaaaaaa", "GIT_SHA": "a" * 40},
+        expected_environment="staging",
+    )
+    supervisors = {item["pool_name"]: item for item in profile.external_slurm_autoscaler_supervisors}
+    assert set(supervisors) == {"gb10", "oldlab", "task-image-builder-gb10", "task-image-builder-oldlab"}
+    for pool in ("gb10", "oldlab"):
+        assert supervisors[pool]["enabled"] is False
+        assert supervisors[pool]["active"] is False
+    for pool in ("task-image-builder-gb10", "task-image-builder-oldlab"):
+        assert supervisors[pool]["enabled"] is True
+        assert supervisors[pool]["active"] is True
+
+
+@pytest.mark.parametrize("policy_enabled", [False, True])
+@pytest.mark.parametrize("authority", [False, True])
+def test_retained_trial_supervisor_requires_disabled_policy_and_allocation_authority(policy_enabled, authority):
+    blockers = staging_gb10_external_activation_blockers(
+        environment="staging",
+        autoscaler_policies=[{"pool_name": "gb10", "actuator": "slurm", "enabled": policy_enabled,
+            "disabled_reason": "protected_global_trial_cutover", "external_runner": True}],
+        prerequisites={"materialize": True, "pools": ["gb10"],
+            "retained_inactive_supervisor_pools": ["gb10"],
+            "require_external_allocation_authority": authority},
+        supervisors=[{"pool_name": "gb10", "enabled": False, "active": False}],
+    )
+    assert ("external_slurm_gb10_supervisor_activation_incomplete" in blockers) is policy_enabled
+    assert ("external_slurm_allocation_authority_requirement_missing" in blockers) is (not authority)
+    if not policy_enabled and authority:
+        assert blockers == ()

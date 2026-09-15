@@ -38,6 +38,7 @@ from .protected_external_supervisor_transport import (
     ProtectedExternalSupervisorTransport,
     classify_external_supervisor_live_state,
 )
+from .protected_legacy_controller_process import validate_controller_process_observation
 
 _IMPLEMENTATION_DIGEST = hashlib.sha256(b"loom-protected-external-supervisor-v4").hexdigest()
 _COMPONENT_ID_BY_EXECUTION_HOST = {
@@ -177,6 +178,49 @@ class ProtectedExternalSupervisorComponent:
             state,
             live.evidence_digest,
         )
+
+    def observe_retirement(self, plan: FinalGatePlan) -> dict[str, object]:
+        """Observe retired trial timers/processes without replaying convergence.
+
+        Independent builders remain enabled. This proves only the two managed
+        staging trial controllers; accepted scheduler work and other host writers
+        require their own closure evidence.
+        """
+        artifact = self._artifact(plan)
+        trials = [item for item in artifact.supervisors if item.pool_name in {"gb10", "oldlab"}]
+        if len(trials) != 1 or trials[0].enabled or trials[0].active:
+            raise ValueError("legacy controller retirement requires an inactive trial supervisor")
+        trial = trials[0]
+        builders = [item for item in artifact.supervisors if item.pool_name == f"task-image-builder-{trial.pool_name}"]
+        if len(artifact.supervisors) != 2 or len(builders) != 1 or not builders[0].enabled or not builders[0].active:
+            raise ValueError("legacy controller retirement must preserve its independent builder")
+
+        def capture() -> ExternalSupervisorLiveObservation:
+            if self.epoch_guard(plan).state is not ComponentState.EXACT:
+                raise RuntimeError("legacy controller retirement epoch changed")
+            live = self.transport.observe(artifact)
+            canonical = live.canonical_identity
+            if (classify_external_supervisor_live_state(artifact, live, unit_dir=self.unit_dir) != "exact"
+                or canonical is None or canonical.plan_digest != plan.plan_digest
+                or canonical.attestation_digest != plan.attestation_digest):
+                raise RuntimeError("legacy controller retirement runtime changed")
+            return live
+
+        before = capture()
+        process = validate_controller_process_observation(self.transport.observe_processes(artifact), artifact)
+        assert before.canonical_identity is not None
+        inner = process["process_evidence"]
+        if (not isinstance(inner, dict) or inner["processes_retired"] is not True
+            or process["canonical_digest"] != before.canonical_identity.evidence_digest):
+            raise RuntimeError("legacy controller retirement process authority changed")
+        after = capture()
+        if (after.canonical_identity != before.canonical_identity
+            or after.timer_statuses[trial.timer_name] != before.timer_statuses[trial.timer_name]
+            or after.service_statuses[trial.service_name] != before.service_statuses[trial.service_name]):
+            raise RuntimeError("legacy controller changed during retirement observation")
+        return {"schema_version": 1, "plan_digest": plan.plan_digest, "pool": trial.pool_name,
+            "process_evidence": process, "timer": before.timer_statuses[trial.timer_name].to_dict(),
+            "service": before.service_statuses[trial.service_name].to_dict()}
 
     def apply(self, plan: FinalGatePlan) -> None:
         artifact = self._artifact(plan)

@@ -1153,6 +1153,9 @@ def test_staging_control_plane_projects_protected_worker_runtime_credential(
         if item["name"] == "LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE"
     )
 
+    assert [item for item in container["env"] if item["name"] == "LOOM_CP_PROTECTED_TRIAL_CUTOVER_ENABLED"] == [
+        {"name": "LOOM_CP_PROTECTED_TRIAL_CUTOVER_ENABLED", "value": "true"},
+    ]
     assert protected_url == {
         "name": "LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE",
         "value": "/run/loom/protected-worker-runtime/files/database-url",

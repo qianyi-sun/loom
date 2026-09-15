@@ -262,7 +262,7 @@ def worker_fakes(*, driver_rc: int = 0) -> Bundle:
     return Bundle(deps, store, order)
 
 
-def advanced_epoch_resume_fakes() -> tuple[Bundle, DriverEnvelope]:
+def advanced_epoch_resume_fakes(state_root: Path | None = None) -> tuple[Bundle, DriverEnvelope]:
     bundle = worker_fakes()
     envelope = replace(valid_envelope(), attempt_number=2, resume=True)
     pointer = ActivePointer(
@@ -271,6 +271,8 @@ def advanced_epoch_resume_fakes() -> tuple[Bundle, DriverEnvelope]:
         unit_name=f"loom-staging-rollout-{envelope.request_id}-2.service",
         status="pending",
     )
+    if state_root is not None:
+        bundle.deps.state_root = state_root
     bundle.store.envelope = envelope
     bundle.store.active = pointer
     bundle.store.active_history = [pointer]
@@ -304,13 +306,14 @@ def test_attempt_claims_guard_and_validates_original_binding_before_store_or_dri
 
 
 def test_attempt_accepts_exact_advanced_epoch_resume_before_driver_lock(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bundle, envelope = advanced_epoch_resume_fakes()
+    bundle, envelope = advanced_epoch_resume_fakes(tmp_path / "state")
     guard = FakeMutationGuard(bundle.order, mutation_epoch=8)
 
     def find_recovery(state_root: Path, **bindings: object) -> int:
-        assert state_root == Path("/var/lib/loom-staging-rollout")
+        assert state_root == tmp_path / "state"
         assert bindings == {
             "request_id": REQUEST_ID,
             "through_attempt": 1,
@@ -332,10 +335,11 @@ def test_attempt_accepts_exact_advanced_epoch_resume_before_driver_lock(
 
 @pytest.mark.parametrize("recovery_attempt", [None, 1])
 def test_attempt_rejects_unproven_or_over_advanced_epoch_resume_before_driver_lock(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     recovery_attempt: int | None,
 ) -> None:
-    bundle, envelope = advanced_epoch_resume_fakes()
+    bundle, envelope = advanced_epoch_resume_fakes(tmp_path / "state")
     guard = FakeMutationGuard(
         bundle.order,
         mutation_epoch=8 if recovery_attempt is None else 9,
@@ -1720,3 +1724,96 @@ def test_final_admission_recovers_component_journal_without_outer_apply(
 
     assert result is resumed_admission
     assert published == [(2, resumed_admission)]
+
+
+@pytest.mark.parametrize("outcome", ["run", "successor", "epoch", "missing-epoch-reader"])
+@pytest.mark.parametrize("advanced_guard", [False, True])
+def test_attempt_uses_original_retained_guard_at_live_advanced_epoch(tmp_path, monkeypatch, outcome, advanced_guard):
+    from tests.loom_cli.rollout.operator.test_application_guard_retention import _guard
+    from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
+
+    bundle, envelope = advanced_epoch_resume_fakes()
+    guard = FakeMutationGuard(bundle.order)
+    original = _guard(_plan(tmp_path))
+    if advanced_guard:
+        original = type(original).build(**{
+            k: v for k, v in original.to_dict().items() if k not in {"schema_version", "evidence_digest", "mutation_epoch"}
+        }, mutation_epoch=original.mutation_epoch + 1)
+    guard.assert_ready = lambda _: (
+        type(original).build(
+                **{k: v for k, v in original.to_dict().items()
+                   if k not in {"schema_version", "evidence_digest", "database_backend_pid"}},
+                database_backend_pid=9999,
+            ) if outcome == "successor" else original
+    )
+    calls = []
+
+    def retained(state_root, **bindings):
+        calls.append(bindings)
+        assert bindings["recovery_attempt"] == 1
+        assert bindings["candidate_tree"] == envelope.resolved_tree
+        return original
+
+    monkeypatch.setattr(worker_module, "find_advanced_epoch_attempt", lambda *a, **k: 1)
+    monkeypatch.setattr(worker_module, "retained_application_guard_for_resume", retained, raising=False)
+    if outcome != "missing-epoch-reader":
+        def probe(evidence):
+            assert evidence == original
+            return 9 if outcome == "epoch" else 8
+        guard.observe_retained_epoch = probe
+    dependencies = replace(bundle.deps, mutation_guard=guard)
+    if outcome == "run":
+        assert run_attempt(envelope, dependencies) == 0
+        assert "driver-run" in bundle.order
+    else:
+        with pytest.raises(ValueError, match="staging mutation guard"):
+            run_attempt(envelope, dependencies)
+        assert "driver-run" not in bundle.order and "driver-lock-acquire" not in bundle.order
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("driver_rc", [0, 1])
+def test_pending_handoff_records_resumable_failure_without_claiming_guard_release(driver_rc):
+    from loom_cli.rollout.operator.staging_mutation_guard import MutationGuardRetainedError
+
+    bundle = worker_fakes(driver_rc=driver_rc)
+    guard = FakeMutationGuard(bundle.order, release_error=MutationGuardRetainedError("handoff pending"))
+    dependencies = replace(bundle.deps, mutation_guard=guard)
+    assert run_attempt(valid_envelope(), dependencies) == 1
+    assert bundle.store.active is None
+    assert bundle.store.events[-1].event == "attempt_failed"
+    assert bundle.store.events[-1].reason == ("application_handoff_pending" if driver_rc == 0 else "driver_failed")
+    assert not any(event.event == "attempt_done" for event in bundle.store.events)
+    assert guard.released == [REQUEST_ID]  # one refused release request; no retry
+
+
+def test_pending_handoff_still_records_failed_final_admission():
+    from loom_cli.rollout.operator.staging_mutation_guard import MutationGuardRetainedError
+
+    bundle = worker_fakes()
+    guard = FakeMutationGuard(bundle.order, release_error=MutationGuardRetainedError("handoff pending"))
+
+    def refuse(_):
+        raise ValueError("admission unavailable")
+
+    dependencies = replace(bundle.deps, mutation_guard=guard, final_admission=refuse)
+    assert run_attempt(valid_envelope(), dependencies) == 1
+    assert bundle.store.active is None
+    assert bundle.store.events[-1].event == "attempt_failed"
+    assert "final-admission" in bundle.store.events[-1].reason
+    assert "driver-run" not in bundle.order
+
+
+
+def test_pending_handoff_records_cancellation_without_releasing_guard():
+    from loom_cli.rollout.operator.staging_mutation_guard import MutationGuardRetainedError
+
+    bundle = worker_fakes()
+    guard = FakeMutationGuard(bundle.order, release_error=MutationGuardRetainedError("handoff pending"))
+    dependencies = replace(bundle.deps, mutation_guard=guard)
+    assert run_attempt(valid_envelope(), dependencies,
+                       signals=worker_module._SignalController(requested=True)) == 130
+    assert bundle.store.active is None
+    assert bundle.store.events[-1].event == "cancelled"
+    assert "driver-run" not in bundle.order
+    assert guard.released == [REQUEST_ID]

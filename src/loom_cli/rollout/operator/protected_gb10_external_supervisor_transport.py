@@ -30,6 +30,7 @@ from loom_cli.rollout.gb10_slurm_acceptance import (
     validate_gb10_slurm_acceptance,
 )
 
+from .protected_active_controller import ActiveControllerRequest
 from .protected_capacity_execution_preparation_component import PreparedControllerRequest
 from .protected_controller_discovery import ControllerDiscoveryRequest
 from .protected_controller_prerequisite_component import ControllerPrerequisiteRequest
@@ -310,7 +311,7 @@ def _encode_helper_request(
         "operation": operation,
         "schema_version": 1,
     }
-    if operation == "observe":
+    if operation in {"observe", "observe_processes"}:
         if artifact is None or any(
             item is not None
             for item in (
@@ -326,6 +327,8 @@ def _encode_helper_request(
             )
         ):
             raise ValueError("GB10 controller observe request is invalid")
+        if operation == "observe_processes" and predecessor_authority is not None:
+            raise ValueError("GB10 controller process observation requires current canonical authority")
         payload.update(
             {
                 "artifact": _artifact_value(artifact),
@@ -582,6 +585,8 @@ def _decode_helper_response(payload: str, *, operation: str) -> dict[str, object
             )
         )
     )
+    if operation == "observe_processes":
+        expected = {"process_observation", "operation", "schema_version", "status"}
     if (
         set(value) != expected
         or type(value.get("schema_version")) is not int
@@ -774,6 +779,16 @@ class FixedGB10ExternalSupervisorTransport:
         )
         return _decode_helper_observation(self._invoke(request, operation="observe"))
 
+    def observe_processes(self, artifact: ExternalSupervisorArtifact) -> dict[str, object]:
+        from .protected_legacy_controller_process import validate_controller_process_observation
+
+        self._validate_artifact(artifact)
+        request = _encode_helper_request(operation="observe_processes",
+            candidate_sha=self.candidate_sha, candidate_tree=self.candidate_tree, artifact=artifact)
+        response = _decode_helper_response(self._invoke(request, operation="observe_processes"),
+            operation="observe_processes")
+        return validate_controller_process_observation(response["process_observation"], artifact)
+
     def apply(
         self,
         artifact: ExternalSupervisorArtifact,
@@ -935,6 +950,33 @@ class FixedGB10ExternalSupervisorTransport:
             candidate_tree=self.candidate_tree,
             prepared_controller=request,
         )
+        return self.run(self._ssh_argv(), rendered)
+
+    def invoke_active_controller(self, operation: str, payload: bytes) -> CommandResult:
+        operations = {
+            "observe-active": "observe_active_controller",
+            "converge-active-files": "converge_active_files",
+            "enable-active-timer": "enable_active_timer",
+            "refresh-active-preparation": "refresh_active_preparation",
+        }
+        try:
+            request = ActiveControllerRequest.from_bytes(payload)
+            remote_operation = operations[operation]
+        except (KeyError, ValueError) as exc:
+            raise ValueError("GB10 active controller request is invalid") from exc
+        if (
+            request.pool_id != "gb10"
+            or request.transport_authority_sha256 != self.controller_prerequisite_authority_sha256
+            or request.prepared.prerequisite.source_sha != self.candidate_sha
+        ):
+            raise ValueError("GB10 active controller request is invalid")
+        rendered = _canonical_json({
+            "schema_version": 1, "operation": remote_operation,
+            "candidate_sha": self.candidate_sha, "candidate_tree": self.candidate_tree,
+            "active_controller": json.loads(payload),
+        })
+        if len(rendered.encode("ascii")) > _MAX_WIRE_BYTES:
+            raise ValueError("GB10 active controller request is too large")
         return self.run(self._ssh_argv(), rendered)
 
     def invoke_pool_credential(
@@ -1156,6 +1198,7 @@ def _handle_helper_request(
     common = {"candidate_sha", "candidate_tree", "operation", "schema_version"}
     if request.get("schema_version") != 1 or operation not in {
         "observe",
+        "observe_processes",
         "apply",
         "reconcile_compensations",
         "observe_credential",
@@ -1189,6 +1232,11 @@ def _handle_helper_request(
         candidate_sha=candidate_sha,
         candidate_tree=candidate_tree,
     )
+    if operation == "observe_processes":
+        if set(request) != common | {"artifact", "predecessor_authority"} or request["predecessor_authority"] is not None:
+            raise ValueError("GB10 controller process request is invalid")
+        return _canonical_json({"schema_version": 1, "operation": operation, "status": "ok",
+            "process_observation": transport.observe_processes(artifact)})
     if operation == "observe":
         if set(request) != common | {"artifact", "predecessor_authority"}:
             raise ValueError("GB10 controller observe request is invalid")

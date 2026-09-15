@@ -186,8 +186,9 @@ def test_control_plane_lifespan_signals_materializer_before_cancelling(
     assert materializer_stop_states == [True]
 
 
+@pytest.mark.parametrize("trial_cutover", [False, True])
 def test_control_plane_lifespan_proves_protected_runtime_before_serving(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, trial_cutover: bool,
 ) -> None:
     from pathlib import Path
 
@@ -232,6 +233,11 @@ def test_control_plane_lifespan_proves_protected_runtime_before_serving(
         _background_noop,
     )
 
+    for name in ("run_worker_pool_autoscaler_loop", "run_live_preview_reconciler_loop",
+                 "run_elastic_slurm_worker_controller_loop", "run_service_execution_scheduler_loop",
+                 "run_service_execution_materializer_loop"):
+        monkeypatch.setattr(control_plane_app, name, _background_noop)
+
     app = control_plane_app.create_app(
         ControlPlaneSettings(
             _env_file=None,
@@ -240,6 +246,9 @@ def test_control_plane_lifespan_proves_protected_runtime_before_serving(
             minio_access_key="minio-access",
             minio_secret_key="minio-secret",
             step_jwt_signing_key="test-step-jwt-signing-key",
+            protected_trial_cutover_enabled=trial_cutover,
+            service_execution_scheduler_enabled=True,
+            service_execution_materializer_enabled=True,
             protected_worker_runtime_db_url_file=Path("/run/loom/runtime/database-url"),
         )
     )
@@ -248,4 +257,75 @@ def test_control_plane_lifespan_proves_protected_runtime_before_serving(
         assert client.get("/healthz").status_code == 200
 
     assert calls[:3] == ["schema", "store", "protected-ready"]
-    assert calls.count("background") == 3
+    assert calls.count("background") == (1 if trial_cutover else 7)
+
+
+@pytest.mark.parametrize("method,path", [
+    ("POST", "/trials"), ("POST", "/admin/worker-tokens"),
+    ("DELETE", "/admin/worker-tokens"), ("POST", "/admin/slurm-worker-jobs"),
+    ("POST", "/admin/slurm-worker-jobs/reconcile"),
+    ("PUT", "/admin/worker-pool-autoscaler-policies/staging/gb10"),
+    ("PUT", "/admin/gb10-worker-pools/staging/gb10/desired-state"),
+    ("POST", "/admin/worker-pools/staging/gb10/prod-pressure"),
+    ("POST", "/execution-attempts/00000000-0000-0000-0000-000000000001/started"),
+    ("POST", "/admin/service-execution/commands/claim"),
+    ("POST", "/trials/00000000-0000-0000-0000-000000000001/terminus/reclaim"),
+])
+def test_trial_cutover_rejects_legacy_writes_before_handler(method, path):
+    from pathlib import Path
+
+    from loom_control_plane.app import create_app
+    from loom_control_plane.config import ControlPlaneSettings
+
+    app = create_app(ControlPlaneSettings(
+        _env_file=None, protected_trial_cutover_enabled=True,
+        db_url="postgresql+psycopg://loom:loom@example/loom",
+        minio_access_key="test", minio_secret_key="test",
+        protected_worker_runtime_db_url_file=Path("/run/loom/runtime/database-url"),
+    ))
+    # Intentionally do not start lifespan: a rejected route cannot reach any SQL handler.
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.request(method, path, json={})
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == "protected_trial_cutover_writer_disabled"
+    assert client.get("/healthz").status_code == 200
+
+
+def test_trial_cutover_requires_protected_runtime():
+    from loom_control_plane.app import create_app
+    from loom_control_plane.config import ControlPlaneSettings
+
+    with pytest.raises(ValueError, match="requires protected worker runtime"):
+        create_app(ControlPlaneSettings(_env_file=None, protected_trial_cutover_enabled=True,
+            db_url="postgresql+psycopg://loom:loom@example/loom",
+            minio_access_key="test", minio_secret_key="test"))
+
+
+def test_trial_cutover_admits_actual_gateway_step_token_route(monkeypatch):
+    from pathlib import Path
+
+    from fastapi import APIRouter
+
+    from loom_control_plane import app as control_plane_app
+    from loom_control_plane.config import ControlPlaneSettings
+
+    # Preserve the actual composed production route; isolate its handler's SQL.
+    route = next(route for route in control_plane_app.step_tokens.router.routes
+                 if route.name == "issue_step_token")
+    probe = APIRouter()
+
+    async def issue_probe():
+        return {"reached": True}
+
+    probe.add_api_route(route.path, issue_probe, methods=list(route.methods))
+    monkeypatch.setattr(control_plane_app.step_tokens, "router", probe)
+    app = control_plane_app.create_app(ControlPlaneSettings(
+        _env_file=None, protected_trial_cutover_enabled=True,
+        db_url="postgresql+psycopg://loom:loom@example/loom",
+        minio_access_key="test", minio_secret_key="test",
+        protected_worker_runtime_db_url_file=Path("/run/loom/runtime/database-url"),
+    ))
+    client = TestClient(app)
+    response = client.post("/admin/step-tokens", json={})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"reached": True}

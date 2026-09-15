@@ -8,6 +8,7 @@ import stat
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 from uuid import UUID
@@ -336,6 +337,25 @@ class ProtectedWorkerSessionStore:
         except CapacityTrialSubmissionError as exc:
             raise ProtectedTrialSubmissionError("protected trial submission rejected") from exc
 
+    async def adopt_legacy_trial(
+        self, *, registration: AgentRegistrationV1, submission: AtomicTrialSubmissionV1,
+        public_requires_caps: Mapping[str, JsonValue], expected_submitted_at: datetime,
+        expected_lifecycle_authority_id: UUID, operation_id: UUID,
+    ) -> AtomicTrialSubmissionReceiptV1:
+        """Atomically adopt the original inert row under the runtime authority."""
+        try:
+            async with self._session_factory() as session, session.begin():
+                return await CapacityTrialSubmissionStore(
+                    session, registration=registration,
+                ).adopt_runtime_initial_submission(
+                    submission, public_requires_caps=public_requires_caps,
+                    expected_submitted_at=expected_submitted_at,
+                    expected_lifecycle_authority_id=expected_lifecycle_authority_id,
+                    operation_id=operation_id,
+                )
+        except (DBAPIError, CapacityTrialSubmissionError) as exc:
+            raise ProtectedTrialSubmissionError("protected legacy trial adoption rejected") from exc
+
     async def publish_trial_readiness(
         self,
         *,
@@ -514,6 +534,42 @@ class ProtectedWorkerSessionStore:
             raise ProtectedWorkerSessionRejected("protected worker session rejected") from exc
         return _session(value)
 
+    async def report_trial_state(
+        self, *, worker_id: UUID, worker_credential: str, report: Mapping[str, object],
+    ) -> Mapping[str, Any] | None:
+        """Authenticate and apply one progress report under the same SQL transaction."""
+        try:
+            async with self._session_factory() as session, session.begin():
+                value = (await session.execute(
+                    text("SELECT loom_capacity_guard.report_staging_trial_state("
+                         ":worker_id, :credential, CAST(:report AS jsonb))"),
+                    {"worker_id": worker_id, "credential": worker_credential,
+                     "report": json.dumps(dict(report), sort_keys=True, separators=(",", ":"))},
+                )).scalar_one()
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) == "42501":
+                raise ProtectedWorkerSessionAuthenticationRejected("protected progress authentication rejected") from exc
+            raise ProtectedWorkerSessionRejected("protected progress rejected") from exc
+        return None if value is None else _mapping(value)
+
+    async def publish_trial_output(
+        self, *, worker_id: UUID, worker_credential: str, report: Mapping[str, object],
+    ) -> Mapping[str, Any] | None:
+        """Authenticate and apply one output report under the same SQL transaction."""
+        try:
+            async with self._session_factory() as session, session.begin():
+                value = (await session.execute(
+                    text("SELECT loom_capacity_guard.publish_staging_trial_output("
+                         ":worker_id, :credential, CAST(:report AS jsonb))"),
+                    {"worker_id": worker_id, "credential": worker_credential,
+                     "report": json.dumps(dict(report), sort_keys=True, separators=(",", ":"))},
+                )).scalar_one()
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) == "42501":
+                raise ProtectedWorkerSessionAuthenticationRejected("protected output authentication rejected") from exc
+            raise ProtectedWorkerSessionRejected("protected output rejected") from exc
+        return None if value is None else _mapping(value)
+
     @asynccontextmanager
     async def assert_session(
         self,
@@ -657,6 +713,32 @@ async def protected_body_worker_claim(
     )
 
 
+async def protected_body_worker_output_session(
+    request: Request,
+    worker_credential: str | None = Header(default=None, alias=EXECUTOR_WORKER_CREDENTIAL_HEADER),
+) -> AsyncIterator[ProtectedWorkerSession | None]:
+    """Preauthenticate output; its write transaction must independently authenticate."""
+    store: ProtectedWorkerSessionStore | None = getattr(request.app.state, "protected_worker_session_store", None)
+    if store is None and worker_credential is None:
+        yield None
+        return
+    if store is None:
+        raise HTTPException(status_code=503, detail="protected worker runtime unavailable")
+    if worker_credential is None:
+        raise HTTPException(status_code=401, detail="protected worker session rejected")
+    try:
+        payload = await request.json()
+        worker_id = UUID(str(payload["worker_id"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="worker_id required") from exc
+    try:
+        authenticated = await store.authenticate_session(worker_id=worker_id, worker_credential=worker_credential)
+    except ProtectedWorkerSessionRejected as exc:
+        raise HTTPException(status_code=401, detail="protected worker session rejected") from exc
+    request.state.protected_worker_session = authenticated
+    yield authenticated
+
+
 async def protected_body_worker_state_session(
     request: Request,
     worker_credential: str | None = Header(
@@ -685,7 +767,7 @@ async def protected_body_worker_state_session(
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="state + worker_id required") from exc
 
-    if target_state in {"succeeded", "failed", "cancelled"}:
+    if target_state in {"running", "materializing", "succeeded", "failed", "cancelled"}:
         try:
             authenticated_session = await store.authenticate_session(
                 worker_id=worker_id,
@@ -944,4 +1026,8 @@ ProtectedTrialWorkerSession = Annotated[
 ProtectedQueryWorkerSession = Annotated[
     ProtectedWorkerSession | None,
     Depends(protected_query_worker_session),
+]
+
+ProtectedBodyWorkerOutputSession = Annotated[
+    ProtectedWorkerSession | None, Depends(protected_body_worker_output_session),
 ]

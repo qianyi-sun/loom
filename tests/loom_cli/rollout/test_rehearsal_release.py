@@ -340,7 +340,7 @@ def test_release_artifact_accepts_real_staging_render(
     control_plane_pod = control_plane["spec"]["template"]["spec"]
     assert "initContainers" not in control_plane_pod
     assert {item["name"] for item in control_plane_pod["containers"][0]["env"]}.isdisjoint(
-        {"LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE"}
+        {"LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE", "LOOM_CP_PROTECTED_TRIAL_CUTOVER_ENABLED"}
     )
     assert {item["name"] for item in control_plane_pod["containers"][0]["volumeMounts"]} == {
         "loom-admin-secret",
@@ -394,6 +394,8 @@ def _contains_null_mapping_field(value: object) -> bool:
         "extra-init",
         "missing-env",
         "drifted-env",
+        "drifted-cutover",
+        "duplicate-cutover",
         "missing-mount",
         "drifted-mount",
         "missing-private-subpath",
@@ -442,6 +444,10 @@ def test_release_artifact_rejects_partial_or_drifted_protected_runtime_bootstrap
             for item in container["env"]
             if item["name"] == "LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE"
         )["value"] = "/var/run/loom/live-database-url"
+    elif mutation in {"drifted-cutover", "duplicate-cutover"}:
+        flag = {"name": "LOOM_CP_PROTECTED_TRIAL_CUTOVER_ENABLED", "value": "true"}
+        container["env"] = [item for item in container["env"] if item["name"] != flag["name"]]
+        container["env"].extend([flag, dict(flag)] if mutation == "duplicate-cutover" else [{**flag, "value": "false"}])
     elif mutation == "missing-mount":
         container["volumeMounts"] = [
             item for item in container["volumeMounts"] if item["name"] != "protected-worker-runtime"

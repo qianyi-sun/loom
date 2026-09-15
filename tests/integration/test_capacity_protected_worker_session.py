@@ -892,7 +892,7 @@ def test_guard_0023_refuses_downgrade_with_protected_public_projection(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0036"
             )
             assert (
                 connection.execute(
@@ -1531,11 +1531,29 @@ def test_protected_claim_routes_accept_guard_credential_instead_of_bearer_hash(
     assert response.status_code == 204, response.text
 
 
+@pytest.mark.parametrize("freeze_before_cancel", [False, True])
 def test_protected_pending_trial_cancel_is_guarded_atomic_and_idempotent(
     capacity_guard_database: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    freeze_before_cancel: bool,
 ) -> None:
+    if freeze_before_cancel:
+        original = ProtectedWorkerSessionStore.cancel_pending_trial
+        frozen = False
+
+        async def freeze_then_cancel(self, **kwargs):
+            nonlocal frozen
+            if not frozen:
+                from tests.integration.test_capacity_trial_writer_fence import _freeze, _initialize
+
+                registration = await self.current_registration()
+                initial = await _initialize(capacity_guard_database, registration=registration)
+                await _freeze(capacity_guard_database, initial["writer_incarnation"], uuid4())
+                frozen = True
+            return await original(self, **kwargs)
+
+        monkeypatch.setattr(ProtectedWorkerSessionStore, "cancel_pending_trial", freeze_then_cancel)
     asyncio.run(_seed_protected_worker(capacity_guard_database))
     team_id = uuid4()
     user_id = uuid4()
@@ -1683,11 +1701,29 @@ def test_protected_pending_trial_cancel_is_guarded_atomic_and_idempotent(
         engine.dispose()
 
 
+@pytest.mark.parametrize("freeze_before_cancel", [False, True])
 def test_family_orchestrator_cancels_assigned_unclaimed_protected_trial(
     capacity_guard_database: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    freeze_before_cancel: bool,
 ) -> None:
+    if freeze_before_cancel:
+        original = ProtectedWorkerSessionStore.cancel_pending_trial
+        frozen = False
+
+        async def freeze_then_cancel(self, **kwargs):
+            nonlocal frozen
+            if not frozen:
+                from tests.integration.test_capacity_trial_writer_fence import _freeze, _initialize
+
+                registration = await self.current_registration()
+                initial = await _initialize(capacity_guard_database, registration=registration)
+                await _freeze(capacity_guard_database, initial["writer_incarnation"], uuid4())
+                frozen = True
+            return await original(self, **kwargs)
+
+        monkeypatch.setattr(ProtectedWorkerSessionStore, "cancel_pending_trial", freeze_then_cancel)
     seeded = asyncio.run(_seed_protected_worker(capacity_guard_database))
     team_id = uuid4()
     user_id = uuid4()
@@ -2709,7 +2745,7 @@ def test_guard_0028_refuses_downgrade_after_terminal_evidence_import(
                     "SELECT version_num FROM "
                     "loom_capacity_guard.capacity_guard_alembic_version"
                 )
-            ).scalar_one() == "guard_0034"
+            ).scalar_one() == "guard_0036"
             assert connection.execute(
                 text(
                     "SELECT count(*) FROM "
@@ -4067,7 +4103,7 @@ def test_guard_0026_refuses_downgrade_with_requeueable_protected_claim(
                 .one()
             )
         assert dict(state) == {
-            "version_num": "guard_0034",
+            "version_num": "guard_0036",
             "state": "claimed",
             "reservation_state": "active",
             "lifecycle_state": "assigned",

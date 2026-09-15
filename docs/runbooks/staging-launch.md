@@ -39,6 +39,22 @@ Do not run `loom cluster up`, `loom cluster rollout`, direct migration Jobs,
 environment-state mutation, tunnel installation, or worker reconfiguration
 outside that request.
 
+## Protected trial cutover
+
+The staging candidate disables the OLDLAB and GB10 legacy trial autoscaler
+policies and timers, while preserving both independent builder services and
+all worker allowlists. Its Control Plane enables protected trial cutover mode
+with the private runtime credential. During this migration, unadmitted legacy
+mutation endpoints return 503 and legacy background writers stay off.
+
+Verify the installed retirement journals, process/cgroup observations, scheduler
+reconciliation and exact successor Pods before activating the global executor.
+Configuration and successful image builds alone do not prove writer closure.
+Do not re-enable legacy timers to recover queued trials. Adopt untouched original
+trials through the protected operation and verify their actual model calls.
+Complete the migration's outstanding application paths before using the full
+release-promotion checklist below.
+
 ## Public route and authentication checks
 
 Verify the logged-out SPA, runtime configuration, and health API at

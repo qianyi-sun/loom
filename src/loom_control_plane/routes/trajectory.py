@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import RedirectResponse
 from sqlalchemy import bindparam, delete, select
 from sqlalchemy import text as sql_text
@@ -14,6 +15,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 from loom.auth import verify_bearer_token
 from loom.data_lifecycle_registry import (
+    RuntimeLifecycleScope,
     bind_existing_trial_lifecycle_authority,
     ensure_artifact_lifecycle_authority,
     ensure_trial_event_lifecycle_authority,
@@ -27,9 +29,14 @@ from loom.trajectory.object_identity import (
     resolve_trajectory_object_key,
 )
 from loom_control_plane.protected_worker_session import (
+    EXECUTOR_WORKER_CREDENTIAL_HEADER,
+    ProtectedBodyWorkerOutputSession,
     ProtectedBodyWorkerSession,
     ProtectedPrincipalTrialSession,
     ProtectedWorkerPrincipal,
+    ProtectedWorkerSessionAuthenticationRejected,
+    ProtectedWorkerSessionRejected,
+    ProtectedWorkerSessionStore,
 )
 from loom_control_plane.routes.execution_fence import (
     OptionalExecutionGenerationHeader,
@@ -656,12 +663,61 @@ async def _sync_typed_artifacts_from_index(
     )
 
 
+async def _publish_protected_output(
+    request: Request, *, trial_id: UUID, worker_id: UUID,
+    index_payload: dict[str, Any], result_payload: Any,
+    execution_lease_id: UUID | None, execution_generation: int | None,
+) -> dict[str, str]:
+    # Descriptor policy is evaluated in Python; SQL compares every persisted
+    # input again while it owns the live claim and all mutation locks.
+    async with request.app.state.session_factory() as session:
+        trial = (await session.execute(select(TrialRow).where(TrialRow.id == trial_id))).scalar_one_or_none()
+        if trial is None:
+            raise HTTPException(status_code=409, detail="worker lost claim")
+        batch = None if trial.batch_id is None else await session.get(Batch, trial.batch_id)
+        descriptors = _artifact_descriptors_from_index(
+            trial, batch, index_payload,
+            artifacts_bucket=request.app.state.settings.artifacts_bucket,
+            trajectories_bucket=request.app.state.settings.trajectories_bucket,
+        )
+        for descriptor in descriptors:
+            _exact_sha256(descriptor["content_hash"])
+            descriptor["metadata"] = descriptor.pop("artifact_metadata")
+        expected = {
+            "trial": {field: getattr(trial, field) for field in
+                      ("id", "team_id", "batch_id", "visibility", "share_status", "source_provenance")},
+            "batch": None if batch is None else {field: getattr(batch, field) for field in
+                      ("id", "visibility", "source_provenance")},
+        }
+        lineage = [{"parent_id": parent_id, "relation": relation, "metadata": metadata}
+                   for parent_id, relation, metadata in _lineage_parent_specs(trial, batch)]
+    scope = RuntimeLifecycleScope.from_environ()
+    store: ProtectedWorkerSessionStore = request.app.state.protected_worker_session_store
+    try:
+        published = await store.publish_trial_output(
+            worker_id=worker_id, worker_credential=request.headers[EXECUTOR_WORKER_CREDENTIAL_HEADER],
+            report=jsonable_encoder({
+                "trial_id": trial_id, "index": index_payload, "result": result_payload,
+                "execution_lease_id": execution_lease_id, "execution_generation": execution_generation,
+                "expected": expected, "artifacts": descriptors, "lineage": lineage,
+                "scope": {"environment": scope.environment, "namespace": scope.namespace},
+            }),
+        )
+    except ProtectedWorkerSessionAuthenticationRejected as exc:
+        raise HTTPException(status_code=401, detail="protected worker session rejected") from exc
+    except ProtectedWorkerSessionRejected as exc:
+        raise HTTPException(status_code=409, detail="protected trial output rejected") from exc
+    if published is None:
+        raise HTTPException(status_code=409, detail="worker lost claim")
+    return {"trial_id": str(published["trial_id"])}
+
+
 @router.patch("/trials/{trial_id}/trajectory_index")
 async def patch_trajectory_index(
     trial_id: UUID,
     request: Request,
     payload: dict[str, Any],
-    protected_worker_session: ProtectedBodyWorkerSession,
+    protected_worker_session: ProtectedBodyWorkerOutputSession,
     authorization: str | None = Header(default=None),
     execution_lease_id: OptionalExecutionLeaseIdHeader = None,
     execution_generation: OptionalExecutionGenerationHeader = None,
@@ -692,6 +748,18 @@ async def patch_trajectory_index(
                     "conflicts": conflicts,
                 },
             )
+
+    if protected_worker_session is not None:
+        try:
+            return await _publish_protected_output(
+                request, trial_id=trial_id, worker_id=worker_id, index_payload=index_payload,
+                result_payload=result_payload, execution_lease_id=execution_lease_id,
+                execution_generation=execution_generation,
+            )
+        except TrajectoryLifecycleEvidenceError as exc:
+            raise HTTPException(status_code=409, detail={
+                "code": "trajectory_lifecycle_evidence_invalid", "message": str(exc),
+            }) from exc
 
     async with request.app.state.session_factory() as session:
         await enforce_trial_execution_fence(

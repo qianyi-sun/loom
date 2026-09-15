@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import JsonValue, ValidationError
@@ -27,6 +28,7 @@ _SCHEMA = "loom_capacity_guard"
 _BINDING_FIELDS = tuple(AgentRegistrationV1.model_fields)
 _AGENT_SUBMISSION_FUNCTION = "submit_inert_trial_projection"
 _RUNTIME_SUBMISSION_FUNCTION = "submit_protected_runtime_trial_projection"
+_RUNTIME_ADOPTION_FUNCTION = "adopt_protected_runtime_trial_projection"
 _RUNTIME_READINESS_FUNCTION = "publish_protected_runtime_trial_readiness"
 
 
@@ -79,6 +81,7 @@ class CapacityTrialSubmissionStore:
         *,
         function_name: str,
         public_requires_caps: Mapping[str, JsonValue] | None = None,
+        adoption_binding: tuple[datetime, UUID, UUID] | None = None,
     ) -> AtomicTrialSubmissionReceiptV1:
 
         if not isinstance(submission, AtomicTrialSubmissionV1):
@@ -100,7 +103,7 @@ class CapacityTrialSubmissionStore:
         requirements_bytes = canonical_bytes(submission.requirements)
         runtime_arguments = ""
         runtime_parameters: dict[str, object] = {}
-        if function_name == _RUNTIME_SUBMISSION_FUNCTION:
+        if function_name in {_RUNTIME_SUBMISSION_FUNCTION, _RUNTIME_ADOPTION_FUNCTION}:
             if public_requires_caps is None:
                 raise TypeError("runtime trial creation requires public capabilities")
             public_requirements_bytes = database_canonical_json_bytes(
@@ -120,6 +123,21 @@ class CapacityTrialSubmissionStore:
             }
         elif public_requires_caps is not None:
             raise TypeError("agent trial creation does not accept public capabilities")
+        if function_name == _RUNTIME_ADOPTION_FUNCTION:
+            if adoption_binding is None:
+                raise TypeError("legacy adoption requires its original identity binding")
+            submitted_at, lifecycle_id, operation_id = adoption_binding
+            if (submitted_at.tzinfo is None or submitted_at.utcoffset() is None
+                    or lifecycle_id.int == 0 or operation_id.int == 0):
+                raise ValueError("legacy adoption identity binding is invalid")
+            runtime_arguments += ", :expected_submitted_at, :expected_lifecycle_authority_id, :operation_id"
+            runtime_parameters.update(
+                expected_submitted_at=submitted_at,
+                expected_lifecycle_authority_id=lifecycle_id,
+                operation_id=operation_id,
+            )
+        elif adoption_binding is not None:
+            raise TypeError("ordinary submission cannot adopt an existing trial")
         async with self._session.begin_nested():
             returned = (
                 await self._session.execute(
@@ -177,7 +195,24 @@ class CapacityTrialSubmissionStore:
                 raise CapacityTrialSubmissionError(
                     "protected submission receipt differs from its request"
                 )
+            if adoption_binding is not None and (
+                identity_mismatch or receipt.submitted_at != adoption_binding[0]
+                or receipt.lifecycle_authority_id != adoption_binding[1]
+            ):
+                raise CapacityTrialSubmissionError("legacy adoption changed the original identity")
         return receipt
+
+    async def adopt_runtime_initial_submission(
+        self, submission: AtomicTrialSubmissionV1, *,
+        public_requires_caps: Mapping[str, JsonValue], expected_submitted_at: datetime,
+        expected_lifecycle_authority_id: UUID, operation_id: UUID,
+    ) -> AtomicTrialSubmissionReceiptV1:
+        """Admit an existing queued trial without minting a replacement identity."""
+        return await self._create_initial_submission(
+            submission, function_name=_RUNTIME_ADOPTION_FUNCTION,
+            public_requires_caps=public_requires_caps,
+            adoption_binding=(expected_submitted_at, expected_lifecycle_authority_id, operation_id),
+        )
 
     async def publish_runtime_submission_readiness(
         self,

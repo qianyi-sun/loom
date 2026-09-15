@@ -1216,11 +1216,21 @@ class SystemdUserManager:
         candidate_sha: str | None = None,
         candidate_tree: str | None = None,
     ) -> MutationGuardEvidence | None:
+        from .protected_application_guard_retention import application_guard_is_retained
+
         try:
             unit_name = mutation_guard_unit_name(request_id)
             _mutation_guard_request_id(unit_name, error_type=SystemdOperationError)
         except UnitLaunchError as exc:
             raise SystemdOperationError("mutation guard request identity is invalid") from exc
+        try:
+            retained = application_guard_is_retained(
+                self.config.state_root, request_id=request_id, service_uid=self.service_uid,
+            )
+        except (OSError, ValueError, RuntimeError):
+            raise SystemdOperationError("mutation guard handoff retention is unverifiable") from None
+        if retained:
+            raise SystemdOperationError("application handoff still retains the original mutation guard")
         candidate_identity = _guard_candidate_identity(
             candidate_sha,
             candidate_tree,

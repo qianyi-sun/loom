@@ -105,9 +105,10 @@ async def test_bootstrap_uses_fixed_staging_identity_and_existing_database_insta
     observed: dict[str, Any] = {}
 
     class Database:
-        def __init__(self, admin_url: str, *, transient_role_admin: bool) -> None:
+        def __init__(self, admin_url: str, *, transient_role_admin: bool, application_owner_binding=None) -> None:
             observed["admin_url"] = admin_url
             observed["transient_role_admin"] = transient_role_admin
+            observed["application_owner_binding"] = application_owner_binding
 
         async def converge_protected(
             self,
@@ -144,6 +145,9 @@ async def test_bootstrap_uses_fixed_staging_identity_and_existing_database_insta
         "sslrootcert": str(tmp_path / "ca.crt"),
     }
     assert observed["transient_role_admin"] is True
+    from loom.personal_dev_capacity_runtime import ApplicationOwnerBinding
+    assert observed["application_owner_binding"] == ApplicationOwnerBinding(
+        database="loom", runtime_role="loom", owner_role="loom_app_staging_owner")
     identity = observed["identity"]
     assert identity.name == "staging"
     assert identity.runtime_environment == "staging"
@@ -207,7 +211,7 @@ async def test_bootstrap_rejects_noncanonical_or_nil_authority(
     factory_called = False
 
     class Database:
-        def __init__(self, _admin_url: str, *, transient_role_admin: bool) -> None:
+        def __init__(self, _admin_url: str, *, transient_role_admin: bool, application_owner_binding=None) -> None:
             nonlocal factory_called
             factory_called = True
 
@@ -251,7 +255,7 @@ async def test_bootstrap_rejects_duplicate_authority_key(
     factory_called = False
 
     class Database:
-        def __init__(self, _admin_url: str, *, transient_role_admin: bool) -> None:
+        def __init__(self, _admin_url: str, *, transient_role_admin: bool, application_owner_binding=None) -> None:
             nonlocal factory_called
             factory_called = True
 

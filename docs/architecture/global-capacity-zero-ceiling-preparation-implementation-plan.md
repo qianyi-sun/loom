@@ -31,7 +31,9 @@ pytest, Ruff, and mypy.
 - Candidate identities retain their tagged `git-sha1` or `source-sha256`
   representation without translation.
 - Inventory may invoke only the fixed typed read-only `scontrol show nodes
-  --json` and `squeue --json` commands. It never constructs an executable
+  --json`, `squeue --json`, and `scontrol show config` commands. Configuration
+  reads around the snapshot require exact cluster identity and `PrivateData=none`.
+  It never constructs an executable
   scheduler backend in prepared mode.
 - Missing, stale, partial, contradictory, foreign, ambiguous, unknown, or
   quarantined evidence keeps prepared readiness false and capacity frozen.

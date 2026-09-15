@@ -36,14 +36,15 @@ def test_staging_external_pool_ceilings_match_current_policy() -> None:
     policies = {item["pool_name"]: item for item in profile["worker_pool_autoscaler_policies"]}
 
     assert set(policies) == {"gb10", "oldlab"}
-    assert policies["gb10"]["enabled"] is True
+    assert policies["gb10"]["enabled"] is False
     assert policies["gb10"]["min_slots"] == 0
     assert policies["gb10"]["max_slots"] == 140
     assert policies["gb10"]["actuator_config"]["partition"] == "loom-staging"
-    assert policies["oldlab"]["enabled"] is True
+    assert policies["oldlab"]["enabled"] is False
     assert policies["oldlab"]["min_slots"] == 0
     assert policies["oldlab"]["max_slots"] == 18
     for policy in policies.values():
+        assert policy["disabled_reason"] == "protected_global_trial_cutover"
         assert policy["actuator_config"]["external_runner"] is True
         assert policy["actuator_config"]["exclusive"] is False
 

@@ -395,3 +395,239 @@ async def test_historical_status_never_aliases_foreign_or_corrupt_delivery(deliv
     encoded = json.dumps(query, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
     with pytest.raises(ValueError):
         await receiver.observe_receipt(encoded)
+
+
+@pytest.mark.parametrize("lose_reply", [False, True])
+async def test_controller_delivery_retains_identity_before_send_and_recovers_after_expiry(delivery, tmp_path, lose_reply):
+    from loom_capacity_executor.journal import ExecutorJournal
+    from loom_capacity_executor.native_bootstrap_outbox import NativeBootstrapOutbox
+
+    _, payload, receiver = objects(delivery)
+    sent = []
+    journal_path = tmp_path / "delivery-journal"
+    with ExecutorJournal(journal_path) as journal:
+        class Client:
+            async def deliver(self, raw):
+                assert journal.latest("executor", "native-delivery:" + str(delivery.physical.binding.intent_id)) is not None
+                sent.append(raw)
+                receipt = await receiver.receive(raw)
+                if lose_reply:
+                    from loom_capacity_executor.native_bootstrap_delivery import (
+                        native_delivery_directory,
+                    )
+                    directory = native_delivery_directory(delivery.node, delivery.lease.reference)
+                    await consume_bootstrap_handoff(directory, delivery.lease.reference,
+                        delivery.physical, delivery.admission, now=lambda: delivery.now)
+                    claim_bootstrap_handoff_launch(directory, delivery.lease.reference,
+                        delivery.physical, delivery.admission, now=lambda: delivery.now)
+                    delivery.admission.current = None
+                    raise ConnectionError("lost delivery reply")
+                return receipt
+
+            async def observe_receipt(self, raw):
+                return await receiver.observe_receipt(raw)
+
+        owner = NativeBootstrapOutbox(journal=journal, store=delivery.store,
+            clients={delivery.physical.binding.node_ids[0]: Client()}, configuration_sha256="a" * 64,
+            now=lambda: delivery.now)
+        if lose_reply:
+            with pytest.raises(ConnectionError):
+                await owner.deliver(delivery.physical)
+        else:
+            assert await owner.deliver(delivery.physical) == module_receipt(payload)
+        # Neither an expired local capability nor an absent source permits creation
+        # of another credential. The retained receipt is the recovery authority.
+        delivery.now += timedelta(minutes=10)
+        (delivery.controller / delivery.lease.reference).unlink()
+        assert await owner.deliver(delivery.physical) == module_receipt(payload)
+        assert sent == [payload]
+        assert json.loads(payload)["record"]["capability"] not in journal_path.read_text()
+
+
+def module_receipt(payload):
+    from loom_capacity_executor.native_bootstrap_delivery import expected_native_delivery_receipt
+    return expected_native_delivery_receipt(payload)
+
+
+async def test_controller_delivery_refuses_changed_configuration_on_retry(delivery, tmp_path):
+    from loom_capacity_executor.journal import ExecutorJournal
+    from loom_capacity_executor.native_bootstrap_outbox import NativeBootstrapOutbox
+
+    sent = []
+
+    class Client:
+        async def deliver(self, raw):
+            sent.append(raw)
+            raise ConnectionError("uncertain delivery")
+
+        async def observe_receipt(self, raw):
+            raise AssertionError("changed route was used")
+
+    with ExecutorJournal(tmp_path / "delivery-journal") as journal:
+        arguments = dict(journal=journal, store=delivery.store,
+            clients={delivery.physical.binding.node_ids[0]: Client()}, now=lambda: delivery.now)
+        with pytest.raises(ConnectionError):
+            await NativeBootstrapOutbox(**arguments, configuration_sha256="a" * 64).deliver(delivery.physical)
+        with pytest.raises(ValueError, match="changed"):
+            await NativeBootstrapOutbox(**arguments, configuration_sha256="b" * 64).deliver(delivery.physical)
+        assert len(sent) == 1
+
+
+async def test_controller_delivery_never_sends_without_durable_intent(delivery, tmp_path, monkeypatch):
+    from loom_capacity_executor.journal import ExecutorJournal
+    from loom_capacity_executor.native_bootstrap_outbox import NativeBootstrapOutbox
+
+    class Client:
+        async def deliver(self, raw):
+            raise AssertionError("delivery preceded journal persistence")
+
+        async def observe_receipt(self, raw):
+            raise AssertionError("fresh delivery has no prior receipt")
+
+    def fail(*args, **kwargs):
+        raise OSError("journal unavailable")
+
+    with ExecutorJournal(tmp_path / "delivery-journal") as journal:
+        monkeypatch.setattr(journal, "append", fail)
+        owner = NativeBootstrapOutbox(journal=journal, store=delivery.store,
+            clients={delivery.physical.binding.node_ids[0]: Client()}, configuration_sha256="a" * 64,
+            now=lambda: delivery.now)
+        with pytest.raises(OSError, match="journal unavailable"):
+            await owner.deliver(delivery.physical)
+
+
+def native_executor(tmp_path, *, fail_delivery=False):
+    from loom_capacity_executor.launch_renderer import (
+        OperatorLaunchProfileV2,
+        canonical_launch_policy_digest,
+    )
+    from loom_capacity_executor.native_bootstrap_outbox import NativeBootstrapOutbox
+    from tests.unit.test_capacity_executor_executable import executor_fixture, permit_fixture
+    from tests.unit.test_capacity_executor_native_launch_profile import native_profile_fixture
+
+    raw = native_profile_fixture().model_dump(mode="json")
+    raw["native_execution"]["root_activated_at"] = "2026-08-01T00:00:00Z"
+    profile = OperatorLaunchProfileV2.model_validate(raw)
+    profile = profile.model_copy(update={"controller_authority_sha256": canonical_launch_policy_digest(profile)})
+    from dataclasses import replace
+    from unittest.mock import patch
+    context = launch_context_fixture()
+    context = replace(context, profile=profile, controller_authority=context.controller_authority.model_copy(
+        update={"controller_authority_sha256": profile.controller_authority_sha256}))
+    with patch("tests.unit.test_capacity_executor_executable.launch_context_fixture", return_value=context):
+        runtime, journal, manager, admission, slurm, context = executor_fixture(tmp_path,
+            work=permit_fixture(context.binding), profiles=(profile,))
+    calls = []
+    receipts = []
+
+    class Client:
+        async def deliver(self, raw):
+            assert admission.bind_requests
+            calls.append(raw)
+            receipt = module_receipt(raw)
+            receipts.append(receipt)
+            if fail_delivery:
+                raise ConnectionError("reply lost after receiver publication")
+            return receipt
+
+        async def observe_receipt(self, raw):
+            return receipts[-1] if receipts else None
+
+    def outbox():
+        return NativeBootstrapOutbox(journal=runtime.journal, store=runtime._bootstrap_handoff_store,
+            clients={context.binding.node_ids[0]: Client()}, configuration_sha256="a" * 64, now=runtime._now)
+
+    runtime.native_bootstrap_outbox = outbox()
+    return SimpleNamespace(runtime=runtime, journal=journal, manager=manager, admission=admission,
+        slurm=slurm, context=context, calls=calls, outbox=outbox)
+
+
+@pytest.mark.parametrize("crash_before_retention", [False, True])
+async def test_native_executor_delivers_after_binding_and_recovers_without_resubmit(tmp_path, monkeypatch, crash_before_retention):
+    from loom_capacity_executor.journal import ExecutorJournal
+
+    state = native_executor(tmp_path, fail_delivery=True)
+    runtime, journal = state.runtime, state.journal
+    try:
+        append = journal.append
+        def crash(event, *args, **kwargs):
+            if event == "native-delivery-retained":
+                raise ConnectionError("crashed before delivery retention")
+            return append(event, *args, **kwargs)
+        if crash_before_retention:
+            monkeypatch.setattr(journal, "append", crash)
+        with pytest.raises(ConnectionError):
+            await runtime.tick()
+        assert state.slurm.submit_count == 1
+        assert len(state.admission.bind_requests) == 1
+        journal.close()
+        journal = ExecutorJournal(journal.path)
+        journal.__enter__()
+        runtime.journal = journal
+        runtime.native_bootstrap_outbox = state.outbox()
+        state.manager.work = None
+        # First send after a pre-retention crash can itself lose its response.
+        if crash_before_retention:
+            with pytest.raises(ConnectionError):
+                await runtime.tick()
+        result = await runtime.tick()
+        assert result.status == "adopted"
+        assert len(state.calls) == 1
+        assert state.slurm.submit_count == 1
+        assert len(state.admission.bind_requests) == 1
+        assert (await runtime.tick()).status == "inventory-published"
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize("drain_only", [False, True])
+async def test_native_delivery_failure_does_not_block_exact_withdrawal(tmp_path, drain_only):
+    from tests.unit.test_capacity_executor_executable import close_fixture
+
+    state = native_executor(tmp_path, fail_delivery=True)
+    try:
+        with pytest.raises(ConnectionError):
+            await state.runtime.tick()
+        state.manager.work = close_fixture(state.context.binding)
+        result = await (state.runtime.tick_drain_only() if drain_only else state.runtime.tick())
+        assert result.status == "pending-cancelled"
+        assert len(state.admission.withdraw_requests) == 1
+        assert len(state.calls) == 1
+        assert state.slurm.submit_count == 1
+        assert state.journal.pending_requests() == ()
+    finally:
+        state.journal.close()
+
+
+async def test_native_executor_refuses_submission_without_installed_delivery(tmp_path):
+    state = native_executor(tmp_path)
+    state.runtime.native_bootstrap_outbox = None
+    try:
+        from loom_capacity_executor.runtime_profiles import RuntimeAssemblyError
+        with pytest.raises(RuntimeAssemblyError, match=r"native.*delivery"):
+            await state.runtime.tick()
+        assert state.slurm.submit_count == 0
+        assert not state.admission.bind_requests
+    finally:
+        state.journal.close()
+
+
+async def test_native_terminal_recovery_never_redelivers_expired_capability(tmp_path):
+    from tests.unit.test_capacity_executor_executable import _terminal_from_job
+
+    state = native_executor(tmp_path, fail_delivery=True)
+    try:
+        with pytest.raises(ConnectionError):
+            await state.runtime.tick()
+        state.manager.work = None
+        state.slurm.terminal_jobs = (_terminal_from_job(state.slurm.jobs.pop()),)
+        state.runtime._now = lambda: _NOW + timedelta(days=1)
+        for path in state.runtime._bootstrap_handoff_store.directory.iterdir():
+            path.unlink()
+        result = await state.runtime.tick()
+        assert result.status == "adopted"
+        assert state.manager.inventories[-1].records[0].state == "terminal"
+        assert len(state.calls) == 1
+        assert state.slurm.submit_count == 1
+    finally:
+        state.journal.close()

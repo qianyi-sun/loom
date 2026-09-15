@@ -787,6 +787,8 @@ class ProtectedExternalSupervisorTransport(Protocol):
 
     def reconcile_compensations(self) -> None: ...
 
+    def observe_processes(self, artifact: ExternalSupervisorArtifact) -> dict[str, object]: ...
+
 
 @dataclass(frozen=True, slots=True)
 class AtomicUserUnitStore:
@@ -1769,6 +1771,33 @@ class FixedExternalSupervisorTransport:
             compensation_blockers=self.store.compensation_blockers(),
         )
 
+    def observe_processes(self, artifact: ExternalSupervisorArtifact) -> dict[str, object]:
+        from .protected_application_admission_recovery import admission_record_digest
+        from .protected_legacy_controller_process import (
+            observe_legacy_controller_processes,
+            validate_controller_process_observation,
+        )
+
+        canonical = self.store.read_canonical()
+        supervisors = [item for item in artifact.supervisors if item.pool_name in {"oldlab", "gb10"}]
+        environment = getattr(self.control, "environment", None)
+        if (canonical is None or canonical.artifact_digest != artifact.artifact_digest
+            or canonical.candidate_sha != artifact.candidate_sha or canonical.candidate_tree != artifact.candidate_tree
+            or canonical.unit_dir != str(self.unit_dir) or len(supervisors) != 1
+            or not isinstance(environment, Mapping) or self.store.compensation_blockers()):
+            raise RuntimeError("legacy controller process canonical authority changed")
+        supervisor = supervisors[0]
+        process = observe_legacy_controller_processes(pool=supervisor.pool_name,
+            expected_unit_sha256=artifact.unit_sha256[supervisor.service_name],
+            read_unit=self.store.read_unit, environment=environment)
+        if self.store.read_canonical() != canonical or self.store.compensation_blockers():
+            raise RuntimeError("legacy controller process canonical authority changed")
+        value: dict[str, object] = {"schema_version": 1, "candidate_sha": artifact.candidate_sha,
+            "candidate_tree": artifact.candidate_tree, "artifact_digest": artifact.artifact_digest,
+            "canonical_digest": canonical.evidence_digest, "process_evidence": process}
+        return validate_controller_process_observation(
+            {**value, "evidence_sha256": admission_record_digest(value)}, artifact)
+
     def reconcile_compensations(self) -> None:
         """Converge crash prefixes to the identity selected by canonical authority."""
 
@@ -1844,6 +1873,7 @@ class FixedExternalSupervisorTransport:
         )
         authority = current.predecessor_authority
         assert authority is not None
+        preserved_builders = self._unchanged_active_builders(target, predecessor)
         intents: list[TimerCompensationEvidence] = []
         identities: list[Mapping[str, str]] = []
         for supervisor in artifact.supervisors:
@@ -1889,7 +1919,11 @@ class FixedExternalSupervisorTransport:
             self.control.daemon_reload()
             failure_code = "loaded-definition-verification-failed"
             self._verify_loaded_definitions(artifact)
+            if self._unchanged_active_builders(target, predecessor) != preserved_builders:
+                raise RuntimeError("protected unchanged builder runtime drifted")
             for supervisor in artifact.supervisors:
+                if supervisor.service_name in preserved_builders:
+                    continue
                 if _supervisor_desired_active(supervisor):
                     failure_code = "service-activation-failed"
                     self.control.start_service(
@@ -1903,11 +1937,11 @@ class FixedExternalSupervisorTransport:
                     self.control.stop_service(supervisor.service_name)
                     self.control.reset_service_failure(supervisor.service_name)
             for supervisor in artifact.supervisors:
-                if _supervisor_desired_active(supervisor):
+                if _supervisor_desired_active(supervisor) and supervisor.service_name not in preserved_builders:
                     failure_code = "timer-enable-failed"
                     self.control.enable_timer(supervisor.timer_name)
             for supervisor in artifact.supervisors:
-                if _supervisor_desired_active(supervisor):
+                if _supervisor_desired_active(supervisor) and supervisor.service_name not in preserved_builders:
                     failure_code = "timer-start-failed"
                     self.control.start_timer(supervisor.timer_name)
             failure_code = "activation-verification-failed"
@@ -2026,6 +2060,7 @@ class FixedExternalSupervisorTransport:
 
         try:
             if desired is not None:
+                preserved_builders = self._unchanged_active_builders(target, predecessor)
                 absent_services = sorted(
                     name
                     for name in target.unit_payloads
@@ -2041,9 +2076,13 @@ class FixedExternalSupervisorTransport:
                     {name: (current[name], desired_payloads[name]) for name in target.unit_payloads}
                 )
                 self.control.daemon_reload()
+                if self._unchanged_active_builders(target, predecessor) != preserved_builders:
+                    raise RuntimeError("protected unchanged builder runtime drifted")
                 for service_name in sorted(
                     name for name in desired.unit_payloads if name.endswith(".service")
                 ):
+                    if service_name in preserved_builders:
+                        continue
                     timer_name = f"{service_name.removesuffix('.service')}.timer"
                     if _identity_pair_desired_active(desired, service_name, timer_name):
                         try:
@@ -2355,6 +2394,42 @@ class FixedExternalSupervisorTransport:
                 unit_dir=str(unit_dir),
             )
         return None
+
+    def _unchanged_active_builders(
+        self,
+        target: ExternalSupervisorCanonicalIdentity,
+        predecessor: ExternalSupervisorCanonicalIdentity | None,
+    ) -> frozenset[str]:
+        """Retain healthy identical builders without scheduling another oneshot.
+
+        Both immutable transition endpoints must contain the same active pair.
+        The ordinary terminal checks still validate every builder. Changed or
+        failed builders continue through the existing reviewed convergence path.
+        Recovery derives the same decision from retained transition records.
+        """
+        if predecessor is None:
+            return frozenset()
+        preserved: set[str] = set()
+        for pool in ("oldlab", "gb10"):
+            service_name = f"loom-task-image-builder-{pool}-staging.service"
+            timer_name = f"loom-task-image-builder-{pool}-staging.timer"
+            names = (service_name, timer_name)
+            if any(name not in target.unit_payloads or name not in predecessor.unit_payloads
+                   or target.unit_payloads[name] != predecessor.unit_payloads[name]
+                   or self.store.read_unit(name) != target.unit_payloads[name].encode()
+                   for name in names):
+                continue
+            if not (_identity_pair_desired_active(target, *names)
+                    and _identity_pair_desired_active(predecessor, *names)):
+                continue
+            timer = self.control.timer_status(timer_name)
+            service = self.control.service_status(service_name)
+            if (_definition_is_fresh(timer_name, timer, unit_dir=self.unit_dir)
+                and _definition_is_fresh(service_name, service, unit_dir=self.unit_dir)
+                and timer.unit_file_state == "enabled" and timer.active_state == "active"
+                and service.result == "success" and service.exec_main_status == 0):
+                preserved.add(service_name)
+        return frozenset(preserved)
 
     def _verify_unit_bytes(self, identity: ExternalSupervisorCanonicalIdentity) -> None:
         if any(

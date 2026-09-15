@@ -1385,6 +1385,23 @@ def _parse_contract(
         },
     )
     policy = _one_row(profile.get("worker_pool_autoscaler_policies"), pool_name="gb10")
+    prerequisites = profile.get("external_slurm_runner_prerequisites")
+    retired_trials = (
+        isinstance(prerequisites, dict)
+        and prerequisites.get("retained_inactive_supervisor_pools") == ["gb10", "oldlab"]
+        and policy.get("enabled") is False
+        and policy.get("disabled_reason") == "protected_global_trial_cutover"
+    )
+    if retired_trials:
+        # Retirement changes the desired legacy controller state, not the
+        # physical allocation boundary or the mandatory materialization proof.
+        for pool in ("gb10", "oldlab"):
+            retired_policy = _one_row(profile.get("worker_pool_autoscaler_policies"), pool_name=pool)
+            retired_supervisor = _one_row(profile.get("external_slurm_autoscaler_supervisors"), pool_name=pool)
+            if (retired_policy.get("enabled") is not False
+                or retired_policy.get("disabled_reason") != "protected_global_trial_cutover"
+                or retired_supervisor.get("enabled") is not False or retired_supervisor.get("active") is not False):
+                raise AcceptanceError("retired trial controller authority is inconsistent")
     config = policy.get("actuator_config")
     if not isinstance(config, dict):
         raise AcceptanceError("GB10 Slurm actuator configuration is unavailable")
@@ -1408,7 +1425,7 @@ def _parse_contract(
     if (
         profile.get("environment") != "staging"
         or not _exact_value(policy.get("actuator"), "slurm")
-        or policy.get("enabled") is not True
+        or (policy.get("enabled") is not True and not retired_trials)
         or not _exact_value(policy.get("min_slots"), 0)
         or not _exact_value(policy.get("max_slots"), 140)
         or any(not _exact_value(config.get(key), value) for key, value in expected_config.items())
@@ -1453,7 +1470,7 @@ def _parse_contract(
             row.get("enabled") is not False or row.get("active") is not False for row in supervisors
         ):
             raise AcceptanceError("manager witness bootstrap supervisors are not inert")
-    elif supervisor.get("enabled") is not True or supervisor.get("active") is not True:
+    elif not retired_trials and (supervisor.get("enabled") is not True or supervisor.get("active") is not True):
         raise AcceptanceError("GB10 supervisor is not controller-bound and active")
     return {
         "profile_path": profile_path,

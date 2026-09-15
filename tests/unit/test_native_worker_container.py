@@ -240,3 +240,33 @@ def test_image_prefetch_does_not_consume_handoff_on_platform_failure(monkeypatch
 
     with pytest.raises(NativeContainerError):
         prefetch_native_image(CLI(), image_digest=_image()["RepoDigests"][0], platform="linux/amd64")
+
+
+def test_native_dedicated_daemon_endpoint_stays_inside_fixed_policy():
+    from loom_capacity_executor.native_worker_container import (
+        FixedDockerCLI,
+        NativeWorkerContainerPolicyV2,
+        native_create_argv,
+    )
+
+    socket = "/run/loom-native-docker/docker.sock"
+    bootstrap = _configured_bootstrap()
+    policy = NativeWorkerContainerPolicyV2(native_execution=bootstrap.native_execution,
+        canonical_worker_settings=bootstrap.canonical_worker_settings,
+        docker_config_directory="/etc/loom/empty-docker", pids_max=128, docker_socket=socket)
+    cli = FixedDockerCLI(executable="/proc/self/fd/9", descriptor=9,
+        config_directory=policy.docker_config_directory, socket_path=policy.docker_socket)
+    assert f"--host=unix://{socket}" in cli.argv("info")
+    allocation = replace(_allocation(), docker_socket=socket)
+    argv = native_create_argv(_prepared(), allocation, name="loom-native-test", ownership="a" * 64)
+    assert f"--mount=type=bind,source={socket},target=/var/run/docker.sock" in argv
+    assert "--mount=type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock" not in argv
+    # The worker sees only the selected daemon at its fixed internal endpoint.
+    assert "--env=DOCKER_HOST=unix:///var/run/docker.sock" in argv
+    assert NativeWorkerContainerPolicyV2.model_validate_json(policy.model_dump_json()) == policy
+    assert "docker_socket" not in policy.model_copy(update={"docker_socket": "/var/run/docker.sock"}).model_dump()
+    for invalid in ("tcp://127.0.0.1:2375", "/tmp/docker.sock", "/run/other/docker.sock"):
+        with pytest.raises(ValueError):
+            NativeWorkerContainerPolicyV2.model_validate_json(policy.model_copy(update={"docker_socket": invalid}).model_dump_json())
+        with pytest.raises(ValueError):
+            replace(cli, socket_path=invalid)

@@ -415,3 +415,16 @@ async def test_database_client_rejects_prepared_revocation_receipt_type_mismatch
 
     with pytest.raises(AssertionError):
         await client.revoke_prepared_bootstrap(request)
+
+
+@pytest.mark.parametrize("address", ["192.0.2.10", "2001:db8::10"])
+def test_admission_url_can_pin_one_route_while_preserving_tls_hostname(address):
+    value = f"postgresql+psycopg://executor:secret@postgres.example.test/loom?sslmode=verify-full&hostaddr={address}"
+    assert admission_client_module._database_url_from_bytes(value.encode()) == value
+
+
+@pytest.mark.parametrize("address", ["", "db.example.test", "192.0.2.10,192.0.2.11", "0.0.0.0", "::", "ff02::1", "fe80::1%eth0", "192.0.2.010"])
+def test_admission_url_rejects_ambiguous_or_nonaddress_routes(address):
+    value = f"postgresql+psycopg://executor:secret@postgres.example.test/loom?sslmode=verify-full&hostaddr={address}"
+    with pytest.raises(ExecutableAdmissionClientError):
+        admission_client_module._database_url_from_bytes(value.encode())

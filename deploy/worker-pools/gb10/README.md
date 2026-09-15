@@ -3,10 +3,18 @@
 The staging GB10 pool is ARM64 Docker capacity allocated through Slurm. Its
 authoritative policy is the `gb10` worker-pool entry in
 `deploy/environment-state/staging.toml`; the external autoscaler supervisor on
-`gx10-01c7` is the capacity actuator. Per-host node-agent and fixed-worker
+`gx10-01c7` is the retired legacy capacity actuator. Per-host node-agent and fixed-worker
 units are kept stopped by environment-state reconciliation.
 
-## Current staging policy
+## Retained legacy staging policy
+
+The committed staging profile disables this legacy trial policy and its
+supervisor for the protected global-execution cutover. The independent task-image
+builders remain enabled. Existing jobs and foreign allocations are preserved.
+The retained limits below describe the legacy boundary; new trial capacity
+requires completed writer retirement and the protected global executor's
+candidate-bound activation. Merged configuration alone does not prove live
+retirement or worker readiness.
 
 The normal worker policy scales from zero to 140 slots across 14 Slurm nodes:
 `trt-gb10-1` and `trt-gb10-3` through `trt-gb10-15`. The full readiness and

@@ -298,7 +298,7 @@ def _bound_single_artifact(tmp_path: Path):
     return bound, candidate_root, artifact
 
 
-def _bound_multi_artifacts(tmp_path: Path):
+def _bound_multi_artifacts(tmp_path: Path, *, retired: bool = False):
     plan = _published_plan(tmp_path)
     candidate_root = tmp_path / "candidate"
     profile_target = candidate_root / "deploy/environment-state/staging.toml"
@@ -307,7 +307,8 @@ def _bound_multi_artifacts(tmp_path: Path):
     profile_target.parent.mkdir(parents=True, exist_ok=True)
     script_target.parent.mkdir(parents=True, exist_ok=True)
     repository = Path(__file__).resolve().parents[4]
-    profile_target.write_text(active_staging_profile_text(), encoding="utf-8")
+    profile_target.write_text((repository / "deploy/environment-state/staging.toml").read_text()
+        if retired else active_staging_profile_text(), encoding="utf-8")
     shutil.copyfile(
         repository / SCRIPT_PATH,
         script_target,

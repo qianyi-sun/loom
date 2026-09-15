@@ -1286,6 +1286,32 @@ async def submit_trial(
     return propagate(resp)
 
 
+class _AdoptProtectedReq(BaseModel):
+    model_config = {"extra": "forbid"}
+    operation_id: UUID
+
+
+@router.post("/trials/{trial_id}/adopt-protected")
+async def adopt_protected_trial(
+    request: Request, sc: SessionAndCtx, trial_id: UUID, payload: _AdoptProtectedReq,
+    authorization: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    """Forward an explicitly identified adoption after checking the original team."""
+    session, ctx = sc
+    require_scope(ctx, "submit")
+    if not authorization:
+        raise HTTPException(status_code=401, detail="bearer authorization required")
+    trial = (await session.execute(select(Trial).where(Trial.id == trial_id))).scalar_one_or_none()
+    if trial is None:
+        raise HTTPException(status_code=404, detail="trial not found")
+    require_team_or_admin(ctx, trial.team_id)
+    response = await forward(
+        request.app.state.http_client, method="POST", path=f"/trials/{trial_id}/adopt-protected",
+        authorization=authorization, json_body=payload.model_dump(mode="json"),
+    )
+    return propagate(response)
+
+
 @router.post("/trials/{trial_id}/cancel")
 async def cancel_trial(
     request: Request,

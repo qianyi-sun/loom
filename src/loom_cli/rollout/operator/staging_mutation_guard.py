@@ -40,6 +40,8 @@ from .config import OperatorConfig, candidate_sha_from_runner_repo
 from .envelope import fixed_operator_config_path
 from .model import validate_safe_identifier
 from .policy import sanitized_child_environment
+from .protected_application_guard_retention import application_guard_is_retained
+from .protected_legacy_writer_fence import lifecycle_retirement_documents
 from .readonly_database_client import (
     READONLY_DATABASE_STATEMENT_TIMEOUT_SECONDS,
     READONLY_DATABASE_TUNNEL_TEARDOWN_BOUND_SECONDS,
@@ -111,6 +113,10 @@ _HEALTH_SQL = (
 
 class MutationGuardError(RuntimeError):
     """Raised when request-bound mutation coordination cannot be proven safe."""
+
+
+class MutationGuardRetainedError(MutationGuardError):
+    """Release refused by pending handoff; never evidence that recovery completed."""
 
 
 class CommandResult(Protocol):
@@ -689,6 +695,47 @@ def _wait_until_inactive(
     raise MutationGuardError("lifecycle active Job did not finish within the guard bound")
 
 
+def _lifecycle_is_retired(config: OperatorConfig, run: KubernetesRunner, cronjob: _CronJob) -> bool:
+    """Preserve retirement only with exact, typechecked, denying live policy objects.
+
+    An annotation alone is insufficient. The enclosing cutover retains the policy
+    identities and excludes policy writers; guard release never removes that fence.
+    """
+    intent = cronjob.annotations.get("loom.dev/legacy-writer-retirement")
+    if intent is None:
+        return False
+    try:
+        documents = lifecycle_retirement_documents(intent)
+    except ValueError as exc:
+        raise MutationGuardError("lifecycle retirement annotation is invalid") from exc
+    for desired in documents:
+        kind = desired["kind"]
+        resource = ("validatingadmissionpolicies.admissionregistration.k8s.io" if kind == "ValidatingAdmissionPolicy"
+                    else "validatingadmissionpolicybindings.admissionregistration.k8s.io")
+        expected = _mapping(desired["metadata"], "lifecycle retirement metadata")
+        observed = _run_json(run, [*_kubectl_prefix(config), "get", resource, str(expected["name"]),
+            "--output=json", "--request-timeout=30s"], "lifecycle retirement policy")
+        metadata = _mapping(observed.get("metadata"), "lifecycle retirement metadata")
+        uid = metadata.get("uid")
+        if (
+            observed.get("apiVersion") != desired["apiVersion"] or observed.get("kind") != kind
+            or observed.get("spec") != desired["spec"]
+            or metadata.get("name") != expected["name"]
+            or metadata.get("annotations") != expected["annotations"]
+            or metadata.get("generation") != 1 or type(metadata.get("generation")) is not int
+            or not isinstance(uid, str) or _UID_RE.fullmatch(uid) is None
+            or metadata.get("deletionTimestamp") is not None
+            or metadata.get("ownerReferences", []) != []
+        ):
+            raise MutationGuardError("lifecycle retirement policy drifted")
+        if kind == "ValidatingAdmissionPolicy":
+            status = _mapping(observed.get("status"), "lifecycle retirement policy status")
+            checking = _mapping(status.get("typeChecking"), "lifecycle retirement policy type checking")
+            if status.get("observedGeneration") != 1 or checking.get("expressionWarnings", []) != []:
+                raise MutationGuardError("lifecycle retirement policy is not typechecked")
+    return True
+
+
 def _restore_cronjob(
     config: OperatorConfig,
     run: KubernetesRunner,
@@ -702,7 +749,10 @@ def _restore_cronjob(
     if current.uid != uid:
         raise MutationGuardError("lifecycle CronJob UID authority drifted during release")
     guard_state = _guard_annotation_state(current)
-    if not current.suspended and not guard_state:
+    retired = _lifecycle_is_retired(config, run, current)
+    if retired and not current.suspended:
+        raise MutationGuardError("retired lifecycle CronJob unexpectedly resumed")
+    if current.suspended == retired and not guard_state:
         return
     if guard_state != _guard_annotations(request_id, candidate_sha, candidate_tree):
         raise MutationGuardError("lifecycle CronJob guard annotation authority drifted")
@@ -710,10 +760,11 @@ def _restore_cronjob(
         config,
         run,
         resource_version=current.resource_version,
-        suspend=False,
+        suspend=retired,
         annotations={key: None for key in _GUARD_ANNOTATIONS},
     )
-    if restored.uid != uid or restored.suspended or _guard_annotation_state(restored):
+    if (restored.uid != uid or restored.suspended != retired or _guard_annotation_state(restored)
+            or _lifecycle_is_retired(config, run, restored) != retired):
         raise MutationGuardError("lifecycle CronJob release verification failed")
 
 
@@ -1008,7 +1059,9 @@ class MutationGuardManager:
                 ) from validation_error
             raise
 
-    def assert_ready(self, request_id: str) -> MutationGuardEvidence:
+    def assert_ready(
+        self, request_id: str, *, candidate_config: OperatorConfig | None = None,
+    ) -> MutationGuardEvidence:
         status = self.systemd.show_mutation_guard(request_id)
         if status is None or not status.is_running or status.main_pid < 1:
             raise MutationGuardError("mutation guard unit is not ready")
@@ -1018,7 +1071,22 @@ class MutationGuardManager:
         )
         if evidence.guard_pid != status.main_pid:
             raise MutationGuardError("mutation guard process identity drifted")
-        return self._validate(evidence, request_id=request_id, state="ready")
+        candidate_sha, candidate_tree = self.resolve_candidate(
+            self.config if candidate_config is None else candidate_config,
+        )
+        return self._validate(evidence, request_id=request_id, state="ready",
+                              candidate_sha=candidate_sha, candidate_tree=candidate_tree)
+
+    def observe_retained_epoch(
+        self, guard: MutationGuardEvidence, *, candidate_config: OperatorConfig | None = None,
+    ) -> int:
+        """Read live epoch without a new connection while admission is closed."""
+        from .protected_application_guard_probe import probe_retained_epoch
+
+        return probe_retained_epoch(
+            self.config, guard=guard, service_uid=self.service_uid,
+            assert_ready=lambda: self.assert_ready(guard.request_id, candidate_config=candidate_config),
+        )
 
     def release(
         self,
@@ -1027,6 +1095,10 @@ class MutationGuardManager:
         candidate_config: OperatorConfig | None = None,
     ) -> MutationGuardEvidence:
         selected_config = self.config if candidate_config is None else candidate_config
+        if application_guard_is_retained(
+            self.config.state_root, request_id=request_id, service_uid=self.service_uid,
+        ):
+            raise MutationGuardRetainedError("application handoff still retains the original mutation guard")
         candidate_sha, candidate_tree = self.resolve_candidate(selected_config)
         evidence = self.systemd.stop_mutation_guard(
             request_id,
@@ -1141,8 +1213,9 @@ def reconcile_orphaned_guard(
     cronjob = _load_cronjob(config, run)
     annotations = _guard_annotation_state(cronjob)
     if not annotations:
-        if cronjob.suspended:
-            raise MutationGuardError("lifecycle CronJob is suspended without guard annotations")
+        retired = _lifecycle_is_retired(config, run, cronjob)
+        if cronjob.suspended != retired:
+            raise MutationGuardError("lifecycle CronJob suspension contradicts guard or retirement authority")
         return {"status": "idle"}
     if set(annotations) != _GUARD_ANNOTATIONS:
         raise MutationGuardError("lifecycle CronJob guard annotations are incomplete")
@@ -1217,6 +1290,11 @@ def reconcile_orphaned_guard(
         raise MutationGuardError("orphaned mutation guard released evidence contradicts suspension")
     if final_evidence != initial_evidence:
         raise MutationGuardError("orphaned mutation guard evidence changed during recovery")
+    if application_guard_is_retained(
+        config.state_root, request_id=request_id, service_uid=service_uid,
+        guard=final_evidence,
+    ):
+        raise MutationGuardError("application handoff retains the orphaned mutation guard freeze")
     _restore_cronjob(
         config,
         run,
@@ -1290,12 +1368,16 @@ def hold_request_guard(
         raise MutationGuardError(
             "lifecycle CronJob is already annotated; annotation authority is occupied"
         )
-    if initial.suspended:
+    retired = _lifecycle_is_retired(config, run, initial)
+    if initial.suspended and not retired:
         raise MutationGuardError("lifecycle CronJob is already suspended")
+    if retired and not initial.suspended:
+        raise MutationGuardError("retired lifecycle CronJob unexpectedly resumed")
     restored = False
     acquired = False
     unsafe_loss = False
     ready_published = False
+    application_retention_seen: set[str] = set()
     ready: MutationGuardEvidence | None = None
     try:
         _require_before_readiness_deadline(
@@ -1449,6 +1531,26 @@ def hold_request_guard(
                         if not math.isfinite(now):
                             unsafe_loss = True
                             raise MutationGuardError("mutation guard clock authority was lost")
+                        if application_guard_is_retained(
+                            config.state_root, request_id=request_id, service_uid=service_uid,
+                            guard=ready, acknowledge=True,
+                            observed_components=application_retention_seen,
+                        ):
+                            if now >= deadline_monotonic:
+                                unsafe_loss = True
+                                raise MutationGuardError(
+                                    "mutation guard deadline expired during retained application handoff"
+                                )
+                            from .protected_application_guard_probe import (
+                                answer_retained_epoch_probe,
+                            )
+
+                            answer_retained_epoch_probe(
+                                config, guard=ready, service_uid=service_uid, query=query,
+                                assert_healthy=lambda: _require_lock_health(query, backend_pid=backend_pid),
+                            )
+                            sleep(1.0)
+                            continue
                         if stop_requested():
                             break
                         if now >= deadline_monotonic:
@@ -1700,6 +1802,7 @@ __all__ = [
     "MutationGuardError",
     "MutationGuardEvidence",
     "MutationGuardManager",
+    "MutationGuardRetainedError",
     "guard_evidence_path",
     "hold_request_guard",
     "main",

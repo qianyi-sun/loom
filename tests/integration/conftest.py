@@ -49,6 +49,7 @@ from loom.db.schema import (
     Token,
     Trial,
 )
+from loom.trial_writer_trigger_authority import trial_writer_trigger_retirement_ddl
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from tests.integration.minio_test_images import MINIO_TEST_IMAGE
@@ -189,26 +190,36 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
         try:
             with environment_admin_engine.begin() as connection:
                 connection.exec_driver_sql(f"GRANT USAGE ON SCHEMA public TO {quoted_owner}")
+                from loom.capacity_trial_output_sql import protected_trial_output_owner_grants
+
+                for grant in protected_trial_output_owner_grants(owner_role):
+                    connection.exec_driver_sql(grant.as_string())
                 connection.exec_driver_sql(
                     f"GRANT REFERENCES (id) ON TABLE public.trials TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    f"GRANT TRIGGER ON TABLE public.trials TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    trial_writer_trigger_retirement_ddl(guard_owner=owner_role).as_string()
                 )
                 connection.exec_driver_sql(
                     "GRANT SELECT (id, team_id, task_id, config, state, requires_caps, "
                     "submit_priority, batch_id, idempotency_key, sample_idx, combination_idx, "
                     "provider_connection_id, provider_model_id, submitted_by_user_id, "
                     "usage_attributed_user_id, usage_attributed_actor, family_key, "
-                    "lifecycle_authority_id, submitted_at, started_at, "
+                    "lifecycle_authority_id, submitted_at, started_at, claimed_at, pre_start_heartbeat_at, failure_reason, "
                     "cancellation_requested_at, cancellation_observed_at, finished_at, "
                     "next_attempt_at, autoscaler_pool_name, "
                     "worker_id, attempt_count, "
-                    "execution_route_json) "
+                    "execution_route_json, result, failure_message) "
                     f"ON TABLE public.trials TO {quoted_owner}"
                 )
                 connection.exec_driver_sql(
                     "GRANT UPDATE (lifecycle_authority_id, state, requires_caps, worker_id, "
                     "claimed_at, pre_start_heartbeat_at, failure_reason, failure_message, "
                     "attempt_count, next_attempt_at, cancellation_requested_at, "
-                    "cancellation_observed_at, finished_at) "
+                    "cancellation_observed_at, finished_at, started_at, result) "
                     "ON TABLE public.trials "
                     f"TO {quoted_owner}"
                 )
@@ -300,6 +311,9 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                     f"GRANT UPDATE (worker_id) ON TABLE public.slurm_worker_jobs TO {quoted_owner}"
                 )
                 claim_select_columns = {
+                    "execution_leases": (
+                        "id", "trial_id", "generation", "revoked_at", "deleted_at", "execution_role", "attempt",
+                    ),
                     "execution_attempts": ("worker_id", "state"),
                     "worker_pool_autoscaler_policies": (
                         "id",
@@ -326,6 +340,7 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                         "state",
                         "task_sequence",
                         "current_index",
+                        "attempt_count",
                         "state_uri",
                     ),
                     "batches": ("id", "family_run_spec"),
@@ -357,11 +372,14 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                         f"TO {quoted_owner}"
                     )
                 connection.exec_driver_sql(
-                    "GRANT UPDATE (state, updated_at) ON TABLE public.batch_family_state "
+                    "GRANT UPDATE (state, updated_at, current_index, attempt_count) ON TABLE public.batch_family_state "
                     f"TO {quoted_owner}"
                 )
                 connection.exec_driver_sql(
                     f"GRANT UPDATE (in_flight_count) ON TABLE public.team_quotas TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    f"GRANT UPDATE (id) ON TABLE public.execution_leases TO {quoted_owner}"
                 )
                 connection.exec_driver_sql(
                     f"GRANT UPDATE (id) ON TABLE public.batches TO {quoted_owner}"

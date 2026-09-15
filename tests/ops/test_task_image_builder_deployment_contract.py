@@ -55,7 +55,8 @@ def test_staging_activates_both_provisioned_native_builders() -> None:
     }
     assert set(trial_pools) == {"gb10", "oldlab"}
     for row in trial_pools.values():
-        assert row["enabled"] is True
+        assert row["enabled"] is False
+        assert row["disabled_reason"] == "protected_global_trial_cutover"
         assert row["actuator_config"]["exclusive"] is False
         assert row["actuator_config"]["requested_concurrency"] > 1
     trial_env_files = {row["actuator_config"]["env_file"] for row in trial_pools.values()}

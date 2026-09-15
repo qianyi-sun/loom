@@ -160,3 +160,69 @@ async def test_pressure_drain_poll_publishes_inventory_without_requesting_new_ad
         assert slurm.submit_count == 0
     finally:
         journal.close()
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+async def test_native_delivery_survives_checkpoint_until_exact_release(tmp_path, confirmed):
+    from loom_capacity_executor.native_bootstrap_delivery import expected_native_delivery_receipt
+    from loom_capacity_executor.native_bootstrap_outbox import NativeBootstrapOutbox
+    from loom_capacity_manager.executable_contracts import canonical_executable_bytes
+    from tests.unit.test_capacity_executor_executable import (
+        _release_work,
+        launch_context_fixture,
+        permit_fixture,
+    )
+
+    context = launch_context_fixture()
+    runtime, journal, manager, _, _, _ = executor_fixture(tmp_path, work=permit_fixture(context.binding))
+    try:
+        await runtime.tick()
+        physical = runtime._physical_binding(runtime._load_launch(context.binding.intent_id))
+
+        class Client:
+            async def deliver(self, raw):
+                if not confirmed:
+                    raise ConnectionError("receiver offline")
+                return expected_native_delivery_receipt(raw)
+
+            async def observe_receipt(self, raw):
+                raise AssertionError("first delivery only")
+
+        owner = NativeBootstrapOutbox(journal=journal, store=runtime._bootstrap_handoff_store,
+            clients={physical.binding.node_ids[0]: Client()}, configuration_sha256="a" * 64, now=runtime._now)
+        if confirmed:
+            await owner.deliver(physical)
+        else:
+            with pytest.raises(ConnectionError):
+                await owner.deliver(physical)
+        # A local delivery intent must not prevent heartbeat/cleanup RPCs or
+        # compaction while the receiver is offline.
+        assert journal.pending_requests() == ()
+        module = import_module("loom_capacity_executor.journal_retention")
+        plan = module.plan_runtime_checkpoint(runtime, await manager.executable_checkpoint())
+        delivery_records = journal.records("executor", "native-delivery:" + str(context.binding.intent_id))
+        assert all(record.sequence in plan.retained_sequences for record in delivery_records)
+        anchor = plan.prepare(journal)
+        journal.commit_checkpoint(central_sequence=anchor.sequence, central_digest=anchor.record_digest)
+        manager.journal_sequence, manager.journal_digest = anchor.sequence, anchor.record_digest
+        journal.close()
+        journal.__enter__()
+        assert journal.records("executor", delivery_records[0].object_id) == delivery_records
+        # Retention consumes a manager-acknowledged exact release, never an empty
+        # inventory or a delivery receipt standing in for worker completion.
+        release = _release_work(context.binding, command_sequence=manager.command_sequence + 1,
+            inventory_sequence=1, terminal_evidence_sha256="b" * 64, protected_release_sha256="c" * 64)
+        payload = canonical_executable_bytes(release)
+        journal.append("reservation-release-confirmed", sha256(payload).hexdigest(),
+            object_kind="tranche", object_id=str(release.tranche_id), payload=payload)
+        manager.command_sequence = release.command_sequence
+        plan = module.plan_runtime_checkpoint(runtime, await manager.executable_checkpoint())
+        assert not any(record.sequence in plan.retained_sequences for record in delivery_records)
+        # A delivery written after release is reopened lifecycle history.
+        record = delivery_records[-1]
+        journal.append(record.event_kind, record.payload_digest, object_kind=record.object_kind,
+            object_id=record.object_id, payload=record.durable_payload())
+        with pytest.raises(JournalRegressionError, match="reopened"):
+            module.plan_runtime_checkpoint(runtime, await manager.executable_checkpoint())
+    finally:
+        journal.close()

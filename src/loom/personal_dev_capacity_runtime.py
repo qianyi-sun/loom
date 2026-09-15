@@ -66,6 +66,7 @@ from loom.personal_dev_storage_admin_fence import (
     storage_admin_connection,
 )
 from loom.personal_dev_storage_secret_write import read_storage_secret_data, write_storage_secret
+from loom.trial_writer_trigger_authority import trial_writer_trigger_retirement_ddl
 from loom_capacity_agent.admission import ProtectedIntentObservationV2
 from loom_capacity_agent.client import (
     DemandReporterTLSFiles,
@@ -97,6 +98,7 @@ _EXECUTABLE_ADMISSION_FUNCTIONS = (
     "admit_executable_claim(uuid,uuid,jsonb,bytea,text)",
 )
 _STAGING_WORKER_RUNTIME_FUNCTIONS = (
+    "adopt_protected_runtime_trial_projection(uuid,jsonb,bytea,text,jsonb,bytea,text,bytea,text,jsonb,bytea,text,timestamp with time zone,uuid,uuid)",
     "current_protected_runtime_registration()",
     "submit_protected_runtime_trial_projection"
     "(uuid,jsonb,bytea,text,jsonb,bytea,text,bytea,text,jsonb,bytea,text)",
@@ -106,6 +108,8 @@ _STAGING_WORKER_RUNTIME_FUNCTIONS = (
     "claim_staging_assigned_trial(uuid,text,jsonb)",
     "retry_staging_claimed_trial(uuid,text,jsonb)",
     "cancel_protected_runtime_pending_trial(uuid,uuid)",
+    "report_staging_trial_state(uuid,text,jsonb)",
+    "publish_staging_trial_output(uuid,text,jsonb)",
 )
 _SECRET_NAME = "loom-capacity-agent"
 _CREDENTIALS_SECRET_NAME = "loom-capacity-agent-credentials"
@@ -129,6 +133,28 @@ def _assert_storage_secret(identity: DevInstanceIdentity, data: dict[str, bytes]
         or any(data.get(key) != value for key, value in expected.items())
     ):
         raise PersonalDevCapacityInstallationError("protected credential storage binding is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class ApplicationOwnerBinding:
+    """Operator-owned identity for guard provisioning after application handoff.
+
+    This is a selection constraint, not proof of complete ownership retirement.
+    It must come from the protected lifecycle operation, never candidate input
+    or a role discovered in the live catalog. No production installer selects
+    this mode until ownership, credentials and recovery are composed.
+    """
+
+    database: str
+    runtime_role: str
+    owner_role: str
+
+    def __post_init__(self) -> None:
+        if self.owner_role == self.runtime_role or any(
+            re.fullmatch(r"[a-z][a-z0-9_]{0,62}", value) is None
+            for value in (self.database, self.runtime_role, self.owner_role)
+        ):
+            raise ValueError("application owner binding is invalid")
 
 
 def _sha256_json(value: object) -> str:
@@ -371,10 +397,118 @@ class PsycopgPersonalDevCapacityDatabase:
         *,
         migration_timeout_seconds: float = 180.0,
         transient_role_admin: bool = False,
+        application_owner_binding: ApplicationOwnerBinding | None = None,
     ) -> None:
         self._admin_url = admin_url
         self._migration_timeout_seconds = migration_timeout_seconds
         self._transient_role_admin = transient_role_admin
+        self._application_owner_binding = application_owner_binding
+
+    def _application_owner(self, identity: DevInstanceIdentity) -> str:
+        binding = self._application_owner_binding
+        if binding is None:
+            return identity.db_role
+        if (
+            binding.database != identity.database
+            or binding.runtime_role != identity.db_role
+            or binding.owner_role in _role_names(identity)
+        ):
+            raise PersonalDevCapacityInstallationError("application owner binding does not match")
+        return binding.owner_role
+
+    async def _verify_application_owner_binding(
+        self, connection: psycopg.AsyncConnection[tuple[object, ...]], identity: DevInstanceIdentity
+    ) -> None:
+        if self._application_owner_binding is None:
+            return
+        application_owner = self._application_owner(identity)
+        await self._verify_application_owner_scope(connection, identity)
+        observed = await connection.execute(
+            "SELECT current_database(), pg_catalog.pg_get_userbyid(d.datdba), "
+            "pg_catalog.pg_get_userbyid(c.relowner), "
+            "NOT r.rolcanlogin AND NOT r.rolinherit AND NOT r.rolsuper "
+            "AND NOT r.rolcreatedb AND NOT r.rolcreaterole AND NOT r.rolreplication "
+            "AND NOT r.rolbypassrls "
+            "FROM pg_catalog.pg_database AS d "
+            "JOIN pg_catalog.pg_roles AS r ON r.rolname = %s "
+            "JOIN pg_catalog.pg_class AS c ON c.oid = 'public.trials'::regclass "
+            "WHERE d.datname = current_database()",
+            (application_owner,),
+        )
+        if await observed.fetchone() != (
+            identity.database,
+            application_owner,
+            application_owner,
+            True,
+        ):
+            raise PersonalDevCapacityInstallationError("application owner binding is not exact")
+        memberships = await connection.execute(
+            "SELECT member.rolname, granted.rolname, m.admin_option, "
+            "m.inherit_option, m.set_option FROM pg_catalog.pg_auth_members AS m "
+            "JOIN pg_catalog.pg_roles AS member ON member.oid = m.member "
+            "JOIN pg_catalog.pg_roles AS granted ON granted.oid = m.roleid "
+            "WHERE member.rolname = %s OR granted.rolname = %s",
+            (application_owner, application_owner),
+        )
+        expected = (
+            [(_role_names(identity)[1], application_owner, False, True, True)]
+            if self._transient_role_admin
+            else []
+        )
+        if await memberships.fetchall() != expected:
+            raise PersonalDevCapacityInstallationError(
+                "application owner binding memberships changed"
+            )
+
+    async def _verify_application_owner_scope(
+        self, connection: psycopg.AsyncConnection[tuple[object, ...]], identity: DevInstanceIdentity
+    ) -> None:
+        """Never adopt a role with authority or dependencies outside this database."""
+        observed = await connection.execute(
+            "SELECT NOT r.rolcanlogin AND NOT r.rolinherit AND NOT r.rolsuper "
+            "AND NOT r.rolcreatedb AND NOT r.rolcreaterole AND NOT r.rolreplication "
+            "AND NOT r.rolbypassrls AND NOT EXISTS ("
+            "SELECT 1 FROM pg_catalog.pg_shdepend AS s "
+            "WHERE s.refclassid = 'pg_catalog.pg_authid'::regclass AND s.refobjid = r.oid "
+            "AND NOT (s.dbid = COALESCE(d.oid, 0) AND s.dbid <> 0 "
+            "OR s.dbid = 0 AND s.classid = 'pg_catalog.pg_database'::regclass "
+            "AND s.objid = COALESCE(d.oid, 0))) "
+            "FROM pg_catalog.pg_roles AS r "
+            "LEFT JOIN pg_catalog.pg_database AS d ON d.datname = %s "
+            "WHERE r.rolname = %s",
+            (identity.database, self._application_owner(identity)),
+        )
+        if await observed.fetchone() != (True,):
+            raise PersonalDevCapacityInstallationError("application owner binding scope changed")
+
+    async def _verify_application_owner_retirement(self, identity: DevInstanceIdentity) -> None:
+        if self._application_owner_binding is None:
+            return
+        application_owner = self._application_owner(identity)
+        async with await psycopg.AsyncConnection.connect(self._connect_url) as connection:
+            observed = await connection.execute(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_database WHERE datname = %s), "
+                "EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = %s)",
+                (identity.database, application_owner),
+            )
+            state = await observed.fetchone()
+            if state == (False, False):
+                return
+            await self._verify_application_owner_scope(connection, identity)
+            memberships = await connection.execute(
+                "SELECT count(*) FROM pg_catalog.pg_auth_members "
+                "WHERE member = %s::regrole OR roleid = %s::regrole",
+                (application_owner, application_owner),
+            )
+            if await memberships.fetchone() != (0,):
+                raise PersonalDevCapacityInstallationError(
+                    "application owner binding requires sealed migration membership before cleanup"
+                )
+        if state is not None and state[0]:
+            async with await psycopg.AsyncConnection.connect(
+                fixture_database_url(self._connect_url, identity.database)
+            ) as connection:
+                await self._verify_application_owner_binding(connection, identity)
 
     @property
     def _connect_url(self) -> str:
@@ -392,6 +526,7 @@ class PsycopgPersonalDevCapacityDatabase:
         runtime: str,
     ) -> None:
         protected = (owner, migrator, agent, executor, observer, runtime)
+        application_owner = self._application_owner(identity)
         try:
             async with await psycopg.AsyncConnection.connect(
                 self._connect_url,
@@ -403,13 +538,13 @@ class PsycopgPersonalDevCapacityDatabase:
                     (identity.database,),
                 )
                 owner_row = await owner_result.fetchone()
-                if owner_row != (identity.db_role,):
+                if owner_row != (application_owner,):
                     raise PersonalDevCapacityInstallationError(
                         "protected capacity transient database owner is invalid"
                     )
                 application_result = await connection.execute(
                     "SELECT rolsuper, rolcreaterole FROM pg_roles WHERE rolname = %s",
-                    (identity.db_role,),
+                    (application_owner,),
                 )
                 application_row = await application_result.fetchone()
                 if application_row is None or application_row != (False, False):
@@ -420,9 +555,10 @@ class PsycopgPersonalDevCapacityDatabase:
                     "SELECT rolname, rolcanlogin, rolinherit, rolsuper, rolcreatedb, "
                     "rolcreaterole, rolreplication, rolbypassrls, "
                     "rolvaliduntil IS NOT NULL AND rolvaliduntil > CURRENT_TIMESTAMP "
-                    "AND rolvaliduntil < 'infinity'::timestamptz "
+                    "AND (rolvaliduntil < 'infinity'::timestamptz "
+                    "OR (%s AND rolname = ANY(%s))) "
                     "FROM pg_roles WHERE rolname = ANY(%s)",
-                    (list(protected),),
+                    (self._application_owner_binding is not None, [agent, observer, runtime], list(protected)),
                 )
                 observed_roles = {row[0]: row[1:] for row in await roles_result.fetchall()}
                 expected_roles = {
@@ -451,7 +587,7 @@ class PsycopgPersonalDevCapacityDatabase:
                     for row in await memberships_result.fetchall()
                 }
                 expected_memberships = {
-                    (migrator, identity.db_role, False, True, True),
+                    (migrator, application_owner, False, True, True),
                     (migrator, owner, False, True, True),
                 }
                 if observed_memberships != expected_memberships:
@@ -508,6 +644,7 @@ class PsycopgPersonalDevCapacityDatabase:
         credentials: CapacityDatabaseCredentials,
     ) -> tuple[str, str, str, str, str, str, str, str]:
         owner, migrator, agent, executor, observer, runtime = _role_names(identity)
+        application_owner = self._application_owner(identity)
         migrator_url = _retarget_database_url(
             self._admin_url,
             database=identity.database,
@@ -524,6 +661,20 @@ class PsycopgPersonalDevCapacityDatabase:
             raise PersonalDevCapacityInstallationError(
                 "protected capacity transient role authority is invalid"
             )
+        if self._application_owner_binding is not None:
+            # Binding refusal is read-only. Only a failure after this preflight
+            # may seal the migrator as cleanup for attempted provisioning.
+            try:
+                async with await psycopg.AsyncConnection.connect(
+                    fixture_database_url(self._connect_url, identity.database)
+                ) as connection:
+                    await self._verify_application_owner_binding(connection, identity)
+            except PersonalDevCapacityInstallationError:
+                raise
+            except Exception:
+                raise PersonalDevCapacityInstallationError(
+                    "application owner binding verification failed"
+                ) from None
         try:
             if self._transient_role_admin:
                 await self._verify_transient_role_envelope(
@@ -646,9 +797,10 @@ class PsycopgPersonalDevCapacityDatabase:
                 async with connection.transaction():
                     if not self._transient_role_admin:
                         await fence_storage_target_transaction(connection, identity)
+                    await self._verify_application_owner_binding(connection, identity)
                     if self._transient_role_admin:
                         await connection.execute(
-                            sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(identity.db_role))
+                            sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(application_owner))
                         )
                     protected_roles = sql.SQL(", ").join(
                         sql.Identifier(role)
@@ -757,16 +909,48 @@ class PsycopgPersonalDevCapacityDatabase:
                         )
                     )
                     await connection.execute(
+                        sql.SQL("GRANT TRIGGER ON TABLE public.trials TO {}").format(
+                            sql.Identifier(owner)
+                        )
+                    )
+                    helper_authority = await connection.execute(
+                        "SELECT current_user, pg_catalog.pg_get_userbyid(relowner) "
+                        "FROM pg_catalog.pg_class WHERE oid = 'public.trials'::regclass"
+                    )
+                    helper_roles = await helper_authority.fetchone()
+                    expected_helper_owners = {application_owner}
+                    if self._application_owner_binding is None and helper_roles is not None:
+                        expected_helper_owners.add(helper_roles[0])
+                    if helper_roles is None or helper_roles[1] not in expected_helper_owners:
+                        raise PersonalDevCapacityInstallationError(
+                            "trial retirement application owner is unexpected"
+                        )
+                    provisioner_role, helper_owner = helper_roles
+                    if helper_owner != provisioner_role:
+                        # Use the expected instance or explicitly bound owner,
+                        # not the shared-fixture administrator. Restrict this
+                        # helper to that exact owner, then restore the caller for
+                        # the remaining grant convergence. On failure the outer
+                        # transaction rolls back SET LOCAL and all helper DDL.
+                        await connection.execute(
+                            sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(helper_owner))
+                        )
+                    await connection.execute(trial_writer_trigger_retirement_ddl(guard_owner=owner))
+                    if helper_owner != provisioner_role:
+                        await connection.execute(
+                            sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(provisioner_role))
+                        )
+                    await connection.execute(
                         sql.SQL(
                             "GRANT SELECT (id, team_id, task_id, config, state, requires_caps, "
                             "submit_priority, batch_id, idempotency_key, sample_idx, "
                             "combination_idx, provider_connection_id, provider_model_id, "
                             "submitted_by_user_id, usage_attributed_user_id, "
                             "usage_attributed_actor, family_key, lifecycle_authority_id, "
-                            "submitted_at, started_at, cancellation_requested_at, "
+                            "submitted_at, started_at, claimed_at, pre_start_heartbeat_at, failure_reason, cancellation_requested_at, "
                             "cancellation_observed_at, finished_at, next_attempt_at, "
                             "autoscaler_pool_name, worker_id, attempt_count, "
-                            "execution_route_json) "
+                            "execution_route_json, result, failure_message) "
                             "ON TABLE public.trials TO {}"
                         ).format(sql.Identifier(owner))
                     )
@@ -775,7 +959,7 @@ class PsycopgPersonalDevCapacityDatabase:
                             "GRANT UPDATE (lifecycle_authority_id, state, requires_caps, "
                             "worker_id, claimed_at, pre_start_heartbeat_at, failure_reason, "
                             "failure_message, attempt_count, next_attempt_at, "
-                            "cancellation_requested_at, cancellation_observed_at, finished_at) "
+                            "cancellation_requested_at, cancellation_observed_at, finished_at, started_at, result) "
                             "ON TABLE public.trials TO {}"
                         ).format(sql.Identifier(owner))
                     )
@@ -788,6 +972,10 @@ class PsycopgPersonalDevCapacityDatabase:
                             "usage_attributed_actor, family_key) ON TABLE public.trials TO {}"
                         ).format(sql.Identifier(owner))
                     )
+                    from loom.capacity_trial_output_sql import protected_trial_output_owner_grants
+
+                    for grant in protected_trial_output_owner_grants(owner):
+                        await connection.execute(grant)
                     await connection.execute(
                         sql.SQL(
                             "GRANT SELECT (id) ON TABLE public.data_lifecycle_authorities TO {}"
@@ -896,6 +1084,9 @@ class PsycopgPersonalDevCapacityDatabase:
                         ).format(sql.Identifier(owner))
                     )
                     claim_select_columns = {
+                        "execution_leases": (
+                            "id", "trial_id", "generation", "revoked_at", "deleted_at", "execution_role", "attempt",
+                        ),
                         "execution_attempts": ("worker_id", "state"),
                         "worker_pool_autoscaler_policies": (
                             "id",
@@ -922,6 +1113,7 @@ class PsycopgPersonalDevCapacityDatabase:
                             "state",
                             "task_sequence",
                             "current_index",
+                            "attempt_count",
                             "state_uri",
                         ),
                         "batches": ("id", "family_run_spec"),
@@ -957,7 +1149,7 @@ class PsycopgPersonalDevCapacityDatabase:
                         )
                     await connection.execute(
                         sql.SQL(
-                            "GRANT UPDATE (state, updated_at) "
+                            "GRANT UPDATE (state, updated_at, current_index, attempt_count) "
                             "ON TABLE public.batch_family_state TO {}"
                         ).format(sql.Identifier(owner))
                     )
@@ -968,6 +1160,11 @@ class PsycopgPersonalDevCapacityDatabase:
                     )
                     await connection.execute(
                         sql.SQL("GRANT UPDATE (id) ON TABLE public.batches TO {}").format(
+                            sql.Identifier(owner)
+                        )
+                    )
+                    await connection.execute(
+                        sql.SQL("GRANT UPDATE (id) ON TABLE public.execution_leases TO {}").format(
                             sql.Identifier(owner)
                         )
                     )
@@ -1076,6 +1273,7 @@ class PsycopgPersonalDevCapacityDatabase:
         """Disable every protected login before retained data can outlive its pod."""
 
         owner, migrator, agent, executor, observer, runtime = _role_names(identity)
+        await self._verify_application_owner_retirement(identity)
         protected = (owner, migrator, agent, executor, observer, runtime, identity.db_role)
         try:
             async with storage_admin_connection(self._admin_url, identity, action="retire") as connection:
@@ -1140,7 +1338,17 @@ class PsycopgPersonalDevCapacityDatabase:
 
         await self.seal(identity)
         owner, migrator, agent, executor, observer, runtime = _role_names(identity)
-        roles = (runtime, observer, executor, agent, migrator, owner, identity.db_role)
+        roles: tuple[str, ...] = (
+            runtime,
+            observer,
+            executor,
+            agent,
+            migrator,
+            owner,
+            identity.db_role,
+        )
+        if self._application_owner_binding is not None:
+            roles += (self._application_owner(identity),)
         try:
             async with storage_admin_connection(self._admin_url, identity, action="cleanup") as connection:
                 await connection.execute(
@@ -2459,6 +2667,7 @@ def parse_pool_capabilities(raw: str) -> tuple[AgentPoolCapabilityV1, ...]:
 
 
 __all__ = [
+    "ApplicationOwnerBinding",
     "CapacityDatabaseCredentials",
     "CapacityDatabaseInstallation",
     "KubectlPersonalDevCapacityInstaller",

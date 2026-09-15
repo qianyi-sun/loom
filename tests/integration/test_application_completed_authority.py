@@ -1,0 +1,145 @@
+"""A completed handoff survives later owner migrations without restoring runtime DDL."""
+
+from uuid import uuid4
+
+import psycopg
+import pytest
+from psycopg import sql
+
+from loom.application_handoff_completion import complete_application_handoff_database
+from tests.integration.test_application_handoff_completion import _closed
+from tests.integration.test_application_ownership_transfer import (
+    transfer_database,  # noqa: F401
+    transfer_postgres,  # noqa: F401
+    transfer_postgres_url,  # noqa: F401
+)
+
+pytestmark = pytest.mark.parametrize("transfer_postgres", [16, 17], indirect=True)
+
+
+@pytest.mark.asyncio
+async def test_completed_authority_survives_new_owner_objects_and_refuses_pending_handoff(transfer_database):  # noqa: F811
+    from loom.application_completed_authority import observe_completed_application_authority
+
+    with _closed(transfer_database) as (peer, maintenance, _guard, args):
+        target = args["target"]
+        options = dict(target=target, runtime_password=args["password"])
+        with pytest.raises(RuntimeError, match="completed application"):
+            observe_completed_application_authority(peer, **options)
+        complete_application_handoff_database(peer, maintenance=maintenance, **args)
+        before = observe_completed_application_authority(peer, **options)
+        # A later trusted migration may add objects and advance schema versions.
+        with peer.transaction():
+            peer.execute(sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(target.successor_role)))
+            peer.execute("CREATE TABLE public.after_handoff(id bigint PRIMARY KEY)")
+            peer.execute("UPDATE public.alembic_version SET version_num='next'")
+        assert observe_completed_application_authority(peer, **options) == before
+        with psycopg.connect(transfer_database[0], user=target.owner_role,
+                             password=args["password"], autocommit=True) as runtime:
+            runtime.execute("INSERT INTO public.after_handoff VALUES (1)")
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                runtime.execute("ALTER TABLE public.after_handoff ADD COLUMN bypass text")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift", ["database-owner", "table-owner", "superuser", "inherit", "schema-create", "database-create", "trigger", "definer", "hidden-definer", "definer-body", "credential", "closed"])
+async def test_completed_authority_refuses_runtime_privilege_or_identity_regression(transfer_database, drift):  # noqa: F811
+    from loom.application_completed_authority import observe_completed_application_authority
+
+    with _closed(transfer_database) as (peer, maintenance, _guard, args):
+        complete_application_handoff_database(peer, maintenance=maintenance, **args)
+        target = args["target"]
+        statements = {
+            "database-owner": sql.SQL("ALTER DATABASE {} OWNER TO {}").format(sql.Identifier(target.database), sql.Identifier(target.owner_role)),
+            "table-owner": sql.SQL("ALTER TABLE public.trials OWNER TO {}").format(sql.Identifier(target.owner_role)),
+            "superuser": sql.SQL("ALTER ROLE {} SUPERUSER").format(sql.Identifier(target.owner_role)),
+            "inherit": sql.SQL("ALTER ROLE {} INHERIT").format(sql.Identifier(target.owner_role)),
+            "schema-create": sql.SQL("GRANT CREATE ON SCHEMA public TO {}").format(sql.Identifier(target.owner_role)),
+            "database-create": sql.SQL("GRANT CREATE ON DATABASE {} TO {}").format(sql.Identifier(target.database), sql.Identifier(target.owner_role)),
+            "trigger": sql.SQL("GRANT TRIGGER ON public.trials TO {}").format(sql.Identifier(target.owner_role)),
+            "definer": sql.SQL("CREATE FUNCTION public.unsafe_completed_definer() RETURNS void LANGUAGE sql SECURITY DEFINER AS 'SELECT'; ALTER FUNCTION public.unsafe_completed_definer() OWNER TO {}").format(sql.Identifier(target.successor_role)),
+            "hidden-definer": sql.SQL("CREATE FUNCTION public.hidden_completed_definer() RETURNS void LANGUAGE sql SECURITY DEFINER AS 'SELECT'; REVOKE ALL ON FUNCTION public.hidden_completed_definer() FROM PUBLIC; ALTER FUNCTION public.hidden_completed_definer() OWNER TO {}").format(sql.Identifier(target.successor_role)),
+            "definer-body": sql.SQL("CREATE OR REPLACE FUNCTION public.loom_close_protected_runtime_trial_claim() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 'BEGIN RETURN NULL; END'"),
+            "credential": sql.SQL("ALTER ROLE {} PASSWORD 'unrelated'").format(sql.Identifier(target.owner_role)),
+            "closed": sql.SQL("ALTER DATABASE {} ALLOW_CONNECTIONS false").format(sql.Identifier(target.database)),
+        }
+        (maintenance if drift == "closed" else peer).execute(statements[drift])
+        with pytest.raises(RuntimeError, match="completed application"):
+            observe_completed_application_authority(peer, target=target, runtime_password=args["password"])
+        # Changes belong only to this disposable fixture; leave its role sealed
+        # enough for ordinary fixture teardown.
+        if drift == "superuser":
+            peer.execute(sql.SQL("ALTER ROLE {} NOSUPERUSER").format(sql.Identifier(target.owner_role)))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift", [None, "oid", "admin", "foreign-membership"])
+async def test_only_the_recorded_successor_migrator_may_hold_owner_membership(transfer_database, drift):  # noqa: F811
+    from loom.application_completed_authority import (
+        ApplicationOwnerSuccessor,
+        observe_completed_application_authority,
+    )
+
+    with _closed(transfer_database) as (peer, maintenance, _guard, args):
+        complete_application_handoff_database(peer, maintenance=maintenance, **args)
+        target = args["target"]
+        migrator = "app_successor_" + uuid4().hex
+        peer.execute(sql.SQL("CREATE ROLE {} NOLOGIN NOINHERIT; GRANT {} TO {} WITH ADMIN FALSE, INHERIT FALSE, SET TRUE").format(sql.Identifier(migrator), sql.Identifier(target.successor_role), sql.Identifier(migrator)))
+        oid = peer.execute("SELECT oid::bigint FROM pg_roles WHERE rolname=%s", (migrator,)).fetchone()[0]
+        try:
+            with pytest.raises(RuntimeError, match="completed application"):
+                observe_completed_application_authority(peer, target=target, runtime_password=args["password"])
+            successor = ApplicationOwnerSuccessor(migrator, oid + (1 if drift == "oid" else 0))
+            if drift == "admin":
+                peer.execute(sql.SQL("GRANT {} TO {} WITH ADMIN TRUE").format(sql.Identifier(target.successor_role), sql.Identifier(migrator)))
+            if drift == "foreign-membership":
+                peer.execute(sql.SQL("GRANT pg_read_all_data TO {}").format(sql.Identifier(migrator)))
+            if drift:
+                with pytest.raises(RuntimeError, match="completed application"):
+                    observe_completed_application_authority(peer, target=target, runtime_password=args["password"], successor=successor)
+            else:
+                observe_completed_application_authority(peer, target=target, runtime_password=args["password"], successor=successor)
+        finally:
+            peer.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(migrator)))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift", [None, "oid", "schema-owner", "membership", "owner-login", "role-setting"])
+async def test_guard_migrator_requires_its_separately_recorded_owner_envelope(transfer_database, drift):  # noqa: F811
+    from loom.application_completed_authority import (
+        ApplicationGuardOwner,
+        ApplicationOwnerSuccessor,
+        observe_completed_application_authority,
+    )
+
+    with _closed(transfer_database) as (peer, maintenance, _guard, args):
+        complete_application_handoff_database(peer, maintenance=maintenance, **args)
+        target = args["target"]
+        guard_owner = next(name for name, alias in args["role_bindings"].items() if alias == "guard-owner")
+        migrator = "app_guard_successor_" + uuid4().hex
+        peer.execute(sql.SQL("CREATE ROLE {} NOLOGIN INHERIT; GRANT {}, {} TO {} WITH ADMIN FALSE, INHERIT TRUE, SET TRUE").format(
+            sql.Identifier(migrator), sql.Identifier(target.successor_role), sql.Identifier(guard_owner), sql.Identifier(migrator)))
+        oid = peer.execute("SELECT oid::bigint FROM pg_roles WHERE rolname=%s", (migrator,)).fetchone()[0]
+        guard_oid = peer.execute("SELECT oid::bigint FROM pg_roles WHERE rolname=%s", (guard_owner,)).fetchone()[0]
+        try:
+            with pytest.raises(RuntimeError, match="completed application"):
+                observe_completed_application_authority(peer, target=target, runtime_password=args["password"],
+                    successor=ApplicationOwnerSuccessor(migrator, oid))
+            successor = ApplicationOwnerSuccessor(migrator, oid,
+                guard_owner=ApplicationGuardOwner(guard_owner, guard_oid + (1 if drift == "oid" else 0)))
+            if drift == "schema-owner":
+                peer.execute(sql.SQL("ALTER SCHEMA loom_capacity_guard OWNER TO {}").format(sql.Identifier(target.successor_role)))
+            elif drift == "membership":
+                peer.execute(sql.SQL("GRANT pg_read_all_data TO {}").format(sql.Identifier(guard_owner)))
+            elif drift == "owner-login":
+                peer.execute(sql.SQL("ALTER ROLE {} LOGIN").format(sql.Identifier(guard_owner)))
+            elif drift == "role-setting":
+                peer.execute(sql.SQL("ALTER ROLE {} SET role TO {}").format(sql.Identifier(migrator), sql.Identifier(target.successor_role)))
+            if drift:
+                with pytest.raises(RuntimeError, match="completed application"):
+                    observe_completed_application_authority(peer, target=target, runtime_password=args["password"], successor=successor)
+            else:
+                observe_completed_application_authority(peer, target=target, runtime_password=args["password"], successor=successor)
+        finally:
+            peer.execute(sql.SQL("ALTER ROLE {} NOLOGIN").format(sql.Identifier(guard_owner)))
+            peer.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(migrator)))

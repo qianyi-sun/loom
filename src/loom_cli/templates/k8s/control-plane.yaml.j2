@@ -56,7 +56,7 @@ spec:
       containers:
         - name: control-plane
           image: {% if container_registry %}{{ container_registry }}/{% endif %}loom-control-plane:{{ image_tag }}
-          {{ env_macros.env_block("control-plane", schema, skip_names=nebius_control_plane_skip_names, override_values=nebius_control_plane_overrides) | indent(10) }}
+          {{ env_macros.env_block("control-plane", schema, skip_names=nebius_control_plane_skip_names + ("protected_trial_cutover_enabled",), override_values=nebius_control_plane_overrides) | indent(10) }}
 {% if nebius_execution.enabled %}
 {% for suffix, key in nebius_source_secret_fields.items() %}
             - name: LOOM_CP_SERVICE_EXECUTION_SOURCE_{{ suffix }}
@@ -74,6 +74,8 @@ spec:
             - name: LOOM_CP_ADMIN_SECRET_FILE
               value: "/var/run/loom/secrets/admin/secrets.toml"
 {% if runtime_environment == "staging" %}
+            - name: LOOM_CP_PROTECTED_TRIAL_CUTOVER_ENABLED
+              value: "true"
             - name: LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE
               value: "/run/loom/protected-worker-runtime/files/database-url"
 {% endif %}

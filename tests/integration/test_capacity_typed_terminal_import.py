@@ -185,7 +185,7 @@ def test_typed_terminal_import_refuses_downgrade_with_retained_evidence(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0036"
             )
             assert (
                 connection.execute(
@@ -199,14 +199,18 @@ def test_typed_terminal_import_refuses_downgrade_with_retained_evidence(
         engine.dispose()
 
 
+@pytest.mark.parametrize("starting_revision", ["guard_0032", "guard_0035"])
 def test_downgrade_fences_an_import_already_executing_the_old_function_body(
     capacity_guard_database,
     monkeypatch,
     tmp_path,
+    starting_revision,
 ):
+    config = _guard_config(capacity_guard_database)
+    # Exercise these historical boundaries explicitly, independent of head.
+    command.downgrade(config, starting_revision)
     seeded = _seed_claimed_protected_trial(capacity_guard_database, monkeypatch, tmp_path)
     payload = typed_payload(seeded)
-    config = _guard_config(capacity_guard_database)
     engine = create_engine(_value(capacity_guard_database, "admin_url"))
     try:
         with ThreadPoolExecutor(max_workers=1) as workers:
@@ -239,11 +243,31 @@ def test_downgrade_fences_an_import_already_executing_the_old_function_body(
                     assert not future.done(), "importer completed before the intended lock fence"
                     assert time.monotonic() < deadline, "importer never reached the lock fence"
                     time.sleep(0.02)
-                command.downgrade(config, "guard_0030")
+                if starting_revision == "guard_0035":
+                    # Trial retirement cannot keep public DDL locks while an
+                    # importer holds private locks. Refuse atomically NOWAIT;
+                    # the admitted importer must remain able to finish.
+                    with pytest.raises(DBAPIError) as busy:
+                        command.downgrade(config, "guard_0030")
+                    assert busy.value.orig.sqlstate == "55P03"
+                    with engine.connect() as observer:
+                        assert observer.execute(text(
+                            "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                        )).scalar_one() == "guard_0035"
+                        assert observer.execute(text(
+                            "SELECT count(*) FROM pg_trigger WHERE tgrelid='public.trials'::regclass "
+                            "AND tgname IN ('capacity_guard_lock_trial_writer', "
+                            "'zz_capacity_guard_account_trial_writer') AND tgenabled='O'"
+                        )).scalar_one() == 2
+                else:
+                    command.downgrade(config, "guard_0030")
             # Replacing a function does not cancel an invocation already inside
             # it. The physical table must reject its now-obsolete schema.
-            with pytest.raises(DBAPIError, match="guard_terminal_inventory_schema_check"):
+            if starting_revision == "guard_0035":
                 future.result(timeout=10)
+            else:
+                with pytest.raises(DBAPIError, match="guard_terminal_inventory_schema_check"):
+                    future.result(timeout=10)
         with engine.connect() as connection:
             assert (
                 connection.execute(
@@ -251,8 +275,12 @@ def test_downgrade_fences_an_import_already_executing_the_old_function_body(
                         "SELECT count(*) FROM loom_capacity_guard.executable_terminal_inventory_evidence"
                     )
                 ).scalar_one()
-                == 0
+                == (1 if starting_revision == "guard_0035" else 0)
             )
+            if starting_revision == "guard_0035":
+                assert connection.execute(text(
+                    "SELECT evidence_payload FROM loom_capacity_guard.executable_terminal_inventory_evidence"
+                )).scalar_one() == payload
     finally:
         engine.dispose()
 

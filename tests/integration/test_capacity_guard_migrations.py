@@ -40,6 +40,9 @@ EXPECTED_GUARD_TABLES = {
     "atomic_trial_submissions",
     "trial_requirements",
     "trial_attempts",
+    "trial_writer_fence",
+    "trial_writer_mutations",
+    "trial_mutation_permits",
     "audit_events",
     "agent_runtime_authority",
     "agent_registrations",
@@ -108,7 +111,14 @@ async def test_guard_schema_startup_returns_numeric_head(
 ) -> None:
     engine = create_async_engine(_value(capacity_guard_database, "migrator_url"))
     try:
-        assert await assert_capacity_guard_schema_at_head(engine) == 34
+        head = await assert_capacity_guard_schema_at_head(engine)
+        assert type(head) is int
+        async with engine.connect() as connection:
+            revision = (await connection.execute(text(
+                "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+            ))).scalar_one()
+        # Compare to the actual migrated database, not a second stale head pin.
+        assert revision == f"guard_{head:04d}"
     finally:
         await engine.dispose()
 
@@ -507,7 +517,7 @@ def test_guard_schema_has_exact_owner_and_preserves_public_application_tables(
             revision = connection.execute(
                 text("SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version")
             ).scalar_one()
-            assert revision == "guard_0034"
+            assert revision == "guard_0036"
             public_before = capacity_guard_database["public_tables_before"]
             assert isinstance(public_before, frozenset)
             assert frozenset(inspect(connection).get_table_names(schema="public")) == public_before
@@ -892,9 +902,15 @@ def test_guard_owner_has_only_bounded_public_submission_privileges(
                         "has_table_privilege(:owner, 'public.data_lifecycle_authorities', "
                         "'REFERENCES') AS can_reference_lifecycle_table, "
                         "has_column_privilege(:owner, 'public.data_lifecycle_authorities', "
-                        "'id', 'REFERENCES') AS can_reference_lifecycle_id"
+                        "'id', 'REFERENCES') AS can_reference_lifecycle_id, "
+                        "has_table_privilege(:owner, 'public.artifacts', 'UPDATE') AS can_update_artifact_table, "
+                        "has_column_privilege(:owner, 'public.artifacts', 'storage', 'UPDATE') AS can_update_artifact_storage, "
+                        "has_column_privilege(:owner, 'public.artifacts', 'actor_user_id', 'UPDATE') AS can_update_artifact_actor, "
+                        "has_column_privilege(:owner, 'public.data_lifecycle_authorities', 'state', 'UPDATE') AS can_change_lifecycle_state, "
+                        "has_any_column_privilege(:runtime, 'public.artifacts', 'UPDATE') AS runtime_can_update_artifacts, "
+                        "has_any_column_privilege(:runtime, 'public.trials', 'UPDATE') AS runtime_can_update_trials"
                     ),
-                    {"owner": owner},
+                    {"owner": owner, "runtime": _value(capacity_guard_database, "runtime_role")},
                 )
                 .mappings()
                 .one()
@@ -917,10 +933,16 @@ def test_guard_owner_has_only_bounded_public_submission_privileges(
             "can_insert_lifecycle_table": False,
             "can_insert_lifecycle_environment": True,
             "can_select_lifecycle_id": True,
-            "can_select_lifecycle_environment": False,
+            "can_select_lifecycle_environment": True,
             "can_insert_lifecycle_deletion_token": False,
             "can_reference_lifecycle_table": False,
             "can_reference_lifecycle_id": True,
+            "can_update_artifact_table": False,
+            "can_update_artifact_storage": True,
+            "can_update_artifact_actor": False,
+            "can_change_lifecycle_state": False,
+            "runtime_can_update_artifacts": False,
+            "runtime_can_update_trials": False,
         }
     finally:
         engine.dispose()
@@ -982,7 +1004,7 @@ def test_guard_0022_staging_submission_admission_is_reversible(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0036"
             )
     finally:
         engine.dispose()
@@ -1071,7 +1093,7 @@ def test_guard_0023_empty_downgrade_and_reupgrade_restore_runtime_surface(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0036"
             )
             for table in runtime_tables:
                 assert (
@@ -1238,7 +1260,7 @@ def test_guard_0024_terminal_closure_is_private_and_reversible(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0036"
             )
     finally:
         engine.dispose()
@@ -1571,7 +1593,7 @@ def test_guard_0026_requeue_is_trigger_only_and_reversible(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0036"
             )
     finally:
         engine.dispose()
@@ -1780,7 +1802,7 @@ def test_guard_0029_pending_cancellation_is_runtime_only_and_reversible(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0036"
             )
     finally:
         command.upgrade(cfg, "head")
@@ -1880,7 +1902,7 @@ def test_guard_0025_refuses_downgrade_with_retry_attempt_evidence(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0036"
             )
             assert (
                 connection.execute(
@@ -1980,7 +2002,7 @@ def test_guard_0021_current_assignment_routine_is_agent_only_and_reversible(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0036"
             )
     finally:
         engine.dispose()
@@ -2028,7 +2050,7 @@ def test_guard_0021_refuses_downgrade_with_abandonment_evidence(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0036"
             )
             assert (
                 connection.execute(
@@ -2067,7 +2089,7 @@ def test_guard_0021_refuses_downgrade_with_never_converged_evidence(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0036"
             )
             assert (
                 connection.execute(
@@ -2240,7 +2262,7 @@ def test_guard_0015_downgrade_restores_executor_only_observation(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0036"
             )
         with observer.connect() as connection, pytest.raises(DBAPIError) as caught:
             connection.execute(statement)
@@ -2398,7 +2420,7 @@ def test_guard_0018_downgrades_to_0016_and_reupgrades_observation_faithfully(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0036"
             )
             row = (
                 connection.execute(
@@ -2571,7 +2593,7 @@ def test_guard_0019_downgrades_to_0017_and_reupgrades_outbox_faithfully(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0036"
             )
             for signature in (read_signature, ack_signature):
                 assert (

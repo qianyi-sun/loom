@@ -414,7 +414,7 @@ def test_candidate_contract_rejects_retired_worker_service_endpoint(
         _parse_test_contract(authority, profile, candidate_sha)
 
 
-def test_candidate_contract_accepts_exact_manager_witness_bootstrap(
+def test_candidate_contract_accepts_exact_retired_trial_controller(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -479,7 +479,7 @@ def test_candidate_contract_rejects_active_non_gb10_supervisor_during_manager_bo
             "\n[[external_slurm_autoscaler_supervisors]]"
         )
         active = "enabled = true\nactive = true"
-        assert section.count(active) == 1
+        assert section.count(active) + section.count("enabled = false\nactive = false") == 1
         section = section.replace(active, "enabled = false\nactive = false", 1)
         payload = prefix + marker + section + next_section + tail
     prefix, marker, suffix = payload.partition('name = "task-image-builder-oldlab-staging"')
@@ -2485,3 +2485,24 @@ def test_acceptance_tmpfiles_provisions_strict_volatile_job_state() -> None:
         "d /run/loom-gb10-slurm-authority/jobs 0700 root root -",
         "f /run/loom-gb10-slurm-authority/acceptance.lock 0600 root root -",
     ]
+
+
+@pytest.mark.parametrize("mutation", ["missing-reason", "missing-retention", "active-supervisor", "enabled-policy"])
+def test_retired_trial_acceptance_refuses_mixed_authority(tmp_path, monkeypatch, mutation):
+    authority = _load_authority()
+    candidate_sha = "a" * 40
+    profile = tmp_path / candidate_sha / "repo/deploy/environment-state/staging.toml"
+    profile.parent.mkdir(parents=True)
+    payload = Path("deploy/environment-state/staging.toml").read_text()
+    if mutation == "missing-reason":
+        payload = payload.replace('disabled_reason = "protected_global_trial_cutover"', '', 1)
+    elif mutation == "missing-retention":
+        payload = payload.replace('retained_inactive_supervisor_pools = ["gb10", "oldlab"]', '', 1)
+    elif mutation == "active-supervisor":
+        payload = payload.replace('enabled = false\nactive = false', 'enabled = true\nactive = true', 1)
+    else:
+        payload = payload.replace('actuator = "slurm"\nenabled = false', 'actuator = "slurm"\nenabled = true', 1)
+    profile.write_text(payload)
+    monkeypatch.setattr(authority, "CANDIDATE_ROOT", tmp_path)
+    with pytest.raises(authority.AcceptanceError):
+        _parse_test_contract(authority, profile, candidate_sha)

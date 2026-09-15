@@ -87,6 +87,58 @@ def _bound_plan(tmp_path: Path) -> FinalGatePlan:
     )
 
 
+def test_installed_activation_uses_verified_candidate_and_fixed_controller_channels(tmp_path, monkeypatch):
+    executor = _executor(tmp_path)
+    plan = _execution_plan(tmp_path)
+    config = executor.config
+    verified = object()
+    artifact = SimpleNamespace(executor_profile_seed=SimpleNamespace(executor_image="immutable-executor"))
+    runtime = SimpleNamespace(_read_execution_prerequisite=lambda bound: artifact if bound == plan else None)
+    application = object()
+    built = SimpleNamespace(staging_capacity_runtime=runtime, application_factory=application)
+    calls = []
+    def validate(self, bound):
+        assert self is executor and bound == plan
+        calls.append("verify")
+        return verified, config
+    def build(self, bound, install, effective):
+        assert (bound, install, effective) == (plan, verified, config)
+        calls.append("build")
+        return built
+    monkeypatch.setattr(InstalledFinalGateExecutor, "_validate_plan", validate)
+    monkeypatch.setattr(InstalledFinalGateExecutor, "_build_protected_apply_executor", build)
+    controller, gb10, oldlab = object(), object(), object()
+    def gb10_controller(**kwargs):
+        assert kwargs == {"candidate_sha": plan.candidate_sha, "candidate_tree": plan.candidate_tree,
+            "run": executor._controller_prerequisite_run}
+        return controller
+    def gb10_active(**kwargs):
+        assert kwargs == {"controller": controller}
+        return gb10
+    def oldlab_active(**kwargs):
+        assert kwargs == {"image": "immutable-executor", "run": executor._controller_prerequisite_run}
+        return oldlab
+    monkeypatch.setattr(installed_module, "build_fixed_gb10_external_supervisor_transport", gb10_controller)
+    monkeypatch.setattr(installed_module, "build_fixed_gb10_active_controller_transport", gb10_active)
+    monkeypatch.setattr(installed_module, "build_fixed_oldlab_active_controller_transport", oldlab_active)
+    documents = {"gb10": object(), "oldlab": object()}
+    result = object()
+    class Activation:
+        def __init__(self, bound_runtime, bound_application, active, *, checkpoint_guard):
+            assert bound_runtime is runtime and bound_application is application
+            assert active == {"gb10": gb10, "oldlab": oldlab}
+            checkpoint_guard()
+        def execute(self, bound, **kwargs):
+            assert bound == plan and kwargs == {"documents": documents, "native_material": None}
+            calls.append("activate")
+            return result
+    from loom_cli.rollout import final_gate_helper
+    monkeypatch.setattr(final_gate_helper, "_verify_checkpoint", lambda bound: calls.append("checkpoint") if bound == plan else pytest.fail("wrong checkpoint"))
+    monkeypatch.setattr(installed_module, "InstalledExecutionActivation", Activation)
+    assert executor.activate_prepared_execution(plan, documents=documents) is result
+    assert calls == ["verify", "build", "checkpoint", "activate"]
+
+
 def _executor(tmp_path: Path) -> InstalledFinalGateExecutor:
     plan = _bound_plan(tmp_path)
     config = replace(
@@ -569,7 +621,51 @@ def test_installed_protected_dispatch_binds_fixed_candidate_and_supervisor_trans
     assert staging_capacity.service_uid == os.geteuid()
     assert staging_capacity.service_gid == os.getegid()
     assert staging_capacity.container_registry == ""
+    assert callable(staging_capacity.database_component_factory)
+    from loom_cli.rollout.operator.installed_application_migration import (
+        InstalledApplicationMigrationFactory,
+    )
+    factory = captured["application_factory"]
+    assert isinstance(factory, InstalledApplicationMigrationFactory)
+    assert factory.handoff.config == executor.config and factory.handoff.runner is staging_capacity.runner
+    assert factory.handoff.successor_source(plan, factory.new_journal(plan)) is None
     assert captured["service_uid"] == os.geteuid()
+
+
+@pytest.mark.parametrize("drift", [None, "guard", "epoch"])
+def test_installed_early_recovery_verifies_live_guard_before_original_chain(tmp_path, monkeypatch, drift):
+    from tests.loom_cli.rollout.operator.test_application_guard_retention import _guard
+
+    executor, plan = _executor(tmp_path), _bound_plan(tmp_path)
+    guard = _guard(plan)
+    calls = []
+    components = (object(), object())
+    terminal = object()
+
+    def recover(candidate, chain, *, guard):
+        assert candidate == plan and chain is components
+        calls.append("recover")
+        return terminal
+
+    journal = SimpleNamespace(recover_pending_application_operation=recover)
+    factory = SimpleNamespace(new_journal=lambda candidate: journal,
+        handoff=SimpleNamespace(completed_guard=lambda candidate: None if drift == "guard" else guard),
+        epoch=lambda candidate: plan.starting_mutation_epoch + (2 if drift == "epoch" else 1))
+
+    def build(candidate, *, journal):
+        assert candidate == plan
+        calls.append("build")
+        return components
+
+    apply_executor = SimpleNamespace(application_factory=factory, build_components=build)
+    monkeypatch.setattr(InstalledFinalGateExecutor, "build_protected_apply_executor", lambda self, candidate: apply_executor)
+    if drift:
+        with pytest.raises(RuntimeError, match="guard or epoch"):
+            executor.recover_pending_application_operation(plan, guard=guard)
+        assert calls == []
+    else:
+        assert executor.recover_pending_application_operation(plan, guard=guard) is terminal
+        assert calls == ["build", "recover"]
 
 
 def test_schema_seven_dispatch_binds_both_fixed_controller_prerequisite_transports(
@@ -798,6 +894,9 @@ def test_schema_seven_dispatch_binds_both_fixed_controller_prerequisite_transpor
         def get_configuration(self) -> object:
             return active_configuration
 
+        def get_execution_preparation_status(self) -> object:
+            return SimpleNamespace(readiness=SimpleNamespace(execution=None))
+
     class _ManagerClientContext:
         def __enter__(self) -> object:
             return _ManagerClient()
@@ -860,6 +959,19 @@ def test_schema_seven_dispatch_binds_both_fixed_controller_prerequisite_transpor
         "gb10": gb10_prepared,
     }
     assert staging_capacity.execution_preparation_dependency_guard is dependency_guard
+    retirement_builds = []
+    def retirement_component(**kwargs):
+        retirement_builds.append(kwargs)
+        return SimpleNamespace(observe_retirement=lambda bound: {"plan_digest": bound.plan_digest,
+            "execution_host": kwargs["execution_host"]})
+    monkeypatch.setattr(installed_module, "ProtectedExternalSupervisorComponent", retirement_component, raising=False)
+    retirement_source = dependency_guard_build["legacy_controller_source"]
+    assert callable(retirement_source)
+    assert len(retirement_source(plan)) == 64
+    assert {item["execution_host"] for item in retirement_builds} == {"gx10-01c7", "TRT-EAI-OLDLAB-1"}
+    for item in retirement_builds:
+        assert item["candidate_root"] == executor.config.runner_repo
+        assert item["transport"] is captured["external_supervisor_transports"][item["execution_host"]]
     desired_source = dependency_guard_build["desired_configuration_source"]
     assert callable(desired_source)
     assert desired_source(plan) is desired_result

@@ -144,8 +144,8 @@ class _ParsedJobResources:
 class ReadOnlySlurmCommandRunner(Protocol):
     """The only command capability accepted by snapshot capture."""
 
-    async def run(self, command: Literal["nodes", "jobs"]) -> bytes:
-        """Return one bounded Slurm JSON document."""
+    async def run(self, command: Literal["nodes", "jobs", "config"]) -> bytes:
+        """Return one bounded Slurm response (JSON inventory or text configuration)."""
 
 
 _SCONTROL_PATH = "/usr/bin/scontrol"
@@ -239,10 +239,11 @@ class SubprocessReadOnlySlurmCommandRunner:
             if len(value) > maximum:
                 raise RuntimeError("Slurm command output exceeded its byte bound")
 
-    async def run(self, command: Literal["nodes", "jobs"]) -> bytes:
+    async def run(self, command: Literal["nodes", "jobs", "config"]) -> bytes:
         commands = {
             "nodes": (_SCONTROL_PATH, "show", "nodes", "--json"),
             "jobs": (_SQUEUE_PATH, "--json"),
+            "config": (_SCONTROL_PATH, "show", "config"),
         }
         argv = commands.get(command)
         if argv is None:
@@ -1120,6 +1121,33 @@ def build_slurm_capacity_reports(
     )
 
 
+def require_slurm_job_visibility(configuration: bytes, *, expected_cluster: str) -> None:
+    """Prove the controller does not filter other users' jobs for this reader.
+
+    Partition/account admission is independent of PrivateData. Do not turn a
+    filtered empty queue into evidence of available capacity or retired work.
+    """
+    if not isinstance(configuration, bytes) or not 0 < len(configuration) <= 256 * 1024:
+        raise ValueError("Slurm job visibility configuration is absent or oversized")
+    try:
+        text = configuration.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("Slurm job visibility configuration is invalid") from None
+    if "\0" in text:
+        raise ValueError("Slurm job visibility configuration is invalid")
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        name, separator, value = line.partition("=")
+        name = name.strip()
+        if name not in {"ClusterName", "PrivateData"}:
+            continue
+        if not separator or name in values:
+            raise ValueError("Slurm job visibility configuration is ambiguous")
+        values[name] = value.strip()
+    if values != {"ClusterName": expected_cluster, "PrivateData": "none"}:
+        raise ValueError("Slurm job visibility is not complete for the protected controller")
+
+
 async def capture_slurm_capacity_reports(
     runner: ReadOnlySlurmCommandRunner,
     *,
@@ -1128,16 +1156,18 @@ async def capture_slurm_capacity_reports(
     source_observed_at: datetime,
     max_attempts: int = 3,
 ) -> SlurmCapacityReports:
-    """Capture a stable paired snapshot through two read-only commands."""
+    """Bracket stable queue/node reads with actual controller visibility checks."""
     if isinstance(runner, SubprocessReadOnlySlurmCommandRunner) and runner._policy != policy:
         raise ValueError("Slurm subprocess runner policy binding does not match capture policy")
     if type(max_attempts) is not int or not 1 <= max_attempts <= 10:
         raise ValueError("Slurm snapshot max_attempts must be between one and ten")
 
     for _attempt in range(max_attempts):
+        require_slurm_job_visibility(await runner.run("config"), expected_cluster=policy.controller_cluster)
         job_before_bytes = await runner.run("jobs")
         node_bytes = await runner.run("nodes")
         job_after_bytes = await runner.run("jobs")
+        require_slurm_job_visibility(await runner.run("config"), expected_cluster=policy.controller_cluster)
         documents: list[object] = []
         for raw in (job_before_bytes, node_bytes, job_after_bytes):
             if not isinstance(raw, bytes) or len(raw) > _MAX_SLURM_JSON_BYTES:
@@ -1169,4 +1199,5 @@ __all__ = [
     "SubprocessReadOnlySlurmCommandRunner",
     "build_slurm_capacity_reports",
     "capture_slurm_capacity_reports",
+    "require_slurm_job_visibility",
 ]

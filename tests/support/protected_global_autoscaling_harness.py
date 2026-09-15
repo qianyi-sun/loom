@@ -14,7 +14,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
-from typing import ClassVar, Self
+from typing import ClassVar, NoReturn, Self
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -90,6 +90,8 @@ from loom_cli.rollout.operator.final_gate_plan import FinalGatePlan
 from loom_cli.rollout.operator.protected_apply_journal import (
     ComponentObservation,
     ComponentState,
+    ProtectedApplyComponent,
+    ProtectedApplyJournal,
 )
 from loom_cli.rollout.operator.protected_capacity_execution_preparation_component import (
     PreparedControllerEvidence,
@@ -1564,6 +1566,9 @@ class FrozenProtectedAutoscalingHarness:
         ) -> str:
             return external_authority.evidence(observed_artifact)
 
+        def no_issuance(_plan: FinalGatePlan) -> NoReturn:
+            raise AssertionError("executor SQL issuance is outside the frozen preparation harness")
+
         runtime = KubernetesProtectedStagingCapacityRuntime(
             runner=kubernetes,
             state_root=state_root,
@@ -1576,6 +1581,8 @@ class FrozenProtectedAutoscalingHarness:
             pool_credential_transports=pool_credential_transports,
             prepared_controller_transports=prepared_transports,
             execution_preparation_dependency_guard=external_dependency_guard,
+            executor_admission_factory=lambda _plan, _journal: ProtectedApplyComponent(
+                "executor-database-admission", "a" * 64, "b" * 64, no_issuance, no_issuance),
         )
         return cls(
             runtime=runtime,
@@ -1618,6 +1625,10 @@ class FrozenProtectedAutoscalingHarness:
             observed_epoch=plan.starting_mutation_epoch + 1,
         )
 
+    def _apply_journal(self) -> ProtectedApplyJournal:
+        return ProtectedApplyJournal(self.runtime.state_root, request_id=self.plan.request_id,
+            attempt_number=self.plan.attempt_number, service_uid=self.runtime.service_uid)
+
     def converge_frozen_execution_path(self) -> dict[str, ComponentState]:
         return self._converge_components(_FROZEN_EXECUTION_COMPONENTS)
 
@@ -1627,7 +1638,7 @@ class FrozenProtectedAutoscalingHarness:
     def apply_execution_preparation(self) -> None:
         component = next(
             item
-            for item in self.runtime.components(self.plan, epoch_guard=self._epoch_guard)
+            for item in self.runtime.components(self.plan, epoch_guard=self._epoch_guard, journal=self._apply_journal())
             if item.component_id == "capacity-execution-preparation"
         )
         component.apply(self.plan)
@@ -1637,7 +1648,7 @@ class FrozenProtectedAutoscalingHarness:
         wanted: frozenset[str],
     ) -> dict[str, ComponentState]:
         observations: dict[str, ComponentState] = {}
-        for component in self.runtime.components(self.plan, epoch_guard=self._epoch_guard):
+        for component in self.runtime.components(self.plan, epoch_guard=self._epoch_guard, journal=self._apply_journal()):
             if component.component_id not in wanted:
                 continue
             before = component.classify(self.plan)

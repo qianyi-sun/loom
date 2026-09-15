@@ -261,6 +261,12 @@ python_type = "Path"
 # no required, no default → `Path | None = None`
 description = "Owner-only file containing the least-privileged PostgreSQL URL used to register and validate protected staging worker sessions. When configured, worker mutation routes require the protected worker credential header."
 
+[service_config.protected_trial_cutover_enabled]
+used_by     = ["control-plane"]
+python_type = "bool"
+default     = false
+description = "Disable legacy control-plane controllers and unadmitted mutation routes during the protected original-trial cutover. Requires protected_worker_runtime_db_url_file. Independent service, pipeline, lifecycle, and host writer retirement must still be proved by the rollout."
+
 [service_config.task_image_execution_config_file]
 used_by     = ["control-plane", "worker"]
 python_type = "Path"
