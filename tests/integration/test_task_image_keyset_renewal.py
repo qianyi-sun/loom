@@ -14,8 +14,52 @@ from loom_task_image_authority.execution_refresh import ExecutionRefreshRequest
 from loom_worker.control_plane_client import HttpControlPlaneClient
 from tests.integration.test_task_image_execution_http import RAW_TOKEN, setup
 from tests.integration.test_task_image_execution_store import start_request
-from tests.integration.test_task_image_publication_jobs import registry_authority_session as registry_authority_session
-from tests.integration.test_task_image_registry_credentials import registry_issuer as registry_issuer
+from tests.integration.test_task_image_publication_jobs import (
+    registry_authority_session as registry_authority_session,
+)
+from tests.integration.test_task_image_registry_credentials import (
+    registry_issuer as registry_issuer,
+)
+
+
+@pytest.mark.parametrize("failure", ["short-lifetime", "commit", "lock-timeout"])
+async def test_failed_keyset_renewal_never_acknowledges_or_persists_new_authority(
+    registry_authority_session, registry_issuer, tmp_path, monkeypatch, failure,
+):
+    from sqlalchemy.exc import SQLAlchemyError
+
+    shift = [0]
+    _, service, old, engine = await setup(registry_authority_session, registry_issuer, tmp_path, monkeypatch, time_shift=shift)
+    blocker = None
+    try:
+        subject = publisher(service, engine)
+        shift[0] = 1801
+        if failure == "short-lifetime":
+            service._signer.policy._lifetime = timedelta(seconds=60)
+        elif failure == "commit":
+            async with registry_authority_session.begin() as session:
+                await session.execute(text("CREATE FUNCTION reject_keyset_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture keyset commit rejected'; END $$"))
+                await session.execute(text("CREATE CONSTRAINT TRIGGER reject_keyset_commit AFTER INSERT ON task_image_publication_keysets DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_keyset_commit()"))
+        else:
+            subject._timeout = 0.1
+            blocker = await engine.connect()
+            await blocker.begin()
+            await blocker.execute(text("SELECT singleton_id FROM task_image_publication_state FOR UPDATE"))
+        with pytest.raises((ValueError, TimeoutError, SQLAlchemyError)):
+            await subject.refresh_if_needed()
+        assert not subject.ready
+        if blocker is not None:
+            await blocker.rollback()
+            await blocker.close()
+            blocker = None
+        async with registry_authority_session.begin() as session:
+            assert (await session.get(TaskImagePublicationState, 1)).keyset_version == old.keyset_version
+            assert len((await session.scalars(select(TaskImagePublicationKeyset))).all()) == 1
+    finally:
+        if blocker is not None:
+            await blocker.rollback()
+            await blocker.close()
+        await engine.dispose()
 
 
 def publisher(service, engine):
@@ -104,8 +148,23 @@ async def test_concurrent_or_cancelled_keyset_signing_holds_no_database_locks(
         provider = service._signer.policy._execution
         provider.entered.clear()
         provider.release.clear()
-        tasks = [asyncio.create_task(publisher(service, engine).refresh_if_needed()) for _ in range(1 if cancel else 2)]
-        await asyncio.wait_for(provider.entered.wait(), 2)
+        count = 1 if cancel else 2
+        entered = 0
+        all_entered = asyncio.Event()
+        original_sign = provider.sign
+
+        async def sign(preimage):
+            nonlocal entered
+            entered += 1
+            if entered == count:
+                all_entered.set()
+            return await original_sign(preimage)
+
+        provider.sign = sign
+        tasks = [asyncio.create_task(publisher(service, engine).refresh_if_needed()) for _ in range(count)]
+        # Both independent signers must have left their short prepare/read
+        # transactions. Waiting only for the first races the second's read.
+        await asyncio.wait_for(all_entered.wait(), 2)
         async with asyncio.timeout(2), registry_authority_session.begin() as session:
             await session.execute(text("SELECT singleton_id FROM task_image_publication_state FOR UPDATE NOWAIT"))
         if cancel:
