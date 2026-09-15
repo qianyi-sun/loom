@@ -21,7 +21,7 @@ def module():
     return importlib.import_module(name)
 
 
-def evidence(tmp_path):
+def signed_evidence(tmp_path):
     (tmp_path / "Dockerfile").write_text("FROM scratch\n")
     (tmp_path / "db").mkdir()
     (tmp_path / "db/Dockerfile").write_text("FROM scratch\n")
@@ -35,11 +35,67 @@ def evidence(tmp_path):
             bundle_prefix=f"bench/revision/{manifest.digest}/",
         )
 
-    payload, _, kwargs = fixture(
+    payload, private, kwargs = fixture(
         arch="x86_64", plan_change=plan_change,
         publication_change=lambda value: value.update(task_checksum=manifest.task_checksum),
     )
+    return payload, private, kwargs
+
+
+def evidence(tmp_path):
+    payload, _, kwargs = signed_evidence(tmp_path)
     return payload, kwargs
+
+
+def refreshed(payload, private, kwargs, now, **changes):
+    from loom_task_image_authority.execution_delivery import TaskImageExecutionDelivery
+    from tests.unit.test_task_image_execution_grant import sign_grant
+    from tests.unit.test_task_image_publication_keyset import _time
+
+    current = dict(payload, revision=payload["revision"] + 1,
+                   issued_at=_time(now), expires_at=_time(now + timedelta(seconds=120)), **changes)
+    return TaskImageExecutionDelivery.model_validate(dict(
+        schema="loom.task-image-execution-delivery/v2", claim=kwargs["expected_claim"],
+        grant_envelope=sign_grant(current, private).decode(), frozen_plan=kwargs["plan_wire"].decode(),
+        publications=tuple(item.decode() for item in kwargs["publication_wires"]), keyset=kwargs["keyset_wire"].decode(),
+    ))
+
+
+@pytest.mark.parametrize("change", ["valid", "claim", "source", "publication", "lost-start"])
+async def test_expired_preparation_refreshes_fresh_authority_without_retrying_start(tmp_path, change):
+    payload, private, kwargs = signed_evidence(tmp_path)
+    now = NOW + timedelta(seconds=121)
+    delivery = refreshed(payload, private, kwargs, now,
+                         **({"task_source": "s3://another/source"} if change == "source" else {}))
+    if change == "claim":
+        delivery = delivery.model_copy(update={"claim": delivery.claim.model_copy(update={"claim_id": "9" * 36})})
+    elif change == "publication":
+        delivery = delivery.model_copy(update={"publications": delivery.publications[:1]})
+
+    async def accept(request):
+        if change == "lost-start":
+            raise ConnectionError("acknowledgement lost after commit")
+        return module().ExecutionStartReceipt.model_validate(dict(
+            schema="loom.task-image-execution-start-receipt/v1", start_id=payload["grant_id"],
+            request_sha256=request.digest, consumed_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            expires_at=(now + timedelta(seconds=20)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        ))
+
+    consume = AsyncMock(side_effect=accept)
+    subject = consumer(tmp_path, payload, kwargs, consume, clock=lambda: now)
+    subject.refresh = AsyncMock(return_value=delivery)
+    if change == "valid":
+        assert await subject.authorize()
+        assert consume.call_args.args[0].revision == 2
+    else:
+        with pytest.raises((ValueError, ConnectionError)):
+            await subject.authorize()
+    subject.refresh.assert_awaited_once()
+    with pytest.raises(RuntimeError, match="already attempted"):
+        await subject.authorize()
+    with pytest.raises(RuntimeError, match="already attempted"):
+        await subject.prepare()
+    assert consume.await_count == (1 if change in {"valid", "lost-start"} else 0)
 
 
 def consumer(tmp_path, payload, kwargs, consume, *, clock=lambda: NOW):

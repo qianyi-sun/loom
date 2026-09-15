@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import json
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import UUID
@@ -15,7 +16,7 @@ from loom_worker.vllm_registry import WorkerVLLMRegistry
 from tests.unit.test_main_loop_cleanup import _FakeCPClient, _FakeSettings
 from tests.unit.test_task_image_publication_signing import NOW
 from tests.unit.test_worker_claim_loop import _healthy_setup_node
-from tests.unit.test_worker_task_image_execution import accepting, evidence
+from tests.unit.test_worker_task_image_execution import accepting, evidence, refreshed, signed_evidence
 
 
 def delivery(kwargs):
@@ -28,13 +29,26 @@ def delivery(kwargs):
     )
 
 
-@pytest.mark.parametrize("case", ["valid", "no_root", "wrong_worker", "wrong_task", "layered", "denied", "cancelled"])
+@pytest.mark.parametrize("case", ["valid", "slow-pull", "no_root", "wrong_worker", "wrong_task", "layered", "denied", "cancelled"])
 async def test_signed_claim_preparation_and_start_stay_bound(tmp_path, monkeypatch, case):
     task_dir = tmp_path / "source"
     task_dir.mkdir()
-    grant, kwargs = evidence(task_dir)
+    grant, private, kwargs = signed_evidence(task_dir)
+    now = NOW
     cp, settings, captured = _FakeCPClient(), _FakeSettings(), {}
     cp.consume_task_image_execution_start = accepting()
+    cp.refresh_task_image_execution = AsyncMock()
+    if case == "slow-pull":
+        async def accept(request):
+            from loom_task_image_authority.execution_start import ExecutionStartReceipt
+
+            return ExecutionStartReceipt.model_validate(dict(
+                schema="loom.task-image-execution-start-receipt/v1", start_id=grant["grant_id"],
+                request_sha256=request.digest, consumed_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                expires_at=(now + timedelta(seconds=20)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            ))
+        cp.consume_task_image_execution_start = AsyncMock(side_effect=accept)
+        cp.refresh_task_image_execution.return_value = refreshed(grant, private, kwargs, NOW + timedelta(seconds=121))
     if case == "denied":
         cp.consume_task_image_execution_start = AsyncMock(side_effect=ConnectionError("offline"))
     elif case == "cancelled":
@@ -43,7 +57,7 @@ async def test_signed_claim_preparation_and_start_stay_bound(tmp_path, monkeypat
     assert hasattr(m, "WorkerExecutionTrust"), "main-loop release trust adapter missing"
     trust = m.WorkerExecutionTrust(
         root=kwargs["trust_root"], purpose="production", shadow_campaign_id=None,
-        clock=lambda: NOW,
+        clock=lambda: now,
     )
     payload = dict(
         trial_id=grant["claim"]["trial_id"], team_id=grant["claim"]["team_id"],
@@ -60,6 +74,12 @@ async def test_signed_claim_preparation_and_start_stay_bound(tmp_path, monkeypat
     expected_image = grant["components"][0]["image"]
     materialize = AsyncMock(return_value=task_dir)
     resolve = AsyncMock(return_value="unsigned:layer" if case == "layered" else expected_image)
+    if case == "slow-pull":
+        async def slow_pull(**_):
+            nonlocal now
+            now += timedelta(seconds=121)
+            return expected_image
+        resolve.side_effect = slow_pull
     layer = AsyncMock(side_effect=AssertionError("must not derive an unsigned layer"))
     monkeypatch.setattr(ml, "_materialize_task_dir", materialize)
     monkeypatch.setattr(ml, "resolve_task_image", resolve)
@@ -89,7 +109,7 @@ async def test_signed_claim_preparation_and_start_stay_bound(tmp_path, monkeypat
     await pool.wait_all(timeout=2)
     assert cp.bundle_requests == 0
     layer.assert_not_called()
-    if case == "valid":
+    if case in {"valid", "slow-pull"}:
         assert captured["ran"]
         assert captured["start_authorization"] is not None
         assert resolve.call_args.kwargs["registry_image"] == expected_image
@@ -98,6 +118,7 @@ async def test_signed_claim_preparation_and_start_stay_bound(tmp_path, monkeypat
             item["component"]: item["image"] for item in grant["components"]
         }
         cp.consume_task_image_execution_start.assert_awaited_once()
+        assert cp.refresh_task_image_execution.await_count == (1 if case == "slow-pull" else 0)
         assert not task_dir.exists()
     else:
         assert not captured.get("ran")
