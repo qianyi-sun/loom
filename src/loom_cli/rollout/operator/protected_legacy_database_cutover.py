@@ -2,7 +2,8 @@
 
 The enclosing installed operation supplies an admitted candidate/target, original
 credential binding, actual guard and continuously checked host/workload/policy
-exclusion. This operation owns only SQL closure and its bounded peer recovery.
+exclusion. This operation owns SQL closure, its bounded peer recovery, and an
+optional freeze of the actual trial ledger through the same admitted peer.
 It cannot publish fleet closure or start successors, and never edits the original
 handoff journal. There is deliberately no standalone destructive CLI.
 """
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import ClassVar, Protocol, get_args
@@ -45,13 +47,17 @@ from .protected_application_admission_recovery import (
 )
 from .protected_legacy_writer_fence_installation import LegacyWriterFenceJournal
 from .protected_peer_database_connection import PeerDatabaseConnection
+from .protected_trial_writer_control import ProtectedTrialWriterControl, TrialWriterControlBinding
 
 _PEERS = 16
 
 
 @dataclass(frozen=True, slots=True)
 class LegacyDatabaseCutoverJournal(LegacyWriterFenceJournal):
-    allowed_records: ClassVar[frozenset[str]] = frozenset({"cutover.intent.json", "cutover.terminal.json"} | {
+    allowed_records: ClassVar[frozenset[str]] = frozenset({
+        "cutover.intent.json", "cutover.terminal.json",
+        "trial-writer.intent.json", "trial-writer.terminal.json",
+    } | {
         f"peer-{index:02d}.{phase}.json" for index in range(_PEERS) for phase in ("intent", "terminal")})
 
     @property
@@ -77,6 +83,7 @@ class LegacyDatabaseCutover:
     schema_revision: ApplicationSchemaRevision
     runner: LegacyDatabaseCutoverRunner
     authority_check: Callable[[], None]
+    trial_writer_binding: TrialWriterControlBinding | None = None
 
     def __post_init__(self) -> None:
         if (any(not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None or value == "0" * 64
@@ -84,6 +91,8 @@ class LegacyDatabaseCutover:
             or self.schema_acl_profile not in get_args(ApplicationSchemaAclProfile)
             or self.schema_revision not in get_args(ApplicationSchemaRevision)
             or not callable(self.authority_check)
+            or (self.trial_writer_binding is not None
+                and not isinstance(self.trial_writer_binding, TrialWriterControlBinding))
             or len([role for role, alias in self.role_bindings.items() if alias == "provisioner"]) != 1):
             raise ValueError("legacy database cutover binding is invalid")
 
@@ -92,12 +101,78 @@ class LegacyDatabaseCutover:
         return next(role for role, alias in self.role_bindings.items() if alias == "provisioner")
 
     def _scope(self) -> dict[str, object]:
-        return {"schema_version": 1, "request_id": self.journal.request_id,
+        scope: dict[str, object] = {"schema_version": 1, "request_id": self.journal.request_id,
             "attempt_number": self.journal.attempt_number, "plan_digest": self.plan_digest,
             "credential_binding_sha256": self.credential_binding_sha256,
             "target": asdict(self.target), "coordination_guard": asdict(self.coordination_guard),
             "role_bindings": dict(self.role_bindings), "schema_acl_profile": self.schema_acl_profile,
             "schema_revision": self.schema_revision}
+        # Preserve the exact wire format of already-retained SQL-only operations.
+        if self.trial_writer_binding is not None:
+            scope["trial_writer_binding"] = {
+                "registration": self.trial_writer_binding.registration.model_dump(mode="json"),
+                "writer_incarnation": str(self.trial_writer_binding.writer_incarnation),
+                "freeze_operation_id": str(self.trial_writer_binding.freeze_operation_id),
+            }
+        return scope
+
+    def _freeze_trial_writer(self, peer: PeerDatabaseConnection) -> None:
+        if self.trial_writer_binding is None:
+            return
+        self.authority_check()
+        # Closure has retired old SQL clients and disabled new admission. Reuse
+        # this exact admitted peer; a fresh application connection is impossible.
+        control = ProtectedTrialWriterControl(lambda: nullcontext(peer), self.trial_writer_binding)
+        control.initialize()
+        observation = control.freeze()
+        if not observation.frozen or control.capture() != observation:
+            raise RuntimeError("legacy database cutover trial writer changed after freeze")
+        self.authority_check()
+        record = {
+            "schema_version": 1,
+            "scope_digest": admission_record_digest(self._scope()),
+            "observation": {
+                "writer_incarnation": str(observation.writer_incarnation),
+                "writer_epoch": observation.writer_epoch,
+                "high_water": observation.high_water,
+                "frozen": observation.frozen,
+                "freeze_operation_id": str(observation.freeze_operation_id),
+                "evidence_sha256": observation.evidence_sha256,
+            },
+        }
+        # Both mutation and readback transactions committed before persistence.
+        # The SQL functions and immutable record enforce exact recovery replay.
+        self.journal.retain("trial-writer.terminal.json", record)
+
+    def _terminal(self, scope_digest: str, peer_digest: str) -> dict[str, object]:
+        terminal: dict[str, object] = {
+            "schema_version": 1, "scope_digest": scope_digest, "peer_digest": peer_digest,
+        }
+        record = self.journal.read("trial-writer.terminal.json")
+        binding = self.trial_writer_binding
+        if binding is None:
+            if record is not None or self.journal.read("trial-writer.intent.json") is not None:
+                raise RuntimeError("legacy database cutover has unbound trial writer evidence")
+            return terminal
+        if (record is None or set(record) != {"schema_version", "scope_digest", "observation"}
+            or type(record["schema_version"]) is not int or record["schema_version"] != 1
+            or record["scope_digest"] != scope_digest):
+            raise RuntimeError("legacy database cutover trial writer evidence binding changed")
+        observed = record["observation"]
+        if (not isinstance(observed, dict)
+            or set(observed) != {"writer_incarnation", "writer_epoch", "high_water", "frozen",
+                                 "freeze_operation_id", "evidence_sha256"}
+            or observed["writer_incarnation"] != str(binding.writer_incarnation)
+            or observed["freeze_operation_id"] != str(binding.freeze_operation_id)
+            or observed["frozen"] is not True
+            or type(observed["writer_epoch"]) is not int or observed["writer_epoch"] < 1
+            or type(observed["high_water"]) is not int or observed["high_water"] < 0
+            or not isinstance(observed["evidence_sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", observed["evidence_sha256"]) is None
+            or observed["evidence_sha256"] == "0" * 64):
+            raise RuntimeError("legacy database cutover trial writer observation binding changed")
+        terminal["trial_writer_digest"] = admission_record_digest(record)
+        return terminal
 
     def _history(self, scope_digest: str) -> tuple[list[ApplicationHandoffReplacementReceipt], int]:
         receipts: list[ApplicationHandoffReplacementReceipt] = []
@@ -156,6 +231,8 @@ class LegacyDatabaseCutover:
                 role_bindings=self.role_bindings, password=self.password,
                 schema_acl_profile=self.schema_acl_profile, schema_revision=self.schema_revision)
         self.authority_check()
+
+        self._freeze_trial_writer(peer)
 
     def _observe_closed(self, backend: ApplicationDatabaseHandoffBackend) -> None:
         self.authority_check()
@@ -227,10 +304,17 @@ class LegacyDatabaseCutover:
             if saved is not None and saved != scope:
                 raise RuntimeError("legacy database cutover retained binding changed")
             self.journal.retain("cutover.intent.json", scope)
+            if self.trial_writer_binding is not None:
+                self.journal.retain("trial-writer.intent.json", {
+                    "schema_version": 1, "scope_digest": digest,
+                })
+            elif (self.journal.read("trial-writer.intent.json") is not None
+                  or self.journal.read("trial-writer.terminal.json") is not None):
+                raise RuntimeError("legacy database cutover has unbound trial writer evidence")
             receipts, index = self._history(digest)
             terminal = self.journal.read("cutover.terminal.json")
             if terminal is not None:
-                if (not receipts or terminal != {"schema_version": 1, "scope_digest": digest, "peer_digest": receipts[-1].digest}
+                if (not receipts or terminal != self._terminal(digest, receipts[-1].digest)
                     or (index < _PEERS and self.journal.read(f"peer-{index:02d}.intent.json") is not None)):
                     raise RuntimeError("legacy database cutover terminal binding changed")
                 self._observe_closed(receipts[-1].handoff_backend)
@@ -246,6 +330,6 @@ class LegacyDatabaseCutover:
                     receipt = self._record_peer(peer, index, digest, receipts)
                     self._close(peer, receipt)
             self._observe_closed(receipt.handoff_backend)
-            terminal = {"schema_version": 1, "scope_digest": digest, "peer_digest": receipt.digest}
+            terminal = self._terminal(digest, receipt.digest)
             self.journal.retain("cutover.terminal.json", terminal)
             return terminal

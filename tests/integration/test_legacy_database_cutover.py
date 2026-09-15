@@ -245,7 +245,9 @@ async def test_cutover_freezes_real_trial_ledger_before_peer_exit_and_recovers(
         assert evidence["observation"]["frozen"] is True
         assert evidence["observation"]["writer_incarnation"] == str(binding.writer_incarnation)
         assert evidence["observation"]["freeze_operation_id"] == str(binding.freeze_operation_id)
-        from loom_cli.rollout.operator.protected_application_admission_recovery import admission_record_digest
+        from loom_cli.rollout.operator.protected_application_admission_recovery import (
+            admission_record_digest,
+        )
         assert terminal["trial_writer_digest"] == admission_record_digest(evidence)
         assert operation.journal.read("cutover.intent.json")["trial_writer_binding"]["registration"] == registration.model_dump(mode="json")
         files = {p.name: p.read_bytes() for p in operation.journal.root.iterdir() if p.is_file()}
@@ -262,3 +264,38 @@ async def test_cutover_freezes_real_trial_ledger_before_peer_exit_and_recovers(
         assert {p.name: p.read_bytes() for p in operation.journal.root.iterdir() if p.is_file()} == files
         with pytest.raises(psycopg.OperationalError):
             active.execute("SELECT 1")
+
+
+@pytest.mark.parametrize("registration_drift", [False, True])
+async def test_cutover_initializes_only_the_actual_registered_trial_writer(
+    transfer_database, transfer_postgres, tmp_path, registration_drift,  # noqa: F811
+):
+    from uuid import uuid4
+
+    from loom_cli.rollout.operator.protected_trial_writer_control import TrialWriterControlBinding
+    from tests.integration.test_capacity_agent_store import _initialize_and_register
+
+    url, _, bindings = transfer_database
+    _, registration = await _initialize_and_register({
+        "migrator_url": url.replace("postgresql://", "postgresql+psycopg://", 1),
+        "owner_role": next(role for role, alias in bindings.items() if alias == "guard-owner"),
+        "agent_role": next(role for role, alias in bindings.items() if alias == "guard-agent"),
+    })
+    if registration_drift:
+        registration = registration.model_copy(update={"configuration_generation": registration.configuration_generation + 1})
+    binding = TrialWriterControlBinding(registration, uuid4(), uuid4())
+    with _runtime(transfer_database) as (peer, maintenance, guard, _, arguments, _):
+        operation = replace(_operation(tmp_path, transfer_postgres, guard, arguments), trial_writer_binding=binding)
+        peer.close()
+        maintenance.close()
+        if registration_drift:
+            with pytest.raises(ValueError, match="registration drifted"):
+                operation.retire()
+            assert operation.journal.read("cutover.terminal.json") is None
+            assert operation.journal.read("trial-writer.terminal.json") is None
+        else:
+            terminal = operation.retire()
+            evidence = operation.journal.read("trial-writer.terminal.json")
+            assert evidence["observation"]["high_water"] == 0
+            assert evidence["observation"]["frozen"] is True
+            assert operation.retire() == terminal

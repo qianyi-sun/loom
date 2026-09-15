@@ -1420,7 +1420,15 @@ client retirement, and briefly reopens only to record the fixed replacement peer
 A lost reopen reply triggers serialized reclosure through fresh maintenance.
 Completed replay only observes closed admission and retired sessions; it never
 signals a newly resumed runtime. The original ownership-handoff journal remains
-untouched. The enclosing installed factory must supply the completed-handoff
+untouched. An optional retained trial-writer binding extends that same scope
+without changing existing SQL-only journal records. After closure, the exact
+admitted application peer initializes and freezes the real trial ledger before
+disconnecting. Committed readback is retained behind its own intent and linked
+by digest to the cutover terminal. Recovery uses the same writer/operation IDs;
+a lost freeze commit reply cannot reset the ledger. Terminal replay validates
+retained evidence and observes SQL closure without reopening the application
+database. This phase proves only the trial domain, not the other mutation paths.
+The enclosing installed factory must supply the completed-handoff
 target and continuously checked policy, workload and host exclusion; this module
 does not yet constitute the full installed fleet cutover command.
 
