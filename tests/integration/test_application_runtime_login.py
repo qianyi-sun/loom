@@ -297,3 +297,30 @@ async def test_cutover_reseals_runtime_without_rotating_credential_or_retiring_e
                 psycopg.connect(url, user=runtime, password=password, connect_timeout=2).close()
             assert original.execute("SELECT pg_backend_pid()").fetchone() == (original_pid,)
             assert guard.execute("SELECT pg_backend_pid()").fetchone() == (coordination.backend.pid,)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift", ["password", "guard-loss"])
+async def test_runtime_cutover_seal_refuses_drift_and_rolls_back_on_guard_loss(transfer_database, monkeypatch, drift):  # noqa: F811
+    from loom import application_runtime_login as module
+    from loom.application_handoff_completion import complete_application_handoff_database
+    from tests.integration.test_application_handoff_completion import _closed
+
+    _, owner, bindings = transfer_database
+    runtime = next(role for role, alias in bindings.items() if alias == "application-owner")
+    with _closed(transfer_database) as (admin, maintenance, guard, arguments):
+        complete_application_handoff_database(admin, maintenance=maintenance, **arguments)
+        before = admin.execute("SELECT rolcanlogin,rolpassword FROM pg_authid WHERE rolname=%s", (runtime,)).fetchone()
+        check = module._require_coordination_guard
+        checked = []
+        def require(*args, **kwargs):
+            checked.append(True)
+            if len(checked) == 2 and drift == "guard-loss":
+                guard.close()
+            return check(*args, **kwargs)
+        monkeypatch.setattr(module, "_require_coordination_guard", require)
+        with pytest.raises(RuntimeError, match="credential state|coordination guard"):
+            module.seal_application_runtime_for_cutover(admin, owner_role=owner, role_bindings=bindings,
+                password="wrong-retained-password" if drift == "password" else arguments["password"],
+                target=arguments["target"], coordination_guard=arguments["coordination_guard"], schema_acl_profile="staging-readonly")
+        assert admin.execute("SELECT rolcanlogin,rolpassword FROM pg_authid WHERE rolname=%s", (runtime,)).fetchone() == before
