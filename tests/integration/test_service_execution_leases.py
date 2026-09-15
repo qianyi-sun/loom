@@ -131,7 +131,7 @@ from loom_execution_actuator.contracts import (
     NormalizedJobState,
 )
 from loom_execution_actuator.controller import ExecutionActuator
-from loom_execution_actuator.renderer import ExecutionTargetRuntime
+from loom_execution_actuator.renderer import ExecutionTargetRuntime, render_execution_job
 from loom_llm_gateway.execution_attempt_dispatch import authorize_trial_execution_dispatch
 from tests.execution_placement_fixtures import placement_fixture
 from tests.support.execution_image_admission import (
@@ -4438,10 +4438,12 @@ async def test_actuator_records_unavailable_before_accepting_an_already_absent_j
 
 @pytest.mark.parametrize("class_cpu_limit", [None, 4_500])
 @pytest.mark.parametrize("independent_controller", [False, True])
+@pytest.mark.parametrize("request_overrides", [False, True])
 async def test_private_terminus_sandboxes_reserve_full_pod_resources(
     postgres_url: str,
     class_cpu_limit: int | None,
     independent_controller: bool,
+    request_overrides: bool,
 ) -> None:
     """Admission and both reservations include the controller and private sandboxes."""
     engine = create_async_engine(postgres_url)
@@ -4487,6 +4489,15 @@ async def test_private_terminus_sandboxes_reserve_full_pod_resources(
                 update={"cpu_millis": 1_000, "memory_mib": 2_048}
             ),
         })
+    if request_overrides:
+        plan = ExecutionRuntimePlanV1.model_validate({
+            **plan.canonical_payload(),
+            "resource_requests": {
+                "controller": {"cpu_millis": 250, "memory_mib": 512, "ephemeral_storage_mib": 256},
+                "task_sandbox": {"cpu_millis": 500, "memory_mib": 1024, "ephemeral_storage_mib": 512},
+                "verifier_sandbox": {"cpu_millis": 250, "memory_mib": 512, "ephemeral_storage_mib": 256},
+            },
+        })
     requirements = _requirements().model_copy(update={"cpu_millis": 2_000, "memory_mib": 4_096})
     try:
         async with sessions() as session:
@@ -4509,7 +4520,7 @@ async def test_private_terminus_sandboxes_reserve_full_pod_resources(
             await session.commit()
 
         async with sessions() as session:
-            if class_cpu_limit is not None:
+            if class_cpu_limit is not None and not request_overrides:
                 # The task's own 2 CPU declaration fits this class; its complete
                 # 5 or 6 CPU Pod does not. No lease or reservation may survive.
                 with pytest.raises(ServiceExecutionConflict, match="cpu_limit_exceeded"):
@@ -4573,11 +4584,38 @@ async def test_private_terminus_sandboxes_reserve_full_pod_resources(
                     )
                 )
             ).scalar_one()
+            admission = (
+                await session.execute(
+                    select(ExecutionAdmissionReservation).where(
+                        ExecutionAdmissionReservation.owner_id == lease_id,
+                        ExecutionAdmissionReservation.owner_kind == "service_execution_lease",
+                    )
+                )
+            ).scalar_one()
+            assert admission.state == "active"
+            expected_cpu = 1_000 if request_overrides else (5_000 if independent_controller else 6_000)
+            expected_memory = 2_048 if request_overrides else (10_240 if independent_controller else 12_288)
+            expected_storage = 1_024 if request_overrides else 6_144
             for reserved in (cost, capacity):
-                assert reserved.requested_cpu_millis == (5_000 if independent_controller else 6_000)
-                assert reserved.requested_memory_mib == (10_240 if independent_controller else 12_288)
-            assert cost.requested_ephemeral_storage_mib == 6_144
+                assert reserved.requested_cpu_millis == expected_cpu
+                assert reserved.requested_memory_mib == expected_memory
+            assert cost.requested_ephemeral_storage_mib == expected_storage
             assert capacity.requested_storage_mib == cost.requested_ephemeral_storage_mib
+            pod = render_execution_job(persisted, target=ExecutionTargetRuntime(
+                target_id=persisted.target_id, namespace=persisted.namespace_name,
+            ), now=now)["spec"]["template"]["spec"]
+            containers = [*pod["containers"], *pod["initContainers"][1:]]
+            for dimension, suffix, expected in (
+                ("cpu", "m", expected_cpu), ("memory", "Mi", expected_memory),
+                ("ephemeral-storage", "Mi", expected_storage),
+            ):
+                assert sum(int(item["resources"]["requests"][dimension].removesuffix(suffix))
+                           for item in containers) == expected
+            assert pod["containers"][0]["resources"]["limits"]["cpu"] == (
+                "1000m" if independent_controller else "2000m"
+            )
+            assert all(item["resources"]["limits"]["cpu"] == "2000m"
+                       for item in pod["initContainers"][1:])
             trial = await session.get(Trial, trial_id)
             assert trial is not None and (trial.state, trial.attempt_count) == ("claimed", 1)
     finally:
