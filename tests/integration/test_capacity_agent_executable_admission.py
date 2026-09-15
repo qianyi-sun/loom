@@ -2663,8 +2663,7 @@ async def test_guard_0020_downgrade_does_not_deadlock_terminal_projection(
         monkeypatch,
         application_name=application_name,
     )
-    if starting_revision == "guard_0030":
-        command.downgrade(config, starting_revision)
+    command.downgrade(config, starting_revision)
     downgrade_task: asyncio.Task[None] | None = None
     terminal_task: asyncio.Task[InertAttemptTransitionV1] | None = None
     terminal_pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()

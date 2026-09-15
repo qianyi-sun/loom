@@ -185,7 +185,7 @@ def test_typed_terminal_import_refuses_downgrade_with_retained_evidence(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0033"
+                == "guard_0034"
             )
             assert (
                 connection.execute(
@@ -207,10 +207,8 @@ def test_downgrade_fences_an_import_already_executing_the_old_function_body(
     starting_revision,
 ):
     config = _guard_config(capacity_guard_database)
-    if starting_revision == "guard_0032":
-        # Preserve the original typed-importer race independently of the newer
-        # trial-retirement lock fence. Both migration boundaries need coverage.
-        command.downgrade(config, starting_revision)
+    # Exercise these historical boundaries explicitly, independent of head.
+    command.downgrade(config, starting_revision)
     seeded = _seed_claimed_protected_trial(capacity_guard_database, monkeypatch, tmp_path)
     payload = typed_payload(seeded)
     engine = create_engine(_value(capacity_guard_database, "admin_url"))
