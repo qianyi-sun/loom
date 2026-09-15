@@ -404,22 +404,55 @@ def test_initial_cutover_prepares_one_slot_without_shrinking_fleet_capacity(
     assert fixture.active == before
 
 
-def test_source_rejects_zero_filled_legacy_high_water(tmp_path: Path) -> None:
-    """Catch replacing observed writer progress with a synthetic zero."""
+@pytest.mark.parametrize("subject_high_water,writer_high_water", [(0, 0), (0, 17), (17, 0)])
+def test_source_preserves_evidenced_zero_legacy_high_water(
+    tmp_path: Path, subject_high_water: int, writer_high_water: int
+) -> None:
+    """Unused frozen domains retain their actual cursor through publication."""
     fixture = _source_fixture(tmp_path)
     acknowledgement = fixture.authority.subject_acknowledgements[0].model_copy(
-        update={"legacy_writer_high_water": 0}
+        update={"legacy_writer_high_water": subject_high_water}
     )
-    fence = fixture.authority.legacy_writer_fences[0].model_copy(update={"high_water": 0})
+    fence = fixture.authority.legacy_writer_fences[0].model_copy(
+        update={"high_water": writer_high_water}
+    )
     authority = replace(
         fixture.authority,
         subject_acknowledgements=(acknowledgement,),
         legacy_writer_fences=(fence,),
     )
-    source = replace(
-        fixture.source,
-        authority_source=lambda _desired: authority,
+    source = replace(fixture.source, authority_source=lambda _desired: authority)
+
+    artifact = fixture.store.read(source.publish(fixture.lease))
+
+    assert artifact.execution_policy.subject_acknowledgements == (acknowledgement,)
+    assert artifact.execution_policy.legacy_writer_fences == (fence,)
+
+
+@pytest.mark.parametrize("placeholder", ["acknowledgement", "freeze"])
+def test_source_rejects_zero_cursor_with_placeholder_evidence(
+    tmp_path: Path, placeholder: str
+) -> None:
+    """Zero is a valid cursor, but never a replacement for freeze evidence."""
+    fixture = _source_fixture(tmp_path)
+    acknowledgement = fixture.authority.subject_acknowledgements[0].model_copy(
+        update={
+            "legacy_writer_high_water": 0,
+            **({"acknowledgement_sha256": "0" * 64} if placeholder == "acknowledgement" else {}),
+        }
     )
+    fence = fixture.authority.legacy_writer_fences[0].model_copy(
+        update={
+            "high_water": 0,
+            **({"freeze_evidence_sha256": "0" * 64} if placeholder == "freeze" else {}),
+        }
+    )
+    authority = replace(
+        fixture.authority,
+        subject_acknowledgements=(acknowledgement,),
+        legacy_writer_fences=(fence,),
+    )
+    source = replace(fixture.source, authority_source=lambda _desired: authority)
 
     with pytest.raises(ProtectedExecutionPrerequisiteSourceError):
         source.publish(fixture.lease)
