@@ -181,3 +181,84 @@ def test_cutover_recovery_recloses_after_lost_reopen_commit_reply(
         with opener() as check:
             assert check.execute("SELECT datallowconn FROM pg_database WHERE datname='" + operation.target.database + "'").fetchone() == (False,)
         operation.retire()
+
+
+@pytest.mark.parametrize("interruption", [
+    None, "peer-00.terminal.json", "freeze-commit", "trial-writer.terminal.json", "cutover.terminal.json",
+])
+async def test_cutover_freezes_real_trial_ledger_before_peer_exit_and_recovers(
+    transfer_database, transfer_postgres, tmp_path, monkeypatch, interruption,  # noqa: F811
+):
+    from contextlib import nullcontext
+    from uuid import uuid4
+
+    from loom_cli.rollout.operator.protected_trial_writer_control import (
+        ProtectedTrialWriterControl,
+        TrialWriterControlBinding,
+    )
+    from tests.integration.test_capacity_agent_store import _initialize_and_register, _seed_trial
+
+    url, _, bindings = transfer_database
+    database = {
+        "admin_url": url.replace("postgresql://", "postgresql+psycopg://", 1),
+        "migrator_url": url.replace("postgresql://", "postgresql+psycopg://", 1),
+        "owner_role": next(role for role, alias in bindings.items() if alias == "guard-owner"),
+        "agent_role": next(role for role, alias in bindings.items() if alias == "guard-agent"),
+    }
+    trial = _seed_trial(database)
+    _, registration = await _initialize_and_register(database)
+    binding = TrialWriterControlBinding(registration, uuid4(), uuid4())
+    with _runtime(transfer_database) as (peer, maintenance, guard, active, arguments, _):
+        operation = replace(_operation(tmp_path, transfer_postgres, guard, arguments), trial_writer_binding=binding)
+        # Account a real committed legacy mutation, rather than supplying a cursor.
+        control = ProtectedTrialWriterControl(lambda: nullcontext(peer), binding)
+        control.initialize()
+        active.execute("UPDATE public.trials SET submit_priority=101 WHERE id=%s", (trial,))
+        assert control.capture().high_water == 1
+        peer.close()
+        maintenance.close()
+        original_retain = type(operation.journal).retain
+        original_freeze = ProtectedTrialWriterControl.freeze
+        injected = []
+
+        def retain(journal, name, value):
+            original_retain(journal, name, value)
+            if name == interruption and not injected:
+                injected.append(name)
+                raise RuntimeError("trial cutover reply lost")
+
+        def freeze(self):
+            result = original_freeze(self)
+            if interruption == "freeze-commit" and not injected:
+                injected.append(interruption)
+                raise RuntimeError("trial cutover reply lost")
+            return result
+
+        monkeypatch.setattr(type(operation.journal), "retain", retain)
+        monkeypatch.setattr(ProtectedTrialWriterControl, "freeze", freeze)
+        if interruption:
+            with pytest.raises(RuntimeError, match="trial cutover reply lost"):
+                operation.retire()
+        terminal = operation.retire()
+        evidence = operation.journal.read("trial-writer.terminal.json")
+        assert evidence["observation"]["high_water"] == 1
+        assert evidence["observation"]["frozen"] is True
+        assert evidence["observation"]["writer_incarnation"] == str(binding.writer_incarnation)
+        assert evidence["observation"]["freeze_operation_id"] == str(binding.freeze_operation_id)
+        from loom_cli.rollout.operator.protected_application_admission_recovery import admission_record_digest
+        assert terminal["trial_writer_digest"] == admission_record_digest(evidence)
+        assert operation.journal.read("cutover.intent.json")["trial_writer_binding"]["registration"] == registration.model_dump(mode="json")
+        files = {p.name: p.read_bytes() for p in operation.journal.root.iterdir() if p.is_file()}
+
+        def refuse_peer():
+            raise AssertionError("terminal replay must not reopen the application database")
+
+        monkeypatch.setattr(operation.runner, "open_staging_peer_database", refuse_peer)
+        assert operation.retire() == terminal
+        with pytest.raises(RuntimeError, match="binding"):
+            replace(operation, trial_writer_binding=replace(binding, freeze_operation_id=uuid4())).retire()
+        with pytest.raises(RuntimeError, match="binding"):
+            replace(operation, trial_writer_binding=None).retire()
+        assert {p.name: p.read_bytes() for p in operation.journal.root.iterdir() if p.is_file()} == files
+        with pytest.raises(psycopg.OperationalError):
+            active.execute("SELECT 1")
