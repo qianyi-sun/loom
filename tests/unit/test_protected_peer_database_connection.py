@@ -74,10 +74,14 @@ def test_pg17_requires_admitted_startup_settings_before_identity(mode):
 @pytest.mark.parametrize(
     "mode", ["early-exit", "hang", "output-limit", "bad-row", "bad-error", "invalid-mode"]
 )
-def test_peer_protocol_failure_is_sanitized_poisoned_and_reaped(monkeypatch, mode):
+@pytest.mark.parametrize("startup_delay", [0, 0.5])
+def test_peer_protocol_failure_is_sanitized_poisoned_and_reaped(monkeypatch, mode, startup_delay):
     monkeypatch.setattr(peer, "_STOP_SECONDS", 0.1)
+    # Deliberate child-startup fault injection, not a wait for readiness. The
+    # protocol failure assertions below must run after successful admission.
+    child = _CHILD.replace("mode = sys.argv[1]", f"time.sleep({startup_delay})\nmode = sys.argv[1]")
     process = subprocess.Popen(
-        [sys.executable, "-u", "-c", _CHILD, mode],
+        [sys.executable, "-u", "-c", child, mode],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
