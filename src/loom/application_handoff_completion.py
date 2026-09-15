@@ -198,6 +198,7 @@ def _quiescence_retry_admitted(
     handoff_backend: ApplicationDatabaseHandoffBackend,
     coordination_guard: ApplicationDatabaseCoordinationGuard, provisioner: str,
 ) -> bool:
+    """Retain exact clients; autovacuum may still run or already have exited."""
     _require_retired_client_work(maintenance, target=target, handoff_backend=handoff_backend,
         coordination_guard=coordination_guard, provisioner=provisioner)
     with _maintenance_transaction(maintenance, database=target.database, provisioner_role=provisioner):
@@ -206,8 +207,14 @@ def _quiescence_retry_admitted(
         _require_coordination_guard(maintenance, target, coordination_guard)
         maintenance.execute("SELECT pg_catalog.pg_stat_clear_snapshot()")
         return maintenance.execute(application_sql(
-            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE datid={} "
-            "AND backend_type='autovacuum worker')", target.database_oid,
+            "SELECT count(*) FILTER (WHERE backend_type='client backend')=2 AND COALESCE(bool_and(("
+            "backend_type='autovacuum worker' OR backend_type='client backend' AND ("
+            "pid={} AND backend_start={}::pg_catalog.timestamptz AND usename={} OR "
+            "pid={} AND backend_start={}::pg_catalog.timestamptz AND usesysid={} AND application_name={}"
+            ")) IS TRUE),false) FROM pg_catalog.pg_stat_activity WHERE datid={}",
+            handoff_backend.pid, handoff_backend.started_at, provisioner,
+            coordination_guard.backend.pid, coordination_guard.backend.started_at,
+            coordination_guard.role_oid, coordination_guard.application_name, target.database_oid,
         )).fetchone() == (True,)
 
 
