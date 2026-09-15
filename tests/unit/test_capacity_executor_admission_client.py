@@ -218,6 +218,40 @@ async def test_database_store_call_sets_local_timeouts_and_rolls_back_on_deadlin
     assert exited_with == [asyncio.CancelledError]
 
 
+async def test_current_bootstrap_client_keeps_fresh_transaction_and_deadline(monkeypatch):
+    exited_with = []
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, *_exc):
+            exited_with.append(exc_type)
+
+        def begin(self):
+            pytest.fail("current bootstrap store must own its fresh transaction")
+
+    class Store:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def observe_current_bootstrap(self, request, **kwargs):
+            assert kwargs == {"statement_timeout_ms": 1200, "lock_timeout_ms": 800}
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(admission_client_module, "ExecutableAdmissionStore", Store)
+    client = object.__new__(DatabaseExecutableAdmissionClient)
+    client._factory = lambda: Session()
+    client._operation_timeout_seconds = 0.01
+    client._statement_timeout_ms = 1200
+    client._lock_timeout_ms = 800
+    client.subject_id = UUID(int=1)
+    client.subject_incarnation = UUID(int=2)
+    with pytest.raises(ExecutableAdmissionClientError, match="timed out"):
+        await asyncio.wait_for(client.observe_current_bootstrap(object()), timeout=0.5)
+    assert exited_with == [asyncio.CancelledError]
+
+
 @pytest.mark.parametrize(
     "url",
     (

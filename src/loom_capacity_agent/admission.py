@@ -423,6 +423,43 @@ class PhysicalJobBindingV2(StrictV2Model):
     executable: Literal[True] = True
 
 
+class CurrentExecutableBootstrapV2(StrictV2Model):
+    """Fresh local evidence, not a signed lease or permission to start runtime."""
+
+    physical_binding: PhysicalJobBindingV2
+    agent_incarnation: UUID
+    bootstrap_sha256: Digest
+    observed_at: datetime
+    bootstrap_expires_at: datetime
+    request_digest: Digest
+    observation_state: Literal["current-unused-bootstrap"] = "current-unused-bootstrap"
+    executable: Literal[False] = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _exact_nonexecutable(cls, value: object) -> object:
+        if isinstance(value, dict) and "executable" in value and value["executable"] is not False:
+            raise ValueError("current bootstrap evidence requires a literal false executable flag")
+        return value
+
+    @property
+    def binding(self) -> ExecutableIntentBindingV2:
+        return self.physical_binding.binding
+
+    @field_validator("observed_at", "bootstrap_expires_at")
+    @classmethod
+    def _aware_time(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+    @model_validator(mode="after")
+    def _current_binding(self) -> CurrentExecutableBootstrapV2:
+        if self.observed_at >= self.bootstrap_expires_at:
+            raise ValueError("current bootstrap evidence is expired")
+        if self.request_digest != canonical_executable_digest(self.physical_binding):
+            raise ValueError("current bootstrap evidence has a different physical binding")
+        return self
+
+
 class ExecutableWorkerRegistrationV2(StrictV2Model):
     """Exchange or requeue one worker identity after physical binding."""
 
@@ -769,6 +806,7 @@ class ProtectedIntentObservationV2(StrictV2Model):
 
 __all__ = [
     "BoundExecutableWorkerV2",
+    "CurrentExecutableBootstrapV2",
     "DrainedExecutableWorkerV2",
     "ExecutableDrainRequestV2",
     "ExecutablePreparedBootstrapRevocationV2",

@@ -6,7 +6,7 @@ import hashlib
 import json
 import ssl
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, TypeAlias, TypeVar
 from urllib.parse import SplitResult, urlsplit
@@ -54,7 +54,9 @@ from loom_capacity_manager.grant_contracts import (
 )
 from loom_capacity_manager.launch_subject_contracts import (
     MAX_LAUNCH_SUBJECT_BYTES,
+    CurrentApplicationAllocationV3,
     ExecutableLaunchSubjectV3,
+    parse_current_application_allocation,
     parse_launch_subject,
 )
 from loom_capacity_manager.typed_inventory_contracts import (
@@ -807,6 +809,30 @@ class ExecutableCapacityExecutorClient:
             raise ExecutorTransportError("capacity manager launch subject is invalid") from exc
         if value.binding != binding:
             raise ExecutorTransportError("capacity manager launch subject intent changed")
+        return value
+
+    async def current_application_allocation(
+        self, binding: ExecutableIntentBindingV2,
+    ) -> CurrentApplicationAllocationV3:
+        """Read fresh post-submit application evidence, never another permit."""
+        self._assert_contract_binding(binding)
+        status_code, content = await _stream_response_bounded(
+            self._http, "GET",
+            f"{self._manager_origin}/v3/executors/{self.registration.pool_id}/intents/{binding.intent_id}/current-application-allocation",
+            headers={"Authorization": f"Bearer {self._bearer_token}"},
+            body_label="application allocation", max_bytes=MAX_LAUNCH_SUBJECT_BYTES,
+        )
+        if 400 <= status_code < 500:
+            raise ExecutorRejectedError(f"capacity manager rejected application allocation with status {status_code}")
+        if status_code != 200:
+            raise ExecutorTransportError(f"capacity manager application allocation failed with status {status_code}")
+        try:
+            value = parse_current_application_allocation(content)
+        except ValueError as exc:
+            raise ExecutorTransportError("capacity manager application allocation is invalid") from exc
+        now = datetime.now(UTC)
+        if value.subject.binding != binding or not value.observed_at <= now < value.expires_at:
+            raise ExecutorTransportError("capacity manager application allocation binding or freshness changed")
         return value
 
     async def next_executable_work(

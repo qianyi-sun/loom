@@ -9,8 +9,11 @@ from __future__ import annotations
 import asyncio
 import json
 import tarfile
+import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -617,3 +620,37 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             assert current is not None and current.source_cleanup_state == "complete"
     finally:
         await engine.dispose()
+
+
+@pytest.mark.timeout(5)
+async def test_restart_probe_does_not_follow_server_retry_after() -> None:
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_HEAD(self):
+            requests.append(self.command)
+            if len(requests) <= 2:
+                self.send_response(503)
+                self.send_header("Retry-After", "3600")
+            else:
+                self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    container = SimpleNamespace(get_config=lambda: {
+        "endpoint": f"127.0.0.1:{server.server_port}",
+        "access_key": "disposable", "secret_key": "disposable",
+    })
+    try:
+        await _wait_for_minio_bucket(container, "artifacts")
+        assert requests == ["HEAD", "HEAD", "HEAD"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

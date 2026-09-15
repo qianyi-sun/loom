@@ -1430,6 +1430,7 @@ def _assert_exact_approved_routes(app: FastAPI) -> None:
         ("/v2/executors/{pool_id}/context", ("GET",)),
         ("/v2/executors/{pool_id}/work", ("GET",)),
         ("/v3/executors/{pool_id}/intents/{intent_id}/launch-subject", ("GET",)),
+        ("/v3/executors/{pool_id}/intents/{intent_id}/current-application-allocation", ("GET",)),
         ("/v2/executors/{pool_id}/inventory", ("PUT",)),
         ("/v3/executors/{pool_id}/inventory", ("PUT",)),
         (

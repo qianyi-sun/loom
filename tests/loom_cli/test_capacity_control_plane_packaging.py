@@ -92,6 +92,7 @@ _GUARD_MIGRATION_RESOURCES = {
     "capacity_guard_migrations/versions/guard_0032_typed_terminal_inventory.py",
     "capacity_guard_migrations/versions/guard_0035_trial_writer_interception.py",
     "capacity_guard_migrations/versions/guard_0033_refundable_admission_compatibility.py",
+    "capacity_guard_migrations/versions/guard_0034_current_bootstrap_observation.py",
     "capacity_guard_migrations/versions/guard_0036_frozen_trial_retry.py",
 }
 _PROFILE = _REPO_ROOT / "deploy/dev-fleet/capacity-control-plane.toml"

@@ -1241,7 +1241,7 @@ def test_agent_runtime_configuration_seals_the_exact_database_admission_digest(
 
     assert capacity_guard_schema_head() == ("guard_0036", 36)
     assert configuration.protected_admission_sha256 == (
-        "5686f2a6398b823fe4e9560668663b25f2febeb75fe66779e0536c5ebf6d33d8"
+        "a35cf8febb302ee63dd3f304c332455ad4738a254e5d6a1d5d485cfa3743b3fc"
     )
 
 
