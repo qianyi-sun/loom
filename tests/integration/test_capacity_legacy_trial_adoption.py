@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import Batch, DataLifecycleAuthority, Trial
-from loom_control_plane.protected_worker_session import ProtectedWorkerSessionStore
+from loom_control_plane.protected_worker_session import ProtectedTrialSubmissionError, ProtectedWorkerSessionStore
 from tests.integration.test_capacity_agent_store import _value
 from tests.integration.test_capacity_protected_trial_submission_route import _initialize_guard
 from tests.integration.test_capacity_submission_store import _atomic_submission, _seed_trial_inputs
@@ -19,8 +19,10 @@ from tests.integration.test_capacity_trial_writer_fence import _freeze, _initial
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("frozen", [False, True])
+@pytest.mark.parametrize("drift", [None, "team", "config", "timestamp", "lifecycle", "attempt", "cancelled", "expired", "deleting", "ordinary-submit", "wrong-role"])
 async def test_adoption_preserves_original_batch_trial_and_retention(
-    capacity_guard_database: dict[str, object], frozen: bool,
+    capacity_guard_database: dict[str, object], frozen: bool, drift: str | None,
+    rewrite_trigger: bool = False,
 ) -> None:
     database = capacity_guard_database
     registration = await _initialize_guard(database)
@@ -34,7 +36,7 @@ async def test_adoption_preserves_original_batch_trial_and_retention(
         "gpu_vendor": "none", "network_policies": ["public"],
         "terminus2_model_switch": False,
     }
-    submitted_at = datetime.now(UTC) - timedelta(days=2)
+    submitted_at = datetime.now(UTC) - timedelta(days=8 if drift == "expired" else 2)
     lifecycle_id = uuid4()
     admin = create_engine(_value(database, "admin_url"))
     snapshot = text("SELECT to_jsonb(trial) FROM public.trials AS trial WHERE id=:trial")
@@ -54,12 +56,14 @@ async def test_adoption_preserves_original_batch_trial_and_retention(
                 id=lifecycle_id, environment=scope[0], namespace=scope[1], team_id=team_id,
                 data_class="trial", owner_kind="trial", owner_id=str(submission.trial_id),
                 created_at=submitted_at, expires_at=submitted_at + timedelta(days=7),
-                pinned=False, state="active",
+                pinned=False, state="deleting" if drift == "deleting" else "active",
             ))
             connection.execute(Trial.__table__.insert().values(
                 id=submission.trial_id, team_id=team_id, task_id=task_id,
                 batch_id=submission.batch_id, config=submission.config, requires_caps=caps,
-                state="queued", submit_priority=submission.submit_priority,
+                state="cancelled" if drift == "cancelled" else "queued",
+                attempt_count=1 if drift == "attempt" else 0,
+                submit_priority=submission.submit_priority,
                 idempotency_key=submission.idempotency_key, sample_idx=submission.sample_idx,
                 combination_idx=submission.combination_idx, submitted_at=submitted_at,
                 lifecycle_authority_id=lifecycle_id,
@@ -73,7 +77,15 @@ async def test_adoption_preserves_original_batch_trial_and_retention(
         writer = await _initialize(database, registration=registration)
         if frozen:
             await _freeze(database, writer["writer_incarnation"], uuid4())
-        engine = create_async_engine(_value(database, "runtime_url"), isolation_level="SERIALIZABLE")
+        if rewrite_trigger:
+            with admin.begin() as connection:
+                connection.exec_driver_sql("""
+                    CREATE FUNCTION public.adoption_rewrite_test() RETURNS trigger
+                    LANGUAGE plpgsql AS $$ BEGIN NEW.config='{"changed":true}'::jsonb; RETURN NEW; END $$;
+                    CREATE TRIGGER adoption_rewrite_test BEFORE UPDATE ON public.trials
+                    FOR EACH ROW EXECUTE FUNCTION public.adoption_rewrite_test();
+                """)
+        engine = create_async_engine(_value(database, "agent_url" if drift == "wrong-role" else "runtime_url"), isolation_level="SERIALIZABLE")
         operation_id = uuid4()
         try:
             store = ProtectedWorkerSessionStore(async_sessionmaker(engine, expire_on_commit=False))
@@ -82,8 +94,31 @@ async def test_adoption_preserves_original_batch_trial_and_retention(
                 expected_submitted_at=submitted_at, expected_lifecycle_authority_id=lifecycle_id,
                 operation_id=operation_id,
             )
+            if drift == "team":
+                request["submission"] = submission.model_copy(update={"team_id": uuid4()})
+            elif drift == "config":
+                request["submission"] = submission.model_copy(update={"config": {"agent_name": "changed"}})
+            elif drift == "timestamp":
+                request["expected_submitted_at"] = submitted_at + timedelta(seconds=1)
+            elif drift == "lifecycle":
+                request["expected_lifecycle_authority_id"] = uuid4()
+            if drift is not None or rewrite_trigger:
+                with pytest.raises(ProtectedTrialSubmissionError):
+                    if drift == "ordinary-submit":
+                        await store.submit_trial(registration=registration, submission=submission, public_requires_caps=caps)
+                    else:
+                        await store.adopt_legacy_trial(**request)
+                with admin.connect() as connection:
+                    assert connection.execute(snapshot, parameters).scalar_one() == before
+                    for relation in ("trial_adoptions", "atomic_trial_submissions", "protected_runtime_trial_submissions", "trial_attempts", "trial_mutation_permits"):
+                        assert connection.execute(text(
+                            f"SELECT count(*) FROM loom_capacity_guard.{relation} WHERE trial_id=:trial"
+                        ), parameters).scalar_one() == 0
+                return
             receipt = await store.adopt_legacy_trial(**request)
             replay = await store.adopt_legacy_trial(**request)
+            with pytest.raises(ProtectedTrialSubmissionError):
+                await store.adopt_legacy_trial(**(request | {"operation_id": uuid4()}))
         finally:
             await engine.dispose()
         assert receipt.trial_id == replay.trial_id == submission.trial_id
@@ -105,5 +140,19 @@ async def test_adoption_preserves_original_batch_trial_and_retention(
             assert connection.execute(text(
                 "SELECT count(*) FROM loom_capacity_guard.protected_runtime_trial_readiness WHERE trial_id=:trial"
             ), parameters).scalar_one() == 0
+            permissions = connection.execute(text(
+                "SELECT operation,state,worker_id,worker_incarnation,claim_operation_id,adoption_operation_id "
+                "FROM loom_capacity_guard.trial_mutation_permits WHERE trial_id=:trial"
+            ), parameters).all()
+            assert permissions == ([("adopt", "consumed", None, None, None, operation_id)] if frozen else [])
     finally:
         admin.dispose()
+
+
+@pytest.mark.asyncio
+async def test_frozen_adoption_rejects_trigger_rewrite_and_rolls_back_every_projection(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    await test_adoption_preserves_original_batch_trial_and_retention(
+        capacity_guard_database, frozen=True, drift=None, rewrite_trigger=True,
+    )

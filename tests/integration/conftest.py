@@ -208,7 +208,7 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                     "submit_priority, batch_id, idempotency_key, sample_idx, combination_idx, "
                     "provider_connection_id, provider_model_id, submitted_by_user_id, "
                     "usage_attributed_user_id, usage_attributed_actor, family_key, "
-                    "lifecycle_authority_id, submitted_at, started_at, "
+                    "lifecycle_authority_id, submitted_at, started_at, claimed_at, pre_start_heartbeat_at, failure_reason, "
                     "cancellation_requested_at, cancellation_observed_at, finished_at, "
                     "next_attempt_at, autoscaler_pool_name, "
                     "worker_id, attempt_count, "

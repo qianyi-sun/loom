@@ -8,6 +8,7 @@ import stat
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 from uuid import UUID
@@ -335,6 +336,25 @@ class ProtectedWorkerSessionStore:
             raise ProtectedTrialSubmissionError("protected trial submission rejected") from exc
         except CapacityTrialSubmissionError as exc:
             raise ProtectedTrialSubmissionError("protected trial submission rejected") from exc
+
+    async def adopt_legacy_trial(
+        self, *, registration: AgentRegistrationV1, submission: AtomicTrialSubmissionV1,
+        public_requires_caps: Mapping[str, JsonValue], expected_submitted_at: datetime,
+        expected_lifecycle_authority_id: UUID, operation_id: UUID,
+    ) -> AtomicTrialSubmissionReceiptV1:
+        """Atomically adopt the original inert row under the runtime authority."""
+        try:
+            async with self._session_factory() as session, session.begin():
+                return await CapacityTrialSubmissionStore(
+                    session, registration=registration,
+                ).adopt_runtime_initial_submission(
+                    submission, public_requires_caps=public_requires_caps,
+                    expected_submitted_at=expected_submitted_at,
+                    expected_lifecycle_authority_id=expected_lifecycle_authority_id,
+                    operation_id=operation_id,
+                )
+        except (DBAPIError, CapacityTrialSubmissionError) as exc:
+            raise ProtectedTrialSubmissionError("protected legacy trial adoption rejected") from exc
 
     async def publish_trial_readiness(
         self,

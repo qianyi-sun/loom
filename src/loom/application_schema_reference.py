@@ -140,20 +140,20 @@ def application_schema_reference(
     if revision == "0146/guard_0034":
         digests = {
             16: (
-                "a40bc1c41241f763d88dddb793fe343fec80c46b4a3ce66005f5968d4c63313b",
-                "8705f523a956b708551aca3358e387acc443b6f0bca8add9a901f082a7436e61",
-                "1b7031e64ae6f2ebc922f3a42abe5b7765f5aa67d58a1890727d0ccf64db1930",
-                "874b280d85c222356c47b4ccb08465fbd59c4753d2cbcf2a049b40ffd3963f44",
-                "420f9660b60b7fe09d853d11b2f9032dffb3da50c4b52e1785544e00c14e4f72",
-                "27622a6d6c62aa9449cdf1ae896bc3673ef5a3e7af77ee02c42af8fb36807e4f",
+                "7d7aea22d77247ba6027ca58c6e7e249ca14c945d2965eea64a66f0a991250e6",
+                "7b95c3264650fa903f65f3a84ab6009c1214c4ed75e36e1e89edb6382581ec61",
+                "437e9c7a30b06906e73a2ef34192fc518aef7a49b9bc947e6530a608caf67892",
+                "26922fb5f92c282713cc06cd9957d8ee46f9d44980b8098e25a21d211973492e",
+                "3ee2424c3361a303218ab040e8dfe90085a7d2d2afc240fdcfa4e08803632943",
+                "7b4ad7883a906e6752e1e164e12e7bec502c7d391e6fb9a2daeb63f6d4eb4304",
             ),
             17: (
-                "85dd383fc17a7140bd9d3a3cb16d39d95d3961765b406c56bbd8d0b18562a516",
-                "df7388046ef6c77459a50d5aaae6ad1bfc331f16a19f1e58a28e0916eee369a6",
-                "90ba0b4fb4ac00eabc86d463a2165571a91e46a4f397fb934324fc4c00bde509",
-                "063cb91baf67363e16fd0d1b14c1a93f7f88e42dc89441c5888f7bd4bd9ea21e",
-                "4a289e197f44ddc87ea420249af27e186a117935f6c8d0d1f56ccbf5ebf425ed",
-                "fd89d4b3d3009a9b671756dd0cf345dcacc874d75806de436e349e4b6eedae0a",
+                "dac618ba7e4ef2a23b8febb094937d89d8ded25910bb471f54344722941a7e7f",
+                "b96326378f62d3c28433330e589064e6aae64bd05bc297b904aa9e3d657ea1a6",
+                "7567c6705b68e8cfa2f1b75f99074ecb123aa50b9f0f6a40db301ae4a8feb44b",
+                "59acdc308f1a26bb823bab2319831ac6da942a55841475376af4d5bc7494dc13",
+                "4247a87ad44a5e6f8065895b5da0568514e888552c2aa249336a97f28d149799",
+                "26f84479da0bcd5f6e6d815b8b228ba9a6195c7b1342e038cb09c9138ec91ab6",
             ),
         }
     if revision == "0134/guard_0030":

@@ -98,6 +98,7 @@ _EXECUTABLE_ADMISSION_FUNCTIONS = (
     "admit_executable_claim(uuid,uuid,jsonb,bytea,text)",
 )
 _STAGING_WORKER_RUNTIME_FUNCTIONS = (
+    "adopt_protected_runtime_trial_projection(uuid,jsonb,bytea,text,jsonb,bytea,text,bytea,text,jsonb,bytea,text,timestamp with time zone,uuid,uuid)",
     "current_protected_runtime_registration()",
     "submit_protected_runtime_trial_projection"
     "(uuid,jsonb,bytea,text,jsonb,bytea,text,bytea,text,jsonb,bytea,text)",
@@ -946,7 +947,7 @@ class PsycopgPersonalDevCapacityDatabase:
                             "combination_idx, provider_connection_id, provider_model_id, "
                             "submitted_by_user_id, usage_attributed_user_id, "
                             "usage_attributed_actor, family_key, lifecycle_authority_id, "
-                            "submitted_at, started_at, cancellation_requested_at, "
+                            "submitted_at, started_at, claimed_at, pre_start_heartbeat_at, failure_reason, cancellation_requested_at, "
                             "cancellation_observed_at, finished_at, next_attempt_at, "
                             "autoscaler_pool_name, worker_id, attempt_count, "
                             "execution_route_json, result, failure_message) "

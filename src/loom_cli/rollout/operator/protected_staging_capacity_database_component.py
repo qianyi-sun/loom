@@ -112,11 +112,12 @@ _AUTHORITY_REBIND_ACTIVITY_TABLES = (
     "trial_attempts",
     "trial_requirements",
     "trial_mutation_permits",
+    "trial_adoptions",
     "trial_writer_mutations",
 )
 _AUTHORITY_REBIND_ACTIVITY_UNION = " UNION ALL ".join(
     "SELECT 1 AS present FROM "
-    + ("ONLY " if table_name == "trial_mutation_permits" else "")
+    + ("ONLY " if table_name in {"trial_mutation_permits", "trial_adoptions"} else "")
     + f"loom_capacity_guard.{table_name}"
     for table_name in _AUTHORITY_REBIND_ACTIVITY_TABLES
 )
@@ -154,13 +155,16 @@ _AUTHORITY_REBIND_LOCK_TABLES = tuple(
     )
 )
 _AUTHORITY_REBIND_LOCK_SQL = ", ".join(
-    ("ONLY " if table_name == "trial_mutation_permits" else "")
+    ("ONLY " if table_name in {"trial_mutation_permits", "trial_adoptions"} else "")
     + f"loom_capacity_guard.{table_name}" for table_name in _AUTHORITY_REBIND_LOCK_TABLES
+)
+_ADOPTION_RELATION_PREDICATE = _RETRY_PERMIT_RELATION_PREDICATE.replace(
+    "'trial_mutation_permits'", "'trial_adoptions'",
 )
 _REQUIRE_RETRY_PERMIT_RELATION_SQL = f"""
 DO $retry_scope$
 BEGIN
-  IF NOT ({_RETRY_PERMIT_RELATION_PREDICATE}) THEN
+  IF NOT (({_RETRY_PERMIT_RELATION_PREDICATE}) AND ({_ADOPTION_RELATION_PREDICATE})) THEN
     RAISE EXCEPTION 'retry permission maintenance relation authority changed'
       USING ERRCODE = '55000';
   END IF;
@@ -256,6 +260,7 @@ _AUTHORITY_REBIND_FOUNDATION_PREDICATE = f"""
     (SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version)
       = 'guard_0034'
     AND ({_RETRY_PERMIT_RELATION_PREDICATE})
+    AND ({_ADOPTION_RELATION_PREDICATE})
     AND NOT EXISTS ({_AUTHORITY_REBIND_ACTIVITY_UNION})
     AND (SELECT count(*) FROM loom_capacity_guard.trial_writer_fence) = 1
     AND EXISTS (

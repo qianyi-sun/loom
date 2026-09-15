@@ -213,15 +213,20 @@ def upgrade() -> None:
           worker_incarnation uuid,
           claim_operation_id uuid,
           cancellation_transition_id uuid,
-          operation text NOT NULL CHECK (operation IN ('claim', 'retry', 'refund', 'state', 'output', 'pending_cancel')),
+          adoption_operation_id uuid,
+          operation text NOT NULL CHECK (operation IN ('claim', 'retry', 'refund', 'state', 'output', 'pending_cancel', 'adopt')),
           CONSTRAINT trial_mutation_permit_actor_binding CHECK (
             (operation = 'pending_cancel' AND worker_id IS NULL
              AND worker_incarnation IS NULL AND claim_operation_id IS NULL
-             AND cancellation_transition_id IS NOT NULL)
+             AND cancellation_transition_id IS NOT NULL AND adoption_operation_id IS NULL)
             OR
-            (operation <> 'pending_cancel' AND worker_id IS NOT NULL
+            (operation = 'adopt' AND worker_id IS NULL AND worker_incarnation IS NULL
+             AND claim_operation_id IS NULL AND cancellation_transition_id IS NULL
+             AND adoption_operation_id IS NOT NULL)
+            OR
+            (operation NOT IN ('pending_cancel', 'adopt') AND worker_id IS NOT NULL
              AND worker_incarnation IS NOT NULL AND claim_operation_id IS NOT NULL
-             AND cancellation_transition_id IS NULL)
+             AND cancellation_transition_id IS NULL AND adoption_operation_id IS NULL)
           ),
           old_binding jsonb NOT NULL,
           changes jsonb NOT NULL,
@@ -410,6 +415,9 @@ def upgrade() -> None:
     from capacity_guard_migrations.trial_output import install_output_reporting
 
     install_output_reporting(_rewrite)
+    from capacity_guard_migrations.trial_adoption import install_trial_adoption
+
+    install_trial_adoption(_rewrite)
     install_pending_cancellation(_rewrite)
 
 
@@ -463,7 +471,9 @@ def downgrade() -> None:
         raise RuntimeError("frozen retry permission evidence requires protected retirement")
     from capacity_guard_migrations.trial_output import uninstall_output_reporting
     from capacity_guard_migrations.trial_state import uninstall_state_reporting
+    from capacity_guard_migrations.trial_adoption import uninstall_trial_adoption
 
+    uninstall_trial_adoption(_rewrite)
     uninstall_pending_cancellation(_rewrite)
     uninstall_output_reporting(_rewrite)
     uninstall_state_reporting(_rewrite)
