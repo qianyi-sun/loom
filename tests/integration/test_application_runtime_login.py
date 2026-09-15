@@ -319,7 +319,7 @@ async def test_runtime_cutover_seal_refuses_drift_and_rolls_back_on_guard_loss(t
                 guard.close()
             return check(*args, **kwargs)
         monkeypatch.setattr(module, "_require_coordination_guard", require)
-        with pytest.raises(RuntimeError, match="credential state|coordination guard"):
+        with pytest.raises(RuntimeError, match=r"credential state|coordination guard"):
             module.seal_application_runtime_for_cutover(admin, owner_role=owner, role_bindings=bindings,
                 password="wrong-retained-password" if drift == "password" else arguments["password"],
                 target=arguments["target"], coordination_guard=arguments["coordination_guard"], schema_acl_profile="staging-readonly")

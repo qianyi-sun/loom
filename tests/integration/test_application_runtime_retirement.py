@@ -1,5 +1,7 @@
 """Retire only sealed application runtime sessions on real PostgreSQL."""
 
+import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
 import psycopg
@@ -45,7 +47,7 @@ def _close(maintenance, options):
 
 def _identity(peer, target):
     return (
-        peer.execute("SELECT * FROM pg_authid WHERE oid=%s", (target.owner_oid,)).fetchall(),
+        peer.execute("SELECT to_jsonb(r) FROM pg_authid r WHERE oid=%s", (target.owner_oid,)).fetchall(),
         peer.execute("SELECT * FROM pg_shdepend WHERE refclassid='pg_authid'::regclass "
                      "AND refobjid=%s ORDER BY dbid,classid,objid,objsubid,deptype", (target.owner_oid,)).fetchall(),
     )
@@ -96,3 +98,66 @@ def test_runtime_retirement_refuses_drift_before_any_session_signal(transfer_dat
         finally:
             if foreign is not None:
                 foreign.close()
+
+
+@pytest.mark.parametrize("database", ["target", "postgres"])
+def test_runtime_retirement_refuses_unpublished_startup(transfer_database, database):  # noqa: F811
+    from loom.application_runtime_retirement import retire_application_runtime_sessions
+
+    with _runtime(transfer_database) as (peer, maintenance, _, active, arguments, options), ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(psycopg.connect, transfer_database[0], autocommit=True,
+            connect_timeout=10, dbname=options["target"].database if database == "target" else "postgres",
+            options="-c post_auth_delay=3")
+        try:
+            deadline = time.monotonic() + 2
+            while not maintenance.execute("SELECT EXISTS (SELECT 1 FROM pg_locks "
+                "WHERE locktype='object' AND classid='pg_database'::regclass AND mode='RowExclusiveLock')").fetchone()[0]:
+                assert time.monotonic() < deadline, "startup lock was not observed"
+                time.sleep(0.01)
+            _seal(peer, arguments)
+            _close(maintenance, options)
+            with pytest.raises(RuntimeError, match="startup"):
+                retire_application_runtime_sessions(maintenance, **options)
+            assert active.execute("SELECT 1").fetchone() == (1,)
+        finally:
+            future.result(timeout=10).close()
+        retire_application_runtime_sessions(maintenance, **options)
+
+
+def test_runtime_retirement_stops_signalling_after_guard_loss(transfer_database):  # noqa: F811
+    from loom.application_runtime_retirement import retire_application_runtime_sessions
+
+    with _runtime(transfer_database) as (peer, maintenance, guard, active, arguments, options):
+        with psycopg.connect(transfer_database[0], user=options["target"].owner_role,
+                            password=options["password"], autocommit=True) as second:
+            _seal(peer, arguments)
+            _close(maintenance, options)
+            before = _identity(peer, options["target"])
+            signalled = []
+
+            class Interrupted:
+                @property
+                def info(self):
+                    return maintenance.info
+
+                def transaction(self):
+                    return maintenance.transaction()
+
+                def execute(self, query):
+                    result = maintenance.execute(query)
+                    rendered = query if isinstance(query, str) else query.as_string(maintenance)
+                    if rendered.startswith("SELECT pg_catalog.pg_terminate_backend"):
+                        signalled.append(rendered)
+                        guard.execute("SELECT pg_advisory_unlock_all()")
+                    return result
+
+            with pytest.raises(RuntimeError, match="coordination guard"):
+                retire_application_runtime_sessions(Interrupted(), **options)
+            assert len(signalled) == 1
+            ordered = sorted((active, second), key=lambda connection: connection.info.backend_pid)
+            with pytest.raises(psycopg.OperationalError):
+                ordered[0].execute("SELECT 1")
+            assert ordered[1].execute("SELECT 1").fetchone() == (1,)
+            assert _identity(peer, options["target"]) == before
+            assert maintenance.execute("SELECT datallowconn FROM pg_database WHERE oid=%s",
+                (options["target"].database_oid,)).fetchone() == (False,)
