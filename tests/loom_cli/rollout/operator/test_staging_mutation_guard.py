@@ -1761,3 +1761,59 @@ def test_guard_cli_preserves_kubernetes_timeout_and_tightly_bounds_systemctl(
         ("systemctl", 30),
         ("systemctl", 30),
     ]
+
+
+class _RetiredLifecycleCluster(_Cluster):
+    def __init__(self) -> None:
+        from loom_cli.rollout.operator.protected_legacy_writer_fence import render_legacy_writer_fence
+
+        super().__init__()
+        self.retirement = "c" * 64
+        metadata = cast(dict[str, object], self.cronjob["metadata"])
+        cast(dict[str, object], metadata["annotations"])["loom.dev/legacy-writer-retirement"] = self.retirement
+        cast(dict[str, object], self.cronjob["spec"])["suspend"] = True
+        self.policies = {}
+        for index, document in enumerate(render_legacy_writer_fence(
+            intent_digest=self.retirement,
+            control_plane_image="registry.example.test/loom-control-plane@sha256:" + "d" * 64,
+        )[-2:]):
+            metadata = document["metadata"]
+            metadata.update({"uid": f"50de34f1-f12b-4dce-9f1c-e049f066bc5{index}", "resourceVersion": "20", "generation": 1})
+            if document["kind"] == "ValidatingAdmissionPolicy":
+                document["status"] = {"observedGeneration": 1, "typeChecking": {"expressionWarnings": []}}
+            self.policies[document["kind"]] = document
+
+    def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+        for kind, resource in (("ValidatingAdmissionPolicy", "validatingadmissionpolicies.admissionregistration.k8s.io"),
+                               ("ValidatingAdmissionPolicyBinding", "validatingadmissionpolicybindings.admissionregistration.k8s.io")):
+            if "get" in argv and resource in argv:
+                return subprocess.CompletedProcess(argv, 0, json.dumps(self.policies[kind]), "")
+        return super().__call__(argv)
+
+
+def test_guard_reacquires_and_releases_with_permanent_lifecycle_retirement(tmp_path: Path) -> None:
+    cluster = _RetiredLifecycleCluster()
+    evidence = _hold(tmp_path, cluster)
+    assert evidence.state == "released"
+    assert cast(dict[str, object], cluster.cronjob["spec"])["suspend"] is True
+    annotations = cast(dict[str, object], cast(dict[str, object], cluster.cronjob["metadata"])["annotations"])
+    assert annotations == {"example.test/preserved": "value", "loom.dev/legacy-writer-retirement": cluster.retirement}
+    assert "unlock" in cluster.events
+    assert "restore" not in cluster.events
+    assert _reconcile_guard(config=_config(tmp_path), cluster=cluster, show_guard=lambda _: None) == {"status": "idle"}
+
+
+@pytest.mark.parametrize("drift", ["binding-audit", "policy-allow", "untyped", "deleted"])
+def test_guard_refuses_unproved_permanent_retirement(tmp_path: Path, drift: str) -> None:
+    cluster = _RetiredLifecycleCluster()
+    if drift == "binding-audit":
+        cluster.policies["ValidatingAdmissionPolicyBinding"]["spec"]["validationActions"] = ["Audit"]
+    elif drift == "policy-allow":
+        cluster.policies["ValidatingAdmissionPolicy"]["spec"]["validations"][0]["expression"] = "true"
+    elif drift == "untyped":
+        cluster.policies["ValidatingAdmissionPolicy"]["status"] = {}
+    else:
+        cluster.policies["ValidatingAdmissionPolicy"]["metadata"]["deletionTimestamp"] = "2026-09-15T18:00:00Z"
+    with pytest.raises(MutationGuardError):
+        _hold(tmp_path, cluster)
+    assert not cluster.events
