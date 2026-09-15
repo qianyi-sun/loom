@@ -169,7 +169,12 @@ async def test_pristine_current_guard_is_eligible_for_authority_rebind(
         cfg = _guard_config(capacity_guard_database)
         command.downgrade(cfg, "guard_0029")
         with engine.connect() as connection:
-            assert connection.exec_driver_sql(statement).scalar_one() == "drifted"
+            # The production caller checks migration head before issuing this
+            # current-schema query. PostgreSQL resolves missing relations before
+            # evaluating its revision predicate, so this direct probe must fail.
+            with pytest.raises(DBAPIError) as absent:
+                connection.exec_driver_sql(statement)
+            assert absent.value.orig.sqlstate == "42P01"
         command.upgrade(cfg, "head")
         with engine.connect() as connection:
             assert connection.exec_driver_sql(statement).scalar_one() == "exact"
