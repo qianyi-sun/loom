@@ -179,6 +179,38 @@ async def test_wait_reuses_compatible_native_allocatable_history(waiting_build):
                            now=now + timedelta(seconds=2))
 
 
+@pytest.mark.parametrize("occupant", ["managed", "foreign"])
+async def test_wait_can_use_observed_managed_drain_without_cold_sample(native_build_setup, occupant):
+    controller, sessions, kube, _, _, trial_id, target, now = native_build_setup
+    occupied = placement_fixture(target_id=target.target_id, nodes=1, used_nodes=1,
+                                 quota_nodes=1, requested_cpu=64_000)
+    occupied["template_samples"] = []
+    occupied["node_group"]["template"]["preset"] = "new-template-without-sample"
+    node = occupied["nodes"][0]
+    node["used_pod_slots"] = 1
+    if occupant == "managed":
+        node["managed_pods"] = [{"uid": "occupied-pod", "lease_id": "occupied-lease", "generation": 1,
+                                 "requests": node["requested"].copy()}]
+    async with sessions() as session, session.begin():
+        await _record(session, target.target_id, now + timedelta(milliseconds=2), occupied)
+    await controller.run_once()
+    async with sessions() as session:
+        wait = await session.get(TaskImageCapacityWait, target.target_id)
+        assert (wait is not None) == (occupant == "managed")
+    if occupant == "foreign":
+        return  # No evidence that unknown resident/DaemonSet overhead can drain.
+    free = placement_fixture(target_id=target.target_id, nodes=1, used_nodes=1, quota_nodes=1)
+    free["template_samples"] = []
+    free["node_group"]["template"]["preset"] = "new-template-without-sample"
+    async with sessions() as session, session.begin():
+        await _record(session, target.target_id, now + timedelta(seconds=1), free)
+    with pytest.raises(ExecutionProvisioningBlockedError):
+        async with sessions() as session, session.begin():
+            await _reserve(session, trial_id=trial_id, target=target, now=now + timedelta(seconds=2))
+    await controller.run_once()
+    assert kube.ensure_calls == 1
+
+
 @pytest.mark.parametrize("domain", ["shared", "independent", "shared-disk", "impossible-policy"])
 async def test_wait_protects_shared_native_quota_but_not_an_independent_domain(waiting_build, domain):
     _, sessions, _, _, _, _, first, now = waiting_build
