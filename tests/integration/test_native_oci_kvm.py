@@ -197,6 +197,53 @@ def test_installed_release_requires_original_uid_and_real_root_ownership(mode):
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
 
 
+@pytest.mark.parametrize("mode", ["clean", "mounted", "foreign", "unprivileged", "journal-complete",
+    "journal-quarantining", "journal-quarantined", "journal-pruned", "journal-removing", "journal-completed", "journal-retired",
+    "journal-lock", "journal-identity", "journal-unexplained", "journal-pending-link",
+    "journal-retired-quarantined", "journal-retired-completed",
+    "journal-locator-digest", "journal-locator-mode", "journal-locator-oversized"])
+def test_quarantine_pruner_preserves_real_ownership_and_mount_fences(mode):
+    if platform.machine() != "x86_64":
+        pytest.skip("quarantine fixture currently has AMD64-only dependencies")
+    name = "loom-quarantine-prune-" + uuid4().hex
+    try:
+        result = checked("docker", "run", "--rm", "--init", "--name", name,
+            "--network=none", "--cpus=1", "--memory=256m", "--pids-limit=64", "--user=0:0",
+            "--cap-drop=ALL", "--cap-add=DAC_OVERRIDE", "--cap-add=CHOWN", "--cap-add=FOWNER",
+            "--cap-add=SETUID", "--cap-add=SETGID", "--cap-add=SYS_ADMIN",
+            "--security-opt=apparmor=unconfined", "--security-opt=seccomp=unconfined", "--read-only",
+            "--tmpfs=/tmp:rw,nodev,size=16m,mode=1777", "--tmpfs=/run:rw,nodev,size=16m,mode=0755",
+            "--env=PYTHONPATH=/trusted-src",
+            "--mount", f"type=bind,src={ROOT / 'tests/support/native_kvm'},dst=/test-support,readonly",
+            "--mount", f"type=bind,src={ROOT / 'src'},dst=/trusted-src,readonly",
+            EXECUTOR, "python3", "/test-support/quarantine_prune.py", mode,
+            capture_output=True, text=True)
+        assert f"quarantine-prune-{mode}-verified" in result.stdout
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(f"quarantine pruning fixture failed:\n{exc.stdout}\n{exc.stderr}")
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
+
+
+def test_native_recovery_cgroup_authority_checks_real_kernel_controls():
+    name = "loom-native-cgroup-authority-" + uuid4().hex
+    try:
+        result = checked("docker", "run", "--rm", "--init", "--name", name,
+            "--network=none", "--cgroupns=private", "--cpus=1", "--memory=256m", "--pids-limit=64",
+            "--user=0:0", "--cap-drop=ALL", "--cap-add=SYS_ADMIN", "--cap-add=CHOWN",
+            "--cap-add=SETUID", "--cap-add=SETGID", "--security-opt=apparmor=unconfined",
+            "--security-opt=seccomp=unconfined", "--read-only", "--tmpfs=/run:rw,nodev,size=16m,mode=0755",
+            "--env=PYTHONPATH=/trusted-src",
+            "--mount", f"type=bind,src={ROOT / 'tests/support/native_kvm'},dst=/test-support,readonly",
+            "--mount", f"type=bind,src={ROOT / 'src'},dst=/trusted-src,readonly",
+            EXECUTOR, "python3", "/test-support/cgroup_authority.py", capture_output=True, text=True)
+        assert "native-cgroup-authority-verified" in result.stdout
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(f"native cgroup authority fixture failed:\n{exc.stdout}\n{exc.stderr}")
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
+
+
 def test_unprivileged_rootlesskit_launches_fixed_native_kvm_runtime(tmp_path):
     """Rootless outer runtime prerequisite, not complete native build acceptance.
 

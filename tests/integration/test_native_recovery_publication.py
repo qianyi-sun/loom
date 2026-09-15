@@ -30,7 +30,9 @@ from tests.integration.test_personal_dev_build_guard_registration import CREDENT
 from tests.integration.test_personal_dev_native_builder_store import sessions as sessions
 
 
-async def recovery_input(prepared_input, owner_sessions, monkeypatch, *, admit=True):
+async def recovery_input(prepared_input, owner_sessions, monkeypatch, *, admit=True, credential=CREDENTIAL):
+    from tests.integration import test_personal_dev_build_guard_registration as registration
+
     contracts = import_module("loom_capacity_agent.native_recovery_publication")
     policy_store = import_module("loom_capacity_build_guard.native_recovery_store").NativeRecoveryInstallationStore
     factory, engine, installation, proposal, *_ = prepared_input
@@ -46,15 +48,19 @@ async def recovery_input(prepared_input, owner_sessions, monkeypatch, *, admit=T
         async with owner_factory.begin() as session:
             await session.execute(text(f"SET LOCAL ROLE {owner}"))
             assert await policy_store(session, expected_owner_role=owner).retain_recovery(policy, hosts=(host,)) == policy
-    claim = await claim_input(prepared_input, monkeypatch)
+    with monkeypatch.context() as registration_patch:
+        registration_patch.setattr(registration, "CREDENTIAL", credential)
+        claim = await claim_input(prepared_input, registration_patch)
     async with factory.begin() as session:
-        await store(session, installation).claim_platform(claim, worker_credential=CREDENTIAL)
+        await store(session, installation).claim_platform(claim, worker_credential=credential)
     with engine.connect() as connection:
         physical = PhysicalJobBindingV2.model_validate_json(bytes(connection.scalar(text(
-            "SELECT wire_payload FROM loom_capacity_build_guard.execution_events WHERE kind='bound'"))))
+            "SELECT wire_payload FROM loom_capacity_build_guard.execution_events WHERE kind='bound' AND intent_id=:intent"),
+            {"intent": claim.binding.intent_id})))
     locator = NativeInstalledAttemptV1(physical=physical, worker_id=claim.worker_id,
         worker_incarnation=claim.worker_incarnation, config_sha256=policy.worker_config_sha256,
-        release_manifest_sha256=policy.release_manifest_sha256, directory="/scratch/attempt-123", device=8, inode=100)
+        release_manifest_sha256=policy.release_manifest_sha256, directory=f"/scratch/attempt-{claim.operation_id}",
+        device=8, inode=claim.operation_id.int % (2**63 - 1) + 1)
     prepared = NativeRecoveryPreparationV1(locator=locator, launch_profile_sha256=pool.launch_profile_sha256,
         node_configuration_sha256=canonical_digest(host), node_id=host.node_id, boot_id=host.boot_id,
         original_uid=host.original_uid, original_gid=host.original_gid,

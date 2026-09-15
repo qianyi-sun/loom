@@ -1,0 +1,7 @@
+# Disposable transport proof only. Never install or publish as a worker.
+FROM ghcr.io/qianyi-sun/loom-capacity-executor@sha256:26d6a31e82838187398889cc958236f5f7e309353caca8c82dc3160828332604
+USER 0:0
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-server sudo \
+    && useradd --uid 25000 --no-create-home --shell /bin/sh --password NP loom-native-recovery \
+    && install -d -m 0755 /run/sshd
+COPY --from=trusted-src / /usr/local/lib/python3.12/site-packages/

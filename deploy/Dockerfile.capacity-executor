@@ -8,6 +8,7 @@ WORKDIR /build
 COPY pyproject.toml uv.lock README.md ./
 COPY src/loom ./src/loom
 COPY src/loom_capacity_agent ./src/loom_capacity_agent
+COPY src/loom_capacity_build_guard ./src/loom_capacity_build_guard
 COPY src/loom_capacity_executor ./src/loom_capacity_executor
 COPY src/loom_capacity_guard ./src/loom_capacity_guard
 COPY src/loom_capacity_manager ./src/loom_capacity_manager
