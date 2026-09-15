@@ -7,7 +7,7 @@ import os
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Request
 from prometheus_client import make_asgi_app
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
@@ -109,7 +109,34 @@ async def _cancel_and_drain_tasks(
 
 
 def create_app(settings: ControlPlaneSettings) -> FastAPI:
+    trial_cutover = settings.protected_trial_cutover_enabled
+    if trial_cutover and settings.protected_worker_runtime_db_url_file is None:
+        raise ValueError("trial cutover requires protected worker runtime")
     source_config = ServiceExecutionSourceConfig.from_settings(settings)
+
+    async def admit_trial_cutover_route(request: Request) -> None:
+        if not trial_cutover or request.method in {"GET", "HEAD", "OPTIONS"}:
+            return
+        # Exact route templates, after routing and before handler dependencies.
+        # New mutation routes remain unavailable until explicitly reviewed.
+        allowed = {
+            ("POST", "/trials/claim"), ("POST", "/work/claim"),
+            ("POST", "/trials/{trial_id}/adopt-protected"),
+            ("POST", "/trials/{trial_id}/cancel"),
+            ("POST", "/trials/{trial_id}/retry"),
+            ("POST", "/trials/{trial_id}/pre-start-heartbeat"),
+            ("POST", "/workers/register"), ("POST", "/workers/{worker_id}/heartbeat"),
+            ("PATCH", "/trials/{trial_id}/state"),
+            ("PATCH", "/trials/{trial_id}/trajectory_index"),
+            ("POST", "/trials/{trial_id}/events"),
+            ("PUT", "/trials/{trial_id}/resource-usage"),
+            ("POST", "/artifacts/upload-url"), ("POST", "/step-tokens"),
+            ("POST", "/api/v1/internal/trial-cache/claim"),
+            ("POST", "/api/v1/internal/trial-cache/{cache_key}/refresh"),
+            ("DELETE", "/api/v1/internal/trial-cache/{cache_key}"),
+        }
+        if (request.method, getattr(request.scope.get("route"), "path", None)) not in allowed:
+            raise HTTPException(status_code=503, detail="protected_trial_cutover_writer_disabled")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -206,7 +233,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
         )
 
         slurm_controller_config = build_controller_config(
-            enabled=settings.slurm_worker_controller_enabled,
+            enabled=settings.slurm_worker_controller_enabled and not trial_cutover,
             environment=settings.slurm_worker_controller_environment,
             pool_name=settings.slurm_worker_controller_pool_name,
             allowed_nodes_csv=settings.slurm_worker_controller_allowed_nodes,
@@ -228,22 +255,24 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             command_timeout_seconds=(settings.slurm_worker_controller_command_timeout_seconds),
         )
 
-        crash_detector_task = asyncio.create_task(
-            run_crash_detector_loop(
-                session_factory=session_factory,
-                expiry_sec=settings.worker_heartbeat_expiry_sec,
-                interval_sec=settings.worker_reclaim_sweep_interval_sec,
-                claimed_without_start_expiry_sec=(settings.claimed_without_start_expiry_sec),
-                running_stale_timeout_multiplier=(
-                    settings.stale_running_trial_timeout_multiplier
-                    if settings.stale_running_trial_reclaim_enabled
-                    else None
+        crash_detector_task: asyncio.Task[None] | None = None
+        if not trial_cutover:
+            crash_detector_task = asyncio.create_task(
+                run_crash_detector_loop(
+                    session_factory=session_factory,
+                    expiry_sec=settings.worker_heartbeat_expiry_sec,
+                    interval_sec=settings.worker_reclaim_sweep_interval_sec,
+                    claimed_without_start_expiry_sec=(settings.claimed_without_start_expiry_sec),
+                    running_stale_timeout_multiplier=(
+                        settings.stale_running_trial_timeout_multiplier
+                        if settings.stale_running_trial_reclaim_enabled
+                        else None
+                    ),
+                    running_stale_grace_sec=settings.stale_running_trial_grace_sec,
+                    running_stale_silence_sec=settings.stale_running_trial_silence_sec,
                 ),
-                running_stale_grace_sec=settings.stale_running_trial_grace_sec,
-                running_stale_silence_sec=settings.stale_running_trial_silence_sec,
-            ),
-            name="loom-cp-crash-detector",
-        )
+                name="loom-cp-crash-detector",
+            )
         # Background refresher for gauge metrics (workers_active,
         # queue_depth, trials_inflight). See metrics_refresher.py
         # for the cadence rationale.
@@ -259,29 +288,35 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
         # attempt_count >= team_quotas.max_attempts_ceiling to state='failed' with
         # failure_reason='retry_exhausted'. Runs at the same cadence
         # as the crash detector so the two sweeps are in lock-step.
-        retry_exhausted_task = asyncio.create_task(
-            run_retry_exhausted_sweeper_loop(
-                session_factory=session_factory,
-                interval_sec=settings.worker_reclaim_sweep_interval_sec,
-            ),
-            name="loom-cp-retry-exhausted-sweeper",
-        )
-        worker_pool_autoscaler_task = asyncio.create_task(
-            run_worker_pool_autoscaler_loop(
-                session_factory=session_factory,
-                environment=settings.slurm_worker_controller_environment,
-                interval_sec=settings.worker_reclaim_sweep_interval_sec,
-                freshness_sec=settings.worker_heartbeat_expiry_sec,
-            ),
-            name="loom-cp-worker-pool-autoscaler",
-        )
-        live_preview_reconciler_task = asyncio.create_task(
-            run_live_preview_reconciler_loop(
-                session_factory=session_factory,
-                interval_sec=30,
-            ),
-            name="loom-cp-live-preview-reconciler",
-        )
+        retry_exhausted_task: asyncio.Task[None] | None = None
+        if not trial_cutover:
+            retry_exhausted_task = asyncio.create_task(
+                run_retry_exhausted_sweeper_loop(
+                    session_factory=session_factory,
+                    interval_sec=settings.worker_reclaim_sweep_interval_sec,
+                ),
+                name="loom-cp-retry-exhausted-sweeper",
+            )
+        worker_pool_autoscaler_task: asyncio.Task[None] | None = None
+        if not trial_cutover:
+            worker_pool_autoscaler_task = asyncio.create_task(
+                run_worker_pool_autoscaler_loop(
+                    session_factory=session_factory,
+                    environment=settings.slurm_worker_controller_environment,
+                    interval_sec=settings.worker_reclaim_sweep_interval_sec,
+                    freshness_sec=settings.worker_heartbeat_expiry_sec,
+                ),
+                name="loom-cp-worker-pool-autoscaler",
+            )
+        live_preview_reconciler_task: asyncio.Task[None] | None = None
+        if not trial_cutover:
+            live_preview_reconciler_task = asyncio.create_task(
+                run_live_preview_reconciler_loop(
+                    session_factory=session_factory,
+                    interval_sec=30,
+                ),
+                name="loom-cp-live-preview-reconciler",
+            )
         slurm_controller_task: asyncio.Task[None] | None = None
         if slurm_controller_config is not None:
             slurm_controller_task = asyncio.create_task(
@@ -296,7 +331,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 name="loom-cp-elastic-slurm-worker-controller",
             )
         service_execution_scheduler_task: asyncio.Task[None] | None = None
-        if settings.service_execution_scheduler_enabled:
+        if settings.service_execution_scheduler_enabled and not trial_cutover:
             service_execution_scheduler_task = asyncio.create_task(
                 run_service_execution_scheduler_loop(
                     session_factory=session_factory,
@@ -314,7 +349,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             )
         service_execution_materializer_task: asyncio.Task[None] | None = None
         service_execution_materializer_stop_event: asyncio.Event | None = None
-        if settings.service_execution_materializer_enabled:
+        if settings.service_execution_materializer_enabled and not trial_cutover:
             service_execution_materializer_stop_event = asyncio.Event()
             service_execution_materializer_task = asyncio.create_task(
                 run_service_execution_materializer_loop(
@@ -364,6 +399,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
         title="Loom Control Plane",
         version="0.0.1",
         lifespan=lifespan,
+        dependencies=[Depends(admit_trial_cutover_route)],
     )
     app.include_router(health.router)
     app.include_router(pipeline_catalog.router)

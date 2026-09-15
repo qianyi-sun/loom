@@ -527,6 +527,23 @@ PostgreSQL 16/17 pins. The retained `0142` and `0147` / `guard_0034` profiles us
 original role-convergence recipe in `scripts/application_schema_trial_writer_baseline.py`;
 current grants cannot silently change a rollback reference.
 
+The control-plane `protected_trial_cutover_enabled` setting requires the protected
+runtime database credential. It disables the legacy crash/retry sweepers, pool
+autoscaler, Slurm controller, live-preview reconciler, and service-execution
+scheduler/materializer. Mutation routes use an explicit allowlist for existing
+trial execution; new submissions, administrative fleet mutations, pipeline
+attempt mutations, and Terminus recovery are unavailable. Existing worker
+credentials and trial identities are retained. The setting is one process's
+no-resume control: rollout must independently prove retirement of older replicas,
+SQL sessions, service/family/pipeline controllers, lifecycle jobs, and host writers.
+It does not itself establish fleet writer closure.
+
+Protected pre-start heartbeats authenticate the credential, live claim, worker
+incarnation, and optional execution lease in one transaction. A frozen-writer
+permission allows only `pre_start_heartbeat_at` to change while the trial is
+claimed and has not started. State changes, invalid claim authority, and altered
+trigger side effects cause rejection and rollback.
+
 After the legacy trial writer is frozen, only the credential-validated protected
 claim, retry, state/output, pending-cancellation and legacy-adoption functions can issue private,
 one-use mutation permissions. They bind the
