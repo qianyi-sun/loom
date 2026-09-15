@@ -395,3 +395,93 @@ async def test_historical_status_never_aliases_foreign_or_corrupt_delivery(deliv
     encoded = json.dumps(query, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
     with pytest.raises(ValueError):
         await receiver.observe_receipt(encoded)
+
+
+@pytest.mark.parametrize("lose_reply", [False, True])
+async def test_controller_delivery_retains_identity_before_send_and_recovers_after_expiry(delivery, tmp_path, lose_reply):
+    from loom_capacity_executor.journal import ExecutorJournal
+    from loom_capacity_executor.native_bootstrap_outbox import NativeBootstrapOutbox
+
+    _, payload, receiver = objects(delivery)
+    sent = []
+    journal_path = tmp_path / "delivery-journal"
+    with ExecutorJournal(journal_path) as journal:
+        class Client:
+            async def deliver(self, raw):
+                assert journal.latest("executor", "native-delivery:" + str(delivery.physical.binding.intent_id)) is not None
+                sent.append(raw)
+                receipt = await receiver.receive(raw)
+                if lose_reply:
+                    raise ConnectionError("lost delivery reply")
+                return receipt
+
+            async def observe_receipt(self, raw):
+                return await receiver.observe_receipt(raw)
+
+        owner = NativeBootstrapOutbox(journal=journal, store=delivery.store,
+            clients={delivery.physical.binding.node_ids[0]: Client()}, configuration_sha256="a" * 64,
+            now=lambda: delivery.now)
+        if lose_reply:
+            with pytest.raises(ConnectionError):
+                await owner.deliver(delivery.physical)
+        else:
+            assert await owner.deliver(delivery.physical) == module_receipt(payload)
+        # Neither an expired local capability nor an absent source permits creation
+        # of another credential. The retained receipt is the recovery authority.
+        delivery.now += timedelta(minutes=10)
+        (delivery.controller / delivery.lease.reference).unlink()
+        assert await owner.deliver(delivery.physical) == module_receipt(payload)
+        assert sent == [payload]
+        assert json.loads(payload)["record"]["capability"] not in journal_path.read_text()
+
+
+def module_receipt(payload):
+    from loom_capacity_executor.native_bootstrap_delivery import expected_native_delivery_receipt
+    return expected_native_delivery_receipt(payload)
+
+
+async def test_controller_delivery_refuses_changed_configuration_on_retry(delivery, tmp_path):
+    from loom_capacity_executor.journal import ExecutorJournal
+    from loom_capacity_executor.native_bootstrap_outbox import NativeBootstrapOutbox
+
+    sent = []
+
+    class Client:
+        async def deliver(self, raw):
+            sent.append(raw)
+            raise ConnectionError("uncertain delivery")
+
+        async def observe_receipt(self, raw):
+            raise AssertionError("changed route was used")
+
+    with ExecutorJournal(tmp_path / "delivery-journal") as journal:
+        arguments = dict(journal=journal, store=delivery.store,
+            clients={delivery.physical.binding.node_ids[0]: Client()}, now=lambda: delivery.now)
+        with pytest.raises(ConnectionError):
+            await NativeBootstrapOutbox(**arguments, configuration_sha256="a" * 64).deliver(delivery.physical)
+        with pytest.raises(RuntimeError, match="changed"):
+            await NativeBootstrapOutbox(**arguments, configuration_sha256="b" * 64).deliver(delivery.physical)
+        assert len(sent) == 1
+
+
+async def test_controller_delivery_never_sends_without_durable_intent(delivery, tmp_path, monkeypatch):
+    from loom_capacity_executor.journal import ExecutorJournal
+    from loom_capacity_executor.native_bootstrap_outbox import NativeBootstrapOutbox
+
+    class Client:
+        async def deliver(self, raw):
+            raise AssertionError("delivery preceded journal persistence")
+
+        async def observe_receipt(self, raw):
+            raise AssertionError("fresh delivery has no prior receipt")
+
+    def fail(*args, **kwargs):
+        raise OSError("journal unavailable")
+
+    with ExecutorJournal(tmp_path / "delivery-journal") as journal:
+        monkeypatch.setattr(journal, "append", fail)
+        owner = NativeBootstrapOutbox(journal=journal, store=delivery.store,
+            clients={delivery.physical.binding.node_ids[0]: Client()}, configuration_sha256="a" * 64,
+            now=lambda: delivery.now)
+        with pytest.raises(OSError, match="journal unavailable"):
+            await owner.deliver(delivery.physical)
