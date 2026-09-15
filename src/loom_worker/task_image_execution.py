@@ -29,12 +29,33 @@ from loom_task_image_authority.execution_grant import (
 )
 from loom_task_image_authority.execution_start import ExecutionStartReceipt as ExecutionStartReceipt
 from loom_task_image_authority.execution_start import ExecutionStartRequest
+from loom_task_image_authority.publication_contracts import CanonicalUUID
 from loom_task_image_authority.publication_keyset import ExecutionGrantTrustRoot, _instant
 from loom_worker.task_bundle_integrity import verified_task_image_cache_identity
 
 
 def _clock() -> datetime:
     return datetime.now(UTC)
+
+
+@dataclass(frozen=True)
+class WorkerExecutionTrust:
+    """Injected by trusted release composition, never populated from a claim."""
+
+    root: ExecutionGrantTrustRoot
+    purpose: BuildPurpose
+    shadow_campaign_id: str | None
+    clock: Callable[[], datetime] = _clock
+
+    def __post_init__(self) -> None:
+        if type(self.root) is not ExecutionGrantTrustRoot:
+            raise ValueError("execution trust requires a pinned root")
+        self.root.__post_init__()
+        TypeAdapter(BuildPurpose).validate_python(self.purpose, strict=True)
+        if self.shadow_campaign_id is not None:
+            TypeAdapter(CanonicalUUID).validate_python(self.shadow_campaign_id, strict=True)
+        if (self.purpose == "production") != (self.shadow_campaign_id is None):
+            raise ValueError("execution purpose and campaign disagree")
 
 
 @dataclass
@@ -65,7 +86,8 @@ class WorkerTaskImageExecution:
         ):
             raise ValueError("invalid execution start deadline")
 
-    def _verify(self) -> VerifiedExecutionGrant:
+    def verify_runtime(self) -> VerifiedExecutionGrant:
+        """Check current signed inputs and private source, without starting work."""
         verified = verify_execution_grant(
             wire=self.wire, plan_wire=self.plan_wire, publication_wires=self.publication_wires,
             keyset_wire=self.keyset_wire, trust_root=self.trust_root,
@@ -104,7 +126,7 @@ class WorkerTaskImageExecution:
         self._attempted = True
         began = time.monotonic()
         async with asyncio.timeout(self.timeout_seconds):
-            verified = self._verify()
+            verified = self.verify_runtime()
             grant = verified.grant
             request = ExecutionStartRequest.model_validate(dict(
                 schema="loom.task-image-execution-start-request/v1",
@@ -126,7 +148,7 @@ class WorkerTaskImageExecution:
             )
             # Recheck the actual tree and original signed evidence after I/O.
             # A prior verification object is not authority after a long pull.
-            current = self._verify()
+            current = self.verify_runtime()
             now = self.clock()
             if (
                 receipt.request_sha256 != request.digest

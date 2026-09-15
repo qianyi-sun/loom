@@ -81,6 +81,8 @@ from loom.trial.workspace import (
 from loom.verifier.base import Verifier
 from loom.verifier.pytest_verifier import PytestVerifier
 from loom.verifier.script_verifier import ScriptVerifier
+from loom_task_image_authority.execution_delivery import SignedWorkClaim, TaskImageExecutionDelivery
+from loom_task_image_authority.execution_grant import verify_execution_grant
 from loom_worker.artifact_input_journal import allocatable_capacity
 from loom_worker.config import WorkerSettings
 from loom_worker.control_plane_client import HttpControlPlaneClient, StepTokenClient
@@ -109,6 +111,7 @@ from loom_worker.signal_handler import ShutdownState, install_signal_handlers
 from loom_worker.step_gateway_client import StepTokenGatewayClient
 from loom_worker.task_bundle_integrity import verified_task_image_cache_identity
 from loom_worker.task_image import TaskImageBuildError, resolve_task_image
+from loom_worker.task_image_execution import WorkerExecutionTrust, WorkerTaskImageExecution
 from loom_worker.task_sidecars import DockerTaskSidecarRuntime
 from loom_worker.terminal_task_validator import attest_terminal_task_validator
 from loom_worker.trial_cache import (
@@ -529,6 +532,7 @@ async def run_worker(
     settings: WorkerSettings,
     *,
     pipeline_run: Callable[[ExecutionAttemptClaimV1], Coroutine[Any, Any, None]] | None = None,
+    execution_trust: WorkerExecutionTrust | None = None,
 ) -> None:
     state = ShutdownState()
     install_signal_handlers(state)
@@ -683,6 +687,7 @@ async def run_worker(
                     sandbox_allocator=sandbox_allocator,
                     sandbox_singleton=sandbox_singleton,
                     resource_usage_outbox=resource_usage_outbox,
+                    execution_trust=execution_trust,
                 )
                 if image_eviction.due():
                     await asyncio.to_thread(_run_trial_cache_eviction, settings)
@@ -976,6 +981,7 @@ async def _claim_available_work(
     sandbox_singleton: SandboxSingletonManager | None = None,
     read_setup_health: Callable[[], Any] | None = None,
     resource_usage_outbox: ResourceUsageOutbox | None = None,
+    execution_trust: WorkerExecutionTrust | None = None,
 ) -> int:
     """Claim from the shared queue when the Pipeline assembly is injected.
 
@@ -987,6 +993,8 @@ async def _claim_available_work(
     """
 
     if pipeline_run is None or capability_snapshot_digest is None:
+        if execution_trust is not None:
+            raise ValueError("trusted task images require authenticated shared-queue claims")
         return await _claim_available_trials(
             pool=pool,
             settings=settings,
@@ -1039,7 +1047,12 @@ async def _claim_available_work(
         # The HTTP boundary contains JSON UUID and timestamp strings.  Validate
         # through Pydantic's JSON path so strict in-process construction remains
         # closed without rejecting the canonical transport representation.
-        parsed = WorkClaimV1.model_validate_json(canonical_document(envelope))
+        raw_payload = envelope.get("payload")
+        parsed: WorkClaimV1 | SignedWorkClaim
+        if isinstance(raw_payload, dict) and raw_payload.get("task_image_execution") is not None:
+            parsed = SignedWorkClaim.model_validate_json(canonical_document(envelope))
+        else:
+            parsed = WorkClaimV1.model_validate_json(canonical_document(envelope))
         payload = parsed.payload
         if parsed.work_kind == "trial":
             await _spawn_trial(
@@ -1049,11 +1062,12 @@ async def _claim_available_work(
                 gateway_client=gateway_client,
                 object_store=object_store,
                 worker_id=worker_id,
-                payload=payload.model_dump(mode="json"),
+                payload=payload.model_dump(mode="json", by_alias=True),
                 vllm_registry=vllm_registry,
                 sandbox_allocator=sandbox_allocator,
                 sandbox_singleton=sandbox_singleton,
                 resource_usage_outbox=resource_usage_outbox,
+                execution_trust=execution_trust,
             )
         elif parsed.work_kind == "execution_attempt":
             if not isinstance(payload, ExecutionAttemptClaimV1):
@@ -1175,6 +1189,7 @@ async def _spawn_trial(
     sandbox_allocator: SandboxNetworkAllocator | None = None,
     sandbox_singleton: SandboxSingletonManager | None = None,
     resource_usage_outbox: ResourceUsageOutbox | None = None,
+    execution_trust: WorkerExecutionTrust | None = None,
 ) -> None:
     trial_id = UUID(str(payload["trial_id"]))
     team_id = UUID(str(payload["team_id"]))
@@ -1189,6 +1204,7 @@ async def _spawn_trial(
     async def _setup_run_and_cleanup() -> None:
         task_dir: Path | None = None
         trial_config: TrialConfig | None = None
+        trusted_execution: WorkerTaskImageExecution | None = None
         pre_start_heartbeat_task = asyncio.create_task(
             _run_pre_start_heartbeat(
                 cp_client=cp_client,
@@ -1205,6 +1221,42 @@ async def _spawn_trial(
                 if raw_task_image_materialization is not None
                 else None
             )
+            raw_execution = payload.get("task_image_execution")
+            delivery: TaskImageExecutionDelivery | None = None
+            if raw_execution is not None:
+                if execution_trust is None or task_image_materialization is not None:
+                    raise ValueError("signed execution requires release trust and forbids V1 fallback")
+                delivery = TaskImageExecutionDelivery.model_validate_json(json.dumps(raw_execution))
+                expected = delivery.claim
+                if (
+                    expected.trial_id != str(trial_id) or expected.team_id != str(team_id)
+                    or expected.worker_id != str(worker_id)
+                    or expected.trial_attempt_count != attempt_count
+                ):
+                    raise ValueError("signed execution delivery differs from authenticated worker claim")
+                verified = verify_execution_grant(
+                    wire=delivery.grant_envelope.encode(), plan_wire=delivery.frozen_plan.encode(),
+                    publication_wires=tuple(item.encode() for item in delivery.publications),
+                    keyset_wire=delivery.keyset.encode(), trust_root=execution_trust.root,
+                    expected_claim=expected, expected_purpose=execution_trust.purpose,
+                    expected_shadow_campaign_id=execution_trust.shadow_campaign_id,
+                    now=execution_trust.clock(),
+                )
+                frozen_task, frozen_provenance = verified.grant.snapshots()
+                if TaskConfig.model_validate(frozen_task).task.id != str(payload["task_id"]):
+                    raise ValueError("signed execution task differs from claim")
+                # Reuse the existing pull-only preparation adapter, retaining
+                # the full signed evidence separately for the online start.
+                # This object is never the V2 runtime's start authority.
+                task_image_materialization = TaskImageExecutionGrantV1.model_validate(dict(
+                    schema_version="loom.task-image-execution-grant.v1",
+                    materialization_id=verified.grant.materialization_id,
+                    materialization_key=verified.grant.materialization_key,
+                    cpu_arch=verified.grant.cpu_arch, task_checksum=verified.grant.task_checksum,
+                    task_config=frozen_task, task_source=verified.grant.task_source,
+                    task_source_provenance=frozen_provenance,
+                    registry_images=dict(verified.registry_images),
+                ))
             if task_image_materialization is None:
                 bundle = await cp_client.get_task_bundle(str(payload["task_id"]))
             else:
@@ -1320,13 +1372,28 @@ async def _spawn_trial(
                 build_if_missing=False,
             )
             # #317 Phase 1: optional Docker-local agent layer.
-            task_image = await _resolve_layered_trial_image(
-                task_image=task_image,
-                agent_name=trial_config.agent_name,
-                settings=settings,
-                cp_client=cp_client,
-                worker_id=worker_id,
-            )
+            if delivery is None:
+                task_image = await _resolve_layered_trial_image(
+                    task_image=task_image,
+                    agent_name=trial_config.agent_name,
+                    settings=settings,
+                    cp_client=cp_client,
+                    worker_id=worker_id,
+                )
+            else:
+                assert execution_trust is not None
+                trusted_execution = WorkerTaskImageExecution(
+                    wire=delivery.grant_envelope.encode(), plan_wire=delivery.frozen_plan.encode(),
+                    publication_wires=tuple(item.encode() for item in delivery.publications),
+                    keyset_wire=delivery.keyset.encode(), trust_root=execution_trust.root,
+                    expected_claim=delivery.claim, expected_purpose=execution_trust.purpose,
+                    expected_shadow_campaign_id=execution_trust.shadow_campaign_id,
+                    task_dir=task_dir, task_config=task_config, task_checksum=task_checksum,
+                    cpu_arch=_host_cpu_arch(), task_image=task_image,
+                    consume=cp_client.consume_task_image_execution_start,
+                    clock=execution_trust.clock,
+                )
+                trusted_execution.verify_runtime()
         except Exception as exc:
             if task_dir is not None:
                 shutil.rmtree(task_dir, ignore_errors=True)
@@ -1571,6 +1638,7 @@ async def _spawn_trial(
             slurm_allocated_gpus=getattr(settings, "slurm_allocated_gpus", -1),
             slurm_gpu_device_ids=_slurm_gpu_device_ids(settings),
             sidecar_runtime_factory=_docker_sidecar_runtime,
+            start_authorization=(trusted_execution.authorize if trusted_execution is not None else None),
         )
 
         # #360 + #378: wrap the runner with the cancellation watchdog so

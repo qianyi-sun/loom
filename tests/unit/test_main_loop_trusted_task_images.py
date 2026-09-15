@@ -1,5 +1,6 @@
 """The real worker preparation path must preserve signed image/start bindings."""
 
+import asyncio
 import importlib
 import json
 from unittest.mock import AsyncMock, Mock
@@ -12,6 +13,7 @@ from loom_worker.runner_pool import RunnerPool
 from loom_worker.vllm_registry import WorkerVLLMRegistry
 from tests.unit.test_main_loop_cleanup import _FakeCPClient, _FakeSettings
 from tests.unit.test_task_image_publication_signing import NOW
+from tests.unit.test_worker_claim_loop import _healthy_setup_node
 from tests.unit.test_worker_task_image_execution import accepting, evidence
 
 
@@ -25,7 +27,7 @@ def delivery(kwargs):
     )
 
 
-@pytest.mark.parametrize("case", ["valid", "no_root", "wrong_worker", "wrong_task", "layered", "denied"])
+@pytest.mark.parametrize("case", ["valid", "no_root", "wrong_worker", "wrong_task", "layered", "denied", "cancelled"])
 async def test_signed_claim_preparation_and_start_stay_bound(tmp_path, monkeypatch, case):
     task_dir = tmp_path / "source"
     task_dir.mkdir()
@@ -34,10 +36,13 @@ async def test_signed_claim_preparation_and_start_stay_bound(tmp_path, monkeypat
     cp.consume_task_image_execution_start = accepting()
     if case == "denied":
         cp.consume_task_image_execution_start = AsyncMock(side_effect=ConnectionError("offline"))
+    elif case == "cancelled":
+        cp.consume_task_image_execution_start = AsyncMock(side_effect=asyncio.CancelledError)
     m = importlib.import_module("loom_worker.task_image_execution")
     assert hasattr(m, "WorkerExecutionTrust"), "main-loop release trust adapter missing"
     trust = m.WorkerExecutionTrust(
         root=kwargs["trust_root"], purpose="production", shadow_campaign_id=None,
+        clock=lambda: NOW,
     )
     payload = dict(
         trial_id=grant["claim"]["trial_id"], team_id=grant["claim"]["team_id"],
@@ -59,7 +64,6 @@ async def test_signed_claim_preparation_and_start_stay_bound(tmp_path, monkeypat
     monkeypatch.setattr(ml, "resolve_task_image", resolve)
     monkeypatch.setattr(ml, "_resolve_layered_trial_image", layer)
     monkeypatch.setattr(ml, "_host_cpu_arch", lambda: "x86_64")
-    monkeypatch.setattr(m, "_clock", lambda: NOW)
 
     class Runner:
         def __init__(self, **values):
@@ -96,11 +100,64 @@ async def test_signed_claim_preparation_and_start_stay_bound(tmp_path, monkeypat
         assert not task_dir.exists()
     else:
         assert not captured.get("ran")
-        assert cp.patch_calls[-1]["state"] == "failed"
-        if case != "denied":
+        if case == "cancelled":
+            assert cp.patch_calls == []
+        else:
+            assert cp.patch_calls[-1]["state"] == "failed"
+        if case not in {"denied", "cancelled"}:
             cp.consume_task_image_execution_start.assert_not_called()
         if case in {"no_root", "wrong_worker", "wrong_task"}:
             materialize.assert_not_called()
             runner.assert_not_called()
         else:
             assert not task_dir.exists()
+
+
+async def test_shared_claim_parser_preserves_signed_wire_and_trusted_context(tmp_path, monkeypatch):
+    grant, kwargs = evidence(tmp_path)
+    raw_delivery = delivery(kwargs)
+    payload = dict(
+        trial_id=grant["claim"]["trial_id"], team_id=grant["claim"]["team_id"],
+        task_id=json.loads(grant["canonical_task_config"])["task"]["id"],
+        attempt_count=grant["claim"]["trial_attempt_count"], config={}, requires_caps={},
+        provider_connection_id=None, family_key=None, family_state_uri=None,
+        family_run_spec=None, state="claimed", task_image_execution=raw_delivery,
+    )
+    cp = _FakeCPClient()
+    cp.claim_work = AsyncMock(side_effect=[dict(
+        schema_version="loom.work-claim.v1", work_kind="trial", payload=payload,
+    ), None])
+    spawn = AsyncMock()
+    monkeypatch.setattr(ml, "_spawn_trial", spawn)
+    m = importlib.import_module("loom_worker.task_image_execution")
+    trust = m.WorkerExecutionTrust(
+        root=kwargs["trust_root"], purpose="production", shadow_campaign_id=None,
+    )
+    settings = _FakeSettings()
+    settings.max_concurrent = 1
+    assert await ml._claim_available_work(
+        pool=RunnerPool(max_concurrent=1), settings=settings, cp_client=cp,
+        gateway_client=None, object_store=None, worker_id=UUID(grant["claim"]["worker_id"]),
+        capability_snapshot_digest="sha256:" + "1" * 64,
+        pipeline_run=AsyncMock(), vllm_registry=WorkerVLLMRegistry(enabled=False),
+        read_setup_health=_healthy_setup_node, execution_trust=trust,
+    ) == 1
+    assert spawn.call_args.kwargs["payload"]["task_image_execution"] == raw_delivery
+    assert spawn.call_args.kwargs["execution_trust"] is trust
+
+
+async def test_release_trust_cannot_enable_legacy_body_capability_claims(tmp_path):
+    _, kwargs = evidence(tmp_path)
+    m = importlib.import_module("loom_worker.task_image_execution")
+    trust = m.WorkerExecutionTrust(
+        root=kwargs["trust_root"], purpose="production", shadow_campaign_id=None,
+    )
+    cp = Mock()
+    with pytest.raises(ValueError, match="authenticated shared-queue"):
+        await ml._claim_available_work(
+            pool=RunnerPool(max_concurrent=1), settings=_FakeSettings(), cp_client=cp,
+            gateway_client=None, object_store=None, worker_id=UUID(kwargs["expected_claim"].worker_id),
+            capability_snapshot_digest=None, pipeline_run=None,
+            vllm_registry=WorkerVLLMRegistry(enabled=False), execution_trust=trust,
+        )
+    assert cp.mock_calls == []

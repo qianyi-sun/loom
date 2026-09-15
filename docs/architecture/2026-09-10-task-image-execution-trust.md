@@ -2,8 +2,10 @@
 
 Status: signed-keyset, complete publication-set and signed V2 execution-evidence
 verification, durable distribution adapter and dedicated signer service/client
-implemented; host signing service provisioning, grant issuance, runtime
-distribution and online start remain uncomposed.
+implemented; an opt-in existing-worker consumer composes source verification and
+an online start client. Host signing service provisioning, grant issuance,
+capability-gated server delivery and durable online consumption remain uncomposed.
+The consumer is not activation evidence.
 
 This document covers the keyset, distribution, dedicated signer and
 execution-evidence contracts of the
@@ -12,6 +14,51 @@ It does not activate builders or authorize a trial runtime. The
 [publication boundary](2026-09-05-task-image-builder-phase2d2-verification.md)
 still requires authenticated distribution and a dedicated signer before runtime
 composition.
+
+## Existing-worker consumer boundary
+
+The opt-in `run_worker(execution_trust=...)` assembly takes an independently
+release-pinned execution root and purpose/campaign. No environment discovery,
+claim payload or registry response installs that root. It requires the
+authenticated shared-queue path; the legacy body-capability endpoint cannot
+enable it. Default worker assembly and existing V1 claims remain unchanged.
+
+`TaskImageExecutionDelivery` carries bounded original grant, plan, publication
+and keyset envelopes plus the scheduler-stamped legacy claim identity. The
+signed trial extension rejects mixed V1/V2 materializations and binds the trial,
+team and attempt. The main loop additionally checks its actual worker ID,
+architecture and task ID, verifies signatures before source preparation, and
+preserves exact canonical attachments through the shared claim parser.
+
+The existing pull-only preparation adapter uses the signed frozen snapshot and
+immutable references without consulting a mutable task record. V2 bypasses the
+optional local agent-layer build: a derived unsigned image cannot replace the
+granted image. Source bytes/modes and the complete publication set are verified
+again at runner admission, along with the actual runtime configuration and image.
+Prebuilt components in the signed snapshot must use immutable image references.
+The downloaded source directory must stay private and worker-owned until use;
+content checks do not protect a concurrently writable shared directory.
+
+`LocalTrialRunner` invokes the supplied start authorization before factories,
+bridges, model launch, token rotation or sidecars. The consumer verifies the
+original evidence and source before and after one bounded online request.
+Only a canonical, exact-request-bound fresh `201` receipt is accepted. Redirects,
+ambiguous/oversized replies, changed source, expired evidence and lost responses
+fail closed. Both runner and consumer mark the start attempted before awaiting:
+cancellation, timeout, replay and concurrent calls cannot retry potentially
+committed consumption. The existing outer task cleanup removes the owned source
+directory after denial or cancellation.
+
+The request binds grant UUID/revision, full envelope digest, exact claim and
+keyset digest/version/revocation epoch. Its receipt binds the canonical request
+digest, unique start UUID and a validity interval of at most thirty seconds.
+This client-side latch is **not** durable one-use enforcement: the server must
+serialize consumption with current worker/claim, grant revision and publication
+revocation authority and reject duplicate consumes even after process restart.
+No server route, grant issuer, capability advertisement, root installation or
+production readiness change is supplied by this consumer. Existing signed V2
+evidence still requires genuine Slurm provenance; this is not yet a Nebius
+publication adapter or a native AMD64/ARM64 acceptance result.
 
 ## Signed keyset
 
@@ -73,7 +120,7 @@ an unaffected historical publication: its key must remain present and nonrevoked
 Publication issued exactly at its key's retirement boundary is rejected.
 
 The keyset helper is deliberately one-component verification, not proof of a complete image
-set or a current claim. The future worker reader must bind all expected components
+set or a current claim. The worker reader must bind all expected components
 and exact envelopes into its versioned execution grant, verify the immutable task
 source and enforce reader capability gating. Immediately before the first task
 or sidecar runtime, it must obtain/consume the online one-use start authorization
@@ -259,10 +306,10 @@ Each pin hashes the complete original publication envelope, not its inner
 statement or image digest. The immutable output uses verified native manifest
 references, matching publication completion even when a root is an OCI index.
 
-This pure helper is not runtime-composed and returns no readiness or start
-authority. Signed versioned trial grants, actual immutable task-source byte
-verification, old-worker capability gating and online one-use start serialized
-with revocation remain required before any Phase 2 trial runtime. A verified
+This pure helper returns no readiness or start authority. The opt-in consumer
+above composes signed evidence with immutable task-source byte verification;
+server grant issuance, old-worker capability gating and durable online one-use
+start serialized with revocation remain required before activation. A verified
 shadow set remains shadow evidence, never production execution authority.
 
 ## Signed V2 execution evidence
@@ -300,7 +347,7 @@ counters or a timestamp. Both ordinary scheduler paths (`claim_one` and
 `claim_id` in the same claim transaction. This is the last legacy claim identity,
 not independent proof of a live claim; it remains retained after release and is
 replaced on the next legacy claim. Historical claims have NULL, never a backfilled
-identity. The API/worker V2 adapter and one-use start remain uncomposed, so this
+identity. The server V2 delivery and durable one-use start remain uncomposed, so this
 change does not make ordinary workers V2-eligible. The explicitly discriminated protected variant
 additionally binds the canonical protected receipt digest, actual worker
 incarnation UUID and claim high-water; these cannot be inferred from ordinary
