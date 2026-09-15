@@ -171,7 +171,7 @@ async def test_pristine_current_guard_is_eligible_for_authority_rebind(
         # back; a real retry's authenticated evidence is covered separately.
         with engine.connect() as connection:
             connection.exec_driver_sql("""
-                INSERT INTO loom_capacity_guard.trial_retry_mutation_permits
+                INSERT INTO loom_capacity_guard.trial_mutation_permits
                   (permit_id, transaction_id, backend_pid, writer_incarnation,
                    writer_epoch, freeze_operation_id, authority_binding, registration,
                    trial_id, protected_attempt_id, execution_generation,
