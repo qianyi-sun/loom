@@ -116,9 +116,8 @@ def application_schema_reference(
             "a4457cf147a7d554b8f81aae84f29d167d8ba95c8387154ac3af4e7f8b2f6958",
         ),
     }
-    # Independently generated on both majors for all six profiles: guard_0034
-    # changes only private guard objects, retaining this exact public inventory.
-    if revision in {"0146/guard_0033", "0146/guard_0034"}:
+    # Retained guard_0033 provisioning and its original public grants.
+    if revision == "0146/guard_0033":
         digests = {
             16: (
                 "38f0a05a37c60f8fab04fdfe2b79d8670fcbeed20f2d658ca7b3a14353529242",
@@ -135,6 +134,26 @@ def application_schema_reference(
                 "f0e1ac6488c7f0e6a42ff0a29a23890f3a2c54f334239214ed35f6d0da95de22",
                 "b256c1b346acf889645c106e7285d9319ef529f62f0a514c86d6af7be2c97058",
                 "6da6d5266c632b2d59a1c1dfb2543bf38de8cb8f51f155880c90d8441e610b38",
+            ),
+        }
+    # Freshly provisioned state/output owner grants; historical pins stay separate.
+    if revision == "0146/guard_0034":
+        digests = {
+            16: (
+                "a40bc1c41241f763d88dddb793fe343fec80c46b4a3ce66005f5968d4c63313b",
+                "8705f523a956b708551aca3358e387acc443b6f0bca8add9a901f082a7436e61",
+                "1b7031e64ae6f2ebc922f3a42abe5b7765f5aa67d58a1890727d0ccf64db1930",
+                "874b280d85c222356c47b4ccb08465fbd59c4753d2cbcf2a049b40ffd3963f44",
+                "420f9660b60b7fe09d853d11b2f9032dffb3da50c4b52e1785544e00c14e4f72",
+                "27622a6d6c62aa9449cdf1ae896bc3673ef5a3e7af77ee02c42af8fb36807e4f",
+            ),
+            17: (
+                "85dd383fc17a7140bd9d3a3cb16d39d95d3961765b406c56bbd8d0b18562a516",
+                "df7388046ef6c77459a50d5aaae6ad1bfc331f16a19f1e58a28e0916eee369a6",
+                "90ba0b4fb4ac00eabc86d463a2165571a91e46a4f397fb934324fc4c00bde509",
+                "063cb91baf67363e16fd0d1b14c1a93f7f88e42dc89441c5888f7bd4bd9ea21e",
+                "4a289e197f44ddc87ea420249af27e186a117935f6c8d0d1f56ccbf5ebf425ed",
+                "fd89d4b3d3009a9b671756dd0cf345dcacc874d75806de436e349e4b6eedae0a",
             ),
         }
     if revision == "0134/guard_0030":

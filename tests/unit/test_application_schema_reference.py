@@ -125,7 +125,7 @@ def test_checkpoint_selection_refuses_unreviewed_revision_pairs(pair):
 @pytest.mark.parametrize("major", [16, 17])
 @pytest.mark.parametrize("ownership", ["legacy-owner", "sealed-owner"])
 @pytest.mark.parametrize("acl_profile", ["application-only", "staging-readonly", "cnpg-staging"])
-def test_private_retry_migration_preserves_public_shape_and_explicit_history(major, ownership, acl_profile):
+def test_protected_writer_grants_have_distinct_reference_and_explicit_history(major, ownership, acl_profile):
     from loom.application_schema_reference import application_schema_revision
 
     profile = application_schema_profile(ownership=ownership, acl_profile=acl_profile)
@@ -133,6 +133,6 @@ def test_private_retry_migration_preserves_public_shape_and_explicit_history(maj
     historical = application_schema_reference(profile=profile, postgres_major=major, revision="0146/guard_0033")
     assert current.guard_head == "guard_0034"
     assert historical.guard_head == "guard_0033"
-    assert current.inventory_sha256 == historical.inventory_sha256
+    assert current.inventory_sha256 != historical.inventory_sha256
     assert current.object_count == historical.object_count
     assert application_schema_revision(public_revision="0146", guard_revision="guard_0034") == "0146/guard_0034"

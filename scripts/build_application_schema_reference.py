@@ -67,9 +67,16 @@ async def _observe_fresh_database(
 ) -> ApplicationSchemaInventory:
     """Internal helper: admin_url belongs exclusively to our disposable container."""
     from scripts.application_schema_baseline import BaselineReferenceDatabase
+    from scripts.application_schema_trial_writer_baseline import (
+        TrialWriterBaselineReferenceDatabase,
+    )
 
     application_head, guard_head = application_schema_revisions(revision)
-    factory = BaselineReferenceDatabase if revision == "0134/guard_0030" else PsycopgPersonalDevCapacityDatabase
+    factory = (
+        BaselineReferenceDatabase if revision == "0134/guard_0030" else
+        TrialWriterBaselineReferenceDatabase if revision in {"0142/guard_0033", "0146/guard_0033"} else
+        PsycopgPersonalDevCapacityDatabase
+    )
     sealed = profile in {"sealed-owner", "staging-readonly-sealed-owner", "cnpg-staging-sealed-owner"}
     staging_readonly = profile in {"staging-readonly-legacy-owner", "staging-readonly-sealed-owner", "cnpg-staging-legacy-owner", "cnpg-staging-sealed-owner"}
     password = uuid4().hex

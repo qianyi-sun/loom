@@ -477,15 +477,19 @@ native-reader fence (`guard_0031`) and typed-terminal importer (`guard_0032`);
 it does not replace either upstream security boundary. Both PostgreSQL
 majors have independently generated pins; PostgreSQL 17 uses a pinned vanilla
 17.4 image, not an observation of the live CNPG database.
-The `guard_0034` claim/retry migration changes only private guard objects. All six
-public reference profiles were independently regenerated on both majors and
-retain the `0146` / `guard_0033` public shape; the migration markers remain
-distinct and historical checkpoint selection remains explicit.
+The `guard_0034` protected writer migration adds narrow public-column permissions
+for the non-login guard owner. Its six public reference profiles have separate
+PostgreSQL 16/17 pins. The retained `0142` and `0146` / `guard_0033` profiles use the
+original role-convergence recipe in `scripts/application_schema_trial_writer_baseline.py`;
+current grants cannot silently change a rollback reference.
 
 After the legacy trial writer is frozen, only the credential-validated protected
-claim and retry functions can issue private, one-use mutation permissions. They bind the
+claim, retry, state/output and pending-cancellation functions can issue private,
+one-use mutation permissions. They bind the
 transaction/backend, frozen writer/epoch/operation, registration/authority,
-trial/attempt/generation and exact worker/claim. The existing statement trigger
+trial/attempt/generation and exact worker/claim. Pending cancellation instead
+requires an unclaimed protected attempt and records absent worker/claim identities
+explicitly; only that operation permits those identity columns to be null. The existing statement trigger
 requires that permission for UPDATE; the existing AFTER-row accounting trigger
 checks the full new row against the old row plus the permitted changes and
 consumes the permission. An optional node-setup attempt refund has its own
@@ -507,9 +511,28 @@ These consumed permissions remain private evidence; they do not advance the
 frozen legacy mutation ledger. Authority reassignment locks and inventories the
 permission table, and downgrade refuses retained evidence. There is no broad
 role exemption, caller-set session flag or new public trigger authority. This
-is claim/retry continuity only: it does not authorize frozen submissions, ordinary
-state/results, cancellation, demand projection or recovery, and does not by
-itself make the fleet ready for a live writer freeze or activation.
+covers protected claim/retry, state reports, output publication and unclaimed
+cancellation. It does not authorize ordinary writers or frozen submissions,
+demand projection or recovery, and does not by itself make the fleet ready for
+activation.
+
+State reports validate the executor credential and exact live claim inside the
+same serializable transaction as the public transition. Terminal-result and
+family-plugin decisions use preliminary Python reads whose exact persisted inputs
+are compared again under SQL locks. Trial state, exact claim closure and the
+family transition commit together; pending sibling cancellation uses the existing
+durable follow-up. Materializing-to-terminal reports close their exact claim even
+though the historical public terminal trigger only handles claimed/running rows.
+
+The worker's `PATCH /trials/{id}/trajectory_index` path also authenticates in its
+write transaction. It commits result/index changes, typed artifacts, lifecycle
+authorities, versioned object identities and lineage edges atomically. Descriptor
+policy remains shared with the ordinary path, while SQL verifies its trial/batch
+inputs and scopes every artifact to the authenticated trial. Suppressed or altered
+writes and conflicting object versions roll back the whole publication. The
+runtime login receives only the named protected function, with no general public
+DML privileges.
+
 
 Catalog SQL selects `daticulocale` on 16 and `datlocale` on 17 before
 parsing; the canonical field remains `icu_locale` and hashes include the major.
