@@ -21,19 +21,23 @@ from tests.integration.test_capacity_trial_writer_fence import _freeze, _initial
     "failure_reason,expected_attempt_count",
     [("env_start_failure", 1), ("node_setup_health", 0)],
 )
+@pytest.mark.parametrize("freeze_before_retry", [False, True])
 def test_authenticated_retry_survives_trial_writer_freeze(
     capacity_guard_database: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     failure_reason: str,
     expected_attempt_count: int,
+    freeze_before_retry: bool,
 ) -> None:
     database = capacity_guard_database
     seeded = _seed_claimed_protected_trial(database, monkeypatch, tmp_path)
     initial = asyncio.run(_initialize(database, registration=seeded.worker.registration))
     freeze_operation = uuid4()
-    frozen = asyncio.run(_freeze(database, initial["writer_incarnation"], freeze_operation))
-    assert frozen["frozen"] is True
+    frozen = None
+    if freeze_before_retry:
+        frozen = asyncio.run(_freeze(database, initial["writer_incarnation"], freeze_operation))
+        assert frozen["frozen"] is True
 
     with TestClient(seeded.app) as client:
         response = client.post(
@@ -82,6 +86,8 @@ def test_authenticated_retry_survives_trial_writer_freeze(
         "runtime_rows": 2,
         "terminal_rows": 1,
     }
-    assert asyncio.run(
-        _freeze(database, initial["writer_incarnation"], freeze_operation)
-    ) == frozen
+    final = asyncio.run(_freeze(database, initial["writer_incarnation"], freeze_operation))
+    if frozen is not None:
+        assert final == frozen
+    else:
+        assert final["high_water"] == (2 if failure_reason == "node_setup_health" else 1)
