@@ -5,10 +5,13 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import DataLifecycleAuthority, Task, Token, Trial, User
+from loom_capacity_agent.store import capture_lifecycle_demand_observation
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 from tests.integration.test_capacity_agent_store import _value
@@ -20,8 +23,9 @@ from tests.integration.test_capacity_submission_store import _seed_trial_inputs
 from tests.integration.test_capacity_trial_writer_fence import _freeze, _initialize
 
 
+@pytest.mark.parametrize("capture_demand", [False, True])
 def test_team_authenticated_adoption_replays_original_id_and_publishes_readiness(
-    capacity_guard_database, tmp_path, monkeypatch,
+    capacity_guard_database, tmp_path, monkeypatch, capture_demand,
 ):
     database = capacity_guard_database
     registration = asyncio.run(_initialize_guard(database))
@@ -81,6 +85,18 @@ def test_team_authenticated_adoption_replays_original_id_and_publishes_readiness
             assert response.json()["trial_id"] == replay.json()["trial_id"] == str(trial_id)
             assert response.json()["state"] == "protected-pending"
             assert response.json()["ready"] is True
+        if capture_demand:
+            async def capture():
+                agent = create_async_engine(_value(database, "agent_url"), isolation_level="SERIALIZABLE")
+                try:
+                    async with async_sessionmaker(agent)() as session, session.begin():
+                        return await capture_lifecycle_demand_observation(
+                            session, registration=registration, expected_high_water=0, max_attempts=100,
+                        )
+                finally:
+                    await agent.dispose()
+            observed = asyncio.run(capture())
+            assert [str(attempt.protected_attempt_id) for attempt in observed.attempts] == [response.json()["protected_attempt_id"]]
         with engine.connect() as connection:
             actual = connection.execute(text(
                 "SELECT submitted_at,lifecycle_authority_id,state FROM public.trials WHERE id=:trial"
