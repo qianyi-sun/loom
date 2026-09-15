@@ -423,6 +423,18 @@ async def test_disconnected_queued_writer_still_blocks_handoff(transfer_database
         authority["provisioner"] = next(role for role, alias in arguments["role_bindings"].items() if alias == "provisioner")
         original_guard = guard.info.backend_pid
         role = "queued_disconnect_" + uuid4().hex[:12]
+        queued_pid = None
+
+        def wait_for_retirement():
+            if queued_pid is None:
+                return
+            deadline = time.monotonic() + 10
+            while maintenance.execute(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=%s)", (queued_pid,),
+            ).fetchone() != (False,):
+                assert time.monotonic() < deadline, "owned probe backend did not finish"
+                time.sleep(0.05)
+
         peer.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(role)))
         try:
             with psycopg.connect(transfer_database[0], dbname=maintenance.info.dbname,
@@ -452,16 +464,14 @@ async def test_disconnected_queued_writer_still_blocks_handoff(transfer_database
                         _quiescence_retry_admitted(maintenance, **authority)
                 # The original guard remains usable while the accepted SQL
                 # commits after unlock; disconnected is not equivalent to cancelled.
-                deadline = time.monotonic() + 10
-                while maintenance.execute(
-                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=%s)", (queued_pid,),
-                ).fetchone() != (False,):
-                    assert time.monotonic() < deadline, "owned probe backend did not finish"
-                    time.sleep(0.05)
+                wait_for_retirement()
                 assert maintenance.execute(
                     "SELECT rolcanlogin FROM pg_roles WHERE rolname=%s", (role,),
                 ).fetchone() == (True,)
                 assert guard.info.backend_pid == original_guard
                 assert _quiescence_retry_admitted(maintenance, **authority)
         finally:
+            # Even a failed assertion must not race DROP ROLE against the
+            # disconnected backend whose accepted ALTER ROLE is still finishing.
+            wait_for_retirement()
             peer.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
