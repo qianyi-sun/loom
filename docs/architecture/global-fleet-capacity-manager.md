@@ -1836,6 +1836,24 @@ the credential across process death. Exact replay creates no temporary file.
 These files remain inert until the separately bound activation operation enables
 the active timer.
 
+The activation coordinator binds both complete controller requests to the
+prerequisite profile, candidate, credential metadata, controller transports, and
+canonical staging subject, including its candidate generation. A private
+immutable journal retains those inputs and the exact manager request before
+effects. A shared operation lock excludes concurrent activation attempts. Both
+prepared timers stop before active files are staged; fresh inventory from both
+controllers precedes the one-slot manager transition and active timer enables.
+A lost manager reply reuses its original readiness digest and idempotency key.
+After a partial enable, compensation validates the saved authority and current
+manager epoch independently of failed forward dependencies. Its retained drain
+intent forbids reactivation, including after a lost drain reply. These coordinator
+checks retire a positively uncommitted prepared epoch if its retained readiness
+expires or changes, preserving the abort request across lost replies. A delayed
+activation that wins the manager's transition lock is drained instead. A retired
+preparation requires a successor preparation; its old activation intent is never
+rewritten. The coordinator still requires the installed source and trusted worker launch material to
+be composed before live execution.
+
 The schema migration writes a canonical seed event beside its generated
 bootstrap authority UUID. A reviewed replacement requires that one pristine
 seed and writes an append-only binding event in the same locked transaction.
