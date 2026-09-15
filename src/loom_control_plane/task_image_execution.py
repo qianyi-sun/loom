@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from loom.auth import verify_bearer_token
 from loom.db.schema import Token
 from loom_task_image_authority.contracts import BuildPurpose
+from loom_task_image_authority.execution_config import ExecutionAdmissionSettings
 from loom_task_image_authority.execution_delivery import TaskImageExecutionDelivery
 from loom_task_image_authority.execution_grant import (
     MAX_EXECUTION_GRANT_ENVELOPE_BYTES,
@@ -31,6 +32,15 @@ from loom_task_image_authority.execution_store import (
 )
 from loom_task_image_authority.publication_contracts import CanonicalUUID
 from loom_task_image_authority.publication_keyset import ExecutionGrantTrustRoot, _instant
+from loom_task_image_authority.publication_transport import HTTPSExecutionSigner
+
+
+@asynccontextmanager
+async def configured_execution_service(engine: AsyncEngine, settings: ExecutionAdmissionSettings) -> AsyncIterator[TaskImageExecutionService]:
+    """Own the fixed mTLS client's cancellation/close through application shutdown."""
+    async with HTTPSExecutionSigner(**settings.signer.model_dump()) as signer:
+        yield TaskImageExecutionService(engine, trust_root=settings.root.trust_root(), purpose=settings.purpose,
+                                        shadow_campaign_id=settings.shadow_campaign_id, signer=signer)
 
 
 class ExecutionSigner(Protocol):

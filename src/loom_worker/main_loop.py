@@ -552,6 +552,15 @@ async def run_worker(
     pipeline_run: Callable[[ExecutionAttemptClaimV1], Coroutine[Any, Any, None]] | None = None,
     execution_trust: WorkerExecutionTrust | None = None,
 ) -> None:
+    execution_config = getattr(settings, "task_image_execution_config_file", None)
+    if execution_config is not None:
+        from loom_task_image_authority.execution_config import load_execution_reader_settings
+
+        if execution_trust is not None:
+            raise ValueError("execution configuration conflicts with injected trust")
+        release = load_execution_reader_settings(execution_config)
+        execution_trust = WorkerExecutionTrust(root=release.root.trust_root(), purpose=release.purpose,
+                                               shadow_campaign_id=release.shadow_campaign_id)
     if execution_trust is not None:
         # Protect registration/claim bearer credentials as well as the later
         # online receipt. Enabling V2 on the legacy HTTP default is forbidden.

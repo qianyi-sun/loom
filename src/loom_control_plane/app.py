@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import AsyncIterator, Callable, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI
 from prometheus_client import make_asgi_app
@@ -70,10 +70,14 @@ from loom_control_plane.service_execution_materializer import (
 from loom_control_plane.service_execution_scheduler import (
     run_service_execution_scheduler_loop,
 )
-from loom_control_plane.task_image_execution import TaskImageExecutionService
+from loom_control_plane.task_image_execution import (
+    TaskImageExecutionService,
+    configured_execution_service,
+)
 from loom_control_plane.worker_pool_autoscaler import (
     run_worker_pool_autoscaler_loop,
 )
+from loom_task_image_authority.execution_config import load_execution_admission_settings
 
 
 def _load_admin_secret_verifier(
@@ -114,12 +118,16 @@ def create_app(
     settings: ControlPlaneSettings, *,
     task_image_execution_factory: Callable[[AsyncEngine], TaskImageExecutionService] | None = None,
 ) -> FastAPI:
-    if task_image_execution_factory is not None and settings.protected_worker_runtime_db_url_file is not None:
+    execution_config_file = settings.task_image_execution_config_file
+    if (task_image_execution_factory is not None or execution_config_file is not None) and settings.protected_worker_runtime_db_url_file is not None:
         raise ValueError("signed legacy execution cannot replace protected worker authority")
+    if task_image_execution_factory is not None and execution_config_file is not None:
+        raise ValueError("execution configuration conflicts with injected factory")
+    execution_config = load_execution_admission_settings(execution_config_file) if execution_config_file is not None else None
     source_config = ServiceExecutionSourceConfig.from_settings(settings)
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def application_lifespan(app: FastAPI, resources: AsyncExitStack) -> AsyncIterator[None]:
         engine = create_async_engine(
             settings.db_engine_url,
             connect_args=settings.db_engine_connect_args,
@@ -128,6 +136,7 @@ def create_app(
             max_overflow=settings.db_max_overflow,
             pool_timeout=settings.db_pool_timeout_sec,
         )
+        resources.push_async_callback(engine.dispose)
         await _assert_schema_startup(engine)
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         admin_secret_verifier = _load_admin_secret_verifier(settings)
@@ -149,12 +158,8 @@ def create_app(
                     expire_on_commit=False,
                 )
             )
-            try:
-                await protected_worker_session_store.assert_ready()
-            except BaseException:
-                await protected_worker_runtime_engine.dispose()
-                await engine.dispose()
-                raise
+            resources.push_async_callback(protected_worker_runtime_engine.dispose)
+            await protected_worker_session_store.assert_ready()
 
         minio_client = build_s3_client(
             endpoint_url=settings.minio_endpoint,
@@ -169,6 +174,8 @@ def create_app(
         app.state.task_image_execution = (
             task_image_execution_factory(engine) if task_image_execution_factory is not None else None
         )
+        if execution_config is not None:
+            app.state.task_image_execution = await resources.enter_async_context(configured_execution_service(engine, execution_config))
         app.state.admin_secret_verifier = admin_secret_verifier
         app.state.minio_client = minio_client
         app.state.protected_worker_session_store = protected_worker_session_store
@@ -238,6 +245,17 @@ def create_app(
             command_timeout_seconds=(settings.slurm_worker_controller_command_timeout_seconds),
         )
 
+        background_tasks: list[asyncio.Task[None]] = []
+        service_execution_materializer_stop_event: asyncio.Event | None = None
+
+        async def stop_background() -> None:
+            if service_execution_materializer_stop_event is not None:
+                service_execution_materializer_stop_event.set()
+            await _cancel_and_drain_tasks(background_tasks)
+
+        # Register teardown before spawning: partial startup must drain work
+        # before the signer and either database engine can be disposed.
+        resources.push_async_callback(stop_background)
         crash_detector_task = asyncio.create_task(
             run_crash_detector_loop(
                 session_factory=session_factory,
@@ -254,6 +272,7 @@ def create_app(
             ),
             name="loom-cp-crash-detector",
         )
+        background_tasks.append(crash_detector_task)
         # Background refresher for gauge metrics (workers_active,
         # queue_depth, trials_inflight). See metrics_refresher.py
         # for the cadence rationale.
@@ -265,6 +284,7 @@ def create_app(
             ),
             name="loom-cp-metrics-refresher",
         )
+        background_tasks.append(metrics_refresher_task)
         # Background sweep that transitions queued trials with
         # attempt_count >= team_quotas.max_attempts_ceiling to state='failed' with
         # failure_reason='retry_exhausted'. Runs at the same cadence
@@ -276,6 +296,7 @@ def create_app(
             ),
             name="loom-cp-retry-exhausted-sweeper",
         )
+        background_tasks.append(retry_exhausted_task)
         worker_pool_autoscaler_task = asyncio.create_task(
             run_worker_pool_autoscaler_loop(
                 session_factory=session_factory,
@@ -285,6 +306,7 @@ def create_app(
             ),
             name="loom-cp-worker-pool-autoscaler",
         )
+        background_tasks.append(worker_pool_autoscaler_task)
         live_preview_reconciler_task = asyncio.create_task(
             run_live_preview_reconciler_loop(
                 session_factory=session_factory,
@@ -292,6 +314,7 @@ def create_app(
             ),
             name="loom-cp-live-preview-reconciler",
         )
+        background_tasks.append(live_preview_reconciler_task)
         slurm_controller_task: asyncio.Task[None] | None = None
         if slurm_controller_config is not None:
             slurm_controller_task = asyncio.create_task(
@@ -305,6 +328,7 @@ def create_app(
                 ),
                 name="loom-cp-elastic-slurm-worker-controller",
             )
+            background_tasks.append(slurm_controller_task)
         service_execution_scheduler_task: asyncio.Task[None] | None = None
         if settings.service_execution_scheduler_enabled:
             service_execution_scheduler_task = asyncio.create_task(
@@ -322,8 +346,8 @@ def create_app(
                 ),
                 name="loom-cp-service-execution-scheduler",
             )
+            background_tasks.append(service_execution_scheduler_task)
         service_execution_materializer_task: asyncio.Task[None] | None = None
-        service_execution_materializer_stop_event: asyncio.Event | None = None
         if settings.service_execution_materializer_enabled:
             service_execution_materializer_stop_event = asyncio.Event()
             service_execution_materializer_task = asyncio.create_task(
@@ -344,31 +368,14 @@ def create_app(
                 ),
                 name="loom-cp-service-execution-materializer",
             )
-        try:
-            yield
-        finally:
-            if service_execution_materializer_task is not None:
-                assert service_execution_materializer_stop_event is not None
-                service_execution_materializer_stop_event.set()
-            # All tasks share one grace window. A driver may defer or consume
-            # the first cancellation while unwinding a database operation, so
-            # any survivors receive a concurrent follow-up cancellation. Every
-            # task is still drained before either database engine is disposed.
-            await _cancel_and_drain_tasks(
-                (
-                    crash_detector_task,
-                    metrics_refresher_task,
-                    retry_exhausted_task,
-                    worker_pool_autoscaler_task,
-                    live_preview_reconciler_task,
-                    slurm_controller_task,
-                    service_execution_scheduler_task,
-                    service_execution_materializer_task,
-                )
-            )
-            await engine.dispose()
-            if protected_worker_runtime_engine is not None:
-                await protected_worker_runtime_engine.dispose()
+            background_tasks.append(service_execution_materializer_task)
+        yield
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        async with AsyncExitStack() as resources:
+            async with application_lifespan(app, resources):
+                yield
 
     app = FastAPI(
         title="Loom Control Plane",

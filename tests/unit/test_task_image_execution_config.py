@@ -5,7 +5,7 @@ import importlib
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -112,3 +112,67 @@ def test_standard_control_plane_rejects_conflicting_or_missing_release_config(tm
     path.unlink()
     with pytest.raises(ValueError):
         create_app(settings)
+
+
+@pytest.mark.parametrize("case", ["normal", "later-startup-failure", "partial-background-failure", "signer-open-failure", "schema-failure"])
+def test_configured_control_plane_owns_signer_and_engine_on_all_exits(tmp_path, monkeypatch, case):
+    import asyncio
+
+    from fastapi.testclient import TestClient
+
+    from loom_control_plane import app as cp_app
+    from loom_control_plane import task_image_execution as admission
+    from loom_control_plane.config import ControlPlaneSettings
+
+    data = document(tmp_path, admission=True)
+    path = save(tmp_path, data)
+    disposed = []
+    engine = SimpleNamespace(dispose=AsyncMock(side_effect=lambda: disposed.append("database")))
+    arguments = []
+
+    class Signer:
+        def __init__(self, **kwargs):
+            arguments.append(kwargs)
+            if case == "signer-open-failure":
+                raise ValueError("fixture signer TLS failure")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            disposed.append("signer")
+
+    async def idle(**_):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(admission, "HTTPSExecutionSigner", Signer)
+    monkeypatch.setattr(cp_app, "create_async_engine", lambda *a, **k: engine)
+    monkeypatch.setattr(cp_app, "_assert_schema_startup", AsyncMock(side_effect=ValueError("fixture schema failure") if case == "schema-failure" else None))
+    monkeypatch.setattr(cp_app, "build_s3_client", lambda **_: object())
+    for name in ("run_crash_detector_loop", "run_metrics_refresher_loop", "run_retry_exhausted_sweeper_loop",
+                 "run_worker_pool_autoscaler_loop", "run_live_preview_reconciler_loop", "run_service_execution_materializer_loop"):
+        monkeypatch.setattr(cp_app, name, idle)
+    if case == "later-startup-failure":
+        monkeypatch.setattr(cp_app, "build_controller_config", Mock(side_effect=ValueError("fixture later failure")))
+    elif case == "partial-background-failure":
+        monkeypatch.setattr(cp_app, "ServiceExecutionMaterializer", Mock(side_effect=ValueError("fixture partial background failure")))
+    app = cp_app.create_app(ControlPlaneSettings(_env_file=None, db_url="postgresql+psycopg://test:test@localhost/test",
+        minio_access_key="x", minio_secret_key="y", task_image_execution_config_file=path))
+
+    def enter():
+        with TestClient(app):
+            service = app.state.task_image_execution
+            assert isinstance(service, admission.TaskImageExecutionService)
+            assert service._engine is engine and service.native_ready_enabled
+            assert service._root.public_key == base64.urlsafe_b64decode(data["root"]["public_key"] + "=")
+
+    if case == "normal":
+        enter()
+    else:
+        with pytest.raises(ValueError, match="fixture"):
+            enter()
+    assert disposed == (["signer", "database"] if case in {"normal", "later-startup-failure", "partial-background-failure"} else ["database"])
+    assert len(arguments) == (0 if case == "schema-failure" else 1)
+    if arguments:
+        assert arguments[0]["origin"] == data["signer"]["origin"]
+        assert arguments[0]["client_key_file"].name == "client.key"

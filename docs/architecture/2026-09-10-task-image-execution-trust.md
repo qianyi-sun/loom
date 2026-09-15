@@ -5,7 +5,8 @@ verification, durable distribution, dedicated signer and opt-in existing-worker
 source-to-start consumption are connected through authenticated shared claims.
 The backend journals grant revisions, signs committed preparations and serializes
 one-use HTTP consumption with current token, worker/claim and revocation authority.
-Host signing service/root provisioning and standard release-entrypoint configuration
+Standard entrypoints accept explicit release-owned public roots and fixed signer
+connections. Host signing service/root provisioning and runtime keyset renewal
 remain incomplete. This implementation is not live activation evidence.
 
 This document covers the keyset, distribution, dedicated signer and
@@ -149,8 +150,36 @@ Expired evidence identifies the refresh request only; it never authorizes a
 runtime or gains invented validity timestamps. Grants with thirty seconds or less
 of keyset/root lifetime cannot refresh. Revocation after refresh still denies
 start. A lost or cancelled start acknowledgement never triggers refresh or retry.
-Release wiring, protected-reader composition and live native acceptance remain
-separate unfinished boundaries.
+Protected-reader composition and live native acceptance remain separate
+unfinished boundaries.
+
+## Release configuration
+
+`LOOM_WORKER_TASK_IMAGE_EXECUTION_CONFIG_FILE` and
+`LOOM_CP_TASK_IMAGE_EXECUTION_CONFIG_FILE` select independently provisioned,
+current-UID-owned 0600 regular nonsymlink JSON files by absolute path. They are
+optional: absent configuration keeps existing behavior. Files are bounded to
+64 KiB and reject duplicate/unknown fields, private signing seed fields and
+expired/not-yet-active roots. Neither response data nor a missing-file fallback
+can supply a root.
+
+The worker schema is `loom.task-image-execution-reader/v1`; the control-plane
+schema is `loom.task-image-execution-admission/v1`. Both contain `root`
+(`key_id`, `environment`, canonical unpadded base64url Ed25519 `public_key`,
+`activated_at`, `expires_at`), `purpose` and the required `shadow_campaign_id`
+only for shadow purpose. The control plane additionally requires `signer`
+(`origin`, `ca_file`, `client_cert_file`, `client_key_file`). Its origin is a
+fixed HTTPS origin with no caller-selected operation path; TLS paths are absolute.
+The TLS client key is not a publication/execution signing key. Workers load no
+private signing material or signer-package key loader.
+
+`run_worker` loads this configuration before signals, cleanup or registration
+and rejects non-HTTPS control-plane transport. The ordinary control-plane
+factory loads its configuration before startup and owns signer cancellation and
+close. Competing injected trust/factories and protected-worker configuration are
+rejected. Application shutdown, including partial startup, drains admitted
+background work before closing signer clients and database engines. These paths
+do not provision credentials, install signing services or yet renew expiring keysets.
 
 ## Signed keyset
 
