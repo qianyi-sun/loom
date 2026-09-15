@@ -570,13 +570,16 @@ be handled safely; running an older worker is not permission for a lossy downgra
 
 ## Legacy-reader exclusion
 
-The ordinary trial and unified-work selectors, and the locked unsigned V1 image
-snapshot reader, require `ready_publication_operation_id IS NULL`. The protected
-claim function applies the same predicate at both candidate selection and locked
-V1 snapshot return. Native-ready images remain ineligible until an explicit
-signed-grant and one-use-start adapter exists. The predicate is per materialization
-and compatible architecture, not a task-wide veto: eligible Phase 1 work must not
-be starved by an earlier native trial or a different native architecture.
+The ordinary trial selector, default unified-work selector and locked unsigned V1
+image snapshot reader require `ready_publication_operation_id IS NULL`. The
+protected claim function applies the same predicate at both candidate selection
+and locked V1 snapshot return. Only the explicitly configured, ready admission
+service and exact registered V2-capable native reader enable the unified-work
+selector's signed branch; that branch uses signed delivery and one-use start,
+never an unsigned V1 snapshot. Protected-reader composition remains disabled.
+The predicate is per materialization and compatible architecture, not a task-wide
+veto: eligible Phase 1 work must not be starved by an earlier native trial or a
+different native architecture.
 Strong source manifests alone do not imply native readiness; Phase 1 may retain
 and use those sources. Missing compatible legacy readiness cannot trigger an
 unsigned native snapshot or a mutable-catalog fallback.
