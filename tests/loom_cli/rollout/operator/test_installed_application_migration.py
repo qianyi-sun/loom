@@ -115,3 +115,53 @@ def test_installed_future_rollout_selects_historical_observer_and_same_origin_fo
     assert not journal.root.exists()
     with pytest.raises(ValueError, match="ordinal"):
         factory.components(plan, journal=journal, ordinal=1)
+
+
+def test_installed_executor_issuer_and_bootstrap_share_exact_successor_journal(tmp_path):
+    import hashlib
+    import json
+
+    from loom_cli.rollout.operator.installed_application_handoff import (
+        InstalledApplicationHandoffFactory,
+    )
+    from loom_cli.rollout.operator.installed_application_migration import (
+        InstalledApplicationMigrationFactory,
+    )
+    from loom_cli.rollout.operator.protected_apply_journal import (
+        ComponentIntent,
+        ProtectedApplyJournal,
+    )
+    from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
+        KubernetesProtectedStagingCapacityDatabaseComponent,
+    )
+    from tests.loom_cli.rollout.operator.test_protected_staging_capacity_runtime import (
+        _execution_plan,
+    )
+
+    # Preserve the installed handoff's database-authority checkpoint while using
+    # the complete execution preparation fields from the execution-plan fixture.
+    execution = _execution_plan(tmp_path)
+    base_root = tmp_path / "handoff-checkpoint"
+    base_root.mkdir()
+    base_plan = _plan(base_root)
+    payload = base_plan.to_dict()
+    payload.update({key: value for key, value in execution.to_dict().items()
+        if key.startswith("execution_") or key == "executor_profile_seed_sha256"})
+    payload["schema_version"] = 7
+    payload["plan_digest"] = hashlib.sha256(json.dumps(
+        {key: value for key, value in payload.items() if key != "plan_digest"},
+        sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    plan = type(base_plan).from_dict(payload)
+    config = _config(tmp_path)
+    runner = SimpleNamespace(environment={})
+    handoff = InstalledApplicationHandoffFactory(config=config, service_uid=os.getuid(),
+        runner=runner, successor_source=lambda *args: None)
+    factory = InstalledApplicationMigrationFactory(handoff=handoff, container_registry="registry.example")
+    journal = ProtectedApplyJournal(config.state_root, request_id=plan.request_id, attempt_number=plan.attempt_number)
+    base = KubernetesProtectedStagingCapacityDatabaseComponent(runner, "registry.example", lambda: {})
+    bootstrap = factory.capacity(plan, journal=journal, ordinal=5, handoff_ordinal=2, base=base, seed_source=lambda: {})
+    issuer = factory.executor_admission(plan, journal=journal, base=base, seed_source=lambda: {})
+    assert issuer.component_id == "executor-database-admission" and issuer.terminal_recovery_authority is None
+    assert bootstrap.apply.__self__.executor_admission_source.__self__.intent == ComponentIntent.build(plan, issuer, 14)
+    assert issuer.apply.__self__.completed_bootstrap().component().input_fingerprint == bootstrap.input_fingerprint
+    assert not journal.root.exists()

@@ -2009,7 +2009,7 @@ class ProtectedApplyJournal:
             raise ProtectedApplyJournalError("application early recovery cannot nest active apply")
         if plan.request_id != self.request_id or plan.attempt_number != self.attempt_number:
             raise ProtectedApplyJournalError("application early recovery plan changed")
-        if component_id not in {None, "application-ownership-handoff", "database-migration", "staging-capacity-database"}:
+        if component_id not in {None, "application-ownership-handoff", "database-migration", "staging-capacity-database", "executor-database-admission"}:
             raise ProtectedApplyJournalError("application early recovery selection is invalid")
         pending = _read_pending_retention(self.attempt_root.parents[3], request_id=self.request_id,
                                           service_uid=self.service_uid, guard=guard)

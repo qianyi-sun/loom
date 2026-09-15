@@ -19,6 +19,7 @@ import yaml  # type: ignore[import-untyped]
 from psycopg import sql
 from sqlalchemy import URL
 
+from loom.application_executor_admission import ApplicationExecutorAdmissionIdentity
 from loom.personal_dev_capacity_identity import (
     capacity_role_names,
     capacity_runtime_database_url,
@@ -1126,7 +1127,11 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         seed: dict[str, object],
         *,
         durable_runtime_credentials: bool = True,
+        executor_admission: ApplicationExecutorAdmissionIdentity | None = None,
     ) -> _DatabaseState:
+        if executor_admission is not None and (not isinstance(executor_admission, ApplicationExecutorAdmissionIdentity)
+                or self.application_owner_role != "loom_app_staging_owner" or not durable_runtime_credentials):
+            raise ValueError("executor admission requires completed separated bootstrap")
         presence = self._query(_REVISION_PRESENCE_SQL).decode("ascii").strip()
         if presence == "absent":
             return _DatabaseState.NEEDS_CONVERGENCE
@@ -1238,6 +1243,18 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             ),
             "runtime_role": "loom_cap_staging_runtime",
         }
+        if executor_admission is not None:
+            # Only the retained successor caller admits credential/OID and the
+            # complete issued schema. This check still owns exact bootstrap data.
+            expected_active_sessions["loom_cap_staging_executor"] = active_protected_sessions["loom_cap_staging_executor"]
+            privileges = expected_details["database_privileges"]
+            roles = expected_details["roles"]
+            assert isinstance(privileges, dict) and isinstance(roles, dict)
+            privileges["loom_cap_staging_executor"] = {
+                "acl": [{"grantable": False, "grantor": self.application_owner_role, "privilege": "CONNECT"}],
+                "connect": True, "create": False, "temporary": False,
+            }
+            roles["loom_cap_staging_executor"].update(can_login=True, has_password=True)
         if not durable_runtime_credentials and self.application_owner_role:
             # A retained retry preserves already durable ordinary credentials.
             # Admit either live lifetime for these three unprivileged logins;

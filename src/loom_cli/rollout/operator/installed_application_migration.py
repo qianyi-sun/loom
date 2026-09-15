@@ -28,6 +28,7 @@ from .protected_apply_journal import (
 )
 from .protected_capacity_bootstrap_component import ProtectedCapacityBootstrapComponent
 from .protected_epoch_component import KubernetesProtectedEpochComponent
+from .protected_executor_admission_component import ProtectedExecutorAdmissionComponent
 from .protected_staging_capacity_database_component import (
     KubernetesProtectedStagingCapacityDatabaseComponent,
 )
@@ -105,6 +106,24 @@ class InstalledApplicationMigrationFactory:
     def capacity(self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal, ordinal: int,
                  handoff_ordinal: int, base: KubernetesProtectedStagingCapacityDatabaseComponent,
                  seed_source: Callable[[], Mapping[str, object]]) -> ProtectedApplyComponent:
+        bootstrap = self.build_capacity(plan, journal=journal, ordinal=ordinal, handoff_ordinal=handoff_ordinal,
+            base=base, seed_source=seed_source)
+        if plan.schema_version == 7:
+            return ProtectedExecutorAdmissionComponent(bootstrap, 14).completed_bootstrap().component()
+        return bootstrap.component()
+
+    def executor_admission(self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal,
+                           base: KubernetesProtectedStagingCapacityDatabaseComponent,
+                           seed_source: Callable[[], Mapping[str, object]]) -> ProtectedApplyComponent:
+        if plan.schema_version != 7:
+            raise ValueError("installed executor admission requires execution preparation")
+        bootstrap = self.build_capacity(plan, journal=journal, ordinal=5, handoff_ordinal=2,
+            base=base, seed_source=seed_source)
+        return ProtectedExecutorAdmissionComponent(bootstrap, 14).component()
+
+    def build_capacity(self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal, ordinal: int,
+                       handoff_ordinal: int, base: KubernetesProtectedStagingCapacityDatabaseComponent,
+                       seed_source: Callable[[], Mapping[str, object]]) -> ProtectedCapacityBootstrapComponent:
         # Ownership, migration, credential seed, then database bootstrap. Keep
         # this original ordinal for early recovery as well as ordinary apply.
         if handoff_ordinal != 2 or ordinal != handoff_ordinal + 3:
@@ -121,4 +140,4 @@ class InstalledApplicationMigrationFactory:
             inputs_source=migration.inputs_source, handoff_source=migration.handoff_source,
             successor_source=migration.successor_source, container_registry=self.container_registry,
             base=replace(base, application_owner_role=APPLICATION_OWNER_ROLE), seed_source=seed_source,
-            migration_source=history, handoff_plan_source=migration.handoff_plan_source).component()
+            migration_source=history, handoff_plan_source=migration.handoff_plan_source)

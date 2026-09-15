@@ -482,6 +482,10 @@ class InstalledFinalGateExecutor:
             return application_factory.capacity(candidate, journal=journal,
                 ordinal=5, handoff_ordinal=2, base=staging_capacity._database_component(candidate),
                 seed_source=lambda: staging_capacity._credential_seed_for_plan(candidate))
+        def executor_admission(candidate: FinalGatePlan, journal: ProtectedApplyJournal) -> ProtectedApplyComponent:
+            return application_factory.executor_admission(candidate, journal=journal,
+                base=staging_capacity._database_component(candidate),
+                seed_source=lambda: staging_capacity._credential_seed_for_plan(candidate))
         staging_capacity = KubernetesProtectedStagingCapacityRuntime(
             runner=protected_runner,
             state_root=effective_config.state_root,
@@ -494,6 +498,7 @@ class InstalledFinalGateExecutor:
             prepared_controller_transports=prepared_controller_transports,
             execution_preparation_dependency_guard=(execution_preparation_dependency_guard),
             database_component_factory=capacity_database,
+            executor_admission_factory=executor_admission,
         )
         return MigrationEpochProtectedApplyExecutor(
             state_root=effective_config.state_root,

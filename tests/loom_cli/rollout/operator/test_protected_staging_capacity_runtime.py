@@ -36,6 +36,7 @@ from loom_cli.rollout.operator.final_gate_plan import FinalGatePlan, FinalGatePl
 from loom_cli.rollout.operator.protected_apply_journal import (
     ComponentObservation,
     ComponentState,
+    ProtectedApplyComponent,
     ProtectedApplyJournal,
     ProtectedApplyJournalError,
 )
@@ -955,6 +956,10 @@ def _runtime(
         pool_credential_transports=pool_credential_transports or {},
         prepared_controller_transports=prepared_controller_transports or {},
         execution_preparation_dependency_guard=lambda _plan, _artifact: "d" * 64,
+        executor_admission_factory=lambda _plan, _journal: ProtectedApplyComponent(
+            "executor-database-admission", "a" * 64, "b" * 64,
+            lambda _: pytest.fail("executor issuance is outside this transport fixture"),
+            lambda _: pytest.fail("executor issuance is outside this transport fixture")),
     )
 
 
@@ -1055,7 +1060,8 @@ def test_execution_plan_converges_both_controller_prerequisites_before_credentia
         controller_prerequisite_transports=_controller_prerequisite_transports(),
         pool_credential_transports=_pool_credential_transports(),
         prepared_controller_transports=_prepared_controller_transports(),
-    ).components(plan, epoch_guard=lambda _plan: epoch)
+    ).components(plan, epoch_guard=lambda _plan: epoch, journal=ProtectedApplyJournal(
+            tmp_path / "state", request_id=plan.request_id, attempt_number=plan.attempt_number, service_uid=os.getuid()))
 
     assert tuple(component.component_id for component in components) == (
         "staging-capacity-credentials",
@@ -1068,6 +1074,7 @@ def test_execution_plan_converges_both_controller_prerequisites_before_credentia
         "capacity-manager-configuration",
         "staging-capacity-agent",
         "capacity-execution-preparation",
+        "executor-database-admission",
     )
 
 
@@ -1086,7 +1093,8 @@ def test_execution_plan_rejects_missing_controller_prerequisite_transport(
             tmp_path,
             pool_credential_transports=_pool_credential_transports(),
             prepared_controller_transports=_prepared_controller_transports(),
-        ).components(plan, epoch_guard=lambda _plan: epoch)
+        ).components(plan, epoch_guard=lambda _plan: epoch, journal=ProtectedApplyJournal(
+            tmp_path / "state", request_id=plan.request_id, attempt_number=plan.attempt_number, service_uid=os.getuid()))
 
 
 def test_execution_plan_rejects_missing_pool_credential_transport(tmp_path: Path) -> None:
@@ -1102,7 +1110,8 @@ def test_execution_plan_rejects_missing_pool_credential_transport(tmp_path: Path
             tmp_path,
             controller_prerequisite_transports=_controller_prerequisite_transports(),
             prepared_controller_transports=_prepared_controller_transports(),
-        ).components(plan, epoch_guard=lambda _plan: epoch)
+        ).components(plan, epoch_guard=lambda _plan: epoch, journal=ProtectedApplyJournal(
+            tmp_path / "state", request_id=plan.request_id, attempt_number=plan.attempt_number, service_uid=os.getuid()))
 
 
 def test_controller_prerequisite_components_dispatch_pool_specific_authority(
@@ -1138,7 +1147,8 @@ def test_controller_prerequisite_components_dispatch_pool_specific_authority(
             controller_prerequisite_transports=_controller_prerequisite_transports(),
             pool_credential_transports=_pool_credential_transports(),
             prepared_controller_transports=_prepared_controller_transports(),
-        ).components(plan, epoch_guard=lambda _plan: epoch)
+        ).components(plan, epoch_guard=lambda _plan: epoch, journal=ProtectedApplyJournal(
+            tmp_path / "state", request_id=plan.request_id, attempt_number=plan.attempt_number, service_uid=os.getuid()))
     }
 
     assert components["oldlab-controller-prerequisite"].classify(plan).state is ComponentState.EXACT

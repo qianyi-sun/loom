@@ -22,7 +22,8 @@ _ACK = "application-guard-retention-ack.json"
 _COMPONENT = "application-ownership-handoff"
 _MIGRATION_COMPONENT = "database-migration"
 _CAPACITY_COMPONENT = "staging-capacity-database"
-_COMPONENTS = (_COMPONENT, _MIGRATION_COMPONENT, _CAPACITY_COMPONENT)
+_EXECUTOR_COMPONENT = "executor-database-admission"
+_COMPONENTS = (_COMPONENT, _MIGRATION_COMPONENT, _CAPACITY_COMPONENT, _EXECUTOR_COMPONENT)
 
 
 def _retention_names(component_id: str) -> tuple[str, str]:
@@ -32,6 +33,8 @@ def _retention_names(component_id: str) -> tuple[str, str]:
         return "application-migration-guard-retention.json", "application-migration-guard-retention-ack.json"
     if component_id == _CAPACITY_COMPONENT:
         return "application-capacity-guard-retention.json", "application-capacity-guard-retention-ack.json"
+    if component_id == _EXECUTOR_COMPONENT:
+        return "executor-admission-guard-retention.json", "executor-admission-guard-retention-ack.json"
     raise ValueError("application guard retention component is invalid")
 
 

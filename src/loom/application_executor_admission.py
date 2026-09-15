@@ -157,19 +157,20 @@ def _issued(role: tuple[int, bool, object, bool], acl: list[tuple[object, ...]],
 
 
 def _privilege_digest(connection: ApplicationDatabaseConnection, role_oid: int) -> str:
-    # Include effective grants and shared ownership dependencies. Exclude only
+    # Include direct and PUBLIC grants (including implicit catalog defaults),
+    # and shared ownership dependencies. Exclude only
     # database ACL dependencies: CONNECT is the separately checked transition.
     rows = connection.execute(application_sql(
         "WITH a(kind,object_id,sub_id,acl) AS ("
-        "SELECT 'routine',oid::bigint,0,proacl FROM pg_catalog.pg_proc UNION ALL "
-        "SELECT 'relation',oid::bigint,0,relacl FROM pg_catalog.pg_class UNION ALL "
+        "SELECT 'routine',oid::bigint,0,COALESCE(proacl,pg_catalog.acldefault('f',proowner)) FROM pg_catalog.pg_proc UNION ALL "
+        "SELECT 'relation',oid::bigint,0,COALESCE(relacl,pg_catalog.acldefault(CASE WHEN relkind='S' THEN 's'::\"char\" ELSE 'r'::\"char\" END,relowner)) FROM pg_catalog.pg_class UNION ALL "
         "SELECT 'column',attrelid::bigint,attnum,attacl FROM pg_catalog.pg_attribute UNION ALL "
-        "SELECT 'schema',oid::bigint,0,nspacl FROM pg_catalog.pg_namespace UNION ALL "
-        "SELECT 'type',oid::bigint,0,typacl FROM pg_catalog.pg_type UNION ALL "
+        "SELECT 'schema',oid::bigint,0,COALESCE(nspacl,pg_catalog.acldefault('n',nspowner)) FROM pg_catalog.pg_namespace UNION ALL "
+        "SELECT 'type',oid::bigint,0,COALESCE(typacl,pg_catalog.acldefault('T',typowner)) FROM pg_catalog.pg_type UNION ALL "
         "SELECT 'default',oid::bigint,0,defaclacl FROM pg_catalog.pg_default_acl), "
-        "evidence AS (SELECT a.kind,a.object_id,a.sub_id,x.grantor::bigint," 
+        "evidence AS (SELECT a.kind||'-'||x.grantee::text,a.object_id,a.sub_id,x.grantor::bigint,"
         "x.privilege_type,x.is_grantable FROM a CROSS JOIN LATERAL pg_catalog.aclexplode(a.acl) x "
-        "WHERE x.grantee={} UNION ALL "
+        "WHERE x.grantee IN (0,{}) UNION ALL "
         "SELECT 'dependency-'||classid::text,objid::bigint,objsubid,dbid::bigint,deptype::text,false "
         "FROM pg_catalog.pg_shdepend WHERE refclassid='pg_catalog.pg_authid'::regclass AND refobjid={} "
         "AND NOT (classid='pg_catalog.pg_database'::regclass AND deptype='a')) "

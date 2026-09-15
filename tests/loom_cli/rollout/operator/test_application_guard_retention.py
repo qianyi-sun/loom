@@ -53,7 +53,7 @@ def _setup(tmp_path):
     return plan, journal
 
 
-@pytest.mark.parametrize("component_id", ["application-ownership-handoff", "database-migration", "staging-capacity-database"])
+@pytest.mark.parametrize("component_id", ["application-ownership-handoff", "database-migration", "staging-capacity-database", "executor-database-admission"])
 def test_no_database_mutation_authority_before_guard_acknowledges_retention(tmp_path, component_id):
     plan, journal = _setup(tmp_path)
     guard = _guard(plan)

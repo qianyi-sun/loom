@@ -321,6 +321,7 @@ class ExecutionStagingCapacityRuntime(StagingCapacityRuntime):
         "capacity-manager-configuration",
         "staging-capacity-agent",
         "capacity-execution-preparation",
+        "executor-database-admission",
     )
 
 

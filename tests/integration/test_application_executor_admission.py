@@ -65,7 +65,7 @@ async def test_existing_executor_issues_only_connect_and_replays_without_passwor
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("drift", ["membership", "elevation", "role-setting", "function-grant", "database-grant"])
+@pytest.mark.parametrize("drift", ["membership", "elevation", "role-setting", "function-grant", "database-grant", "public-grant", "implicit-public-function"])
 async def test_executor_admission_refuses_changed_authority_before_issuance(transfer_database, drift):  # noqa: F811
     from loom.application_executor_admission import admit_sealed_executor, issue_executor_admission
 
@@ -83,6 +83,10 @@ async def test_executor_admission_refuses_changed_authority_before_issuance(tran
             peer.execute("ALTER ROLE loom_cap_staging_executor SET search_path=public")
         elif drift == "function-grant":
             peer.execute("REVOKE ALL ON ALL FUNCTIONS IN SCHEMA loom_capacity_guard FROM loom_cap_staging_executor")
+        elif drift == "public-grant":
+            peer.execute("GRANT SELECT ON public.trials TO PUBLIC")
+        elif drift == "implicit-public-function":
+            peer.execute("CREATE FUNCTION public.executor_unexpected() RETURNS integer LANGUAGE sql AS 'SELECT 1'")
         else:
             peer.execute(sql.SQL("GRANT TEMPORARY ON DATABASE {} TO loom_cap_staging_executor").format(sql.Identifier(args["target"].database)))
         with pytest.raises(RuntimeError):

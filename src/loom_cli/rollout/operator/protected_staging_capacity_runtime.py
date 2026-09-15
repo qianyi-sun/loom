@@ -227,6 +227,8 @@ class KubernetesProtectedStagingCapacityRuntime:
     execution_preparation_dependency_guard: ExecutionPreparationDependencyGuard | None = None
     database_component_factory: Callable[[FinalGatePlan, ProtectedApplyJournal], ProtectedApplyComponent] | None = None
 
+    executor_admission_factory: Callable[[FinalGatePlan, ProtectedApplyJournal], ProtectedApplyComponent] | None = None
+
     def __post_init__(self) -> None:
         if (
             not self.state_root.is_absolute()
@@ -298,6 +300,13 @@ class KubernetesProtectedStagingCapacityRuntime:
             raise ValueError("protected staging capacity epoch authority is invalid")
 
         def build(component_id: str) -> ProtectedApplyComponent:
+            if component_id == "executor-database-admission":
+                if journal is None or self.executor_admission_factory is None:
+                    raise ValueError("protected executor admission installed factory is absent")
+                component = self.executor_admission_factory(plan, journal)
+                if component.component_id != component_id or component.terminal_recovery_authority is not None:
+                    raise ValueError("protected executor admission component changed")
+                return component
             if component_id == "staging-capacity-database" and self.database_component_factory is not None:
                 if journal is None:
                     raise ValueError("protected staging capacity original journal is absent")
@@ -382,6 +391,7 @@ class KubernetesProtectedStagingCapacityRuntime:
                 _EXECUTION_CREDENTIAL_COMPONENT_ID,
                 *_COMPONENT_IDS[3:],
                 _EXECUTION_PREPARATION_COMPONENT_ID,
+                "executor-database-admission",
             )
         return tuple(build(component_id) for component_id in component_ids)
 

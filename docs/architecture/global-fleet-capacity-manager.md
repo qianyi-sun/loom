@@ -180,6 +180,17 @@ expansion therefore requires a separately reviewed execution epoch, not a
 larger activation request against the initial preparation. Preparation remains
 non-launching at an effective ceiling of zero until all activation gates pass.
 
+After preparation, the installed execution plan issues the existing staging
+executor's database login through a separate retained component. The original
+bootstrap still requires a sealed executor. Issuance records that bootstrap's
+terminal, database and role identity, guard, inputs, and one generated credential
+before atomically enabling LOGIN and granting only owner-issued CONNECT. Recovery
+uses the same credential and independently pinned sealed or issued schema profile;
+PUBLIC and implicit routine grants are included in privilege drift checks. A
+completed component can be observed under a valid successor guard; an interrupted
+issuance must retain its original acknowledged guard. The credential is private
+rollout state at this point; controller delivery and activation remain separate.
+
 The installed rollout manager client exposes typed `activate_execution`,
 `drain_execution`, and `retire_execution` transports for those existing APIs.
 Each uses its own execution credential, requires a nonzero idempotency key, and

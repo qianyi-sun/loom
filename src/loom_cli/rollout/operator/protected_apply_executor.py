@@ -141,6 +141,7 @@ _STAGING_CAPACITY_EXECUTION_COMPONENT_ORDER = (
     "staging-capacity-execution-credentials",
     *_STAGING_CAPACITY_COMPONENT_ORDER[3:],
     "capacity-execution-preparation",
+    "executor-database-admission",
 )
 
 
