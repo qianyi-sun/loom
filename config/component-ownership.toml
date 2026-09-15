@@ -88,6 +88,14 @@ pins = [
   { path = "tests/integration/test_capacity_manager_execution_store.py", shard_index = 1 },
   { path = "tests/integration/test_capacity_final_release_witness.py", shard_index = 1 },
   { path = "tests/integration/test_capacity_typed_terminal_sql.py", shard_index = 1 },
+  # PR #1960 run 34925212036: shard 1 progressed to 78% at 90 minutes,
+  # while shard 2 finished in 54 minutes. These five complete PostgreSQL
+  # modules account for approximately 1,545 seconds in the shard-1 log.
+  { path = "tests/integration/test_application_handoff_completion.py", shard_index = 1 },
+  { path = "tests/integration/test_application_completed_authority.py", shard_index = 1 },
+  { path = "tests/integration/test_application_capacity_bootstrap_runtime.py", shard_index = 1 },
+  { path = "tests/integration/test_application_schema_reference.py", shard_index = 1 },
+  { path = "tests/integration/test_application_migrator_provision.py", shard_index = 1 },
 ]
 
 [[execution_policies]]

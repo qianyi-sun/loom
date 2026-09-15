@@ -2014,6 +2014,11 @@ def test_python_test_shards_are_complete_and_non_overlapping() -> None:
         "tests/integration/test_capacity_manager_execution_store.py",
         "tests/integration/test_capacity_final_release_witness.py",
         "tests/integration/test_capacity_typed_terminal_sql.py",
+        "tests/integration/test_application_handoff_completion.py",
+        "tests/integration/test_application_completed_authority.py",
+        "tests/integration/test_application_capacity_bootstrap_runtime.py",
+        "tests/integration/test_application_schema_reference.py",
+        "tests/integration/test_application_migrator_provision.py",
     } <= set(integration_shards[1])
     auth_path = "tests/integration/test_username_password_auth.py"
     schema_path = "tests/integration/test_username_password_schema.py"
