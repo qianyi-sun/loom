@@ -36,7 +36,7 @@ does not introduce another lock broker or silently steal an active deployment.
 
 ## Validation and phases
 
-Historical Nebius databases at ambiguous revisions `0133`–`0135` require the
+Historical Nebius databases at ambiguous revisions `0133`–`0136` require the
 [qualified lineage conversion](nebius-lineage-conversion.md) before their first
 dev migration. Preserve the backup and writer-quiescence requirements in that
 runbook; ordinary deployment does not infer or stamp the historical lineage.

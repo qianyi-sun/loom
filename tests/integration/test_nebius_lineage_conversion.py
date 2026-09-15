@@ -34,8 +34,9 @@ def _historical(url: str, revision: str) -> None:
         with engine.begin() as connection:
             # These are the integrated copies of Nebius 0133–0135 at
             # 7912ec076babc2fe51768fd2596b70c7de9e3d31. Shared history ends at 0132.
+            # The later native-usage 0136 is included in deployed d07718e2.
             with Operations.context(MigrationContext.configure(connection)):
-                for number in range(144, int(revision) + 12):
+                for number in (144, 145, 146, 148)[: int(revision) - 132]:
                     script = _scripts().get_revision(f"{number:04}")
                     assert script is not None
                     script.module.upgrade()
@@ -90,7 +91,7 @@ def _schema(connection: Connection) -> list[tuple[Any, ...]]:
     ]
 
 
-@pytest.mark.parametrize("revision", ["0133", "0134", "0135"])
+@pytest.mark.parametrize("revision", ["0133", "0134", "0135", "0136"])
 def test_conversion_preserves_history_and_reaches_dev(
     isolated_migration_postgres_url: str,
     revision: str,
@@ -193,7 +194,7 @@ def test_conversion_preserves_history_and_reaches_dev(
             """),
                 {"id": attempt, "materialization": materialization},
             )
-            if revision == "0135":
+            if revision in {"0135", "0136"}:
                 connection.exec_driver_sql("""UPDATE task_image_materialization_attempts
                     SET native_build='{"job_uid":"retained-native-job","cpu_millis":500}'""")
             before = _snapshot(connection)
@@ -203,13 +204,15 @@ def test_conversion_preserves_history_and_reaches_dev(
         with engine.connect() as connection:
             assert _schema(connection) == expected_schema
             after = _snapshot(connection)
-            if revision != "0135":
+            for row in before["trials"]:
+                row["legacy_claim_id"] = None
+            if revision not in {"0135", "0136"}:
                 for row in before["task_image_materialization_attempts"]:
                     row["native_build"] = None
             assert after == before
             assert (
                 connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-                == "0146"
+                == "0148"
             )
             assert connection.exec_driver_sql(
                 "SELECT to_regclass('gateway_dispatch_receipts')"
@@ -323,7 +326,7 @@ def test_job_command_inspects_applies_and_sanitizes_rejection(
         with engine.connect() as connection:
             assert (
                 connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-                == "0146"
+                == "0148"
             )
         result = subprocess.run(
             [*argv, "--apply"], env=environment, capture_output=True, text=True, timeout=60
@@ -359,5 +362,41 @@ def test_conversion_rejects_source_drift(isolated_migration_postgres_url: str, d
         with pytest.raises(ValueError):
             with engine.begin() as connection:
                 convert_lineage(connection, _scripts(), "0135")
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "ALTER TABLE trial_resource_usage DROP CONSTRAINT trial_resource_usage_authority_check",
+        "ALTER TABLE trial_resource_usage ALTER COLUMN pod_uid TYPE varchar(200)",
+        "DROP INDEX trial_resource_usage_native_lease_idx",
+    ],
+)
+def test_0136_conversion_rejects_native_usage_drift(
+    isolated_migration_postgres_url: str,
+    change: str,
+) -> None:
+    url = isolated_migration_postgres_url
+    _historical(url, "0136")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(change)
+        with pytest.raises(ValueError, match="native resource usage"):
+            with engine.begin() as connection:
+                convert_lineage(connection, _scripts(), "0136")
+        with engine.connect() as connection:
+            assert (
+                connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
+                == "0136"
+            )
+            assert (
+                connection.exec_driver_sql(
+                    "SELECT to_regclass('public.gateway_dispatch_receipts')"
+                ).scalar_one()
+                is None
+            )
     finally:
         engine.dispose()

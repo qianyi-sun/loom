@@ -103,7 +103,7 @@ def _assert_compatible_migration_lineage(connection: Any) -> None:
     if connection.exec_driver_sql("SELECT to_regclass('public.alembic_version')").scalar() is None:
         return
     revisions = set(connection.exec_driver_sql("SELECT version_num FROM public.alembic_version").scalars())
-    if revisions.intersection({"0133", "0134", "0135"}) and connection.exec_driver_sql(
+    if revisions.intersection({"0133", "0134", "0135", "0136"}) and connection.exec_driver_sql(
         "SELECT to_regclass('public.gateway_dispatch_receipts')"
     ).scalar() is None:
         raise RuntimeError(
