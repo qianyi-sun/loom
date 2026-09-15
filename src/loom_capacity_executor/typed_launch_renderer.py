@@ -18,7 +18,11 @@ from loom_capacity_executor.launch_policy_set import (
     full_launch_profile_digest,
     resolve_typed_runtime_profile,
 )
-from loom_capacity_executor.launch_renderer import OperatorLaunchProfileV2, _render_slurm_request
+from loom_capacity_executor.launch_renderer import (
+    OperatorLaunchProfileV2,
+    _render_slurm_request,
+    assert_native_root_at_submission,
+)
 from loom_capacity_executor.slurm_contracts import SlurmLaunchRequestV2
 from loom_capacity_manager.contracts import (
     ConfigurationGenerationRefV1,
@@ -88,6 +92,7 @@ def render_typed_signed_launch(context: TrustedLaunchContextV3) -> RenderedTrust
         raise ValueError("typed launch subject, candidate or acknowledgement binding changed")
     profile = resolve_typed_runtime_profile(binding, context.profiles, policy=context.policy,
         purpose=authority.purpose, controller_authority_sha256=context.controller_authority.controller_authority_sha256)
+    assert_native_root_at_submission(profile, context.submitted_at)
     pinned = next((item for item in subject.profiles if item.pool_id == binding.pool_id), None)
     shape = None if pinned is None else next((item for item in pinned.worker_shapes if item.shape_id == binding.shape_id), None)
     if (

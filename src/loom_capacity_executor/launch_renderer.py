@@ -10,9 +10,15 @@ import posixpath
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import (
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from loom_capacity_executor.keys import ExecutorOwnershipKey
 from loom_capacity_executor.slurm_contracts import (
@@ -40,6 +46,12 @@ from loom_capacity_manager.executable_contracts import (
     canonical_executable_bytes,
 )
 from loom_capacity_manager.ownership import sign_executable_ownership
+from loom_task_image_authority.publication_contracts import PublicationTimestamp
+from loom_task_image_authority.publication_keyset import (
+    ExecutionGrantTrustRoot,
+    _base64url,
+    _instant,
+)
 
 _SLURM_IDENTIFIER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
 _CONTROLLER_HOST_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}[A-Za-z0-9]$"
@@ -116,6 +128,40 @@ class OperatorGenericTresMappingV2(StrictV2Model):
         return SlurmTresValueV2(name=value, value=1).name
 
 
+class NativeTaskImageExecutionV2(StrictV2Model):
+    """Optional release policy; not worker attestation or permission to start.
+
+    The enclosing approved profile pins the worker image, launcher executable,
+    launcher config and release. This contract selects the one supported native
+    launch protocol and pins the independent public root used by that worker.
+    Runtime eligibility additionally requires owner projection and authenticated
+    registration; accepting this document alone grants no native claims.
+    """
+
+    protocol: Literal["loom.task-image-native-execution/v2"]
+    launch_protocol: Literal["immutable-container-stdin/v1"]
+    platform: Literal["linux/amd64", "linux/arm64"]
+    root_key_id: Identifier
+    environment: Identifier
+    root_public_key: Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{43}$")]
+    root_activated_at: PublicationTimestamp
+    root_expires_at: PublicationTimestamp
+
+    def trust_root(self) -> ExecutionGrantTrustRoot:
+        return ExecutionGrantTrustRoot(
+            key_id=self.root_key_id,
+            environment=self.environment,
+            public_key=_base64url(self.root_public_key, 32),
+            activated_at=_instant(self.root_activated_at),
+            expires_at=_instant(self.root_expires_at),
+        )
+
+    @model_validator(mode="after")
+    def _valid_root(self) -> NativeTaskImageExecutionV2:
+        self.trust_root()
+        return self
+
+
 class OperatorLaunchProfileV2(StrictV2Model):
     """Operator launch policy joined to an immutable manager profile binding."""
 
@@ -149,6 +195,17 @@ class OperatorLaunchProfileV2(StrictV2Model):
     trusted_launcher_config: SlurmFileIdentityV2
     trusted_launcher_release_sha256: Digest
     image_digest: Annotated[str, Field(max_length=512, pattern=_IMAGE_DIGEST_PATTERN)]
+    native_execution: NativeTaskImageExecutionV2 | None = None
+
+    @model_serializer(mode="wrap")
+    def _preserve_legacy_wire(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # Existing policy, approved-set and artifact digests cover full model
+        # serialization (including nulls). Absent native policy must not change
+        # those retained Phase 1 bytes or force a legacy authority rollover.
+        payload: dict[str, Any] = handler(self)
+        if self.native_execution is None:
+            payload.pop("native_execution", None)
+        return payload
 
     @field_validator("resource_domains")
     @classmethod
@@ -303,6 +360,7 @@ def _assert_profile_binding(context: TrustedLaunchContextV2) -> OperatorResource
 
     # Revalidate after the digest check so model_copy cannot bypass profile invariants.
     OperatorLaunchProfileV2.model_validate(profile.model_dump(mode="python"))
+    assert_native_root_at_submission(profile, context.submitted_at)
     if (
         binding.pool_id != profile.pool_id
         or binding.pool_generation != profile.pool_generation
@@ -341,6 +399,15 @@ def _assert_profile_binding(context: TrustedLaunchContextV2) -> OperatorResource
     if len(binding.node_ids) > MAX_SLURM_NODES:
         raise TrustedLaunchRenderError("intent node set exceeds the scheduler bound")
     return selected[0]
+
+
+def assert_native_root_at_submission(profile: OperatorLaunchProfileV2, submitted_at: datetime) -> None:
+    """Apply the same native root lifetime fence before either ownership signer."""
+
+    if profile.native_execution is not None:
+        root = profile.native_execution.trust_root()
+        if not root.activated_at <= submitted_at < root.expires_at:
+            raise TrustedLaunchRenderError("native execution root is not valid at submission")
 
 
 def build_executable_ownership_metadata(
@@ -427,6 +494,7 @@ def _render_slurm_request(
         launcher_release_sha256=profile.trusted_launcher_release_sha256,
         image_digest=profile.image_digest,
         ownership_token=ownership_token,
+        native_lifetime="single-use-no-requeue/v1" if profile.native_execution is not None else None,
     )
 
 
@@ -437,6 +505,7 @@ def render_launch_request(context: TrustedLaunchContextV2) -> SlurmLaunchRequest
 
 
 __all__ = [
+    "NativeTaskImageExecutionV2",
     "OperatorGenericTresMappingV2",
     "OperatorLaunchProfileV2",
     "OperatorResourceDomainV2",

@@ -110,7 +110,7 @@ async def test_guard_schema_startup_returns_numeric_head(
 ) -> None:
     engine = create_async_engine(_value(capacity_guard_database, "migrator_url"))
     try:
-        assert await assert_capacity_guard_schema_at_head(engine) == 33
+        assert await assert_capacity_guard_schema_at_head(engine) == 34
     finally:
         await engine.dispose()
 
