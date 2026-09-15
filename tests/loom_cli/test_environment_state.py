@@ -2928,3 +2928,19 @@ def test_staging_bootstrap_preserves_both_zero_minimum_slurm_pool_contracts() ->
     assert gb10_state["target_slots"] == 0
     assert gb10_state["host_intents"]["trt-gb10-7"] == "stopped"
     assert sum(intent == "stopped" for intent in gb10_state["host_intents"].values()) == 15
+
+
+def test_staging_global_cutover_retires_only_legacy_trial_supervisors() -> None:
+    profile = load_environment_state_profile(
+        Path("deploy/environment-state/staging.toml"),
+        variables={"IMAGE_TAG": "staging-aaaaaaa", "ENV_CONFIG_VERSION": "staging-aaaaaaa", "GIT_SHA": "a" * 40},
+        expected_environment="staging",
+    )
+    supervisors = {item["pool_name"]: item for item in profile.external_slurm_autoscaler_supervisors}
+    assert set(supervisors) == {"gb10", "oldlab", "task-image-builder-gb10", "task-image-builder-oldlab"}
+    for pool in ("gb10", "oldlab"):
+        assert supervisors[pool]["enabled"] is False
+        assert supervisors[pool]["active"] is False
+    for pool in ("task-image-builder-gb10", "task-image-builder-oldlab"):
+        assert supervisors[pool]["enabled"] is True
+        assert supervisors[pool]["active"] is True
