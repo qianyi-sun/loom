@@ -63,9 +63,9 @@ def validate_purpose_resolved_tasks(
 
 __all__ = [
     "BATCH_PURPOSES",
-    "BatchPurpose",
     "PURPOSE_EVALUATION",
     "PURPOSE_TRAJECTORY_GENERATION",
+    "BatchPurpose",
     "task_filter_selects_task_set",
     "validate_purpose_resolved_tasks",
     "validate_purpose_task_filter",

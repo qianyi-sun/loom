@@ -394,7 +394,7 @@ function FieldLabel({
         {children}
       </span>
       {hint ? (
-        <span className="shrink-0 text-xs font-normal normal-case tracking-normal text-slate-400">
+        <span className="shrink-0 text-xs font-normal normal-case tracking-normal text-slate-500">
           {hint}
         </span>
       ) : null}
