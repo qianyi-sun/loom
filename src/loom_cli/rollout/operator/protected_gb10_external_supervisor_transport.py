@@ -30,6 +30,7 @@ from loom_cli.rollout.gb10_slurm_acceptance import (
     validate_gb10_slurm_acceptance,
 )
 
+from .protected_active_controller import ActiveControllerRequest
 from .protected_capacity_execution_preparation_component import PreparedControllerRequest
 from .protected_controller_discovery import ControllerDiscoveryRequest
 from .protected_controller_prerequisite_component import ControllerPrerequisiteRequest
@@ -935,6 +936,32 @@ class FixedGB10ExternalSupervisorTransport:
             candidate_tree=self.candidate_tree,
             prepared_controller=request,
         )
+        return self.run(self._ssh_argv(), rendered)
+
+    def invoke_active_controller(self, operation: str, payload: bytes) -> CommandResult:
+        operations = {
+            "observe-active": "observe_active_controller",
+            "converge-active-files": "converge_active_files",
+            "enable-active-timer": "enable_active_timer",
+        }
+        try:
+            request = ActiveControllerRequest.from_bytes(payload)
+            remote_operation = operations[operation]
+        except (KeyError, ValueError) as exc:
+            raise ValueError("GB10 active controller request is invalid") from exc
+        if (
+            request.pool_id != "gb10"
+            or request.transport_authority_sha256 != self.controller_prerequisite_authority_sha256
+            or request.prepared.prerequisite.source_sha != self.candidate_sha
+        ):
+            raise ValueError("GB10 active controller request is invalid")
+        rendered = _canonical_json({
+            "schema_version": 1, "operation": remote_operation,
+            "candidate_sha": self.candidate_sha, "candidate_tree": self.candidate_tree,
+            "active_controller": json.loads(payload),
+        })
+        if len(rendered.encode("ascii")) > _MAX_WIRE_BYTES:
+            raise ValueError("GB10 active controller request is too large")
         return self.run(self._ssh_argv(), rendered)
 
     def invoke_pool_credential(

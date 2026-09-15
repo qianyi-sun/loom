@@ -1982,7 +1982,7 @@ async def test_activation_validation_reads_context_and_local_authority_without_e
         "execution_state": "active", "executable_new_capacity_ceiling": 1,
         "executable_new_capacity_rate_per_minute": 1,
     })
-    artifact = object()
+    artifact = SimpleNamespace(execution=active)
     events = []
 
     class ManagedClient(InventoryClient):
@@ -2018,3 +2018,30 @@ async def test_activation_validation_reads_context_and_local_authority_without_e
         result = await run_daemon_once(config, activation_runtime_artifact=tmp_path / "activation.json", validate_activation_only=True)
         assert result.mode == "activation-validated"
     assert events == ["context", "validated", "closed"]
+
+
+@pytest.mark.asyncio
+async def test_activation_validation_rejects_drain_before_local_validation(tmp_path, monkeypatch):
+    config = PoolExecutorConfig.from_files(executor_files(tmp_path).config)
+    active = config.execution.model_copy(update={
+        "execution_state": "active", "executable_new_capacity_ceiling": 1,
+        "executable_new_capacity_rate_per_minute": 1,
+    })
+    drain = active.model_copy(update={"execution_state": "drain-only",
+                                     "executable_new_capacity_ceiling": 0,
+                                     "executable_new_capacity_rate_per_minute": 0})
+    class ManagedClient(InventoryClient):
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            pass
+        async def current_execution_context(self):
+            return drain
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("drain context reached runtime validation or execution")
+    monkeypatch.setattr(once, "build_executable_client", lambda _: ManagedClient())
+    monkeypatch.setattr(once, "load_activation_runtime_artifact", lambda _: SimpleNamespace(execution=active))
+    monkeypatch.setattr(once, "validate_executable_runtime_inputs", forbidden)
+    monkeypatch.setattr(once, "build_executable_runtime", forbidden)
+    with pytest.raises(ExecutorConfigError, match="exact active context"):
+        await run_daemon_once(config, activation_runtime_artifact=tmp_path / "activation.json", validate_activation_only=True)

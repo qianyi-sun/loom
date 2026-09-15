@@ -153,6 +153,8 @@ async def run_daemon_once(
         assert activation_runtime_artifact is not None
         artifact = load_activation_runtime_artifact(activation_runtime_artifact)
         if validate_activation_only:
+            if current_context != artifact.execution:
+                raise ExecutorConfigError("activation validation requires the exact active context")
             validate_executable_runtime_inputs(config, artifact, current_context=current_context)
             return ExecutorOnceResult("activation-validated")
         executor = build_executable_runtime(

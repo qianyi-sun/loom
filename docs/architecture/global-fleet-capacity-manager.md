@@ -279,6 +279,25 @@ retaining that exact registration for drain replay.
 
 ## Dynamic personal subject projection
 
+The fixed controller command channels expose `observe-active`,
+`converge-active-files`, and `enable-active-timer`. An activation request binds a
+stable operation UUID to the exact prepared profile, prerequisite release, and
+portable V2 document. The installer derives the active config, runtime artifact,
+and service environment; callers cannot supply an arbitrary file map. All
+prepared, prerequisite, release, credential, and active mutations share one host
+lock. Active file convergence requires stopped executor units and retains its
+operation under a root-owned private authority directory before publishing any
+service-owned input. Retained activation intent fences subsequent prepared
+mutations. Changed operation identities or existing file bytes are refused.
+
+Timer enablement validates the artifact using the installed service-user Python
+and authenticated current manager context, then rechecks the local inputs. It
+separately enables and starts the fixed active timer, allowing exact retries
+after an interrupted enable and when already active. Each daemon invocation
+independently authenticates execution authority. These transports do not create
+admission bindings, freeze legacy writers, publish execution authority, or grant
+manager activation; the installed composition must supply those prerequisites.
+
 After stable-route activation, the lifecycle service registers the personal
 deployment through `PUT /v1/development-projections/{subject_id}` before the
 environment can be marked ready. The manager derives the

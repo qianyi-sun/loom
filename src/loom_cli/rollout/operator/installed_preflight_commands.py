@@ -30,6 +30,9 @@ _OLDLAB_CONTROLLER_MAX_INPUT_BYTES = 8 * 1024 * 1024
 _OLDLAB_CONTROLLER_MAX_OUTPUT_BYTES = 2 * 1024 * 1024
 _OLDLAB_CONTROLLER_OPERATIONS = frozenset(
     {
+        "observe-active",
+        "converge-active-files",
+        "enable-active-timer",
         "converge-prerequisite",
         "converge-prepared-files",
         "disable-prepared-timer",

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import importlib.util
 import ipaddress
@@ -17,11 +18,22 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from collections.abc import Callable, Sequence
+import threading
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path, PurePosixPath
-from typing import IO, TYPE_CHECKING, Protocol
+from typing import IO, TYPE_CHECKING, Concatenate, ParamSpec, Protocol, TypeVar
+from uuid import uuid4
 
+from loom_cli.rollout.operator.installed_execution_authority import (
+    _publish_authority_without_replace,
+)
+from loom_cli.rollout.operator.protected_active_controller import (
+    ActiveControllerEvidence,
+    ActiveControllerRequest,
+)
 from loom_cli.rollout.operator.protected_capacity_execution_preparation_component import (
     PreparedControllerEvidence,
     PreparedControllerRequest,
@@ -129,6 +141,8 @@ _MAX_PREREQUISITE_REQUEST_BYTES = 2 * 1024 * 1024
 _MAX_DISCOVERY_REQUEST_BYTES = 256 * 1024
 _MAX_CREDENTIAL_REQUEST_BYTES = 8 * 1024 * 1024
 _MAX_PREPARED_REQUEST_BYTES = 4 * 1024 * 1024
+_ACTIVE_OPERATIONS = frozenset({"observe-active", "converge-active-files", "enable-active-timer"})
+_MAX_ACTIVE_REQUEST_BYTES = 4 * 1024 * 1024
 _PREPARED_OPERATIONS = frozenset(
     {
         "observe-prepared",
@@ -501,6 +515,21 @@ def _metadata_identity(value: os.stat_result) -> tuple[int, ...]:
     )
 
 
+_OperationParameters = ParamSpec("_OperationParameters")
+_OperationResult = TypeVar("_OperationResult")
+
+
+def _serialized_controller_mutation(
+    method: Callable[Concatenate[ControllerInstaller, _OperationParameters], _OperationResult],
+) -> Callable[Concatenate[ControllerInstaller, _OperationParameters], _OperationResult]:
+    @wraps(method)
+    def serialized(self: ControllerInstaller, /, *args: _OperationParameters.args, **kwargs: _OperationParameters.kwargs) -> _OperationResult:
+        with self._controller_operation_lock():
+            self._refuse_retained_active_operation()
+            return method(self, *args, **kwargs)
+    return serialized
+
+
 class ControllerInstaller:
     def __init__(
         self,
@@ -513,6 +542,8 @@ class ControllerInstaller:
         effective_uid: int | None = None,
     ) -> None:
         self.context = context
+        self._operation_mutex = threading.RLock()
+        self._operation_depth = 0
         self.runner = runner
         self.extractor = extractor
         self.machine = platform.machine() if machine is None else machine
@@ -1552,6 +1583,7 @@ class ControllerInstaller:
         self._assert_quiescent()
         return evidence
 
+    @_serialized_controller_mutation
     def publish_credential(
         self,
         payload: PoolExecutionCredentialPayload,
@@ -1569,6 +1601,7 @@ class ControllerInstaller:
     def _prepared_prerequisite(
         self,
         request: PreparedControllerRequest,
+        *, active: bool = False,
     ) -> _PreparedLocalAuthority:
         if (
             self.effective_uid != 0
@@ -1577,6 +1610,8 @@ class ControllerInstaller:
             or request.transport_authority_sha256 != request.prerequisite.transport_authority_sha256
         ):
             raise CapacityExecutorInstallError("prepared controller request is invalid")
+        if not active:
+            self._refuse_retained_active_operation()
         prerequisite = request.prerequisite
         digest = _validate_image_reference(prerequisite.image)
         uid, gid, _executables, _configuration = self._local_authority(prerequisite)
@@ -1630,7 +1665,9 @@ class ControllerInstaller:
             raise CapacityExecutorInstallError(
                 "controller prerequisite changed before prepared operation"
             )
-        _unit_sha256, active_states, file_states = self._prepared_unit_evidence(expected_release)
+        _unit_sha256, active_states, file_states = self._unit_evidence(
+            expected_release, allow_prepared_timer=not active, allow_active_timer=active,
+        )
         return _PreparedLocalAuthority(
             uid=uid,
             gid=gid,
@@ -1680,6 +1717,7 @@ class ControllerInstaller:
             tick_evidence_sha256=tick_digest if timer_active else None,
         )
 
+    @_serialized_controller_mutation
     def converge_prepared_files(
         self,
         request: PreparedControllerRequest,
@@ -1705,6 +1743,7 @@ class ControllerInstaller:
             raise CapacityExecutorInstallError("prepared controller files did not converge")
         return evidence
 
+    @_serialized_controller_mutation
     def enable_prepared_timer(
         self,
         request: PreparedControllerRequest,
@@ -1728,6 +1767,7 @@ class ControllerInstaller:
             raise CapacityExecutorInstallError("prepared controller timer did not converge")
         return evidence
 
+    @_serialized_controller_mutation
     def run_prepared_tick(
         self,
         request: PreparedControllerRequest,
@@ -1766,6 +1806,7 @@ class ControllerInstaller:
             raise CapacityExecutorInstallError("prepared controller tick did not converge")
         return evidence
 
+    @_serialized_controller_mutation
     def disable_prepared_timer(
         self,
         request: PreparedControllerRequest,
@@ -1848,6 +1889,188 @@ class ControllerInstaller:
         if current != expected:
             raise CapacityExecutorInstallError("prepared controller tick evidence drifted")
         return hashlib.sha256(current).hexdigest()
+
+    @contextmanager
+    def _controller_operation_lock(self) -> Iterator[None]:
+        # RLock permits only same-thread nesting (prerequisite -> install);
+        # flock excludes all other installer instances and processes.
+        if not self._operation_mutex.acquire(blocking=False):
+            raise BlockingIOError("controller mutation is already in progress")
+        directory = descriptor = None
+        try:
+            if self._operation_depth:
+                self._operation_depth += 1
+                try:
+                    yield
+                finally:
+                    self._operation_depth -= 1
+                return
+            if self.effective_uid != 0:
+                raise CapacityExecutorInstallError("controller mutation requires root")
+            self._ensure_authority_tree(_RELEASES_ROOT.parent)
+            directory = os.open(self._path(_RELEASES_ROOT.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            metadata = os.fstat(directory)
+            if (metadata.st_uid != self.context.authority_uid or metadata.st_gid != self.context.authority_gid
+                    or stat.S_IMODE(metadata.st_mode) & 0o022):
+                raise CapacityExecutorInstallError("controller lock parent is unsafe")
+            descriptor = os.open(".loom-capacity-executor-operation.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory)
+            metadata = os.fstat(descriptor)
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                    or stat.S_IMODE(metadata.st_mode) != 0o600
+                    or metadata.st_uid != self.context.authority_uid or metadata.st_gid != self.context.authority_gid):
+                raise CapacityExecutorInstallError("controller lock is unsafe")
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._operation_depth = 1
+            try:
+                yield
+            finally:
+                self._operation_depth = 0
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            if directory is not None:
+                os.close(directory)
+            self._operation_mutex.release()
+
+    def _refuse_retained_active_operation(self) -> None:
+        path = self._path(self._active_marker_path())
+        if path.exists() or path.is_symlink():
+            raise CapacityExecutorInstallError("controller mutation conflicts with retained active operation")
+
+    def _publish_active_input(self, absolute: Path, payload: bytes, *, uid: int, gid: int) -> None:
+        self._private_directory_evidence(absolute.parent, uid=uid, gid=gid)
+        path = self._path(absolute)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        temporary = f".{path.name}.{uuid4().hex}.tmp"
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory)
+            with os.fdopen(descriptor, "wb") as stream:
+                os.fchown(stream.fileno(), uid, gid)
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                _publish_authority_without_replace(directory, temporary, path.name)
+            except FileExistsError:
+                pass
+            if self._read_private_input(absolute, uid=uid, gid=gid) != payload:
+                raise CapacityExecutorInstallError("active controller publication conflicts with retained evidence")
+            os.fsync(directory)
+        finally:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+            os.close(directory)
+
+    def _active_prerequisite(self, request: ActiveControllerRequest) -> _PreparedLocalAuthority:
+        if not isinstance(request, ActiveControllerRequest):
+            raise CapacityExecutorInstallError("active controller request is invalid")
+        request = ActiveControllerRequest.from_bytes(request.to_bytes())
+        authority = self._prepared_prerequisite(request.prepared, active=True)
+        for absolute, expected in request.prepared.files.items():
+            if self._read_private_input(Path(absolute), uid=authority.uid, gid=authority.gid) != expected:
+                raise CapacityExecutorInstallError("active controller installed preparation changed")
+        return authority
+
+    @staticmethod
+    def _active_marker_path() -> Path:
+        return _RELEASES_ROOT / ".active-authority" / "operation.json"
+
+    @staticmethod
+    def _active_units_stopped(authority: _PreparedLocalAuthority) -> bool:
+        return all(state == "inactive" for state in authority.unit_active_state.values()) and all(
+            state == ("disabled" if unit.endswith(".timer") else "static")
+            for unit, state in authority.unit_file_state.items()
+        )
+
+    def _observe_active(self, request: ActiveControllerRequest) -> ActiveControllerEvidence | None:
+        authority = self._active_prerequisite(request)
+        try:
+            marker = self._read_private_input(self._active_marker_path(), uid=self.context.authority_uid, gid=self.context.authority_gid)
+        except FileNotFoundError:
+            if not self._active_units_stopped(authority):
+                raise CapacityExecutorInstallError("active controller units have no retained operation") from None
+            for absolute in request.files:
+                try:
+                    self._read_private_input(Path(absolute), uid=authority.uid, gid=authority.gid)
+                except FileNotFoundError:
+                    continue
+                raise CapacityExecutorInstallError("active controller files have no retained operation") from None
+            return None
+        self._private_directory_evidence(self._active_marker_path().parent, uid=self.context.authority_uid, gid=self.context.authority_gid)
+        if marker != request.to_bytes():
+            raise CapacityExecutorInstallError("active controller operation replay changed")
+        installed = {}
+        for absolute, expected in request.files.items():
+            try:
+                value = self._read_private_input(Path(absolute), uid=authority.uid, gid=authority.gid)
+            except FileNotFoundError:
+                if not self._active_units_stopped(authority):
+                    raise CapacityExecutorInstallError("active controller running files are incomplete") from None
+                return None
+            if value != expected:
+                raise CapacityExecutorInstallError("active controller installed files changed")
+            installed[absolute] = hashlib.sha256(value).hexdigest()
+        return ActiveControllerEvidence(
+            operation_id=request.operation_id, pool_id=request.pool_id,
+            request_sha256=request.request_sha256, transport_authority_sha256=request.transport_authority_sha256,
+            file_sha256=installed, unit_active_state=authority.unit_active_state, unit_file_state=authority.unit_file_state,
+        )
+
+    def observe_active(self, request: ActiveControllerRequest) -> ActiveControllerEvidence | None:
+        with self._controller_operation_lock():
+            return self._observe_active(request)
+
+    def converge_active_files(self, request: ActiveControllerRequest) -> ActiveControllerEvidence:
+        with self._controller_operation_lock():
+            authority = self._active_prerequisite(request)
+            if not self._active_units_stopped(authority):
+                raise CapacityExecutorInstallError("active controller files require all executor units stopped")
+            self._observe_active(request)
+            self._ensure_directory(self._active_marker_path().parent, mode=0o700,
+                                   uid=self.context.authority_uid, gid=self.context.authority_gid)
+            self._publish_active_input(self._active_marker_path(), request.to_bytes(),
+                                       uid=self.context.authority_uid, gid=self.context.authority_gid)
+            for absolute, payload in request.files.items():
+                self._publish_active_input(Path(absolute), payload, uid=authority.uid, gid=authority.gid)
+            evidence = self._observe_active(request)
+            if evidence is None or evidence.state != "staged":
+                raise CapacityExecutorInstallError("active controller files did not converge")
+            return evidence
+
+    def enable_active_timer(self, request: ActiveControllerRequest) -> ActiveControllerEvidence:
+        with self._controller_operation_lock():
+            evidence = self._observe_active(request)
+            if evidence is None:
+                raise CapacityExecutorInstallError("active controller files are not staged")
+            authority = self._active_prerequisite(request)
+            config_path = Path(request.prepared.prerequisite.binding.config_file)
+            result = self._run_as_service(
+                str(authority.release_root / "venv/bin/python"), "-I", "-B", "-m", "loom_capacity_pool_controller",
+                "--config", str(config_path.with_name(f"{request.pool_id}-active.json")),
+                "--expected-manifest-sha256", request.document.immutable_manifest_sha256,
+                "--pool", request.pool_id, "--activation-runtime-artifact",
+                str(config_path.with_name(f"{request.pool_id}-activation-runtime.json")),
+                "--validate-activation-only",
+            )
+            if result.returncode != 0 or result.stdout or result.stderr:
+                raise CapacityExecutorInstallError("active controller target authority validation failed")
+            # Validation authenticated the current manager context. Recheck local
+            # files and installed authority immediately before each systemd step.
+            evidence = self._observe_active(request)
+            if evidence is None:
+                raise CapacityExecutorInstallError("active controller files changed during validation")
+            timer = "loom-capacity-pool-executor-active.timer"
+            if evidence.state == "staged":
+                self._run(_SYSTEMCTL, "enable", timer)
+                evidence = self._observe_active(request)
+            if evidence is not None and evidence.state == "enabling":
+                self._run(_SYSTEMCTL, "start", timer)
+                evidence = self._observe_active(request)
+            if evidence is None or evidence.state != "active":
+                raise CapacityExecutorInstallError("active controller timer did not converge")
+            return evidence
 
     def _ensure_private_child_directory(
         self,
@@ -1960,6 +2183,7 @@ class ControllerInstaller:
         release_root: Path,
         *,
         allow_prepared_timer: bool,
+        allow_active_timer: bool = False,
     ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
         active_states: dict[str, str] = {}
         file_states: dict[str, str] = {}
@@ -1981,6 +2205,13 @@ class ControllerInstaller:
                 if allow_prepared_timer and prepared_timer
                 else {("inactive", expected_file_state)}
             )
+            if allow_active_timer:
+                if allow_prepared_timer:
+                    raise CapacityExecutorInstallError("prepared and active modes cannot overlap")
+                if unit.endswith("-active.timer"):
+                    allowed_state = {("inactive", "disabled"), ("inactive", "enabled"), ("active", "enabled")}
+                elif unit.endswith("-active.service"):
+                    allowed_state = {("inactive", "static"), ("activating", "static"), ("active", "static")}
             if (active, enabled) not in allowed_state:
                 raise CapacityExecutorInstallError(
                     "controller prerequisite units are not exactly inert"
@@ -2115,6 +2346,7 @@ class ControllerInstaller:
             local_authority_sha256=request.binding.local_authority_sha256,
         )
 
+    @_serialized_controller_mutation
     def converge_prerequisite(
         self,
         request: ControllerPrerequisiteRequest,
@@ -2147,6 +2379,7 @@ class ControllerInstaller:
             raise CapacityExecutorInstallError("controller prerequisite convergence was incomplete")
         return evidence
 
+    @_serialized_controller_mutation
     def install(self, *, image: str, source_sha: str) -> InstallResult:
         if self.effective_uid != 0:
             raise CapacityExecutorInstallError("capacity executor installation requires root")
@@ -2280,6 +2513,27 @@ def _prepared_controller_operation(
     return b"null\n" if evidence is None else evidence.to_bytes()
 
 
+def _active_controller_operation(
+    installer: ControllerInstaller, operation: str, payload: bytes,
+) -> bytes:
+    if operation not in _ACTIVE_OPERATIONS:
+        raise CapacityExecutorInstallError("active controller operation is invalid")
+    if not isinstance(payload, bytes) or not 0 < len(payload) <= _MAX_ACTIVE_REQUEST_BYTES:
+        raise CapacityExecutorInstallError("active controller request bytes are invalid")
+    try:
+        request = ActiveControllerRequest.from_bytes(payload)
+    except ValueError as exc:
+        raise CapacityExecutorInstallError("active controller request is invalid") from exc
+    if operation == "observe-active":
+        evidence = installer.observe_active(request)
+        return b"null\n" if evidence is None else evidence.to_bytes()
+    handlers = {
+        "converge-active-files": installer.converge_active_files,
+        "enable-active-timer": installer.enable_active_timer,
+    }
+    return handlers[operation](request).to_bytes()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -2296,6 +2550,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "enable-prepared-timer",
             "run-prepared-tick",
             "disable-prepared-timer",
+            "observe-active",
+            "converge-active-files",
+            "enable-active-timer",
         ),
         default="install",
     )
@@ -2355,6 +2612,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     payload,
                     runtime_image=args.runtime_image,
                 )
+            elif args.operation in _ACTIVE_OPERATIONS:
+                if args.runtime_image is not None:
+                    raise CapacityExecutorInstallError(
+                        "active controller operation has unexpected arguments"
+                    )
+                payload = sys.stdin.buffer.read(_MAX_ACTIVE_REQUEST_BYTES + 1)
+                response = _active_controller_operation(installer, args.operation, payload)
             elif args.operation in _PREPARED_OPERATIONS:
                 if args.runtime_image is not None:
                     raise CapacityExecutorInstallError(

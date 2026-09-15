@@ -857,6 +857,9 @@ def _parse_request(payload: bytes) -> dict[str, object]:
         "enable_prepared_timer": common | {"prepared_controller"},
         "run_prepared_tick": common | {"prepared_controller"},
         "disable_prepared_timer": common | {"prepared_controller"},
+        "observe_active_controller": common | {"active_controller"},
+        "converge_active_files": common | {"active_controller"},
+        "enable_active_timer": common | {"active_controller"},
     }
     if (
         type(value.get("schema_version")) is not int
@@ -904,6 +907,8 @@ def _parse_request(payload: bytes) -> dict[str, object]:
             value.get("prepared_controller"),
             candidate_sha=candidate_sha,
         )
+    if operation in {"observe_active_controller", "converge_active_files", "enable_active_timer"}:
+        _validate_active_controller_request(value.get("active_controller"), candidate_sha=candidate_sha)
     return value
 
 
@@ -1047,6 +1052,33 @@ def _validate_controller_prerequisite_request(
         or any(node.get("pool_id") != "gb10" for node in nodes)
     ):
         raise BrokerError("GB10 controller prerequisite authority is invalid")
+
+
+def _validate_active_controller_request(value: object, *, candidate_sha: str) -> None:
+    # The stdlib-only broker checks the envelope and candidate/preparation binding.
+    # The trusted candidate installer revalidates every typed profile/document
+    # contract before host I/O and derives the only permitted output paths.
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema_version", "operation_id", "prepared", "profile", "document"}
+        or type(value.get("schema_version")) is not int or value["schema_version"] != 1
+        or not isinstance(value.get("profile"), dict) or not isinstance(value.get("document"), dict)
+        or len(_canonical_json(value)) > 4 * 1024 * 1024
+    ):
+        raise BrokerError("GB10 active controller authority is invalid")
+    operation_id = value.get("operation_id")
+    try:
+        identity = UUID(operation_id) if isinstance(operation_id, str) else None
+    except ValueError as exc:
+        raise BrokerError("GB10 active controller operation identity is invalid") from exc
+    if identity is None or identity.int == 0 or str(identity) != operation_id:
+        raise BrokerError("GB10 active controller operation identity is invalid")
+    _validate_prepared_controller_request(value["prepared"], candidate_sha=candidate_sha)
+    prepared = value["prepared"]
+    document = value["document"]
+    assert isinstance(prepared, dict) and isinstance(document, dict)
+    if document.get("pool_id") != "gb10":
+        raise BrokerError("GB10 active controller pool is invalid")
 
 
 def _validate_prepared_controller_request(
@@ -3060,6 +3092,129 @@ def run_controller_prepared(candidate: Path, payload: bytes) -> bytes:
     return encoded
 
 
+def run_controller_active(candidate: Path, payload: bytes) -> bytes:
+    """Run only the candidate installer's typed active-controller operation."""
+
+    request = _parse_request(payload)
+    operations = {
+        "observe_active_controller": "observe-active",
+        "converge_active_files": "converge-active-files",
+        "enable_active_timer": "enable-active-timer",
+    }
+    try:
+        operation = operations[str(request["operation"])]
+    except KeyError as exc:
+        raise BrokerError("GB10 active controller operation is invalid") from exc
+    candidate_sha = str(request["candidate_sha"])
+    if (
+        not candidate.is_absolute()
+        or candidate.parent != CANDIDATES_ROOT
+        or candidate.name != candidate_sha
+        or ".." in candidate.parts
+    ):
+        raise BrokerError("GB10 active controller candidate is invalid")
+    inner = _canonical_json(request["active_controller"]).decode("ascii")
+    python = candidate / "venv/bin/python"
+    installer = candidate / "repo/scripts/ops/install_capacity_executor.py"
+    result = _run(
+        [
+            str(python),
+            "-I",
+            "-B",
+            str(installer),
+            "--operation",
+            operation,
+        ],
+        cwd=candidate / "repo",
+        environment={
+            "HOME": "/root",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        timeout=180,
+        check=False,
+        input_payload=inner,
+    )
+    encoded = result.stdout.encode("utf-8")
+    if (
+        result.returncode != 0
+        or result.stderr
+        or not 0 < len(encoded) <= _MAX_COMMAND_OUTPUT
+        or not encoded.endswith(b"\n")
+    ):
+        raise BrokerError("GB10 active controller operation failed safely")
+    try:
+        response = json.loads(encoded)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise BrokerError("GB10 active controller response is invalid") from exc
+    if (
+        _canonical_json(response) != encoded
+        or (response is None and operation != "observe-active")
+        or (response is not None and not isinstance(response, dict))
+    ):
+        raise BrokerError("GB10 active controller response is invalid")
+    if response is not None:
+        _validate_active_controller_response(
+            response,
+            request=request,
+            operation=operation,
+        )
+    return encoded
+
+
+def _validate_active_controller_response(
+    value: object, *, request: dict[str, object], operation: str,
+) -> None:
+    expected = {"schema_version", "operation_id", "pool_id", "request_sha256",
+                "transport_authority_sha256", "file_sha256", "unit_active_state",
+                "unit_file_state", "state"}
+    active_request = request.get("active_controller")
+    if not isinstance(value, dict) or set(value) != expected or not isinstance(active_request, dict):
+        raise BrokerError("GB10 active controller response is invalid")
+    prepared = active_request.get("prepared")
+    files = value.get("file_sha256")
+    active = value.get("unit_active_state")
+    enabled = value.get("unit_file_state")
+    prefix = "loom-capacity-pool-executor"
+    units = {prefix + suffix for suffix in (".service", "-prepared.service", "-prepared.timer", "-active.service", "-active.timer")}
+    if (
+        not isinstance(prepared, dict)
+        or type(value.get("schema_version")) is not int or value["schema_version"] != 1
+        or value.get("operation_id") != active_request.get("operation_id")
+        or value.get("pool_id") != "gb10"
+        or value.get("request_sha256") != hashlib.sha256(_canonical_json(active_request)).hexdigest()
+        or value.get("transport_authority_sha256") != prepared.get("transport_authority_sha256")
+        or not isinstance(files, dict) or set(files) != {
+            "/etc/loom-capacity-executor/gb10-active.json",
+            "/etc/loom-capacity-executor/gb10-activation-runtime.json",
+            "/etc/loom-capacity-executor/active-service.env"}
+        or any(not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None or digest == "0" * 64 for digest in files.values())
+        or not isinstance(active, dict) or set(active) != units
+        or not isinstance(enabled, dict) or set(enabled) != units
+    ):
+        raise BrokerError("GB10 active controller response is invalid")
+    for unit in units:
+        if unit.endswith("-active.timer"):
+            allowed = {("inactive", "disabled"), ("inactive", "enabled"), ("active", "enabled")}
+        elif unit.endswith("-active.service"):
+            allowed = {("inactive", "static"), ("activating", "static"), ("active", "static")}
+        else:
+            allowed = {("inactive", "disabled" if unit.endswith(".timer") else "static")}
+        if not isinstance(active[unit], str) or not isinstance(enabled[unit], str) or (active[unit], enabled[unit]) not in allowed:
+            raise BrokerError("GB10 active controller unit response is invalid")
+    timer = prefix + "-active.timer"
+    state = "active" if active[timer] == "active" else "enabling" if enabled[timer] == "enabled" else "staged"
+    if (
+        value.get("state") != state
+        or (state == "staged" and active[prefix + "-active.service"] != "inactive")
+        or (operation == "converge-active-files" and state != "staged")
+        or (operation == "enable-active-timer" and state != "active")
+    ):
+        raise BrokerError("GB10 active controller operation did not converge")
+
+
 def _validate_prepared_controller_response(
     value: object,
     *,
@@ -3317,6 +3472,11 @@ def _main(argv: list[str] | None = None) -> int:
             "disable_prepared_timer",
         }:
             sys.stdout.buffer.write(run_controller_prepared(candidate, payload))
+            return 0
+        if request.get("operation") in {
+            "observe_active_controller", "converge_active_files", "enable_active_timer",
+        }:
+            sys.stdout.buffer.write(run_controller_active(candidate, payload))
             return 0
         _exec_helper(candidate, payload)
     except BrokerCapacityFailureError as exc:

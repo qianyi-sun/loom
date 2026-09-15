@@ -1453,7 +1453,8 @@ def test_installer_rejects_drift_anywhere_in_an_existing_runtime_tree(
 def test_installer_rejects_a_foreign_current_release_symlink_before_extraction(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "opt").mkdir()
+    (tmp_path / "opt").mkdir(mode=0o755)
+    (tmp_path / "opt").chmod(0o755)
     (tmp_path / "opt/loom-capacity-executor").symlink_to("/tmp/foreign-release")
     extracted = False
 
