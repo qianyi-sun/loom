@@ -273,3 +273,27 @@ async def test_restoration_sends_no_plaintext_and_rolls_back_after_alter(transfe
         assert admin.execute(
             "SELECT rolcanlogin,rolpassword FROM pg_authid WHERE rolname=%s", (runtime,)
         ).fetchone() == (False, None)
+
+
+@pytest.mark.asyncio
+async def test_cutover_reseals_runtime_without_rotating_credential_or_retiring_existing_session(transfer_database):  # noqa: F811
+    from loom.application_handoff_completion import complete_application_handoff_database
+    from loom.application_runtime_login import seal_application_runtime_for_cutover
+    from tests.integration.test_application_handoff_completion import _closed
+
+    url, owner, bindings = transfer_database
+    runtime = next(role for role, alias in bindings.items() if alias == "application-owner")
+    with _closed(transfer_database) as (admin, maintenance, guard, arguments):
+        complete_application_handoff_database(admin, maintenance=maintenance, **arguments)
+        password, target, coordination = arguments["password"], arguments["target"], arguments["coordination_guard"]
+        with psycopg.connect(url, user=runtime, password=password, autocommit=True) as original:
+            original_pid = original.info.backend_pid
+            old_verifier = admin.execute("SELECT rolpassword FROM pg_authid WHERE rolname=%s", (runtime,)).fetchone()[0]
+            for _ in range(2):
+                seal_application_runtime_for_cutover(admin, owner_role=owner, role_bindings=bindings,
+                    password=password, target=target, coordination_guard=coordination, schema_acl_profile="staging-readonly")
+            assert admin.execute("SELECT rolcanlogin,rolpassword FROM pg_authid WHERE rolname=%s", (runtime,)).fetchone() == (False, old_verifier)
+            with pytest.raises(psycopg.OperationalError):
+                psycopg.connect(url, user=runtime, password=password, connect_timeout=2).close()
+            assert original.execute("SELECT pg_backend_pid()").fetchone() == (original_pid,)
+            assert guard.execute("SELECT pg_backend_pid()").fetchone() == (coordination.backend.pid,)
