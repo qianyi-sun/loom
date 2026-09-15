@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import ssl
 import subprocess
 import tempfile
 import time
@@ -12,6 +13,7 @@ from uuid import uuid4
 
 import pytest
 import yaml
+from urllib3.exceptions import MaxRetryError, SSLError
 
 from loom.db.schema import ServiceExecutionLease
 from loom.execution_contract import (
@@ -369,18 +371,35 @@ def _import_image(container: object, *, tag: str, root: Path, ordinal: int) -> s
 
 async def _wait_for_dns_pods(core: object, *, timeout: float = 60) -> list[object]:
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        pods = (
-            await asyncio.to_thread(
-                core.list_namespaced_pod,
-                "kube-system",
-                label_selector="k8s-app=kube-dns",
-            )
-        ).items
-        if pods:
-            return pods
-        await asyncio.sleep(0.25)
-    raise AssertionError("disposable k3s did not create a CoreDNS Pod")
+    last_error: MaxRetryError | None = None
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            pods = (
+                await asyncio.to_thread(
+                    core.list_namespaced_pod,
+                    "kube-system",
+                    label_selector="k8s-app=kube-dns",
+                    _request_timeout=min(5, remaining),
+                )
+            ).items
+        except MaxRetryError as error:
+            # A newly started API server can close TLS after discovery succeeds.
+            # Only this read-only setup probe tolerates the observed EOF; all
+            # authority errors, writes and network-policy assertions fail normally.
+            reason = error.reason
+            if not (
+                isinstance(reason, SSLError)
+                and reason.args
+                and isinstance(reason.args[0], ssl.SSLEOFError)
+            ):
+                raise
+            last_error = error
+        else:
+            if pods:
+                return pods
+            last_error = None
+        await asyncio.sleep(min(0.25, max(0, deadline - time.monotonic())))
+    raise AssertionError("disposable k3s did not create a CoreDNS Pod") from last_error
 
 
 def _wait_for_pod(core: object, namespace: str, name: str) -> object:
