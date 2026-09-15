@@ -191,6 +191,14 @@ cutover, create freeze evidence, or install/start executors. The protected
 activation composition still owns foundation-generation binding, the complete
 writer and workload inventory, its operation journal, and #906's acceptance gates.
 
+The installed owner-authority publication uses Linux atomic create-only rename
+to retain a single-link, owner-only evidence file without overwriting an existing
+publication. A process exit after publication leaves readable evidence; exact
+replay syncs its directory before acknowledging completion. Unsupported atomic
+publication, different existing evidence, and unsafe metadata refuse without a
+hard-link fallback or automatic adoption. This storage guarantee does not create
+freeze evidence or perform the live cutover.
+
 ## Controller-local Slurm inventory and active execution
 
 OLDLAB's installed controller channel passes canonical request bytes to the

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib
 import json
@@ -672,6 +673,86 @@ def test_publisher_exact_replay_syncs_directory_before_acknowledgement(
     assert publisher(publication) == publication
     directory = authority_root.stat()
     assert (directory.st_dev, directory.st_ino) in synced_directories
+
+
+def test_publisher_replay_sync_failure_preserves_authority_for_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed durability acknowledgement must leave evidence intact and retryable."""
+    module = _authority_module()
+    publication = _publication(tmp_path)
+    authority_root = tmp_path / "owner-authority"
+    authority_root.mkdir(mode=0o700)
+    authority_path = authority_root / "issue-906.json"
+    publisher = module.InstalledExecutionAuthorityPublisher(
+        path=authority_path,
+        expected_uid=os.geteuid(), expected_gid=os.getegid(),
+    )
+    publisher(publication)
+    before = authority_path.stat()
+    payload = authority_path.read_bytes()
+    sync = os.fsync
+
+    def fail_directory_sync(descriptor):
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError(errno.EIO, "injected directory sync failure")
+        sync(descriptor)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fsync", fail_directory_sync)
+        with pytest.raises(OSError) as failure:
+            publisher(publication)
+        assert failure.value.errno == errno.EIO
+
+    after = authority_path.stat()
+    assert (after.st_dev, after.st_ino, after.st_ctime_ns, after.st_nlink) == (
+        before.st_dev, before.st_ino, before.st_ctime_ns, 1,
+    )
+    assert authority_path.read_bytes() == payload
+    assert list(authority_root.iterdir()) == [authority_path]
+    assert module.InstalledExecutionAuthorityReader(
+        path=authority_path,
+        expected_uid=os.geteuid(), expected_gid=os.getegid(),
+    )() == publication
+    assert publisher(publication) == publication
+
+
+def test_atomic_publication_preserves_competing_destination(tmp_path: Path) -> None:
+    """The kernel primitive must retain both winner bytes and the losing source."""
+    module = _authority_module()
+    winner = tmp_path / "winner"
+    loser = tmp_path / "loser"
+    target = tmp_path / "issue-906.json"
+    winner.write_bytes(b"winner evidence")
+    loser.write_bytes(b"competing evidence")
+    directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        module._publish_authority_without_replace(directory, winner.name, target.name)
+        with pytest.raises(FileExistsError):
+            module._publish_authority_without_replace(directory, loser.name, target.name)
+    finally:
+        os.close(directory)
+    assert target.read_bytes() == b"winner evidence"
+    assert target.stat().st_nlink == 1
+    assert loser.read_bytes() == b"competing evidence"
+    assert not winner.exists()
+
+
+def test_publisher_refuses_missing_atomic_primitive_without_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _authority_module()
+    publication = _publication(tmp_path)
+    authority_root = tmp_path / "owner-authority"
+    authority_root.mkdir(mode=0o700)
+    publisher = module.InstalledExecutionAuthorityPublisher(
+        path=authority_root / "issue-906.json",
+        expected_uid=os.geteuid(), expected_gid=os.getegid(),
+    )
+    monkeypatch.setattr(module.ctypes, "CDLL", lambda *args, **kwargs: object())
+    with pytest.raises(ValueError, match="authority publication failed"):
+        publisher(publication)
+    assert list(authority_root.iterdir()) == []
 
 
 def test_publisher_rejects_changed_replay_without_replacing_authority(tmp_path: Path) -> None:
