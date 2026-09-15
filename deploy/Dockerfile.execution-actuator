@@ -24,6 +24,7 @@ COPY src/loom_control_plane/__init__.py src/loom_control_plane/execution_admissi
     src/loom_control_plane/execution_capacity.py src/loom_control_plane/execution_finance.py \
     src/loom_control_plane/execution_placement.py \
     src/loom_control_plane/task_image_materializations.py src/loom_control_plane/task_image_capacity.py \
+    src/loom_control_plane/task_image_capacity_wait.py \
     src/loom_control_plane/metrics.py src/loom_control_plane/service_execution.py \
     ./src/loom_control_plane/
 COPY src/loom_execution_actuator ./src/loom_execution_actuator
