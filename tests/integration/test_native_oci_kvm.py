@@ -29,7 +29,7 @@ from loom_capacity_executor.native_oci_bundles import (
     render_native_oci_bundles,
 )
 from loom_capacity_executor.native_sandbox_contract import render_native_sandbox_contract
-from loom_capacity_manager.contracts import canonical_digest
+from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
 from tests.unit.test_native_execution_permit import execution_request
 from tests.unit.test_native_sandbox_consumer import bound_context
 from tests.unit.test_personal_dev_builder import _attempt, _candidate
@@ -259,7 +259,7 @@ def test_unprivileged_rootlesskit_launches_fixed_native_kvm_runtime(tmp_path):
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
 
 
-@pytest.mark.parametrize("root_stop", ["signal", "launcher-death", "supervisor-death", "monitored", "monitored-expiry", "monitored-rootless", "monitored-rootless-expiry", "monitored-rootless-outer", "monitored-rootless-outer-expiry", "monitored-rootless-outer-v2", "monitored-rootless-outer-v2-expiry"])
+@pytest.mark.parametrize("root_stop", ["signal", "launcher-death", "supervisor-death", "monitored", "monitored-expiry", "monitored-rootless", "monitored-rootless-expiry", "monitored-rootless-outer", "monitored-rootless-outer-expiry", "monitored-rootless-outer-v2", "monitored-rootless-outer-v2-expiry", "monitored-rootless-outer-v2-recovery", "monitored-rootless-outer-v2-recovery-expiry"])
 def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path, root_stop):
     arch = platform.machine()
     if arch not in BUILDERS or not Path("/dev/kvm").exists():
@@ -324,6 +324,16 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
     claim = execution_request("oldlab" if arch == "x86_64" else "gb10").claim
     context = context.model_copy(update={"claim_digest": canonical_digest(claim), "request_id": claim.request_id})
     (fixtures / "claim.json").write_text(claim.model_dump_json())
+    if "-recovery" in root_stop:
+        from tests.unit.test_native_recovery_contracts import observation
+
+        _, final = observation()
+        locator = final.preparation.locator
+        locator = locator.model_copy(update={"physical": locator.physical.model_copy(update={"binding": claim.binding}),
+            "worker_id": claim.worker_id, "worker_incarnation": claim.worker_incarnation})
+        prepared = final.preparation.model_copy(update={"locator": locator, "node_id": claim.binding.node_ids[0],
+            "original_uid": 1000, "original_gid": 1000})
+        (fixtures / "preparation.json").write_bytes(canonical_bytes(prepared))
     (fixtures / "context.json").write_text(context.model_dump_json())
     wire = (ROOT / "deploy/personal-dev-builder/client-seccomp-v1.json").read_bytes()
     (fixtures / "client-seccomp.json").write_bytes(wire)
@@ -392,6 +402,8 @@ def test_rendered_native_kvm_client_builds_and_verifies_all_components(tmp_path,
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20, check=False)
     assert "native-allocated-runtime-cleanup-ok" in output.stdout
+    if "-recovery" in root_stop:
+        assert "native-recovery-finalization-bound-before-material" in output.stdout
     if "-outer" in root_stop:
         if material_v2:
             assert "native-v2-one-launch-session-settled" in output.stdout

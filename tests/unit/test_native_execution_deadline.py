@@ -5,12 +5,17 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from loom_capacity_agent.build_admission import BuildExecutionPermitV1
+from loom_capacity_agent.native_recovery_execution import (
+    BuildExecutionPermitV2,
+    BuildExecutionRequestV2,
+)
 from loom_capacity_manager.contracts import canonical_digest
+from loom_capacity_manager.executable_contracts import canonical_executable_digest
 from tests.unit.test_native_execution_permit import execution_request
 
 
-@pytest.fixture
-def deadline(monkeypatch):
+@pytest.fixture(params=[1, 2])
+def deadline(monkeypatch, request):
     from loom_capacity_executor import native_execution_deadline as module
 
     clock = [100_000_000_000]
@@ -19,12 +24,16 @@ def deadline(monkeypatch):
         return clock[0]
     monkeypatch.setattr(module.time, "clock_gettime_ns", read)
     original = execution_request()
-    return module.NativeExecutionDeadline(original.claim, source_binding_sha256=original.source_binding_sha256), clock
+    options = {"recovery_finalization_sha256": "f" * 64} if request.param == 2 else {}
+    return module.NativeExecutionDeadline(original.claim, source_binding_sha256=original.source_binding_sha256, **options), clock
 
 
 def receipt(request, seconds=10):
     # Deliberately unrelated wall clock: only server lifetime is relevant.
     issued = datetime(2001, 1, 1, tzinfo=UTC)
+    if isinstance(request, BuildExecutionRequestV2):
+        return BuildExecutionPermitV2(request=request, request_digest=canonical_executable_digest(request),
+            issued_at=issued, not_after=issued + timedelta(seconds=seconds))
     return BuildExecutionPermitV1(request=request, request_digest=canonical_digest(request),
         issued_at=issued, not_after=issued + timedelta(seconds=seconds))
 
@@ -139,12 +148,13 @@ def test_renewal_has_fresh_challenge_and_conservative_new_deadline(deadline):
 def test_validation_time_cannot_bridge_expiry(deadline, monkeypatch):
     guard, clock = deadline
     request = guard.begin_request()
-    original = BuildExecutionPermitV1.model_validate_json
+    model = BuildExecutionPermitV2 if isinstance(request, BuildExecutionRequestV2) else BuildExecutionPermitV1
+    original = model.model_validate_json
     def delayed(wire):
         result = original(wire)
         clock[0] += 10_000_000_000
         return result
-    monkeypatch.setattr(BuildExecutionPermitV1, "model_validate_json", delayed)
+    monkeypatch.setattr(model, "model_validate_json", delayed)
     with pytest.raises(RuntimeError):
         guard.accept(receipt(request))
     assert guard.stopped_reason == "expired"

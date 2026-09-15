@@ -17,7 +17,9 @@ AUTHORITY = r"""
 import json, socket, sys
 from datetime import UTC, datetime, timedelta
 from loom_capacity_agent.build_admission import BuildExecutionPermitV1, BuildExecutionRequestV1
+from loom_capacity_agent.native_recovery_execution import BuildExecutionPermitV2, BuildExecutionRequestV2
 from loom_capacity_manager.contracts import canonical_bytes, canonical_digest
+from loom_capacity_manager.executable_contracts import canonical_executable_bytes, canonical_executable_digest
 channel = socket.socket(fileno=int(sys.argv[1]))
 boundary = sys.argv[2]
 count = 0
@@ -25,7 +27,10 @@ while True:
     wire = channel.recv(65537)
     if not wire:
         break
-    request = BuildExecutionRequestV1.model_validate_json(json.dumps(json.loads(wire)['request']))
+    document = json.loads(wire)['request']
+    version2 = document['schema_version'] == 2
+    request_type = BuildExecutionRequestV2 if version2 else BuildExecutionRequestV1
+    request = request_type.model_validate_json(json.dumps(document))
     count += 1
     if boundary == 'initial-silence':
         import signal
@@ -48,9 +53,12 @@ while True:
         from uuid import uuid4
         request = request.model_copy(update={'challenge':uuid4()})
     now = datetime.now(UTC)
-    permit = BuildExecutionPermitV1(request=request, request_digest=canonical_digest(request),
+    permit_type = BuildExecutionPermitV2 if version2 else BuildExecutionPermitV1
+    encode = canonical_executable_bytes if version2 else canonical_bytes
+    digest = canonical_executable_digest if version2 else canonical_digest
+    permit = permit_type(request=request, request_digest=digest(request),
         issued_at=now, not_after=now + timedelta(seconds=1))
-    reply = b'{"kind":"permit","permit":' + canonical_bytes(permit) + b',"schema_version":1}'
+    reply = b'{"kind":"permit","permit":' + encode(permit) + b',"schema_version":1}'
     channel.send(reply + (b' ' if boundary == 'noncanonical' else b''))
     if boundary == 'duplicate':
         channel.send(reply)
@@ -94,7 +102,8 @@ while True:
     "oversize", "malformed", "cancelled", "broker-eof", "wrong-order", "client-failed", "initial-silence",
     "noncanonical", "wrong-challenge", "duplicate", "renew", "suspend-before-pause",
     "suspend-before-buildkit", "suspend-before-client", "suspend-before-completion"])
-def test_supervisor_stops_exact_broker_without_blocking_on_helpers(tmp_path, monkeypatch, boundary):
+@pytest.mark.parametrize("version", [1, 2])
+def test_supervisor_stops_exact_broker_without_blocking_on_helpers(tmp_path, monkeypatch, boundary, version):
     import json
 
     from loom_capacity_executor.native_supervisor import supervise_native_execution
@@ -135,7 +144,8 @@ def test_supervisor_stops_exact_broker_without_blocking_on_helpers(tmp_path, mon
     started = time.monotonic()
     try:
         result = supervise_native_execution(request.claim, source_binding_sha256=request.source_binding_sha256,
-            authority=authority, broker_channel=broker_channel, broker_process=broker)
+            authority=authority, broker_channel=broker_channel, broker_process=broker,
+            recovery_finalization_sha256="f" * 64 if version == 2 else None)
         assert time.monotonic() - started < (12 if boundary == "initial-silence" else 5), "blocked helper stalled the deadline monitor"
         assert result.broker_reaped and broker.poll() is not None
         roles = json.loads(trace.read_text()) if trace.exists() else []

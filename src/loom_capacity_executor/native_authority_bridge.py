@@ -20,6 +20,10 @@ from loom_capacity_agent.build_admission import (
     BuildExecutionPermitV1,
     BuildExecutionRequestV1,
 )
+from loom_capacity_agent.native_recovery_execution import (
+    BuildExecutionPermitV2,
+    BuildExecutionRequestV2,
+)
 from loom_capacity_executor.native_supervisor import (
     NativeAuthorityPermission,
     NativeAuthorityRequest,
@@ -34,6 +38,10 @@ class NativeExecutionAuthorityClient(Protocol):
     async def authorize_execution(self, request: BuildExecutionRequestV1, *,
         worker_credential: str,
     ) -> BuildExecutionPermitV1: ...
+
+    async def authorize_recovery_execution(self, request: BuildExecutionRequestV2, *,
+        worker_credential: str,
+    ) -> BuildExecutionPermitV2: ...
 
 
 async def _readable(channel: socket.socket) -> None:
@@ -61,6 +69,7 @@ def _stop(channel: socket.socket) -> None:
 
 async def serve_native_execution_authority(channel: socket.socket, *, claim: BuildClaimRequestV1,
     source_binding_sha256: str, worker_credential: str, client: NativeExecutionAuthorityClient,
+    recovery_finalization_sha256: str | None = None,
 ) -> None:
     """Forward only this consumed claim/source; caller retains socket ownership.
 
@@ -74,6 +83,10 @@ async def serve_native_execution_authority(channel: socket.socket, *, claim: Bui
             claim=claim, worker_credential=worker_credential).model_dump_json())
         if not isinstance(source_binding_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", source_binding_sha256) is None:
             raise ValueError("invalid source binding")
+        if recovery_finalization_sha256 is not None and (
+            not isinstance(recovery_finalization_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", recovery_finalization_sha256) is None
+        ):
+            raise ValueError("invalid recovery finalization binding")
     except ValueError:
         raise ValueError("native authority helper identity is invalid") from None
     _configure(channel)
@@ -88,10 +101,22 @@ async def serve_native_execution_authority(channel: socket.socket, *, claim: Bui
                 or message.request.claim != envelope.claim
                 or message.request.source_binding_sha256 != source_binding_sha256):
                 raise ValueError("native authority request identity changed")
-            permit = await client.authorize_execution(message.request, worker_credential=envelope.worker_credential)
-            if not isinstance(permit, BuildExecutionPermitV1):
-                raise ValueError("native authority receipt is not typed")
-            permit = BuildExecutionPermitV1.model_validate_json(permit.model_dump_json())
+            permit: BuildExecutionPermitV1 | BuildExecutionPermitV2
+            if recovery_finalization_sha256 is None:
+                if not isinstance(message.request, BuildExecutionRequestV1):
+                    raise ValueError("native authority request version changed")
+                permit = await client.authorize_execution(message.request, worker_credential=envelope.worker_credential)
+                if not isinstance(permit, BuildExecutionPermitV1):
+                    raise ValueError("native authority receipt is not typed")
+                permit = BuildExecutionPermitV1.model_validate_json(permit.model_dump_json())
+            else:
+                if (not isinstance(message.request, BuildExecutionRequestV2)
+                    or message.request.recovery_finalization_sha256 != recovery_finalization_sha256):
+                    raise ValueError("native authority recovery binding changed")
+                permit = await client.authorize_recovery_execution(message.request, worker_credential=envelope.worker_credential)
+                if not isinstance(permit, BuildExecutionPermitV2):
+                    raise ValueError("native authority recovery receipt is not typed")
+                permit = BuildExecutionPermitV2.model_validate_json(permit.model_dump_json())
             if permit.request != message.request:
                 raise ValueError("native authority receipt request changed")
             _send(channel, NativeAuthorityPermission(permit=permit))
