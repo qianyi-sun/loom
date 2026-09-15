@@ -62,7 +62,7 @@ def ensure_guard_claim_compatibility(
                 or not isinstance(row[2], str) or len(row[2].encode()) > 256 * 1024
                 or row[3] is not True or row[4] != ["search_path=pg_catalog"]
                 or row[5:9] != ("plpgsql", guard_owner, True, True)
-                or row[9] not in {"guard_0030", "guard_0031", "guard_0032", "guard_0033", "guard_0034", "guard_0035"}):
+                or row[9] not in {"guard_0030", "guard_0031", "guard_0032", "guard_0033", "guard_0034", "guard_0035", "guard_0036"}):
             raise RuntimeError("guard compatibility source authority changed")
         definition = row[2]
         if definition.count(_OLD) == 1 and "guard_0033" not in definition:

@@ -63,7 +63,7 @@ async def _observe_fresh_database(
     identity: DevInstanceIdentity,
     *,
     profile: ApplicationSchemaProfile = "legacy-owner",
-    revision: ApplicationSchemaRevision = "0147/guard_0035",
+    revision: ApplicationSchemaRevision = "0147/guard_0036",
 ) -> ApplicationSchemaInventory:
     """Internal helper: admin_url belongs exclusively to our disposable container."""
     from scripts.application_schema_baseline import BaselineReferenceDatabase
@@ -71,12 +71,12 @@ async def _observe_fresh_database(
         TrialWriterBaselineReferenceDatabase,
     )
 
-    if profile == "cnpg-staging-executor-admission" and revision != "0147/guard_0035":
+    if profile == "cnpg-staging-executor-admission" and revision != "0147/guard_0036":
         raise ValueError("executor admission reference requires its reviewed current revision")
     application_head, guard_head = application_schema_revisions(revision)
     factory = (
         BaselineReferenceDatabase if revision == "0134/guard_0030" else
-        TrialWriterBaselineReferenceDatabase if revision in {"0142/guard_0034", "0147/guard_0034"} else
+        TrialWriterBaselineReferenceDatabase if revision in {"0142/guard_0035", "0147/guard_0035"} else
         PsycopgPersonalDevCapacityDatabase
     )
     sealed = profile in {"sealed-owner", "staging-readonly-sealed-owner", "cnpg-staging-sealed-owner", "cnpg-staging-executor-admission"}
@@ -318,7 +318,7 @@ async def _retire_application_migrator(
 
 async def build_application_schema_reference(
     *, profile: ApplicationSchemaProfile = "legacy-owner", postgres_major: int = 16,
-    revision: ApplicationSchemaRevision = "0147/guard_0035",
+    revision: ApplicationSchemaRevision = "0147/guard_0036",
 ) -> ApplicationSchemaReference:
     """Require two independent fresh installations to agree before emitting metadata."""
     if profile not in {
@@ -331,10 +331,10 @@ async def build_application_schema_reference(
         "cnpg-staging-executor-admission",
     }:
         raise ValueError("application schema reference profile is invalid")
-    if profile == "cnpg-staging-executor-admission" and revision != "0147/guard_0035":
+    if profile == "cnpg-staging-executor-admission" and revision != "0147/guard_0036":
         raise ValueError("executor admission reference requires its reviewed current revision")
     application_head, guard_head = application_schema_revisions(revision)
-    if revision == "0147/guard_0035" and (application_head, guard_head) != (_head("migrations"), _head("capacity_guard_migrations")):
+    if revision == "0147/guard_0036" and (application_head, guard_head) != (_head("migrations"), _head("capacity_guard_migrations")):
         raise RuntimeError("current application schema reference revisions require review")
     image = application_reference_postgres_image(postgres_major=postgres_major)
     with PostgresContainer(
@@ -390,13 +390,13 @@ async def _build_profiles() -> dict[str, object]:
         "cnpg-staging-sealed-owner",
         "cnpg-staging-executor-admission",
     )
-    revisions: tuple[ApplicationSchemaRevision, ...] = ("0147/guard_0035", "0147/guard_0034", "0142/guard_0034", "0134/guard_0030")
+    revisions: tuple[ApplicationSchemaRevision, ...] = ("0147/guard_0036", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030")
     for major in (16, 17):
         result[str(major)] = {
             revision: {
                 profile: asdict(await build_application_schema_reference(
                     profile=profile, postgres_major=major, revision=revision,
-                )) for profile in profiles if profile != "cnpg-staging-executor-admission" or revision == "0147/guard_0035"
+                )) for profile in profiles if profile != "cnpg-staging-executor-admission" or revision == "0147/guard_0036"
             } for revision in revisions
         }
     return result

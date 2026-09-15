@@ -142,7 +142,7 @@ async def test_initial_database_phase_recovers_each_commit_without_recapturing_c
 
     _, journal = _setup(tmp_path)
     password = "the-original-runtime-password"
-    plan, live = _sources(tmp_path, password=password, schema_revision="0147/guard_0035")
+    plan, live = _sources(tmp_path, password=password, schema_revision="0147/guard_0036")
     evidence = _guard(plan)
     request = dict(request_id=plan.request_id, candidate_sha=plan.candidate_sha,
                    candidate_tree=plan.candidate_tree, generation=evidence.generation)

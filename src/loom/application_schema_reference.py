@@ -38,7 +38,7 @@ ApplicationSchemaProfile = Literal[
     "cnpg-staging-sealed-owner",
     "cnpg-staging-executor-admission",
 ]
-ApplicationSchemaRevision = Literal["0147/guard_0035", "0147/guard_0034", "0142/guard_0034", "0134/guard_0030"]
+ApplicationSchemaRevision = Literal["0147/guard_0036", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"]
 
 ApplicationSchemaAclProfile = Literal["application-only", "staging-readonly", "cnpg-staging"]
 
@@ -84,15 +84,15 @@ def application_reference_postgres_image(*, postgres_major: int = 16) -> str:
 
 def application_schema_reference(
     *, profile: ApplicationSchemaProfile = "legacy-owner", postgres_major: int = 16,
-    revision: ApplicationSchemaRevision = "0147/guard_0035",
+    revision: ApplicationSchemaRevision = "0147/guard_0036",
 ) -> ApplicationSchemaReference:
     """Select one bundled profile, never a caller-selected digest."""
     if profile == "cnpg-staging-executor-admission":
-        if revision != "0147/guard_0035":
+        if revision != "0147/guard_0036":
             raise ApplicationSchemaReferenceError("executor admission reference revision is unsupported")
         image = application_reference_postgres_image(postgres_major=postgres_major)
         return ApplicationSchemaReference(
-            format_version=1, profile=profile, application_head="0147", guard_head="guard_0035",
+            format_version=1, profile=profile, application_head="0147", guard_head="guard_0036",
             postgres_image=image, postgres_major=postgres_major, object_count=7234,
             inventory_sha256={
                 16: "03684efabced805259ebd75fbc9d34966414cbb24e2cd097c3942543f848bdc1",
@@ -129,8 +129,8 @@ def application_schema_reference(
             "a4457cf147a7d554b8f81aae84f29d167d8ba95c8387154ac3af4e7f8b2f6958",
         ),
     }
-    # Retained guard_0034 provisioning and its original public grants.
-    if revision == "0147/guard_0034":
+    # Retained guard_0035 provisioning and its original public grants.
+    if revision == "0147/guard_0035":
         digests = {
             16: (
                 "cd9df3002c56fa6906adcaca9ffb45a8b8f240a8d8de4c89790389d1eb193c1a",
@@ -150,7 +150,7 @@ def application_schema_reference(
             ),
         }
     # Freshly provisioned state/output owner grants; historical pins stay separate.
-    if revision == "0147/guard_0035":
+    if revision == "0147/guard_0036":
         digests = {
             16: (
                 "cf29cf8051d65317e4fab59ff3d957418c47f4fd3ec983708ed51cc9ddd08f34",
@@ -195,7 +195,7 @@ def application_schema_reference(
         guard_head=guard_head,
         postgres_image=image,
         postgres_major=postgres_major,
-        object_count={"0147/guard_0035": 7232, "0147/guard_0034": 7232, "0142/guard_0034": 7227, "0134/guard_0030": 6736}[revision]
+        object_count={"0147/guard_0036": 7232, "0147/guard_0035": 7232, "0142/guard_0035": 7227, "0134/guard_0030": 6736}[revision]
         + (0 if profile in {"legacy-owner", "staging-readonly-legacy-owner", "cnpg-staging-legacy-owner"} else 2),
         inventory_sha256=digests[postgres_major][profiles.index(profile)],
     )
@@ -203,7 +203,7 @@ def application_schema_reference(
 
 def require_application_schema_reference(
     observed: ApplicationSchemaInventory, *, profile: ApplicationSchemaProfile = "legacy-owner",
-    revision: ApplicationSchemaRevision = "0147/guard_0035",
+    revision: ApplicationSchemaRevision = "0147/guard_0036",
 ) -> None:
     """Compare only; caller still owns trusted role binding, quiescence and locks."""
     if type(observed.postgres_major) is not int or observed.postgres_major not in {16, 17}:
@@ -219,12 +219,12 @@ def require_application_schema_reference(
 
 def application_schema_revisions(revision: ApplicationSchemaRevision) -> tuple[str, str]:
     """Only reviewed migration pairs can select a reference recipe."""
+    if revision == "0147/guard_0036":
+        return "0147", "guard_0036"
     if revision == "0147/guard_0035":
         return "0147", "guard_0035"
-    if revision == "0147/guard_0034":
-        return "0147", "guard_0034"
-    if revision == "0142/guard_0034":
-        return "0142", "guard_0034"
+    if revision == "0142/guard_0035":
+        return "0142", "guard_0035"
     if revision == "0134/guard_0030":
         return "0134", "guard_0030"
     raise ApplicationSchemaReferenceError("application schema reference revision is unsupported")
@@ -234,12 +234,12 @@ def application_schema_revision(
     *, public_revision: str | None, guard_revision: str | None,
 ) -> ApplicationSchemaRevision:
     """Select using a protected original checkpoint, never a new live observation."""
+    if (public_revision, guard_revision) == ("0147", "guard_0036"):
+        return "0147/guard_0036"
     if (public_revision, guard_revision) == ("0147", "guard_0035"):
         return "0147/guard_0035"
-    if (public_revision, guard_revision) == ("0147", "guard_0034"):
-        return "0147/guard_0034"
-    if (public_revision, guard_revision) == ("0142", "guard_0034"):
-        return "0142/guard_0034"
+    if (public_revision, guard_revision) == ("0142", "guard_0035"):
+        return "0142/guard_0035"
     if (public_revision, guard_revision) == ("0134", "guard_0030"):
         return "0134/guard_0030"
     raise ApplicationSchemaReferenceError("application schema reference revision is unsupported")

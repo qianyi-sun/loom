@@ -200,7 +200,7 @@ async def test_retirement_refuses_changed_trigger_identity(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0035"
+                == "guard_0036"
             )
             assert (
                 observer.execute(
@@ -226,7 +226,7 @@ async def test_retirement_and_upgrade_reuse_exact_retained_helper(
 
     def round_trip(config, revision):
         original_downgrade(config, revision)
-        command.upgrade(config, "guard_0034")
+        command.upgrade(config, "guard_0035")
 
     monkeypatch.setattr(command, "downgrade", round_trip)
     _downgrade(database, monkeypatch)
@@ -275,7 +275,7 @@ async def test_initialization_cannot_cross_in_flight_retirement(
     database = capacity_guard_database
     _, registration = await _initialize_and_register(database)
     migration = importlib.import_module(
-        "capacity_guard_migrations.versions.guard_0034_trial_writer_interception"
+        "capacity_guard_migrations.versions.guard_0035_trial_writer_interception"
     )
     async with _control_session(database) as retirement:
 

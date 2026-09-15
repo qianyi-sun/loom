@@ -508,8 +508,8 @@ can satisfy its preconditions.
 These observations are not trusted reference artifacts or ownership-transfer
 receipts. The runtime package now bundles separate PostgreSQL-major-bound
 legacy-owner and sealed-owner references for the reviewed pairs
-`0134` / `guard_0030`, `0142` / `guard_0034`, `0147` / `guard_0034` and
-`0147` / `guard_0035`.
+`0134` / `guard_0030`, `0142` / `guard_0035`, `0147` / `guard_0035` and
+`0147` / `guard_0036`.
 The 0142 pair includes the publication/keyset, task-source, personal
 membership, incarnation-storage and build-platform objects introduced by
 application migrations `0135`–`0142`. The current 0147 pair additionally includes
@@ -521,9 +521,9 @@ refundable-admission compatibility (`guard_0033`);
 it does not replace either upstream security boundary. Both PostgreSQL
 majors have independently generated pins; PostgreSQL 17 uses a pinned vanilla
 17.4 image, not an observation of the live CNPG database.
-The `guard_0035` protected writer migration adds narrow public-column permissions
+The `guard_0036` protected writer migration adds narrow public-column permissions
 for the non-login guard owner. Its six public reference profiles have separate
-PostgreSQL 16/17 pins. The retained `0142` and `0147` / `guard_0034` profiles use the
+PostgreSQL 16/17 pins. The retained `0142` and `0147` / `guard_0035` profiles use the
 original role-convergence recipe in `scripts/application_schema_trial_writer_baseline.py`;
 current grants cannot silently change a rollback reference.
 

@@ -18,7 +18,7 @@ from loom.application_schema_reference import (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("revision", ["0147/guard_0035", "0147/guard_0034", "0142/guard_0034", "0134/guard_0030"])
+@pytest.mark.parametrize("revision", ["0147/guard_0036", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"])
 @pytest.mark.parametrize("postgres_major", [16, 17])
 @pytest.mark.parametrize("profile", ["legacy-owner", "sealed-owner", "staging-readonly-legacy-owner", "staging-readonly-sealed-owner", "cnpg-staging-legacy-owner", "cnpg-staging-sealed-owner"])
 async def test_bundled_reference_matches_independent_actual_provisioning(
@@ -91,10 +91,10 @@ def test_bundled_reference_pins_actual_release_image_and_migration_heads() -> No
 @pytest.mark.parametrize("postgres_major", [16, 17])
 async def test_executor_admission_reference_matches_two_fresh_databases(monkeypatch, postgres_major):
     await test_bundled_reference_matches_independent_actual_provisioning(
-        monkeypatch, "cnpg-staging-executor-admission", postgres_major, "0147/guard_0035")
+        monkeypatch, "cnpg-staging-executor-admission", postgres_major, "0147/guard_0036")
 
 
-@pytest.mark.parametrize("revision", ["0134/guard_0030", "0142/guard_0034", "0147/guard_0034"])
+@pytest.mark.parametrize("revision", ["0134/guard_0030", "0142/guard_0035", "0147/guard_0035"])
 def test_executor_admission_profile_cannot_select_a_historical_bootstrap(revision):
     with pytest.raises(ApplicationSchemaReferenceError, match="revision"):
         application_schema_reference(profile="cnpg-staging-executor-admission", revision=revision)

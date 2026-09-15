@@ -28,7 +28,7 @@ from tests.loom_cli.rollout.operator.test_cnpg_manager_replacement import _manag
 from tests.loom_cli.rollout.operator.test_protected_apply_journal import _journal
 
 
-@pytest.mark.parametrize("schema_revision", ["0142/guard_0034", "0134/guard_0030"])
+@pytest.mark.parametrize("schema_revision", ["0142/guard_0035", "0134/guard_0030"])
 @pytest.mark.parametrize("missing", [None, "successor", "ack", "manager-receipt", "guard-identity", "pending-peer"])
 def test_database_completion_requires_original_journal_authority(tmp_path, monkeypatch, missing, schema_revision):
     from loom_cli.rollout.operator import protected_application_database_completion as module

@@ -892,7 +892,7 @@ def test_guard_0023_refuses_downgrade_with_protected_public_projection(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0035"
+                == "guard_0036"
             )
             assert (
                 connection.execute(
@@ -2745,7 +2745,7 @@ def test_guard_0028_refuses_downgrade_after_terminal_evidence_import(
                     "SELECT version_num FROM "
                     "loom_capacity_guard.capacity_guard_alembic_version"
                 )
-            ).scalar_one() == "guard_0035"
+            ).scalar_one() == "guard_0036"
             assert connection.execute(
                 text(
                     "SELECT count(*) FROM "
@@ -4103,7 +4103,7 @@ def test_guard_0026_refuses_downgrade_with_requeueable_protected_claim(
                 .one()
             )
         assert dict(state) == {
-            "version_num": "guard_0035",
+            "version_num": "guard_0036",
             "state": "claimed",
             "reservation_state": "active",
             "lifecycle_state": "assigned",
