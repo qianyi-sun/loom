@@ -100,7 +100,7 @@ async def lock_execution_claim(
         or worker.lease_epoch != checked.worker_lease_epoch
         or worker.auth_token_hash is None
         or not hmac.compare_digest(bytes(worker.auth_token_hash), worker_token_hash)
-        or worker.supported_work_kinds != ["trial", "execution_attempt"]
+        or worker.supported_work_kinds not in (["trial"], ["trial", "execution_attempt"])
         or worker.capability_snapshot_json is None
     ):
         raise ValueError("execution worker is stale or unauthenticated")

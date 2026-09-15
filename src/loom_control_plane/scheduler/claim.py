@@ -993,7 +993,7 @@ async def claim_work(
                 raise WorkClaimConflictError("execution_reader_capability_invalid") from None
             if (
                 canonical_digest(snapshot.model_dump(mode="json")) != guard["capability_snapshot_digest"]
-                or registered_kinds != ["trial", "execution_attempt"]
+                or registered_kinds not in (["trial"], ["trial", "execution_attempt"])
                 or snapshot.cpu_arch not in worker_cpu_arches
             ):
                 raise WorkClaimConflictError("execution_reader_capability_drift")

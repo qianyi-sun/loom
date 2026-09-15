@@ -253,3 +253,23 @@ def test_trial_only_reader_measures_native_host_without_pipeline_capabilities(tm
     assert snapshot["gpu_devices"] == []
     assert snapshot["input_cache_capacity_bytes"] == 0
     assert values["capabilities"][0]["cpu_arch"] == "arm64"
+
+
+async def test_trial_only_reader_rejects_an_unrequested_pipeline_attempt(tmp_path):
+    from loom.pipeline.work_protocol import ExecutionAttemptClaimV1
+    from loom_worker.task_image_execution import WorkerExecutionTrust
+    from tests.unit.test_pipeline_work_protocol import attempt_claim
+
+    _, kwargs = evidence(tmp_path)
+    trust = WorkerExecutionTrust(root=kwargs["trust_root"], purpose="production", shadow_campaign_id=None)
+    cp = SimpleNamespace(claim_work=AsyncMock(return_value=dict(
+        schema_version="loom.work-claim.v1", work_kind="execution_attempt", payload=ExecutionAttemptClaimV1.model_validate(attempt_claim()).model_dump(mode="json"))))
+    pool = RunnerPool(max_concurrent=1)
+    settings = _FakeSettings()
+    settings.max_concurrent = 1
+    with pytest.raises(RuntimeError, match="mismatched Pipeline claim"):
+        await ml._claim_available_work(pool=pool, settings=settings, cp_client=cp, gateway_client=None,
+            object_store=None, worker_id=UUID(kwargs["expected_claim"].worker_id), capability_snapshot_digest="sha256:" + "1" * 64,
+            pipeline_run=None, vllm_registry=WorkerVLLMRegistry(enabled=False), read_setup_health=_healthy_setup_node,
+            execution_trust=trust)
+    assert pool.in_flight == 0

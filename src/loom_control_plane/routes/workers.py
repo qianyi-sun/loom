@@ -1166,10 +1166,11 @@ async def register_worker(
         ):
             raise HTTPException(status_code=409, detail="input_cache_capacity_drift")
         capacity_bytes, reserved_bytes, ready_bytes = snapshot_cache
-        if supported_work_kinds != ["trial", "execution_attempt"]:
+        trial_image_reader = supported_work_kinds == ["trial"] and "task-image-execution-v2" in capability_snapshot.container_runtime_features
+        if supported_work_kinds != ["trial", "execution_attempt"] and not trial_image_reader:
             raise HTTPException(
                 status_code=400,
-                detail="canonical capability snapshots require execution_attempt support",
+                detail="canonical capability snapshots require execution_attempt support or a signed Trial reader",
             )
         expected_gpu_vendor = "nvidia" if capability_snapshot.gpu_devices else "none"
         projected_network_policies = {
@@ -1227,7 +1228,7 @@ async def register_worker(
                 raise HTTPException(status_code=409, detail="gpu_worker_pool_contract_drift")
         elif raw_allocation_evidence is not None:
             raise HTTPException(status_code=400, detail="cpu_worker_has_gpu_allocation")
-        elif pool_name not in {"behavior-cpu-data", *TERMINALGEN_POOL_POLICIES}:
+        elif not trial_image_reader and pool_name not in {"behavior-cpu-data", *TERMINALGEN_POOL_POLICIES}:
             raise HTTPException(status_code=409, detail="cpu_worker_pool_contract_drift")
         capability_identity = capability_snapshot.model_dump(mode="json")
     elif raw_allocation_evidence is not None:

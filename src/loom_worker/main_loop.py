@@ -293,6 +293,20 @@ def _host_memory_bytes() -> int:
         raise RuntimeError("worker host memory cannot be measured") from None
 
 
+def _trial_execution_registration_payload(settings: WorkerSettings) -> dict[str, Any]:
+    """Measure an ordinary reader without enabling Pipeline, GPU or input-cache work."""
+    snapshot = build_worker_capability_snapshot(
+        cpu_arch=_host_cpu_arch(), cpu_cores=max(1, os.cpu_count() or 1),
+        memory_bytes=_host_memory_bytes(), scratch_bytes=shutil.disk_usage(settings.trajectory_cache_dir).total,
+        network_profiles=["gateway", "none"], container_runtime_features=[], gpu_devices=(),
+        input_cache_capacity_bytes=0, input_cache_reserved_bytes=0, input_cache_ready_bytes=0,
+    )
+    capabilities = _worker_capabilities(settings)
+    capabilities[0].update(cpu_arch=snapshot.cpu_arch, gpu_vendor="none")
+    return {"capabilities": capabilities, "capability_snapshot": snapshot.model_dump(mode="json"),
+            "capability_snapshot_digest": snapshot.digest}
+
+
 def _pipeline_registration_payload(
     settings: WorkerSettings,
     *,
@@ -757,7 +771,7 @@ async def _register_worker_with_retry(
     if execution_trust is not None:
         execution_trust.__post_init__()
         validate_task_image_execution_origin(str(settings.control_plane_url))
-        if not pipeline_enabled or settings.executor_worker_credential is not None:
+        if settings.executor_worker_credential is not None:
             raise ValueError("execution reader requires the authenticated legacy shared-queue assembly")
     register_kwargs: dict[str, Any] = {
         "hostname": _worker_hostname(settings.hostname),
@@ -781,16 +795,14 @@ async def _register_worker_with_retry(
         register_kwargs["executor_worker_credential"] = (
             settings.executor_worker_credential.get_secret_value()
         )
-    if pipeline_enabled:
-        register_kwargs["supported_work_kinds"] = ["trial", "execution_attempt"]
-        registration = (
-            _pipeline_registration_payload(settings)
-            if pipeline_cache_fields is None
-            else _pipeline_registration_payload(
-                settings,
-                cache_fields=pipeline_cache_fields,
-            )
-        )
+    if pipeline_enabled or execution_trust is not None:
+        register_kwargs["supported_work_kinds"] = ["trial", "execution_attempt"] if pipeline_enabled else ["trial"]
+        if not pipeline_enabled:
+            registration = _trial_execution_registration_payload(settings)
+        elif pipeline_cache_fields is None:
+            registration = _pipeline_registration_payload(settings)
+        else:
+            registration = _pipeline_registration_payload(settings, cache_fields=pipeline_cache_fields)
         register_kwargs.update(registration)
         if execution_trust is not None:
             raw_snapshot = dict(registration["capability_snapshot"])
@@ -1006,16 +1018,13 @@ async def _claim_available_work(
     resource_usage_outbox: ResourceUsageOutbox | None = None,
     execution_trust: WorkerExecutionTrust | None = None,
 ) -> int:
-    """Claim from the shared queue when the Pipeline assembly is injected.
+    """Use measured shared claims for Pipeline or an explicitly trusted Trial reader.
 
-    Production Artifact materialization/commit/cancellation are owned by
-    #1240/#1214/#1215.  Until those adapters are assembled, passing no
-    ``pipeline_run`` deliberately retains the old Trial-only endpoint and
-    registration contract.  Focused #8 acceptance injects the strict runner
-    and proves that both work kinds consume this same ``RunnerPool``.
+    Without either assembly, preserve the old Trial endpoint. A trusted reader
+    without a Pipeline runner requests only Trials and must never dispatch attempts.
     """
 
-    if pipeline_run is None or capability_snapshot_digest is None:
+    if (pipeline_run is None and execution_trust is None) or capability_snapshot_digest is None:
         if execution_trust is not None:
             raise ValueError("trusted task images require authenticated shared-queue claims")
         return await _claim_available_trials(
@@ -1056,6 +1065,7 @@ async def _claim_available_work(
                 worker_id=worker_id,
                 capability_snapshot_digest=capability_snapshot_digest,
                 free_slots=settings.max_concurrent - pool.in_flight,
+                supported_work_kinds=["trial", "execution_attempt"] if pipeline_run is not None else ["trial"],
             )
         except httpx.HTTPError as exc:
             logger.warning(
@@ -1093,7 +1103,7 @@ async def _claim_available_work(
                 execution_trust=execution_trust,
             )
         elif parsed.work_kind == "execution_attempt":
-            if not isinstance(payload, ExecutionAttemptClaimV1):
+            if pipeline_run is None or not isinstance(payload, ExecutionAttemptClaimV1):
                 raise RuntimeError("Control Plane returned a mismatched Pipeline claim")
             await pool.spawn(pipeline_run(payload))
         else:

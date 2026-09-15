@@ -27,11 +27,15 @@ or other worker effects, protecting the bearer used by both claim and start.
 Default worker assembly and existing V1 claims remain unchanged.
 
 The explicit trusted assembly advertises `task-image-execution-v2` in its measured
-and digest-checked registration snapshot. This currently requires the existing
-dual-kind Pipeline/shared-queue assembly and refuses a protected-worker credential;
-it does not install a protected-claim adapter or make Trial-only workers advertise
-Pipeline support. Capability advertisement requires the configured root and HTTPS,
-not a response field or a task-selected boolean.
+and digest-checked registration snapshot. Ordinary Trial-only readers use the same
+authenticated shared queue, requesting exactly `['trial']`; they do not advertise
+Pipeline, GPU allocation, or Pipeline input-cache capabilities. Existing Pipeline
+assemblies retain their dual-kind registration and allocation/pool checks. The
+server binds each claim's work-kind list to its retained registration, and a
+Trial-only worker rejects an unrequested Pipeline response before dispatch.
+Protected-worker credentials remain unsupported by this adapter. Capability
+advertisement requires the configured root and HTTPS, not a response field or a
+task-selected boolean. Default workers without that trust retain their legacy path.
 
 `TaskImageExecutionDelivery` carries bounded original grant, plan, publication
 and keyset envelopes plus the scheduler-stamped legacy claim identity. The
