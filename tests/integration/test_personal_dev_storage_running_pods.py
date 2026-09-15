@@ -22,9 +22,14 @@ _BUSYBOX = "docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c
 
 @pytest.fixture
 async def running_storage_kubectl():
+    # Nested kubelet sees the host filesystem. Keep a fixed disk reserve so a
+    # multi-terabyte host with ample free space does not evict these tiny Pods.
+    # Preserve the default memory and inode safeguards.
     container = DockerContainer(_K3S).with_command([
         "server", "--disable=traefik", "--disable=servicelb", "--disable=metrics-server",
         "--disable=local-storage", "--disable=coredns",
+        "--kubelet-arg=eviction-hard=memory.available<100Mi,nodefs.inodesFree<5%,imagefs.inodesFree<5%,"
+        "nodefs.available<2Gi,imagefs.available<2Gi",
     ]).with_kwargs(privileged=True)
     try:
         await asyncio.to_thread(container.start)
