@@ -38,6 +38,17 @@ from loom_capacity_agent.build_admission import (
 from loom_capacity_agent.build_artifact_stream import BuildArtifactUploadReceiptV1
 from loom_capacity_agent.claim_guard import ExecutableClaimProposalV2
 from loom_capacity_agent.client import read_owner_only_bytes
+from loom_capacity_agent.native_recovery_execution import (
+    BuildExecutionPermitV2,
+    BuildExecutionRequestV2,
+)
+from loom_capacity_agent.native_recovery_publication import (
+    NativeRecoveryAdmissionRequestV1,
+    NativeRecoveryAdmissionV1,
+    NativeRecoveryHistoryV1,
+    NativeRecoveryPublicationV1,
+    NativeRecoveryReceiptV1,
+)
 from loom_capacity_executor.admission_client import DatabaseExecutableAdmissionClient
 from loom_capacity_executor.build_admission_client import (
     BuildAdmissionClient,
@@ -105,6 +116,8 @@ _BUILD_CONSUMERS = frozenset({
     "prepare_worker", "bind_slurm_job", "observe_intent", "revoke_prepared_bootstrap",
     "withdraw_unregistered_worker", "register_worker", "claim_platform", "begin_drain", "record_outcome", "acknowledge_release",
     "read_source", "read_source_context", "claim_assigned_platform", "upload_artifact", "authorize_execution",
+    "publish_recovery", "read_recovery", "read_recovery_admission",
+    "authorize_recovery_execution",
 })
 
 
@@ -239,6 +252,54 @@ class TypedAdmissionRouter:
         if not isinstance(receipt, BuildSourceReadReceiptV1):
             raise ValueError("native source route returned an invalid receipt")
         return receipt
+
+    async def authorize_recovery_execution(self, request: BuildExecutionRequestV2, *, worker_credential: str) -> BuildExecutionPermitV2:
+        request = BuildExecutionRequestV2.model_validate_json(request.model_dump_json())
+        if self.purpose(request.claim.binding) != "personal-build-worker":
+            raise ValueError("native recovery execution requires a build-purpose route")
+        permit = await self._call(request.claim.binding, "authorize_recovery_execution", request, worker_credential=worker_credential)
+        if not isinstance(permit, BuildExecutionPermitV2):
+            raise ValueError("native recovery execution route returned an invalid permit")
+        permit = BuildExecutionPermitV2.model_validate_json(permit.model_dump_json())
+        if permit.request != request:
+            raise ValueError("native recovery execution route returned changed permission")
+        return permit
+
+    async def read_recovery_admission(self, request: NativeRecoveryAdmissionRequestV1, *, worker_credential: str) -> NativeRecoveryAdmissionV1:
+        request = NativeRecoveryAdmissionRequestV1.model_validate_json(request.model_dump_json())
+        if self.purpose(request.claim.binding) != "personal-build-worker":
+            raise ValueError("native recovery admission requires a build-purpose route")
+        admission = await self._call(request.claim.binding, "read_recovery_admission", request, worker_credential=worker_credential)
+        if not isinstance(admission, NativeRecoveryAdmissionV1):
+            raise ValueError("native recovery admission route returned invalid admission")
+        admission = NativeRecoveryAdmissionV1.model_validate_json(admission.model_dump_json())
+        if admission.request != request:
+            raise ValueError("native recovery admission route returned changed request")
+        return admission
+
+    async def publish_recovery(self, request: NativeRecoveryPublicationV1, *, worker_credential: str) -> NativeRecoveryReceiptV1:
+        request = NativeRecoveryPublicationV1.model_validate_json(request.model_dump_json())
+        if self.purpose(request.claim.binding) != "personal-build-worker":
+            raise ValueError("native recovery requires a build-purpose route")
+        receipt = await self._call(request.claim.binding, "publish_recovery", request, worker_credential=worker_credential)
+        if not isinstance(receipt, NativeRecoveryReceiptV1):
+            raise ValueError("native recovery route returned an invalid receipt")
+        receipt = NativeRecoveryReceiptV1.model_validate_json(receipt.model_dump_json())
+        if receipt.request != request:
+            raise ValueError("native recovery route returned changed publication")
+        return receipt
+
+    async def read_recovery(self, claim: BuildClaimRequestV1, *, worker_credential: str) -> NativeRecoveryHistoryV1:
+        claim = BuildClaimRequestV1.model_validate_json(claim.model_dump_json())
+        if self.purpose(claim.binding) != "personal-build-worker":
+            raise ValueError("native recovery requires a build-purpose route")
+        history = await self._call(claim.binding, "read_recovery", claim, worker_credential=worker_credential)
+        if not isinstance(history, NativeRecoveryHistoryV1):
+            raise ValueError("native recovery route returned invalid history")
+        history = NativeRecoveryHistoryV1.model_validate_json(history.model_dump_json())
+        if any(receipt.request.claim != claim for receipt in (history.preparation, history.finalization) if receipt is not None):
+            raise ValueError("native recovery route returned changed history")
+        return history
 
     async def authorize_execution(self, request: BuildExecutionRequestV1, *, worker_credential: str) -> BuildExecutionPermitV1:
         request = BuildExecutionRequestV1.model_validate_json(request.model_dump_json())

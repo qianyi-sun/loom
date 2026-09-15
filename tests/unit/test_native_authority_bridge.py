@@ -15,14 +15,28 @@ from tests.unit.test_native_execution_permit import execution_request
 
 
 @pytest.mark.parametrize("pool", ["oldlab", "gb10"])
-async def test_authority_bridge_forwards_exact_initial_and_renewal_without_credentials(pool):
+@pytest.mark.parametrize("version", [1, 2])
+async def test_authority_bridge_forwards_exact_initial_and_renewal_without_credentials(pool, version):
     module = importlib.import_module("loom_capacity_executor.native_authority_bridge")
     request = execution_request(pool)
+    options = {}
+    if version == 2:
+        from loom_capacity_agent.native_recovery_execution import BuildExecutionRequestV2
+
+        request = BuildExecutionRequestV2(claim=request.claim, challenge=request.challenge,
+            source_binding_sha256=request.source_binding_sha256, recovery_finalization_sha256="f" * 64)
+        options = {"recovery_finalization_sha256": "f" * 64}
     calls = []
     expected = []
 
     class Client:
         async def authorize_execution(self, value, *, worker_credential):
+            assert version == 1
+            calls.append((value, worker_credential))
+            return receipt(value)
+
+        async def authorize_recovery_execution(self, value, *, worker_credential):
+            assert version == 2
             calls.append((value, worker_credential))
             return receipt(value)
 
@@ -30,7 +44,7 @@ async def test_authority_bridge_forwards_exact_initial_and_renewal_without_crede
     monitor.setblocking(False)
     task = asyncio.create_task(module.serve_native_execution_authority(helper,
         claim=request.claim, source_binding_sha256=request.source_binding_sha256,
-        worker_credential="x" * 43, client=Client()))
+        worker_credential="x" * 43, client=Client(), **options))
     try:
         for _ in range(2):
             request = request.model_copy(update={"challenge": uuid4()})

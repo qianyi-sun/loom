@@ -17,15 +17,17 @@ import socket
 import stat
 import sys
 from pathlib import Path
-from typing import NoReturn, Self
+from typing import Literal, NoReturn, Self
 
-from pydantic import BaseModel, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, Field, TypeAdapter, field_validator, model_validator
 
 from loom_capacity_agent.build_admission import (
     BuildArtifactV1,
     BuildClaimRequestV1,
     BuildSourceContextV1,
 )
+from loom_capacity_agent.native_recovery import NativeRecoveryPreparationV1
+from loom_capacity_agent.native_recovery_publication import NativeRecoveryPublicationV1
 from loom_capacity_executor.native_artifact_transfer import send_native_artifact
 from loom_capacity_executor.native_build_session import execute_native_build_session
 from loom_capacity_executor.native_mapped_scratch import (
@@ -33,6 +35,7 @@ from loom_capacity_executor.native_mapped_scratch import (
     clean_native_mapped_scratch,
 )
 from loom_capacity_executor.native_parent_death import bind_native_parent_death
+from loom_capacity_executor.native_recovery_handshake import acknowledge_mapped_recovery
 from loom_capacity_executor.native_rootless_material import (
     NativeRootlessMaterialV1,
     prepare_native_rootless_material,
@@ -110,7 +113,28 @@ class NativeRootlessSpecV2(_NativeRootlessSpec, StrictV2Model):
         return self
 
 
-NativeRootlessSpec = NativeRootlessSpecV1 | NativeRootlessSpecV2
+class NativeRootlessSpecV3(NativeRootlessSpecV2):
+    """Recovery-capable material launch; legacy V2 canonical bytes stay unchanged."""
+
+    schema_version: Literal[3] = 3  # type: ignore[assignment]
+    recovery_preparation: NativeRecoveryPreparationV1
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _exact_version(cls, value: object) -> object:
+        if type(value) is not int or value != 3:
+            raise ValueError("native recovery specification requires integer version3")
+        return value
+
+    @model_validator(mode="after")
+    def _recovery_scope(self) -> Self:
+        NativeRecoveryPublicationV1(claim=self.claim, record=self.recovery_preparation)
+        if Path(self.recovery_preparation.locator.directory) != Path(self.workspace).parent:
+            raise ValueError("native recovery specification attempt changed")
+        return self
+
+
+NativeRootlessSpec = NativeRootlessSpecV1 | NativeRootlessSpecV2 | NativeRootlessSpecV3
 _SPEC_ADAPTER: TypeAdapter[NativeRootlessSpec] = TypeAdapter(NativeRootlessSpec)
 
 
@@ -234,6 +258,9 @@ def run_native_mapped_runtime(spec_path: Path, *, expected_sha256: str,
     authority, artifact_channel = _activation_channels()
     with authority, artifact_channel:
         scratch = None
+        recovery_digest = None
+        if isinstance(spec, NativeRootlessSpecV3):
+            recovery_digest = acknowledge_mapped_recovery(authority, spec=spec, runtime_spec_sha256=expected_sha256)
         if isinstance(spec, NativeRootlessSpecV2):
             prepare_native_rootless_material(spec)
             # Fail on reused state before feature execution. This root retains
@@ -242,7 +269,8 @@ def run_native_mapped_runtime(spec_path: Path, *, expected_sha256: str,
             scratch = capture_native_mapped_scratch(spec)
         result = execute_native_build_session(claim=spec.claim, context=spec.context, layout=spec.layout(),
             workspace=Path(spec.workspace), authority=authority, expected_parent_pid=parent,
-            max_artifact_bytes=spec.max_artifact_bytes, max_image_archive_bytes=spec.max_image_archive_bytes)
+            max_artifact_bytes=spec.max_artifact_bytes, max_image_archive_bytes=spec.max_image_archive_bytes,
+            recovery_finalization_sha256=recovery_digest)
         artifact = None
         if result.artifact is not None:
             if not (result.supervision.client_succeeded and result.supervision.broker_reaped and result.cleanup.confirmed):

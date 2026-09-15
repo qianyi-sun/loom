@@ -26,6 +26,7 @@ from loom_capacity_executor.native_rootless_runtime import (
     NativeRootlessResultV1,
     NativeRootlessSpec,
     NativeRootlessSpecV2,
+    NativeRootlessSpecV3,
     read_native_rootless_spec,
 )
 from loom_capacity_executor.native_runtime_input import prepare_native_runtime_input
@@ -186,6 +187,8 @@ async def run_native_outer_build(owner: NativeAllocatedIO, *, spec_path: Path, e
     spec = read_native_rootless_spec(spec_path, expected_sha256=expected_sha256)
     if spec.claim != owner.claim or spec.context != owner.source.context:
         raise ValueError("native outer build source identity changed")
+    if isinstance(spec, NativeRootlessSpecV3):
+        owner.require_recovery_preparation(spec.recovery_preparation)
     authority, mapped_authority = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     artifact, mapped_artifact = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     process = None
@@ -198,7 +201,12 @@ async def run_native_outer_build(owner: NativeAllocatedIO, *, spec_path: Path, e
                 process = await _spawn(spec_path, expected_sha256, mapped_authority.fileno(), mapped_artifact.fileno())
                 mapped_authority.close()
                 mapped_artifact.close()
-                authority_task = asyncio.create_task(owner.serve_authority(authority))
+                recovery_digest = None
+                if isinstance(spec, NativeRootlessSpecV3):
+                    recovery_digest = await _owned_operation(asyncio.create_task(owner.finalize_recovery(authority,
+                        preparation=spec.recovery_preparation, runtime_spec_sha256=expected_sha256)))
+                authority_task = asyncio.create_task(owner.serve_authority(authority,
+                    recovery_finalization_sha256=recovery_digest))
                 # Both directions progress under backpressure. TaskGroup cancels
                 # the receiver immediately if result capture fails its bound.
                 async with asyncio.TaskGroup() as group:

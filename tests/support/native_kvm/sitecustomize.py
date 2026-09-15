@@ -20,7 +20,8 @@ def install():
     if sys.orig_argv[1:5] != ["-I", "-m", "loom_capacity_executor.native_rootless_runtime", "mapped"]:
         return
     identity = json.loads(Path("/fixtures/identity.json").read_bytes())
-    if identity["root_stop"] not in {"monitored-rootless-outer-v2", "monitored-rootless-outer-v2-expiry"}:
+    if identity["root_stop"] not in {"monitored-rootless-outer-v2", "monitored-rootless-outer-v2-expiry",
+        "monitored-rootless-outer-v2-recovery", "monitored-rootless-outer-v2-recovery-expiry"}:
         return
 
     def failure(kind, value, tb):
