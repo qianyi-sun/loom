@@ -13,7 +13,8 @@ def _properties():
         "ActiveState": "inactive", "SubState": "dead", "MainPID": "0", "ControlPID": "0",
         "ControlGroup": "", "Job": "", "KillMode": "control-group", "Delegate": "no",
         "ExecMainStartTimestampMonotonic": "12345", "InvocationID": "",
-        "NeedDaemonReload": "no", "Transient": "no", "DropInPaths": ""}
+        "NeedDaemonReload": "no", "Transient": "no", "DropInPaths": "",
+        "FragmentPath": "/var/lib/loom-staging-rollout/.config/systemd/user/loom-autoscaler-oldlab-staging.service"}
 
 
 @pytest.mark.parametrize("key,value", [("ActiveState", "active"), ("SubState", "running"),
@@ -41,7 +42,7 @@ def test_cgroup_path_refuses_unbound_or_ambiguous_locations(group):
         module.controller_cgroup_empty(group)
 
 
-@pytest.mark.parametrize("drift", [None, "process", "source", "duplicate", "failed-command"])
+@pytest.mark.parametrize("drift", [None, "process", "source", "duplicate", "failed-command", "fragment"])
 def test_process_capture_binds_stable_source_and_actual_manager_readbacks(monkeypatch, drift):
     calls = []
     reads = []
@@ -51,6 +52,8 @@ def test_process_capture_binds_stable_source_and_actual_manager_readbacks(monkey
         properties = _properties()
         if drift == "process" and len(calls) == 2:
             properties["MainPID"] = "999"
+        if drift == "fragment":
+            properties["FragmentPath"] = "/tmp/foreign.service"
         output = "\n".join(f"{key}={value}" for key, value in properties.items()) + "\n"
         if drift == "duplicate":
             output += "MainPID=0\n"
