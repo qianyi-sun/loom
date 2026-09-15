@@ -1869,8 +1869,21 @@ epoch, state and ceiling, while their historical shadow/key digest remains the
 immutable prerequisite binding. Only an authenticated immediate predecessor may
 wait up to thirty seconds for the asynchronous publisher, with the full manager
 context pinned throughout. Changed keys, epochs, expired witnesses and a missed
-deadline refuse forward progress. The operator command and trusted worker launch
-material still require composition before live execution.
+deadline refuse forward progress.
+
+The installed `loom-staging-rollout-final-gate activate-prepared` command takes
+`--plan` and `--plan-sha256`. Initial activation additionally takes `--documents`
+and `--documents-sha256`; the private file must be named
+`execution-activation-documents.json` beside the exact attempt's plan and contain
+both typed pool documents. Recovery omits both document arguments and uses the
+retained inputs. The command verifies immutable plan, envelope and artifacts;
+the installed forward guard checks checkpoint freshness before every forward
+step. Expired backup admission therefore refuses new effects without blocking
+saved-authority drain. Output contains the execution context and plan digest;
+exit 0 denotes active, exit 1 denotes drain-only, and exit 2 denotes refusal.
+It is separate from prepared convergence and does not re-run the rollout's
+prepared-only verification after activation. Trusted worker launch material and
+complete legacy writer closure remain required before live execution.
 
 The schema migration writes a canonical seed event beside its generated
 bootstrap authority UUID. A reviewed replacement requires that one pristine

@@ -548,7 +548,10 @@ class InstalledFinalGateExecutor:
             "oldlab": build_fixed_oldlab_active_controller_transport(image=artifact.executor_profile_seed.executor_image,
                 run=self._controller_prerequisite_run),
         }
-        return InstalledExecutionActivation(runtime, application, active).execute(plan, documents=documents)
+        from loom_cli.rollout.final_gate_helper import _verify_checkpoint
+
+        return InstalledExecutionActivation(runtime, application, active,
+            checkpoint_guard=lambda: _verify_checkpoint(plan)).execute(plan, documents=documents)
 
     def _application_factory(
         self, config: OperatorConfig, runner: SubprocessProtectedApplyCommandRunner, container_registry: str,

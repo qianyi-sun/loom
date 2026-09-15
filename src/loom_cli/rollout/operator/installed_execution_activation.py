@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol, cast
 from uuid import NAMESPACE_URL, uuid5
@@ -37,6 +37,7 @@ class InstalledExecutionActivation:
     runtime: KubernetesProtectedStagingCapacityRuntime
     application: InstalledApplicationMigrationFactory
     active: Mapping[str, ActiveControllerTransport]
+    checkpoint_guard: Callable[[], None]
 
     def execute(self, plan: FinalGatePlan, *,
                 documents: Mapping[str, ActivationRuntimeDocumentV2] | None = None) -> ExecutionContextV2:
@@ -55,6 +56,7 @@ class InstalledExecutionActivation:
                 service_gid=runtime.service_gid) as client:
             manager = cast(InstalledActivationManagerClient, client)
             def guard() -> None:
+                self.checkpoint_guard()
                 if runtime._read_execution_prerequisite(plan) != artifact:
                     raise RuntimeError("installed activation prerequisite changed")
                 context = manager.get_execution_preparation_status().readiness.execution
