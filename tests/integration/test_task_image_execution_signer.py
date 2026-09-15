@@ -6,16 +6,24 @@ from uuid import UUID
 
 import pytest
 import rfc8785
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from loom.db.schema import TaskImageExecutionGrant, TaskImagePublicationKey
 from loom_task_image_authority import execution_store as store
-from loom_task_image_authority.publication_contracts import decode_publication_envelope, decode_publication_statement
+from loom_task_image_authority.publication_contracts import (
+    decode_publication_envelope,
+    decode_publication_statement,
+)
 from loom_task_image_signer.policy import PublicationSelection, SignerPolicy
-from tests.integration.test_task_image_execution_store import ready
-from tests.integration.test_task_image_publication_jobs import registry_authority_session as registry_authority_session
-from tests.integration.test_task_image_registry_credentials import registry_issuer as registry_issuer
+from tests.integration.test_task_image_execution_store import ready, start_request
+from tests.integration.test_task_image_publication_jobs import (
+    registry_authority_session as registry_authority_session,
+)
+from tests.integration.test_task_image_registry_credentials import (
+    registry_issuer as registry_issuer,
+)
 from tests.integration.test_task_image_signer_policy import Provider
 from tests.integration.test_trial_legacy_claim_identity import _TOKEN_HASH
 
@@ -60,6 +68,50 @@ async def test_dedicated_signer_reply_finalizes_and_consumes_retained_authority(
             assert delivery.grant_envelope.encode() == wire
         # Stable fixed provider is safe to retry at issuance, never at start.
         assert await policy.sign_execution(request.canonical_bytes()) == wire
+        async with factory.begin() as session:
+            grant = (await session.scalars(select(TaskImageExecutionGrant))).one()
+            from loom_task_image_authority.execution_grant import TaskImageExecutionGrantV2
+
+            decoded = TaskImageExecutionGrantV2.model_validate_json(grant.canonical_grant)
+            await store.consume_execution_start(session, request=start_request(decoded, wire), **common)
+        with pytest.raises(ValueError):
+            await policy.sign_execution(request.canonical_bytes())
+        assert len(provider.preimages) == 1
+    finally:
+        await engine.dispose()
+
+
+async def test_real_mtls_execution_signing_under_read_only_journal_role(
+    registry_authority_session, registry_issuer, tmp_path, monkeypatch,
+):
+    from loom_task_image_authority.publication_transport import HTTPSExecutionSigner
+    from loom_task_image_signer.preflight import verify_signer_database_role
+    from tests.integration.test_task_image_signer_preflight import role_engine
+    from tests.unit.test_task_image_signer_server import service
+
+    factory = registry_authority_session
+    request, policy, provider, common, engine = await setup(factory, registry_issuer, tmp_path, monkeypatch)
+    try:
+        async with role_engine((engine, factory), execution=True) as (restricted, _):
+            await verify_signer_database_role(restricted, execution_enabled=True)
+            policy._engine = restricted
+            async with service(tmp_path, operations=policy) as (_, _, identities):
+                async with HTTPSExecutionSigner(**identities["execution"]) as client:
+                    wire = await client.sign_execution(request.canonical_bytes(), maximum_reply_bytes=524288)
+            async with factory.begin() as session:
+                delivery = await store.finalize_execution_grant(session, wire=wire, **common)
+                assert delivery.grant_envelope.encode() == wire
+            for sql in (
+                "SELECT auth_token_hash FROM workers",
+                "SELECT * FROM trials",
+                "UPDATE task_image_execution_grants SET revoked_at=now()",
+                "UPDATE task_image_execution_starts SET expires_at=now()",
+                "DELETE FROM task_image_execution_grants",
+            ):
+                with pytest.raises(DBAPIError):
+                    async with restricted.begin() as connection:
+                        await connection.execute(text(sql))
+            assert len(provider.preimages) == 1
     finally:
         await engine.dispose()
 

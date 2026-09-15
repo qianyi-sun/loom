@@ -42,6 +42,7 @@ from loom_task_image_authority.execution_grant import (
     decode_execution_claim,
     verify_execution_grant,
 )
+from loom_task_image_authority.execution_signing_request import ExecutionSigningRequest
 from loom_task_image_authority.execution_start import ExecutionStartReceipt, ExecutionStartRequest
 from loom_task_image_authority.publication_completion import replay_completed_publication
 from loom_task_image_authority.publication_contracts import (
@@ -283,6 +284,26 @@ async def prepare_execution_grant(
     if not now <= clock() < _instant(grant.expires_at):
         raise ValueError("execution grant expired during persistence")
     return grant
+
+
+async def prepare_execution_signing_request(
+    session: AsyncSession, *, claim: LegacyExecutionClaim, worker_token_hash: bytes,
+    trust_root: ExecutionGrantTrustRoot, purpose: BuildPurpose, shadow_campaign_id: str | None,
+    clock: Callable[[], datetime] = _clock, lifetime_seconds: int = 120,
+) -> ExecutionSigningRequest:
+    """Prepare fixed signer input in the caller transaction; COMMIT before sending."""
+    grant = await prepare_execution_grant(
+        session, claim=claim, worker_token_hash=worker_token_hash, trust_root=trust_root,
+        purpose=purpose, shadow_campaign_id=shadow_campaign_id, clock=clock,
+        lifetime_seconds=lifetime_seconds,
+    )
+    authority = await lock_execution_claim(session, claim=claim, worker_token_hash=worker_token_hash)
+    values = await _inputs(session, authority, trust_root, clock)
+    return ExecutionSigningRequest.model_validate(dict(
+        schema="loom.task-image-execution-signing-request/v1", grant_id=grant.grant_id,
+        revision=grant.revision, grant_sha256=hashlib.sha256(canonical_execution_grant_bytes(grant)).hexdigest(),
+        frozen_plan=values.plan.decode(), publications=tuple(item.decode() for item in values.publications),
+    ))
 
 
 def _verify_record(

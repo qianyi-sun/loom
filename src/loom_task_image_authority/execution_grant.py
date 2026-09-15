@@ -298,6 +298,46 @@ def verify_execution_grant(
         )
     except (InvalidSignature, ValueError):
         raise ValueError("invalid execution grant signature") from None
+    grant, publications = verify_execution_grant_input(
+        canonical_grant=canonical, plan_wire=plan_wire, publication_wires=publication_wires,
+        keyset_wire=keyset_wire, trust_root=trust_root, expected_claim=claim,
+        expected_purpose=expected_purpose, expected_shadow_campaign_id=expected_shadow_campaign_id,
+        now=now,
+    )
+    return VerifiedExecutionGrant(grant, hashlib.sha256(wire).hexdigest(), publications)
+
+
+def verify_execution_grant_input(
+    *, canonical_grant: bytes, plan_wire: bytes, publication_wires: tuple[bytes, ...],
+    keyset_wire: bytes, trust_root: ExecutionGrantTrustRoot,
+    expected_claim: LegacyExecutionClaim | ProtectedExecutionClaim,
+    expected_purpose: BuildPurpose, expected_shadow_campaign_id: str | None, now: datetime,
+) -> tuple[TaskImageExecutionGrantV2, VerifiedPublicationSet]:
+    """Validate unsigned preparation and full signed attachments, not grant authority.
+
+    Only the dedicated signer may turn an independently retained, current request
+    into a signature. Workers must call verify_execution_grant, never this helper.
+    """
+    if type(trust_root) is not ExecutionGrantTrustRoot or type(expected_claim) not in {
+        LegacyExecutionClaim, ProtectedExecutionClaim,
+    }:
+        raise ValueError("execution input requires independent root and claim")
+    trust_root.__post_init__()
+    _time(now)
+    claim = decode_execution_claim(rfc8785.dumps(expected_claim.model_dump(mode="json", exclude_none=True)))
+    TypeAdapter(BuildPurpose).validate_python(expected_purpose, strict=True)
+    if expected_shadow_campaign_id is not None:
+        TypeAdapter(CanonicalUUID).validate_python(expected_shadow_campaign_id, strict=True)
+    if (expected_purpose == "production") != (expected_shadow_campaign_id is None):
+        raise ValueError("invalid independent execution purpose")
+    if (
+        type(plan_wire) is not bytes or not 0 < len(plan_wire) <= MAX_TASK_IMAGE_BUILD_PLAN_BYTES
+        or type(keyset_wire) is not bytes or not 0 < len(keyset_wire) <= MAX_KEYSET_ENVELOPE_BYTES
+        or type(publication_wires) is not tuple or not 1 <= len(publication_wires) <= MAX_TASK_IMAGE_COMPONENTS
+        or any(type(item) is not bytes or not 0 < len(item) <= MAX_SIGNER_REPLY_BYTES for item in publication_wires)
+    ):
+        raise ValueError("invalid bounded execution attachments")
+    canonical = canonical_grant
     grant = _decode(canonical, TaskImageExecutionGrantV2, MAX_EXECUTION_GRANT_BYTES)
     issued, expires = _instant(grant.issued_at), _instant(grant.expires_at)
     if (
@@ -387,4 +427,4 @@ def verify_execution_grant(
         (item.component, item.image) for item in grant.components
     ):
         raise ValueError("execution native image mapping differs from verified publications")
-    return VerifiedExecutionGrant(grant, hashlib.sha256(wire).hexdigest(), publications)
+    return grant, publications

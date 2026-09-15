@@ -5,7 +5,7 @@ verification, durable distribution adapter and dedicated signer service/client
 implemented; an opt-in existing-worker consumer composes source verification and
 an online start client. The backend now journals grant revisions and serializes
 one-use consumption with current claim and revocation authority. Host signing
-service provisioning, execution signing, capability-gated server delivery and
+service provisioning, capability-gated server delivery and
 the HTTP start route remain uncomposed.
 The consumer is not activation evidence.
 
@@ -216,7 +216,7 @@ No private signing key, live signer service or worker capability is installed he
 ## Dedicated signer policy and fixed clients
 
 `loom_task_image_signer.policy` is a separate process-owned policy package, not an
-in-process authority private-key provider. It has two fixed operations. Keyset
+in-process authority private-key provider. It has three fixed operations. Keyset
 signing accepts a closed canonical preparation request containing environment,
 previous/proposed version, revocation epoch and the complete ordered public-key
 snapshot. It independently reads the durable authority, stamps its own clock,
@@ -234,7 +234,18 @@ is deliberately not a static release setting: new legitimate allocations must
 not require signer reconfiguration. The signer does not claim to re-fetch OCI
 graphs or grant readiness from a signature alone.
 
-Both operations use separate bounded READ COMMITTED transactions before and
+Execution signing accepts only an immutable grant ID/revision/digest and original
+bounded plan/publication attachments. The aggregate request ceiling is 2 MiB,
+in addition to each attachment's existing limits. It reads the committed grant,
+latest revision, current keyset and consumed-start journal independently. Unknown,
+revoked, superseded, consumed or substituted preparation fails before private-key
+I/O. Full source/plan and signed publication-set verification runs before signing,
+including the operator-configured provenance/purpose selection. The fixed execution
+root signs only the execution-grant domain. Finalization and online consumption
+still independently recheck the live worker/Trial and ready publication authority;
+the private-key service neither needs their credentials nor grants runtime access.
+
+All operations use separate bounded READ COMMITTED transactions before and
 after provider I/O, with no database locks retained while signing. Server-side
 statement/idle limits complement an outer checkout/provider/cleanup-inclusive
 deadline. The original signed issue/expiry and exact retained artifact are
@@ -251,11 +262,25 @@ key bytes/lifecycle, audit rows, trigger state, schema ownership and roles.
 Production provisioning must verify effective privileges, no broad inherited
 grants/ownership and the required immutable/state-lock triggers.
 
-`HTTPSKeysetSigner` and `HTTPSPublicationSigner` reuse one bounded mTLS transport
+Explicitly enabling the `execution` peer operation additionally requires SELECT
+on `task_image_execution_grants` and `task_image_execution_starts`, with no new
+UPDATE rights. Their migration-0148 mutation triggers acquire the same publication
+state fence, so read-only journal access suffices. Startup pins the exact trigger
+set and function bodies before loading private keys. An execution-disabled service
+continues to require only its original table scope and rejects extra journal
+access. Restricted-role tests run execution signing over real mTLS and prove the
+role cannot read worker credentials/Trial rows or modify grants and receipts.
+
+`HTTPSKeysetSigner`, `HTTPSPublicationSigner` and `HTTPSExecutionSigner` reuse one bounded mTLS transport
 but expose separate fixed operation paths. TLS identities remain operator-owned;
 neither client accepts an arbitrary signing domain, key or endpoint path. The
 keyset response is still untrusted until the existing cryptographic verifier and
 durable finalizer accept it.
+
+Execution has its own `/v1/executions/sign` path and explicit peer certificate
+operation pin; publication/keyset-only peers cannot invoke it. Issuance may return
+the exact already-retained signature after current-authority verification. This
+does not make online start consumption replayable.
 
 `SignerServer` explicitly binds TLS 1.3 with required client certificates and
 maps the actual socket peer's DER-certificate SHA-256 to permitted operations.
