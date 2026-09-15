@@ -16,6 +16,7 @@ from typing import Any, cast
 from loom_capacity_executor.runtime import ActivationRuntimeDocumentV2
 from loom_capacity_manager.executable_contracts import ExecutionContextV2
 from loom_cli.cluster_config import load_cluster_config
+from loom_cli.rollout.external_supervisor_predecessor import external_supervisor_unit_directory
 from loom_cli.rollout.external_supervisor_readiness import (
     STAGING_ROLLOUT_EXECUTION_HOST,
 )
@@ -45,6 +46,7 @@ from .protected_active_controller_transport import (
     build_fixed_gb10_active_controller_transport,
     build_fixed_oldlab_active_controller_transport,
 )
+from .protected_application_admission_recovery import admission_record_digest
 from .protected_apply_executor import (
     KubernetesProtectedConvergenceExecutor,
     MigrationEpochProtectedApplyExecutor,
@@ -69,6 +71,7 @@ from .protected_controller_prerequisite_transport import (
 from .protected_environment_state_component import (
     HttpxProtectedEnvironmentStateTransport,
 )
+from .protected_epoch_component import KubernetesProtectedEpochComponent
 from .protected_execution_activation import ActiveControllerTransport
 from .protected_execution_preparation_dependency import (
     ProtectedExecutionPreparationDependencyGuard,
@@ -80,6 +83,7 @@ from .protected_execution_prerequisite_store import (
     ProtectedExecutionPrerequisitePublication,
     ProtectedExecutionPrerequisiteStore,
 )
+from .protected_external_supervisor_component import ProtectedExternalSupervisorComponent
 from .protected_external_supervisor_credential_transport import (
     FixedLocalExternalSupervisorCredentialTransport,
     ProtectedExternalSupervisorCredentialTransport,
@@ -444,10 +448,26 @@ class InstalledFinalGateExecutor:
                 ) as client:
                     return capture_current_execution_authority(source, desired=desired, manager=client)
 
+            def legacy_controller_source(bound_plan: FinalGatePlan) -> str:
+                if bound_plan.plan_digest != plan.plan_digest:
+                    raise ValueError("installed legacy controller plan changed")
+                epoch = KubernetesProtectedEpochComponent(runner=protected_runner,
+                    environment=protected_runner.environment)
+                observations = {
+                    host: ProtectedExternalSupervisorComponent(
+                        candidate_root=effective_config.runner_repo,
+                        transport=external_supervisors[host], epoch_guard=epoch.classify,
+                        execution_host=host, unit_dir=Path(external_supervisor_unit_directory(host)),
+                    ).observe_retirement(bound_plan)
+                    for host in (GB10_CONTROLLER_EXECUTION_HOST, STAGING_ROLLOUT_EXECUTION_HOST)
+                }
+                return admission_record_digest(observations)
+
             execution_preparation_dependency_guard = (
                 ProtectedExecutionPreparationDependencyGuard(
                     desired_configuration_source=desired_configuration_source,
                     authority_source=execution_authority_source,
+                    legacy_controller_source=legacy_controller_source,
                 )
             )
         gb10 = build_fixed_gb10_ssh_transport(

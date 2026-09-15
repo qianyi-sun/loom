@@ -970,7 +970,7 @@ def test_schema_seven_dispatch_binds_both_fixed_controller_prerequisite_transpor
     assert len(retirement_source(plan)) == 64
     assert {item["execution_host"] for item in retirement_builds} == {"gx10-01c7", "TRT-EAI-OLDLAB-1"}
     for item in retirement_builds:
-        assert item["candidate_root"] == config.runner_repo
+        assert item["candidate_root"] == executor.config.runner_repo
         assert item["transport"] is captured["external_supervisor_transports"][item["execution_host"]]
     desired_source = dependency_guard_build["desired_configuration_source"]
     assert callable(desired_source)

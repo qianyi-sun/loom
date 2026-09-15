@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -30,9 +31,11 @@ class ProtectedExecutionPreparationDependencyGuard:
 
     desired_configuration_source: DesiredConfigurationSource
     authority_source: ExecutionAuthoritySource
+    legacy_controller_source: Callable[[FinalGatePlan], str]
 
     def __post_init__(self) -> None:
-        if not callable(self.desired_configuration_source) or not callable(self.authority_source):
+        if not all(callable(source) for source in (self.desired_configuration_source,
+            self.authority_source, self.legacy_controller_source)):
             raise ValueError("execution preparation dependency source is invalid")
 
     def __call__(
@@ -48,6 +51,10 @@ class ProtectedExecutionPreparationDependencyGuard:
             or artifact.core_artifact_bundle_sha256 != plan.artifact_bundle_digest
         ):
             raise ValueError("execution preparation dependency binding is invalid")
+        controllers = self.legacy_controller_source(plan)
+        if (not isinstance(controllers, str) or re.fullmatch(r"[0-9a-f]{64}", controllers) is None
+            or controllers == "0" * 64):
+            raise ValueError("execution preparation legacy controller evidence is invalid")
         desired = self.desired_configuration_source(plan)
         if not isinstance(desired, ProtectedStagingDesiredConfiguration) or not desired.exact:
             raise ValueError("execution preparation configuration is not exact")
@@ -76,6 +83,8 @@ class ProtectedExecutionPreparationDependencyGuard:
             or authority.legacy_writer_fences != artifact.execution_policy.legacy_writer_fences
         ):
             raise ValueError("execution preparation authority drifted")
+        if self.legacy_controller_source(plan) != controllers:
+            raise ValueError("execution preparation legacy controller evidence drifted")
         return hashlib.sha256(
             json.dumps(
                 {
@@ -83,6 +92,7 @@ class ProtectedExecutionPreparationDependencyGuard:
                     "configuration_evidence_sha256": desired.original.evidence_digest,
                     "credential_metadata_sha256": artifact.credential_metadata_manifest_sha256,
                     "legacy_writer_sha256": artifact.legacy_writer_manifest_sha256,
+                    "legacy_controller_sha256": controllers,
                     "manager_route_sha256": artifact.manager_route_sha256,
                     "witness_sha256": artifact.witness_manifest_sha256,
                 },

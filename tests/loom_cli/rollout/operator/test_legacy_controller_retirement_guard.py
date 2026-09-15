@@ -7,8 +7,12 @@ from types import SimpleNamespace
 import pytest
 
 from loom_cli.rollout.external_supervisor_predecessor import external_supervisor_unit_directory
-from loom_cli.rollout.operator.protected_application_admission_recovery import admission_record_digest
-from loom_cli.rollout.operator.protected_external_supervisor_component import ProtectedExternalSupervisorComponent
+from loom_cli.rollout.operator.protected_application_admission_recovery import (
+    admission_record_digest,
+)
+from loom_cli.rollout.operator.protected_external_supervisor_component import (
+    ProtectedExternalSupervisorComponent,
+)
 from tests.loom_cli.rollout.operator.test_legacy_controller_process import _properties
 from tests.loom_cli.rollout.operator.test_protected_external_supervisor_component import (
     _bound_multi_artifacts,

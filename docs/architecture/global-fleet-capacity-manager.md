@@ -2052,8 +2052,21 @@ step. Expired backup admission therefore refuses new effects without blocking
 saved-authority drain. Output contains the execution context and plan digest;
 exit 0 denotes active, exit 1 denotes drain-only, and exit 2 denotes refusal.
 It is separate from prepared convergence and does not re-run the rollout's
-prepared-only verification after activation. Trusted worker launch material and
-complete legacy writer closure remain required before live execution.
+prepared-only verification after activation. Its installed dependency guard now
+reads both legacy trial controllers before and after manager authority capture.
+Each read requires plan-bound canonical units, disabled/inactive trial timers,
+retained enabled builders, the exact claimed mutation epoch, and stable empty
+process/cgroup evidence. A resumed timer, surviving descendant, changed canonical
+record or changed evidence refuses forward preparation and activation. This read
+path never converges units and does not establish accepted Slurm-job retirement,
+exclusion of other host writers, or native worker installation.
+
+The writer-freeze ceremony also avoids calling its shutdown adapter when the
+complete initial snapshot is already frozen. It still recaptures and compares
+writer identities, counters and acknowledgements before exact persistence and
+publication. A retry after a lost publication reply therefore cannot repeat
+shutdown against admitted successors. Trusted worker launch material and complete
+legacy writer closure remain required before live execution.
 
 Permanent legacy-writer admission policies use a separate
 `legacy-writer-fence-journals` namespace. The protected installer records absence
