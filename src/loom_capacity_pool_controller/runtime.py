@@ -594,6 +594,11 @@ def main() -> int:
             parser.error("executable mode refuses a prepared inventory policy")
         if args.activation_runtime_artifact is None:
             parser.error("executable mode requires an activation runtime artifact")
+    # Native delivery refuses dumpable processes. Establish and read back both
+    # protections before any retained controller credential enters this heap.
+    from loom_capacity_executor.native_worker_bootstrap import _disable_bootstrap_dumps
+
+    _disable_bootstrap_dumps()
     config = PoolExecutorConfig.from_files(
         args.config, expected_manifest_sha256=args.expected_manifest_sha256
     )

@@ -2068,3 +2068,20 @@ runtime.main()
 '''
     result = subprocess.run([sys.executable, "-c", source], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
+
+
+def test_controller_entrypoint_refuses_config_read_if_process_protection_fails(monkeypatch):
+    from loom_capacity_executor import native_worker_bootstrap
+
+    def refuse():
+        raise RuntimeError("process protection refused")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("private configuration was read")
+
+    monkeypatch.setattr(native_worker_bootstrap, "_disable_bootstrap_dumps", refuse)
+    monkeypatch.setattr(once.PoolExecutorConfig, "from_files", forbidden)
+    monkeypatch.setattr(sys, "argv", ["controller", "--config", "/not-opened",
+        "--expected-manifest-sha256", "a" * 64, "--validate-only"])
+    with pytest.raises(RuntimeError, match="process protection refused"):
+        once.main()
