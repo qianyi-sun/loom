@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from uuid import uuid4
 
@@ -23,7 +24,7 @@ from tests.integration.test_capacity_protected_worker_session import (
 from tests.integration.test_capacity_trial_writer_fence import _freeze, _initialize
 
 
-@pytest.mark.parametrize("target_state", ["running", "materializing", "failed"])
+@pytest.mark.parametrize("target_state", ["running", "materializing", "failed", "succeeded", "cancelled"])
 @pytest.mark.parametrize("freeze_before_report", [False, True])
 def test_authenticated_state_report_survives_trial_writer_freeze(
     capacity_guard_database: dict[str, object],
@@ -49,8 +50,10 @@ def test_authenticated_state_report_survives_trial_writer_freeze(
         payload = {"worker_id": str(seeded.worker.worker.worker_id), "state": target_state}
         if target_state == "failed":
             payload["failure_reason"] = "agent_error"
+        if target_state == "succeeded":
+            payload["result"] = {"state": "succeeded", "reward": 0}
         errors = []
-        report = ProtectedWorkerSessionStore.report_trial_progress
+        report = ProtectedWorkerSessionStore.report_trial_state
 
         async def observed_report(self, **kwargs):
             try:
@@ -61,7 +64,7 @@ def test_authenticated_state_report_survives_trial_writer_freeze(
                                getattr(getattr(original, "diag", None), "message_primary", None)))
                 raise
 
-        monkeypatch.setattr(ProtectedWorkerSessionStore, "report_trial_progress", observed_report)
+        monkeypatch.setattr(ProtectedWorkerSessionStore, "report_trial_state", observed_report)
         with TestClient(seeded.app, raise_server_exceptions=False) as client:
             def observe_error(context):
                 original = context.original_exception
@@ -86,7 +89,7 @@ def test_authenticated_state_report_survives_trial_writer_freeze(
         assert row["state"] == target_state
         assert row["worker_id"] == seeded.worker.worker.worker_id
         assert row["started"] is (target_state == "running")
-        assert row["finished"] is (target_state == "failed")
+        assert row["finished"] is (target_state in {"failed", "succeeded", "cancelled"})
         assert after - before == (0 if freeze_before_report else 1)
         if freeze_before_report:
             assert asyncio.run(_freeze(database, initial["writer_incarnation"], operation)) == frozen
@@ -100,9 +103,9 @@ async def _report(database, seeded, *, credential=_WORKER_CREDENTIAL, extra=None
         store = ProtectedWorkerSessionStore(async_sessionmaker(engine, expire_on_commit=False))
         payload = {"trial_id": str(seeded.trial_id), "state": "running", "result": None,
                    "failure_reason": None, "failure_message": None,
-                   "execution_lease_id": None, "execution_generation": None}
+                   "execution_lease_id": None, "execution_generation": None, "expected": None, "family": None}
         payload.update(extra or {})
-        return await store.report_trial_progress(
+        return await store.report_trial_state(
             worker_id=seeded.worker.worker.worker_id, worker_credential=credential, report=payload,
         )
     finally:
@@ -180,5 +183,77 @@ def test_materializing_terminal_report_closes_exact_claim(capacity_guard_databas
                 "SELECT count(*) FROM loom_capacity_guard.executable_claim_terminal_events "
                 "WHERE protected_attempt_id = :attempt"),
                 {"attempt": seeded.first_attempt["protected_attempt_id"]}).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("interference", [None, "suppress", "stale"])
+@pytest.mark.parametrize("decision,target,count,index", [("advance", "adapting", 0, 0), ("retry", "pending", 1, 0),
+                                                        ("skip", "done", 0, 1), ("abort", "aborted", 0, 0)])
+def test_frozen_terminal_report_commits_family_decision(capacity_guard_database, monkeypatch, tmp_path, decision, target, count, index, interference):
+    from loom.family_run.spec import AdvanceDecision
+
+    database = capacity_guard_database
+    seeded = _seed_claimed_protected_trial(database, monkeypatch, tmp_path)
+    batch_id = uuid4()
+    spec = {"enabled": True, "family_key_extractor": {"name": "instance_id_prefix", "params": {}},
+            "sequencer": {"name": "alphabetical", "params": {}},
+            "advance_predicate": {"name": "always_on_terminal", "params": {}},
+            "adapter": {"name": "noop", "params": {}}, "failure_policy": {"name": "stall_family", "params": {}},
+            "state_backend": {"name": "s3_artifacts", "params": {}}, "mount_path": "/root/.skills"}
+
+    class Predicate:
+        def decide(self, **kwargs):
+            assert kwargs["trial"].state == "failed"
+            return AdvanceDecision(decision)
+
+    monkeypatch.setattr("loom_control_plane.routes.state.resolve_plugin", lambda *_: Predicate())
+    engine = create_engine(_value(database, "admin_url"))
+    try:
+        with engine.begin() as connection:
+            trial = connection.execute(text("SELECT team_id, task_id FROM public.trials WHERE id = :id"),
+                                       {"id": seeded.trial_id}).mappings().one()
+            connection.execute(text("INSERT INTO public.batches "
+                "(id, team_id, name, task_filter, trial_config, state, created_by_token_prefix, family_run_spec) "
+                "VALUES (:batch, :team, :name, '{}'::jsonb, '{}'::jsonb, 'running', 'fixture', CAST(:spec AS jsonb))"),
+                {"batch": batch_id, "team": trial["team_id"], "name": f"frozen-family-{batch_id}", "spec": json.dumps(spec)})
+            connection.execute(text("UPDATE public.trials SET batch_id = :batch, family_key = 'family' WHERE id = :id"),
+                               {"batch": batch_id, "id": seeded.trial_id})
+            connection.execute(text("INSERT INTO public.batch_family_state "
+                "(batch_id, family_key, task_sequence, current_index, state, attempt_count) "
+                "VALUES (:batch, 'family', ARRAY[:task], 0, 'running', 0)"), {"batch": batch_id, "task": trial["task_id"]})
+            if interference == "suppress":
+                connection.exec_driver_sql(
+                    "CREATE FUNCTION public.suppress_family_state() RETURNS trigger LANGUAGE plpgsql "
+                    "AS $test$ BEGIN RETURN NULL; END $test$; "
+                    "CREATE TRIGGER suppress_family_state BEFORE UPDATE ON public.batch_family_state "
+                    "FOR EACH ROW EXECUTE FUNCTION public.suppress_family_state();"
+                )
+        if interference == "stale":
+            report = ProtectedWorkerSessionStore.report_trial_state
+
+            async def change_family_before_write(self, **kwargs):
+                with engine.begin() as connection:
+                    connection.execute(text("UPDATE public.batch_family_state SET attempt_count = 2 WHERE batch_id = :id"), {"id": batch_id})
+                return await report(self, **kwargs)
+
+            monkeypatch.setattr(ProtectedWorkerSessionStore, "report_trial_state", change_family_before_write)
+        initial = asyncio.run(_initialize(database, registration=seeded.worker.registration))
+        asyncio.run(_freeze(database, initial["writer_incarnation"], uuid4()))
+        with TestClient(seeded.app, raise_server_exceptions=False) as client:
+            response = client.patch(f"/trials/{seeded.trial_id}/state", headers=seeded.claim_headers,
+                json={"worker_id": str(seeded.worker.worker.worker_id), "state": "failed", "failure_reason": "agent_error"})
+        assert response.status_code == (200 if interference is None else 409), response.text
+        with engine.connect() as connection:
+            family = connection.execute(text("SELECT state, current_index, attempt_count FROM public.batch_family_state WHERE batch_id = :id"),
+                                        {"id": batch_id}).mappings().one()
+            assert dict(family) == ({"state": target, "current_index": index, "attempt_count": count} if interference is None else
+                                   {"state": "running", "current_index": 0, "attempt_count": 2 if interference == "stale" else 0})
+            assert connection.execute(text("SELECT state FROM public.trials WHERE id = :id"), {"id": seeded.trial_id}).scalar_one() == (
+                "failed" if interference is None else "claimed")
+            assert connection.execute(text("SELECT count(*) FROM loom_capacity_guard.trial_writer_mutations")).scalar_one() == 0
+            if interference is not None:
+                assert connection.execute(text("SELECT count(*) FROM loom_capacity_guard.trial_mutation_permits")).scalar_one() == 0
+                assert connection.execute(text("SELECT count(*) FROM loom_capacity_guard.executable_claim_terminal_events")).scalar_one() == 0
     finally:
         engine.dispose()

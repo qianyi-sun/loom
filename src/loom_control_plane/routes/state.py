@@ -14,16 +14,18 @@ Also enforces:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 
 from loom.auth import verify_bearer_token
-from loom.family_run.orchestration import apply_advance_decision
+from loom.family_run.orchestration import NextFamilyState, apply_advance_decision
 from loom.family_run.registry import resolve_plugin
 from loom.family_run.spec import AdvanceDecision, ResolvedFamilyRunSpec
 from loom.models.result import FailureReason, TrialState
@@ -193,6 +195,36 @@ class _FamilyCancellation:
     final_state: str
 
 
+def _family_decision(
+    row: Mapping[str, Any], *, trial_id: UUID, new_state: TrialState,
+) -> tuple[AdvanceDecision, NextFamilyState]:
+    spec = ResolvedFamilyRunSpec.model_validate(row["spec"])
+    predicate = resolve_plugin("loom.family.advance", spec.advance_predicate)
+    trial_shim = _TrialShim(
+        id=trial_id,
+        task_id=row["task_id"],
+        state=new_state.value,
+        reward=_reward_from_result(row["result"]),
+        attempt_count=row["attempt_count"],
+    )
+    family_shim = _FamilyShim(
+        batch_id=row["batch_id"],
+        family_key=row["family_key"],
+        task_sequence=list(row["task_sequence"]),
+        current_index=row["current_index"],
+        attempt_count=row["family_attempt_count"],
+    )
+    decision: AdvanceDecision = predicate.decide(
+        trial=trial_shim,
+        family=family_shim,
+        spec=spec,
+        params=spec.advance_predicate.params,
+    )
+    next_state = apply_advance_decision(family_shim, decision)
+
+    return decision, next_state
+
+
 async def _finalize_family(
     session: Any,
     *,
@@ -221,29 +253,7 @@ async def _finalize_family(
     if row is None:
         return None
 
-    spec = ResolvedFamilyRunSpec.model_validate(row["spec"])
-    predicate = resolve_plugin("loom.family.advance", spec.advance_predicate)
-    trial_shim = _TrialShim(
-        id=trial_id,
-        task_id=row["task_id"],
-        state=new_state.value,
-        reward=_reward_from_result(row["result"]),
-        attempt_count=row["attempt_count"],
-    )
-    family_shim = _FamilyShim(
-        batch_id=row["batch_id"],
-        family_key=row["family_key"],
-        task_sequence=list(row["task_sequence"]),
-        current_index=row["current_index"],
-        attempt_count=row["family_attempt_count"],
-    )
-    decision: AdvanceDecision = predicate.decide(
-        trial=trial_shim,
-        family=family_shim,
-        spec=spec,
-        params=spec.advance_predicate.params,
-    )
-    next_state = apply_advance_decision(family_shim, decision)
+    decision, next_state = _family_decision(row, trial_id=trial_id, new_state=new_state)
 
     # #672 PR-2: no more per-adapter shortcut. Every ADVANCE decision
     # transitions to 'adapting'; the loom_family_orchestrator service
@@ -287,6 +297,37 @@ async def _finalize_family(
             final_state=persist_state,
         )
     return None
+
+
+async def _finish_family_cancellation(request: Request, family_cancellation: _FamilyCancellation) -> None:
+    protected_store = getattr(
+        request.app.state,
+        "protected_worker_session_store",
+        None,
+    )
+    try:
+        for family_trial_id in family_cancellation.trial_ids:
+            await cancel_trial_under_authority(
+                session_factory=request.app.state.session_factory,
+                protected_store=protected_store,
+                trial_id=family_trial_id,
+                team_id=family_cancellation.team_id,
+            )
+    except ProtectedTrialCancellationError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="protected family trial cancellation unavailable",
+        ) from exc
+    async with request.app.state.session_factory() as session:
+        await session.execute(
+            _FAMILY_COMPLETE_CANCELLATION_SQL,
+            {
+                "batch_id": family_cancellation.batch_id,
+                "family_key": family_cancellation.family_key,
+                "final_state": family_cancellation.final_state,
+            },
+        )
+        await session.commit()
 
 
 @router.patch("/trials/{trial_id}/state")
@@ -351,17 +392,48 @@ async def patch_state(
     result_payload = payload.get("result")
     has_result = result_payload is not None
 
-    if protected_worker_session is not None and new_state not in _TERMINAL:
+    if protected_worker_session is not None:
         store: ProtectedWorkerSessionStore = request.app.state.protected_worker_session_store
         credential = request.headers[EXECUTOR_WORKER_CREDENTIAL_HEADER]
+        expected = None
+        family_report = None
+        if new_state in _TERMINAL:
+            async with request.app.state.session_factory() as session:
+                current = (await session.execute(
+                    _STATE_PATCH_RESULT_SQL,
+                    {"trial_id": trial_id, "worker_id": worker_id, "allowed_from": allowed_from},
+                )).mappings().one_or_none()
+            if current is None:
+                raise HTTPException(status_code=409, detail="worker lost claim or terminal transition is fenced")
+            if new_state == TrialState.SUCCEEDED and not has_result and current["result"] is None:
+                raise HTTPException(status_code=400, detail="state 'succeeded' requires result to be supplied or already persisted")
+            conflicts = terminal_result_conflicts(
+                state=new_state.value, result=result_payload if has_result else current["result"],
+                failure_reason=failure_reason_str, config=current["config"],
+            )
+            if conflicts:
+                raise HTTPException(status_code=422, detail={
+                    "code": "trial_terminal_result_inconsistent",
+                    "message": "terminal state does not agree with the persisted trial result",
+                    "trial_id": str(trial_id), "requested_state": new_state.value, "conflicts": conflicts,
+                })
+            # SQL compares these exact inputs again after taking its own locks;
+            # preliminary reads and Python authentication cannot authorize writes.
+            expected = {"result": current["result"], "config": current["config"]}
+            async with request.app.state.session_factory() as session:
+                family = (await session.execute(_FAMILY_FINALIZE_LOAD_SQL, {"trial_id": trial_id})).mappings().one_or_none()
+            if family is not None:
+                effective_family = {**dict(family), "result": result_payload if has_result else current["result"]}
+                decision, _ = _family_decision(effective_family, trial_id=trial_id, new_state=new_state)
+                family_report = {"before": jsonable_encoder(dict(family)), "decision": decision.value}
         try:
-            progress = await store.report_trial_progress(
+            progress = await store.report_trial_state(
                 worker_id=worker_id, worker_credential=credential,
                 report={"trial_id": str(trial_id), "state": new_state.value,
                         "result": result_payload, "failure_reason": failure_reason_str,
                         "failure_message": failure_message_str,
                         "execution_lease_id": None if execution_lease_id is None else str(execution_lease_id),
-                        "execution_generation": execution_generation},
+                        "execution_generation": execution_generation, "expected": expected, "family": family_report},
             )
         except ProtectedWorkerSessionAuthenticationRejected as exc:
             raise HTTPException(status_code=401, detail="protected worker session rejected") from exc
@@ -369,8 +441,15 @@ async def patch_state(
             raise HTTPException(status_code=409, detail="protected trial progress rejected") from exc
         if progress is None:
             raise HTTPException(status_code=409, detail="worker lost claim or progress transition is fenced")
+        cancellation = progress.get("family_cancellation")
+        if cancellation is not None:
+            await _finish_family_cancellation(request, _FamilyCancellation(
+                batch_id=UUID(cancellation["batch_id"]), family_key=cancellation["family_key"],
+                team_id=UUID(cancellation["team_id"]), trial_ids=tuple(UUID(item) for item in cancellation["trial_ids"]),
+                final_state=cancellation["final_state"],
+            ))
         STATE_PATCH_TOTAL.labels(endpoint="state", result="ok").inc()
-        return dict(progress)
+        return {"trial_id": progress["trial_id"], "state": progress["state"]}
 
     async with request.app.state.session_factory() as session:
         await enforce_trial_execution_fence(
@@ -465,34 +544,7 @@ async def patch_state(
         await session.commit()
 
     if family_cancellation is not None:
-        protected_store = getattr(
-            request.app.state,
-            "protected_worker_session_store",
-            None,
-        )
-        try:
-            for family_trial_id in family_cancellation.trial_ids:
-                await cancel_trial_under_authority(
-                    session_factory=request.app.state.session_factory,
-                    protected_store=protected_store,
-                    trial_id=family_trial_id,
-                    team_id=family_cancellation.team_id,
-                )
-        except ProtectedTrialCancellationError as exc:
-            raise HTTPException(
-                status_code=503,
-                detail="protected family trial cancellation unavailable",
-            ) from exc
-        async with request.app.state.session_factory() as session:
-            await session.execute(
-                _FAMILY_COMPLETE_CANCELLATION_SQL,
-                {
-                    "batch_id": family_cancellation.batch_id,
-                    "family_key": family_cancellation.family_key,
-                    "final_state": family_cancellation.final_state,
-                },
-            )
-            await session.commit()
+        await _finish_family_cancellation(request, family_cancellation)
 
     if row is None:
         STATE_PATCH_TOTAL.labels(endpoint="state", result="fenced").inc()

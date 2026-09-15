@@ -107,7 +107,7 @@ _STAGING_WORKER_RUNTIME_FUNCTIONS = (
     "claim_staging_assigned_trial(uuid,text,jsonb)",
     "retry_staging_claimed_trial(uuid,text,jsonb)",
     "cancel_protected_runtime_pending_trial(uuid,uuid)",
-    "report_staging_trial_progress(uuid,text,jsonb)",
+    "report_staging_trial_state(uuid,text,jsonb)",
 )
 _SECRET_NAME = "loom-capacity-agent"
 _CREDENTIALS_SECRET_NAME = "loom-capacity-agent-credentials"
@@ -1107,6 +1107,7 @@ class PsycopgPersonalDevCapacityDatabase:
                             "state",
                             "task_sequence",
                             "current_index",
+                            "attempt_count",
                             "state_uri",
                         ),
                         "batches": ("id", "family_run_spec"),
@@ -1142,7 +1143,7 @@ class PsycopgPersonalDevCapacityDatabase:
                         )
                     await connection.execute(
                         sql.SQL(
-                            "GRANT UPDATE (state, updated_at) "
+                            "GRANT UPDATE (state, updated_at, current_index, attempt_count) "
                             "ON TABLE public.batch_family_state TO {}"
                         ).format(sql.Identifier(owner))
                     )

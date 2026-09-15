@@ -514,14 +514,14 @@ class ProtectedWorkerSessionStore:
             raise ProtectedWorkerSessionRejected("protected worker session rejected") from exc
         return _session(value)
 
-    async def report_trial_progress(
+    async def report_trial_state(
         self, *, worker_id: UUID, worker_credential: str, report: Mapping[str, object],
     ) -> Mapping[str, Any] | None:
         """Authenticate and apply one progress report under the same SQL transaction."""
         try:
             async with self._session_factory() as session, session.begin():
                 value = (await session.execute(
-                    text("SELECT loom_capacity_guard.report_staging_trial_progress("
+                    text("SELECT loom_capacity_guard.report_staging_trial_state("
                          ":worker_id, :credential, CAST(:report AS jsonb))"),
                     {"worker_id": worker_id, "credential": worker_credential,
                      "report": json.dumps(dict(report), sort_keys=True, separators=(",", ":"))},

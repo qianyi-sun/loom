@@ -336,6 +336,7 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                         "state",
                         "task_sequence",
                         "current_index",
+                        "attempt_count",
                         "state_uri",
                     ),
                     "batches": ("id", "family_run_spec"),
@@ -367,7 +368,7 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                         f"TO {quoted_owner}"
                     )
                 connection.exec_driver_sql(
-                    "GRANT UPDATE (state, updated_at) ON TABLE public.batch_family_state "
+                    "GRANT UPDATE (state, updated_at, current_index, attempt_count) ON TABLE public.batch_family_state "
                     f"TO {quoted_owner}"
                 )
                 connection.exec_driver_sql(
