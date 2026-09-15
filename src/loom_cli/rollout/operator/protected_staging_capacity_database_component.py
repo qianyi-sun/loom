@@ -115,9 +115,26 @@ _AUTHORITY_REBIND_ACTIVITY_TABLES = (
     "trial_writer_mutations",
 )
 _AUTHORITY_REBIND_ACTIVITY_UNION = " UNION ALL ".join(
-    f"SELECT 1 AS present FROM loom_capacity_guard.{table_name}"
+    "SELECT 1 AS present FROM "
+    + ("ONLY " if table_name == "trial_retry_mutation_permits" else "")
+    + f"loom_capacity_guard.{table_name}"
     for table_name in _AUTHORITY_REBIND_ACTIVITY_TABLES
 )
+_RETRY_PERMIT_RELATION_PREDICATE = """
+    EXISTS (
+      SELECT 1 FROM pg_catalog.pg_class AS relation
+      JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+      JOIN pg_catalog.pg_roles AS owner ON owner.oid = relation.relowner
+      WHERE namespace.nspname = 'loom_capacity_guard'
+        AND relation.relname = 'trial_retry_mutation_permits'
+        AND relation.relkind = 'r' AND relation.relpersistence = 'p'
+        AND NOT relation.relispartition AND owner.rolname = 'loom_cap_staging_owner'
+        AND NOT EXISTS (
+          SELECT 1 FROM pg_catalog.pg_inherits
+          WHERE inhparent = relation.oid OR inhrelid = relation.oid
+        )
+    )
+"""
 _AUTHORITY_REBIND_LOCK_TABLES = tuple(
     sorted(
         {
@@ -137,11 +154,24 @@ _AUTHORITY_REBIND_LOCK_TABLES = tuple(
     )
 )
 _AUTHORITY_REBIND_LOCK_SQL = ", ".join(
-    f"loom_capacity_guard.{table_name}" for table_name in _AUTHORITY_REBIND_LOCK_TABLES
+    ("ONLY " if table_name == "trial_retry_mutation_permits" else "")
+    + f"loom_capacity_guard.{table_name}" for table_name in _AUTHORITY_REBIND_LOCK_TABLES
 )
-_AUTHORITY_REBIND_LOCK_STATEMENT = (
-    f"LOCK TABLE {_AUTHORITY_REBIND_LOCK_SQL} IN ACCESS EXCLUSIVE MODE NOWAIT;"
-)
+_REQUIRE_RETRY_PERMIT_RELATION_SQL = f"""
+DO $retry_scope$
+BEGIN
+  IF NOT ({_RETRY_PERMIT_RELATION_PREDICATE}) THEN
+    RAISE EXCEPTION 'retry permission maintenance relation authority changed'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$retry_scope$;
+"""
+_AUTHORITY_REBIND_LOCK_STATEMENT = f"""
+{_REQUIRE_RETRY_PERMIT_RELATION_SQL}
+LOCK TABLE {_AUTHORITY_REBIND_LOCK_SQL} IN ACCESS EXCLUSIVE MODE NOWAIT;
+{_REQUIRE_RETRY_PERMIT_RELATION_SQL}
+"""
 _AUTHORITY_REBIND_TRIGGER_PREDICATE = """
     (
       SELECT count(*) = 6
@@ -225,6 +255,7 @@ _AUTHORITY_BINDING_AUDIT_MODEL_TYPES: dict[str, type[GuardFenceV1] | type[AgentR
 _AUTHORITY_REBIND_FOUNDATION_PREDICATE = f"""
     (SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version)
       = 'guard_0034'
+    AND ({_RETRY_PERMIT_RELATION_PREDICATE})
     AND NOT EXISTS ({_AUTHORITY_REBIND_ACTIVITY_UNION})
     AND (SELECT count(*) FROM loom_capacity_guard.trial_writer_fence) = 1
     AND EXISTS (
