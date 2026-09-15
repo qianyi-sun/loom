@@ -18,6 +18,10 @@ from loom_capacity_agent.build_admission import (
     BuildExecutionPermitV1,
     BuildExecutionRequestV1,
 )
+from loom_capacity_agent.native_recovery_execution import (
+    BuildExecutionPermitV2,
+    BuildExecutionRequestV2,
+)
 
 _MAX_LIFETIME_NS = 10_000_000_000
 _STOP_REASONS = frozenset({"cancelled", "renewal-failed", "cleanup", "completed",
@@ -33,14 +37,22 @@ class NativeExecutionDeadline:
     its own deadline, even while the request's network operation is blocked.
     """
 
-    def __init__(self, claim: BuildClaimRequestV1, *, source_binding_sha256: str) -> None:
-        self._template = BuildExecutionRequestV1.model_validate_json(BuildExecutionRequestV1(
-            claim=claim, challenge=uuid4(), source_binding_sha256=source_binding_sha256).model_dump_json())
+    def __init__(self, claim: BuildClaimRequestV1, *, source_binding_sha256: str,
+        recovery_finalization_sha256: str | None = None,
+    ) -> None:
+        self._template: BuildExecutionRequestV1 | BuildExecutionRequestV2
+        if recovery_finalization_sha256 is None:
+            self._template = BuildExecutionRequestV1.model_validate_json(BuildExecutionRequestV1(
+                claim=claim, challenge=uuid4(), source_binding_sha256=source_binding_sha256).model_dump_json())
+        else:
+            self._template = BuildExecutionRequestV2.model_validate_json(BuildExecutionRequestV2(
+                claim=claim, challenge=uuid4(), source_binding_sha256=source_binding_sha256,
+                recovery_finalization_sha256=recovery_finalization_sha256).model_dump_json())
         self._lock = Lock()
         self._stopped: str | None = None
         self._last_clock: int | None = None
         self._deadline: int | None = None
-        self._pending: tuple[BuildExecutionRequestV1, int] | None = None
+        self._pending: tuple[BuildExecutionRequestV1 | BuildExecutionRequestV2, int] | None = None
         self._read_clock()
 
     def _fail(self, reason: str) -> NoReturn:
@@ -68,7 +80,7 @@ class NativeExecutionDeadline:
             self._fail("expired")
         return now
 
-    def begin_request(self) -> BuildExecutionRequestV1:
+    def begin_request(self) -> BuildExecutionRequestV1 | BuildExecutionRequestV2:
         with self._lock:
             now = self._check()
             if self._pending is not None:
@@ -77,11 +89,12 @@ class NativeExecutionDeadline:
             self._pending = (request, now)
             return request
 
-    def accept(self, permit: BuildExecutionPermitV1) -> None:
+    def accept(self, permit: BuildExecutionPermitV1 | BuildExecutionPermitV2) -> None:
         with self._lock:
             self._check()
             try:
-                permit = BuildExecutionPermitV1.model_validate_json(permit.model_dump_json())
+                model = BuildExecutionPermitV2 if isinstance(self._template, BuildExecutionRequestV2) else BuildExecutionPermitV1
+                permit = model.model_validate_json(permit.model_dump_json())
             except (AttributeError, ValueError):
                 self._fail("protocol-error")
             if self._pending is None or permit.request != self._pending[0]:

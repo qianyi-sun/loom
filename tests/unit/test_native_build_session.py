@@ -19,7 +19,8 @@ from tests.unit.test_personal_dev_builder_artifact import _artifact
 
 
 @pytest.mark.parametrize("boundary", ["success", "expired", "failed", "unreaped", "uncertain", "wrong-artifact"])
-def test_session_orders_execution_cleanup_and_private_artifact_verification(tmp_path, monkeypatch, boundary):
+@pytest.mark.parametrize("recovery_digest", [None, "e" * 64])
+def test_session_orders_execution_cleanup_and_private_artifact_verification(tmp_path, monkeypatch, boundary, recovery_digest):
     from loom_capacity_executor import native_build_session as module
 
     claim = execution_request().claim
@@ -39,6 +40,7 @@ def test_session_orders_execution_cleanup_and_private_artifact_verification(tmp_
 
     def supervise(*args, **kwargs):
         assert events == ["bound", "spawn"]
+        assert kwargs.get("recovery_finalization_sha256") == recovery_digest
         events.append("supervise")
         return NativeSupervisionResult(boundary not in {"expired", "failed"},
             "expired" if boundary == "expired" else "fixture", boundary != "unreaped")
@@ -59,7 +61,7 @@ def test_session_orders_execution_cleanup_and_private_artifact_verification(tmp_
     monkeypatch.setattr(module, "reconcile_native_runtime_cleanup", cleanup)
     arguments = dict(claim=claim, context=context, layout=layout, workspace=workspace,
         authority=object(), expected_parent_pid=123, max_artifact_bytes=1024**2,
-        max_image_archive_bytes=256 * 1024)
+        max_image_archive_bytes=256 * 1024, recovery_finalization_sha256=recovery_digest)
     if boundary == "wrong-artifact":
         with pytest.raises(RuntimeError):
             module.execute_native_build_session(**arguments)

@@ -43,8 +43,10 @@ def protected_helper_host(monkeypatch):
     monkeypatch.setattr(os, "fstat", metadata)
 
 
-@pytest.mark.parametrize("boundary", ["exact", "config", "release", "binding", "scope", "claim", "runtime", "cancel", "replay"])
-async def test_installed_worker_closes_handoff_before_checks_and_retains_recovery_identity(tmp_path, monkeypatch, boundary):
+@pytest.mark.parametrize(("recovery", "boundary"), [(recovery, boundary) for recovery in (False, True)
+    for boundary in ("exact", "config", "release", "binding", "scope", "claim", "runtime", "cancel", "replay")]
+    + [(True, boundary) for boundary in ("admission", "host", "capture", "publication", "admitted-config", "admitted-release", "lost-preparation-ack")])
+async def test_installed_worker_closes_handoff_before_checks_and_retains_recovery_identity(tmp_path, monkeypatch, boundary, recovery):
     module = import_module("loom_capacity_executor.native_installed_worker")
     _directory, _lease, physical, admission, credential = await prepared_worker(tmp_path)
     packet = packet_for(physical, admission.requests[0], credential, tmp_path)
@@ -57,6 +59,10 @@ async def test_installed_worker_closes_handoff_before_checks_and_retains_recover
         max_artifact_bytes=2 * 1024**2, max_image_archive_bytes=1024**2,
         max_unpacked_bytes=32 * 1024**2, max_rootfs_entries=1000, tmp_bytes=1024**2,
         buildkit_state_bytes=32 * 1024**2, timeout_seconds=60)
+    if recovery:
+        from loom_capacity_build_guard.installation_store import _identity
+        config = module.NativeInstalledWorkerConfigV2.model_validate({**config.model_dump(), "schema_version": 2,
+            "host_identity_path": "/protected/host.json"})
     claim = module.allocated_claim_request(packet.registration).model_dump()
     from loom_capacity_agent.build_admission import BuildClaimRequestV1
     claim = BuildClaimRequestV1.model_validate({**claim, "request_id": uuid4()})
@@ -102,6 +108,54 @@ async def test_installed_worker_closes_handoff_before_checks_and_retains_recover
     monkeypatch.setattr(module, "_bind_running_installation", lambda *args: checked("binding"))
     monkeypatch.setattr(module, "validate_native_worker_scope", lambda *args, **kwargs: checked("scope"))
 
+    if recovery:
+        from loom_capacity_agent.native_recovery_publication import (
+            NativeRecoveryAdmissionV1,
+            NativeRecoveryHostIdentityV1,
+            NativeRecoveryProfileV1,
+            NativeRecoveryReceiptV1,
+        )
+        from tests.unit.test_native_recovery_contracts import observation
+
+        host = NativeRecoveryHostIdentityV1(node_id=physical.binding.node_ids[0], boot_id=uuid4(), original_uid=24850,
+            original_gid=24851, cgroup_namespace_device=4, cgroup_namespace_inode=100)
+        profile = NativeRecoveryProfileV1(installation_id=_identity(claim.binding.subject_id, claim.binding.subject_incarnation,
+            claim.binding.deployment_generation), pool_id="oldlab", launch_profile_sha256="e" * 64,
+            worker_config_sha256="f" * 64 if boundary == "admitted-config" else "d" * 64,
+            release_manifest_sha256="f" * 64 if boundary == "admitted-release" else config.release_manifest_sha256)
+        monkeypatch.setattr(module, "read_native_recovery_boot_id", lambda: host.boot_id)
+
+        def read_host(path, *, expected_sha256):
+            assert str(path) == config.host_identity_path and expected_sha256 == canonical_digest(host)
+            checked("host")
+            return host
+
+        def capture(locator, **kwargs):
+            checked("capture")
+            assert locator.config_sha256 == "d" * 64
+            assert kwargs == {"launch_profile_sha256": profile.launch_profile_sha256,
+                "node_configuration_sha256": canonical_digest(host), "host_identity": host}
+            _contracts, final = observation()
+            return final.preparation.model_copy(update={"locator": locator, "node_id": host.node_id,
+                "boot_id": host.boot_id, "launch_profile_sha256": profile.launch_profile_sha256,
+                "node_configuration_sha256": canonical_digest(host)})
+
+        monkeypatch.setattr(module, "read_native_recovery_host_identity", read_host)
+        monkeypatch.setattr(module, "capture_native_recovery_preparation", capture)
+
+        class Client:
+            async def read_recovery_admission(self, request, *, worker_credential):
+                checked("admission")
+                assert request.claim == claim and request.boot_id == host.boot_id
+                assert worker_credential == credential
+                return NativeRecoveryAdmissionV1(request=request, profile=profile, host=host)
+
+            async def publish_recovery(self, request, *, worker_credential):
+                checked("publication")
+                assert worker_credential == credential and request.claim == claim
+                result = NativeRecoveryReceiptV1(request=request, request_digest=canonical_digest(request))
+                return result.model_copy(update={"request_digest": "f" * 64}) if boundary == "lost-preparation-ack" else result
+
     @asynccontextmanager
     async def io(observed_packet, **kwargs):
         checked("claim")
@@ -116,7 +170,15 @@ async def test_installed_worker_closes_handoff_before_checks_and_retains_recover
         assert credential not in (attempt / "recovery.json").read_text()
         assert (attempt / "recovery.json").stat().st_mode & 0o777 == 0o400
         try:
-            yield SimpleNamespace(claim=claim, source=SimpleNamespace(context=context))
+            if recovery:
+                from loom_capacity_executor.native_allocated_io import scoped_native_allocated_io
+                from loom_capacity_executor.native_build_source import NativeStagedBuildSource
+
+                async with scoped_native_allocated_io(claim=claim,
+                    source=NativeStagedBuildSource(context, attempt / "source/archive"), client=Client(), worker_credential=credential) as owner:
+                    yield owner
+            else:
+                yield SimpleNamespace(claim=claim, source=SimpleNamespace(context=context))
         finally:
             calls.append("io-exit")
 
@@ -130,6 +192,10 @@ async def test_installed_worker_closes_handoff_before_checks_and_retains_recover
         assert spec.material.client_seccomp_sha256 == hashlib.sha256(seccomp).hexdigest()
         assert spec.runsc == "/protected/gvisor/runsc"
         assert artifact_workspace.name == "artifacts" and timeout_seconds == 60
+        if recovery:
+            assert spec.schema_version == 3
+            owner.require_recovery_preparation(spec.recovery_preparation)
+            assert calls.index("admission") < calls.index("host") < calls.index("capture") < calls.index("publication") < calls.index("runtime")
         if boundary == "cancel":
             raise asyncio.CancelledError
         return receipt
@@ -164,6 +230,9 @@ async def test_installed_worker_closes_handoff_before_checks_and_retains_recover
         assert len(list(scratch.iterdir())) == 1, "retain exact scratch for allocation recovery"
     if boundary in {"exact", "runtime", "cancel"}:
         assert calls[-1] == "io-exit"
+    if boundary in {"admission", "host", "capture", "publication", "admitted-config", "admitted-release", "lost-preparation-ack"}:
+        assert "runtime" not in calls and calls[-1] == "io-exit"
+        assert not list(scratch.glob("*/work/runtime-spec.json"))
 
 
 @pytest.mark.parametrize("fault", ["exact", "not-isolated", "interpreter", "rootlesskit", "import-tree", "traversal-import", "unlisted-module"])
@@ -188,8 +257,9 @@ def test_running_process_must_match_verified_installation(monkeypatch, protected
             module._bind_running_installation(SimpleNamespace(manifest=manifest))
 
 
-@pytest.mark.parametrize("fault", ["exact", "digest", "mode", "symlink", "unknown", "boolean-bound", "noncanonical"])
-def test_config_reader_requires_protected_canonical_bytes(release, monkeypatch, fault):
+@pytest.mark.parametrize("fault", ["exact", "digest", "mode", "symlink", "unknown", "boolean-bound", "noncanonical", "float-version"])
+@pytest.mark.parametrize("version", [1, 2])
+def test_config_reader_requires_protected_canonical_bytes(release, monkeypatch, fault, version):
     import json
 
     module = import_module("loom_capacity_executor.native_installed_worker")
@@ -200,6 +270,10 @@ def test_config_reader_requires_protected_canonical_bytes(release, monkeypatch, 
         scratch_root="/private/scratch", max_source_archive_bytes=1024**2, max_artifact_bytes=1024**2,
         max_image_archive_bytes=1024**2, max_unpacked_bytes=1024**2, max_rootfs_entries=100,
         tmp_bytes=1024**2, buildkit_state_bytes=1024**2, timeout_seconds=60)
+    if version == 2:
+        document.update(schema_version=2, host_identity_path="/protected/host.json")
+    if fault == "float-version":
+        document["schema_version"] = float(version)
     if fault == "unknown":
         document["command"] = ["arbitrary"]
     if fault == "boolean-bound":

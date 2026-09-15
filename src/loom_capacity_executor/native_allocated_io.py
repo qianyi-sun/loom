@@ -7,6 +7,7 @@ import socket
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from typing import Protocol
+from uuid import UUID
 
 from loom_capacity_agent.build_admission import (
     BuildArtifactV1,
@@ -17,15 +18,27 @@ from loom_capacity_agent.build_admission import (
     BuildSourceContextV1,
 )
 from loom_capacity_agent.build_artifact_stream import BuildArtifactUploadReceiptV1
+from loom_capacity_agent.native_recovery import NativeRecoveryPreparationV1
+from loom_capacity_agent.native_recovery_publication import (
+    NativeRecoveryAdmissionRequestV1,
+    NativeRecoveryAdmissionV1,
+    NativeRecoveryPublicationV1,
+    NativeRecoveryReceiptV1,
+)
 from loom_capacity_executor.native_authority_bridge import (
     NativeExecutionAuthorityClient,
     serve_native_execution_authority,
 )
 from loom_capacity_executor.native_build_source import NativeStagedBuildSource
+from loom_capacity_executor.native_recovery_handshake import commit_mapped_recovery
 from loom_capacity_manager.contracts import canonical_digest
 
 
 class NativeAllocatedIOClient(NativeExecutionAuthorityClient, Protocol):
+    async def read_recovery_admission(self, request: NativeRecoveryAdmissionRequestV1, *, worker_credential: str) -> NativeRecoveryAdmissionV1: ...
+
+    async def publish_recovery(self, request: NativeRecoveryPublicationV1, *, worker_credential: str) -> NativeRecoveryReceiptV1: ...
+
     async def upload_artifact(self, claim: BuildClaimRequestV1, *, worker_credential: str,
         artifact: BuildArtifactV1, chunks: AsyncIterator[bytes],
     ) -> BuildArtifactUploadReceiptV1: ...
@@ -56,6 +69,10 @@ class NativeAllocatedIO:
         self._credential = packet.worker_credential
         self._closed = False
         self._operations: set[asyncio.Task[object]] = set()
+        self._preparation: NativeRecoveryReceiptV1 | None = None
+        self._finalization: str | None = None
+        self._preparation_started = False
+        self._finalization_started = False
 
     @property
     def claim(self) -> BuildClaimRequestV1:
@@ -78,12 +95,70 @@ class NativeAllocatedIO:
         finally:
             self._operations.discard(task)
 
-    async def serve_authority(self, channel: socket.socket) -> None:
+    async def read_recovery_admission(self, *, boot_id: UUID) -> NativeRecoveryAdmissionV1:
+        with self._operation() as credential:
+            request = NativeRecoveryAdmissionRequestV1(claim=self.claim, boot_id=boot_id)
+            admission = await self._client.read_recovery_admission(request, worker_credential=credential)
+            if not isinstance(admission, NativeRecoveryAdmissionV1):
+                raise ValueError("native recovery admission is not typed")
+            admission = NativeRecoveryAdmissionV1.model_validate_json(admission.model_dump_json())
+            if admission.request != request:
+                raise ValueError("native recovery admission identity changed")
+            return admission
+
+    async def prepare_recovery(self, preparation: NativeRecoveryPreparationV1) -> NativeRecoveryReceiptV1:
+        """Publish once; uncertainty never permits mapped startup."""
+        with self._operation() as credential:
+            if self._preparation_started:
+                raise ValueError("native recovery preparation already attempted")
+            request = NativeRecoveryPublicationV1(claim=self.claim, record=preparation)
+            self._preparation_started = True
+            receipt = await self._publish_recovery(request, credential)
+            self._preparation = receipt
+            return receipt
+
+    async def _publish_recovery(self, request: NativeRecoveryPublicationV1, credential: str) -> NativeRecoveryReceiptV1:
+        receipt = await self._client.publish_recovery(request, worker_credential=credential)
+        if not isinstance(receipt, NativeRecoveryReceiptV1):
+            raise ValueError("native recovery receipt is not typed")
+        receipt = NativeRecoveryReceiptV1.model_validate_json(receipt.model_dump_json())
+        if receipt.request != request:
+            raise ValueError("native recovery receipt identity changed")
+        return receipt
+
+    def require_recovery_preparation(self, preparation: NativeRecoveryPreparationV1) -> None:
+        if self._closed:
+            raise RuntimeError("native allocated IO scope is closed")
+        if (self._preparation is None or self._preparation.request.claim != self.claim
+            or self._preparation.request.record != preparation):
+            raise ValueError("native recovery preparation is not acknowledged")
+
+    async def finalize_recovery(self, channel: socket.socket, *, preparation: NativeRecoveryPreparationV1,
+        runtime_spec_sha256: str,
+    ) -> str:
+        with self._operation() as credential:
+            self.require_recovery_preparation(preparation)
+            if self._finalization_started:
+                raise ValueError("native recovery finalization already attempted")
+            self._finalization_started = True
+
+            async def publish(request: NativeRecoveryPublicationV1) -> NativeRecoveryReceiptV1:
+                return await self._publish_recovery(request, credential)
+
+            self._finalization = await commit_mapped_recovery(channel, claim=self.claim, preparation=preparation,
+                runtime_spec_sha256=runtime_spec_sha256, publish=publish)
+            return self._finalization
+
+    async def serve_authority(self, channel: socket.socket, *, recovery_finalization_sha256: str | None = None) -> None:
         """Channel ownership remains with the outer process; no cached permits."""
         with self._operation() as credential:
+            if (recovery_finalization_sha256 != self._finalization
+                or (self._preparation_started and self._finalization is None)):
+                raise ValueError("native recovery execution finalization is not acknowledged")
             await serve_native_execution_authority(channel, claim=self.claim,
                 source_binding_sha256=self.source.context.source_binding_sha256,
-                worker_credential=credential, client=self._client)
+                worker_credential=credential, client=self._client,
+                recovery_finalization_sha256=recovery_finalization_sha256)
 
     async def upload_artifact(self, artifact: BuildArtifactV1, *, chunks: AsyncIterator[bytes]) -> BuildArtifactUploadReceiptV1:
         """One exact upload; even a lost reply does not imply another attempt."""

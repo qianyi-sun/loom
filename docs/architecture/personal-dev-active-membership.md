@@ -2206,6 +2206,104 @@ pruning does not provide it. The executable is not wired into fleet intake yet. 
 release publication/retention, scratch recovery after process death, restricted
 networking and installed Slurm/concurrent-owner acceptance still gate activation.
 
+The mapped-root guard observes every actual UID and GID extent before material
+creation, capability restoration or mapped pruning. The bounded immutable
+observation rejects parent-root mappings, invalid ranges and overlaps in either
+coordinate; UID and GID ranges remain separate. These outside IDs are relative
+to the parent user namespace, not authenticated host IDs. This observation is
+not persisted in the legacy V1 locator. Recovery-capable V3 launches publish it
+through the protected two-phase route below. It does not authorize
+interrupted-attempt deletion or certify subid retention.
+
+`loom_capacity_agent.native_recovery` defines bounded canonical preparation and
+final V2 observation records. Preparation binds the original locator, admitted
+launch-profile/node-configuration digests, allocated node, boot, original UID/GID
+and exact job-cgroup identity. Finalization additionally binds the runtime spec
+and complete UID/GID maps. The strict final reader requires externally retained
+preparation and digest; its legacy reader keeps V1 inspection compatibility but
+V1 cannot satisfy finalized recovery. `capture_native_recovery_preparation`
+observes original host UID/GID, canonical boot identity and the exact Slurm job
+cgroup rather than its batch step. It requires the original host identity maps,
+the host cgroup namespace and full cgroup2 mount, rejects foreign/nested jobs and
+cross-mount paths, and pins directories through a final path/kernel readback.
+The attempt must match its locator's device/inode and remain private. Node and
+profile/configuration identities must come from protected installed authority;
+the observer does not authenticate caller-supplied digests or kernel hostnames.
+The node identity is a canonical root-owned readonly installer record, loaded
+against an externally pinned digest. It binds node, boot, worker UID/GID and host
+cgroup-namespace device/inode. The unprivileged worker compares only its own proc
+namespace link; inspecting root PID1 namespace links would require privileges it
+must not have. Boot/account/namespace mismatches fail closed and are rechecked
+before returning facts. The installer must genuinely occupy host namespaces and
+retain old records by digest; reboot requires fresh protected host-record
+admission, not worker-side replacement of expected facts. Static configuration
+does not embed the boot-specific digest. The launch-profile hash
+is supplied separately by protected authority to avoid a self-referential config
+hash. Host PID/proc namespace and worker-account isolation remain installer requirements.
+Read-only kernel coverage checks the actual cgroup2 mount and rejects an ordinary
+scratch directory; this is not installed Slurm containment evidence.
+Revision `build_guard_0032` retains recovery history through the existing pool-
+authenticated build-admission route, additionally requiring the exact committed
+claim and allocated worker credential. Owner-only static recovery profiles bind
+the installation/pool, launch profile, worker config and release manifest;
+initial admission must precede scoped execution. Host identities are separately
+append-only so reboot does not rewrite historical recovery authority. A changed
+static profile requires a new installation generation. The installer remains
+responsible for verifying recovery-capable code and account isolation; retaining
+hashes does not perform that verification. Agents have no table-write permission.
+
+Preparation requires admitted profile/host facts and the exact committed physical
+event's canonical bytes. Finalization requires a prior-transaction preparation
+and complete strict maps. Conflicting replay fails; current source/lease and
+terminal fences are checked before and after publication. HTTP acknowledgment
+follows transaction commit. Historical reads require the exact committed claim
+and worker credential, but deliberately do not require a still-live source lease.
+Reads reject same-transaction records. Neither receipt releases a capacity hold,
+proves execution/quiescence, nor permits deletion. Legacy V1 execution permits
+are denied for the whole recovery-required installation/pool, even before its
+first publication; this prevents bypass through an unpublished claim.
+
+The same revision exposes a separate `recovery-execution` operation using explicit
+`BuildExecutionRequestV2`/`BuildExecutionPermitV2`. Its finalization digest names
+the canonical retained final publication, including the claim and mapped runtime
+specification. Both initial permission and renewal require that exact committed
+record and the existing current source/claim/terminal fence; lifetime is at most
+ten seconds and never extends the source lease. The local deadline monitor keeps
+the digest immutable across fresh challenges, includes transport/validation and
+suspend time, and rejects downgrade or foreign finalization. The outer authority
+bridge forwards only the selected version and exact digest; credentials do not
+enter monitor packets. Production `native-execution` activation remains rejected.
+
+`NativeInstalledWorkerConfigV2` adds the protected host-record path while
+preserving V1 configuration bytes. The static config is common to the pool:
+embedding a node name would conflict with the pool's single admitted config
+digest. Node/boot-specific records occupy the same protected path on each host.
+The original-UID worker reads its actual kernel boot ID and obtains the exact
+committed profile and unique matching boot record within its allocated nodes
+through authenticated `recovery-admission`. The response binds the claim's
+derived installation, pool, allocated node and boot. Missing, ambiguous or
+uncommitted admission fails; current source authority is required. Neither an
+environment hostname nor a caller-selected node supplies host authority. The worker verifies the
+protected local host record against that admitted digest, captures original
+preparation, and publishes it before launching the mapper.
+
+`NativeRootlessSpecV3` contains that acknowledged preparation and otherwise uses
+the V2 material/transfer/pruning path. The existing private authority socket
+first carries actual complete maps and the final runtime-spec binding. Original-
+UID IO validates and publishes finalization once, then acknowledges its exact
+publication digest. Only afterward may the mapper prepare material or start
+feature execution. Permission renewal on both sides binds that same digest;
+there are never two readers competing for the authority socket. Directory
+identity, mode and ownership are checked across acknowledgment. Failed or lost
+publication replies retain the attempt without retrying writes or starting
+material. The legacy locator remains alongside retained protected history.
+
+Intake remains disabled. Real networkless KVM V3 build/renewal-expiry coverage,
+protected-config tests and database/HTTP composition are not installed Slurm or
+multi-owner acceptance. Installed recovery after interruption, restricted
+dependency networking, release publication and concurrent-owner acceptance
+remain activation requirements.
+
 The versioned client policy is
 `deploy/personal-dev-builder/client-seccomp-v1.json`. It permits ordinary
 Python/buildctl file IO, read-only extended-attribute inspection, constrained

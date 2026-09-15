@@ -184,6 +184,10 @@ def test_capacity_agent_has_no_pool_mutation_or_candidate_runtime_wiring() -> No
             "loom_capacity_agent.admission",
             "loom_capacity_agent.build_admission",
             "loom_capacity_agent.build_artifact_stream",
+            # Pool-authenticated recovery admission/publication and execution
+            # request contracts; no scheduler or candidate runtime authority.
+            "loom_capacity_agent.native_recovery_execution",
+            "loom_capacity_agent.native_recovery_publication",
         },
     }
     wired_sources = {

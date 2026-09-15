@@ -3,7 +3,7 @@
 import base64
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal, Self
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import Field, field_validator, model_validator
 
@@ -19,6 +19,11 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
     ExecutableIntentBindingV2,
 )
+
+
+def build_installation_id(subject: UUID, incarnation: UUID, deployment: int) -> UUID:
+    """Existing stable installation identity shared by retention and readback."""
+    return uuid5(NAMESPACE_URL, f"loom:personal-build-installation:{subject}:{incarnation}:{deployment}")
 
 
 class BuildPreparationRequestV1(StrictV1Model):
