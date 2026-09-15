@@ -1390,6 +1390,17 @@ signals. Replay observes disappearance without dropping the runtime role or
 changing its grants or verifier. This proves retirement only for that runtime;
 the enclosing operation must still reconcile privileged SQL and host writers.
 
+`close_application_runtime_for_cutover` composes these phases with serialized
+database admission closure and the existing cluster-wide client-work check. The
+supplied application connection must be the retained exact peer. A lost closure
+acknowledgement can be replayed through that still-live peer: seal validation
+accepts closed admission, while ordinary login observation/restoration continue
+to require open admission. Completion requires only the retained application
+peer, maintenance peer and guard to remain among client sessions; an unknown
+administrator connection in `postgres` refuses completion without being signalled.
+No phase reopens admission. Durable admission of a replacement peer after peer
+loss and successor startup remain responsibilities of the enclosing operation.
+
 Admission and ownership transfer retain strict password-absence defaults. An
 explicit `runtime_password`, recovered from the protected original credential,
 allows only a matching bounded SCRAM verifier on the still-`NOLOGIN` former

@@ -119,6 +119,7 @@ def seal_application_runtime_for_cutover(
     password, memberships or grants and does not signal already connected clients.
     Original/successor guard admission belongs to that enclosing durable operation;
     this transaction verifies the supplied exact live guard before and after DDL.
+    A retained live peer can also validate an already-closed database on replay.
     """
     if not isinstance(coordination_guard, ApplicationDatabaseCoordinationGuard):
         raise ApplicationRuntimeLoginError("application runtime cutover requires a bound guard")
@@ -207,13 +208,14 @@ def _application_runtime_login(
         if connection.execute(
             application_sql(
                 "SELECT s.system_identifier::pg_catalog.text={} AND d.oid={} AND d.datname={} "
-                "AND d.datallowconn AND d.datdba={} AND a.oid={} AND b.oid={} "
+                "AND (d.datallowconn OR {}) AND d.datdba={} AND a.oid={} AND b.oid={} "
                 "FROM pg_catalog.pg_database d CROSS JOIN pg_catalog.pg_control_system() s "
                 "JOIN pg_catalog.pg_roles a ON a.rolname={} JOIN pg_catalog.pg_roles b ON b.rolname={} "
                 "WHERE d.datname=pg_catalog.current_database()",
                 target.system_identifier,
                 target.database_oid,
                 target.database,
+                seal,
                 target.successor_oid,
                 target.owner_oid,
                 target.successor_oid,
