@@ -1,23 +1,16 @@
 """Authenticate trial progress and its frozen-writer permission in one transaction.
 
-Revision ID: guard_0035
-Revises: guard_0034
+Installed as part of the unreleased guard_0034 trial-writer permission migration.
 """
 
 from __future__ import annotations
 
-import sqlalchemy as sa
+from collections.abc import Callable
+
 from alembic import op
 
-from capacity_guard_migrations.versions.guard_0034_frozen_trial_retry import _rewrite
-
-revision: str = "guard_0035"
-down_revision: str | None = "guard_0034"
-branch_labels: str | None = None
-depends_on: str | None = None
-
 _FUNCTION = "loom_capacity_guard.report_staging_trial_progress(uuid,text,jsonb)"
-_ISSUER = "loom_capacity_guard.authorize_frozen_retry_update(uuid,uuid,bigint,uuid,uuid,uuid,text,jsonb)"
+_ISSUER = "loom_capacity_guard.authorize_frozen_trial_update(uuid,uuid,bigint,uuid,uuid,uuid,text,jsonb)"
 _VALIDATOR = "loom_capacity_guard.current_protected_runtime_registration()"
 _OLD_ALLOWED = "'loom_capacity_guard.cancel_protected_runtime_pending_trial(uuid,uuid)'::regprocedure::oid\n          ];"
 _NEW_ALLOWED = "'loom_capacity_guard.cancel_protected_runtime_pending_trial(uuid,uuid)'::regprocedure::oid,\n            'loom_capacity_guard.report_staging_trial_progress(uuid,text,jsonb)'::regprocedure::oid\n          ];"
@@ -36,43 +29,8 @@ _NEW = """          ELSIF p_operation = 'progress' THEN
             RAISE EXCEPTION 'frozen retry operation is unavailable' USING ERRCODE = '55000';"""
 
 
-def _lock_permissions() -> None:
-    op.execute("""
-        DO $admit$
-        DECLARE v_table oid := 'loom_capacity_guard.trial_retry_mutation_permits'::regclass;
-        BEGIN
-          IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class WHERE oid = v_table
-                         AND relowner = current_user::regrole::oid AND relkind = 'r'
-                         AND NOT relispartition)
-             OR EXISTS (SELECT 1 FROM pg_catalog.pg_inherits
-                        WHERE inhparent = v_table OR inhrelid = v_table) THEN
-            RAISE EXCEPTION 'progress permission relation authority changed' USING ERRCODE = '55000';
-          END IF;
-          LOCK TABLE ONLY loom_capacity_guard.trial_retry_mutation_permits
-            IN ACCESS EXCLUSIVE MODE NOWAIT;
-          IF 'loom_capacity_guard.trial_retry_mutation_permits'::regclass::oid <> v_table
-             OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class WHERE oid = v_table
-                         AND relowner = current_user::regrole::oid AND relkind = 'r'
-                         AND NOT relispartition)
-             OR EXISTS (SELECT 1 FROM pg_catalog.pg_inherits
-                        WHERE inhparent = v_table OR inhrelid = v_table) THEN
-            RAISE EXCEPTION 'progress permission relation authority changed' USING ERRCODE = '55000';
-          END IF;
-        END
-        $admit$;
-    """)
-
-
-def upgrade() -> None:
-    _lock_permissions()
-    op.execute("""
-        ALTER TABLE ONLY loom_capacity_guard.trial_retry_mutation_permits
-          DROP CONSTRAINT trial_retry_mutation_permits_operation_check;
-        ALTER TABLE ONLY loom_capacity_guard.trial_retry_mutation_permits
-          ADD CONSTRAINT trial_retry_mutation_permits_operation_check
-          CHECK (operation IN ('retry','refund','progress'));
-    """)
-    _rewrite(_ISSUER, [(_OLD, _NEW)], upgrading=True)
+def install_progress(rewrite: Callable[..., None]) -> None:
+    rewrite(_ISSUER, [(_OLD, _NEW)], upgrading=True)
     op.execute("""
         CREATE FUNCTION loom_capacity_guard.report_staging_trial_progress(
           p_worker_id uuid, p_worker_credential text, p_report jsonb
@@ -160,7 +118,7 @@ def upgrade() -> None:
             'failure_reason', p_report->>'failure_reason',
             'failure_message', COALESCE(p_report->>'failure_message', v_current.failure_message),
             'started_at', CASE WHEN p_report->>'state' = 'running' THEN COALESCE(v_current.started_at, now()) ELSE v_current.started_at END);
-          v_permit := loom_capacity_guard.authorize_frozen_retry_update(
+          v_permit := loom_capacity_guard.authorize_frozen_trial_update(
             v_current.trial_id, v_current.protected_attempt_id, v_current.execution_generation,
             p_worker_id, (v_session->>'worker_incarnation')::uuid, v_current.claim_operation_id, 'progress', v_changes);
           UPDATE public.trials AS trial
@@ -170,7 +128,7 @@ def upgrade() -> None:
            WHERE trial.id = v_current.trial_id AND trial.worker_id = p_worker_id AND trial.state = v_current.state
            RETURNING trial.state INTO v_state;
           IF NOT FOUND THEN RAISE EXCEPTION 'protected progress update lost its row' USING ERRCODE = '55000'; END IF;
-          PERFORM loom_capacity_guard.assert_frozen_retry_consumed(v_permit);
+          PERFORM loom_capacity_guard.assert_frozen_trial_mutation_consumed(v_permit);
           RETURN jsonb_build_object('trial_id', v_current.trial_id, 'state', v_state);
         END
         $function$;
@@ -181,21 +139,10 @@ def upgrade() -> None:
     quoted = op.get_bind().dialect.identifier_preparer.quote(role)
     op.execute(f"REVOKE ALL ON FUNCTION {_FUNCTION} FROM PUBLIC")
     op.execute(f"GRANT EXECUTE ON FUNCTION {_FUNCTION} TO {quoted}")
-    _rewrite(_VALIDATOR, [(_OLD_ALLOWED, _NEW_ALLOWED)], upgrading=True)
+    rewrite(_VALIDATOR, [(_OLD_ALLOWED, _NEW_ALLOWED)], upgrading=True)
 
 
-def downgrade() -> None:
-    _lock_permissions()
-    if op.get_bind().execute(sa.text(
-        "SELECT EXISTS (SELECT 1 FROM ONLY loom_capacity_guard.trial_retry_mutation_permits WHERE operation = 'progress')"
-    )).scalar_one():
-        raise RuntimeError("protected progress evidence requires protected retirement")
-    _rewrite(_VALIDATOR, [(_OLD_ALLOWED, _NEW_ALLOWED)], upgrading=False)
+def uninstall_progress(rewrite: Callable[..., None]) -> None:
+    """Caller has already locked and proved the complete permission ledger empty."""
+    rewrite(_VALIDATOR, [(_OLD_ALLOWED, _NEW_ALLOWED)], upgrading=False)
     op.execute(f"DROP FUNCTION {_FUNCTION}")
-    _rewrite(_ISSUER, [(_OLD, _NEW)], upgrading=False)
-    op.execute("""
-        ALTER TABLE ONLY loom_capacity_guard.trial_retry_mutation_permits
-          DROP CONSTRAINT trial_retry_mutation_permits_operation_check;
-        ALTER TABLE ONLY loom_capacity_guard.trial_retry_mutation_permits
-          ADD CONSTRAINT trial_retry_mutation_permits_operation_check CHECK (operation IN ('retry','refund'));
-    """)

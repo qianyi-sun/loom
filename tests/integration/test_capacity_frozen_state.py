@@ -124,7 +124,7 @@ def test_frozen_progress_rejects_unadmitted_input(capacity_guard_database, monke
         with engine.connect() as connection:
             assert connection.execute(text("SELECT state FROM public.trials WHERE id = :id"),
                                       {"id": seeded.trial_id}).scalar_one() == "claimed"
-            assert connection.execute(text("SELECT count(*) FROM loom_capacity_guard.trial_retry_mutation_permits")).scalar_one() == 0
+            assert connection.execute(text("SELECT count(*) FROM loom_capacity_guard.trial_mutation_permits")).scalar_one() == 0
             assert connection.execute(text("SELECT count(*) FROM loom_capacity_guard.trial_writer_mutations")).scalar_one() == 0
     finally:
         engine.dispose()
@@ -153,7 +153,7 @@ def test_frozen_progress_rolls_back_unapproved_trigger_effects(capacity_guard_da
         with engine.connect() as connection:
             assert connection.execute(text("SELECT to_jsonb(t) FROM public.trials t WHERE id = :id"),
                                       {"id": seeded.trial_id}).scalar_one() == before
-            assert connection.execute(text("SELECT count(*) FROM loom_capacity_guard.trial_retry_mutation_permits")).scalar_one() == 0
+            assert connection.execute(text("SELECT count(*) FROM loom_capacity_guard.trial_mutation_permits")).scalar_one() == 0
             assert connection.execute(text("SELECT count(*) FROM loom_capacity_guard.trial_writer_mutations")).scalar_one() == 0
     finally:
         engine.dispose()
