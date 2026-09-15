@@ -15,7 +15,7 @@ from loom.application_schema_reference import (
 
 def test_bundled_reference_is_immutable_and_has_no_caller_digest() -> None:
     reference = application_schema_reference()
-    assert (reference.application_head, reference.guard_head) == ("0147", "guard_0036")
+    assert (reference.application_head, reference.guard_head) == ("0148", "guard_0036")
     # A caller-created alternate value cannot change the module's pinned value.
     alternate = replace(reference, inventory_sha256="e" * 64)
     assert application_schema_reference() == reference
@@ -104,7 +104,7 @@ def test_unreviewed_revision_pair_is_not_reference_authority(revision):
         application_schema_reference(revision=revision)
 
 
-@pytest.mark.parametrize("revision", ["0147/guard_0036", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"])
+@pytest.mark.parametrize("revision", ["0148/guard_0036", "0147/guard_0036", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"])
 @pytest.mark.parametrize("major", [16, 17])
 @pytest.mark.parametrize("ownership", ["legacy-owner", "sealed-owner"])
 def test_cnpg_locale_is_distinct_from_personal_development(revision, major, ownership):
@@ -136,3 +136,16 @@ def test_protected_writer_grants_have_distinct_reference_and_explicit_history(ma
     assert current.inventory_sha256 != historical.inventory_sha256
     assert current.object_count == historical.object_count
     assert application_schema_revision(public_revision="0147", guard_revision="guard_0036") == "0147/guard_0036"
+
+
+@pytest.mark.parametrize("major", [16, 17])
+@pytest.mark.parametrize("profile", ["legacy-owner", "sealed-owner", "staging-readonly-legacy-owner", "staging-readonly-sealed-owner", "cnpg-staging-legacy-owner", "cnpg-staging-sealed-owner", "cnpg-staging-executor-admission"])
+def test_execution_journal_head_preserves_prior_reference(major, profile):
+    from loom.application_schema_reference import application_schema_revision
+    current = application_schema_reference(profile=profile, postgres_major=major)
+    historical = application_schema_reference(profile=profile, postgres_major=major, revision="0147/guard_0036")
+    assert current.application_head == "0148"
+    assert historical.application_head == "0147"
+    assert current.inventory_sha256 != historical.inventory_sha256
+    assert current.object_count > historical.object_count
+    assert application_schema_revision(public_revision="0148", guard_revision="guard_0036") == "0148/guard_0036"
