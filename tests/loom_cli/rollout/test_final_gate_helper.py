@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from loom_cli.rollout import final_gate_helper as helper
 from loom_cli.rollout.final_gate_readiness import FinalGateResult
@@ -263,3 +267,59 @@ def test_final_gate_helper_accepts_live_smoke_inside_claimed_epoch(
         == 0
     )
     assert '"check_id":"final.smoke"' in capsys.readouterr().out
+
+
+def _activation_documents(tmp_path, path):
+    from tests.loom_cli.rollout.operator.test_protected_execution_activation import fixture
+    (tmp_path / "activation-fixture").mkdir()
+    owner, _, _, _ = fixture(tmp_path / "activation-fixture")
+    documents = {pool: request.document for pool, request in owner.requests.items()}
+    payload = json.dumps({pool: document.model_dump(mode="json") for pool, document in documents.items()}).encode()
+    source = path.with_name("execution-activation-documents.json")
+    source.write_bytes(payload)
+    source.chmod(0o600)
+    return owner, documents, source, hashlib.sha256(payload).hexdigest()
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_activation_command_uses_bound_documents_or_retained_recovery(tmp_path, monkeypatch, capsys, resume):
+    _, path, digest = _prepared(tmp_path, monkeypatch)
+    owner, documents, source, source_digest = _activation_documents(tmp_path, path)
+    # Freshness belongs to the installed forward guard; recovery may need drain.
+    monkeypatch.setattr(helper, "_verify_checkpoint", lambda _: pytest.fail("checkpoint must be checked by installed forward guard"))
+    calls = []
+    def activate(plan, *, documents):
+        calls.append(documents)
+        assert plan.plan_digest == digest
+        return owner.expected
+    args = ["activate-prepared", "--plan", str(path), "--plan-sha256", digest]
+    if not resume:
+        args += ["--documents", str(source), "--documents-sha256", source_digest]
+    assert helper.main(args, activate=activate) == 0
+    assert calls == [None if resume else documents]
+    record = json.loads(capsys.readouterr().out)
+    assert record["plan_digest"] == digest
+    assert record["execution"]["execution_state"] == "active"
+
+
+@pytest.mark.parametrize("drift", ["digest", "path", "mode", "duplicate", "missing-pool", "unpaired-digest"])
+def test_activation_command_refuses_unbound_document_inputs(tmp_path, monkeypatch, capsys, drift):
+    _, path, digest = _prepared(tmp_path, monkeypatch)
+    _, _, source, source_digest = _activation_documents(tmp_path, path)
+    if drift == "digest":
+        source_digest = "f" * 64
+    elif drift == "path":
+        other = source.with_name("unbound.json")
+        source.rename(other)
+        source = other
+    elif drift == "mode":
+        source.chmod(0o644)
+    elif drift in {"duplicate", "missing-pool"}:
+        source.write_bytes(b'{"gb10":{},"gb10":{}}' if drift == "duplicate" else b'{"gb10":{}}')
+        source_digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    args = ["activate-prepared", "--plan", str(path), "--plan-sha256", digest,
+        "--documents-sha256", source_digest]
+    if drift != "unpaired-digest":
+        args += ["--documents", str(source)]
+    assert helper.main(args, activate=lambda *args, **kwargs: pytest.fail("invalid input reached executor")) == 2
+    assert capsys.readouterr().out == ""

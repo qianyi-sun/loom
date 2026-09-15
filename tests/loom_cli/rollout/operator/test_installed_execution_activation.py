@@ -42,7 +42,7 @@ def installed(tmp_path, monkeypatch):
     application = SimpleNamespace(new_journal=lambda _: object(), controller_admission=admission)
     monkeypatch.setattr(module, "derive_protected_staging_capacity_configuration",
         lambda **kwargs: SimpleNamespace(exact=True, staging_subject=owner.subject))
-    source = module.InstalledExecutionActivation(runtime, application, controllers)
+    source = module.InstalledExecutionActivation(runtime, application, controllers, checkpoint_guard=lambda: None)
     documents = {pool: request.document for pool, request in owner.requests.items()}
     return source, owner, manager, controllers, calls, observed, documents, preparation
 
@@ -76,3 +76,20 @@ def test_installed_activation_refuses_unfinished_preparation_before_delivery(tmp
     with pytest.raises(RuntimeError, match="completed preparation journal"):
         source.execute(owner.plan, documents=documents)
     assert calls == observed == []
+
+
+def test_installed_activation_checkpoint_expiry_prevents_forward_but_not_drain(tmp_path, monkeypatch):
+    from dataclasses import replace
+    source, owner, manager, controllers, calls, _, documents, _ = installed(tmp_path, monkeypatch)
+    def expired():
+        raise RuntimeError("checkpoint expired")
+    expired_source = replace(source, checkpoint_guard=expired)
+    with pytest.raises(RuntimeError, match="checkpoint expired"):
+        expired_source.execute(owner.plan, documents=documents)
+    assert calls == []
+    controllers["oldlab"].fail = True
+    with pytest.raises(RuntimeError, match="controller enable failed"):
+        source.execute(owner.plan, documents=documents)
+    assert expired_source.execute(owner.plan).execution_state == "drain-only"
+    assert calls.count(("manager", "activate")) == 1
+    assert manager.execution.execution_state == "drain-only"

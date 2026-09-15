@@ -124,16 +124,19 @@ def test_installed_activation_uses_verified_candidate_and_fixed_controller_chann
     documents = {"gb10": object(), "oldlab": object()}
     result = object()
     class Activation:
-        def __init__(self, bound_runtime, bound_application, active):
+        def __init__(self, bound_runtime, bound_application, active, *, checkpoint_guard):
             assert bound_runtime is runtime and bound_application is application
             assert active == {"gb10": gb10, "oldlab": oldlab}
+            checkpoint_guard()
         def execute(self, bound, **kwargs):
             assert bound == plan and kwargs == {"documents": documents}
             calls.append("activate")
             return result
+    from loom_cli.rollout import final_gate_helper
+    monkeypatch.setattr(final_gate_helper, "_verify_checkpoint", lambda bound: calls.append("checkpoint") if bound == plan else pytest.fail("wrong checkpoint"))
     monkeypatch.setattr(installed_module, "InstalledExecutionActivation", Activation)
     assert executor.activate_prepared_execution(plan, documents=documents) is result
-    assert calls == ["verify", "build", "activate"]
+    assert calls == ["verify", "build", "checkpoint", "activate"]
 
 
 def _executor(tmp_path: Path) -> InstalledFinalGateExecutor:
