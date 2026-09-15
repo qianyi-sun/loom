@@ -1746,6 +1746,22 @@ invokes the procedures. Consequently this protected surface cannot consume
 manager work or change physical capacity while the global executable ceiling
 and deployment entry points remain zero.
 
+Native application delivery binds a sorted, exact node-to-receiver route set and
+three private TLS file hashes into the portable activation document. The protected
+controller installer publishes those files as owner-only inputs and reads back
+their hashes and TLS usability before enabling its timer. Normal runtime loads
+TLS only for delivery, so expired routes or unavailable keys cannot block drain
+and terminal cleanup. It closes delivery clients before releasing its journal. These controller checks do not establish compute-node
+receiver installation or fleet writer closure.
+
+After physical job binding, the controller retains the expected receipt and
+configuration digest before sending the capability. Lost replies recover by
+querying that receipt; a crash before retention is discovered from the bound job.
+Delivery records contain no capability and do not occupy the central RPC queue.
+Cleanup work takes priority, drain-only execution does not deliver, and terminal
+job recovery publishes inventory without redelivery. Journal checkpoints retain
+this evidence until an exact manager-acknowledged release permits reclamation.
+
 Implementation lives under `src/loom_capacity_manager/`,
 `src/loom_capacity_executor/`, `src/loom_capacity_pool_executor/`, and
 `src/loom_capacity_agent/`. The service, executor, and protected-store

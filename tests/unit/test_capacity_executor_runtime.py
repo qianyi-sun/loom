@@ -390,7 +390,8 @@ def test_runtime_profile_resolver_selects_exact_profile_identity_and_resources()
 # Production break caught: the normal active daemon path had no immutable
 # activation artifact capable of constructing the real manager/admission/Slurm
 # executor runtime from exact local bindings.
-def test_activation_runtime_artifact_builds_exact_executor_runtime(tmp_path: Path) -> None:
+@pytest.mark.parametrize("native", [False, True])
+def test_activation_runtime_artifact_builds_exact_executor_runtime(tmp_path: Path, monkeypatch, native) -> None:
     files = executor_files(tmp_path)
     config = PoolExecutorConfig.from_files(files.config)
     context = launch_context_fixture()
@@ -417,6 +418,9 @@ def test_activation_runtime_artifact_builds_exact_executor_runtime(tmp_path: Pat
             "controller_authority_sha256": "0" * 64,
         }
     )
+    if native:
+        from tests.unit.test_capacity_executor_native_launch_profile import native_profile_fixture
+        profile = profile.model_copy(update={"native_execution": native_profile_fixture().native_execution})
     profile = profile.model_copy(
         update={"controller_authority_sha256": canonical_launch_policy_digest(profile)}
     )
@@ -464,6 +468,22 @@ def test_activation_runtime_artifact_builds_exact_executor_runtime(tmp_path: Pat
         ),
         profiles=profiles,
     )
+    if native:
+        from dataclasses import replace
+        from datetime import UTC, datetime
+
+        from loom_capacity_executor.native_bootstrap_configuration import (
+            NativeBootstrapConfigurationV1,
+        )
+        from tests.loom_cli.rollout.operator.test_protected_active_controller import (
+            native_configuration,
+        )
+        native_config, _ = native_configuration(artifact)
+        native_config = native_config.model_copy(update={"routes": tuple(replace(route,
+            expires_at=datetime(2020, 1, 1, tzinfo=UTC)) for route in native_config.routes)})
+        artifact = artifact.model_copy(update={"native_delivery": native_config})
+        original_validate_local = NativeBootstrapConfigurationV1.validate_local
+        monkeypatch.setattr(NativeBootstrapConfigurationV1, "validate_local", lambda self: None)
     manager = object()
     admission = object()
     seen: list[SlurmAuthorityV2] = []
@@ -479,6 +499,12 @@ def test_activation_runtime_artifact_builds_exact_executor_runtime(tmp_path: Pat
         seen.append(authority)
         return object()
 
+    if native:
+        monkeypatch.setattr(NativeBootstrapConfigurationV1, "validate_local", original_validate_local)
+        with pytest.raises(ValueError, match="expired"):
+            validate_executable_runtime_inputs(config, artifact, current_context=active)
+        # The real runtime factory must still assemble for cleanup without
+        # reading these expired routes' unavailable fixed-path TLS files.
     executor = build_executable_runtime(
         config,
         artifact,
@@ -488,6 +514,9 @@ def test_activation_runtime_artifact_builds_exact_executor_runtime(tmp_path: Pat
         slurm_backend_factory=slurm_factory,
     )
 
+    assert (executor.native_bootstrap_outbox is not None) == native
+    if native:
+        assert all(client._transport is None for client in executor.native_bootstrap_outbox._clients.values())
     assert executor.registration.execution == active
     assert executor.client is manager
     assert executor.admission is admission

@@ -29,6 +29,7 @@ from .protected_capacity_execution_preparation_component import (
     prepared_executor_profile_sha256,
 )
 from .protected_controller_admission import ADMISSION_CA_PATH, ControllerAdmissionBundle
+from .protected_native_delivery_material import NativeDeliveryMaterial
 
 _MAX_BYTES = 4 * 1024 * 1024
 
@@ -49,6 +50,7 @@ class ActiveControllerRequest:
     profile: CapacityPoolExecutorProfile
     document: ActivationRuntimeDocumentV2
     admission: ControllerAdmissionBundle | None = field(default=None, repr=False)
+    native_delivery_material: NativeDeliveryMaterial | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if (
@@ -95,6 +97,11 @@ class ActiveControllerRequest:
         if self.admission is not None:
             admission = ControllerAdmissionBundle.from_dict(self.admission.to_dict())
             admission.files(document)
+        if (document.native_delivery is None) != (self.native_delivery_material is None):
+            raise ValueError("native delivery activation and private material must be paired")
+        if self.native_delivery_material is not None:
+            material = NativeDeliveryMaterial.from_dict(self.native_delivery_material.to_dict())
+            material.files(document)
         # These renderers validate all execution, profile, manifest and Slurm bindings.
         _ = self.files
         if len(self.to_bytes()) > _MAX_BYTES:
@@ -113,6 +120,7 @@ class ActiveControllerRequest:
         config = PurePosixPath(self.prepared.prerequisite.binding.config_file)
         return MappingProxyType(
             {
+                **(self.native_delivery_material.files(self.document) if self.native_delivery_material is not None else {}),
                 str(
                     config.with_name(f"{self.pool_id}-active.json")
                 ): render_capacity_pool_executor_active_config(
@@ -140,6 +148,8 @@ class ActiveControllerRequest:
                 "profile": self.profile.model_dump(mode="json"),
                 "document": self.document.model_dump(mode="json"),
                 **({"admission": self.admission.to_dict()} if self.admission is not None else {}),
+                **({"native_delivery_material": self.native_delivery_material.to_dict()}
+                    if self.native_delivery_material is not None else {}),
             }
         )
 
@@ -151,8 +161,8 @@ class ActiveControllerRequest:
             value = json.loads(payload)
             if (
                 not isinstance(value, dict)
-                or set(value) not in ({"schema_version", "operation_id", "prepared", "profile", "document"},
-                    {"schema_version", "operation_id", "prepared", "profile", "document", "admission"})
+                or not {"schema_version", "operation_id", "prepared", "profile", "document"} <= set(value)
+                or not set(value) <= {"schema_version", "operation_id", "prepared", "profile", "document", "admission", "native_delivery_material"}
                 or not isinstance(value["operation_id"], str)
                 or type(value["schema_version"]) is not int
                 or value["schema_version"] != 1
@@ -169,6 +179,8 @@ class ActiveControllerRequest:
                     json.dumps(value["document"])
                 ),
                 admission=ControllerAdmissionBundle.from_dict(value["admission"]) if "admission" in value else None,
+                native_delivery_material=NativeDeliveryMaterial.from_dict(value["native_delivery_material"])
+                    if "native_delivery_material" in value else None,
             )
         except (TypeError, KeyError, UnicodeError) as exc:
             raise ValueError("active controller request is invalid") from exc
@@ -210,7 +222,9 @@ class ActiveControllerEvidence:
             not isinstance(self.operation_id, UUID)
             or self.operation_id.int == 0
             or self.pool_id not in {"oldlab", "gb10"}
-            or set(self.file_sha256) != paths
+            or set(self.file_sha256) not in (paths, paths | {
+                f"/etc/loom-capacity-executor/{self.pool_id}-native-{name}"
+                for name in ("ca.pem", "client.pem", "client-key.pem")})
             or set(self.unit_active_state) != units
             or set(self.unit_file_state) != units
         ):

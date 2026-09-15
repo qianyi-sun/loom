@@ -66,6 +66,7 @@ from loom_capacity_executor.launch_renderer import (
     executable_ownership_token,
     render_signed_launch,
 )
+from loom_capacity_executor.native_bootstrap_outbox import NativeBootstrapOutbox
 from loom_capacity_executor.runtime_profiles import RuntimeAssemblyError, resolve_runtime_profile
 from loom_capacity_executor.slurm_contracts import (
     SlurmAccountingHighWaterV2,
@@ -371,6 +372,7 @@ class ExecutablePoolExecutor:
         typed_policy: PoolLaunchPolicyV3 | None = None,
         now: Callable[[], datetime] | None = None,
         bootstrap_handoff_store: BootstrapHandoffStore | None = None,
+        native_bootstrap_outbox: NativeBootstrapOutbox | None = None,
     ) -> None:
         if not isinstance(registration, ExecutableExecutorRegistrationV2):
             raise TypeError("executable executor requires its exact registration")
@@ -412,6 +414,7 @@ class ExecutablePoolExecutor:
             raise ValueError("executor ownership key differs from registration")
         self.registration = registration
         self.journal = journal
+        self.native_bootstrap_outbox = native_bootstrap_outbox
         self.client = client
         self.admission = admission
         self.slurm = slurm
@@ -1065,7 +1068,7 @@ class ExecutablePoolExecutor:
         if replayed is not None:
             return replayed
         if self._has_recovering_launch():
-            return await self.recover()
+            return await self.recover(drain_only=drain_only)
         raise JournalRegressionError("unrecognized pending runtime work")
 
     async def tick(self) -> ExecutorTickResult:
@@ -1082,6 +1085,13 @@ class ExecutablePoolExecutor:
             return replayed_inventory
         if self.registration.execution.execution_state == "prepared":
             return await self._publish_inventory(checkpoint)
+        if self._pending_native_launches():
+            cleanup = await self.client.next_executable_work(checkpoint.command_sequence, cleanup_only=True)
+            if cleanup is not None:
+                if not isinstance(cleanup, (ExecutableIntentCloseV2, ExecutablePartialReleaseV2)):
+                    raise JournalRegressionError("native delivery cleanup poll returned capacity work")
+                return await self._apply_one(cleanup, checkpoint)
+            return await self.recover(native_delivery=True)
         work = await self.client.next_executable_work(checkpoint.command_sequence)
         if work is None:
             return await self._publish_inventory(checkpoint)
@@ -1119,7 +1129,7 @@ class ExecutablePoolExecutor:
         if replayed_local is not None:
             return replayed_local
         if self._has_recovering_launch():
-            return await self.recover()
+            return await self.recover(drain_only=True)
         replayed = await self._replay_drain_only_central_request(checkpoint)
         if replayed is not None:
             return replayed
@@ -1132,6 +1142,38 @@ class ExecutablePoolExecutor:
         if isinstance(work, (ExecutableIntentCloseV2, ExecutablePartialReleaseV2)):
             return await self._apply_one(work, checkpoint)
         raise ValueError("drain-only executor rejected new capacity work")
+
+    def _pending_native_launches(self) -> tuple[JournalRecord, ...]:
+        pending = []
+        for record in self.journal.latest_records("job"):
+            if record.event_kind != "physical-bind-confirmed":
+                continue
+            envelope = self._load_launch(UUID(record.object_id))
+            if envelope is None:
+                raise JournalRegressionError("native recovery lacks launch evidence")
+            binding = envelope.rendered.ownership_proof.metadata.binding
+            if self._profile_for(binding).native_execution is None:
+                continue
+            latest = self.journal.latest("intent", str(binding.intent_id))
+            # Drain/withdraw/close owns the lifecycle once physical binding has
+            # been superseded. Receiver availability cannot delay that authority.
+            if latest is None or latest.event_kind != "physical-bind-confirmed":
+                continue
+            physical = self._physical_binding(envelope)
+            if physical is None or self.native_bootstrap_outbox is None:
+                raise RuntimeAssemblyError("native bootstrap delivery is not installed or bound")
+            if not self.native_bootstrap_outbox.confirmed(physical):
+                pending.append(record)
+        return tuple(pending)
+
+    async def _deliver_native(self, envelope: _LaunchEnvelope) -> None:
+        binding = envelope.rendered.ownership_proof.metadata.binding
+        if self._profile_for(binding).native_execution is None:
+            return
+        physical = self._physical_binding(envelope)
+        if physical is None or self.native_bootstrap_outbox is None:
+            raise RuntimeAssemblyError("native bootstrap delivery is not installed or bound")
+        await self.native_bootstrap_outbox.deliver(physical)
 
     def _has_recovering_launch(self) -> bool:
         return any(
@@ -1621,6 +1663,8 @@ class ExecutablePoolExecutor:
             )
         if isinstance(work, ExecutableLaunchPermitV2):
             self._assert_binding(work.binding)
+            if self._profile_for(work.binding).native_execution is not None and self.native_bootstrap_outbox is None:
+                raise RuntimeAssemblyError("native bootstrap delivery is not installed")
             envelope = self._load_launch(work.binding.intent_id)
             if envelope is not None:
                 return await self.recover()
@@ -1683,6 +1727,7 @@ class ExecutablePoolExecutor:
                 launch_subject=envelope.launch_subject,
             )
             await self._bind_physical(envelope=envelope, job_id=submission.job_id)
+            await self._deliver_native(envelope)
             return ExecutorTickResult("submitted", work.binding.intent_id, submission.job_id)
         if isinstance(work, ExecutableIntentCloseV2):
             self._assert_binding(work.binding)
@@ -2678,7 +2723,7 @@ class ExecutablePoolExecutor:
             ).encode("ascii")
         ).hexdigest()
 
-    async def recover(self) -> ExecutorTickResult:
+    async def recover(self, *, drain_only: bool = False, native_delivery: bool = False) -> ExecutorTickResult:
         self._assert_operation_consumers_ready()
         checkpoint = await self._checkpoint()
         replayed_local = await self._replay_local_request(checkpoint)
@@ -2699,6 +2744,8 @@ class ExecutablePoolExecutor:
                 "physical-bind-requested",
             }
         )
+        if native_delivery and not drain_only:
+            recovering += self._pending_native_launches()
         if not recovering:
             return await self._publish_inventory(checkpoint, jobs=jobs)
         record = min(recovering, key=lambda item: item.sequence)
@@ -2738,6 +2785,8 @@ class ExecutablePoolExecutor:
             )
         if len(matches) == 1:
             await self._bind_physical(envelope=envelope, job_id=matches[0].job_id)
+            if not drain_only:
+                await self._deliver_native(envelope)
             await self._publish_inventory(checkpoint, jobs=jobs)
             return ExecutorTickResult("adopted", intent_id, matches[0].job_id)
         if high_water.observed_through >= submitted_at and len(terminal_matches) == 1:

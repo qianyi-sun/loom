@@ -15,7 +15,7 @@ from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import Field, field_validator
+from pydantic import Field, SerializerFunctionWrapHandler, field_validator, model_serializer
 
 from loom_capacity_agent.admission import (
     ExecutableDrainRequestV2,
@@ -35,6 +35,7 @@ from loom_capacity_executor.launch_renderer import (
     OperatorLaunchProfileV2,
     canonical_launch_policy_digest,
 )
+from loom_capacity_executor.native_bootstrap_configuration import NativeBootstrapConfigurationV1
 from loom_capacity_executor.runtime_profiles import (
     RuntimeAssemblyError,
     resolve_runtime_profile,
@@ -244,6 +245,14 @@ class _ActivationRuntimeDocumentBaseV2(StrictV2Model):
     state_directory: Annotated[str, Field(min_length=1, max_length=4096)]
     slurm_authority: SlurmAuthorityV2
     profiles: Annotated[tuple[OperatorLaunchProfileV2, ...], Field(min_length=1)]
+    native_delivery: NativeBootstrapConfigurationV1 | None = None
+
+    @model_serializer(mode="wrap")
+    def _preserve_existing_activation(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        payload: dict[str, Any] = handler(self)
+        if self.native_delivery is None:
+            payload.pop("native_delivery", None)
+        return payload
 
     @field_validator("slurm_authority", mode="before")
     @classmethod
@@ -405,7 +414,7 @@ def _absolute_owner_path(value: str) -> Path:
 
 def validate_executable_runtime_inputs(
     config: PoolExecutorConfig, artifact: ActivationRuntimeArtifactV2, *,
-    current_context: ExecutionContextV2,
+    current_context: ExecutionContextV2, validate_delivery_material: bool = True,
 ) -> None:
     """Validate activation inputs without creating a journal, backend or worker."""
 
@@ -419,6 +428,12 @@ def validate_executable_runtime_inputs(
         raise RuntimeAssemblyError("current execution context differs from activation artifact")
     _assert_config_artifact_binding(config, artifact)
     _assert_profiles(config, artifact)
+    if artifact.native_delivery is not None:
+        artifact.native_delivery.assert_document(artifact)
+        if validate_delivery_material:
+            artifact.native_delivery.validate_local()
+    elif any(profile.native_execution is not None for profile in artifact.profiles):
+        raise RuntimeAssemblyError("native bootstrap delivery is not installed")
     admission_directory = Path(artifact.admission_directory)
     if (
         canonical_admission_directory_digest(admission_directory)
@@ -438,7 +453,8 @@ def build_executable_runtime(
 ) -> ExecutablePoolExecutor:
     """Assemble one positive pool executor from exact local and activation bindings."""
 
-    validate_executable_runtime_inputs(config, artifact, current_context=current_context)
+    validate_executable_runtime_inputs(config, artifact, current_context=current_context,
+        validate_delivery_material=False)
     admission_directory = Path(artifact.admission_directory)
     admission = (
         RoutedExecutableAdmissionClient(
@@ -454,6 +470,8 @@ def build_executable_runtime(
     journal = ExecutorJournal(config.journal_file)
     journal.__enter__()
     try:
+        store = BootstrapHandoffStore(Path(artifact.handoff_directory))
+        outbox = artifact.native_delivery.build(journal, store) if artifact.native_delivery is not None else None
         return ExecutablePoolExecutor(
             config.registration.model_copy(update={"execution": artifact.execution}),
             journal,
@@ -467,7 +485,8 @@ def build_executable_runtime(
                 controller_authority_sha256=artifact.controller_authority_sha256,
             ),
             ownership_key=config.ownership_key,
-            bootstrap_handoff_store=BootstrapHandoffStore(Path(artifact.handoff_directory)),
+            bootstrap_handoff_store=store,
+            native_bootstrap_outbox=outbox,
         )
     except Exception:
         journal.close()

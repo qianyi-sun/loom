@@ -26,6 +26,7 @@ from loom_capacity_executor.launch_facts_journal import (
     _MIN_RECOVERY_RESERVE_BYTES,
     _PER_JOB_RECOVERY_RESERVE_BYTES,
 )
+from loom_capacity_executor.native_bootstrap_outbox import NATIVE_DELIVERY_EVENTS
 from loom_capacity_manager.executable_contracts import ExecutablePartialReleaseV2
 
 if TYPE_CHECKING:
@@ -39,7 +40,7 @@ _CENTRAL_EVENTS = {
         "permit-consume", "intent-close")
     for result in ("requested", "confirmed", "rejected")
 }
-_LIFECYCLE_EVENTS = _CENTRAL_EVENTS | {
+_LIFECYCLE_EVENTS = _CENTRAL_EVENTS | NATIVE_DELIVERY_EVENTS | {
     "slurm-submit-requested", "slurm-submit-unknown", "slurm-submit-confirmed",
     "physical-bind-requested", "physical-bind-confirmed", "launch-facts-retained",
     "protected-bootstrap-requested", "protected-bootstrap-confirmed", "protected-bootstrap-revoked",

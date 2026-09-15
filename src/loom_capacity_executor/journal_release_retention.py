@@ -8,6 +8,10 @@ from uuid import UUID
 
 from loom_capacity_executor.journal import JournalRecord, JournalRegressionError
 from loom_capacity_executor.launch_facts_journal import LaunchFactsReferenceV3
+from loom_capacity_executor.native_bootstrap_outbox import (
+    NATIVE_DELIVERY_EVENTS,
+    retained_native_delivery,
+)
 from loom_capacity_executor.slurm_contracts import SlurmCancelRequestV2
 from loom_capacity_manager.executable_contracts import (
     ExecutableIntentBindingV2,
@@ -121,6 +125,13 @@ def lifecycle_retention(
                 raise JournalRegressionError("cancellation retention ownership is ambiguous")
             if not reclaimable(next(iter(matches.values())), record):
                 selected.add(record.sequence)
+            continue
+        if record.event_kind in NATIVE_DELIVERY_EVENTS:
+            _, delivery = retained_native_delivery(record)
+            binding = delivery.physical.binding
+            if not reclaimable(binding, record):
+                selected.add(record.sequence)
+                active_jobs.add(binding.intent_id)
             continue
         value = json.loads(payload)
         if not isinstance(value, dict) or "binding" not in value:

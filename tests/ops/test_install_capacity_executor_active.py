@@ -58,8 +58,8 @@ class ActiveHostRunner(FakeHostRunner):
         return super().run(argv, check=check, env=env)
 
 
-def _installed(tmp_path, *, admission=False):
-    request = _request(tmp_path)
+def _installed(tmp_path, *, admission=False, native=False):
+    request = _request(tmp_path, native=native)
     if admission:
         from tests.loom_cli.rollout.operator.test_controller_admission import _bundle
         bundle = _bundle(request.document)
@@ -83,8 +83,9 @@ def _path(root, absolute):
     return root.joinpath(*Path(absolute).parts[1:])
 
 
-def test_active_publication_and_enable_replay(tmp_path):
-    request, installer, runner = _installed(tmp_path)
+@pytest.mark.parametrize("native", [False, True])
+def test_active_publication_and_enable_replay(tmp_path, native):
+    request, installer, runner = _installed(tmp_path, native=native)
     assert installer.observe_active(request) is None
     staged = installer.converge_active_files(request)
     assert staged.state == "staged"
@@ -397,4 +398,16 @@ def test_exact_active_replay_never_opens_a_publication_crash_window(tmp_path, mo
         pytest.fail("exact replay reopened atomic publication")
     monkeypatch.setattr(installer_module, "_publish_authority_without_replace", refuse)
     assert installer.converge_active_files(request) == evidence
+    assert not runner.active_units and not runner.enabled_units
+
+
+
+def test_native_private_material_drift_prevents_timer_enable(tmp_path):
+    request, installer, runner = _installed(tmp_path, native=True)
+    staged = installer.converge_active_files(request)
+    assert len(staged.file_sha256) == 6
+    key = _path(tmp_path, f"/etc/loom-capacity-executor/{request.pool_id}-native-client-key.pem")
+    key.write_bytes(b"changed private key")
+    with pytest.raises(CapacityExecutorInstallError, match="installed files changed"):
+        installer.enable_active_timer(request)
     assert not runner.active_units and not runner.enabled_units

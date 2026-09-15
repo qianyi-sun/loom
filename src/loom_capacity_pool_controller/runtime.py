@@ -177,9 +177,14 @@ async def run_daemon_once(
                 executor=executor,
             )
         finally:
-            close = getattr(getattr(executor, "journal", None), "close", None)
-            if callable(close):
-                close()
+            try:
+                outbox = getattr(executor, "native_bootstrap_outbox", None)
+                if outbox is not None:
+                    await outbox.aclose()
+            finally:
+                close = getattr(getattr(executor, "journal", None), "close", None)
+                if callable(close):
+                    close()
 
 
 async def run_executor_once(

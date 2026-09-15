@@ -29,7 +29,7 @@ from tests.loom_cli.test_capacity_control_plane import _active_render_fixture
 from tests.ops.test_install_capacity_executor import _controller_request
 
 
-def _request(tmp_path, *, prerequisite=None):
+def _request(tmp_path, *, prerequisite=None, native=False):
     if prerequisite is None:
         prerequisite = _controller_request(tmp_path)
     fixture_root = tmp_path / "runtime-fixture"
@@ -51,6 +51,9 @@ def _request(tmp_path, *, prerequisite=None):
             "qos": pool.qos,
         }
     )
+    if native:
+        from tests.unit.test_capacity_executor_native_launch_profile import native_profile_fixture
+        operator = operator.model_copy(update={"native_execution": native_profile_fixture().native_execution})
     operator = operator.model_copy(
         update={"controller_authority_sha256": canonical_launch_policy_digest(operator)}
     )
@@ -130,6 +133,10 @@ def _request(tmp_path, *, prerequisite=None):
             ).encode(),
         },
     )
+    if native:
+        config, material = native_configuration(document)
+        document = document.model_copy(update={"native_delivery": config})
+        return ActiveControllerRequest(uuid4(), prepared, profile, document, native_delivery_material=material)
     return ActiveControllerRequest(uuid4(), prepared, profile, document)
 
 
@@ -194,3 +201,62 @@ def test_active_request_refuses_noncanonical_wire(tmp_path, mutation):
         wire = wire.replace(b'{"document":', b'{"schema_version":1,"document":', 1)
     with pytest.raises(ValueError):
         ActiveControllerRequest.from_bytes(wire)
+
+
+
+def native_configuration(document):
+    from datetime import UTC, datetime
+
+    from loom_capacity_executor.native_bootstrap_configuration import (
+        NativeBootstrapConfigurationV1,
+        NativeBootstrapIdentityV1,
+        NativeDeliveryFileV1,
+    )
+    from loom_capacity_executor.native_bootstrap_transport import NativeBootstrapRoute
+    from loom_cli.rollout.operator.protected_native_delivery_material import NativeDeliveryMaterial
+
+    material = NativeDeliveryMaterial(b"ca" * 64, b"certificate" * 64, b"private-key" * 64)
+    def pin(name, payload):
+        return NativeDeliveryFileV1(path=f"/etc/loom-capacity-executor/{document.pool_id}-native-{name}",
+            sha256=hashlib.sha256(payload).hexdigest())
+    nodes = sorted({node for profile in document.profiles for domain in profile.resource_domains for node in domain.node_ids})
+    config = NativeBootstrapConfigurationV1(executor_id=document.executor_id, executor_incarnation=document.executor_incarnation,
+        identity=NativeBootstrapIdentityV1(ca=pin("ca.pem", material.ca), certificate=pin("client.pem", material.certificate),
+            private_key=pin("client-key.pem", material.private_key)),
+        routes=tuple(NativeBootstrapRoute(address=f"127.0.0.{index + 1}", port=41443, hostname=node, target_node=node,
+            pool_id=document.pool_id, trusted_release_sha256=document.execution.trusted_fleet_release_sha256,
+            server_certificate_sha256="b" * 64, expires_at=datetime(2030, 1, 1, tzinfo=UTC)) for index, node in enumerate(nodes)))
+    return config, material
+
+
+def test_native_active_request_roundtrips_exact_private_files_and_routes(tmp_path):
+    request = _request(tmp_path, native=True)
+    assert ActiveControllerRequest.from_bytes(request.to_bytes()) == request
+    assert len(request.files) == 6
+    assert request.files["/etc/loom-capacity-executor/oldlab-native-client-key.pem"] == request.native_delivery_material.private_key
+    assert request.native_delivery_material.private_key.decode() not in repr(request)
+    changed = replace(request.native_delivery_material, private_key=b"changed-key" * 64)
+    with pytest.raises(ValueError, match="hashes"):
+        replace(request, native_delivery_material=changed)
+    with pytest.raises(ValueError, match="paired"):
+        replace(request, native_delivery_material=None)
+
+
+@pytest.mark.parametrize("change", ["node", "release", "pool", "executor", "incarnation", "path", "duplicate"])
+def test_native_active_request_rejects_route_or_identity_drift(tmp_path, change):
+    request = _request(tmp_path, native=True)
+    config = request.document.native_delivery
+    if change in {"node", "release", "pool"}:
+        route = replace(config.routes[0], **{{"node": "target_node", "release": "trusted_release_sha256", "pool": "pool_id"}[change]:
+            "f" * 64 if change == "release" else "foreign"})
+        config = config.model_copy(update={"routes": (route, *config.routes[1:])})
+    elif change in {"executor", "incarnation"}:
+        config = config.model_copy(update={{"executor": "executor_id", "incarnation": "executor_incarnation"}[change]:
+            "foreign" if change == "executor" else uuid4()})
+    elif change == "path":
+        config = config.model_copy(update={"identity": config.identity.model_copy(update={
+            "private_key": config.identity.private_key.model_copy(update={"path": "/tmp/foreign-key"})})})
+    else:
+        config = config.model_copy(update={"routes": (*config.routes, config.routes[0])})
+    with pytest.raises(ValueError):
+        replace(request, document=request.document.model_copy(update={"native_delivery": config}))
