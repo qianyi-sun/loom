@@ -27,12 +27,13 @@ from loom.models.trajectory import (
     VerifierEndEvent,
     VerifierStartEvent,
 )
+from loom.trajectory.llm_call_events import llm_call_diagnostic_counts
 
 # Bumped whenever project_to_atif's logic changes such that a re-projection
 # of the same events would no longer be byte-identical. Mixed into the
 # deterministic trajectory_id hash so re-runs after a logic change are
 # distinguishable from prior runs.
-PROJECTION_VERSION = "1"
+PROJECTION_VERSION = "2"
 
 
 class AtifMetadata(BaseModel):
@@ -217,6 +218,7 @@ def _project_step(
         cache_write_tokens=sum(c.cache_write_tokens for c in calls),
         thinking_tokens=sum(c.thinking_tokens for c in calls),
         cost_usd=sum(c.cost_usd_snapshot for c in calls),
+        **llm_call_diagnostic_counts(calls),
     )
 
     last_call = calls[-1]
