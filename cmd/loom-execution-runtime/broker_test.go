@@ -486,3 +486,117 @@ func TestConfiguredPodIdentityFailsClosedBeforeAnyBrokerRequest(t *testing.T) {
 		t.Fatal("legacy mode did not send its request")
 	}
 }
+
+func TestPhaseDeadlineBindsTokenRefreshAndCancelsHTTP(t *testing.T) {
+	var tokenDeadlines []time.Time
+	disconnected := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/token") {
+			var body tokenRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+				return
+			}
+			if body.AttemptDeadline == nil {
+				t.Error("phase deadline omitted from native token request")
+				return
+			}
+			tokenDeadlines = append(tokenDeadlines, *body.AttemptDeadline)
+			_ = json.NewEncoder(w).Encode(tokenResponse{SchemaVersion: "loom.service-execution-token.v1", Token: "phase-token", ExpiresAt: time.Now().Add(480 * time.Second)})
+			return
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case <-r.Context().Done():
+			disconnected <- struct{}{}
+		case <-time.After(3 * time.Second):
+		}
+	}))
+	defer server.Close()
+	root, _ := url.Parse(server.URL + "/internal/service-execution")
+	broker := &workloadBroker{root: root, client: server.Client()}
+	first := time.Now().Add(time.Minute)
+	broker.setPhaseDeadline(first)
+	if _, err := broker.currentToken(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	second := time.Now().Add(100 * time.Millisecond)
+	broker.setPhaseDeadline(second)
+	proxy, stop, err := broker.startProxy(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stop() }()
+	req, _ := http.NewRequest(http.MethodPost, proxy+"/openai/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("X-Loom-Attempt-Deadline", time.Now().Add(time.Hour).Format(time.RFC3339Nano))
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("unbounded provider result: %d", response.StatusCode)
+	}
+	select {
+	case <-disconnected:
+	case <-time.After(time.Second):
+		t.Fatal("phase expiry did not close provider HTTP")
+	}
+	if len(tokenDeadlines) != 2 || !tokenDeadlines[0].Equal(first) || !tokenDeadlines[1].Equal(second) {
+		t.Fatalf("phase change did not refresh signed deadline: %v", tokenDeadlines)
+	}
+	broker.setPhaseDeadline(time.Time{})
+	response, err = http.Post(proxy+"/openai/v1/chat/completions", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("request admitted outside phase: %d", response.StatusCode)
+	}
+}
+
+func TestRunPhasePublishesAndClearsBrokerDeadline(t *testing.T) {
+	var captured time.Time
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/token") {
+			var body tokenRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+				return
+			}
+			if body.AttemptDeadline == nil {
+				t.Error("actual runPhase supplied no deadline")
+				return
+			}
+			captured = *body.AttemptDeadline
+			_ = json.NewEncoder(w).Encode(tokenResponse{SchemaVersion: "loom.service-execution-token.v1", Token: "fixture", ExpiresAt: time.Now().Add(480 * time.Second)})
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+	root, _ := url.Parse(server.URL + "/internal/service-execution")
+	broker := &workloadBroker{root: root, client: server.Client()}
+	proxy, stop, err := broker.startProxy(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stop() }()
+	workspace := t.TempDir()
+	start := time.Now()
+	evidence, err := runPhase(context.Background(), phase{
+		Role: "agent", Argv: []string{os.Args[0], "-test.run=^TestModelProxyPhaseHelper$"},
+		WorkingDirectory: workspace, TimeoutSeconds: 3,
+		Environment: map[string]string{"LOOM_TEST_PROXY_URL": proxy},
+	}, 1, workspace, t.TempDir(), 4096, 50*time.Millisecond, nil, broker.setPhaseDeadline)
+	if err != nil || evidence.ExitCode != 0 {
+		t.Fatalf("phase failed: %v %+v", err, evidence)
+	}
+	if captured.Before(start.Add(3*time.Second)) || captured.After(time.Now().Add(3*time.Second)) {
+		t.Fatalf("not actual phase deadline: %s", captured)
+	}
+	if !broker.phaseBound || !broker.phaseDeadline.IsZero() || broker.token != "" {
+		t.Fatal("completed phase left model authority active")
+	}
+}

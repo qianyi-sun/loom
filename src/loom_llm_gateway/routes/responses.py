@@ -291,6 +291,7 @@ async def responses(
     trial_id = ctx.trial_id
     execution_attempt_id = ctx.execution_attempt_id
     request.state.execution_attempt_id = execution_attempt_id
+    request.state.llm_auth_context = ctx
     step_id = ctx.step_id
     model_name = payload.get("model")
     if not isinstance(model_name, str) or not model_name:
@@ -1037,6 +1038,7 @@ async def _record_failed_responses_call(
     async with request.app.state.session_factory() as session:
         await record_failed_call(
             session,
+            auth_context=getattr(request.state, "llm_auth_context", None),
             team_id=team_id,
             trial_id=trial_id,
             execution_attempt_id=getattr(request.state, "execution_attempt_id", None),

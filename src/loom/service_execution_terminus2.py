@@ -80,6 +80,8 @@ class LeaseGatewayClient:
         self, *, team_id: UUID, trial_id: UUID, step_id: str, ttl_sec: int,
         attempt_deadline_wall_clock: datetime,
     ) -> _ProxyTokenGrant:
+        # The trusted Go phase supervisor supplies and signs the tighter native
+        # deadline through the broker; this loopback caller cannot extend it.
         del attempt_deadline_wall_clock
         await self.mint_step_token(
             team_id=team_id, trial_id=trial_id, step_id=step_id, ttl_sec=ttl_sec,

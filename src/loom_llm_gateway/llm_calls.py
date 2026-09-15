@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom.auth import AuthContext
 from loom.data_lifecycle_registry import ensure_trial_event_lifecycle_authority
 from loom.db.schema import ExecutionAttempt, LlmCall, PipelineRun, PipelineStageRun
 from loom.request_params import coerce_request_params, normalize_request_params
@@ -165,6 +166,7 @@ async def record_failed_call(
     response_model: str | None = None,
     role: str | None = None,
     correlation_status: str = "legacy_uncorrelated",
+    auth_context: AuthContext | None = None,
 ) -> None:
     """Insert one zero-token audit row for an attempted upstream call.
 
@@ -201,6 +203,19 @@ async def record_failed_call(
         provider_extras["_loom_failure_status_code"] = int(failure_status_code)
     if failure_error_type:
         provider_extras["_loom_failure_error_type"] = failure_error_type
+
+    # Dispatch already fenced this context before the upstream request. Retain
+    # that identity even if the request finishes after revocation; never infer
+    # a newer generation from current lease state or client-supplied fields.
+    if auth_context is not None and auth_context.service_execution_lease_id is not None:
+        if auth_context.service_execution_generation is None:
+            raise ValueError("service execution call lacks its generation")
+        if auth_context.trial_id != trial_id or auth_context.team_id != team_id:
+            raise ValueError("service execution call subject differs from authenticated context")
+        provider_extras["_loom_raw_provider_log"] = {"service_execution": {
+            "lease_id": str(auth_context.service_execution_lease_id),
+            "generation": auth_context.service_execution_generation,
+        }}
 
     lifecycle_authority_id = None
     if trial_id is not None:
