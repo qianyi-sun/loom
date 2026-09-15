@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
@@ -550,6 +551,21 @@ class InstalledExecutionAuthorityReader:
             raise ValueError("installed execution authority directory is unsafe")
 
 
+def _publish_authority_without_replace(directory: int, source: str, destination: str) -> None:
+    """Atomically publish one single-link inode on the Linux rollout controller."""
+    try:
+        rename = ctypes.CDLL(None, use_errno=True).renameat2
+    except AttributeError as exc:
+        raise OSError("atomic execution authority publication is unavailable") from exc
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    # RENAME_NOREPLACE preserves competing evidence. link/unlink is not a
+    # fallback: a process exit between them leaves a reader-rejected inode.
+    if rename(directory, os.fsencode(source), directory, os.fsencode(destination), 1) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
 @dataclass(frozen=True, slots=True)
 class InstalledExecutionAuthorityPublisher:
     """Create one canonical owner publication without replacing prior evidence."""
@@ -619,13 +635,7 @@ class InstalledExecutionAuthorityPublisher:
             finally:
                 os.close(descriptor)
             try:
-                os.link(
-                    temporary,
-                    self.path.name,
-                    src_dir_fd=directory,
-                    dst_dir_fd=directory,
-                    follow_symlinks=False,
-                )
+                _publish_authority_without_replace(directory, temporary, self.path.name)
             except FileExistsError:
                 existing = InstalledExecutionAuthorityReader(
                     path=self.path,
@@ -636,10 +646,12 @@ class InstalledExecutionAuthorityPublisher:
                     raise ValueError(
                         "installed execution authority already exists with different evidence"
                     ) from None
+                # The original process may have exited after publication but
+                # before syncing the directory. Complete that work on replay.
+                os.fsync(directory)
                 return existing
             except OSError as exc:
                 raise ValueError("installed execution authority publication failed") from exc
-            os.unlink(temporary, dir_fd=directory)
             temporary_created = False
             os.fsync(directory)
         finally:
