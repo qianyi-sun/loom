@@ -66,21 +66,21 @@ def test_live_wait_refuses_downgrade_then_expiry_allows_roundtrip(wait_migration
     with Session(engine) as session, session.begin():
         session.add(TaskImageCapacityWait(**values))
     with pytest.raises(DBAPIError, match="native builder capacity waits must expire"):
-        command.downgrade(config, "0147")
+        command.downgrade(config, "0148")
     with engine.begin() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0148"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0149"
         assert connection.scalar(text("SELECT count(*) FROM task_image_capacity_waits")) == 1
         connection.execute(text("UPDATE task_image_capacity_waits SET "
                                 "first_waited_at = now() - interval '121 seconds', "
                                 "renewed_at = now() - interval '121 seconds', "
                                 "expires_at = now() - interval '1 second'"))
-    command.downgrade(config, "0147")
+    command.downgrade(config, "0148")
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT to_regclass('task_image_capacity_waits')")) is None
         assert connection.scalar(text("SELECT count(*) FROM task_image_materializations")) == 1
-    command.upgrade(config, "0148")
+    command.upgrade(config, "0149")
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0148"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0149"
         assert connection.scalar(text("SELECT count(*) FROM task_image_capacity_waits")) == 0
 
 
@@ -129,14 +129,14 @@ def test_wait_has_one_head_per_target_and_materialization(wait_migration):
 @pytest.mark.parametrize("busy_table", ["execution_targets", "task_image_materializations"])
 def test_wait_upgrade_refuses_busy_parent_without_partial_schema(wait_migration, busy_table):
     config, engine, _ = wait_migration
-    command.downgrade(config, "0147")
+    command.downgrade(config, "0148")
     with engine.begin() as busy:
         busy.execute(text(f"LOCK TABLE {busy_table} IN ROW EXCLUSIVE MODE"))
         with pytest.raises(DBAPIError, match="could not obtain lock"):
-            command.upgrade(config, "0148")
+            command.upgrade(config, "0149")
         with engine.connect() as check:
-            assert check.scalar(text("SELECT version_num FROM alembic_version")) == "0147"
+            assert check.scalar(text("SELECT version_num FROM alembic_version")) == "0148"
             assert check.scalar(text("SELECT to_regclass('task_image_capacity_waits')")) is None
-    command.upgrade(config, "0148")
+    command.upgrade(config, "0149")
     with engine.connect() as check:
-        assert check.scalar(text("SELECT version_num FROM alembic_version")) == "0148"
+        assert check.scalar(text("SELECT version_num FROM alembic_version")) == "0149"
