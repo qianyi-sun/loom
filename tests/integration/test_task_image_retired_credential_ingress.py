@@ -35,19 +35,22 @@ async def _prepared_insert(factory, issuer):
     return attempt.id, values
 
 
-async def _retire(factory, attempt_id):
+async def _observe_setup(factory, attempt_id, instant):
     # Retirement is setup for the direct-ingress assertion, not the behavior
     # under test. A loaded runner can let PostgreSQL abort the bounded setup
     # transaction. Retry that exact known rollback once in a fresh transaction;
     # never relax the production timeout or retry ambiguous/other failures.
+    for retry in range(2):
+        try:
+            return await observe(factory, attempt_id, instant)
+        except DBAPIError as error:
+            if retry or getattr(error.orig, "sqlstate", None) != "25P03":
+                raise
+
+
+async def _retire(factory, attempt_id):
     for instant in (NOW + timedelta(hours=1), NOW + timedelta(hours=25)):
-        for retry in range(2):
-            try:
-                result = await observe(factory, attempt_id, instant)
-                break
-            except DBAPIError as error:
-                if retry or getattr(error.orig, "sqlstate", None) != "25P03":
-                    raise
+        result = await _observe_setup(factory, attempt_id, instant)
     assert result.status == "retired"
 
 
@@ -76,18 +79,16 @@ async def test_retirement_setup_retry_is_bounded_and_only_for_server_abort(monke
     assert len(calls) == calls_expected
 
 
-@pytest.mark.parametrize("expire_setup", (False, True))
-async def test_retired_attempt_rejects_direct_credential_insert(
-    registry_authority_session, registry_issuer, monkeypatch, expire_setup,
-):
-    factory = registry_authority_session
-    attempt_id, values = await _prepared_insert(factory, registry_issuer)
+def _expire_setup_once(monkeypatch, factory, expire_call):
     module = store()
     original = module.revalidate_retirement_inventory
     expired_backends = []
+    calls = 0
 
     async def expire_first_setup_transaction(session, *, prepared):
-        if expire_setup and not expired_backends:
+        nonlocal calls
+        calls += 1
+        if calls == expire_call and not expired_backends:
             backend = await session.scalar(text("SELECT pg_backend_pid()"))
             assert await session.scalar(text("SHOW idle_in_transaction_session_timeout")) == "1s"
             async with factory.kw["bind"].connect() as probe:
@@ -102,6 +103,16 @@ async def test_retired_attempt_rejects_direct_credential_insert(
         await original(session, prepared=prepared)
 
     monkeypatch.setattr(module, "revalidate_retirement_inventory", expire_first_setup_transaction)
+    return expired_backends
+
+
+@pytest.mark.parametrize("expire_setup", (False, True))
+async def test_retired_attempt_rejects_direct_credential_insert(
+    registry_authority_session, registry_issuer, monkeypatch, expire_setup,
+):
+    factory = registry_authority_session
+    attempt_id, values = await _prepared_insert(factory, registry_issuer)
+    expired_backends = _expire_setup_once(monkeypatch, factory, int(expire_setup))
     await _retire(factory, attempt_id)
     assert len(expired_backends) == int(expire_setup)
     async with factory() as session:
@@ -112,20 +123,23 @@ async def test_retired_attempt_rejects_direct_credential_insert(
         assert await session.scalar(select(func.count()).select_from(TaskImageRegistryCredentialGeneration)) == 0
 
 
+@pytest.mark.parametrize("expire_call", [0, 1, 2])
 @pytest.mark.parametrize("isolation", ["REPEATABLE READ", "SERIALIZABLE"])
 async def test_stale_snapshot_cannot_hide_committed_retirement(
-    registry_authority_session, registry_issuer, isolation,
+    registry_authority_session, registry_issuer, isolation, monkeypatch, expire_call,
 ):
     factory = registry_authority_session
     attempt_id, values = await _prepared_insert(factory, registry_issuer)
-    await observe(factory, attempt_id, NOW + timedelta(hours=1))
+    expired_backends = _expire_setup_once(monkeypatch, factory, expire_call)
+    await _observe_setup(factory, attempt_id, NOW + timedelta(hours=1))
     async with factory() as stale:
         await stale.execute(text(f"SET TRANSACTION ISOLATION LEVEL {isolation}"))
         assert (await stale.get(TaskImageAttemptRetention, attempt_id)).retired_at is None
-        assert (await observe(factory, attempt_id, NOW + timedelta(hours=25))).status == "retired"
+        assert (await _observe_setup(factory, attempt_id, NOW + timedelta(hours=25))).status == "retired"
         with pytest.raises(IntegrityError) as error:
             await _insert(stale, values)
         assert error.value.orig.diag.constraint_name == "task_image_registry_credentials_read_committed"
+    assert len(expired_backends) == int(bool(expire_call))
 
 
 @pytest.mark.parametrize("commit", [False, True])

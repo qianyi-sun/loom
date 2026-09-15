@@ -68,6 +68,11 @@ on:
         required: false
         type: boolean
         default: false
+      coverage_summary:
+        description: "Collect combined Python coverage in addition to the required fast-tier floor"
+        required: false
+        type: boolean
+        default: false
       integration_docker:
         description: "Run docker-heavy integration tier (DockerDriver, trial-e2e, ~30 min)"
         required: false
@@ -165,6 +170,7 @@ jobs:
           PR_BASE_CHANGED: ${{ github.event.changes.base != null }}
           DISPATCH_INTEGRATION: ${{ inputs.integration }}
           DISPATCH_INTEGRATION_DOCKER: ${{ inputs.integration_docker }}
+          DISPATCH_COVERAGE_SUMMARY: ${{ inputs.coverage_summary }}
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
@@ -188,14 +194,18 @@ jobs:
             workflow_dispatch)
               git show --pretty=format: --name-only "$HEAD_SHA" \
                 > /tmp/loom-changed-files.txt
-              if [[ "$DISPATCH_INTEGRATION" == "true" && \
-                    "$DISPATCH_INTEGRATION_DOCKER" == "true" ]]; then
-                PR_LABELS_JSON='["ci:integration","ci:integration-docker"]'
-              elif [[ "$DISPATCH_INTEGRATION" == "true" ]]; then
-                PR_LABELS_JSON='["ci:integration"]'
-              elif [[ "$DISPATCH_INTEGRATION_DOCKER" == "true" ]]; then
-                PR_LABELS_JSON='["ci:integration-docker"]'
-              fi
+              PR_LABELS_JSON="$(python3 - <<'PYLABELS'
+          import json
+          import os
+          print(json.dumps([
+              label for flag, label in (
+                  ("DISPATCH_INTEGRATION", "ci:integration"),
+                  ("DISPATCH_INTEGRATION_DOCKER", "ci:integration-docker"),
+                  ("DISPATCH_COVERAGE_SUMMARY", "ci:coverage-summary"),
+              ) if os.environ[flag] == "true"
+          ]))
+          PYLABELS
+              )"
               ;;
             *)
               echo "Unsupported event: $EVENT_NAME" >&2
@@ -488,7 +498,7 @@ jobs:
           uv run --no-sync pytest "${test_paths[@]}" \
             --durations=25 \
             --cov=src --cov=packages \
-            --cov-report=term --cov-report=xml
+            --cov-report=
 
       - name: Produce synthetic global capacity shadow evidence
         if: matrix.shard_index == 0
@@ -640,7 +650,7 @@ jobs:
           [[ ${#test_paths[@]} -gt 0 ]]
           uv run --no-sync pytest "${test_paths[@]}" \
             --cov=src --cov=packages \
-            --cov-report=term --cov-report=xml
+            --cov-report=
 
       - name: Upload package coverage data
         if: always()
@@ -1021,6 +1031,7 @@ jobs:
             shard_index: 1
     env:
       COVERAGE_FILE: .coverage.integration-${{ matrix.shard }}
+      COVERAGE_ENABLED: ${{ needs.workflow-plan.outputs.coverage_summary }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -1058,16 +1069,20 @@ jobs:
             > "${manifest_paths_file}"
           mapfile -t test_paths < "${manifest_paths_file}"
           [[ ${#test_paths[@]} -gt 0 ]]
+          coverage_args=(-p no:cov)
+          if [[ "$COVERAGE_ENABLED" == "true" ]]; then
+            coverage_args=(--cov=src --cov=packages --cov-report=)
+          fi
           uv run --no-sync pytest "${test_paths[@]}" \
             -m "not docker" \
             --durations=15 \
-            --cov=src --cov=packages --cov-report=term
+            "${coverage_args[@]}"
 
       # Binary .coverage data file consumed by coverage-summary to
       # combine with fast-tier coverage. No standalone gate yet —
       # collecting combined-tier baseline first (Phase 3 of #260).
       - name: Upload integration coverage data
-        if: always()
+        if: success() && env.COVERAGE_ENABLED == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-data-integration-${{ matrix.shard }}
@@ -1123,10 +1138,11 @@ jobs:
           uv run --no-sync pytest "${test_paths[@]}" \
             --durations=15
 
-  # Optional PR-only combined coverage summary. The default fast-tier
+  # Optional combined coverage summary for PRs and manual diagnostics.
+  # The default fast-tier
   # summary is written by fast-checks so ordinary PRs do not
-  # start another runner only for summary text. Apply ci:integration
-  # or ci:coverage-summary when combined coverage details are useful.
+  # start another runner only for summary text. Apply ci:coverage-summary
+  # or use the manual coverage_summary input for combined coverage details.
   # This used to post a PR comment via `gh pr comment`; step summary
   # keeps the same information on the workflow page without email spam.
   coverage-summary:
