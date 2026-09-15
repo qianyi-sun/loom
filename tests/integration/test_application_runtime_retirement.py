@@ -161,3 +161,21 @@ def test_runtime_retirement_stops_signalling_after_guard_loss(transfer_database)
             assert _identity(peer, options["target"]) == before
             assert maintenance.execute("SELECT datallowconn FROM pg_database WHERE oid=%s",
                 (options["target"].database_oid,)).fetchone() == (False,)
+
+
+def test_installed_peer_transport_seals_and_retires_runtime(transfer_database, transfer_postgres):  # noqa: F811
+    from loom.application_runtime_retirement import retire_application_runtime_sessions
+    from tests.integration.test_protected_peer_database_connection import _peer
+
+    with _runtime(transfer_database) as (peer, maintenance, guard, active, arguments, options):
+        with _peer(transfer_postgres, database=options["target"].database) as installed_app:
+            _seal(installed_app, arguments)
+        before = _identity(peer, options["target"])
+        _close(maintenance, options)
+        with _peer(transfer_postgres, database="postgres") as installed_maintenance:
+            retire_application_runtime_sessions(installed_maintenance, **options)
+            retire_application_runtime_sessions(installed_maintenance, **options)
+        with pytest.raises(psycopg.OperationalError):
+            active.execute("SELECT 1")
+        assert _identity(peer, options["target"]) == before
+        assert guard.execute("SELECT 1").fetchone() == (1,)
