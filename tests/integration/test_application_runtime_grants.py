@@ -79,7 +79,7 @@ def test_runtime_grants_preserve_data_access_and_deny_schema_changes(
         assert admin.execute("SELECT id FROM public.runtime_future").fetchone() == (1,)
         assert admin.execute("SELECT nextval('public.runtime_future_sequence')").fetchone() == (1,)
         assert admin.execute("SELECT version_num FROM public.alembic_version").fetchone() == (
-            "0146",
+            "0147",
         )
         for forbidden in (
             "UPDATE public.alembic_version SET version_num=version_num",
