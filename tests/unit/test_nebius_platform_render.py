@@ -11,6 +11,33 @@ from loom.nebius_platform_render import NebiusPlatformError, build_platform, wri
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize("maximum", [None, 14400])
+def test_scheduler_deadline_can_cover_long_task_phase_timeouts(
+    platform_inputs: tuple, maximum: int | None,
+) -> None:
+    config, candidate, profile = platform_inputs
+    if maximum is not None:
+        config["service_execution_scheduler_max_deadline_sec"] = maximum
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    control_plane = next(
+        doc for doc in files["40-services.yaml"]
+        if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "loom-control-plane"
+    )
+    env = {
+        item["name"]: item.get("value")
+        for item in control_plane["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_MAX_DEADLINE_SEC"] == str(maximum or 7200)
+
+
+@pytest.mark.parametrize("maximum", [0, -1, True, "14400", 14400.5])
+def test_scheduler_deadline_requires_positive_integer(platform_inputs: tuple, maximum: object) -> None:
+    config, candidate, profile = platform_inputs
+    config["service_execution_scheduler_max_deadline_sec"] = maximum
+    with pytest.raises(NebiusPlatformError, match="service_execution_scheduler_max_deadline_sec"):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
 @pytest.mark.parametrize("concurrency", [1, 2])
 def test_native_builds_share_the_actuator_but_have_an_isolated_namespace(
     platform_inputs: tuple, concurrency: int,
