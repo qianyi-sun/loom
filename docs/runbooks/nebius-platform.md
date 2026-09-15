@@ -759,6 +759,12 @@ Task Dockerfiles are product workloads: the existing execution actuator claims
 `task_image_materializations` and runs one native Kubernetes Job per fenced
 attempt. No additional queue, worker service or autoscaler is required.
 
+The actuator image must include the source-admission dependency closure used on
+the first claim, as well as the waiting-capacity module. Its build-time smoke
+imports both entrypoints and the lazily loaded source journal. The storage and
+Docker Python libraries are dependencies of those shared source helpers; this
+does not mount a host runtime socket or move Dockerfile execution into the actuator.
+
 Enable the primary-only loop by adding the following to the operator's platform
 configuration; omission leaves native building disabled:
 
