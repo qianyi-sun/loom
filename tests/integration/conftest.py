@@ -208,14 +208,14 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                     "cancellation_requested_at, cancellation_observed_at, finished_at, "
                     "next_attempt_at, autoscaler_pool_name, "
                     "worker_id, attempt_count, "
-                    "execution_route_json) "
+                    "execution_route_json, result, failure_message) "
                     f"ON TABLE public.trials TO {quoted_owner}"
                 )
                 connection.exec_driver_sql(
                     "GRANT UPDATE (lifecycle_authority_id, state, requires_caps, worker_id, "
                     "claimed_at, pre_start_heartbeat_at, failure_reason, failure_message, "
                     "attempt_count, next_attempt_at, cancellation_requested_at, "
-                    "cancellation_observed_at, finished_at) "
+                    "cancellation_observed_at, finished_at, started_at, result) "
                     "ON TABLE public.trials "
                     f"TO {quoted_owner}"
                 )
@@ -307,6 +307,9 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                     f"GRANT UPDATE (worker_id) ON TABLE public.slurm_worker_jobs TO {quoted_owner}"
                 )
                 claim_select_columns = {
+                    "execution_leases": (
+                        "id", "trial_id", "generation", "revoked_at", "deleted_at", "execution_role", "attempt",
+                    ),
                     "execution_attempts": ("worker_id", "state"),
                     "worker_pool_autoscaler_policies": (
                         "id",
@@ -369,6 +372,9 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                 )
                 connection.exec_driver_sql(
                     f"GRANT UPDATE (in_flight_count) ON TABLE public.team_quotas TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    f"GRANT UPDATE (id) ON TABLE public.execution_leases TO {quoted_owner}"
                 )
                 connection.exec_driver_sql(
                     f"GRANT UPDATE (id) ON TABLE public.batches TO {quoted_owner}"

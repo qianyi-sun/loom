@@ -30,8 +30,12 @@ from loom.models.result import FailureReason, TrialState
 from loom.terminal_result_semantics import terminal_result_conflicts
 from loom_control_plane.metrics import STATE_PATCH_TOTAL
 from loom_control_plane.protected_worker_session import (
+    EXECUTOR_WORKER_CREDENTIAL_HEADER,
     ProtectedBodyWorkerStateSession,
     ProtectedTrialCancellationError,
+    ProtectedWorkerSessionAuthenticationRejected,
+    ProtectedWorkerSessionRejected,
+    ProtectedWorkerSessionStore,
 )
 from loom_control_plane.routes.execution_fence import (
     OptionalExecutionGenerationHeader,
@@ -346,6 +350,27 @@ async def patch_state(
     allowed_from = sorted(s.value for s in _ALLOWED_FROM[new_state])
     result_payload = payload.get("result")
     has_result = result_payload is not None
+
+    if protected_worker_session is not None and new_state not in _TERMINAL:
+        store: ProtectedWorkerSessionStore = request.app.state.protected_worker_session_store
+        credential = request.headers[EXECUTOR_WORKER_CREDENTIAL_HEADER]
+        try:
+            progress = await store.report_trial_progress(
+                worker_id=worker_id, worker_credential=credential,
+                report={"trial_id": str(trial_id), "state": new_state.value,
+                        "result": result_payload, "failure_reason": failure_reason_str,
+                        "failure_message": failure_message_str,
+                        "execution_lease_id": None if execution_lease_id is None else str(execution_lease_id),
+                        "execution_generation": execution_generation},
+            )
+        except ProtectedWorkerSessionAuthenticationRejected as exc:
+            raise HTTPException(status_code=401, detail="protected worker session rejected") from exc
+        except ProtectedWorkerSessionRejected as exc:
+            raise HTTPException(status_code=409, detail="protected trial progress rejected") from exc
+        if progress is None:
+            raise HTTPException(status_code=409, detail="worker lost claim or progress transition is fenced")
+        STATE_PATCH_TOTAL.labels(endpoint="state", result="ok").inc()
+        return dict(progress)
 
     async with request.app.state.session_factory() as session:
         await enforce_trial_execution_fence(

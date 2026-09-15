@@ -514,6 +514,24 @@ class ProtectedWorkerSessionStore:
             raise ProtectedWorkerSessionRejected("protected worker session rejected") from exc
         return _session(value)
 
+    async def report_trial_progress(
+        self, *, worker_id: UUID, worker_credential: str, report: Mapping[str, object],
+    ) -> Mapping[str, Any] | None:
+        """Authenticate and apply one progress report under the same SQL transaction."""
+        try:
+            async with self._session_factory() as session, session.begin():
+                value = (await session.execute(
+                    text("SELECT loom_capacity_guard.report_staging_trial_progress("
+                         ":worker_id, :credential, CAST(:report AS jsonb))"),
+                    {"worker_id": worker_id, "credential": worker_credential,
+                     "report": json.dumps(dict(report), sort_keys=True, separators=(",", ":"))},
+                )).scalar_one()
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) == "42501":
+                raise ProtectedWorkerSessionAuthenticationRejected("protected progress authentication rejected") from exc
+            raise ProtectedWorkerSessionRejected("protected progress rejected") from exc
+        return None if value is None else _mapping(value)
+
     @asynccontextmanager
     async def assert_session(
         self,
@@ -685,7 +703,7 @@ async def protected_body_worker_state_session(
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="state + worker_id required") from exc
 
-    if target_state in {"succeeded", "failed", "cancelled"}:
+    if target_state in {"running", "materializing", "succeeded", "failed", "cancelled"}:
         try:
             authenticated_session = await store.authenticate_session(
                 worker_id=worker_id,

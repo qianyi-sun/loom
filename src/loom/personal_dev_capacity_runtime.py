@@ -107,6 +107,7 @@ _STAGING_WORKER_RUNTIME_FUNCTIONS = (
     "claim_staging_assigned_trial(uuid,text,jsonb)",
     "retry_staging_claimed_trial(uuid,text,jsonb)",
     "cancel_protected_runtime_pending_trial(uuid,uuid)",
+    "report_staging_trial_progress(uuid,text,jsonb)",
 )
 _SECRET_NAME = "loom-capacity-agent"
 _CREDENTIALS_SECRET_NAME = "loom-capacity-agent-credentials"
@@ -947,7 +948,7 @@ class PsycopgPersonalDevCapacityDatabase:
                             "submitted_at, started_at, cancellation_requested_at, "
                             "cancellation_observed_at, finished_at, next_attempt_at, "
                             "autoscaler_pool_name, worker_id, attempt_count, "
-                            "execution_route_json) "
+                            "execution_route_json, result, failure_message) "
                             "ON TABLE public.trials TO {}"
                         ).format(sql.Identifier(owner))
                     )
@@ -956,7 +957,7 @@ class PsycopgPersonalDevCapacityDatabase:
                             "GRANT UPDATE (lifecycle_authority_id, state, requires_caps, "
                             "worker_id, claimed_at, pre_start_heartbeat_at, failure_reason, "
                             "failure_message, attempt_count, next_attempt_at, "
-                            "cancellation_requested_at, cancellation_observed_at, finished_at) "
+                            "cancellation_requested_at, cancellation_observed_at, finished_at, started_at, result) "
                             "ON TABLE public.trials TO {}"
                         ).format(sql.Identifier(owner))
                     )
@@ -1077,6 +1078,9 @@ class PsycopgPersonalDevCapacityDatabase:
                         ).format(sql.Identifier(owner))
                     )
                     claim_select_columns = {
+                        "execution_leases": (
+                            "id", "trial_id", "generation", "revoked_at", "deleted_at", "execution_role", "attempt",
+                        ),
                         "execution_attempts": ("worker_id", "state"),
                         "worker_pool_autoscaler_policies": (
                             "id",
@@ -1149,6 +1153,11 @@ class PsycopgPersonalDevCapacityDatabase:
                     )
                     await connection.execute(
                         sql.SQL("GRANT UPDATE (id) ON TABLE public.batches TO {}").format(
+                            sql.Identifier(owner)
+                        )
+                    )
+                    await connection.execute(
+                        sql.SQL("GRANT UPDATE (id) ON TABLE public.execution_leases TO {}").format(
                             sql.Identifier(owner)
                         )
                     )

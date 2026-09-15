@@ -1,0 +1,201 @@
+"""Authenticate trial progress and its frozen-writer permission in one transaction.
+
+Revision ID: guard_0035
+Revises: guard_0034
+"""
+
+from __future__ import annotations
+
+import sqlalchemy as sa
+from alembic import op
+
+from capacity_guard_migrations.versions.guard_0034_frozen_trial_retry import _rewrite
+
+revision: str = "guard_0035"
+down_revision: str | None = "guard_0034"
+branch_labels: str | None = None
+depends_on: str | None = None
+
+_FUNCTION = "loom_capacity_guard.report_staging_trial_progress(uuid,text,jsonb)"
+_ISSUER = "loom_capacity_guard.authorize_frozen_retry_update(uuid,uuid,bigint,uuid,uuid,uuid,text,jsonb)"
+_VALIDATOR = "loom_capacity_guard.current_protected_runtime_registration()"
+_OLD_ALLOWED = "'loom_capacity_guard.cancel_protected_runtime_pending_trial(uuid,uuid)'::regprocedure::oid\n          ];"
+_NEW_ALLOWED = "'loom_capacity_guard.cancel_protected_runtime_pending_trial(uuid,uuid)'::regprocedure::oid,\n            'loom_capacity_guard.report_staging_trial_progress(uuid,text,jsonb)'::regprocedure::oid\n          ];"
+_OLD = """          ELSE
+            RAISE EXCEPTION 'frozen retry operation is unavailable' USING ERRCODE = '55000';"""
+_NEW = """          ELSIF p_operation = 'progress' THEN
+            IF v_old->>'state' NOT IN ('claimed', 'running')
+               OR v_old->>'worker_id' IS DISTINCT FROM p_worker::text
+               OR pg_catalog.jsonb_typeof(p_changes) IS DISTINCT FROM 'object'
+               OR NOT (p_changes ?& ARRAY['state','result','failure_reason','failure_message','started_at'])
+               OR p_changes - ARRAY['state','result','failure_reason','failure_message','started_at'] <> '{}'::jsonb
+               OR p_changes->>'state' NOT IN ('running','materializing') THEN
+              RAISE EXCEPTION 'frozen progress row transition changed' USING ERRCODE = '55000';
+            END IF;
+          ELSE
+            RAISE EXCEPTION 'frozen retry operation is unavailable' USING ERRCODE = '55000';"""
+
+
+def _lock_permissions() -> None:
+    op.execute("""
+        DO $admit$
+        DECLARE v_table oid := 'loom_capacity_guard.trial_retry_mutation_permits'::regclass;
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class WHERE oid = v_table
+                         AND relowner = current_user::regrole::oid AND relkind = 'r'
+                         AND NOT relispartition)
+             OR EXISTS (SELECT 1 FROM pg_catalog.pg_inherits
+                        WHERE inhparent = v_table OR inhrelid = v_table) THEN
+            RAISE EXCEPTION 'progress permission relation authority changed' USING ERRCODE = '55000';
+          END IF;
+          LOCK TABLE ONLY loom_capacity_guard.trial_retry_mutation_permits
+            IN ACCESS EXCLUSIVE MODE NOWAIT;
+          IF 'loom_capacity_guard.trial_retry_mutation_permits'::regclass::oid <> v_table
+             OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class WHERE oid = v_table
+                         AND relowner = current_user::regrole::oid AND relkind = 'r'
+                         AND NOT relispartition)
+             OR EXISTS (SELECT 1 FROM pg_catalog.pg_inherits
+                        WHERE inhparent = v_table OR inhrelid = v_table) THEN
+            RAISE EXCEPTION 'progress permission relation authority changed' USING ERRCODE = '55000';
+          END IF;
+        END
+        $admit$;
+    """)
+
+
+def upgrade() -> None:
+    _lock_permissions()
+    op.execute("""
+        ALTER TABLE ONLY loom_capacity_guard.trial_retry_mutation_permits
+          DROP CONSTRAINT trial_retry_mutation_permits_operation_check;
+        ALTER TABLE ONLY loom_capacity_guard.trial_retry_mutation_permits
+          ADD CONSTRAINT trial_retry_mutation_permits_operation_check
+          CHECK (operation IN ('retry','refund','progress'));
+    """)
+    _rewrite(_ISSUER, [(_OLD, _NEW)], upgrading=True)
+    op.execute("""
+        CREATE FUNCTION loom_capacity_guard.report_staging_trial_progress(
+          p_worker_id uuid, p_worker_credential text, p_report jsonb
+        ) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+        AS $function$
+        DECLARE
+          v_session jsonb;
+          v_current record;
+          v_lease record;
+          v_changes jsonb;
+          v_permit uuid;
+          v_state text;
+        BEGIN
+          IF current_setting('transaction_isolation') <> 'serializable' THEN
+            RAISE EXCEPTION 'protected progress requires SERIALIZABLE' USING ERRCODE = '25000';
+          END IF;
+          IF jsonb_typeof(p_report) IS DISTINCT FROM 'object'
+             OR p_report - ARRAY['trial_id','state','result','failure_reason','failure_message',
+                                 'execution_lease_id','execution_generation'] <> '{}'::jsonb
+             OR NOT (p_report ?& ARRAY['trial_id','state','result','failure_reason','failure_message',
+                                      'execution_lease_id','execution_generation'])
+             OR jsonb_typeof(p_report->'trial_id') IS DISTINCT FROM 'string'
+             OR p_report->>'state' NOT IN ('running','materializing')
+             OR jsonb_typeof(p_report->'state') IS DISTINCT FROM 'string'
+             OR jsonb_typeof(p_report->'failure_reason') NOT IN ('string','null')
+             OR jsonb_typeof(p_report->'failure_message') NOT IN ('string','null') THEN
+            RAISE EXCEPTION 'protected progress request is malformed' USING ERRCODE = '22023';
+          END IF;
+          -- Serialize before shared authentication locks can require an upgrade.
+          PERFORM 1 FROM loom_capacity_guard.agent_runtime_authority
+           WHERE singleton_id = 1 FOR UPDATE NOWAIT;
+          v_session := loom_capacity_guard.assert_staging_worker_session(p_worker_id, p_worker_credential);
+          SELECT trial.id AS trial_id, trial.state, trial.result, trial.failure_message, trial.started_at,
+                 runtime.protected_attempt_id, attempt.execution_generation,
+                 claim.operation_id AS claim_operation_id
+            INTO v_current
+            FROM loom_capacity_guard.protected_runtime_trial_submissions AS runtime
+            JOIN loom_capacity_guard.protected_runtime_trial_readiness AS readiness
+              ON readiness.trial_id = runtime.trial_id AND readiness.protected_attempt_id = runtime.protected_attempt_id
+            JOIN loom_capacity_guard.atomic_trial_submissions AS submission ON submission.trial_id = runtime.trial_id
+            JOIN loom_capacity_guard.trial_attempts AS attempt ON attempt.protected_attempt_id = runtime.protected_attempt_id
+            JOIN loom_capacity_guard.attempt_lifecycle_heads AS head ON head.protected_attempt_id = attempt.protected_attempt_id
+            JOIN loom_capacity_guard.attempt_lifecycle_events AS assignment
+              ON assignment.transition_id = head.transition_id AND assignment.protected_attempt_id = head.protected_attempt_id
+            JOIN loom_capacity_guard.executable_claim_leases AS claim
+              ON claim.protected_attempt_id = attempt.protected_attempt_id
+             AND claim.execution_generation = attempt.execution_generation AND claim.requirements_digest = attempt.requirements_digest
+            JOIN loom_capacity_guard.executable_claim_state AS claim_state ON claim_state.intent_id = claim.intent_id
+            JOIN public.trials AS trial ON trial.id = runtime.trial_id
+           WHERE trial.id = (p_report->>'trial_id')::uuid
+             AND runtime.public_attempt_count + 1 = trial.attempt_count
+             AND runtime.not_before IS NOT DISTINCT FROM trial.next_attempt_at
+             AND trial.state IN ('claimed','running') AND trial.worker_id = p_worker_id
+             AND attempt.claim_state = 'queued' AND head.lifecycle_state = 'assigned' AND NOT head.executable
+             AND assignment.operation = 'assign' AND assignment.previous_state = 'pending-unassigned'
+             AND assignment.lifecycle_state = 'assigned' AND assignment.transition_sequence = head.transition_sequence
+             AND assignment.execution_generation = attempt.execution_generation
+             AND assignment.requirements_digest = attempt.requirements_digest AND NOT assignment.executable
+             AND assignment.submission_intent_id = (v_session->>'intent_id')::uuid
+             AND assignment.submission_intent_id = claim.intent_id
+             AND claim.worker_id = p_worker_id AND claim.worker_incarnation = (v_session->>'worker_incarnation')::uuid
+             AND claim.lease_state = 'live' AND claim.executable
+             AND claim_state.subject_id = claim.subject_id AND claim_state.subject_incarnation = claim.subject_incarnation
+             AND claim_state.claim_high_water >= claim.claim_high_water
+             AND claim_state.terminal_high_water < claim_state.claim_high_water
+             AND NOT EXISTS (SELECT 1 FROM loom_capacity_guard.executable_claim_terminal_events AS terminal
+                             WHERE terminal.admitted_operation_id = claim.operation_id
+                                OR terminal.protected_attempt_id = claim.protected_attempt_id)
+           FOR UPDATE OF trial, head, claim_state NOWAIT
+           FOR KEY SHARE OF runtime, readiness, submission, attempt, assignment, claim NOWAIT;
+          IF NOT FOUND THEN RETURN NULL; END IF;
+
+          SELECT lease.id, lease.generation, lease.revoked_at, lease.deleted_at INTO v_lease
+            FROM public.execution_leases AS lease
+           WHERE lease.trial_id = v_current.trial_id AND lease.execution_role = 'attempt'
+           ORDER BY lease.attempt DESC LIMIT 1 FOR UPDATE NOWAIT;
+          IF FOUND AND (p_report->>'execution_lease_id' IS DISTINCT FROM v_lease.id::text
+                        OR (p_report->>'execution_generation')::bigint IS DISTINCT FROM v_lease.generation
+                        OR v_lease.revoked_at IS NOT NULL OR v_lease.deleted_at IS NOT NULL) THEN
+            RAISE EXCEPTION 'protected progress execution generation changed' USING ERRCODE = '55000';
+          END IF;
+          v_changes := jsonb_build_object(
+            'state', p_report->>'state',
+            'result', CASE WHEN p_report->'result' = 'null'::jsonb THEN v_current.result ELSE p_report->'result' END,
+            'failure_reason', p_report->>'failure_reason',
+            'failure_message', COALESCE(p_report->>'failure_message', v_current.failure_message),
+            'started_at', CASE WHEN p_report->>'state' = 'running' THEN COALESCE(v_current.started_at, now()) ELSE v_current.started_at END);
+          v_permit := loom_capacity_guard.authorize_frozen_retry_update(
+            v_current.trial_id, v_current.protected_attempt_id, v_current.execution_generation,
+            p_worker_id, (v_session->>'worker_incarnation')::uuid, v_current.claim_operation_id, 'progress', v_changes);
+          UPDATE public.trials AS trial
+             SET state = v_changes->>'state', result = NULLIF(v_changes->'result', 'null'::jsonb),
+                 failure_reason = v_changes->>'failure_reason', failure_message = v_changes->>'failure_message',
+                 started_at = (v_changes->>'started_at')::timestamptz
+           WHERE trial.id = v_current.trial_id AND trial.worker_id = p_worker_id AND trial.state = v_current.state
+           RETURNING trial.state INTO v_state;
+          IF NOT FOUND THEN RAISE EXCEPTION 'protected progress update lost its row' USING ERRCODE = '55000'; END IF;
+          PERFORM loom_capacity_guard.assert_frozen_retry_consumed(v_permit);
+          RETURN jsonb_build_object('trial_id', v_current.trial_id, 'state', v_state);
+        END
+        $function$;
+    """)
+    role = op.get_context().config.attributes.get("capacity_guard_runtime_role")
+    if not isinstance(role, str) or not role:
+        raise RuntimeError("protected progress migration is missing runtime role")
+    quoted = op.get_bind().dialect.identifier_preparer.quote(role)
+    op.execute(f"REVOKE ALL ON FUNCTION {_FUNCTION} FROM PUBLIC")
+    op.execute(f"GRANT EXECUTE ON FUNCTION {_FUNCTION} TO {quoted}")
+    _rewrite(_VALIDATOR, [(_OLD_ALLOWED, _NEW_ALLOWED)], upgrading=True)
+
+
+def downgrade() -> None:
+    _lock_permissions()
+    if op.get_bind().execute(sa.text(
+        "SELECT EXISTS (SELECT 1 FROM ONLY loom_capacity_guard.trial_retry_mutation_permits WHERE operation = 'progress')"
+    )).scalar_one():
+        raise RuntimeError("protected progress evidence requires protected retirement")
+    _rewrite(_VALIDATOR, [(_OLD_ALLOWED, _NEW_ALLOWED)], upgrading=False)
+    op.execute(f"DROP FUNCTION {_FUNCTION}")
+    _rewrite(_ISSUER, [(_OLD, _NEW)], upgrading=False)
+    op.execute("""
+        ALTER TABLE ONLY loom_capacity_guard.trial_retry_mutation_permits
+          DROP CONSTRAINT trial_retry_mutation_permits_operation_check;
+        ALTER TABLE ONLY loom_capacity_guard.trial_retry_mutation_permits
+          ADD CONSTRAINT trial_retry_mutation_permits_operation_check CHECK (operation IN ('retry','refund'));
+    """)
