@@ -38,7 +38,7 @@ ApplicationSchemaProfile = Literal[
     "cnpg-staging-sealed-owner",
     "cnpg-staging-executor-admission",
 ]
-ApplicationSchemaRevision = Literal["0147/guard_0036", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"]
+ApplicationSchemaRevision = Literal["0148/guard_0036", "0147/guard_0036", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"]
 
 ApplicationSchemaAclProfile = Literal["application-only", "staging-readonly", "cnpg-staging"]
 
@@ -84,20 +84,29 @@ def application_reference_postgres_image(*, postgres_major: int = 16) -> str:
 
 def application_schema_reference(
     *, profile: ApplicationSchemaProfile = "legacy-owner", postgres_major: int = 16,
-    revision: ApplicationSchemaRevision = "0147/guard_0036",
+    revision: ApplicationSchemaRevision = "0148/guard_0036",
 ) -> ApplicationSchemaReference:
     """Select one bundled profile, never a caller-selected digest."""
     if profile == "cnpg-staging-executor-admission":
-        if revision != "0147/guard_0036":
+        if revision not in {"0148/guard_0036", "0147/guard_0036"}:
             raise ApplicationSchemaReferenceError("executor admission reference revision is unsupported")
         image = application_reference_postgres_image(postgres_major=postgres_major)
-        return ApplicationSchemaReference(
-            format_version=1, profile=profile, application_head="0147", guard_head="guard_0036",
-            postgres_image=image, postgres_major=postgres_major, object_count=7234,
-            inventory_sha256={
+        admission_digests = {
+            "0147/guard_0036": {
                 16: "03684efabced805259ebd75fbc9d34966414cbb24e2cd097c3942543f848bdc1",
                 17: "1c2621a55dbdee330db9bce9e63e303a786f4824c1b83a191eb70594ce137174",
-            }[postgres_major],
+            },
+            "0148/guard_0036": {
+                16: "c3813c47394f8f30109f874d50b2a7465f0e44e3a82af9feb08154474c53e0d8",
+                17: "c86186641a0d92b902e20f6bb030176a5dfe278647b5b053d6ecf6d65b231fd9",
+            },
+        }
+        application_head, guard_head = application_schema_revisions(revision)
+        return ApplicationSchemaReference(
+            format_version=1, profile=profile, application_head=application_head, guard_head=guard_head,
+            postgres_image=image, postgres_major=postgres_major,
+            object_count=7321 if revision == "0148/guard_0036" else 7234,
+            inventory_sha256=admission_digests[revision][postgres_major],
         )
     profiles: tuple[ApplicationSchemaProfile, ...] = (
         "legacy-owner",
@@ -169,6 +178,26 @@ def application_schema_reference(
                 "7f8d454022a2ea15032f37b2eff293216e6c9b255946ea1d4db5b3ef0ea74322",
             ),
         }
+    # Reviewed execution revision/start journal, independently provisioned on both majors.
+    if revision == "0148/guard_0036":
+        digests = {
+            16: (
+                "25751c5c312e82e66425f159e6bd28a6aec942479141531e3cbcbc237bea7af3",
+                "3b27b4dcf93c9faafe7b9a3748fdbf087b720d0df7fc0c1ea823173c4f979261",
+                "7615d5bf8cdc07e05f33fba390560247bc23ee52c4b9aeeb834b5cca761dfcf8",
+                "c34b9805801d848300c4ac84d981e00d091b8b43e182cd9bbd2f00d8fabd3477",
+                "95126b4bf28c378ffe4ca7f8679558b25c053c6b058d6156eef1951d6da310f4",
+                "5c417576312d9458955328917330e251dc767a76a780dc3bdf0ed5f964ffba40",
+            ),
+            17: (
+                "f1425a433bf1b3de1872a32dc9e8f7d09b0706fdcda67406f21c86bfe4af43de",
+                "a11014bc75572d20f032e83cb9716c9e571d451f48d89fd93c22af7980c0c1ed",
+                "006db1667785f9df06865c4cc6c06aab684d97a2ca0b0bc2b4f8795fe887c069",
+                "abee76baa8e43634a9c919a2ce42245feabb1fff3e437903744acc8989dfd23f",
+                "9f62ad35a906970bdb9d6a9e7e7a389fb97c8811248b95775ad118a8a6039c9e",
+                "081e5bd4ac8d6700c5a703121ac7ffde8c8d76088ca5907c0192e005dd18b12d",
+            ),
+        }
     if revision == "0134/guard_0030":
         digests = {
             16: (
@@ -195,7 +224,7 @@ def application_schema_reference(
         guard_head=guard_head,
         postgres_image=image,
         postgres_major=postgres_major,
-        object_count={"0147/guard_0036": 7232, "0147/guard_0035": 7232, "0142/guard_0035": 7227, "0134/guard_0030": 6736}[revision]
+        object_count={"0148/guard_0036": 7319, "0147/guard_0036": 7232, "0147/guard_0035": 7232, "0142/guard_0035": 7227, "0134/guard_0030": 6736}[revision]
         + (0 if profile in {"legacy-owner", "staging-readonly-legacy-owner", "cnpg-staging-legacy-owner"} else 2),
         inventory_sha256=digests[postgres_major][profiles.index(profile)],
     )
@@ -203,7 +232,7 @@ def application_schema_reference(
 
 def require_application_schema_reference(
     observed: ApplicationSchemaInventory, *, profile: ApplicationSchemaProfile = "legacy-owner",
-    revision: ApplicationSchemaRevision = "0147/guard_0036",
+    revision: ApplicationSchemaRevision = "0148/guard_0036",
 ) -> None:
     """Compare only; caller still owns trusted role binding, quiescence and locks."""
     if type(observed.postgres_major) is not int or observed.postgres_major not in {16, 17}:
@@ -219,6 +248,8 @@ def require_application_schema_reference(
 
 def application_schema_revisions(revision: ApplicationSchemaRevision) -> tuple[str, str]:
     """Only reviewed migration pairs can select a reference recipe."""
+    if revision == "0148/guard_0036":
+        return "0148", "guard_0036"
     if revision == "0147/guard_0036":
         return "0147", "guard_0036"
     if revision == "0147/guard_0035":
@@ -234,6 +265,8 @@ def application_schema_revision(
     *, public_revision: str | None, guard_revision: str | None,
 ) -> ApplicationSchemaRevision:
     """Select using a protected original checkpoint, never a new live observation."""
+    if (public_revision, guard_revision) == ("0148", "guard_0036"):
+        return "0148/guard_0036"
     if (public_revision, guard_revision) == ("0147", "guard_0036"):
         return "0147/guard_0036"
     if (public_revision, guard_revision) == ("0147", "guard_0035"):
