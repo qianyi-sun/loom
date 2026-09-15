@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 from pathlib import Path
+from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
 
 from sqlalchemy import text
@@ -69,13 +71,26 @@ def _database_url_from_bytes(payload: bytes) -> str:
     except (ArgumentError, ValueError) as exc:
         raise ExecutableAdmissionClientError("database URL is invalid") from exc
     query = dict(parsed.query)
+    pairs = parse_qsl(urlsplit(value).query, keep_blank_values=True)
+    route = query.get("hostaddr")
+    if route is not None:
+        try:
+            if not isinstance(route, str) or "%" in route:
+                raise ValueError
+            address = ipaddress.ip_address(route)
+            if address.is_unspecified or address.is_multicast or str(address) != route:
+                raise ValueError
+        except ValueError:
+            raise ExecutableAdmissionClientError("database route must be one canonical unicast address") from None
     if (
         parsed.drivername != "postgresql+psycopg"
         or not parsed.username
         or not parsed.password
         or not parsed.host
         or not parsed.database
-        or query != {"sslmode": "verify-full"}
+        or query.get("sslmode") != "verify-full"
+        or set(query) - {"sslmode", "hostaddr"}
+        or len(pairs) != len(query) or dict(pairs) != query
     ):
         raise ExecutableAdmissionClientError(
             "database URL must be credential-scoped PostgreSQL with verify-full TLS"
