@@ -374,6 +374,22 @@ async def _latest_observation(
     ).scalar_one_or_none()
 
 
+async def native_allocatable_sample(
+    session: AsyncSession, target_id: str, current: CapacityPlacement,
+) -> NodeTemplateSample | None:
+    sample = cold_sample(current)
+    if sample is not None:
+        return sample
+    # Reuse the same compatible immutable history for actual admission and
+    # waiting eligibility. A zero-node observation need not carry a new sample.
+    history = (await session.scalars(select(ExecutionCapacityObservation.observation_json)
+        .where(ExecutionCapacityObservation.target_id == target_id,
+               ExecutionCapacityObservation.observation_json["placement"]["template_samples"].astext != "[]")
+        .order_by(ExecutionCapacityObservation.observed_at.desc()).limit(100))).all()
+    return cold_sample(current, (CapacityPlacement.model_validate(row["placement"])
+                                for row in history if row.get("placement")))
+
+
 @dataclass(frozen=True)
 class _NativeCapacityReservation:
     attempt_id: UUID
@@ -553,9 +569,24 @@ async def admit_capacity_resources(
     )
     native = await _native_capacity_reservations(session, current_time=current_time)
     native_active = [row for row in native if not row.released and row.attempt_id != exclude_native_attempt_id]
+    from loom_control_plane.task_image_capacity_wait import read_capacity_waits, wait_resources
 
-    def native_demands(target_id: str) -> list[tuple[str, ResourceTotals]]:
-        return [(row.demand_id, row.resources) for row in native_active if row.target_id == target_id]
+    claiming = None
+    if exclude_native_attempt_id is not None:
+        claiming = await session.get(TaskImageMaterializationAttempt, exclude_native_attempt_id)
+    # Previously committed authority precedes later waiting work. Revalidation
+    # remains subject to genuine reservations and provider/cleanup evidence.
+    waiting = [] if already_reserved else await read_capacity_waits(
+        session, now=current_time, claiming_attempt=claiming,
+        claiming_target=target, claiming_resources=resources,
+    )
+
+    def native_demands(target_id: str, *, include_waits: bool = True) -> list[tuple[str, ResourceTotals]]:
+        return [
+            *((row.demand_id, row.resources) for row in native_active if row.target_id == target_id),
+            *((f"task-image-wait:{row.materialization_id}:{row.lease_epoch}", wait_resources(row))
+              for row in waiting if include_waits and row.target_id == target_id),
+        ]
 
     same_target = [row for row in authorizations if row.target_id == target.id]
     generations = {
@@ -588,14 +619,15 @@ async def admit_capacity_resources(
         row.target_id == target.id and row.reserved_at >= current_time - timedelta(minutes=1)
         for row in native
     )
-    if not already_reserved and int(recent_creates or 0) >= policy.max_create_per_minute:
+    waiting_here = sum(row.target_id == target.id for row in waiting)
+    if not already_reserved and int(recent_creates or 0) + waiting_here >= policy.max_create_per_minute:
         raise ExecutionProvisioningBlockedError("execution_capacity_create_rate_exceeded", 30)
     recent_pending = sum(
         row.state in _PENDING_AUTHORIZATION_STATES for row in recent_authorizations
     )
     recent_pending += sum(row.state != "running" for row in recent_native)
     incoming_pending = int(demand_id not in observed_leases)
-    if observation.pending_jobs + recent_pending + incoming_pending > policy.max_pending_jobs:
+    if observation.pending_jobs + recent_pending + incoming_pending + waiting_here > policy.max_pending_jobs:
         raise ExecutionProvisioningBlockedError("execution_capacity_pending_limit_exceeded")
     recent_unschedulable = (sum(row.state == "unschedulable" for row in recent_authorizations)
                             + sum(row.state == "unschedulable" for row in recent_native))
@@ -631,41 +663,13 @@ async def admit_capacity_resources(
             for row in rows
         ]
 
-    async def sample_for(target_id: str, current: CapacityPlacement) -> NodeTemplateSample | None:
-        sample = cold_sample(current)
-        if sample is not None:
-            return sample
-        # JSONB preserves immutable observed templates; no new table/cache writer.
-        history = (
-            (
-                await session.execute(
-                    select(ExecutionCapacityObservation.observation_json)
-                    .where(
-                        ExecutionCapacityObservation.target_id == target_id,
-                        ExecutionCapacityObservation.observation_json["placement"][
-                            "template_samples"
-                        ].astext
-                        != "[]",
-                    )
-                    .order_by(ExecutionCapacityObservation.observed_at.desc())
-                    .limit(100)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        return cold_sample(
-            current,
-            (
-                CapacityPlacement.model_validate(row["placement"])
-                for row in history
-                if row.get("placement")
-            ),
-        )
-
     try:
-        sample = await sample_for(target.id, placement)
-        prior = plan_placement(placement, [*demands(same_target), *native_demands(target.id)], sample=sample)
+        sample = await native_allocatable_sample(session, target.id, placement)
+        actual_demands = [*demands(same_target), *native_demands(target.id, include_waits=False)]
+        prior = plan_placement(placement, actual_demands, sample=sample)
+        actual_projected = plan_placement(
+            placement, [*actual_demands, (demand_id, resources)], sample=sample,
+        )
         projected = plan_placement(
             placement,
             [
@@ -685,7 +689,8 @@ async def admit_capacity_resources(
     except PlacementUnavailableError as exc:
         raise ExecutionProvisioningBlockedError(str(exc)) from exc
     total_nodes = projected.additional_nodes
-    incremental_nodes = max(0, total_nodes - prior.additional_nodes)
+    # Waiting protects headroom but is not an acquired create or cost event.
+    incremental_nodes = max(0, actual_projected.additional_nodes - prior.additional_nodes)
     raw = placement.node_group.raw_node
     if projected.cold_nodes > 0:
         if observation.provider_capacity_state == "insufficient":
@@ -758,7 +763,8 @@ async def admit_capacity_resources(
     for other_target in other_targets:
         other_observation = await _latest_observation(session, other_target)
         has_active = (any(row.target_id == other_target for row in authorizations)
-                      or any(row.target_id == other_target for row in native_active))
+                      or any(row.target_id == other_target for row in native_active)
+                      or any(row.target_id == other_target for row in waiting))
         if other_observation is None and not has_active:
             continue
         if other_observation is None:
@@ -811,7 +817,7 @@ async def admit_capacity_resources(
                 other,
                 [*demands([row for row in authorizations if row.target_id == other_target]),
                  *native_demands(other_target)],
-                sample=await sample_for(other_target, other),
+                sample=await native_allocatable_sample(session, other_target, other),
             )
         except PlacementUnavailableError as exc:
             raise ExecutionProvisioningBlockedError(
@@ -837,7 +843,7 @@ async def admit_capacity_resources(
             raise ExecutionProvisioningBlockedError(
                 f"execution_capacity_provider_quota_{key}_exceeded"
             )
-    decision_reason = "existing_allocatable" if total_nodes == 0 else "bounded_scale_headroom"
+    decision_reason = "existing_allocatable" if actual_projected.additional_nodes == 0 else "bounded_scale_headroom"
     payload = {
         "target_id": target.id,
         "observation_id": str(observation.id),
