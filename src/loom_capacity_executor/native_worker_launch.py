@@ -123,6 +123,7 @@ async def launch_native_worker_once(
         or binding.resources.memory_bytes != allocation.memory_bytes
         or binding.concurrency_slots != allocation.concurrency_slots or policy.pids_max != allocation.pids_max
         or image.platform != policy.native_execution.platform
+        or allocation.docker_socket != policy.docker_socket
     ):
         raise NativeContainerError("native worker allocation differs from protected physical binding")
     if not root.activated_at <= now() < root.expires_at:
@@ -280,12 +281,14 @@ async def _run_native_worker_on_host(
 
     if os.geteuid() == 0 or os.getegid() == 0:
         raise NativeContainerError("native worker launcher requires an unprivileged runtime identity")
+    if cli.socket_path != policy.docker_socket:
+        raise NativeContainerError("native Docker endpoint differs from protected policy")
     _verify_native_docker_config(Path(cli.config_directory))
     binding = physical.binding
     if binding.resources.gpu_count or binding.resources.generic or len(binding.node_ids) != 1:
         raise NativeContainerError("native worker allocation requires the CPU-only trial runtime")
     try:
-        socket_info = Path("/var/run/docker.sock").lstat()
+        socket_info = Path(policy.docker_socket).lstat()
         if not stat.S_ISSOCK(socket_info.st_mode) or socket_info.st_uid != 0 or socket_info.st_mode & 0o002:
             raise NativeContainerError("native worker Docker endpoint is not protected")
     except OSError:
@@ -302,7 +305,8 @@ async def _run_native_worker_on_host(
             cgroup_parent=parent, cpu_millicores=binding.resources.cpu_millicores,
             memory_bytes=binding.resources.memory_bytes, pids_max=policy.pids_max,
             concurrency_slots=binding.concurrency_slots, scratch_directory=str(scratch.directory),
-            docker_socket_gid=socket_info.st_gid, runtime_uid=os.geteuid(), runtime_gid=os.getegid(),
+            docker_socket_gid=socket_info.st_gid, docker_socket=policy.docker_socket,
+            runtime_uid=os.geteuid(), runtime_gid=os.getegid(),
             pool_id=binding.pool_id, hostname=binding.node_ids[0], candidate_sha=binding.candidate.identity)
         await launch_native_worker_once(directory=directory, reference=reference, physical=physical,
             admission=admission, policy=policy, cli=cli, image=image, allocation=allocation, now=now,

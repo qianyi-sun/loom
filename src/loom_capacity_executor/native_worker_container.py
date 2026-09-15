@@ -18,10 +18,16 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import (
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from loom_capacity_executor.launch_renderer import NativeTaskImageExecutionV2
 from loom_capacity_executor.native_worker_bootstrap import NativeWorkerBootstrap
@@ -32,6 +38,8 @@ _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}", re.ASCII)
 _CONTAINER_ID = re.compile(r"[0-9a-f]{64}", re.ASCII)
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*", re.ASCII)
 _SOCKET = "/var/run/docker.sock"
+NativeDockerSocket = Literal["/var/run/docker.sock", "/run/loom-native-docker/docker.sock"]
+_NATIVE_DOCKER_SOCKETS = {_SOCKET, "/run/loom-native-docker/docker.sock"}
 _FIXED_ENV = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8",
               "HOME": "/nonexistent", "DOCKER_HOST": "unix:///var/run/docker.sock",
               "PYTHONDONTWRITEBYTECODE": "1"}
@@ -48,6 +56,14 @@ class NativeWorkerContainerPolicyV2(StrictV2Model):
     canonical_worker_settings: Annotated[str, Field(min_length=2, max_length=2048, repr=False)]
     docker_config_directory: Annotated[str, Field(min_length=1, max_length=4096)]
     pids_max: Annotated[int, Field(gt=0, le=1_048_576)]
+    docker_socket: NativeDockerSocket = "/var/run/docker.sock"
+
+    @model_serializer(mode="wrap")
+    def _preserve_existing_policy(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        payload: dict[str, Any] = handler(self)
+        if self.docker_socket == _SOCKET:
+            payload.pop("docker_socket", None)
+        return payload
 
     @field_validator("docker_config_directory")
     @classmethod
@@ -119,6 +135,7 @@ class NativeWorkerAllocation:
     pool_id: str
     hostname: str
     candidate_sha: str
+    docker_socket: NativeDockerSocket = "/var/run/docker.sock"
 
     def __post_init__(self) -> None:
         try:
@@ -126,6 +143,7 @@ class NativeWorkerAllocation:
             parent = PurePosixPath(self.cgroup_parent)
             if (
                 str(UUID(self.intent_id)) != self.intent_id
+                or self.docker_socket not in _NATIVE_DOCKER_SOCKETS
                 or self.pool_id not in {"oldlab", "gb10"}
                 or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", self.hostname) is None
                 or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", self.candidate_sha) is None
@@ -194,7 +212,7 @@ def native_create_argv(image: PreparedNativeImage, allocation: NativeWorkerAlloc
         f"--platform={image.platform}", f"--cgroup-parent={allocation.cgroup_parent}",
         f"--cpus={allocation.cpu_millicores / 1000:.3f}", f"--memory={allocation.memory_bytes}",
         f"--memory-swap={allocation.memory_bytes}", f"--pids-limit={allocation.pids_max}",
-        "--ulimit=core=0:0", "--mount=type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock",
+        "--ulimit=core=0:0", f"--mount=type=bind,source={allocation.docker_socket},target=/var/run/docker.sock",
         f"--mount=type=bind,source={allocation.scratch_directory},target={allocation.scratch_directory}",
         *cleared, *(f"--env={key}={value}" for key, value in sorted(environment.items())),
         image.image_id, "-I", "-m", "loom_worker.native_main",
@@ -209,10 +227,15 @@ class FixedDockerCLI:
     descriptor: int
     config_directory: str
     stop_requested: Callable[[], bool] | None = None
+    socket_path: NativeDockerSocket = "/var/run/docker.sock"
+
+    def __post_init__(self) -> None:
+        if self.socket_path not in _NATIVE_DOCKER_SOCKETS:
+            raise ValueError("native Docker endpoint is not installed policy")
 
     def argv(self, *arguments: str) -> tuple[str, ...]:
         return (self.executable, f"--config={self.config_directory}",
-                "--host=unix:///var/run/docker.sock", *arguments)
+                f"--host=unix://{self.socket_path}", *arguments)
 
     def call(self, *arguments: str, timeout: int = 60, interruptible: bool = True) -> bytes:
         try:

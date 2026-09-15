@@ -579,7 +579,8 @@ async def run_trusted_launcher_process(
                 physical=physical, admission=admission, policy=config.native_worker,
                 cli=FixedDockerCLI(executable=f"/proc/self/fd/{candidate_descriptor}",
                     descriptor=candidate_descriptor,
-                    config_directory=config.native_worker.docker_config_directory),
+                    config_directory=config.native_worker.docker_config_directory,
+                    socket_path=config.native_worker.docker_socket),
                 image_digest=config.candidate_image_digest, now=now,
             )
             return

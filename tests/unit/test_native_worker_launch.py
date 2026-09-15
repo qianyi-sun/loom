@@ -147,7 +147,8 @@ async def test_failed_native_launch_never_retries_or_claims_unconfirmed_cleanup(
 
 
 @pytest.mark.parametrize("tamper", (None, "physical", "node"))
-async def test_trusted_process_selects_native_branch_without_legacy_credential_environment(tmp_path, monkeypatch, tamper):
+@pytest.mark.parametrize("docker_socket", ("/var/run/docker.sock", "/run/loom-native-docker/docker.sock"))
+async def test_trusted_process_selects_native_branch_without_legacy_credential_environment(tmp_path, monkeypatch, tamper, docker_socket):
     import json
 
     from loom_capacity_agent.admission import CurrentExecutableBootstrapV2
@@ -179,7 +180,7 @@ async def test_trusted_process_selects_native_branch_without_legacy_credential_e
     config.update(candidate_argv=(str(candidate),), native_worker={
         "native_execution": bootstrap.native_execution.model_dump(mode="json"),
         "canonical_worker_settings": bootstrap.canonical_worker_settings,
-        "docker_config_directory": "/etc/loom/empty-docker", "pids_max": 128})
+        "docker_config_directory": "/etc/loom/empty-docker", "pids_max": 128, "docker_socket": docker_socket})
     argv = _trusted_launcher_process_argv_for_candidate_config(tmp_path, config_payload=config,
         source_handoff_directory=controller)
     args = _parser().parse_args(list(argv[1:]))
@@ -228,12 +229,14 @@ async def test_trusted_process_selects_native_branch_without_legacy_credential_e
     assert observed[0]["physical"].slurm_job_id == "101"
     assert observed[0]["image_digest"] == config["candidate_image_digest"]
     assert observed[0]["directory"] == delivered
+    assert observed[0]["policy"].docker_socket == docker_socket
+    assert observed[0]["cli"].socket_path == docker_socket
     assert not (directory / args.bootstrap_handoff).exists()
     assert "ambient" not in repr(observed)
 
 
 @pytest.mark.parametrize("field,value", [("pool_id", "gb10"), ("hostname", "foreign"),
-    ("cpu_millicores", 2000), ("candidate_sha", "e" * 64)])
+    ("cpu_millicores", 2000), ("candidate_sha", "e" * 64), ("docker_socket", "/run/loom-native-docker/docker.sock")])
 async def test_substituted_allocation_refused_before_registration(tmp_path, monkeypatch, field, value):
     from loom_capacity_executor import native_worker_launch as launch
     from loom_capacity_executor.native_worker_container import (

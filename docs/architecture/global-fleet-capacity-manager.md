@@ -1746,6 +1746,14 @@ invokes the procedures. Consequently this protected surface cannot consume
 manager work or change physical capacity while the global executable ceiling
 and deployment entry points remain zero.
 
+Native application launch requires a cgroup-v2 `cgroupfs` Docker endpoint so the
+worker and task descendants share the real Slurm job ancestor. The pinned native
+worker policy can select the existing `/var/run/docker.sock` or an independently
+installed `/run/loom-native-docker/docker.sock`; arbitrary sockets and TCP endpoints
+are refused. The trusted host CLI and worker socket mount select the same daemon.
+The worker retains `/var/run/docker.sock` internally, and launcher code never
+reconfigures the host's shared Docker daemon.
+
 Native application delivery binds a sorted, exact node-to-receiver route set and
 three private TLS file hashes into the portable activation document. The protected
 controller installer publishes those files as owner-only inputs and reads back
