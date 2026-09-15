@@ -291,12 +291,17 @@ one NUL byte, and original canonical grant bytes. The verified result's
 
 Both claim variants bind trial/team/worker-registration UUIDs, actual worker lease
 epoch and trial attempt count. The ordinary variant additionally requires a
-nonzero `claim_id`, created and persisted atomically by its future scheduler
-adapter for each new claim. It must remain stable for that claim's grant refreshes
+nonzero `claim_id`, created and persisted atomically by its scheduler
+for each new claim. It must remain stable for that claim's grant refreshes
 and change on requeue/reclaim, even when `node_setup_health` refunds attempt count.
 Neither the grant issuer nor the worker may invent or derive it from refundable
-counters or a timestamp. The current ordinary scheduler has no such identity and
-remains V2-ineligible until that adapter exists. The explicitly discriminated protected variant
+counters or a timestamp. Both ordinary scheduler paths (`claim_one` and
+`claim_work`) now stamp a fresh UUID in `trials.legacy_claim_id` and return it as
+`claim_id` in the same claim transaction. This is the last legacy claim identity,
+not independent proof of a live claim; it remains retained after release and is
+replaced on the next legacy claim. Historical claims have NULL, never a backfilled
+identity. The API/worker V2 adapter and one-use start remain uncomposed, so this
+change does not make ordinary workers V2-eligible. The explicitly discriminated protected variant
 additionally binds the canonical protected receipt digest, actual worker
 incarnation UUID and claim high-water; these cannot be inferred from ordinary
 trial attempt count. The expected claim and purpose come from independent
@@ -316,9 +321,37 @@ image: current execution validity comes from the new grant and keyset.
 The result is immutable evidence, not a start receipt. It neither verifies actual
 downloaded source bytes nor proves a current committed grant revision, worker
 capability, claim liveness or one-use start consumption. No signer operation,
-database migration, claim/worker adapter, catalog fallback or runtime default is
-added. Those boundaries must remain fail-closed before any sidecar, task or
+worker verification adapter, catalog fallback or runtime default is added by that
+verifier. Those boundaries must remain fail-closed before any sidecar, task or
 verifier container starts; Phase 1 behavior is unchanged.
+
+### Refundable legacy claims and migration order
+
+Application migration `0147` adds the nullable legacy identity without upgrading
+old claims. A pre-start `node_setup_health` refund releases admission in the
+`AFTER UPDATE` trigger using `OLD.attempt_count`, in the same transaction as the
+counter decrement. Only a released
+legacy reservation explicitly marked `trial_setup_refund` leaves the attempt/role
+uniqueness fence; active reservations, other release reasons (including NULL),
+and service/protected owners retain their fence. A later claim inserts a new
+reservation, keeping every earlier row immutable and applying the usual shared
+capacity checks and counter update. No old reservation is recycled.
+
+Install guard migration `guard_0033` before this application migration wherever
+the protected claim function exists. It changes only that function's conflict
+syntax to target-free `ON CONFLICT DO NOTHING`, retaining all unique checks,
+function ownership, permissions and previous claim fences. This is compatible
+with both the old constraint and the new partial index. The application migration
+refuses an installed incompatible guard; it never changes guard-owned code.
+Guard label rollback retains compatibility. Application downgrade refuses retained
+new claim identities or refund records rather than discarding fencing history.
+
+The repair is prospective. Before activation, inventory active legacy admission
+reservations on nonactive Trials. Historical refunds may already have leaked a
+slot under the old trigger. This migration does not infer their ownership or
+rewrite historical records/counters; any repair needs exact scoped reconciliation
+and evidence. Code rollback keeps the additive schema until retained authority can
+be handled safely; running an older worker is not permission for a lossy downgrade.
 
 ## Legacy-reader exclusion
 

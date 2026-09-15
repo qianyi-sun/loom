@@ -336,6 +336,20 @@ async def test_full_compensation_covers_every_protected_role_session(
                 await connection.execute(runner.payloads[1].decode("utf-8"))
             await connection.rollback()
 
+            # pg_terminate_backend sends a signal; return is not process-exit
+            # evidence. Observe this exact backend leaving before exercising
+            # the next reconciliation. Keep the first live-session refusal
+            # and the production fail-closed payload unchanged.
+            async with asyncio.timeout(5):
+                while True:
+                    departed = await connection.execute(
+                        "SELECT count(*) FROM pg_stat_activity WHERE pid = %s",
+                        (backend_pid,),
+                    )
+                    if await departed.fetchone() == (0,):
+                        break
+                    await asyncio.sleep(0.01)
+
             component._terminate_transient_sessions(preserve_runtime_credentials=False)
             assert len(runner.payloads) == 3
             await connection.execute(runner.payloads[2].decode("utf-8"))

@@ -168,6 +168,38 @@ class ApplicationMigrationJournal:
             raise ValueError("application migration append readback changed")
         return event
 
+    def read_claim_compatibility(self) -> Mapping[str, object] | None:
+        """Read the fixed guard prerequisite under this original active component."""
+        events = self.read()
+        if self.capacity_bootstrap or not events:
+            raise ValueError("guard compatibility requires original application migration authority")
+        path = self.root / "guard-claim-compatibility.json"
+        try:
+            value = self.journal._read(path)
+        except FileNotFoundError:
+            return None
+        if (set(value) != {"schema_version", "intent_digest", "guard_digest", "binding"}
+                or type(value["schema_version"]) is not int or value["schema_version"] != 1
+                or value["intent_digest"] != self.intent.intent_digest
+                or value["guard_digest"] != events[0].guard_digest
+                or not isinstance(value["binding"], dict)):
+            raise ValueError("guard compatibility original journal binding changed")
+        self.journal._sync_application_recovery(self.root, path.name)
+        return value["binding"]
+
+    def retain_claim_compatibility(self, binding: Mapping[str, object], *, guard: MutationGuardEvidence) -> None:
+        self.journal.require_application_guard_retained(self.plan, guard=guard)
+        root, intent = self.journal._application_admission_context()
+        events = self.read()
+        if (root != self.root or intent != self.intent or self.capacity_bootstrap
+                or not events or events[0].guard_digest != guard.evidence_digest):
+            raise ValueError("guard compatibility active authority changed")
+        self.journal._publish_or_match(self.root / "guard-claim-compatibility.json",
+            {"schema_version": 1, "intent_digest": intent.intent_digest,
+             "guard_digest": guard.evidence_digest, "binding": dict(binding)})
+        if self.read_claim_compatibility() != binding:
+            raise ValueError("guard compatibility journal readback changed")
+
 
 def _fields(payload: Mapping[str, object], keys: set[str]) -> None:
     if set(payload) != keys:

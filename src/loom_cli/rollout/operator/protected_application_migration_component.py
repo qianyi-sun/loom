@@ -12,6 +12,8 @@ from loom.application_completed_authority import (
     ApplicationOwnerSuccessor,
     observe_completed_application_authority,
 )
+from loom.application_database_connection import ApplicationDatabaseConnection
+from loom.application_guard_claim_compatibility import ensure_guard_claim_compatibility
 from loom.application_migrator_recovery import observe_application_migrator_role
 
 from .final_gate_plan import FinalGatePlan
@@ -235,6 +237,7 @@ class ProtectedApplicationMigrationComponent:
             events = migration.read()
         original = ApplicationAdmissionRecoveryRecord.from_dict(_mapping(events[0].payload["admission"]))
         assert original.coordination_guard is not None
+        coordination_guard = original.coordination_guard
         def checkpoint() -> None:
             current_guard, current = self._context(migration.read())
             if current_guard != guard or current != inputs or self._template() != template:
@@ -243,11 +246,20 @@ class ProtectedApplicationMigrationComponent:
                                      ("template1", self.runner.open_staging_peer_template_database)):
                 with opener() as connection:
                     require_cnpg_effective_sql_profile(connection, database=database, original=original.handoff_backend)
+        def before_generation(connection: ApplicationDatabaseConnection) -> None:
+            if int(self.plan.migration_target_revision) < 147:
+                return
+            checkpoint()
+            ensure_guard_claim_compatibility(connection, target=original.target,
+                coordination_guard=coordination_guard, provisioner_role="postgres",
+                guard_owner="loom_cap_staging_owner", retained=migration.read_claim_compatibility(),
+                persist=lambda binding: migration.retain_claim_compatibility(binding, guard=guard))
+            checkpoint()
         with ProtectedApplicationMigrationRuntime(plan=self.plan, guard=guard, target=original.target,
                 coordination_guard=original.coordination_guard, runner=self.runner, template=template,
                 ca_certificate=inputs.ca.certificate, runtime_password=inputs.credential.credential.password,
                 container_registry=self.container_registry, assert_guard=self._guard, assert_inputs=checkpoint,
-                intent_digest=migration.intent.intent_digest) as runtime:
+                intent_digest=migration.intent.intent_digest, before_generation=before_generation) as runtime:
             ApplicationMigrationLifecycle(migration, guard, runtime).run()
 
     def _observe_completed(self, events: Sequence[ApplicationMigrationEvent], guard: MutationGuardEvidence,

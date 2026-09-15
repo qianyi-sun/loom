@@ -185,3 +185,46 @@ def test_capacity_journal_binds_initial_configuration_and_certified_rebind_sql(t
     component = replace(_component(apply), component_id="staging-capacity-database")
     with pytest.raises(RuntimeError, match="end test"):
         journal.execute(plan, [component])
+
+
+@pytest.mark.parametrize("tamper", [None, "intent_digest", "guard_digest"])
+def test_claim_compatibility_journal_requires_active_original_authority(tmp_path, tamper):
+    from loom_cli.rollout.operator.protected_application_migration_journal import (
+        ApplicationMigrationJournal,
+    )
+
+    plan, journal = _setup(tmp_path)
+    guard = _guard(plan)
+    binding = {"schema_version": 1, "database_oid": 42, "system_identifier": "12345",
+        "function_oid": 100, "owner_oid": 101, "owner_role": "loom_cap_staging_owner",
+        "before_sha256": "a" * 64, "after_sha256": "b" * 64}
+    def apply(_):
+        journal.retain_application_guard(plan, guard=guard)
+        application_guard_is_retained(tmp_path / "state", request_id=plan.request_id,
+            service_uid=os.getuid(), guard=guard, acknowledge=True)
+        migration.append("authority", _authority(plan, component, guard), guard=guard)
+        assert migration.read_claim_compatibility() is None
+        migration.retain_claim_compatibility(binding, guard=guard)
+        migration.retain_claim_compatibility(binding, guard=guard)
+        assert migration.read_claim_compatibility() == binding
+        with pytest.raises((RuntimeError, ValueError)):
+            migration.retain_claim_compatibility({**binding, "function_oid": 200}, guard=guard)
+        raise RuntimeError("retained original prerequisite")
+    component = replace(_component(apply), component_id="database-migration")
+    migration = ApplicationMigrationJournal(journal, plan, component, 0)
+    with pytest.raises(RuntimeError, match="active component"):
+        migration.retain_claim_compatibility(binding, guard=guard)
+    with pytest.raises(RuntimeError, match="retained original prerequisite"):
+        journal.execute(plan, [component])
+    with pytest.raises(RuntimeError, match="active component"):
+        migration.retain_claim_compatibility(binding, guard=guard)
+    path = migration.root / "guard-claim-compatibility.json"
+    assert path.stat().st_mode & 0o777 == 0o600
+    if tamper:
+        value = json.loads(path.read_text())
+        value[tamper] = "f" * 64
+        path.write_text(json.dumps(value))
+        with pytest.raises(ValueError, match="original journal binding"):
+            migration.read_claim_compatibility()
+    else:
+        assert migration.read_claim_compatibility() == binding

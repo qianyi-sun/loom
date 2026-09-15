@@ -219,6 +219,7 @@ UPDATE trials t
    SET state = 'claimed',
        worker_id = :worker_id,
        claimed_at = NOW(),
+       legacy_claim_id = (:claim_id)::uuid,
        pre_start_heartbeat_at = NULL,
        failure_reason = NULL,
        failure_message = NULL,
@@ -226,7 +227,7 @@ UPDATE trials t
   FROM admitted
  WHERE t.id = admitted.id
  RETURNING t.id, t.team_id, t.task_id, t.config, t.requires_caps,
-           t.attempt_count, t.provider_connection_id,
+           t.attempt_count, t.provider_connection_id, t.legacy_claim_id AS claim_id,
            t.family_key, t.batch_id,
            (SELECT state_uri FROM family_lock) AS family_state_uri,
            (SELECT b.family_run_spec
@@ -257,6 +258,7 @@ async def claim_one(
         "worker_network_policies": json.dumps(worker_network_policies),
         "worker_backends": worker_backends or ["docker"],
         "enforce_shared_slot": enforce_shared_slot,
+        "claim_id": uuid4(),
     }
     result = await session.execute(_CLAIM_SQL, params)
     return result.mappings().one_or_none()
@@ -859,6 +861,7 @@ WITH candidates AS (
 ), claimed_trial AS (
   UPDATE trials t
      SET state = 'claimed', worker_id = (:worker_id)::uuid, claimed_at = NOW(),
+         legacy_claim_id = (:claim_id)::uuid,
          pre_start_heartbeat_at = NULL, failure_reason = NULL, failure_message = NULL,
          attempt_count = attempt_count + 1
     FROM admitted p
@@ -872,7 +875,7 @@ WITH candidates AS (
        )
      )
   RETURNING 'trial'::text AS work_kind, t.id, t.team_id, NULL::uuid AS stage_run_id,
-            NULL::uuid AS pipeline_run_id, NULL::uuid AS claim_id,
+            NULL::uuid AS pipeline_run_id, t.legacy_claim_id AS claim_id,
             NULL::bigint AS lease_epoch, NULL::timestamptz AS lease_expires_at,
             t.task_id, t.config, t.requires_caps, t.attempt_count,
             t.provider_connection_id, t.family_key, t.batch_id
