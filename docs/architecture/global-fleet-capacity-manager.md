@@ -714,6 +714,10 @@ before the retry probe. The probe admits exactly the original peer and guard,
 after verifying cluster-wide client retirement. Each retry repeats closure,
 complete drainage and schema checks.
 Other refusals and surviving client writers remain errors.
+The trigger's quiescence refusal uses application SQLSTATE `55L01`. The protected
+peer transport preserves that bounded code while discarding server diagnostics,
+so recovery does not depend on private error text or retry unrelated `55000`
+authority refusals.
 
 Capacity bootstrap uses a permanent migrator with exactly the application owner
 and guard owner memberships. Its SQL helpers retain both owner identities, keep

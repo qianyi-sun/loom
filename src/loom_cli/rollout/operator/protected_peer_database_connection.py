@@ -402,9 +402,14 @@ class PeerDatabaseConnection:
                                     error_type = psycopg.errors.lookup(code)
                                 except KeyError:
                                     error_type = psycopg.DatabaseError
-                                raise error_type(
+                                error = error_type(
                                     "peer database statement failed (SQLSTATE " + code + ")"
                                 )
+                                # Unknown application SQLSTATEs have no psycopg
+                                # subclass. Preserve the bounded code without
+                                # restoring any private server diagnostics.
+                                error.sqlstate = code
+                                raise error
                             if not returns_rows:
                                 raise PeerDatabaseTransportError(
                                     "peer database response is unexpected"

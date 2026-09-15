@@ -13,7 +13,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from psycopg.errors import ObjectNotInPrerequisiteState
+from psycopg import Error as PsycopgError
 from psycopg.pq import TransactionStatus
 
 from loom.application_database_admission import (
@@ -159,11 +159,13 @@ def complete_application_handoff_database(
                         coordination_guard=coordination_guard, schema_acl_profile=schema_acl_profile, schema_revision=schema_revision,
                     )
                 break
-            except (ApplicationDatabaseAdmissionError, ApplicationOwnershipTransferError, ObjectNotInPrerequisiteState) as exc:
-                message = exc.diag.message_primary if isinstance(exc, ObjectNotInPrerequisiteState) else str(exc)
-                if (message not in {"application database sessions are not drained",
+            except (ApplicationDatabaseAdmissionError, ApplicationOwnershipTransferError, PsycopgError) as exc:
+                message = exc.diag.message_primary if isinstance(exc, PsycopgError) else str(exc)
+                quiescence = (isinstance(exc, PsycopgError) and exc.sqlstate == "55L01") or message in {
+                        "application database sessions are not drained",
                         "application ownership requires reconciled sessions",
                         "application trigger handoff requires quiescent legacy authority"}
+                if (not quiescence
                         or time.monotonic() >= deadline
                         or not _quiescence_retry_admitted(maintenance, target=target, handoff_backend=handoff_backend,
                             coordination_guard=coordination_guard, provisioner=provisioner)):

@@ -178,7 +178,7 @@ def application_trigger_owner_handoff_ddl(
                           AND NOT COALESCE(({coordination_guard_match}), false)
                           AND a.pid <> pg_catalog.pg_backend_pid()) THEN
             RAISE EXCEPTION 'application trigger handoff requires quiescent legacy authority'
-              USING ERRCODE='55000';
+              USING ERRCODE='55L01';
           END IF;
           {fence_admission}
           LOCK TABLE ONLY public.trials IN ACCESS EXCLUSIVE MODE NOWAIT;

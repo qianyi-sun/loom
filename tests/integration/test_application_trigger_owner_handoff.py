@@ -275,8 +275,9 @@ def test_definer_handoff_scopes_stale_set_role_sessions_to_its_database(
             assert stale.execute(text("SELECT current_user")).scalar_one() == previous
             stale.commit()
             if same_database:
-                with pytest.raises(DBAPIError, match="quiescent legacy authority"):
+                with pytest.raises(DBAPIError, match="quiescent legacy authority") as refusal:
                     _handoff(handoff_roles)
+                assert refusal.value.orig.sqlstate == "55L01"
             else:
                 _handoff(handoff_roles)
                 assert stale.execute(text("SELECT current_user")).scalar_one() == previous
