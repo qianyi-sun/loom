@@ -1708,8 +1708,19 @@ prove restored authentication while schema creation, trigger disabling, table
 truncation, migration-marker writes and owner-role assumption remain denied;
 these are credential/permission tests, not real-model or fleet-activation proof.
 
-This interception is not complete cutover authority. There is no live freeze
-caller: public table-owner credential sealing, private protected-transition
+The installed `ProtectedTrialWriterControl` adapter invokes the reviewed
+initialization/freezing routines through the enclosing cutover's admitted database
+opener. It verifies the exact agent registration before a write and checks the
+returned ledger against current database authority. Each operation commits before
+returning evidence; NOWAIT refusals roll back before a retry with the same retained
+writer and operation IDs. Readback counts committed ledger rows, including a valid
+zero, and never substitutes sequence values or fabricated per-route counters.
+The prerequisite publisher accepts evidenced zero cursors while refusing placeholder
+acknowledgement/freeze hashes. This adapter still needs the enclosing installed
+cutover command and runtime retirement composition.
+
+This interception is not complete cutover authority. The enclosing installed freeze
+caller must compose: public table-owner credential sealing, private protected-transition
 permits and terminal/retry continuity, bound-writer configuration rollover,
 durable operation reconciliation, and the other mutation domains must be
 completed before activation. A frozen trial domain currently rejects ordinary
