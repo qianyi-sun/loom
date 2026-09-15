@@ -3799,3 +3799,34 @@ def test_helper_exec_spec_is_fixed_to_candidate_module_and_service_identity(
     assert spec.environment["HOME"] == "/var/lib/loom-rollout"
     assert spec.environment["XDG_RUNTIME_DIR"] == "/run/user/995"
     assert spec.environment["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/995/bus"
+
+
+@pytest.mark.parametrize("with_admission,with_native", [(False, False), (True, False), (False, True), (True, True)])
+def test_active_broker_accepts_installed_controller_material(tmp_path, with_admission, with_native):
+    from tests.loom_cli.rollout.operator.test_controller_admission import _bundle
+    from tests.loom_cli.rollout.operator.test_protected_active_controller import _request
+    from tests.ops.test_install_capacity_executor import _controller_request
+
+    request = _request(tmp_path, prerequisite=_controller_request(tmp_path, "gb10"), native=with_native)
+    if with_admission:
+        bundle = _bundle(request.document)
+        request = replace(request, admission=bundle, document=request.document.model_copy(
+            update={"admission_directory_sha256": bundle.directory_sha256}))
+    value = {"schema_version": 1, "candidate_sha": request.prepared.prerequisite.source_sha,
+             "candidate_tree": "b" * 40, "operation": "converge_active_files",
+             "active_controller": json.loads(request.to_bytes())}
+    assert broker._parse_request(broker._canonical_json(value)) == value
+
+
+@pytest.mark.parametrize("field", ["admission", "native_delivery_material", "unreviewed_file_map"])
+def test_active_broker_refuses_unbounded_or_unknown_material(tmp_path, field):
+    from tests.loom_cli.rollout.operator.test_protected_active_controller import _request
+    from tests.ops.test_install_capacity_executor import _controller_request
+
+    request = _request(tmp_path, prerequisite=_controller_request(tmp_path, "gb10"))
+    active = json.loads(request.to_bytes())
+    active[field] = {"unrelated-path": "x" * 90001}
+    value = {"schema_version": 1, "candidate_sha": request.prepared.prerequisite.source_sha,
+             "candidate_tree": "b" * 40, "operation": "converge_active_files", "active_controller": active}
+    with pytest.raises(broker.BrokerError, match="active controller"):
+        broker._parse_request(broker._canonical_json(value))
