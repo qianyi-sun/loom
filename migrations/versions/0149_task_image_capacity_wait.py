@@ -38,7 +38,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("LOCK TABLE task_image_capacity_waits IN ACCESS EXCLUSIVE MODE NOWAIT")
+    # Removing the child also removes FK triggers from its parents. Acquire
+    # those DROP-time locks explicitly so even a parent reader fails fast.
+    op.execute("LOCK TABLE task_image_materializations, execution_targets, "
+               "task_image_capacity_waits IN ACCESS EXCLUSIVE MODE NOWAIT")
     op.execute("""DO $$ BEGIN
         IF EXISTS (SELECT 1 FROM task_image_capacity_waits WHERE expires_at > clock_timestamp()) THEN
             RAISE EXCEPTION 'native builder capacity waits must expire before downgrade';
