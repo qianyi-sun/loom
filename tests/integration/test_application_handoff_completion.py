@@ -1,6 +1,11 @@
 """Complete and resume the database phases against real, isolated PostgreSQL."""
 
+import os
+import socket
+import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -406,3 +411,57 @@ async def test_quiescence_retry_requires_retirement_in_other_databases(transfer_
             with pytest.raises(RuntimeError, match="client work"):
                 _quiescence_retry_admitted(maintenance, **authority)
         assert _quiescence_retry_admitted(maintenance, **authority)
+
+
+@pytest.mark.asyncio
+async def test_disconnected_queued_writer_still_blocks_handoff(transfer_database):  # noqa: F811
+    """A closed controller socket does not retire PostgreSQL's accepted SQL."""
+    from loom.application_handoff_completion import _quiescence_retry_admitted
+
+    with _closed(transfer_database) as (peer, maintenance, guard, arguments):
+        authority = {key: arguments[key] for key in ("target", "handoff_backend", "coordination_guard")}
+        authority["provisioner"] = next(role for role, alias in arguments["role_bindings"].items() if alias == "provisioner")
+        original_guard = guard.info.backend_pid
+        role = "queued_disconnect_" + uuid4().hex[:12]
+        peer.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(role)))
+        try:
+            with psycopg.connect(transfer_database[0], dbname=maintenance.info.dbname,
+                                 autocommit=True) as queued, ThreadPoolExecutor(max_workers=1) as executor:
+                queued_pid = queued.info.backend_pid
+                assert queued.execute("SHOW client_connection_check_interval").fetchone() == ("0",)
+                with peer.transaction():
+                    peer.execute("LOCK TABLE pg_authid IN SHARE MODE")
+                    pending = executor.submit(queued.execute,
+                        sql.SQL("ALTER ROLE {} LOGIN").format(sql.Identifier(role)))
+                    deadline = time.monotonic() + 10
+                    while maintenance.execute(
+                        "SELECT wait_event_type FROM pg_stat_activity WHERE pid=%s", (queued_pid,),
+                    ).fetchone() != ("Lock",):
+                        assert time.monotonic() < deadline, "owned probe did not queue"
+                        time.sleep(0.05)
+                    # Abruptly closing this disposable client's socket models
+                    # exec winning the race against asynchronous cancellation.
+                    with socket.socket(fileno=os.dup(queued.pgconn.socket)) as wire:
+                        wire.shutdown(socket.SHUT_RDWR)
+                    with pytest.raises(psycopg.OperationalError):
+                        pending.result(timeout=5)
+                    assert maintenance.execute(
+                        "SELECT wait_event_type FROM pg_stat_activity WHERE pid=%s", (queued_pid,),
+                    ).fetchone() == ("Lock",)
+                    with pytest.raises(RuntimeError, match="client work"):
+                        _quiescence_retry_admitted(maintenance, **authority)
+                # The original guard remains usable while the accepted SQL
+                # commits after unlock; disconnected is not equivalent to cancelled.
+                deadline = time.monotonic() + 10
+                while maintenance.execute(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=%s)", (queued_pid,),
+                ).fetchone() != (False,):
+                    assert time.monotonic() < deadline, "owned probe backend did not finish"
+                    time.sleep(0.05)
+                assert maintenance.execute(
+                    "SELECT rolcanlogin FROM pg_roles WHERE rolname=%s", (role,),
+                ).fetchone() == (True,)
+                assert guard.info.backend_pid == original_guard
+                assert _quiescence_retry_admitted(maintenance, **authority)
+        finally:
+            peer.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
