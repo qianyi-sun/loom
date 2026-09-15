@@ -25,6 +25,15 @@ async def test_execution_journal_has_durable_cross_revision_one_use_fence(
                 "WHERE conrelid='task_image_execution_starts'::regclass AND contype='f'"
             ))).scalars())
             assert any("(grant_id, revision, claim_id)" in item for item in definitions)
+            audit_parents = set((await connection.execute(text(
+                "SELECT confrelid::regclass::text FROM pg_constraint "
+                "WHERE conrelid='task_image_execution_grants'::regclass AND contype='f'"
+            ))).scalars())
+            # Historical signed identity must not become a permanent live
+            # worker/trial retention pin. Admission independently locks them.
+            assert audit_parents == {
+                "task_image_publication_jobs", "task_image_publication_keysets",
+            }
     finally:
         await engine.dispose()
 
