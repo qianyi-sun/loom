@@ -748,3 +748,44 @@ async def test_accounting_refresh_defers_bad_archive_and_preserves_cancellation(
     with pytest.raises(asyncio.CancelledError):
         await materializer.reconcile_accounting_once(now=now + timedelta(seconds=61))
     assert materializer._accounting_retry_after == {}
+
+
+@pytest.mark.parametrize("agent", ["direct-completion", "terminus-2"])
+def test_compiler_opts_only_isolated_terminus_into_timeout_verification(agent: str) -> None:
+    task = _task(
+        agent={"name": agent, "timeout_sec": 900},
+        verifier={
+            "name": "script",
+            "args": {"script_path": "verifier/check.sh"},
+            "timeout_sec": 1200,
+        },
+    )
+    controller = "registry.example/controller@sha256:" + "9" * 64
+    profile = _profile().model_copy(
+        update={
+            "agent_image_ref": controller,
+            "image_admission": signed_image_admission_bundle(
+                (_TASK_IMAGE, _RUNTIME_IMAGE, controller)
+            ),
+        }
+    )
+    trial = _trial().model_copy(update={"agent_name": agent})
+    plan = compile_service_execution_plan(
+        task=task,
+        trial=trial,
+        profile=profile,
+        source_provenance=_provenance(),
+        task_revision_sha256=_REVISION,
+    )
+    assert plan.main.timeout_seconds == 900
+    assert plan.verifier is not None and plan.verifier.timeout_seconds == 1200
+    if agent == "terminus-2":
+        assert plan.canonical_payload()["verifier_after_agent_timeout"] is True
+        assert plan.agent_image_ref == controller
+        assert {sidecar.role_name for sidecar in plan.sidecars if sidecar.private_sandbox} == {
+            "task-sandbox",
+            "verifier-sandbox",
+        }
+    else:
+        assert not plan.verifier_after_agent_timeout
+        assert "verifier_after_agent_timeout" not in plan.canonical_payload()

@@ -94,7 +94,7 @@ def canonical_api_job(job, *, null_defaults=False):
     for volume in pod["volumes"]:
         if "emptyDir" in volume:
             size = volume["emptyDir"]["sizeLimit"]
-            volume["emptyDir"]["sizeLimit"] = {"7168Mi": "7Gi", "4096Mi": "4Gi"}.get(size, size)
+            volume["emptyDir"]["sizeLimit"] = {"16384Mi": "16Gi", "7168Mi": "7Gi", "4096Mi": "4Gi"}.get(size, size)
     return observed
 
 
@@ -227,3 +227,36 @@ async def test_create_conflict_recovers_api_normalized_native_job(request):
     clients.job["spec"]["template"]["spec"]["volumes"][1]["emptyDir"]["sizeLimit"] = "8Gi"
     with pytest.raises(ValueError, match="differs"):
         await api.ensure(cm, job)
+
+
+def test_observation_preserves_bounded_sanitized_pod_and_job_diagnostics():
+    _, job = receipt_job()
+    message = 'Usage of EmptyDir volume "builder-tmp" exceeds the limit "7Gi". token=pod-secret '
+    job["pods"][0]["status"].update(phase="Failed", reason="Evicted", message=message)
+    job["status"] = {"failed": 1, "conditions": [{
+        "type": "Failed", "status": "True", "reason": "BackoffLimitExceeded",
+        "message": 'password=job-secret Authorization: Bearer bearer-secret ' + "x" * 4000,
+        "unknown": "must-not-store",
+    }]}
+    result = build_observation(job)
+    assert result["pod_status"]["reason"] == "Evicted"
+    assert "exceeds the limit" in result["pod_status"]["message"]
+    assert result["job_conditions"][0]["reason"] == "BackoffLimitExceeded"
+    assert len(result["job_conditions"][0]["message"]) <= 2000
+    encoded = json.dumps(result)
+    for secret in ("pod-secret", "job-secret", "bearer-secret", "must-not-store"):
+        assert secret not in encoded
+
+
+def test_native_diagnostic_redacts_quoted_keys_urls_and_multiline_credentials():
+    _, job = receipt_job()
+    job["pods"][0]["status"].update(reason="Evicted", message=(
+        '{"api_key": "quoted-private", "token": "token-private"}\n'
+        'password="private with spaces"\n'
+        'https://user:pass@registry.example/private '
+        'https://store.example/path?X-Amz-Signature=signed-private '
+        'Authorization: Bearer bearer-private'
+    ))
+    encoded = json.dumps(build_observation(job))
+    for secret in ("quoted-private", "token-private", "private with spaces", "user:pass", "signed-private", "bearer-private"):
+        assert secret not in encoded
