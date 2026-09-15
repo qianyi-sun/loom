@@ -305,16 +305,21 @@ def test_cnpg_queued_role_retirement_preserves_original_guard(cnpg_probe, replac
         assert _query(guard, f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid={old_pid} AND wait_event_type='Lock')") == "t"
         if replace_manager:
             _replace_manager(argv, kube, pod, expected_manager=expected_manager)
+            # Context cancellation and exec do not synchronously retire SQL
+            # already accepted by PostgreSQL. Keep the guard while allowing
+            # that work to finish; handoff separately requires SQL quiescence.
+            assert _query(guard, "SELECT rolcanlogin FROM pg_roles WHERE rolname='queued_probe'") == "f"
+        assert _query(blocker, "ROLLBACK; SELECT 'unlocked'") == "unlocked"
+        if replace_manager:
             _eventually(
                 lambda: _query(guard, f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid={old_pid})"),
-                lambda value: value == "f", "old queued SQL backend survived exec", seconds=30,
+                lambda value: value == "f", "old queued SQL backend did not retire after unlock", seconds=30,
             )
-        assert _query(blocker, "ROLLBACK; SELECT 'unlocked'") == "unlocked"
-        expected_login = "f" if replace_manager else "t"
-        _eventually(
-            lambda: _query(guard, "SELECT rolcanlogin FROM pg_roles WHERE rolname='queued_probe'"),
-            lambda value: value == expected_login, "unexpected queued role outcome", seconds=30,
-        )
+        else:
+            _eventually(
+                lambda: _query(guard, "SELECT rolcanlogin FROM pg_roles WHERE rolname='queued_probe'"),
+                lambda value: value == "t", "removing desired role unexpectedly retired queued SQL", seconds=30,
+            )
         after = _query(guard, "SELECT pg_backend_pid() || '|' || pg_postmaster_start_time() || '|' || EXISTS(SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='advisory' AND granted)")
         assert after == before
 
