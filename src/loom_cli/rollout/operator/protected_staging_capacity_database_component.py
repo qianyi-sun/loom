@@ -111,12 +111,12 @@ _AUTHORITY_REBIND_ACTIVITY_TABLES = (
     "protected_runtime_trial_submissions",
     "trial_attempts",
     "trial_requirements",
-    "trial_retry_mutation_permits",
+    "trial_mutation_permits",
     "trial_writer_mutations",
 )
 _AUTHORITY_REBIND_ACTIVITY_UNION = " UNION ALL ".join(
     "SELECT 1 AS present FROM "
-    + ("ONLY " if table_name == "trial_retry_mutation_permits" else "")
+    + ("ONLY " if table_name == "trial_mutation_permits" else "")
     + f"loom_capacity_guard.{table_name}"
     for table_name in _AUTHORITY_REBIND_ACTIVITY_TABLES
 )
@@ -126,7 +126,7 @@ _RETRY_PERMIT_RELATION_PREDICATE = """
       JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
       JOIN pg_catalog.pg_roles AS owner ON owner.oid = relation.relowner
       WHERE namespace.nspname = 'loom_capacity_guard'
-        AND relation.relname = 'trial_retry_mutation_permits'
+        AND relation.relname = 'trial_mutation_permits'
         AND relation.relkind = 'r' AND relation.relpersistence = 'p'
         AND NOT relation.relispartition AND owner.rolname = 'loom_cap_staging_owner'
         AND NOT EXISTS (
@@ -154,7 +154,7 @@ _AUTHORITY_REBIND_LOCK_TABLES = tuple(
     )
 )
 _AUTHORITY_REBIND_LOCK_SQL = ", ".join(
-    ("ONLY " if table_name == "trial_retry_mutation_permits" else "")
+    ("ONLY " if table_name == "trial_mutation_permits" else "")
     + f"loom_capacity_guard.{table_name}" for table_name in _AUTHORITY_REBIND_LOCK_TABLES
 )
 _REQUIRE_RETRY_PERMIT_RELATION_SQL = f"""

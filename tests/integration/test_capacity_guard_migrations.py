@@ -42,7 +42,7 @@ EXPECTED_GUARD_TABLES = {
     "trial_attempts",
     "trial_writer_fence",
     "trial_writer_mutations",
-    "trial_retry_mutation_permits",
+    "trial_mutation_permits",
     "audit_events",
     "agent_runtime_authority",
     "agent_registrations",

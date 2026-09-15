@@ -63,7 +63,7 @@ def test_maintenance_cannot_cross_an_inflight_retry_permission(
     # permission. Maintenance must refuse rather than ignore this new evidence.
     with _owner_connection(capacity_guard_database) as retry:
         retry.execute(text(
-            "LOCK TABLE loom_capacity_guard.trial_retry_mutation_permits IN ROW EXCLUSIVE MODE"
+            "LOCK TABLE loom_capacity_guard.trial_mutation_permits IN ROW EXCLUSIVE MODE"
         ))
         with pytest.raises(DBAPIError) as busy:
             with _owner_connection(capacity_guard_database) as maintenance:
@@ -93,18 +93,18 @@ async def test_retry_maintenance_does_not_read_or_lock_foreign_descendants(
             if drift == "descendant":
                 admin.exec_driver_sql(
                     "CREATE TABLE foreign_scope.retry_child () INHERITS "
-                    "(loom_capacity_guard.trial_retry_mutation_permits)"
+                    "(loom_capacity_guard.trial_mutation_permits)"
                 )
             else:
                 admin.exec_driver_sql("CREATE TABLE foreign_scope.retry_child ()")
                 if drift == "ancestor":
                     admin.exec_driver_sql(
-                        "ALTER TABLE loom_capacity_guard.trial_retry_mutation_permits "
+                        "ALTER TABLE loom_capacity_guard.trial_mutation_permits "
                         "INHERIT foreign_scope.retry_child"
                     )
                 else:
                     admin.exec_driver_sql(
-                        "ALTER TABLE loom_capacity_guard.trial_retry_mutation_permits OWNER TO CURRENT_USER"
+                        "ALTER TABLE loom_capacity_guard.trial_mutation_permits OWNER TO CURRENT_USER"
                     )
         with engine.begin() as foreign:
             foreign.exec_driver_sql("LOCK TABLE ONLY foreign_scope.retry_child IN ACCESS EXCLUSIVE MODE")
