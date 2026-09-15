@@ -538,6 +538,21 @@ no-resume control: rollout must independently prove retirement of older replicas
 SQL sessions, service/family/pipeline controllers, lifecycle jobs, and host writers.
 It does not itself establish fleet writer closure.
 
+The cutover's Kubernetes retirement fence denies restarts of the fixed legacy
+service, family, pipeline and lifecycle controllers, including their ReplicaSet,
+scale and Pod entrypoints. The successor control plane must use the pinned image,
+cutover mode and protected runtime credential file; the capacity agent must use
+its pinned image and reviewed module entrypoint. Zero-replica and suspended
+endpoints remain admissible. The enclosing installed cutover must retain the
+policy identities, verify enforcement, census unowned credential consumers and
+retire old processes and SQL sessions before publishing writer closure.
+Maintenance-guard acquisition, release and orphan recovery preserve a lifecycle
+retirement only after reading the exact denying policy/binding and completed
+policy type checking. A CronJob annotation alone cannot establish retirement.
+The guard clears its own annotations and releases its database lock while keeping
+the retired CronJob suspended. Policy-writer exclusion remains required; these
+rules do not protect their own removal. They are not yet installed by the cutover.
+
 Protected pre-start heartbeats authenticate the credential, live claim, worker
 incarnation, and optional execution lease in one transaction. A frozen-writer
 permission allows only `pre_start_heartbeat_at` to change while the trial is
@@ -1722,8 +1737,7 @@ cutover command and runtime retirement composition.
 This interception is not complete cutover authority. The enclosing installed freeze
 caller must compose: public table-owner credential sealing, private protected-transition
 permits and terminal/retry continuity, bound-writer configuration rollover,
-durable operation reconciliation, and the other mutation domains must be
-completed before activation. A frozen trial domain currently rejects ordinary
+durable operation reconciliation, and the other mutation domains before activation. A frozen trial domain currently rejects ordinary
 trial mutations; installing its schema is not evidence of global autoscaling.
 
 The base guard remains disabled at allocation epoch zero. Its ordinary

@@ -1765,7 +1765,9 @@ def test_guard_cli_preserves_kubernetes_timeout_and_tightly_bounds_systemctl(
 
 class _RetiredLifecycleCluster(_Cluster):
     def __init__(self) -> None:
-        from loom_cli.rollout.operator.protected_legacy_writer_fence import render_legacy_writer_fence
+        from loom_cli.rollout.operator.protected_legacy_writer_fence import (
+            render_legacy_writer_fence,
+        )
 
         super().__init__()
         self.retirement = "c" * 64
@@ -1817,3 +1819,32 @@ def test_guard_refuses_unproved_permanent_retirement(tmp_path: Path, drift: str)
     with pytest.raises(MutationGuardError):
         _hold(tmp_path, cluster)
     assert not cluster.events
+
+
+def test_guard_preserves_retirement_committed_during_maintenance(tmp_path: Path) -> None:
+    cluster = _RetiredLifecycleCluster()
+    annotations = cast(dict[str, object], cast(dict[str, object], cluster.cronjob["metadata"])["annotations"])
+    annotations.pop("loom.dev/legacy-writer-retirement")
+    cast(dict[str, object], cluster.cronjob["spec"])["suspend"] = False
+    config = _config(tmp_path)
+
+    def retired_after_ready() -> bool:
+        if not guard_evidence_path(config, _REQUEST_ID).exists():
+            return False
+        annotations["loom.dev/legacy-writer-retirement"] = cluster.retirement
+        return True
+
+    evidence = _hold(tmp_path, cluster, stop_requested=retired_after_ready)
+    assert evidence.state == "released"
+    assert cast(dict[str, object], cluster.cronjob["spec"])["suspend"] is True
+    assert "restore" not in cluster.events
+    assert cluster.events[-1] == "unlock"
+
+
+def test_orphan_guard_release_preserves_permanent_retirement(tmp_path: Path) -> None:
+    cluster = _RetiredLifecycleCluster()
+    _annotate_guard(cluster)
+    result = _reconcile_guard(config=_config(tmp_path), cluster=cluster, show_guard=lambda _: None)
+    assert result == {"request_id": _REQUEST_ID, "status": "restored"}
+    assert cast(dict[str, object], cluster.cronjob["spec"])["suspend"] is True
+    assert "restore" not in cluster.events

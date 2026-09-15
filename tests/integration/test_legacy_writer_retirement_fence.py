@@ -56,8 +56,13 @@ def test_old_writers_cannot_resume_but_exact_successor_can_run():
             time.sleep(0.1)
         for document in documents:
             if document["kind"] == "ValidatingAdmissionPolicy":
-                policy = admission.read_validating_admission_policy(document["metadata"]["name"])
-                assert not policy.status.type_checking.expression_warnings
+                while True:
+                    policy = admission.read_validating_admission_policy(document["metadata"]["name"])
+                    if policy.status is not None and policy.status.type_checking is not None:
+                        assert not policy.status.type_checking.expression_warnings
+                        break
+                    assert time.monotonic() < deadline, "policy type checking did not finish"
+                    time.sleep(0.1)
         for name in ("loom-service", "loom-family-orchestrator", "loom-pipeline-orchestrator"):
             with pytest.raises(ApiException) as refused:
                 apps.create_namespaced_deployment("loom-staging", _deployment(name), dry_run="All")
@@ -68,6 +73,28 @@ def test_old_writers_cannot_resume_but_exact_successor_can_run():
             assert refused.value.status == 403
         successor = _deployment("loom-control-plane", cutover=True)
         apps.create_namespaced_deployment("loom-staging", successor, dry_run="All")
+        for change in ("command", "missing-credential", "duplicate-cutover"):
+            invalid = copy.deepcopy(successor)
+            worker = invalid["spec"]["template"]["spec"]["containers"][0]
+            if change == "command":
+                worker["command"] = ["python", "-m", "loom_service"]
+            elif change == "missing-credential":
+                worker["env"].pop()
+            else:
+                worker["env"].append({"name": "LOOM_CP_PROTECTED_TRIAL_CUTOVER_ENABLED", "value": "false"})
+            with pytest.raises(ApiException) as refused:
+                apps.create_namespaced_deployment("loom-staging", invalid, dry_run="All")
+            assert refused.value.status == 403
+        for cutover in (False, True):
+            replica = _deployment("loom-control-plane", cutover=cutover)
+            replica["kind"] = "ReplicaSet"
+            replica["metadata"].update({"name": "loom-control-plane-abcdef", "labels": {"app": "loom-control-plane"}})
+            if cutover:
+                apps.create_namespaced_replica_set("loom-staging", replica, dry_run="All")
+            else:
+                with pytest.raises(ApiException) as refused:
+                    apps.create_namespaced_replica_set("loom-staging", replica, dry_run="All")
+                assert refused.value.status == 403
         apps.create_namespaced_deployment("foreign", _deployment("loom-control-plane"), dry_run="All")
         apps.patch_namespaced_deployment_scale("loom-service", "loom-staging", {"spec": {"replicas": 0}}, dry_run="All")
         # A prior ReplicaSet or direct old Pod cannot evade Deployment admission.
@@ -88,6 +115,15 @@ def test_old_writers_cannot_resume_but_exact_successor_can_run():
         assert refused.value.status == 403
         job["spec"]["suspend"] = True
         batch.create_namespaced_job("loom-staging", job, dry_run="All")
+        cronjob = {"apiVersion": "batch/v1", "kind": "CronJob",
+                   "metadata": {"name": "loom-staging-data-lifecycle"},
+                   "spec": {"schedule": "*/5 * * * *", "suspend": False,
+                            "jobTemplate": {"spec": copy.deepcopy(job["spec"])}}}
+        with pytest.raises(ApiException) as refused:
+            batch.create_namespaced_cron_job("loom-staging", cronjob, dry_run="All")
+        assert refused.value.status == 403
+        cronjob["spec"]["suspend"] = True
+        batch.create_namespaced_cron_job("loom-staging", cronjob, dry_run="All")
     finally:
         client.Configuration.set_default(original)
         container.stop()

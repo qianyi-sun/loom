@@ -41,6 +41,7 @@ from .envelope import fixed_operator_config_path
 from .model import validate_safe_identifier
 from .policy import sanitized_child_environment
 from .protected_application_guard_retention import application_guard_is_retained
+from .protected_legacy_writer_fence import lifecycle_retirement_documents
 from .readonly_database_client import (
     READONLY_DATABASE_STATEMENT_TIMEOUT_SECONDS,
     READONLY_DATABASE_TUNNEL_TEARDOWN_BOUND_SECONDS,
@@ -694,6 +695,47 @@ def _wait_until_inactive(
     raise MutationGuardError("lifecycle active Job did not finish within the guard bound")
 
 
+def _lifecycle_is_retired(config: OperatorConfig, run: KubernetesRunner, cronjob: _CronJob) -> bool:
+    """Preserve retirement only with exact, typechecked, denying live policy objects.
+
+    An annotation alone is insufficient. The enclosing cutover retains the policy
+    identities and excludes policy writers; guard release never removes that fence.
+    """
+    intent = cronjob.annotations.get("loom.dev/legacy-writer-retirement")
+    if intent is None:
+        return False
+    try:
+        documents = lifecycle_retirement_documents(intent)
+    except ValueError as exc:
+        raise MutationGuardError("lifecycle retirement annotation is invalid") from exc
+    for desired in documents:
+        kind = desired["kind"]
+        resource = ("validatingadmissionpolicies.admissionregistration.k8s.io" if kind == "ValidatingAdmissionPolicy"
+                    else "validatingadmissionpolicybindings.admissionregistration.k8s.io")
+        expected = _mapping(desired["metadata"], "lifecycle retirement metadata")
+        observed = _run_json(run, [*_kubectl_prefix(config), "get", resource, str(expected["name"]),
+            "--output=json", "--request-timeout=30s"], "lifecycle retirement policy")
+        metadata = _mapping(observed.get("metadata"), "lifecycle retirement metadata")
+        uid = metadata.get("uid")
+        if (
+            observed.get("apiVersion") != desired["apiVersion"] or observed.get("kind") != kind
+            or observed.get("spec") != desired["spec"]
+            or metadata.get("name") != expected["name"]
+            or metadata.get("annotations") != expected["annotations"]
+            or metadata.get("generation") != 1 or type(metadata.get("generation")) is not int
+            or not isinstance(uid, str) or _UID_RE.fullmatch(uid) is None
+            or metadata.get("deletionTimestamp") is not None
+            or metadata.get("ownerReferences", []) != []
+        ):
+            raise MutationGuardError("lifecycle retirement policy drifted")
+        if kind == "ValidatingAdmissionPolicy":
+            status = _mapping(observed.get("status"), "lifecycle retirement policy status")
+            checking = _mapping(status.get("typeChecking"), "lifecycle retirement policy type checking")
+            if status.get("observedGeneration") != 1 or checking.get("expressionWarnings", []) != []:
+                raise MutationGuardError("lifecycle retirement policy is not typechecked")
+    return True
+
+
 def _restore_cronjob(
     config: OperatorConfig,
     run: KubernetesRunner,
@@ -707,7 +749,10 @@ def _restore_cronjob(
     if current.uid != uid:
         raise MutationGuardError("lifecycle CronJob UID authority drifted during release")
     guard_state = _guard_annotation_state(current)
-    if not current.suspended and not guard_state:
+    retired = _lifecycle_is_retired(config, run, current)
+    if retired and not current.suspended:
+        raise MutationGuardError("retired lifecycle CronJob unexpectedly resumed")
+    if current.suspended == retired and not guard_state:
         return
     if guard_state != _guard_annotations(request_id, candidate_sha, candidate_tree):
         raise MutationGuardError("lifecycle CronJob guard annotation authority drifted")
@@ -715,10 +760,11 @@ def _restore_cronjob(
         config,
         run,
         resource_version=current.resource_version,
-        suspend=False,
+        suspend=retired,
         annotations={key: None for key in _GUARD_ANNOTATIONS},
     )
-    if restored.uid != uid or restored.suspended or _guard_annotation_state(restored):
+    if (restored.uid != uid or restored.suspended != retired or _guard_annotation_state(restored)
+            or _lifecycle_is_retired(config, run, restored) != retired):
         raise MutationGuardError("lifecycle CronJob release verification failed")
 
 
@@ -1167,8 +1213,9 @@ def reconcile_orphaned_guard(
     cronjob = _load_cronjob(config, run)
     annotations = _guard_annotation_state(cronjob)
     if not annotations:
-        if cronjob.suspended:
-            raise MutationGuardError("lifecycle CronJob is suspended without guard annotations")
+        retired = _lifecycle_is_retired(config, run, cronjob)
+        if cronjob.suspended != retired:
+            raise MutationGuardError("lifecycle CronJob suspension contradicts guard or retirement authority")
         return {"status": "idle"}
     if set(annotations) != _GUARD_ANNOTATIONS:
         raise MutationGuardError("lifecycle CronJob guard annotations are incomplete")
@@ -1321,8 +1368,11 @@ def hold_request_guard(
         raise MutationGuardError(
             "lifecycle CronJob is already annotated; annotation authority is occupied"
         )
-    if initial.suspended:
+    retired = _lifecycle_is_retired(config, run, initial)
+    if initial.suspended and not retired:
         raise MutationGuardError("lifecycle CronJob is already suspended")
+    if retired and not initial.suspended:
+        raise MutationGuardError("retired lifecycle CronJob unexpectedly resumed")
     restored = False
     acquired = False
     unsafe_loss = False
