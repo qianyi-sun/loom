@@ -11,9 +11,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import UUID, uuid5
 
-from sqlalchemy import func, select, true, update
+from sqlalchemy import func, select, text, true, update
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from loom_capacity_manager.contracts import (
     MICROTOKENS_PER_LAUNCH,
@@ -67,7 +67,10 @@ from loom_capacity_manager.executable_contracts import (
 )
 from loom_capacity_manager.grant_contracts import ReservationShapeV1
 from loom_capacity_manager.launch_subject_contracts import (
+    APPLICATION_ALLOCATION_OBSERVATION_TTL,
+    CurrentApplicationAllocationV3,
     ExecutableLaunchSubjectV3,
+    canonical_current_application_allocation_bytes,
     canonical_launch_subject_bytes,
 )
 from loom_capacity_manager.membership_contracts import ExecutionPreparationV3
@@ -361,6 +364,27 @@ async def _database_now(session: AsyncSession) -> datetime:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+@asynccontextmanager
+async def _application_observation_transaction(session: AsyncSession) -> AsyncIterator[None]:
+    """Fresh, bounded readback; contention requires retry of the entire read."""
+    if session.in_transaction() or (
+        isinstance(session.bind, AsyncConnection) and session.bind.in_transaction()
+    ):
+        raise CapacityStoreError("application allocation observation requires a fresh owned transaction")
+    if session.new or session.dirty or session.deleted:
+        raise CapacityStoreError("application allocation observation requires a clean session")
+    session.expire_all()
+    try:
+        async with _write_transaction(session):
+            await session.execute(text("SET LOCAL lock_timeout = '1000ms'"))
+            await session.execute(text("SET LOCAL statement_timeout = '5000ms'"))
+            yield
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) in {"55P03", "57014"}:
+            raise CapacityStoreError("application allocation observation timed out; retry the whole observation") from exc
+        raise
 
 
 def _context_matches(
@@ -1197,6 +1221,117 @@ class CapacityExecutionStore:
             )
             canonical_launch_subject_bytes(result)
             return result
+
+    async def current_application_allocation(
+        self,
+        session: AsyncSession,
+        executor: PreparedExecutorBindingV2,
+        *,
+        intent_id: UUID,
+        management: CapacityManagementStore,
+    ) -> CurrentApplicationAllocationV3:
+        """Observe an already consumed application intent, without admitting work.
+
+        Own the fresh SERIALIZABLE transaction through commit. Authority and
+        executor locks precede the intent, matching permit consumption. No
+        latest-plan/headroom/rate check: this allocation is already charged.
+        Current execution, subject, purpose and exact consumed permit remain
+        mandatory. Unknown or closing state cannot authorize host preparation.
+        """
+        # expire_on_commit=False must not turn a fresh SQL snapshot into stale
+        # authority through retained identity-map objects.
+        async with _application_observation_transaction(session):
+            observed_at = cast(datetime, await session.scalar(select(func.transaction_timestamp())))
+            authority = await self._lock_authority(session)
+            epoch = await self._lock_current_epoch(session, authority)
+            initial = await session.scalar(select(CapacityExecutableIntent).where(
+                CapacityExecutableIntent.intent_id == intent_id,
+            ))
+            if initial is None:
+                raise ExecutionConflictError("application allocation intent is unknown")
+            binding = ExecutableIntentBindingV2.model_validate_json(json.dumps(initial.binding_payload))
+            if (
+                binding.intent_id != intent_id
+                or binding.pool_id != executor.pool_id
+                or binding.pool_generation != executor.pool_generation
+                or binding.executor_id != executor.executor_id
+                or binding.executor_incarnation != executor.executor_incarnation
+            ):
+                raise ExecutionConflictError("application allocation executor binding changed")
+            context = await self._locked_execution_context(session, binding.execution, executor)
+            row = await self._locked_intent(session, intent_id)
+            await management.execution_authority(session)
+            if (
+                canonical_executable_digest(binding) != row.binding_digest
+                or row.state not in {"submitting-unknown", "bound", "observed"}
+                or row.observed_state not in {None, "pending", "active"}
+                or row.permit_consumed_at is None
+                or row.permit_payload is None
+                or row.released_at is not None
+                or row.terminal_evidence_sha256 is not None
+                or (row.state == "observed" and (
+                    row.terminal_kind != "slurm-job" or row.terminal_identity is None
+                ))
+                or (row.terminal_kind is not None and row.terminal_kind != "slurm-job")
+                or ((row.terminal_kind is None) != (row.terminal_identity is None))
+            ):
+                raise ExecutionConflictError("application allocation requires a live consumed intent")
+            permit = ExecutableLaunchPermitV2.model_validate_json(json.dumps(row.permit_payload))
+            if (
+                permit.binding != binding
+                or permit.permit_id != row.permit_id
+                or permit.permit_epoch != row.permit_epoch
+                or permit.expires_at != row.permit_expires_at
+                or canonical_executable_digest(permit) != row.permit_digest
+                or permit.bootstrap_registration_epoch != row.bootstrap_registration_epoch
+                or permit.bootstrap_evidence_sha256 != row.bootstrap_evidence_sha256
+            ):
+                raise ExecutionConflictError("application allocation consumed permit changed")
+            receipts = (await session.scalars(select(CapacityExecutableCommandReceipt).where(
+                CapacityExecutableCommandReceipt.execution_epoch == binding.execution.execution_epoch,
+                CapacityExecutableCommandReceipt.executor_incarnation == binding.executor_incarnation,
+                CapacityExecutableCommandReceipt.operation_kind == "permit-consumption",
+                CapacityExecutableCommandReceipt.result_payload["intent_id"].astext == str(intent_id),
+            ))).all()
+            if len(receipts) != 1:
+                raise ExecutionConflictError("application allocation consumption receipt is unavailable")
+            receipt = receipts[0]
+            consumption = ExecutablePermitConsumptionV2(
+                binding=binding, permit_id=permit.permit_id,
+                permit_digest=canonical_executable_digest(permit),
+                command_sequence=receipt.command_sequence,
+            )
+            expected_result = {"permit_id": str(permit.permit_id), "intent_id": str(intent_id), "executable": True}
+            if (
+                receipt.request_digest != canonical_executable_digest(consumption)
+                or receipt.result_payload != expected_result
+                or receipt.result_digest != _payload_digest(expected_result)
+                or receipt.command_sequence > context.executor.command_high_water
+            ):
+                raise ExecutionConflictError("application allocation consumption receipt changed")
+            allocation = await self._allocation_for_binding(session, binding)
+            resolved = await resolve_allocation_launch_subject(
+                session, epoch, allocation, subject_id=binding.subject_id, require_current=True,
+            )
+            if resolved.authority.purpose != "application-worker":
+                raise ExecutionConflictError("application allocation excludes builder purpose")
+            try:
+                result = CurrentApplicationAllocationV3(
+                    subject=ExecutableLaunchSubjectV3(
+                        binding=binding, configuration=resolved.configuration,
+                        acknowledgement=resolved.acknowledgement, authority=resolved.authority,
+                    ),
+                    permit=permit, permit_consumed_at=row.permit_consumed_at,
+                    observed_slurm_job_id=row.terminal_identity,
+                    observed_at=observed_at,
+                    expires_at=min(observed_at + APPLICATION_ALLOCATION_OBSERVATION_TTL, context.executor.lease_expires_at),
+                )
+                canonical_current_application_allocation_bytes(result)
+            except ValueError as exc:
+                raise ExecutionConflictError("application allocation observation is invalid") from exc
+            if await _database_now(session) >= result.expires_at:
+                raise ExecutionConflictError("application allocation observation expired")
+        return result
 
     async def next_pool_work(
         self,

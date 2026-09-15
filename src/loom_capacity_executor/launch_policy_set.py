@@ -100,6 +100,8 @@ def validate_typed_runtime_profiles(
             or profile.pool_id != policy.pool_id or profile.pool_generation != policy.pool_generation
         ):
             raise ValueError("typed launch profile set differs from controller policy")
+        if profile.native_execution is not None and entries[digest] != "application-worker":
+            raise ValueError("native task-image execution requires application-worker purpose")
         observed.add(digest)
     if observed != set(entries):
         raise ValueError("typed launch profile set is incomplete")
