@@ -85,7 +85,11 @@ from loom_task_image_authority.execution_delivery import SignedWorkClaim, TaskIm
 from loom_task_image_authority.execution_grant import verify_execution_grant
 from loom_worker.artifact_input_journal import allocatable_capacity
 from loom_worker.config import WorkerSettings
-from loom_worker.control_plane_client import HttpControlPlaneClient, StepTokenClient
+from loom_worker.control_plane_client import (
+    HttpControlPlaneClient,
+    StepTokenClient,
+    validate_task_image_execution_origin,
+)
 from loom_worker.gpu_capabilities import (
     GpuCapabilityProbeError,
     build_worker_capability_snapshot,
@@ -534,6 +538,10 @@ async def run_worker(
     pipeline_run: Callable[[ExecutionAttemptClaimV1], Coroutine[Any, Any, None]] | None = None,
     execution_trust: WorkerExecutionTrust | None = None,
 ) -> None:
+    if execution_trust is not None:
+        # Protect registration/claim bearer credentials as well as the later
+        # online receipt. Enabling V2 on the legacy HTTP default is forbidden.
+        validate_task_image_execution_origin(str(settings.control_plane_url))
     state = ShutdownState()
     install_signal_handlers(state)
     # Evaluate the controller-owned containment binding before registration,

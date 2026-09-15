@@ -21,7 +21,9 @@ The opt-in `run_worker(execution_trust=...)` assembly takes an independently
 release-pinned execution root and purpose/campaign. No environment discovery,
 claim payload or registry response installs that root. It requires the
 authenticated shared-queue path; the legacy body-capability endpoint cannot
-enable it. Default worker assembly and existing V1 claims remain unchanged.
+enable it. The assembly rejects a non-HTTPS control-plane URL before registration
+or other worker effects, protecting the bearer used by both claim and start.
+Default worker assembly and existing V1 claims remain unchanged.
 
 `TaskImageExecutionDelivery` carries bounded original grant, plan, publication
 and keyset envelopes plus the scheduler-stamped legacy claim identity. The
@@ -42,7 +44,11 @@ content checks do not protect a concurrently writable shared directory.
 `LocalTrialRunner` invokes the supplied start authorization before factories,
 bridges, model launch, token rotation or sidecars. The consumer verifies the
 original evidence and source before and after one bounded online request.
-Only a canonical, exact-request-bound fresh `201` receipt is accepted. Redirects,
+Only a canonical, exact-request-bound fresh `201` receipt is accepted over HTTPS
+at the exact configured control-plane origin. Plain HTTP, embedded URL credentials,
+query/fragment overrides and a differently based injected client are rejected
+before sending a worker token. The unsigned receipt relies on server-authenticated
+TLS; a valid signed grant cannot authenticate a forged online reply. Redirects,
 ambiguous/oversized replies, changed source, expired evidence and lost responses
 fail closed. Both runner and consumer mark the start attempted before awaiting:
 cancellation, timeout, replay and concurrent calls cannot retry potentially

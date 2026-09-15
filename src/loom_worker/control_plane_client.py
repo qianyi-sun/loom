@@ -35,6 +35,17 @@ _MAX_STEP_TOKEN_TTL_SEC = 30_000
 _STEP_TOKEN_DEADLINE_GRACE_SEC = 300
 
 
+def validate_task_image_execution_origin(base_url: str) -> httpx.URL:
+    """Require server-authenticated authority before any trusted-worker token use."""
+    origin = httpx.URL(base_url)
+    if (
+        origin.scheme != "https" or not origin.host
+        or origin.userinfo or origin.query or origin.fragment
+    ):
+        raise ValueError("online execution start requires an authenticated HTTPS origin")
+    return origin
+
+
 def _parse_wall_clock_timestamp(value: object, *, field_name: str) -> datetime:
     if not isinstance(value, str):
         raise ValueError(f"{field_name} must be an RFC 3339 string")
@@ -419,8 +430,11 @@ class HttpControlPlaneClient:
         never a generic 200/idempotency replay. No redirect can select an issuer.
         """
         _ = request.digest
+        origin = validate_task_image_execution_origin(self.base_url)
         client, owned = self._http()
         try:
+            if str(client.base_url).rstrip("/") != str(origin).rstrip("/"):
+                raise ValueError("online execution start client origin differs from configuration")
             async with client.stream(
                 "POST", f"/trials/{request.claim.trial_id}/task-image/start",
                 headers=self.request_headers,

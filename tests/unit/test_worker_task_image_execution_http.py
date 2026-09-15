@@ -104,6 +104,6 @@ async def test_start_requires_authenticated_configured_origin_before_sending_tok
     ) as http:
         client = HttpControlPlaneClient(configured, "worker-token", _client=http)
         subject = consumer(tmp_path, payload, kwargs, client.consume_task_image_execution_start)
-        with pytest.raises(ValueError, match="HTTPS|origin"):
+        with pytest.raises(ValueError, match=r"HTTPS|origin"):
             await subject.authorize()
     assert sent == []

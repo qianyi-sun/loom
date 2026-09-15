@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import UUID
 
@@ -161,3 +162,18 @@ async def test_release_trust_cannot_enable_legacy_body_capability_claims(tmp_pat
             vllm_registry=WorkerVLLMRegistry(enabled=False), execution_trust=trust,
         )
     assert cp.mock_calls == []
+
+
+async def test_release_trust_rejects_http_before_worker_registration(tmp_path, monkeypatch):
+    _, kwargs = evidence(tmp_path)
+    m = importlib.import_module("loom_worker.task_image_execution")
+    trust = m.WorkerExecutionTrust(
+        root=kwargs["trust_root"], purpose="production", shadow_campaign_id=None,
+    )
+    effects = Mock(side_effect=AssertionError("worker assembly must not start"))
+    monkeypatch.setattr(ml, "install_signal_handlers", effects)
+    with pytest.raises(ValueError, match="HTTPS"):
+        await ml.run_worker(
+            SimpleNamespace(control_plane_url="http://cp.example"), execution_trust=trust,
+        )
+    effects.assert_not_called()
