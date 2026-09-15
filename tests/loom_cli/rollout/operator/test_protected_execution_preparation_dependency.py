@@ -40,6 +40,7 @@ def test_dependency_guard_accepts_only_exact_live_configuration_and_execution_au
     guard = ProtectedExecutionPreparationDependencyGuard(
         desired_configuration_source=lambda _plan: desired,
         authority_source=authority_source,
+        legacy_controller_source=lambda _plan: "d" * 64,
     )
 
     digest = guard(fixture.plan, artifact)
@@ -70,10 +71,39 @@ def test_dependency_guard_rejects_configuration_or_signed_witness_drift(
         ProtectedExecutionPreparationDependencyGuard(
             desired_configuration_source=lambda _plan: fixture.desired,
             authority_source=lambda _desired: fixture.authority,
+            legacy_controller_source=lambda _plan: "d" * 64,
         )(fixture.plan, artifact)
 
     with pytest.raises(ValueError, match="authority drifted"):
         ProtectedExecutionPreparationDependencyGuard(
             desired_configuration_source=lambda _plan: desired,
             authority_source=lambda _desired: stale_witness,
+            legacy_controller_source=lambda _plan: "d" * 64,
         )(fixture.plan, artifact)
+
+
+@pytest.mark.parametrize("failure", ["absent", "zero", "malformed", "drift", "active"])
+def test_preparation_and_activation_require_stable_live_legacy_controller_retirement(tmp_path, failure):
+    fixture = _source_fixture(tmp_path)
+    artifact = fixture.store.read(fixture.source.publish(fixture.lease))
+    desired = derive_protected_staging_capacity_configuration(
+        active_document=_active_document(fixture.desired.fleet, fixture.desired.subjects),
+        seed_values=fixture.seed_values,
+        target_generation=fixture.plan.starting_mutation_epoch + 1,
+    )
+    calls = []
+    def retired(plan):
+        assert plan == fixture.plan
+        calls.append("retirement")
+        if failure == "active":
+            raise RuntimeError("legacy controller active")
+        return {"absent": None, "zero": "0" * 64, "malformed": "x" * 64,
+                "drift": "a" * 64 if len(calls) == 1 else "b" * 64}[failure]
+    guard = ProtectedExecutionPreparationDependencyGuard(
+        desired_configuration_source=lambda _plan: desired,
+        authority_source=lambda _desired: fixture.authority,
+        legacy_controller_source=retired,
+    )
+    with pytest.raises((ValueError, RuntimeError), match="legacy controller"):
+        guard(fixture.plan, artifact)
+    assert len(calls) == (2 if failure == "drift" else 1)

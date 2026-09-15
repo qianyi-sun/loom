@@ -959,6 +959,19 @@ def test_schema_seven_dispatch_binds_both_fixed_controller_prerequisite_transpor
         "gb10": gb10_prepared,
     }
     assert staging_capacity.execution_preparation_dependency_guard is dependency_guard
+    retirement_builds = []
+    def retirement_component(**kwargs):
+        retirement_builds.append(kwargs)
+        return SimpleNamespace(observe_retirement=lambda bound: {"plan_digest": bound.plan_digest,
+            "execution_host": kwargs["execution_host"]})
+    monkeypatch.setattr(installed_module, "ProtectedExternalSupervisorComponent", retirement_component, raising=False)
+    retirement_source = dependency_guard_build["legacy_controller_source"]
+    assert callable(retirement_source)
+    assert len(retirement_source(plan)) == 64
+    assert {item["execution_host"] for item in retirement_builds} == {"gx10-01c7", "TRT-EAI-OLDLAB-1"}
+    for item in retirement_builds:
+        assert item["candidate_root"] == config.runner_repo
+        assert item["transport"] is captured["external_supervisor_transports"][item["execution_host"]]
     desired_source = dependency_guard_build["desired_configuration_source"]
     assert callable(desired_source)
     assert desired_source(plan) is desired_result
