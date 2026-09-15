@@ -445,6 +445,50 @@ async def test_fail_closed_and_bounded_observation_failure(
     assert "secret-fixture-token" not in caplog.text
 
 
+@pytest.mark.parametrize("category", ["timeout", "database", "other"])
+async def test_admission_failure_logs_only_fixed_error_category(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture, category: str,
+) -> None:
+    audit = DispatchAudit(
+        dispatch_audit._RequestAudit(),
+        AuthContext(token_hash=b"", type="step", scopes=["llm:call"],
+                    team_id=uuid4(), expires_at=None, trial_id=uuid4(),
+                    step_id="main", step_jwt_id=uuid4()),
+        "openai", None, "model_call",
+    )
+    secret = "private-driver-bind-value"
+
+    @asynccontextmanager
+    async def unavailable():
+        if category == "timeout":
+            await asyncio.Event().wait()
+        if category == "database":
+            raise IntegrityError("private SQL", {"token": secret}, RuntimeError(secret))
+        raise RuntimeError(secret)
+        yield
+
+    monkeypatch.setattr(dispatch_audit, "_AUDIT_TIMEOUT_SECONDS", 0.02)
+    audit.state.session_factory = unavailable
+
+    async def forbidden():
+        pytest.fail("failed receipt admission must prevent transport")
+
+    with pytest.raises(DispatchAuditUnavailableError, match="audit unavailable"):
+        await audit.send(forbidden, deadline=None)
+    assert audit.state.receipt_ids == []
+    records = [record for record in caplog.records
+               if "gateway_dispatch_admission_failed" in record.getMessage()]
+    assert len(records) == 1
+    assert records[0].getMessage() == (
+        f"gateway_dispatch_admission_failed request_id={audit.state.request_id} "
+        f"error_category={category}"
+    )
+    assert records[0].exc_info is None
+    assert secret not in caplog.text
+    assert "private SQL" not in caplog.text
+
+
 async def test_legacy_and_pipeline_subjects_not_fabricated(audit_setup: tuple) -> None:
     audit, request = audit_setup
     request.scope["_loom_dispatch_auth"] = replace(audit.ctx, trial_id=None, step_id=None)

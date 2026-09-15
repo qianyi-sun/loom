@@ -513,7 +513,7 @@ These observations are not trusted reference artifacts or ownership-transfer
 receipts. The runtime package now bundles separate PostgreSQL-major-bound
 legacy-owner and sealed-owner references for the reviewed pairs
 `0134` / `guard_0030`, `0142` / `guard_0035`, `0147` / `guard_0035` and
-`0147` / `guard_0036`, and current `0148` / `guard_0036`.
+`0147` / `guard_0036`, `0148` / `guard_0035`, and current `0148` / `guard_0036`.
 The 0142 pair includes the publication/keyset, task-source, personal
 membership, incarnation-storage and build-platform objects introduced by
 application migrations `0135`–`0142`. The 0147 pair additionally includes

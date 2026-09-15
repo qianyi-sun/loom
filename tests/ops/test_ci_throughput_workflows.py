@@ -2058,10 +2058,11 @@ def test_root_test_shard_timeout_has_bounded_growth_headroom() -> None:
 def test_integration_shard_timeout_has_bounded_growth_headroom() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
 
-    # Run34920843738 shard1 reached only71% at its60-minute job limit while
-    # making normal progress through the expanded PostgreSQL handoff tests.
-    # Keep a bounded completion/coverage/cleanup budget for every selected test.
-    assert 85 <= workflow["jobs"]["integration"]["timeout-minutes"] <= 90
+    # Run35011189004 shard2 exhausted 90 minutes while still progressing at70%.
+    # The remaining suffix took nine minutes in run34925212036. Preserve every
+    # test and allow bounded headroom for growth, coverage and runner variation;
+    # per-test timeouts remain unchanged.
+    assert 110 <= workflow["jobs"]["integration"]["timeout-minutes"] <= 120
 
 
 def test_ci_supports_merge_queue_merge_group_event() -> None:

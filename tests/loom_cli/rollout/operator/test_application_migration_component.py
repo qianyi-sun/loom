@@ -152,7 +152,7 @@ def test_runtime_prerequisite_runs_before_any_credential_generation(tmp_path, mo
     assert events[-1] == "close"
 
 
-@pytest.mark.parametrize("target_revision", ["0142", "0147"])
+@pytest.mark.parametrize("target_revision", ["0142", "0147", "0148"])
 def test_installed_component_retains_guard_prerequisite_in_original_migration_journal(tmp_path, monkeypatch, target_revision):
     from contextlib import nullcontext
 
@@ -203,9 +203,9 @@ def test_installed_component_retains_guard_prerequisite_in_original_migration_jo
     def run(lifecycle):
         assert lifecycle.migration.intent == migration.intent
         lifecycle.runtime.prepare_generation(1)
-        assert calls == (["compatibility"] if target_revision == "0147" else [])
+        assert calls == (["compatibility"] if target_revision in {"0147", "0148"} else [])
         lifecycle.runtime.prepare_generation(1)
-        assert calls == (["compatibility", "compatibility"] if target_revision == "0147" else [])
+        assert calls == (["compatibility", "compatibility"] if target_revision in {"0147", "0148"} else [])
         raise RuntimeError("installed prerequisite verified")
     monkeypatch.setattr(module.ApplicationMigrationLifecycle, "run", run)
     def apply(_):
@@ -221,4 +221,4 @@ def test_installed_component_retains_guard_prerequisite_in_original_migration_jo
     with pytest.raises(RuntimeError, match="installed prerequisite verified"):
         journal.execute(plan, [prior, replace(component, apply=apply,
             classify=lambda _: ComponentObservation(ComponentState.READY, "e" * 64, plan.starting_mutation_epoch + 1))])
-    assert migration.read_claim_compatibility() == (binding if target_revision == "0147" else None)
+    assert migration.read_claim_compatibility() == (binding if target_revision in {"0147", "0148"} else None)

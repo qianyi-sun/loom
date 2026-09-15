@@ -76,7 +76,7 @@ async def _observe_fresh_database(
     application_head, guard_head = application_schema_revisions(revision)
     factory = (
         BaselineReferenceDatabase if revision == "0134/guard_0030" else
-        TrialWriterBaselineReferenceDatabase if revision in {"0142/guard_0035", "0147/guard_0035"} else
+        TrialWriterBaselineReferenceDatabase if guard_head == "guard_0035" else
         PsycopgPersonalDevCapacityDatabase
     )
     sealed = profile in {"sealed-owner", "staging-readonly-sealed-owner", "cnpg-staging-sealed-owner", "cnpg-staging-executor-admission"}
@@ -390,7 +390,7 @@ async def _build_profiles() -> dict[str, object]:
         "cnpg-staging-sealed-owner",
         "cnpg-staging-executor-admission",
     )
-    revisions: tuple[ApplicationSchemaRevision, ...] = ("0148/guard_0036", "0147/guard_0036", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030")
+    revisions: tuple[ApplicationSchemaRevision, ...] = ("0148/guard_0036", "0148/guard_0035", "0147/guard_0036", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030")
     for major in (16, 17):
         result[str(major)] = {
             revision: {

@@ -38,7 +38,7 @@ ApplicationSchemaProfile = Literal[
     "cnpg-staging-sealed-owner",
     "cnpg-staging-executor-admission",
 ]
-ApplicationSchemaRevision = Literal["0148/guard_0036", "0147/guard_0036", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"]
+ApplicationSchemaRevision = Literal["0148/guard_0036", "0148/guard_0035", "0147/guard_0036", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"]
 
 ApplicationSchemaAclProfile = Literal["application-only", "staging-readonly", "cnpg-staging"]
 
@@ -138,6 +138,25 @@ def application_schema_reference(
             "a4457cf147a7d554b8f81aae84f29d167d8ba95c8387154ac3af4e7f8b2f6958",
         ),
     }
+    if revision == "0148/guard_0035":
+        digests = {
+            16: (
+                "715c86c712d51b7d9df1884894dd8844147ea22ca57eb8948f5205e7bd5e8af7",
+                "3acd63531654cc3e2838a80e0310b0599782c3b1b1b97fe5bdc772b56bcbef89",
+                "02350ad6e3a9d329af15c0318ec000a31f7277b93bc7627826fa2d277543bec1",
+                "f2aec22201d949fef464b2bf2b13110c442cd675073bfa1f9d83f499933985ed",
+                "1f489c96e79cc9913f7f5425217338f2381587b0869be1ec5fc01222ae713dbf",
+                "2f6ee33de89fe2d381ff16ef2a14b87881cc12be63f0325374d9e01f201402d5",
+            ),
+            17: (
+                "08fa6337f448ecc40c438fb1f0fdbe6587a10e50909e037a2c5cf877e4515eec",
+                "85a5434b00240a9defb25258027841a5be7b0f680068b0e0f555ff654d7a9e98",
+                "946abb6e13217df38e69481db21a0af2c6be7a0610cb5e290fa662b82ce611c9",
+                "6e12a995d18c343b657ec74eedf8495ae8cbf923debcee7ca3cd8cd1eb2b1568",
+                "d73dbe9514bf0a1765f4eb21eab595ed1d94ffdc6f1f3a4a6de4ee8c0d14d67f",
+                "455997397e451a262e3462c12e0b0072c410c99789a158ea2a19b4784ca9b630",
+            ),
+        }
     # Retained guard_0035 provisioning and its original public grants.
     if revision == "0147/guard_0035":
         digests = {
@@ -224,7 +243,7 @@ def application_schema_reference(
         guard_head=guard_head,
         postgres_image=image,
         postgres_major=postgres_major,
-        object_count={"0148/guard_0036": 7319, "0147/guard_0036": 7232, "0147/guard_0035": 7232, "0142/guard_0035": 7227, "0134/guard_0030": 6736}[revision]
+        object_count={"0148/guard_0036": 7319, "0148/guard_0035": 7319, "0147/guard_0036": 7232, "0147/guard_0035": 7232, "0142/guard_0035": 7227, "0134/guard_0030": 6736}[revision]
         + (0 if profile in {"legacy-owner", "staging-readonly-legacy-owner", "cnpg-staging-legacy-owner"} else 2),
         inventory_sha256=digests[postgres_major][profiles.index(profile)],
     )
@@ -250,6 +269,8 @@ def application_schema_revisions(revision: ApplicationSchemaRevision) -> tuple[s
     """Only reviewed migration pairs can select a reference recipe."""
     if revision == "0148/guard_0036":
         return "0148", "guard_0036"
+    if revision == "0148/guard_0035":
+        return "0148", "guard_0035"
     if revision == "0147/guard_0036":
         return "0147", "guard_0036"
     if revision == "0147/guard_0035":
@@ -267,6 +288,8 @@ def application_schema_revision(
     """Select using a protected original checkpoint, never a new live observation."""
     if (public_revision, guard_revision) == ("0148", "guard_0036"):
         return "0148/guard_0036"
+    if (public_revision, guard_revision) == ("0148", "guard_0035"):
+        return "0148/guard_0035"
     if (public_revision, guard_revision) == ("0147", "guard_0036"):
         return "0147/guard_0036"
     if (public_revision, guard_revision) == ("0147", "guard_0035"):
