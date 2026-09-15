@@ -509,13 +509,15 @@ These observations are not trusted reference artifacts or ownership-transfer
 receipts. The runtime package now bundles separate PostgreSQL-major-bound
 legacy-owner and sealed-owner references for the reviewed pairs
 `0134` / `guard_0030`, `0142` / `guard_0035`, `0147` / `guard_0035` and
-`0147` / `guard_0036`.
+`0147` / `guard_0036`, and current `0148` / `guard_0036`.
 The 0142 pair includes the publication/keyset, task-source, personal
 membership, incarnation-storage and build-platform objects introduced by
-application migrations `0135`–`0142`. The current 0147 pair additionally includes
+application migrations `0135`–`0142`. The 0147 pair additionally includes
 the reviewed build-grant constraint, reward backfill, zero-quota constraint and
-native build observation and refundable legacy-claim identity changes. Older reference pins remain available for
-their explicit historical revisions. The trial-writer migration follows the
+native build observation and refundable legacy-claim identity changes. The current 0148 pair additionally covers the signed task-image execution revision
+and one-use start journals. Its six public profiles and executor-admission
+profile are independently provisioned twice on each PostgreSQL major. Older
+reference pins remain available for their explicit historical revisions. The trial-writer migration follows the
 native-reader fence (`guard_0031`), typed-terminal importer (`guard_0032`) and
 refundable-admission compatibility (`guard_0033`);
 it does not replace either upstream security boundary. Both PostgreSQL
@@ -527,7 +529,10 @@ PostgreSQL 16/17 pins. The retained `0142` and `0147` / `guard_0035` profiles us
 original role-convergence recipe in `scripts/application_schema_trial_writer_baseline.py`;
 current grants cannot silently change a rollback reference.
 
-The control-plane `protected_trial_cutover_enabled` setting requires the protected
+The staging control-plane renderer enables `protected_trial_cutover_enabled`
+with its existing private protected runtime database credential. Credential-free
+rehearsals remove the exact reviewed flag together with that credential projection;
+drifted or duplicate flags refuse conversion. The setting requires the protected
 runtime database credential. It disables the legacy crash/retry sweepers, pool
 autoscaler, Slurm controller, live-preview reconciler, and service-execution
 scheduler/materializer. Mutation routes use an explicit allowlist for existing
@@ -1423,10 +1428,20 @@ manager jobs, control processes, populated child cgroups, delegation, changed
 drop-ins, or a changed unit definition refuse retirement evidence. Fixed OLDLAB
 and GB10 transports expose this read without changing existing canonical records.
 The GB10 broker must be refreshed from the reviewed merged source to admit the
-new operation. This evidence covers the two staging trial-pool supervisor
+new operation. The committed staging profile disables both legacy trial-pool
+supervisors and their legacy scaling policies while keeping the two independent
+builder supervisors enabled. Explicit retained inactivity preserves allocation
+authority checks when materializing controller prerequisites; it cannot excuse
+an enabled legacy scaling policy.
+Existing protected unit transitions own timer shutdown and process stop; the
+separate process observation must still verify their result. This evidence covers the two staging trial-pool supervisor
 processes only; timer shutdown and previously accepted Slurm/SQL work still need
 their own retirement evidence. Independent builder services are not stopped by
-this operation.
+this operation. Ordinary trial-supervisor transitions also preserve a healthy
+builder when both retained endpoints contain identical active service/timer
+bytes. This avoids scheduling extra builder work during retirement or recovery;
+changed definitions and failed runtime observations still use the existing
+admission and convergence rules.
 
 Admission and ownership transfer retain strict password-absence defaults. An
 explicit `runtime_password`, recovered from the protected original credential,

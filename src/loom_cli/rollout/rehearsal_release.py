@@ -365,13 +365,14 @@ def _strip_protected_worker_runtime_bootstrap(
         for item in environment
         if item.get("name") == "LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE"
     ]
+    cutover_environment = [item for item in environment if item.get("name") == "LOOM_CP_PROTECTED_TRIAL_CUTOVER_ENABLED"]
     runtime_mounts = [item for item in mounts if item.get("name") == "protected-worker-runtime"]
     runtime_volumes = [
         item
         for item in volumes
         if item.get("name") in {"protected-worker-runtime", "protected-worker-runtime-projected"}
     ]
-    if not any((runtime_init, runtime_environment, runtime_mounts, runtime_volumes)):
+    if not any((runtime_init, runtime_environment, cutover_environment, runtime_mounts, runtime_volumes)):
         return
     expected_init = {
         "command": [
@@ -441,12 +442,17 @@ def _strip_protected_worker_runtime_bootstrap(
         deployment_name != "loom-control-plane"
         or init_containers != [expected_init]
         or runtime_environment != [expected_environment]
+        or cutover_environment not in ([], [{"name": "LOOM_CP_PROTECTED_TRIAL_CUTOVER_ENABLED", "value": "true"}])
         or runtime_mounts != [expected_mount]
         or runtime_volumes != expected_volumes
     ):
         raise ValueError("rehearsal protected worker runtime bootstrap is invalid")
     pod.pop("initContainers")
     environment.remove(runtime_environment[0])
+    # The credential-free rehearsal exercises ordinary isolated application
+    # behavior; its removed protected credential cannot authorize cutover mode.
+    for item in cutover_environment:
+        environment.remove(item)
     mounts.remove(runtime_mounts[0])
     for volume in runtime_volumes:
         volumes.remove(volume)
@@ -619,7 +625,8 @@ def _reject_protected_worker_runtime_authority(value: object) -> None:
     elif isinstance(value, list):
         for item in value:
             _reject_protected_worker_runtime_authority(item)
-    elif isinstance(value, str) and "protected-worker-runtime" in value.lower().replace("_", "-"):
+    elif isinstance(value, str) and any(marker in value.lower().replace("_", "-")
+                                      for marker in ("protected-worker-runtime", "protected-trial-cutover")):
         raise ValueError("rehearsal protected worker runtime authority is forbidden")
 
 

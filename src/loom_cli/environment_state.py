@@ -480,9 +480,13 @@ def staging_gb10_external_activation_blockers(
         blockers.append("external_slurm_allocation_authority_requirement_missing")
     if not materializes_gb10:
         blockers.append("external_slurm_gb10_materialization_required")
+    retained_gb10 = (
+        retained_inactive_valid and "gb10" in retained_inactive_pools
+        and bool(gb10_policies) and all(policy.get("enabled") is False for policy in gb10_policies)
+    )
     if len(gb10_supervisors) != 1:
         blockers.append("external_slurm_gb10_supervisor_count_invalid")
-    elif not manager_bootstrap and (
+    elif not manager_bootstrap and not retained_gb10 and (
         gb10_supervisors[0].get("enabled") is not True
         or gb10_supervisors[0].get("active") is not True
     ):

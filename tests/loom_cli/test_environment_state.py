@@ -2432,7 +2432,7 @@ def test_committed_development_profile_ships_fail_closed_supervisors() -> None:
     )
 
 
-def test_committed_staging_profile_activates_core_and_native_builder_supervisors() -> None:
+def test_committed_staging_profile_retires_trials_and_preserves_native_builder_supervisors() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables={
@@ -2452,14 +2452,14 @@ def test_committed_staging_profile_activates_core_and_native_builder_supervisors
         "task-image-builder-oldlab-staging",
     }
     assert "manager_witness_export_bootstrap" not in (profile.external_slurm_runner_prerequisites)
-    assert "retained_inactive_supervisor_pools" not in (profile.external_slurm_runner_prerequisites)
+    assert profile.external_slurm_runner_prerequisites["retained_inactive_supervisor_pools"] == ["gb10", "oldlab"]
 
     gb10 = by_name["gb10-staging"]
     assert gb10["pool_name"] == "gb10"
     assert gb10["service_name"] == "loom-autoscaler-gb10-staging.service"
     assert gb10["timer_name"] == "loom-autoscaler-gb10-staging.timer"
-    assert gb10["enabled"] is True
-    assert gb10["active"] is True
+    assert gb10["enabled"] is False
+    assert gb10["active"] is False
     assert "15451" in gb10["args"]
     assert "loom-external-slurm-autoscaler-db" in gb10["args"]
     _assert_manager_trust_arguments(gb10, pool_name="gb10")
@@ -2468,8 +2468,8 @@ def test_committed_staging_profile_activates_core_and_native_builder_supervisors
     assert oldlab["pool_name"] == "oldlab"
     assert oldlab["service_name"] == "loom-autoscaler-oldlab-staging.service"
     assert oldlab["timer_name"] == "loom-autoscaler-oldlab-staging.timer"
-    assert oldlab["enabled"] is True
-    assert oldlab["active"] is True
+    assert oldlab["enabled"] is False
+    assert oldlab["active"] is False
     assert "15448" in oldlab["args"]
     assert "service/loom-postgres-rw" in oldlab["args"]
     assert oldlab["working_directory"].startswith("/opt/loom-staging-runner/candidates/")
@@ -2870,7 +2870,8 @@ def test_staging_bootstrap_preserves_both_zero_minimum_slurm_pool_contracts() ->
     policies = {policy["pool_name"]: policy for policy in profile.autoscaler_policies}
     assert set(policies) == {"gb10", "oldlab"}
     gb10 = policies["gb10"]
-    assert gb10["enabled"] is True
+    assert gb10["enabled"] is False
+    assert gb10["disabled_reason"] == "protected_global_trial_cutover"
     assert gb10["min_slots"] == 0
     assert gb10["max_slots"] == 140
     assert gb10["actuator_config"]["candidate_sha"] == "a" * 40
@@ -2894,7 +2895,8 @@ def test_staging_bootstrap_preserves_both_zero_minimum_slurm_pool_contracts() ->
     ]
     assert gb10["actuator_config"]["max_jobs"] == 14
     oldlab = policies["oldlab"]
-    assert oldlab["enabled"] is True
+    assert oldlab["enabled"] is False
+    assert oldlab["disabled_reason"] == "protected_global_trial_cutover"
     assert oldlab["min_slots"] == 0
     assert oldlab["max_slots"] == 18
     assert oldlab["actuator_config"]["exclusive"] is False

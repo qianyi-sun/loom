@@ -10,7 +10,7 @@
 environment = "staging"
 
 # The protected manager now exports authenticated execution witnesses. Core
-# OLDLAB and GB10 supervisors consume those witnesses. Both proven exclusive
+# OLDLAB and GB10 trial supervisors are retired for global execution. Both proven exclusive
 # task-image builders are enabled as transitional native-architecture capacity
 # while the allocation-scoped rootless backend remains fail-closed.
 [[worker_pool_autoscaler_policies]]
@@ -20,7 +20,8 @@ environment = "staging"
 # workers use node 1 and nodes 3-15 while full-host readiness still covers 1-15.
 pool_name = "gb10"
 actuator = "slurm"
-enabled = true
+enabled = false
+disabled_reason = "protected_global_trial_cutover"
 min_slots = 0
 max_slots = 140
 scale_up_threshold_slots = 1
@@ -97,7 +98,8 @@ external_runner = true
 [[worker_pool_autoscaler_policies]]
 pool_name = "oldlab"
 actuator = "slurm"
-enabled = true
+enabled = false
+disabled_reason = "protected_global_trial_cutover"
 min_slots = 0
 max_slots = 18
 scale_up_threshold_slots = 1
@@ -278,6 +280,7 @@ rate_card_provider = "yibuapi"
 required = true
 
 [external_slurm_runner_prerequisites]
+retained_inactive_supervisor_pools = ["gb10", "oldlab"]
 pools = ["gb10", "oldlab"]
 expected_repo_ref = "${IMAGE_TAG}"
 require_clean_repo = true
@@ -344,8 +347,9 @@ args = [
   "--global-execution-witness-kubeconfig", "/var/lib/loom-staging-rollout/external-supervisor.kubeconfig",
   "--expected-manager-public-key-sha256", "54b44788af0dc10dc5f0a8277396a35fedf2f143b39e14d5ee35ce09b56b18cd",
 ]
-enabled = true
-active = true
+# Retired by the protected global trial-writer cutover; builders stay independent.
+enabled = false
+active = false
 
 # OLDLAB staging autoscaler supervisor. The shared working directory exists on
 # every Slurm execution node, and the `-rw` service supports kubectl
@@ -380,8 +384,9 @@ args = [
   "--global-execution-witness-kubeconfig", "/var/lib/loom-staging-rollout/external-supervisor.kubeconfig",
   "--expected-manager-public-key-sha256", "54b44788af0dc10dc5f0a8277396a35fedf2f143b39e14d5ee35ce09b56b18cd",
 ]
-enabled = true
-active = true
+# Retired by the protected global trial-writer cutover; builders stay independent.
+enabled = false
+active = false
 
 # Builder supervisors are activated per native capacity class only after every
 # policy blocker for that architecture is cleared.

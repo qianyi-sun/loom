@@ -23,6 +23,11 @@ def active_staging_profile_text() -> str:
         encoding="utf-8"
     )
     profile = profile.replace("manager_witness_export_bootstrap = true\n", "", 1)
+    profile = profile.replace('retained_inactive_supervisor_pools = ["gb10", "oldlab"]\n', "", 1)
+    for pool in ("gb10", "oldlab"):
+        profile = profile.replace(f'pool_name = "{pool}"\nactuator = "slurm"\nenabled = false',
+            f'pool_name = "{pool}"\nactuator = "slurm"\nenabled = true', 1)
+    profile = profile.replace('disabled_reason = "protected_global_trial_cutover"\n', "")
     profile = profile.replace(
         'retained_inactive_supervisor_pools = ["task-image-builder-oldlab"]\n',
         "",
@@ -38,18 +43,18 @@ def active_staging_profile_text() -> str:
         "activation_blockers = []",
         1,
     )
-    name = "task-image-builder-oldlab-staging"
-    prefix, marker, suffix = profile.partition(f'name = "{name}"')
-    if not marker:
-        raise AssertionError(f"missing committed supervisor fixture: {name}")
-    section, next_section, tail = suffix.partition("\n[[external_slurm_autoscaler_supervisors]]")
-    disabled = "enabled = false\nactive = false"
-    active = "enabled = true\nactive = true"
-    if section.count(disabled) == 1 and section.count(active) == 0:
-        section = section.replace(disabled, active, 1)
-    elif section.count(disabled) != 0 or section.count(active) != 1:
-        raise AssertionError(f"committed supervisor fixture is not canonical: {name}")
-    profile = prefix + marker + section + next_section + tail
+    for name in ("gb10-staging", "oldlab-staging", "task-image-builder-oldlab-staging"):
+        prefix, marker, suffix = profile.partition(f'name = "{name}"')
+        if not marker:
+            raise AssertionError(f"missing committed supervisor fixture: {name}")
+        section, next_section, tail = suffix.partition("\n[[external_slurm_autoscaler_supervisors]]")
+        disabled = "enabled = false\nactive = false"
+        active = "enabled = true\nactive = true"
+        if section.count(disabled) == 1 and section.count(active) == 0:
+            section = section.replace(disabled, active, 1)
+        elif section.count(disabled) != 0 or section.count(active) != 1:
+            raise AssertionError(f"committed supervisor fixture is not canonical: {name}")
+        profile = prefix + marker + section + next_section + tail
     return profile
 
 
