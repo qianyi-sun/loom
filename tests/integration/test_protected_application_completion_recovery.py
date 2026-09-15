@@ -58,7 +58,7 @@ async def test_recovery_completes_without_reclosing_a_restored_database(
 
         monkeypatch.setattr(completion, "transfer_application_ownership", refuse_once)
     password = "ab" * 16
-    plan, live = _sources(tmp_path, password=password, schema_revision="0146/guard_0033")
+    plan, live = _sources(tmp_path, password=password, schema_revision="0146/guard_0034")
     journal = _journal(tmp_path)
     for path in (tmp_path / "state", tmp_path / "state/requests", journal.attempt_root.parent.parent, journal.attempt_root.parent):
         path.chmod(0o700)

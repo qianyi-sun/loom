@@ -76,11 +76,11 @@ async def test_builder_emits_all_fixed_major_profile_pairs(monkeypatch) -> None:
     monkeypatch.setattr(builder, "build_application_schema_reference", build)
     result = await builder._build_profiles()
     assert set(result) == {"16", "17"}
-    assert build.await_count == 36
+    assert build.await_count == 48
     for major in (16, 17):
         profiles = {"legacy-owner", "sealed-owner", "staging-readonly-legacy-owner", "staging-readonly-sealed-owner", "cnpg-staging-legacy-owner", "cnpg-staging-sealed-owner"}
-        assert set(result[str(major)]) == {"0146/guard_0033", "0142/guard_0033", "0134/guard_0030"}
-        for revision in ("0146/guard_0033", "0142/guard_0033", "0134/guard_0030"):
+        assert set(result[str(major)]) == {"0146/guard_0034", "0146/guard_0033", "0142/guard_0033", "0134/guard_0030"}
+        for revision in ("0146/guard_0034", "0146/guard_0033", "0142/guard_0033", "0134/guard_0030"):
             assert set(result[str(major)][revision]) == profiles
             for profile in profiles:
                 build.assert_any_await(postgres_major=major, profile=profile, revision=revision)
