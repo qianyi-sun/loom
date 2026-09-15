@@ -79,16 +79,33 @@ class LostAcknowledgementError(RuntimeError):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("observation", ["autovacuum", "retired", "unretired"])
 @pytest.mark.parametrize("refusal", ["trigger", "trigger-code", "unrelated-code", "sessions", "prepared"])
-async def test_handoff_retries_rolled_back_quiescence_when_current_work_is_admitted(transfer_database, monkeypatch, observation, refusal):  # noqa: F811
+async def test_handoff_retries_rolled_back_quiescence_when_current_work_is_admitted(transfer_database, monkeypatch, observation, refusal, early_quiescence=False):  # noqa: F811
     from loom import application_handoff_completion as module
     from loom.application_ownership_transfer import ApplicationOwnershipTransferError
 
     transfer = module.transfer_application_ownership
     calls = []
+    injected_refusal_pending = False
+    early_refusals = []
+    if early_quiescence:
+        from loom.application_database_admission import ApplicationDatabaseAdmissionError
+
+        drained = module.require_application_database_drained
+
+        def initial_quiescence(connection, **kwargs):
+            drained(connection, **kwargs)
+            if not early_refusals:
+                early_refusals.append(1)
+                raise ApplicationDatabaseAdmissionError("application database sessions are not drained")
+
+        monkeypatch.setattr(module, "require_application_database_drained", initial_quiescence)
+
     def interrupted(connection, **kwargs):
+        nonlocal injected_refusal_pending
         transfer(connection, **kwargs)
         calls.append(1)
         if len(calls) == 1:
+            injected_refusal_pending = True
             if refusal in {"trigger-code", "unrelated-code"}:
                 code = "55L01" if refusal == "trigger-code" else "55000"
                 connection.execute(f"DO $$ BEGIN RAISE EXCEPTION 'unclassified private diagnostic' USING ERRCODE='{code}'; END $$")
@@ -101,7 +118,18 @@ async def test_handoff_retries_rolled_back_quiescence_when_current_work_is_admit
                 "USING ERRCODE='55000'; END $$")
     monkeypatch.setattr(module, "transfer_application_ownership", interrupted)
     if observation != "retired":
-        monkeypatch.setattr(module, "_quiescence_retry_admitted", lambda *args, **kwargs: observation == "autovacuum")
+        retry_admitted = module._quiescence_retry_admitted
+
+        def classify_injected_refusal(*args, **kwargs):
+            nonlocal injected_refusal_pending
+            if injected_refusal_pending:
+                injected_refusal_pending = False
+                return observation == "autovacuum"
+            # Startup/retirement observations outside our injected fault still
+            # use the real bounded classifier and original authority checks.
+            return retry_admitted(*args, **kwargs)
+
+        monkeypatch.setattr(module, "_quiescence_retry_admitted", classify_injected_refusal)
     with _closed(transfer_database) as (peer, maintenance, _guard_peer, arguments):
         if observation != "unretired" and refusal not in {"prepared", "unrelated-code"}:
             module.complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
@@ -112,6 +140,23 @@ async def test_handoff_retries_rolled_back_quiescence_when_current_work_is_admit
                 module.complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
             assert len(calls) == 1
             assert peer.execute("SELECT datdba FROM pg_database WHERE datname=current_database()").fetchone() == (arguments["target"].owner_oid,)
+    assert early_refusals == ([1] if early_quiescence else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("observation,refusal", [
+    ("unretired", "unrelated-code"),
+    ("unretired", "trigger-code"),
+    ("autovacuum", "trigger-code"),
+])
+async def test_injected_transfer_refusal_does_not_classify_preliminary_drain(
+    transfer_database, monkeypatch, observation, refusal,  # noqa: F811
+):
+    # A legitimate initial drain retry must reach the separately injected
+    # transfer failure. The classifier double represents that failure only.
+    await test_handoff_retries_rolled_back_quiescence_when_current_work_is_admitted(
+        transfer_database, monkeypatch, observation, refusal, early_quiescence=True,
+    )
 
 
 class InterruptCommit:
