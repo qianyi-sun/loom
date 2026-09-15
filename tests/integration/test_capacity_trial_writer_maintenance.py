@@ -5,9 +5,10 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
+    _AUTHORITY_REBIND_FOUNDATION_SQL,
     _AUTHORITY_REBIND_LOCK_STATEMENT,
 )
-from tests.integration.test_capacity_agent_store import _seed_trial
+from tests.integration.test_capacity_agent_store import _initialize_and_register, _seed_trial, _value
 from tests.integration.test_capacity_guard_migrations import _owner_connection
 from tests.integration.test_capacity_trial_writer_fence import _legacy_engine
 
@@ -60,3 +61,37 @@ def test_maintenance_cannot_cross_an_inflight_retry_permission(
                 maintenance.execute(text(_AUTHORITY_REBIND_LOCK_STATEMENT))
         assert busy.value.orig.sqlstate == "55P03"
         assert "could not obtain lock" in str(busy.value.orig)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["observe", "lock"])
+async def test_retry_maintenance_does_not_read_or_lock_foreign_descendants(
+    capacity_guard_database: dict[str, object], operation: str,
+) -> None:
+    from sqlalchemy import create_engine
+
+    database = capacity_guard_database
+    await _initialize_and_register(database)
+    statement = _AUTHORITY_REBIND_FOUNDATION_SQL if operation == "observe" else _AUTHORITY_REBIND_LOCK_STATEMENT
+    for kind in ("owner", "agent", "executor", "observer", "runtime"):
+        statement = statement.replace(f"'loom_cap_staging_{kind}'", "'" + _value(database, f"{kind}_role") + "'")
+    engine = create_engine(_value(database, "admin_url"))
+    try:
+        with engine.begin() as admin:
+            admin.exec_driver_sql("CREATE SCHEMA foreign_scope")
+            admin.exec_driver_sql(
+                "CREATE TABLE foreign_scope.retry_child () INHERITS "
+                "(loom_capacity_guard.trial_retry_mutation_permits)"
+            )
+        with engine.begin() as foreign:
+            foreign.exec_driver_sql("LOCK TABLE foreign_scope.retry_child IN ACCESS EXCLUSIVE MODE")
+            with engine.begin() as maintenance:
+                maintenance.exec_driver_sql("SET LOCAL lock_timeout='250ms'")
+                if operation == "observe":
+                    assert maintenance.exec_driver_sql(statement).scalar_one() == "drifted"
+                else:
+                    with pytest.raises(DBAPIError) as refusal:
+                        maintenance.exec_driver_sql(statement)
+                    assert refusal.value.orig.sqlstate == "55000"
+    finally:
+        engine.dispose()
