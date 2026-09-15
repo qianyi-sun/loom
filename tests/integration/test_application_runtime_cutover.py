@@ -65,10 +65,24 @@ def test_runtime_cutover_recovers_closed_admission_without_credential_rotation(t
 def test_runtime_cutover_refuses_privileged_foreign_client_before_completion(transfer_database):  # noqa: F811
     from loom.application_runtime_cutover import close_application_runtime_for_cutover
 
-    with _runtime(transfer_database) as (peer, maintenance, guard, _, arguments, options):
+    with _runtime(transfer_database) as (peer, maintenance, guard, _, arguments, _options):
         with psycopg.connect(transfer_database[0], dbname="postgres", autocommit=True) as foreign:
             with pytest.raises(RuntimeError, match="surviving or unknown"):
                 close_application_runtime_for_cutover(peer, maintenance=maintenance, **arguments)
             assert foreign.execute("SELECT 1").fetchone() == (1,)
         close_application_runtime_for_cutover(peer, maintenance=maintenance, **arguments)
         assert guard.execute("SELECT 1").fetchone() == (1,)
+
+
+def test_runtime_cutover_refuses_unrecorded_peer_before_sealing(transfer_database):  # noqa: F811
+    from loom.application_runtime_cutover import close_application_runtime_for_cutover
+
+    with _runtime(transfer_database) as (peer, maintenance, _, active, arguments, options):
+        before = _identity(peer, options["target"])
+        with psycopg.connect(transfer_database[0], autocommit=True) as replacement:
+            with pytest.raises(RuntimeError, match="peer changed"):
+                close_application_runtime_for_cutover(replacement, maintenance=maintenance, **arguments)
+        assert _identity(peer, options["target"]) == before
+        assert active.execute("SELECT 1").fetchone() == (1,)
+        assert maintenance.execute("SELECT datallowconn FROM pg_database WHERE oid=%s",
+            (options["target"].database_oid,)).fetchone() == (True,)

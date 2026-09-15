@@ -6,7 +6,9 @@ import pytest
 from psycopg import sql
 
 from loom.application_runtime_retirement import retire_application_runtime_sessions
-from tests.integration.test_application_migrator_retirement_recovery import transfer_postgres  # noqa: F401
+from tests.integration.test_application_migrator_retirement_recovery import (
+    transfer_postgres,  # noqa: F401
+)
 from tests.integration.test_application_ownership_transfer import (
     transfer_database,  # noqa: F401
     transfer_postgres_url,  # noqa: F401
