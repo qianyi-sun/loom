@@ -21,8 +21,8 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.exc import SQLAlchemyError
 
-SOURCE_REVISIONS = ("0133", "0134", "0135")
-TARGET_REVISION = "0146"
+SOURCE_REVISIONS = ("0133", "0134", "0135", "0136")
+TARGET_REVISION = "0148"
 _DEV_TABLES = (
     "gateway_dispatch_receipts",
     "task_image_publication_keys",
@@ -62,7 +62,7 @@ def inspect_lineage(connection: Connection, expected_revision: str) -> str:
         WHERE a.attrelid = to_regclass('public.task_image_materialization_attempts')
           AND a.attname = 'native_build' AND NOT a.attisdropped
     """).one_or_none()
-    if expected_revision == "0135":
+    if expected_revision in {"0135", "0136"}:
         if native is None or tuple(native) != ("jsonb", False, False, ""):
             raise ValueError("historical native_build column does not match revision 0135")
     elif native is not None:
@@ -101,7 +101,87 @@ def inspect_lineage(connection: Connection, expected_revision: str) -> str:
         or normalize(quota[0]) != normalize("CHECK (" + " AND ".join(terms) + ")")
     ):
         raise ValueError("quota constraint does not match the historical source revision")
+    _assert_native_usage(connection, expected_revision)
     return expected_revision
+
+
+def _assert_native_usage(connection: Connection, revision: str) -> None:
+    """Verify the complete additive Nebius 0136 schema before retaining it."""
+    expected_types = {
+        "execution_lease_id": "uuid",
+        "resource_generation": "integer",
+        "target_id": "text",
+        "pod_uid": "text",
+        "cpu_sampled_max_nanocores": "bigint",
+        "memory_sampled_max_bytes": "bigint",
+        "filesystem_sampled_max_bytes": "bigint",
+        "ephemeral_storage_sampled_max_bytes": "bigint",
+    }
+    columns = {
+        row[0]: tuple(row[1:])
+        for row in connection.exec_driver_sql("""
+        SELECT a.attname, format_type(a.atttypid,a.atttypmod), a.attnotnull,
+               a.atthasdef, a.attgenerated
+        FROM pg_attribute a WHERE a.attrelid=to_regclass('public.trial_resource_usage')
+          AND a.attnum>0 AND NOT a.attisdropped
+    """)
+    }
+    native = revision == "0136"
+    if columns.get("worker_id") != ("uuid", not native, False, ""):
+        raise ValueError("resource usage worker identity does not match source revision")
+    for name, type_name in expected_types.items():
+        if (native and columns.get(name) != (type_name, False, False, "")) or (
+            not native and name in columns
+        ):
+            raise ValueError("native resource usage columns do not match source revision")
+    constraints = {
+        row[0]: (row[1], row[2])
+        for row in connection.exec_driver_sql("""
+        SELECT conname, pg_get_constraintdef(oid), convalidated FROM pg_constraint
+        WHERE conrelid=to_regclass('public.trial_resource_usage')
+    """)
+    }
+    if not native:
+        if "trial_resource_usage_authority_check" in constraints:
+            raise ValueError("unexpected native resource usage authority")
+        return
+    expected_constraints = {
+        "execution_lease_id_fkey": "FOREIGN KEY (execution_lease_id) REFERENCES execution_leases(id) ON DELETE RESTRICT",
+        "authority_check": """CHECK (
+          (worker_id IS NOT NULL AND execution_lease_id IS NULL AND resource_generation IS NULL
+           AND target_id IS NULL AND pod_uid IS NULL) OR
+          (worker_id IS NULL AND execution_lease_id IS NOT NULL AND resource_generation IS NOT NULL
+           AND resource_generation > 0 AND target_id IS NOT NULL AND pod_uid IS NOT NULL))""",
+        "role_check": "CHECK (container_role = ANY (ARRAY['agent'::text,'verifier'::text,'sidecar'::text,'controller'::text,'task'::text,'pod'::text]))",
+        "source_check": "CHECK (source = ANY (ARRAY['docker_stats'::text,'provider'::text,'unsupported'::text,'kubelet_summary'::text]))",
+    }
+    expected_constraints.update(
+        {
+            name + "_check": f"CHECK ({name} >= 0)"
+            for name in expected_types
+            if "sampled_max" in name
+        }
+    )
+
+    def normalized(value: str) -> str:
+        return "".join(value.replace("(", "").replace(")", "").split())
+
+    for suffix, definition in expected_constraints.items():
+        observed = constraints.get("trial_resource_usage_" + suffix)
+        if observed is None or not observed[1] or normalized(observed[0]) != normalized(definition):
+            raise ValueError("native resource usage constraints do not match source revision")
+    index = connection.exec_driver_sql("""
+        SELECT pg_get_indexdef(i.indexrelid), i.indisvalid, i.indisready
+        FROM pg_index i WHERE i.indexrelid=to_regclass('public.trial_resource_usage_native_lease_idx')
+    """).one_or_none()
+    expected_index = "CREATE INDEX trial_resource_usage_native_lease_idx ON public.trial_resource_usage USING btree (execution_lease_id) WHERE (execution_lease_id IS NOT NULL)"
+    if (
+        index is None
+        or not index[1]
+        or not index[2]
+        or normalized(index[0]) != normalized(expected_index)
+    ):
+        raise ValueError("native resource usage index does not match source revision")
 
 
 def convert_lineage(
@@ -140,14 +220,16 @@ def convert_lineage(
     )
     inspect_lineage(connection, expected_revision)
     with Operations.context(MigrationContext.configure(connection)):
-        for number in range(133, 147):
+        for number in range(133, 149):
             revision = f"{number:04}"
             script = scripts.get_revision(revision)
             if script is None or script.down_revision != f"{number - 1:04}":
                 raise ValueError("conversion requires the pinned linear dev migration history")
-            # Only this DDL already exists at Nebius 0135. Its exact type,
-            # nullability and default were verified under the table locks.
-            if revision == "0146" and expected_revision == "0135":
+            # Retain only additions already verified under the table locks:
+            # native-build from Nebius 0135, and native usage from Nebius 0136.
+            if revision == "0146" and expected_revision in {"0135", "0136"}:
+                continue
+            if revision == "0148" and expected_revision == "0136":
                 continue
             script.module.upgrade()
     result = connection.execute(

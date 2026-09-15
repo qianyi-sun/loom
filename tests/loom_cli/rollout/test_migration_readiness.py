@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 import pytest
-from alembic.script import ScriptDirectory
 
 from loom_cli.rollout.migration_readiness import inspect_migration_plan
 

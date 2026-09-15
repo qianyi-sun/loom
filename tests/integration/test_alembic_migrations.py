@@ -12,7 +12,6 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from alembic.script import ScriptDirectory
 from sqlalchemy import CheckConstraint, create_engine, inspect, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
