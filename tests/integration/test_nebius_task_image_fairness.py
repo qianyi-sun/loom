@@ -273,7 +273,8 @@ async def test_concurrent_controller_replicas_consume_one_wait_once(waiting_buil
     assert row.attempt_count == len(attempts) == kube.ensure_calls == 1
 
 
-async def test_older_waiting_builder_wins_without_mutual_wait(waiting_build):
+@pytest.fixture
+async def two_waiting_builds(waiting_build):
     first, sessions, first_kube, image_id, builder_trial_id, _, target, now = waiting_build
     async with sessions() as session, session.begin():
         _, second_target = await _seed_ready_trial(session, now=now)
@@ -310,6 +311,12 @@ async def test_older_waiting_builder_wins_without_mutual_wait(waiting_build):
             free = placement_fixture(target_id=current.target_id, nodes=0, used_nodes=0,
                                      quota_nodes=1, parent_id="ordered-waits")
             await _record(session, current.target_id, now + timedelta(seconds=1), free)
+    return waiting_build, second, second_kube, second_image, second_target
+
+
+async def test_older_waiting_builder_wins_without_mutual_wait(two_waiting_builds):
+    waiting_build, second, second_kube, second_image, _ = two_waiting_builds
+    first, sessions, first_kube, image_id, builder_trial_id, _, _, now = waiting_build
     async with sessions() as locked, locked.begin():
         await locked.get(TaskImageMaterialization, image_id, with_for_update=True)
         await second.run_once()
@@ -327,3 +334,24 @@ async def test_older_waiting_builder_wins_without_mutual_wait(waiting_build):
     await second.run_once()
     assert second_kube.ensure_calls == 1
     assert (await rows(sessions, second_image))[0].attempt_count == 1
+
+
+@pytest.mark.parametrize("changed", ["epoch", "resources"])
+async def test_changed_claim_cannot_inherit_an_old_waiting_priority(two_waiting_builds, changed):
+    waiting_build, second, second_kube, _, second_target = two_waiting_builds
+    first, sessions, first_kube, image_id, _, _, target, _ = waiting_build
+    if changed == "epoch":
+        async with sessions() as session, session.begin():
+            (await session.get(TaskImageMaterialization, image_id)).lease_epoch += 1
+    else:
+        first.settings = first.settings.model_copy(update={"cpu_millis": 63_000})
+    await first.run_once()
+    assert first_kube.ensure_calls == 0
+    async with sessions() as session:
+        renewed = await session.get(TaskImageCapacityWait, target.target_id)
+        other = await session.get(TaskImageCapacityWait, second_target.target_id)
+        assert renewed.first_waited_at > other.first_waited_at
+    async with sessions() as locked, locked.begin():
+        await locked.get(TaskImageMaterialization, image_id, with_for_update=True)
+        await second.run_once()
+    assert second_kube.ensure_calls == 1
