@@ -227,6 +227,10 @@ def _observe(plan: FinalGatePlan, runner: ApplicationWorkloadRunner, guard: Muta
             if not isinstance(uid, str) or not isinstance(name, str):
                 raise ValueError("application workload ReplicaSet identity is invalid")
             roots[uid] = ("ReplicaSet", name)
+        elif _runtime_secret(document.get("spec")):
+            # A zero-replica or not-yet-reconciled orphan can create a client
+            # after this census; current Pod absence does not retire its input.
+            raise RuntimeError("application workload has an unowned credential-consuming ReplicaSet")
     roots.update({item.uid: (item.kind, item.name) for item in saved})
     missing_jobs = {item.uid for item in saved if item.kind == "Job" and (item.kind, item.name) not in objects}
     active = False

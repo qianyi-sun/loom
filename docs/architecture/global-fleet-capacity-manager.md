@@ -1990,7 +1990,22 @@ under the enclosing exclusive policy authority; it refuses unowned objects,
 replacement UIDs, changed policies, and disappearance of an already retained object.
 It never removes or overwrites policies, including on failure. This acquisition
 record still requires live admission probes and independent process/SQL retirement
-before it can contribute to the complete writer-freeze publication.
+before it can contribute to the complete writer-freeze publication. Fixed server
+dry runs cover all six policies and require the exact named policy/binding denial.
+Authentication, transport and unrelated admission failures never establish a fence.
+
+The workload shutdown phase uses a separate `legacy-workload-cutover-journals`
+namespace, preserving the database handoff's original restore records. It saves
+identities before compare-and-swap patches, catches late owned lifecycle Jobs,
+and requires old Pods to exit before recording retirement. Dormant unowned
+ReplicaSets referencing runtime credentials also refuse the census. A retained
+terminal is observation-only: replay cannot restore or re-pause a later successor.
+The lifecycle retirement annotation is published under the permanent fence and
+preserved on guard release. Each operation checks live guard and fence authority;
+a freshly admitted guard for the same plan, claimed epoch and CronJob can finish
+an interrupted shutdown without changing its saved workload identities. SQL/host
+retirement, successor configuration and freeze publication still require the
+enclosing installed cutover composition.
 
 The schema migration writes a canonical seed event beside its generated
 bootstrap authority UUID. A reviewed replacement requires that one pristine

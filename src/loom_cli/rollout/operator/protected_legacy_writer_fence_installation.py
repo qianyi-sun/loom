@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import ClassVar, Protocol
 from uuid import UUID
 
 from .protected_execution_preparation_journal import (
@@ -62,6 +62,8 @@ def _decode(payload: bytes) -> dict[str, object]:
 
 @dataclass(frozen=True, slots=True)
 class LegacyWriterFenceJournal(ExecutionPreparationOperationJournal):
+    allowed_records: ClassVar[frozenset[str]] = _RECORDS
+
     @property
     def root(self) -> Path:
         return self.state_root / "protected-capacity" / "legacy-writer-fence-journals" / self.request_id / str(self.attempt_number)
@@ -79,7 +81,7 @@ class LegacyWriterFenceJournal(ExecutionPreparationOperationJournal):
             _require_directory(path, service_uid=self.service_uid)
 
     def read(self, name: str) -> dict[str, object] | None:
-        if name not in _RECORDS:
+        if name not in self.allowed_records:
             raise ValueError("legacy writer fence record name is invalid")
         try:
             payload = self._read(name)
@@ -91,7 +93,7 @@ class LegacyWriterFenceJournal(ExecutionPreparationOperationJournal):
         return value
 
     def retain(self, name: str, value: dict[str, object]) -> None:
-        if name not in _RECORDS:
+        if name not in self.allowed_records:
             raise ValueError("legacy writer fence record name is invalid")
         self._publish(name, _wire(value))
 
@@ -104,9 +106,9 @@ class LegacyWriterFenceJournal(ExecutionPreparationOperationJournal):
             self._validate_directories()
             for name in self._entry_names():
                 temporary = _TEMP.fullmatch(name)
-                if name not in _RECORDS and (temporary is None or temporary.group("final") not in _RECORDS):
+                if name not in self.allowed_records and (temporary is None or temporary.group("final") not in self.allowed_records):
                     raise RuntimeError("legacy writer fence journal contains unknown records")
-            for name in _RECORDS:
+            for name in self.allowed_records:
                 if name.endswith(".terminal.json") and self.read(name) is not None and self.read(name.replace(".terminal.", ".intent.")) is None:
                     raise RuntimeError("legacy writer fence terminal lacks its intent")
             yield
