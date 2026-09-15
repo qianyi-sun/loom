@@ -157,7 +157,7 @@ async def test_pristine_current_guard_is_eligible_for_authority_rebind(
     # Only translate installation-specific role names to this isolated fixture;
     # execute the production predicate, including its unmodified revision check.
     statement = _AUTHORITY_REBIND_FOUNDATION_SQL
-    for kind in ("agent", "executor", "observer", "runtime"):
+    for kind in ("owner", "agent", "executor", "observer", "runtime"):
         statement = statement.replace(
             f"'loom_cap_staging_{kind}'",
             sql.Literal(_value(capacity_guard_database, f"{kind}_role")).as_string(),
