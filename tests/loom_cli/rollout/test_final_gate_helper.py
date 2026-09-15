@@ -269,10 +269,10 @@ def test_final_gate_helper_accepts_live_smoke_inside_claimed_epoch(
     assert '"check_id":"final.smoke"' in capsys.readouterr().out
 
 
-def _activation_documents(tmp_path, path):
+def _activation_documents(tmp_path, path, *, native=False):
     from tests.loom_cli.rollout.operator.test_protected_execution_activation import fixture
     (tmp_path / "activation-fixture").mkdir()
-    owner, _, _, _ = fixture(tmp_path / "activation-fixture")
+    owner, _, _, _ = fixture(tmp_path / "activation-fixture", native=native)
     documents = {pool: request.document for pool, request in owner.requests.items()}
     payload = json.dumps({pool: document.model_dump(mode="json") for pool, document in documents.items()}).encode()
     source = path.with_name("execution-activation-documents.json")
@@ -323,3 +323,47 @@ def test_activation_command_refuses_unbound_document_inputs(tmp_path, monkeypatc
         args += ["--documents", str(source)]
     assert helper.main(args, activate=lambda *args, **kwargs: pytest.fail("invalid input reached executor")) == 2
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("drift", [None, "hash", "path", "mode", "symlink", "missing", "extra", "no-documents", "key"])
+def test_activation_command_binds_private_native_material(tmp_path, monkeypatch, capsys, drift):
+    _, path, digest = _prepared(tmp_path, monkeypatch)
+    owner, documents, source, source_digest = _activation_documents(tmp_path, path, native=True)
+    material = {pool: request.native_delivery_material for pool, request in owner.requests.items()}
+    payload = {pool: value.to_dict() for pool, value in material.items()}
+    if drift == "missing":
+        payload.pop("oldlab")
+    elif drift == "extra":
+        payload["unbound"] = payload["gb10"]
+    elif drift == "key":
+        from loom_cli.rollout.operator.protected_native_delivery_material import NativeDeliveryMaterial
+        payload["oldlab"] = NativeDeliveryMaterial(b"a" * 64, b"b" * 64, b"c" * 64).to_dict()
+    material_path = path.with_name("execution-activation-native-material.json")
+    raw = json.dumps(payload).encode()
+    material_path.write_bytes(raw)
+    material_path.chmod(0o600)
+    material_digest = hashlib.sha256(raw).hexdigest()
+    if drift == "hash":
+        material_digest = "f" * 64
+    elif drift in {"path", "symlink"}:
+        other = material_path.with_name("unbound-material.json")
+        material_path.rename(other)
+        if drift == "path":
+            material_path = other
+        else:
+            material_path.symlink_to(other)
+    elif drift == "mode":
+        material_path.chmod(0o644)
+    calls = []
+    def activate(plan, *, documents, native_material):
+        calls.append(plan)
+        assert native_material == material
+        return owner.expected
+    args = ["activate-prepared", "--plan", str(path), "--plan-sha256", digest,
+        "--native-material", str(material_path), "--native-material-sha256", material_digest]
+    if drift != "no-documents":
+        args += ["--documents", str(source), "--documents-sha256", source_digest]
+    assert helper.main(args, activate=activate) == (0 if drift is None else 2)
+    assert len(calls) == (1 if drift is None else 0)
+    captured = capsys.readouterr()
+    assert all(value not in captured.out + captured.err for entry in payload.values() for value in entry.values())
