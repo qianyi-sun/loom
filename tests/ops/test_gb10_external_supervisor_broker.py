@@ -3830,3 +3830,51 @@ def test_active_broker_refuses_unbounded_or_unknown_material(tmp_path, field):
              "candidate_tree": "b" * 40, "operation": "converge_active_files", "active_controller": active}
     with pytest.raises(broker.BrokerError, match="active controller"):
         broker._parse_request(broker._canonical_json(value))
+
+
+@pytest.mark.parametrize("drift", ["tls-hash", "sql-hash", "missing-native", "native-executor", "noncanonical-base64"])
+def test_active_broker_refuses_material_binding_drift(tmp_path, drift):
+    from tests.loom_cli.rollout.operator.test_controller_admission import _bundle
+    from tests.loom_cli.rollout.operator.test_protected_active_controller import _request
+    from tests.ops.test_install_capacity_executor import _controller_request
+
+    request = _request(tmp_path, prerequisite=_controller_request(tmp_path, "gb10"), native=True)
+    bundle = _bundle(request.document)
+    request = replace(request, admission=bundle, document=request.document.model_copy(
+        update={"admission_directory_sha256": bundle.directory_sha256}))
+    active = json.loads(request.to_bytes())
+    if drift == "tls-hash":
+        active["document"]["native_delivery"]["identity"]["private_key"]["sha256"] = "e" * 64
+    elif drift == "sql-hash":
+        active["admission"]["entry"]["database_url_sha256"] = "e" * 64
+    elif drift == "missing-native":
+        active.pop("native_delivery_material")
+    elif drift == "native-executor":
+        active["document"]["native_delivery"]["executor_id"] = "foreign-executor"
+    else:
+        active["native_delivery_material"]["ca"] += "\n"
+    value = {"schema_version": 1, "candidate_sha": request.prepared.prerequisite.source_sha,
+             "candidate_tree": "b" * 40, "operation": "converge_active_files", "active_controller": active}
+    with pytest.raises(broker.BrokerError, match="active controller"):
+        broker._parse_request(broker._canonical_json(value))
+
+
+def test_active_broker_accepts_exact_native_file_receipt(tmp_path):
+    from tests.loom_cli.rollout.operator.test_protected_active_controller import _request
+    from tests.loom_cli.rollout.operator.test_protected_active_controller_transport import _evidence
+    from tests.ops.test_install_capacity_executor import _controller_request
+
+    request = _request(tmp_path, prerequisite=_controller_request(tmp_path, "gb10"), native=True)
+    envelope = {"active_controller": json.loads(request.to_bytes())}
+    evidence = json.loads(_evidence(request).to_bytes())
+    broker._validate_active_controller_response(evidence, request=envelope, operation="converge-active-files")
+    for drift in ("omitted", "wrong-hash", "extra"):
+        changed = json.loads(json.dumps(evidence))
+        if drift == "omitted":
+            changed["file_sha256"].pop("/etc/loom-capacity-executor/gb10-native-ca.pem")
+        elif drift == "wrong-hash":
+            changed["file_sha256"]["/etc/loom-capacity-executor/gb10-native-ca.pem"] = "e" * 64
+        else:
+            changed["file_sha256"]["/etc/unrelated"] = "e" * 64
+        with pytest.raises(broker.BrokerError, match="active controller"):
+            broker._validate_active_controller_response(changed, request=envelope, operation="converge-active-files")
