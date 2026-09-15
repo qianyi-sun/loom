@@ -477,13 +477,14 @@ native-reader fence (`guard_0031`) and typed-terminal importer (`guard_0032`);
 it does not replace either upstream security boundary. Both PostgreSQL
 majors have independently generated pins; PostgreSQL 17 uses a pinned vanilla
 17.4 image, not an observation of the live CNPG database.
-The `guard_0034` claim/retry migration changes only private guard objects. All six
+The `guard_0034` claim/retry/pending-cancellation migration changes only private guard objects. All six
 public reference profiles were independently regenerated on both majors and
 retain the `0146` / `guard_0033` public shape; the migration markers remain
 distinct and historical checkpoint selection remains explicit.
 
-After the legacy trial writer is frozen, only the credential-validated protected
-claim and retry functions can issue private, one-use mutation permissions. They bind the
+After the legacy trial writer is frozen, credential-validated protected
+claim/retry and runtime-authorized pending cancellation use private, one-use
+mutation permissions. Worker operations bind the
 transaction/backend, frozen writer/epoch/operation, registration/authority,
 trial/attempt/generation and exact worker/claim. The existing statement trigger
 requires that permission for UPDATE; the existing AFTER-row accounting trigger
@@ -499,16 +500,26 @@ Suppressed, extra-row or extra-column changes fail the transaction; quota,
 reservation, policy, family, lease, lifecycle and successor changes roll back
 with it. Validation relies on
 the attested trigger chain's transactional effects, not arbitrary externally
-side-effecting triggers. Claim and retry take the runtime lock before authentication and
-uses nonblocking conflicting locks, so a competing operation is refused and
+side-effecting triggers. Claim, retry and pending cancellation take the runtime
+lock before authentication and use nonblocking conflicting locks, so a competing operation is refused and
 must retry its whole transaction rather than deadlock during a lock upgrade.
+
+Pending cancellation does not invent a worker identity: its typed permission
+requires the actual new cancellation lifecycle transition and no worker/claim
+fields. The private issuer revalidates the bound runtime login, team scope,
+current frozen authority, exact trial/attempt/generation, workerless pending row
+and nonexecutable cancellation event/head. It permits only the cancelled state
+and the three cancellation/finish timestamps. Both unassigned and assigned but
+unclaimed trials are supported. Replay adds no lifecycle event or permission;
+the existing trusted-runtime administrator's null-team scope is unchanged.
 
 These consumed permissions remain private evidence; they do not advance the
 frozen legacy mutation ledger. Authority reassignment locks and inventories the
 permission table, and downgrade refuses retained evidence. There is no broad
 role exemption, caller-set session flag or new public trigger authority. This
-is claim/retry continuity only: it does not authorize frozen submissions, ordinary
-state/results, cancellation, demand projection or recovery, and does not by
+is claim/retry/pending-cancellation continuity only: it does not authorize frozen
+submissions, ordinary state/results, claimed-worker cancellation, demand projection
+or recovery, and does not by
 itself make the fleet ready for a live writer freeze or activation.
 
 Catalog SQL selects `daticulocale` on 16 and `datlocale` on 17 before
