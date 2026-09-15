@@ -272,3 +272,81 @@ def test_frozen_terminal_report_commits_family_decision(capacity_guard_database,
                 assert connection.execute(text("SELECT count(*) FROM loom_capacity_guard.executable_claim_terminal_events")).scalar_one() == 0
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize("frozen", [False, True])
+def test_protected_pre_start_heartbeat_updates_only_liveness(
+    capacity_guard_database, monkeypatch, tmp_path, frozen,
+):
+    database = capacity_guard_database
+    seeded = _seed_claimed_protected_trial(database, monkeypatch, tmp_path)
+    initial = asyncio.run(_initialize(database, registration=seeded.worker.registration))
+    operation = uuid4()
+    if frozen:
+        receipt = asyncio.run(_freeze(database, initial["writer_incarnation"], operation))
+    engine = create_engine(_value(database, "admin_url"))
+    try:
+        with engine.connect() as connection:
+            before = connection.execute(text(
+                "SELECT to_jsonb(trial) FROM public.trials trial WHERE id = :id"
+            ), {"id": seeded.trial_id}).scalar_one()
+        with TestClient(seeded.app, raise_server_exceptions=False) as client:
+            response = client.post(
+                f"/trials/{seeded.trial_id}/pre-start-heartbeat",
+                headers=seeded.claim_headers,
+                json={"worker_id": str(seeded.worker.worker.worker_id)},
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["trial_id"] == str(seeded.trial_id)
+        assert response.json()["pre_start_heartbeat_at"]
+        with engine.connect() as connection:
+            after = connection.execute(text(
+                "SELECT to_jsonb(trial) FROM public.trials trial WHERE id = :id"
+            ), {"id": seeded.trial_id}).scalar_one()
+            permits = connection.execute(text(
+                "SELECT operation, state FROM loom_capacity_guard.trial_mutation_permits"
+            )).all()
+        assert after.pop("pre_start_heartbeat_at") is not None
+        before.pop("pre_start_heartbeat_at")
+        assert after == before
+        assert permits == ([("heartbeat", "consumed")] if frozen else [])
+        if frozen:
+            assert asyncio.run(_freeze(database, initial["writer_incarnation"], operation)) == receipt
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("bad_input", ["credential", "extra_field", "result", "execution_lease", "execution_generation", "started"])
+def test_protected_pre_start_heartbeat_refuses_unadmitted_input(
+    capacity_guard_database, monkeypatch, tmp_path, bad_input,
+):
+    database = capacity_guard_database
+    seeded = _seed_claimed_protected_trial(database, monkeypatch, tmp_path)
+    if bad_input == "started":
+        assert asyncio.run(_report(database, seeded))["state"] == "running"
+    initial = asyncio.run(_initialize(database, registration=seeded.worker.registration))
+    asyncio.run(_freeze(database, initial["writer_incarnation"], uuid4()))
+    extra = {"state": "pre-start-heartbeat"}
+    if bad_input == "extra_field":
+        extra["unadmitted"] = True
+    elif bad_input == "result":
+        extra["result"] = {"unadmitted": True}
+    elif bad_input == "execution_lease":
+        extra["execution_lease_id"] = str(uuid4())
+    elif bad_input == "execution_generation":
+        extra["execution_generation"] = 3
+    if bad_input == "started":
+        assert asyncio.run(_report(database, seeded, extra=extra)) is None
+    else:
+        with pytest.raises(ProtectedWorkerSessionRejected):
+            asyncio.run(_report(database, seeded, extra=extra,
+                credential="wrong" if bad_input == "credential" else _WORKER_CREDENTIAL))
+    engine = create_engine(_value(database, "admin_url"))
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(text(
+                "SELECT pre_start_heartbeat_at FROM public.trials WHERE id = :id"
+            ), {"id": seeded.trial_id}).scalar_one() is None
+            assert connection.execute(text("SELECT count(*) FROM loom_capacity_guard.trial_mutation_permits")).scalar_one() == 0
+    finally:
+        engine.dispose()
