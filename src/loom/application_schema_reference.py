@@ -37,7 +37,7 @@ ApplicationSchemaProfile = Literal[
     "cnpg-staging-legacy-owner",
     "cnpg-staging-sealed-owner",
 ]
-ApplicationSchemaRevision = Literal["0146/guard_0033", "0142/guard_0033", "0134/guard_0030"]
+ApplicationSchemaRevision = Literal["0146/guard_0034", "0146/guard_0033", "0142/guard_0033", "0134/guard_0030"]
 
 ApplicationSchemaAclProfile = Literal["application-only", "staging-readonly", "cnpg-staging"]
 
@@ -185,6 +185,8 @@ def require_application_schema_reference(
 
 def application_schema_revisions(revision: ApplicationSchemaRevision) -> tuple[str, str]:
     """Only reviewed migration pairs can select a reference recipe."""
+    if revision == "0146/guard_0034":
+        return "0146", "guard_0034"
     if revision == "0146/guard_0033":
         return "0146", "guard_0033"
     if revision == "0142/guard_0033":

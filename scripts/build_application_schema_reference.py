@@ -314,7 +314,7 @@ async def build_application_schema_reference(
     }:
         raise ValueError("application schema reference profile is invalid")
     application_head, guard_head = application_schema_revisions(revision)
-    if revision == "0146/guard_0033" and (application_head, guard_head) != (_head("migrations"), _head("capacity_guard_migrations")):
+    if revision == "0146/guard_0034" and (application_head, guard_head) != (_head("migrations"), _head("capacity_guard_migrations")):
         raise RuntimeError("current application schema reference revisions require review")
     image = application_reference_postgres_image(postgres_major=postgres_major)
     with PostgresContainer(
