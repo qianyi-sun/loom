@@ -538,6 +538,70 @@ def test_installed_authority_verifies_signed_witness_after_execution_transition(
             source.capture_during_execution(desired, execution=execution)
 
 
+@pytest.mark.parametrize("boundary", ["retry", "oversleep", "capture", "readback"])
+def test_execution_witness_deadline_refuses_new_attempts_and_late_results(boundary):
+    from types import SimpleNamespace
+
+    module = _authority_module()
+    clock = [0.0]
+    attempts = []
+    manager_reads = []
+    context = object()
+
+    class Manager:
+        def get_execution_preparation_status(self):
+            manager_reads.append(clock[0])
+            if boundary == "readback" and len(manager_reads) == 3:
+                clock[0] = 30.0
+            return SimpleNamespace(readiness=SimpleNamespace(execution=context))
+
+    class Source:
+        def capture_during_execution(self, desired, *, execution):
+            assert execution is context
+            attempts.append(clock[0])
+            if boundary in {"retry", "oversleep"} and len(attempts) == 1:
+                clock[0] = 29.9
+                raise module.ExecutionWitnessPendingError("publication pending")
+            if boundary == "capture":
+                clock[0] = 30.0
+            return object()
+
+    def sleep(seconds):
+        clock[0] += seconds + (1.0 if boundary == "oversleep" else 0.0)
+
+    with pytest.raises(ValueError, match="deadline"):
+        module.capture_current_execution_authority(
+            Source(), desired=object(), manager=Manager(),
+            monotonic=lambda: clock[0], sleep=sleep,
+        )
+    assert attempts == [0.0]
+
+
+def test_execution_witness_within_deadline_keeps_exact_manager_bracket():
+    from types import SimpleNamespace
+
+    module = _authority_module()
+    context, authority = object(), object()
+    calls = []
+
+    class Manager:
+        def get_execution_preparation_status(self):
+            calls.append("manager")
+            return SimpleNamespace(readiness=SimpleNamespace(execution=context))
+
+    class Source:
+        def capture_during_execution(self, desired, *, execution):
+            assert execution is context
+            calls.append("source")
+            return authority
+
+    assert module.capture_current_execution_authority(
+        Source(), desired=object(), manager=Manager(), monotonic=lambda: 0.0,
+        sleep=lambda _: pytest.fail("no wait required for exact evidence"),
+    ) is authority
+    assert calls == ["manager", "manager", "source", "manager"]
+
+
 class _WitnessRunner:
     environment: ClassVar[dict[str, str]] = {
         "HOME": "/var/lib/loom-staging-rollout",

@@ -1118,27 +1118,38 @@ def capture_current_execution_authority(source: InstalledExecutionAuthoritySourc
     """Wait for signed publication with the full authenticated context pinned.
 
     The publisher runs every ten seconds. Only a valid immediate predecessor
-    can wait, for at most thirty seconds; no forward effects occur during wait.
+    can wait for thirty seconds; no new capture attempt begins or result is
+    accepted after that deadline. In-flight observations may finish later;
+    their late results are refused.
     Signature, freshness and epoch failures retain their immediate refusal.
     """
     before = manager.get_execution_preparation_status().readiness.execution
     deadline = monotonic() + 30.0
+
+    def remaining_budget() -> float:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise ValueError("installed execution witness did not converge before deadline")
+        return remaining
+
     while True:
+        remaining_budget()
         if manager.get_execution_preparation_status().readiness.execution != before:
             raise RuntimeError("installed execution context changed during authority capture")
+        remaining_budget()
         try:
             observed = (source(desired) if before is None
                 else source.capture_during_execution(desired, execution=before))
         except ExecutionWitnessPendingError:
+            remaining_budget()
             if manager.get_execution_preparation_status().readiness.execution != before:
                 raise RuntimeError("installed execution context changed during authority capture") from None
-            remaining = deadline - monotonic()
-            if remaining <= 0:
-                raise ValueError("installed execution witness did not converge before deadline") from None
-            sleep(min(1.0, remaining))
+            sleep(min(1.0, remaining_budget()))
             continue
+        remaining_budget()
         if manager.get_execution_preparation_status().readiness.execution != before:
             raise RuntimeError("installed execution context changed during authority capture")
+        remaining_budget()
         return observed
 
 
