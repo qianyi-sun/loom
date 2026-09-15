@@ -18,6 +18,8 @@ from loom.service_execution_materialization import (
     automatic_service_execution_rejections,
     build_service_execution_input_manifest,
     compile_service_execution_plan,
+    prepare_service_execution_input_manifest,
+    service_execution_input_binding,
 )
 from loom.trajectory.storage import FakeObjectStore
 from loom_control_plane.service_execution_materializer import (
@@ -114,6 +116,32 @@ def test_input_manifest_is_canonical_and_preserves_executable_mode(tmp_path: Pat
     ]
     assert [item.mode for item in manifest.files] == ["0644", "0755"]
     assert json.loads(manifest.canonical_bytes()) == manifest.model_dump(mode="json")
+
+
+def test_prepare_service_execution_input_manifest_binding_matches_body(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "instruction.md").write_text("hello\n", encoding="utf-8")
+    body, provenance = prepare_service_execution_input_manifest(
+        tmp_path,
+        task_checksum=_REVISION,
+        bucket="artifacts",
+        manifest_key="bench/task/service-execution-input.json",
+    )
+    binding = service_execution_input_binding(provenance)
+    assert binding is not None
+    assert binding.manifest_uri == (
+        "s3://artifacts/bench/task/service-execution-input.json"
+    )
+    assert binding.manifest_sha256 == "sha256:" + hashlib.sha256(body).hexdigest()
+    assert binding.file_count == 1
+    assert binding.total_bytes == len(b"hello\n")
+    assert "immutable_task_input_unavailable" not in automatic_service_execution_rejections(
+        _task(),
+        _trial(),
+        source_provenance=provenance,
+        allow_task_image_preparation=True,
+    )
 
 
 def test_ordinary_task_compiles_to_profile_owned_nebius_plan() -> None:

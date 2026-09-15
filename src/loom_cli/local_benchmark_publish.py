@@ -26,6 +26,9 @@ from loom.driver.task_image import (
     dockerfile_uses_runtime_arm64_fallback_base,
 )
 from loom.models.task_checksum import task_checksum
+from loom.service_execution_materialization import (
+    prepare_service_execution_input_manifest,
+)
 from loom.task_bundle_compat import (
     CompatibilitySeverity,
     collect_task_dir_compatibility_issues,
@@ -170,9 +173,6 @@ async def publish_local_benchmark(
                     metadata_digest = bundle_file_metadata_sha256(staged).removeprefix(
                         "sha256:",
                     )
-                    source_provenance = {
-                        "bundle_file_metadata_sha256": f"sha256:{metadata_digest}",
-                    }
                     prefix = _task_revision_prefix(
                         entry.id,
                         rel,
@@ -186,6 +186,25 @@ async def publish_local_benchmark(
                         prefix=prefix,
                         task_dir=staged,
                     )
+                    # #1978: same immutable input binding TaskSet materialization
+                    # attaches — keep metadata digest and add service_execution_input.
+                    manifest_key = f"{prefix}service-execution-input.json"
+                    manifest_body, sei_provenance = prepare_service_execution_input_manifest(
+                        staged,
+                        task_checksum=checksum,
+                        bucket=bucket,
+                        manifest_key=manifest_key,
+                    )
+                    await object_store.put_object(
+                        bucket=bucket,
+                        key=manifest_key,
+                        body=manifest_body,
+                    )
+                    uploaded_objects += 1
+                    source_provenance = {
+                        "bundle_file_metadata_sha256": f"sha256:{metadata_digest}",
+                        **sei_provenance,
+                    }
                 existing = await _get_task(session, task_id)
                 if existing is None:
                     inserted += 1
