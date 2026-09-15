@@ -94,3 +94,24 @@ def test_latent_unowned_replica_set_with_database_credentials_blocks_cutover(tmp
     with pytest.raises(RuntimeError, match=r"unowned.*ReplicaSet"):
         owner.retire()
     assert runner.patch_calls == []
+
+
+def test_fresh_guard_for_same_plan_can_finish_a_partial_retirement(tmp_path):
+    from dataclasses import asdict
+
+    from loom_cli.rollout.operator.staging_mutation_guard import MutationGuardEvidence
+
+    owner, _, runner, _ = fixture(tmp_path)
+    runner.fail_after = 2
+    with pytest.raises(RuntimeError, match="lost workload patch"):
+        owner.retire()
+    values = asdict(owner.guard)
+    values.pop("schema_version")
+    values.pop("evidence_digest")
+    values.update(generation="c" * 32, database_backend_pid=owner.guard.database_backend_pid + 1,
+        mutation_epoch=owner.plan.starting_mutation_epoch + 1)
+    successor = MutationGuardEvidence.build(**values)
+    checks = []
+    resumed = replace(owner, guard=successor, guard_check=lambda: checks.append(successor.generation))
+    assert len(resumed.retire()["workloads"]) == 8
+    assert checks and set(checks) == {successor.generation}
