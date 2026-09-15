@@ -20,32 +20,47 @@ from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
 # Immutable multi-platform manifest already used by the local disposable runtime.
 _BUSYBOX = "docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616"
 
+# This disposable single-pod fixture needs fixed disk headroom, not a percentage
+# of a multi-terabyte Docker host. Retain memory and inode eviction safeguards.
+# No production kubelet or host filesystem policy is changed.
+_RUNNING_SERVER_ARGS = [
+    "server", "--disable=traefik", "--disable=servicelb", "--disable=metrics-server",
+    "--disable=local-storage", "--disable=coredns",
+    "--kubelet-arg=eviction-hard=memory.available<100Mi,nodefs.available<1Gi,imagefs.available<1Gi,nodefs.inodesFree<5%,imagefs.inodesFree<5%",
+]
 
-@pytest.fixture
-async def running_storage_kubectl():
-    # Nested kubelet sees the host filesystem. Keep a fixed disk reserve so a
-    # multi-terabyte host with ample free space does not evict these tiny Pods.
-    # Preserve the default memory and inode safeguards.
-    container = DockerContainer(_K3S).with_command([
-        "server", "--disable=traefik", "--disable=servicelb", "--disable=metrics-server",
-        "--disable=local-storage", "--disable=coredns",
-        "--kubelet-arg=eviction-hard=memory.available<100Mi,nodefs.inodesFree<5%,imagefs.inodesFree<5%,"
-        "nodefs.available<2Gi,imagefs.available<2Gi",
-    ]).with_kwargs(privileged=True)
+
+async def _wait_ready_nodes(kubectl, *, timeout_seconds=120):
+    states = "unobserved"
     try:
-        await asyncio.to_thread(container.start)
-        kubectl = KubectlClient("kubectl", runner=_ContainerKubectl(container.get_wrapped_container().id))
-        async with asyncio.timeout(120):
+        async with asyncio.timeout(timeout_seconds):
             while True:
                 try:
                     reply = await kubectl.runner.run(kubectl._argv("get", "nodes", "-o", "json"), timeout_seconds=10)
                     nodes = json.loads(reply.stdout)["items"]
-                    if nodes and all(any(condition["type"] == "Ready" and condition["status"] == "True"
-                        for condition in node.get("status", {}).get("conditions", [])) for node in nodes):
-                        break
+                    wanted = {"Ready": "True", "DiskPressure": "False", "MemoryPressure": "False", "PIDPressure": "False"}
+                    observed = [{name: next((condition.get("status") for condition in node.get("status", {}).get("conditions", [])
+                        if condition.get("type") == name), None) for name in wanted} for node in nodes[:4]]
+                    # Finite labels only; no node names, messages, endpoints or raw errors.
+                    states = json.dumps([{name: value if value in {"True", "False", "Unknown"} else "unavailable"
+                        for name, value in row.items()} for row in observed], sort_keys=True)
+                    if 1 <= len(nodes) <= 4 and all(row == wanted for row in observed):
+                        return
                 except DevInstanceRuntimeError:
-                    pass
+                    states = "read-failed"
                 await asyncio.sleep(0.5)
+    except TimeoutError as error:
+        error.add_note("disposable k3s readiness: " + states)
+        raise
+
+
+@pytest.fixture
+async def running_storage_kubectl():
+    container = DockerContainer(_K3S).with_command(_RUNNING_SERVER_ARGS).with_kwargs(privileged=True)
+    try:
+        await asyncio.to_thread(container.start)
+        kubectl = KubectlClient("kubectl", runner=_ContainerKubectl(container.get_wrapped_container().id))
+        await _wait_ready_nodes(kubectl)
         yield kubectl
     finally:
         await asyncio.to_thread(container.stop)
