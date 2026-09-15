@@ -36,7 +36,10 @@ class ActiveHostRunner(FakeHostRunner):
         if call[0] == "/usr/sbin/runuser" and "--validate-activation-only" in call:
             self.calls.append(call)
             assert call[1:4] == ("--user", "loom_capacity_executor", "--")
-            assert call[5:9] == ("-I", "-B", "-m", "loom_capacity_pool_controller")
+            python_offset = 6 if call[4] == "/usr/bin/env" else 4
+            if python_offset == 6:
+                assert call[5] == "PGSSLROOTCERT=/opt/loom-capacity-executor-releases/.active-trust/postgres-ca.pem"
+            assert call[python_offset + 1:python_offset + 5] == ("-I", "-B", "-m", "loom_capacity_pool_controller")
             self.validation_hook()
             return self.validation_result
         if (
@@ -55,8 +58,12 @@ class ActiveHostRunner(FakeHostRunner):
         return super().run(argv, check=check, env=env)
 
 
-def _installed(tmp_path):
+def _installed(tmp_path, *, admission=False):
     request = _request(tmp_path)
+    if admission:
+        from tests.loom_cli.rollout.operator.test_controller_admission import _bundle
+        bundle = _bundle(request.document)
+        request = replace(request, document=request.document.model_copy(update={"admission_directory_sha256": bundle.directory_sha256}), admission=bundle)
     runner = ActiveHostRunner(tmp_path)
     runner.group_present = runner.user_present = True
     installer = ControllerInstaller(
@@ -265,3 +272,129 @@ def test_staged_inventory_refresh_propagates_prepared_context_refusal(tmp_path):
     with pytest.raises(CapacityExecutorInstallError):
         installer.refresh_active_preparation(request)
     assert not runner.enabled_units and not runner.active_units
+
+
+def test_active_installer_delivers_exact_staging_credentials_and_root_ca(tmp_path):
+    from loom_cli.rollout.operator.protected_controller_admission import ADMISSION_CA_PATH
+
+    request, installer, runner = _installed(tmp_path, admission=True)
+    assert installer.converge_active_files(request).state == "staged"
+    assert request.admission is not None
+    for absolute, expected in request.admission.files(request.document).items():
+        path = _path(tmp_path, absolute)
+        assert path.read_bytes() == expected and path.stat().st_mode & 0o777 == 0o600
+    trust = _path(tmp_path, ADMISSION_CA_PATH)
+    assert trust.read_bytes() == request.admission.ca_certificate
+    assert trust.stat().st_mode & 0o777 == 0o644
+    assert trust.stat().st_uid == installer.context.authority_uid
+    assert trust.parent.stat().st_mode & 0o777 == 0o755
+    inode = trust.stat().st_ino
+    installer.converge_active_files(request)
+    assert trust.stat().st_ino == inode and not runner.active_units
+    assert installer.enable_active_timer(request).state == "active"
+    validation = next(call for call in runner.calls if "--validate-activation-only" in call)
+    assert f"PGSSLROOTCERT={ADMISSION_CA_PATH}" in validation
+
+
+@pytest.mark.parametrize("drift", ["ca-bytes", "ca-directory", "url", "unexpected-entry"])
+def test_active_installer_refuses_changed_admission_before_timer_enable(tmp_path, drift):
+    from loom_cli.rollout.operator.protected_controller_admission import ADMISSION_CA_PATH
+
+    request, installer, runner = _installed(tmp_path, admission=True)
+    installer.converge_active_files(request)
+    assert request.admission is not None
+    trust = _path(tmp_path, ADMISSION_CA_PATH)
+    if drift == "ca-bytes":
+        trust.write_bytes(trust.read_bytes() + b"\n")
+    elif drift == "ca-directory":
+        trust.parent.chmod(0o777)
+    elif drift == "url":
+        _path(tmp_path, request.admission.entry.database_url_file).write_bytes(b"wrong")
+    else:
+        _path(tmp_path, request.document.admission_directory).joinpath("unexpected.json").write_text("{}")
+    with pytest.raises(CapacityExecutorInstallError):
+        installer.enable_active_timer(request)
+    assert not runner.active_units and not runner.enabled_units
+
+
+@pytest.mark.parametrize("cut", [0, 1, 2, 3])
+def test_admission_publication_crash_retains_credential_and_resumes(tmp_path, monkeypatch, cut):
+    request, installer, runner = _installed(tmp_path, admission=True)
+    assert request.admission is not None
+    from loom_cli.rollout.operator.protected_controller_admission import ADMISSION_CA_PATH
+    paths = [*request.admission.files(request.document), str(ADMISSION_CA_PATH), next(iter(request.files))]
+    publish = installer._publish_active_input
+    def interrupted(path, payload, **kwargs):
+        if str(path) == paths[cut]:
+            raise OSError("simulated delivery interruption")
+        return publish(path, payload, **kwargs)
+    monkeypatch.setattr(installer, "_publish_active_input", interrupted)
+    with pytest.raises(OSError, match="delivery interruption"):
+        installer.converge_active_files(request)
+    marker = _path(tmp_path, installer._active_marker_path())
+    assert marker.read_bytes() == request.to_bytes()
+    retained = {p: (_path(tmp_path, p).stat().st_ino, _path(tmp_path, p).read_bytes()) for p in paths[:cut]}
+    assert installer.observe_active(request) is None
+    assert not runner.active_units and not runner.enabled_units
+    monkeypatch.setattr(installer, "_publish_active_input", publish)
+    assert installer.converge_active_files(request).state == "staged"
+    for p, (inode, payload) in retained.items():
+        assert (_path(tmp_path, p).stat().st_ino, _path(tmp_path, p).read_bytes()) == (inode, payload)
+    assert installer.enable_active_timer(request).state == "active"
+
+
+@pytest.mark.parametrize("orphan", ["admission", "admission-credentials", "handoff"])
+def test_admission_without_retained_intent_is_rejected(tmp_path, orphan):
+    request, installer, runner = _installed(tmp_path, admission=True)
+    directory = _path(tmp_path, request.document.state_directory) / orphan
+    directory.mkdir(mode=0o700)
+    path = directory / "unbound"
+    path.write_bytes(b"unbound material")
+    with pytest.raises(CapacityExecutorInstallError, match="retained operation"):
+        installer.converge_active_files(request)
+    assert path.read_bytes() == b"unbound material"
+    assert not _path(tmp_path, installer._active_marker_path()).exists()
+    assert not runner.active_units and not runner.enabled_units
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_admission_recovers_process_death_inside_atomic_publication(tmp_path, partial):
+    import signal
+
+    request, installer, runner = _installed(tmp_path, admission=True)
+    assert request.admission is not None
+    target = _path(tmp_path, request.admission.entry.database_url_file)
+    child = os.fork()
+    if child == 0:
+        original = installer_module._publish_authority_without_replace
+        def die(directory, temporary, final):
+            if final == "staging.url":
+                if partial:
+                    descriptor = os.open(temporary, os.O_WRONLY, dir_fd=directory)
+                    os.ftruncate(descriptor, 13)
+                    os.close(descriptor)
+                os.kill(os.getpid(), signal.SIGKILL)
+            return original(directory, temporary, final)
+        installer_module._publish_authority_without_replace = die
+        try:
+            installer.converge_active_files(request)
+        finally:
+            os._exit(1)
+    _, status = os.waitpid(child, 0)
+    assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+    assert not target.exists()
+    assert len(list(target.parent.iterdir())) == 1
+    assert installer.converge_active_files(request).state == "staged"
+    assert target.read_bytes() == request.admission.database_url
+    assert list(target.parent.iterdir()) == [target]
+    assert not runner.active_units and not runner.enabled_units
+
+
+def test_exact_active_replay_never_opens_a_publication_crash_window(tmp_path, monkeypatch):
+    request, installer, runner = _installed(tmp_path, admission=True)
+    evidence = installer.converge_active_files(request)
+    def refuse(*args):
+        pytest.fail("exact replay reopened atomic publication")
+    monkeypatch.setattr(installer_module, "_publish_authority_without_replace", refuse)
+    assert installer.converge_active_files(request) == evidence
+    assert not runner.active_units and not runner.enabled_units

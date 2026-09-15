@@ -963,7 +963,7 @@ def test_policy_enabled_manager_ingress_admits_only_exact_external_client_hosts(
         if document["kind"] == "NetworkPolicy"
     }
     router_ingress = policies["capacity-manager-router-ingress"]["ingress"][0]
-    assert router_ingress["ports"] == [{"protocol": "TCP", "port": 31443}]
+    assert router_ingress["ports"] == [{"protocol": "TCP", "port": 31443}, {"protocol": "TCP", "port": 31432}]
     assert router_ingress["from"] == [
         {"ipBlock": {"cidr": "192.168.20.1/32"}},
         {"ipBlock": {"cidr": "192.168.50.13/32"}},
@@ -1094,6 +1094,11 @@ def test_policy_enabled_router_network_is_default_deny_with_exact_egress() -> No
                 {"protocol": "UDP", "port": 53},
                 {"protocol": "TCP", "port": 53},
             ],
+        },
+        {
+            "to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "loom-staging"}},
+                "podSelector": {"matchLabels": {"cnpg.io/cluster": "loom-postgres", "cnpg.io/instanceRole": "primary"}}}],
+            "ports": [{"protocol": "TCP", "port": 5432}],
         },
     ]
 
@@ -1639,3 +1644,27 @@ def test_renderer_rejects_the_nil_authority_incarnation() -> None:
             manager_image=_MANAGER_IMAGE,
             authority_incarnation=UUID(int=0),
         )
+
+
+def test_prepared_executor_database_route_is_fixed_private_and_matches_cnpg_primary():
+    documents = _policy_enabled_documents()
+    router = next(document for document in documents if document["kind"] == "Deployment"
+        and document["metadata"]["name"] == "loom-capacity-manager-router")
+    containers = router["spec"]["template"]["spec"]["containers"]
+    assert [container["name"] for container in containers] == ["router", "executor-admission"]
+    manager, database = containers
+    assert database["command"] == ["python", "-m", "loom_capacity_manager.tcp_proxy"]
+    assert database["args"] == ["--purpose", "executor-admission", *manager["args"]]
+    assert database["image"] == manager["image"] == _MANAGER_IMAGE
+    assert database["securityContext"] == manager["securityContext"]
+    assert database["ports"] == [{"name": "admission-tls", "hostPort": 31432,
+        "containerPort": 31432, "hostIP": "192.168.50.103", "protocol": "TCP"}]
+    assert database["readinessProbe"]["tcpSocket"] == {"port": 31432}
+    ingress = next(document for document in documents if document["metadata"]["name"] == "capacity-executor-admission-ingress")
+    assert ingress["metadata"]["namespace"] == "loom-staging"
+    assert ingress["spec"] == {
+        "podSelector": {"matchLabels": {"cnpg.io/cluster": "loom-postgres"}}, "policyTypes": ["Ingress"],
+        "ingress": [{"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "loom-capacity-router"}},
+            "podSelector": {"matchLabels": {"app.kubernetes.io/name": "loom-capacity-manager-router"}}}],
+            "ports": [{"protocol": "TCP", "port": 5432}]}],
+    }

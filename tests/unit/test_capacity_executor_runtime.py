@@ -765,3 +765,25 @@ def test_approved_profile_set_loader_requires_owner_only_bounded_regular_file(
     source.chmod(0o640)
     with pytest.raises(RuntimeAssemblyError, match="0600"):
         load_approved_launch_profile_set(source)
+
+
+async def test_portable_admission_entry_defers_symlink_rejection_to_controller_read(tmp_path, monkeypatch):
+    binding = launch_context_fixture().binding
+    directory = tmp_path / "admission-portable"
+    directory.mkdir(mode=0o700)
+    entry = _entry(tmp_path, binding, "alice")
+    payload = entry.model_dump_json()
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "is_symlink", lambda _: pytest.fail("portable entry touched controller filesystem"))
+        assert AdmissionBindingEntryV2.model_validate_json(payload) == entry
+    write_admission_binding_directory(directory, (entry,))
+    url = Path(entry.database_url_file)
+    target = tmp_path / "retained-url"
+    url.rename(target)
+    url.symlink_to(target)
+    resolver = RoutedExecutableAdmissionClient(directory,
+        expected_directory_sha256=canonical_admission_directory_digest(directory),
+        client_factory=lambda *args, **kwargs: pytest.fail("symlink reached database client"))
+    with pytest.raises(AdmissionBindingResolutionError, match="nonsymlink"):
+        await resolver.observe_intent(binding)
+    assert target.read_text() == _database_url("alice")

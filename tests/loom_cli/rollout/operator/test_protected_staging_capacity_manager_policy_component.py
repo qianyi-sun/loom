@@ -470,6 +470,7 @@ def test_policy_resource_builder_selects_only_bound_router_and_manager_resources
         ("Deployment", "loom-dev", "loom-capacity-manager"),
         ("Deployment", "loom-capacity-router", "loom-capacity-manager-router"),
         ("NetworkPolicy", "loom-dev", "capacity-manager-ingress"),
+        ("NetworkPolicy", "loom-staging", "capacity-executor-admission-ingress"),
         (
             "NetworkPolicy",
             "loom-capacity-router",
@@ -587,6 +588,7 @@ def test_policy_component_converges_foundations_before_private_router(
         manager_status_reader=lambda: dict(cluster.status),
     )
 
+    assert ("NetworkPolicy", "loom-staging", "capacity-executor-admission-ingress") not in cluster.resources
     assert component.classify(plan)[0] is ComponentState.READY
     component.apply(plan)
 
@@ -601,6 +603,7 @@ def test_policy_component_converges_foundations_before_private_router(
         ("Deployment", "loom-dev", "loom-capacity-manager"),
         ("Deployment", "loom-capacity-router", "loom-capacity-manager-router"),
         ("NetworkPolicy", "loom-dev", "capacity-manager-ingress"),
+        ("NetworkPolicy", "loom-staging", "capacity-executor-admission-ingress"),
         (
             "NetworkPolicy",
             "loom-capacity-router",
