@@ -509,7 +509,7 @@ def test_guard_schema_has_exact_owner_and_preserves_public_application_tables(
             revision = connection.execute(
                 text("SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version")
             ).scalar_one()
-            assert revision == "guard_0034"
+            assert revision == "guard_0035"
             public_before = capacity_guard_database["public_tables_before"]
             assert isinstance(public_before, frozenset)
             assert frozenset(inspect(connection).get_table_names(schema="public")) == public_before
@@ -984,7 +984,7 @@ def test_guard_0022_staging_submission_admission_is_reversible(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0035"
             )
     finally:
         engine.dispose()
@@ -1073,7 +1073,7 @@ def test_guard_0023_empty_downgrade_and_reupgrade_restore_runtime_surface(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0035"
             )
             for table in runtime_tables:
                 assert (
@@ -1240,7 +1240,7 @@ def test_guard_0024_terminal_closure_is_private_and_reversible(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0035"
             )
     finally:
         engine.dispose()
@@ -1573,7 +1573,7 @@ def test_guard_0026_requeue_is_trigger_only_and_reversible(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0035"
             )
     finally:
         engine.dispose()
@@ -1782,7 +1782,7 @@ def test_guard_0029_pending_cancellation_is_runtime_only_and_reversible(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0035"
             )
     finally:
         command.upgrade(cfg, "head")
@@ -1882,7 +1882,7 @@ def test_guard_0025_refuses_downgrade_with_retry_attempt_evidence(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0035"
             )
             assert (
                 connection.execute(
@@ -1982,7 +1982,7 @@ def test_guard_0021_current_assignment_routine_is_agent_only_and_reversible(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0035"
             )
     finally:
         engine.dispose()
@@ -2030,7 +2030,7 @@ def test_guard_0021_refuses_downgrade_with_abandonment_evidence(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0035"
             )
             assert (
                 connection.execute(
@@ -2069,7 +2069,7 @@ def test_guard_0021_refuses_downgrade_with_never_converged_evidence(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0035"
             )
             assert (
                 connection.execute(
@@ -2242,7 +2242,7 @@ def test_guard_0015_downgrade_restores_executor_only_observation(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0035"
             )
         with observer.connect() as connection, pytest.raises(DBAPIError) as caught:
             connection.execute(statement)
@@ -2400,7 +2400,7 @@ def test_guard_0018_downgrades_to_0016_and_reupgrades_observation_faithfully(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0035"
             )
             row = (
                 connection.execute(
@@ -2573,7 +2573,7 @@ def test_guard_0019_downgrades_to_0017_and_reupgrades_outbox_faithfully(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0035"
             )
             for signature in (read_signature, ack_signature):
                 assert (

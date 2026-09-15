@@ -1,7 +1,7 @@
 """Account and fence actual trial mutations transactionally.
 
-Revision ID: guard_0034
-Revises: guard_0033
+Revision ID: guard_0035
+Revises: guard_0034
 Create Date: 2026-09-09
 """
 
@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision: str = "guard_0034"
-down_revision: str | None = "guard_0033"
+revision: str = "guard_0035"
+down_revision: str | None = "guard_0034"
 branch_labels: str | None = None
 depends_on: str | None = None
 

@@ -2639,7 +2639,7 @@ async def test_guard_0020_downgrade_gates_new_executor_calls_before_evidence(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("starting_revision", ["guard_0030", "guard_0034"])
+@pytest.mark.parametrize("starting_revision", ["guard_0030", "guard_0035"])
 async def test_guard_0020_downgrade_does_not_deadlock_terminal_projection(
     capacity_guard_database: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,

@@ -185,7 +185,7 @@ def test_typed_terminal_import_refuses_downgrade_with_retained_evidence(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0035"
             )
             assert (
                 connection.execute(
@@ -199,7 +199,7 @@ def test_typed_terminal_import_refuses_downgrade_with_retained_evidence(
         engine.dispose()
 
 
-@pytest.mark.parametrize("starting_revision", ["guard_0032", "guard_0034"])
+@pytest.mark.parametrize("starting_revision", ["guard_0032", "guard_0035"])
 def test_downgrade_fences_an_import_already_executing_the_old_function_body(
     capacity_guard_database,
     monkeypatch,
@@ -245,7 +245,7 @@ def test_downgrade_fences_an_import_already_executing_the_old_function_body(
                     assert not future.done(), "importer completed before the intended lock fence"
                     assert time.monotonic() < deadline, "importer never reached the lock fence"
                     time.sleep(0.02)
-                if starting_revision == "guard_0034":
+                if starting_revision == "guard_0035":
                     # Trial retirement cannot keep public DDL locks while an
                     # importer holds private locks. Refuse atomically NOWAIT;
                     # the admitted importer must remain able to finish.
@@ -255,7 +255,7 @@ def test_downgrade_fences_an_import_already_executing_the_old_function_body(
                     with engine.connect() as observer:
                         assert observer.execute(text(
                             "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
-                        )).scalar_one() == "guard_0034"
+                        )).scalar_one() == "guard_0035"
                         assert observer.execute(text(
                             "SELECT count(*) FROM pg_trigger WHERE tgrelid='public.trials'::regclass "
                             "AND tgname IN ('capacity_guard_lock_trial_writer', "
@@ -265,7 +265,7 @@ def test_downgrade_fences_an_import_already_executing_the_old_function_body(
                     command.downgrade(config, "guard_0030")
             # Replacing a function does not cancel an invocation already inside
             # it. The physical table must reject its now-obsolete schema.
-            if starting_revision == "guard_0034":
+            if starting_revision == "guard_0035":
                 future.result(timeout=10)
             else:
                 with pytest.raises(DBAPIError, match="guard_terminal_inventory_schema_check"):
@@ -277,9 +277,9 @@ def test_downgrade_fences_an_import_already_executing_the_old_function_body(
                         "SELECT count(*) FROM loom_capacity_guard.executable_terminal_inventory_evidence"
                     )
                 ).scalar_one()
-                == (1 if starting_revision == "guard_0034" else 0)
+                == (1 if starting_revision == "guard_0035" else 0)
             )
-            if starting_revision == "guard_0034":
+            if starting_revision == "guard_0035":
                 assert connection.execute(text(
                     "SELECT evidence_payload FROM loom_capacity_guard.executable_terminal_inventory_evidence"
                 )).scalar_one() == payload
