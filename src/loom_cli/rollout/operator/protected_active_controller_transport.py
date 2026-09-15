@@ -27,6 +27,7 @@ _ACTIVE_OPERATIONS = frozenset(
         "observe-active",
         "converge-active-files",
         "enable-active-timer",
+        "refresh-active-preparation",
     }
 )
 
@@ -81,6 +82,11 @@ class FixedActiveControllerTransport:
 
     def converge_files(self, request: ActiveControllerRequest) -> ActiveControllerEvidence:
         evidence = self._operation("converge-active-files", request)
+        assert evidence is not None
+        return evidence
+
+    def refresh_preparation(self, request: ActiveControllerRequest) -> ActiveControllerEvidence:
+        evidence = self._operation("refresh-active-preparation", request)
         assert evidence is not None
         return evidence
 
@@ -158,6 +164,9 @@ class FixedGB10ActiveControllerTransport:
 
     def converge_files(self, request: ActiveControllerRequest) -> ActiveControllerEvidence:
         return self._transport().converge_files(request)
+
+    def refresh_preparation(self, request: ActiveControllerRequest) -> ActiveControllerEvidence:
+        return self._transport().refresh_preparation(request)
 
     def enable_timer(self, request: ActiveControllerRequest) -> ActiveControllerEvidence:
         return self._transport().enable_timer(request)
@@ -279,7 +288,7 @@ def _require_authority_sha256(value: object) -> str:
 def _evidence_matches_operation(evidence: ActiveControllerEvidence, operation: str) -> bool:
     return (
         operation == "observe-active"
-        or (operation == "converge-active-files" and evidence.state == "staged")
+        or (operation in {"converge-active-files", "refresh-active-preparation"} and evidence.state == "staged")
         or (operation == "enable-active-timer" and evidence.state == "active")
     )
 

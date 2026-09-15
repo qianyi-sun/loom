@@ -244,3 +244,24 @@ def test_retained_active_intent_fences_prepared_enable_and_lives_outside_service
     with pytest.raises(CapacityExecutorInstallError, match="retained active operation"):
         installer.enable_prepared_timer(request.prepared)
     assert not runner.enabled_units
+
+
+def test_staged_activation_can_refresh_prepared_inventory_without_restart(tmp_path):
+    request, installer, runner = _installed(tmp_path)
+    staged = installer.converge_active_files(request)
+    assert installer.refresh_active_preparation(request) == staged
+    assert runner.prepared_ticks == 1
+    assert not runner.enabled_units and not runner.active_units
+    installer.enable_active_timer(request)
+    with pytest.raises(CapacityExecutorInstallError, match="staged"):
+        installer.refresh_active_preparation(request)
+    assert runner.prepared_ticks == 1
+
+
+def test_staged_inventory_refresh_propagates_prepared_context_refusal(tmp_path):
+    request, installer, runner = _installed(tmp_path)
+    installer.converge_active_files(request)
+    runner.prepared_service_fails = True
+    with pytest.raises(CapacityExecutorInstallError):
+        installer.refresh_active_preparation(request)
+    assert not runner.enabled_units and not runner.active_units

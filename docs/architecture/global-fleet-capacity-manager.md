@@ -293,7 +293,11 @@ mutations. Changed operation identities or existing file bytes are refused.
 Timer enablement validates the artifact using the installed service-user Python
 and authenticated current manager context, then rechecks the local inputs. It
 separately enables and starts the fixed active timer, allowing exact retries
-after an interrupted enable and when already active. Each daemon invocation
+after an interrupted enable and when already active. While files remain staged,
+`refresh-active-preparation` runs only the exact prepared inventory oneshot,
+which authenticates the still-prepared epoch without enabling either timer. This
+refresh permits recovery when inventory expires during an interrupted cutover.
+Each daemon invocation
 independently authenticates execution authority. These transports do not create
 admission bindings, freeze legacy writers, publish execution authority, or grant
 manager activation; the installed composition must supply those prerequisites.

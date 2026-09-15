@@ -221,6 +221,7 @@ def test_gb10_uses_fixed_ssh_channel_and_revalidates_transport(tmp_path, monkeyp
         ("observe_active_controller", "staged"),
         ("converge_active_files", "staged"),
         ("enable_active_timer", "active"),
+        ("refresh_active_preparation", "staged"),
     ],
 )
 def test_gb10_broker_invokes_only_bound_candidate_installer(
@@ -258,6 +259,7 @@ def test_gb10_broker_invokes_only_bound_candidate_installer(
             "observe_active_controller": "observe-active",
             "converge_active_files": "converge-active-files",
             "enable_active_timer": "enable-active-timer",
+            "refresh_active_preparation": "refresh-active-preparation",
         }[operation],
     ]
     assert kwargs["input_payload"].encode() == request.to_bytes()

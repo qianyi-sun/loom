@@ -943,6 +943,7 @@ class FixedGB10ExternalSupervisorTransport:
             "observe-active": "observe_active_controller",
             "converge-active-files": "converge_active_files",
             "enable-active-timer": "enable_active_timer",
+            "refresh-active-preparation": "refresh_active_preparation",
         }
         try:
             request = ActiveControllerRequest.from_bytes(payload)

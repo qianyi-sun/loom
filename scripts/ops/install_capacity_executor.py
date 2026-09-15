@@ -141,7 +141,7 @@ _MAX_PREREQUISITE_REQUEST_BYTES = 2 * 1024 * 1024
 _MAX_DISCOVERY_REQUEST_BYTES = 256 * 1024
 _MAX_CREDENTIAL_REQUEST_BYTES = 8 * 1024 * 1024
 _MAX_PREPARED_REQUEST_BYTES = 4 * 1024 * 1024
-_ACTIVE_OPERATIONS = frozenset({"observe-active", "converge-active-files", "enable-active-timer"})
+_ACTIVE_OPERATIONS = frozenset({"observe-active", "converge-active-files", "enable-active-timer", "refresh-active-preparation"})
 _MAX_ACTIVE_REQUEST_BYTES = 4 * 1024 * 1024
 _PREPARED_OPERATIONS = frozenset(
     {
@@ -2039,6 +2039,21 @@ class ControllerInstaller:
                 raise CapacityExecutorInstallError("active controller files did not converge")
             return evidence
 
+    def refresh_active_preparation(self, request: ActiveControllerRequest) -> ActiveControllerEvidence:
+        """Refresh only the prepared inventory while retained active files are inert."""
+        with self._controller_operation_lock():
+            evidence = self._observe_active(request)
+            if evidence is None or evidence.state != "staged":
+                raise CapacityExecutorInstallError("active preparation refresh requires staged files")
+            # The exact installed oneshot uses --prepared-only and independently
+            # rejects any manager context other than this prepared epoch. It
+            # captures read-only Slurm inventory; it never enables either timer.
+            self._run(_SYSTEMCTL, "start", "loom-capacity-pool-executor-prepared.service")
+            refreshed = self._observe_active(request)
+            if refreshed != evidence:
+                raise CapacityExecutorInstallError("active preparation changed during inventory refresh")
+            return refreshed
+
     def enable_active_timer(self, request: ActiveControllerRequest) -> ActiveControllerEvidence:
         with self._controller_operation_lock():
             evidence = self._observe_active(request)
@@ -2530,6 +2545,7 @@ def _active_controller_operation(
     handlers = {
         "converge-active-files": installer.converge_active_files,
         "enable-active-timer": installer.enable_active_timer,
+        "refresh-active-preparation": installer.refresh_active_preparation,
     }
     return handlers[operation](request).to_bytes()
 
@@ -2553,6 +2569,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "observe-active",
             "converge-active-files",
             "enable-active-timer",
+            "refresh-active-preparation",
         ),
         default="install",
     )

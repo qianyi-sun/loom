@@ -860,6 +860,7 @@ def _parse_request(payload: bytes) -> dict[str, object]:
         "observe_active_controller": common | {"active_controller"},
         "converge_active_files": common | {"active_controller"},
         "enable_active_timer": common | {"active_controller"},
+        "refresh_active_preparation": common | {"active_controller"},
     }
     if (
         type(value.get("schema_version")) is not int
@@ -907,7 +908,7 @@ def _parse_request(payload: bytes) -> dict[str, object]:
             value.get("prepared_controller"),
             candidate_sha=candidate_sha,
         )
-    if operation in {"observe_active_controller", "converge_active_files", "enable_active_timer"}:
+    if operation in {"observe_active_controller", "converge_active_files", "enable_active_timer", "refresh_active_preparation"}:
         _validate_active_controller_request(value.get("active_controller"), candidate_sha=candidate_sha)
     return value
 
@@ -3100,6 +3101,7 @@ def run_controller_active(candidate: Path, payload: bytes) -> bytes:
         "observe_active_controller": "observe-active",
         "converge_active_files": "converge-active-files",
         "enable_active_timer": "enable-active-timer",
+        "refresh_active_preparation": "refresh-active-preparation",
     }
     try:
         operation = operations[str(request["operation"])]
@@ -3209,7 +3211,7 @@ def _validate_active_controller_response(
     if (
         value.get("state") != state
         or (state == "staged" and active[prefix + "-active.service"] != "inactive")
-        or (operation == "converge-active-files" and state != "staged")
+        or (operation in {"converge-active-files", "refresh-active-preparation"} and state != "staged")
         or (operation == "enable-active-timer" and state != "active")
     ):
         raise BrokerError("GB10 active controller operation did not converge")
@@ -3474,7 +3476,7 @@ def _main(argv: list[str] | None = None) -> int:
             sys.stdout.buffer.write(run_controller_prepared(candidate, payload))
             return 0
         if request.get("operation") in {
-            "observe_active_controller", "converge_active_files", "enable_active_timer",
+            "observe_active_controller", "converge_active_files", "enable_active_timer", "refresh_active_preparation",
         }:
             sys.stdout.buffer.write(run_controller_active(candidate, payload))
             return 0

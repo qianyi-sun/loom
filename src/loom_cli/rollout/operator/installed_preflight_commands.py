@@ -33,6 +33,7 @@ _OLDLAB_CONTROLLER_OPERATIONS = frozenset(
         "observe-active",
         "converge-active-files",
         "enable-active-timer",
+        "refresh-active-preparation",
         "converge-prerequisite",
         "converge-prepared-files",
         "disable-prepared-timer",
