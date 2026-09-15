@@ -299,3 +299,33 @@ def test_trial_cutover_requires_protected_runtime():
         create_app(ControlPlaneSettings(_env_file=None, protected_trial_cutover_enabled=True,
             db_url="postgresql+psycopg://loom:loom@example/loom",
             minio_access_key="test", minio_secret_key="test"))
+
+
+def test_trial_cutover_admits_actual_gateway_step_token_route(monkeypatch):
+    from pathlib import Path
+
+    from fastapi import APIRouter
+
+    from loom_control_plane import app as control_plane_app
+    from loom_control_plane.config import ControlPlaneSettings
+
+    # Preserve the actual composed production route; isolate its handler's SQL.
+    route = next(route for route in control_plane_app.step_tokens.router.routes
+                 if route.name == "issue_step_token")
+    probe = APIRouter()
+
+    async def issue_probe():
+        return {"reached": True}
+
+    probe.add_api_route(route.path, issue_probe, methods=list(route.methods))
+    monkeypatch.setattr(control_plane_app.step_tokens, "router", probe)
+    app = control_plane_app.create_app(ControlPlaneSettings(
+        _env_file=None, protected_trial_cutover_enabled=True,
+        db_url="postgresql+psycopg://loom:loom@example/loom",
+        minio_access_key="test", minio_secret_key="test",
+        protected_worker_runtime_db_url_file=Path("/run/loom/runtime/database-url"),
+    ))
+    client = TestClient(app)
+    response = client.post("/admin/step-tokens", json={})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"reached": True}
