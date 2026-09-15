@@ -72,6 +72,11 @@ validating actual demand and a realizable native shape. Cancellation, changed
 materialization epoch, disabled target/policy and incompatible resource evidence
 invalidate it. Compatible historical allocatable samples remain usable after
 scale-to-zero. An impossible node/allowance combination cannot block other work.
+An observed Ready node can also establish fit after its managed Pods drain,
+without a compatible cold-node sample. Unknown foreign/DaemonSet resource and
+slot occupancy remains charged; this does not establish cold-node capacity.
+Changing a claim's epoch, target/pool or resource envelope loses its old waiting
+priority and rejoins at the tail.
 
 New admissions preserve waiting headroom in bin-packing, pending/create limits
 and shared native quota accounting, including independent CPU pools sharing SSD

@@ -63,6 +63,27 @@ async def _realizable(
                               ("memory", raw.memory_mib), ("storage", raw.storage_mib))):
         return False
     sample = await native_allocatable_sample(session, target_id, placement)
+    # Existing Ready nodes need no cold-template proof. Only observed managed
+    # work is considered drainable; retain foreign/DaemonSet resource and slot
+    # occupancy. This is waiting eligibility, never permission to release the
+    # actual reservation or extrapolate the node into a cold-node sample.
+    dimensions = ("cpu_millis", "memory_mib", "storage_mib")
+    for node in placement.nodes:
+        if not node.ready or node.unschedulable or node.deleting:
+            continue
+        count = len(node.managed_pods)
+        if (count > node.used_pod_slots
+                or len({pod.uid for pod in node.managed_pods}) != count
+                or len({(pod.lease_id, pod.generation) for pod in node.managed_pods}) != count):
+            continue
+        resident = {key: getattr(node.requested, key)
+                    - sum(getattr(pod.requests, key) for pod in node.managed_pods)
+                    for key in dimensions}
+        if (min(resident.values()) >= 0
+                and node.pod_slots > node.used_pod_slots - count
+                and all(getattr(resources, key) <= getattr(node.allocatable, key) - resident[key]
+                        for key in dimensions)):
+            return True
     # A policy's raw node shape is not proof of workload allocatable capacity.
     if sample is None or sample.pod_slots <= sample.daemonset_slots:
         return False
