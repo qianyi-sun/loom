@@ -152,6 +152,7 @@ class AdminSmokeContract:
             "name": batch_name,
             "represented_username": self.authority.represented_username,
             "team_id": self.authority.team_id,
+            "purpose": "evaluation",
             "task_filter": {"task_ids": [self.authority.task_id]},
             "trial_config": self.trial_config_payload(),
             "n_per_task": n_per_task,

@@ -1403,7 +1403,7 @@ def test_render_schema_transition_emits_exact_job_and_canonical_plan(
             "--expected-predecessor-schema-head",
             "0112",
             "--expected-target-schema-head",
-            "0147",
+            "0148",
         ]
     )
 
@@ -1414,7 +1414,7 @@ def test_render_schema_transition_emits_exact_job_and_canonical_plan(
     assert captured_inputs["backup_evidence_sha256"] == "a" * 64
     assert captured_inputs["predecessor_shadow_sha256"] == "b" * 64
     assert captured_inputs["expected_predecessor_head"] == "0112"
-    assert captured_inputs["expected_target_head"] == "0147"
+    assert captured_inputs["expected_target_head"] == "0148"
     assert source_validation_count == 2
 
 
@@ -1535,7 +1535,7 @@ def test_render_schema_transition_real_cli_binds_exact_checkout_and_inputs(
     assert job["metadata"]["namespace"] == "loom-dev"
     assert plan["schema"] == "loom-personal-dev-schema-transition-plan-v1"
     assert plan["predecessor"]["schema_head"] == "0112"
-    assert plan["target"]["schema_head"] == "0147"
+    assert plan["target"]["schema_head"] == "0148"
     assert plan["target"]["source_commit"] == source_sha
     assert plan["target"]["source_tree"] == source_tree
     assert plan["capacity"]["executable_new_capacity_ceiling"] == 0
@@ -1719,7 +1719,7 @@ def test_render_schema_transition_has_a_specific_fail_closed_error(
             "--expected-predecessor-schema-head",
             "0112",
             "--expected-target-schema-head",
-            "0147",
+            "0148",
         ]
     )
 

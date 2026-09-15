@@ -27,6 +27,19 @@ Statuses are:
 Task filtering rechecks TaskSet ownership even when callers supply exact task
 IDs. A TaskSet must be `ready` or `partial` before its tasks can run.
 
+## Batch purpose
+
+Batches declare a `purpose` at create time:
+
+- `evaluation` — official/native **benchmarks** only; verification required
+  (`skip_verifier` rejected). Private TaskSets are not selectable.
+- `trajectory_generation` — team **TaskSets** and, during transition, native
+  benchmarks too; verifier optional.
+
+Trial execution, agent harness selection, and trajectory export are the same
+for both purposes. The split is catalog provenance and verification policy,
+not a second runner.
+
 ## Browser links
 
 Share `/task-sets/detail?id=ts%2F<team-id>%2F<slug>` (under the configured
