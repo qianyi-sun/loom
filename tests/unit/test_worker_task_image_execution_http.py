@@ -11,6 +11,51 @@ from loom_worker.control_plane_client import HttpControlPlaneClient
 from tests.unit.test_worker_task_image_execution import accepting, consumer, evidence
 
 
+@pytest.mark.parametrize("case", ["valid", "http", "origin", "redirect", "oversized", "duplicate", "wrong-status"])
+async def test_refresh_requires_bounded_canonical_delivery_from_fixed_https_origin(tmp_path, case):
+    import json
+
+    from loom_task_image_authority.execution_refresh import (
+        MAX_EXECUTION_DELIVERY_BYTES,
+        ExecutionRefreshRequest,
+    )
+    from loom_task_image_authority.execution_start import ExecutionStartRequest
+    from tests.unit.test_main_loop_trusted_task_images import delivery
+
+    payload, kwargs = evidence(tmp_path)
+    seen = []
+    subject = consumer(tmp_path, payload, kwargs, accepting())
+    await subject.authorize()
+    previous = subject.consume.call_args.args[0]
+    request = ExecutionRefreshRequest.model_validate(dict(schema="loom.task-image-execution-refresh-request/v1", previous=previous))
+    wire = rfc8785.dumps(delivery(kwargs))
+    if case == "oversized":
+        wire = b"x" * (MAX_EXECUTION_DELIVERY_BYTES + 1)
+    elif case == "duplicate":
+        wire = wire[:-1] + b',"schema":"loom.task-image-execution-delivery/v2"}'
+
+    def handle(sent):
+        seen.append(sent)
+        assert ExecutionStartRequest.model_validate(json.loads(sent.content)["previous"]) == previous
+        return httpx.Response(307 if case == "redirect" else 201 if case == "wrong-status" else 200, content=wire,
+                              headers={"location": "https://different.example"} if case == "redirect" else {})
+
+    origin = "http://cp.example" if case == "http" else "https://cp.example"
+    async with httpx.AsyncClient(base_url="https://different.example" if case == "origin" else origin,
+                                transport=httpx.MockTransport(handle)) as http:
+        client = HttpControlPlaneClient(origin, "worker-token", _client=http)
+        if case == "valid":
+            response = await client.refresh_task_image_execution(request)
+            assert response.grant_envelope.encode() == kwargs["wire"]
+        else:
+            with pytest.raises((ValueError, httpx.HTTPError)):
+                await client.refresh_task_image_execution(request)
+    assert len(seen) == (0 if case in {"http", "origin"} else 1)
+    if seen:
+        assert seen[0].url.path.endswith("/task-image/refresh")
+        assert seen[0].headers["authorization"] == "Bearer worker-token"
+
+
 @pytest.mark.parametrize("status", [200, 201, 204, 307, 409, 503])
 async def test_start_response_requires_exact_created_receipt(tmp_path, status):
     payload, kwargs = evidence(tmp_path)

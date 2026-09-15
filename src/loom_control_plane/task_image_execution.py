@@ -21,6 +21,7 @@ from loom_task_image_authority.execution_grant import (
     MAX_EXECUTION_GRANT_ENVELOPE_BYTES,
     LegacyExecutionClaim,
 )
+from loom_task_image_authority.execution_refresh import ExecutionRefreshRequest
 from loom_task_image_authority.execution_start import ExecutionStartReceipt, ExecutionStartRequest
 from loom_task_image_authority.execution_store import (
     consume_execution_start,
@@ -113,12 +114,14 @@ class TaskImageExecutionService:
             if token.expires_at is not None and token.expires_at <= self._clock():
                 raise PermissionError("worker token expired during admission")
 
-    async def issue(self, *, claim: LegacyExecutionClaim, worker_token_hash: bytes) -> TaskImageExecutionDelivery:
+    async def issue(self, *, claim: LegacyExecutionClaim, worker_token_hash: bytes,
+                    previous_request: ExecutionStartRequest | None = None) -> TaskImageExecutionDelivery:
         async with asyncio.timeout(self._timeout):
             async with self._transaction(worker_token_hash) as session:
                 request = await prepare_execution_signing_request(
                     session, claim=claim, worker_token_hash=worker_token_hash, trust_root=self._root,
                     purpose=self._purpose, shadow_campaign_id=self._campaign, clock=self._clock,
+                    previous_request=previous_request,
                 )
             wire = await self._signer.sign_execution(request.canonical_bytes(), maximum_reply_bytes=MAX_EXECUTION_GRANT_ENVELOPE_BYTES)
             async with self._transaction(worker_token_hash) as session:
@@ -137,6 +140,18 @@ class TaskImageExecutionService:
                 expected_shadow_campaign_id=self._campaign, now=self._clock(),
             )
             return delivery
+
+    async def refresh(self, *, request: ExecutionRefreshRequest, authorization: str | None) -> TaskImageExecutionDelivery:
+        previous = request.previous
+        if not isinstance(previous.claim, LegacyExecutionClaim):
+            raise ValueError("protected execution refresh is not enabled")
+        async with asyncio.timeout(self._timeout):
+            async with self._connection() as session:
+                await self._limits(session)
+                auth = await verify_bearer_token(session, authorization)
+                if auth is None or auth.type != "worker" or "worker:claim" not in auth.scopes:
+                    raise PermissionError("worker refresh is unauthenticated")
+            return await self.issue(claim=previous.claim, worker_token_hash=auth.token_hash, previous_request=previous)
 
     async def consume(self, *, request: ExecutionStartRequest, authorization: str | None) -> ExecutionStartReceipt:
         if not isinstance(request.claim, LegacyExecutionClaim):

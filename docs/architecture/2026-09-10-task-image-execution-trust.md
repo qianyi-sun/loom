@@ -129,10 +129,24 @@ the fallback; compensation never rewrites a started, cancelled or replacement cl
 Tests exercise a refundable re-claim through the actual shared HTTP route and worker
 client, and reject the earlier claim's otherwise valid signed evidence.
 
-Release wiring, a worker-accessible grant-refresh path for preparation that outlives
-the initial grant, protected-reader composition and live native acceptance remain
-separate unfinished boundaries. The store's revision support alone does not supply
-an online refresh protocol.
+`/trials/{trial_id}/task-image/refresh` authenticates the worker and binds its
+previous full signed-envelope/keyset identity to the current, still-unconsumed
+claim. Preparation and finalization retain the same state-first fence as initial
+issuance; signer I/O runs outside database locks. Only revision, signed times and
+current keyset may change. Lost refresh acknowledgements may retrieve the latest
+issuance; consumed claims cannot refresh. Requests are bounded to 8 KiB and canonical
+responses to 4 MiB over the configured HTTPS origin, without redirects.
+
+The worker refreshes near-expired evidence after cold preparation and always
+requests current authority at runner admission, including when a keyset rolled
+over while its old grant remained valid. It fully verifies fresh signed evidence,
+unchanged source/image/publication bindings and actual local source before start.
+Expired evidence identifies the refresh request only; it never authorizes a
+runtime or gains invented validity timestamps. Grants with thirty seconds or less
+of keyset/root lifetime cannot refresh. Revocation after refresh still denies
+start. A lost or cancelled start acknowledgement never triggers refresh or retry.
+Release wiring, protected-reader composition and live native acceptance remain
+separate unfinished boundaries.
 
 ## Signed keyset
 
@@ -381,8 +395,9 @@ the database pool. Interrupted context cleanup retains that ordering.
 
 Disposable tests exercise this complete startup-to-signature path with an actual
 restricted login, owner-only key files and mTLS. This is not a production key
-ceremony or native activation. There is still no installed service account, live
-listener, worker delivery, complete execution grant or one-use start evidence.
+ceremony or native activation. There is still no installed service account or live
+listener. Connected delivery and one-use start tests are disposable fixture
+evidence, not live deployment acceptance.
 
 ## Complete publication-set verification
 
@@ -446,8 +461,8 @@ counters or a timestamp. Both ordinary scheduler paths (`claim_one` and
 `claim_id` in the same claim transaction. This is the last legacy claim identity,
 not independent proof of a live claim; it remains retained after release and is
 replaced on the next legacy claim. Historical claims have NULL, never a backfilled
-identity. The server V2 delivery and durable one-use start remain uncomposed, so this
-change does not make ordinary workers V2-eligible. The explicitly discriminated protected variant
+identity. Server V2 delivery and durable one-use start require the explicit trusted
+reader assembly described above; legacy readers remain excluded. The explicitly discriminated protected variant
 additionally binds the canonical protected receipt digest, actual worker
 incarnation UUID and claim high-water; these cannot be inferred from ordinary
 trial attempt count. The expected claim and purpose come from independent

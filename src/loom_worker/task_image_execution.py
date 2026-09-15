@@ -8,10 +8,11 @@ Its source directory must remain private and worker-owned through runtime use.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -21,11 +22,21 @@ from loom.driver.task_image import TaskImageBuildError
 from loom.models.task import TaskConfig
 from loom.task_image_materialization import ImmutableRegistryImage
 from loom_task_image_authority.contracts import BuildPurpose
+from loom_task_image_authority.execution_delivery import TaskImageExecutionDelivery
 from loom_task_image_authority.execution_grant import (
+    MAX_EXECUTION_GRANT_BYTES,
+    MAX_EXECUTION_GRANT_ENVELOPE_BYTES,
+    ExecutionGrantEnvelope,
     LegacyExecutionClaim,
     ProtectedExecutionClaim,
+    TaskImageExecutionGrantV2,
     VerifiedExecutionGrant,
+    _decode,
     verify_execution_grant,
+)
+from loom_task_image_authority.execution_refresh import (
+    REFRESH_MINIMUM_REMAINING_SECONDS,
+    ExecutionRefreshRequest,
 )
 from loom_task_image_authority.execution_start import ExecutionStartReceipt as ExecutionStartReceipt
 from loom_task_image_authority.execution_start import ExecutionStartRequest
@@ -76,7 +87,9 @@ class WorkerTaskImageExecution:
     consume: Callable[[ExecutionStartRequest], Awaitable[ExecutionStartReceipt]]
     clock: Callable[[], datetime] = _clock
     timeout_seconds: float = 5.0
+    refresh: Callable[[ExecutionRefreshRequest], Awaitable[TaskImageExecutionDelivery]] | None = None
     _attempted: bool = field(default=False, init=False)
+    _preparing: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         if (
@@ -120,12 +133,63 @@ class WorkerTaskImageExecution:
             raise ValueError("execution source verification failed") from exc
         return verified
 
+    async def prepare(self) -> None:
+        """Refresh after bounded cold preparation, never after attempting a start."""
+        if self._attempted:
+            raise RuntimeError("execution start already attempted")
+        if self._preparing:
+            raise RuntimeError("execution preparation already in progress")
+        self._preparing = True
+        try:
+            async with asyncio.timeout(self.timeout_seconds):
+                await self._refresh_if_needed()
+        finally:
+            self._preparing = False
+
+    async def _refresh_if_needed(self, *, current_authority: bool = False) -> None:
+        # Decode the old identity only to request current authority. Expired
+        # bytes are never verified at an invented earlier time or admitted.
+        envelope = _decode(self.wire, ExecutionGrantEnvelope, MAX_EXECUTION_GRANT_ENVELOPE_BYTES)
+        old = _decode(envelope.canonical_grant.encode(), TaskImageExecutionGrantV2, MAX_EXECUTION_GRANT_BYTES)
+        if self.refresh is None or (not current_authority and (_instant(old.expires_at) - self.clock()).total_seconds() > REFRESH_MINIMUM_REMAINING_SECONDS):
+            self.verify_runtime()
+            return
+        previous = ExecutionStartRequest.model_validate(dict(
+            schema="loom.task-image-execution-start-request/v1", grant_id=old.grant_id, revision=old.revision,
+            envelope_sha256=hashlib.sha256(self.wire).hexdigest(), claim=self.expected_claim,
+            keyset_sha256=old.keyset_sha256, keyset_version=old.keyset_version, revocation_epoch=old.revocation_epoch,
+        ))
+        delivery = await self.refresh(ExecutionRefreshRequest.model_validate(dict(
+            schema="loom.task-image-execution-refresh-request/v1", previous=previous,
+        )))
+        if type(delivery) is not TaskImageExecutionDelivery or delivery.claim != self.expected_claim:
+            raise ValueError("execution refresh changed claim")
+        candidate = replace(self, wire=delivery.grant_envelope.encode(), plan_wire=delivery.frozen_plan.encode(),
+                            publication_wires=tuple(item.encode() for item in delivery.publications), keyset_wire=delivery.keyset.encode())
+        fresh = candidate.verify_runtime().grant
+        mutable = {"revision", "issued_at", "expires_at", "keyset_sha256", "keyset_version", "revocation_epoch"}
+        if (
+            fresh.model_dump(exclude=mutable) != old.model_dump(exclude=mutable)
+            or fresh.revision < old.revision or fresh.keyset_version < old.keyset_version
+            or fresh.revocation_epoch < old.revocation_epoch
+            or (fresh.revision == old.revision and candidate.wire != self.wire)
+            or candidate.plan_wire != self.plan_wire or candidate.publication_wires != self.publication_wires
+            or (_instant(fresh.expires_at) - self.clock()).total_seconds() <= REFRESH_MINIMUM_REMAINING_SECONDS
+        ):
+            raise ValueError("execution refresh changed immutable inputs or lacks fresh lifetime")
+        self.wire, self.keyset_wire = candidate.wire, candidate.keyset_wire
+
     async def authorize(self) -> bool:
         if self._attempted:
             raise RuntimeError("execution start already attempted")
+        if self._preparing:
+            raise RuntimeError("execution preparation already in progress")
         self._attempted = True
         began = time.monotonic()
         async with asyncio.timeout(self.timeout_seconds):
+            # A keyset may have rolled over even while local evidence remains
+            # valid. Refresh before consume, never in response to its failure.
+            await self._refresh_if_needed(current_authority=True)
             verified = self.verify_runtime()
             grant = verified.grant
             request = ExecutionStartRequest.model_validate(dict(

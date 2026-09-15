@@ -16,7 +16,12 @@ from loom_worker.vllm_registry import WorkerVLLMRegistry
 from tests.unit.test_main_loop_cleanup import _FakeCPClient, _FakeSettings
 from tests.unit.test_task_image_publication_signing import NOW
 from tests.unit.test_worker_claim_loop import _healthy_setup_node
-from tests.unit.test_worker_task_image_execution import accepting, evidence, refreshed, signed_evidence
+from tests.unit.test_worker_task_image_execution import (
+    accepting,
+    evidence,
+    refreshed,
+    signed_evidence,
+)
 
 
 def delivery(kwargs):
@@ -37,7 +42,9 @@ async def test_signed_claim_preparation_and_start_stay_bound(tmp_path, monkeypat
     now = NOW
     cp, settings, captured = _FakeCPClient(), _FakeSettings(), {}
     cp.consume_task_image_execution_start = accepting()
-    cp.refresh_task_image_execution = AsyncMock()
+    from loom_task_image_authority.execution_delivery import TaskImageExecutionDelivery
+
+    cp.refresh_task_image_execution = AsyncMock(return_value=TaskImageExecutionDelivery.model_validate(delivery(kwargs)))
     if case == "slow-pull":
         async def accept(request):
             from loom_task_image_authority.execution_start import ExecutionStartReceipt
@@ -118,7 +125,7 @@ async def test_signed_claim_preparation_and_start_stay_bound(tmp_path, monkeypat
             item["component"]: item["image"] for item in grant["components"]
         }
         cp.consume_task_image_execution_start.assert_awaited_once()
-        assert cp.refresh_task_image_execution.await_count == (1 if case == "slow-pull" else 0)
+        assert cp.refresh_task_image_execution.await_count == (2 if case == "slow-pull" else 1)
         assert not task_dir.exists()
     else:
         assert not captured.get("ran")

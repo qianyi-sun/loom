@@ -42,6 +42,7 @@ from loom_task_image_authority.execution_grant import (
     decode_execution_claim,
     verify_execution_grant,
 )
+from loom_task_image_authority.execution_refresh import REFRESH_MINIMUM_REMAINING_SECONDS
 from loom_task_image_authority.execution_signing_request import ExecutionSigningRequest
 from loom_task_image_authority.execution_start import ExecutionStartReceipt, ExecutionStartRequest
 from loom_task_image_authority.publication_completion import replay_completed_publication
@@ -253,11 +254,26 @@ async def prepare_execution_grant(
     session: AsyncSession, *, claim: LegacyExecutionClaim, worker_token_hash: bytes,
     trust_root: ExecutionGrantTrustRoot, purpose: BuildPurpose, shadow_campaign_id: str | None,
     clock: Callable[[], datetime] = _clock, lifetime_seconds: int = 120,
+    previous_request: ExecutionStartRequest | None = None,
 ) -> TaskImageExecutionGrantV2:
     """Persist an immutable request, then COMMIT before calling the dedicated signer."""
     if type(lifetime_seconds) is not int or not 1 <= lifetime_seconds <= 900:
         raise ValueError("invalid execution grant lifetime")
     authority = await lock_execution_claim(session, claim=claim, worker_token_hash=worker_token_hash)
+    if previous_request is not None:
+        _ = previous_request.digest
+        prior = await session.get(TaskImageExecutionGrant, (UUID(previous_request.grant_id), previous_request.revision), populate_existing=True)
+        if prior is None or prior.canonical_envelope is None:
+            raise ValueError("execution refresh requires a retained signed grant")
+        original = _retained(prior, claim)
+        if (
+            previous_request.claim != claim
+            or hashlib.sha256(prior.canonical_envelope).hexdigest() != previous_request.envelope_sha256
+            or previous_request.keyset_sha256 != original.keyset_sha256
+            or previous_request.keyset_version != original.keyset_version
+            or previous_request.revocation_epoch != original.revocation_epoch
+        ):
+            raise ValueError("execution refresh previous identity differs")
     values = await _inputs(session, authority, trust_root, clock)
     previous = await _latest(session, claim)
     now = clock()
@@ -268,11 +284,17 @@ async def prepare_execution_grant(
             raise ValueError("execution refresh cannot change publication or purpose")
         current = _candidate(values, authority, trust_root, purpose, shadow_campaign_id,
                              old.grant_id, old.revision, _instant(old.issued_at), _instant(old.expires_at))
-        if canonical_execution_grant_bytes(current) == previous.canonical_grant and _instant(old.issued_at) <= now < _instant(old.expires_at):
+        mutable = {"revision", "issued_at", "expires_at", "keyset_sha256", "keyset_version", "revocation_epoch"}
+        if current.model_dump(exclude=mutable) != old.model_dump(exclude=mutable):
+            raise ValueError("execution refresh cannot change immutable source or images")
+        minimum = timedelta(seconds=REFRESH_MINIMUM_REMAINING_SECONDS if previous_request is not None else 0)
+        if canonical_execution_grant_bytes(current) == previous.canonical_grant and _instant(old.issued_at) <= now < _instant(old.expires_at) - minimum:
             return old
         grant_id, revision = old.grant_id, old.revision + 1
     grant = _candidate(values, authority, trust_root, purpose, shadow_campaign_id,
                        grant_id, revision, now, min(now + timedelta(seconds=lifetime_seconds), values.keyset.expires_at, trust_root.expires_at))
+    if previous_request is not None and (_instant(grant.expires_at) - now).total_seconds() <= REFRESH_MINIMUM_REMAINING_SECONDS:
+        raise ValueError("execution refresh requires a fresh keyset and root lifetime")
     wire = canonical_execution_grant_bytes(grant)
     session.add(TaskImageExecutionGrant(
         grant_id=UUID(grant.grant_id), revision=grant.revision, claim_id=UUID(claim.claim_id),
@@ -290,12 +312,14 @@ async def prepare_execution_signing_request(
     session: AsyncSession, *, claim: LegacyExecutionClaim, worker_token_hash: bytes,
     trust_root: ExecutionGrantTrustRoot, purpose: BuildPurpose, shadow_campaign_id: str | None,
     clock: Callable[[], datetime] = _clock, lifetime_seconds: int = 120,
+    previous_request: ExecutionStartRequest | None = None,
 ) -> ExecutionSigningRequest:
     """Prepare fixed signer input in the caller transaction; COMMIT before sending."""
     grant = await prepare_execution_grant(
         session, claim=claim, worker_token_hash=worker_token_hash, trust_root=trust_root,
         purpose=purpose, shadow_campaign_id=shadow_campaign_id, clock=clock,
         lifetime_seconds=lifetime_seconds,
+        previous_request=previous_request,
     )
     authority = await lock_execution_claim(session, claim=claim, worker_token_hash=worker_token_hash)
     values = await _inputs(session, authority, trust_root, clock)

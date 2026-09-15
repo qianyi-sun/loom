@@ -1,8 +1,8 @@
 """Exercise signed source-to-start consumption, not a fabricated verified object."""
 
 import asyncio
-import importlib
 import hashlib
+import importlib
 import json
 from datetime import timedelta
 from unittest.mock import AsyncMock

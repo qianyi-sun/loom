@@ -66,7 +66,8 @@ async def setup(factory, issuer, tmp_path, monkeypatch, *, time_shift=None):
     module = importlib.import_module(name)
     _, policy, _, common, engine = await signer_setup(factory, issuer, tmp_path, monkeypatch)
     original_clock = common["clock"]
-    clock = lambda: original_clock() + timedelta(seconds=time_shift[0] if time_shift else 0)
+    def clock():
+        return original_clock() + timedelta(seconds=time_shift[0] if time_shift else 0)
     policy._clock = clock
     token_hash = hashlib.sha256(RAW_TOKEN.encode()).digest()
     async with factory.begin() as session:
@@ -74,6 +75,9 @@ async def setup(factory, issuer, tmp_path, monkeypatch, *, time_shift=None):
         await session.execute(update(Worker).where(Worker.id == UUID(common["claim"].worker_id)).values(auth_token_hash=token_hash))
 
     class Signer:
+        def __init__(self):
+            self.policy = policy
+
         async def sign_execution(self, request, *, maximum_reply_bytes):
             return await policy.sign_execution(request)
 
@@ -91,12 +95,12 @@ async def setup(factory, issuer, tmp_path, monkeypatch, *, time_shift=None):
     return app, service, request, engine
 
 
-@pytest.mark.parametrize("change", ["expired", "near-expiry", "consumed", "stale-claim", "wrong-digest", "revoked-token"])
+@pytest.mark.parametrize("change", ["expired", "near-expiry", "keyset-rollover", "consumed", "stale-claim", "wrong-digest", "revoked-token"])
 async def test_authenticated_refresh_preserves_claim_and_never_reopens_consumed_start(
     registry_authority_session, registry_issuer, tmp_path, monkeypatch, change,
 ):
-    from loom_task_image_authority.execution_refresh import ExecutionRefreshRequest
     from loom_task_image_authority.execution_grant import verify_execution_grant
+    from loom_task_image_authority.execution_refresh import ExecutionRefreshRequest
 
     factory, shift = registry_authority_session, [0]
     app, service, old, engine = await setup(factory, registry_issuer, tmp_path, monkeypatch, time_shift=shift)
@@ -114,8 +118,24 @@ async def test_authenticated_refresh_preserves_claim_and_never_reopens_consumed_
                 async with factory.begin() as session:
                     await session.execute(update(Token).values(revoked_at=service._clock()))
             shift[0] = 100 if change == "near-expiry" else 121
+            if change == "keyset-rollover":
+                from loom_task_image_authority.publication_keyset_store import (
+                    finalize_keyset,
+                    prepare_keyset,
+                )
+                from tests.unit.test_task_image_publication_keyset import _sign, _time
+
+                shift[0] = 1801
+                async with factory.begin() as session:
+                    prepared = await prepare_keyset(session, trust_root=service._root)
+                wire = _sign(dict(schema="loom.task-image-publication-keyset/v1", environment=service._root.environment,
+                    keyset_version=prepared.proposed_state.keyset_version, revocation_epoch=prepared.proposed_state.revocation_epoch,
+                    issued_at=_time(service._clock()), expires_at=_time(service._clock() + timedelta(minutes=5)),
+                    keys=[key.model_dump(mode="json", exclude_none=True) for key in prepared.keys]), service._signer.policy._execution.private)
+                async with factory.begin() as session:
+                    await finalize_keyset(session, preparation=prepared, wire=wire, trust_root=service._root, clock=service._clock)
             request = ExecutionRefreshRequest.model_validate(dict(schema="loom.task-image-execution-refresh-request/v1", previous=old))
-            if change not in {"expired", "near-expiry"}:
+            if change not in {"expired", "near-expiry", "keyset-rollover"}:
                 with pytest.raises(httpx.HTTPStatusError):
                     await client.refresh_task_image_execution(request)
                 return
@@ -124,6 +144,8 @@ async def test_authenticated_refresh_preserves_claim_and_never_reopens_consumed_
                 publication_wires=tuple(item.encode() for item in delivery.publications), keyset_wire=delivery.keyset.encode(),
                 trust_root=service._root, expected_claim=old.claim, expected_purpose="production", expected_shadow_campaign_id=None, now=service._clock())
             assert current.grant.grant_id == old.grant_id and current.grant.revision == old.revision + 1
+            if change == "keyset-rollover":
+                assert current.grant.keyset_version > old.keyset_version
             # A lost refresh acknowledgement may replay current issuance, but
             # cannot consume the previous revision or recover a lost start.
             assert await client.refresh_task_image_execution(request) == delivery

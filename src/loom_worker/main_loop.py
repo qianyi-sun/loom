@@ -1414,9 +1414,10 @@ async def _spawn_trial(
                     task_dir=task_dir, task_config=task_config, task_checksum=task_checksum,
                     cpu_arch=_host_cpu_arch(), task_image=task_image,
                     consume=cp_client.consume_task_image_execution_start,
+                    refresh=cp_client.refresh_task_image_execution,
                     clock=execution_trust.clock,
                 )
-                trusted_execution.verify_runtime()
+                await trusted_execution.prepare()
         except Exception as exc:
             if task_dir is not None:
                 shutil.rmtree(task_dir, ignore_errors=True)
