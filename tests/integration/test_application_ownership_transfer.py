@@ -94,7 +94,7 @@ async def transfer_database(
         ) = await provisioner._converge_roles(identity, _new_credentials())
         from scripts.build_application_schema_reference import _migrate_reference_guard
         await _migrate_reference_guard(
-            guard_head="guard_0030" if baseline else "guard_0033",
+            guard_head="guard_0030" if baseline else "guard_0034",
             migrator_url=migrator_url,
             owner=owner,
             agent=agent,

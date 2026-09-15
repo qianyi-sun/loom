@@ -43,3 +43,20 @@ def test_maintenance_refuses_writer_without_waiting_or_retaining_partial_locks(
                 ).scalar_one()
     finally:
         engine.dispose()
+
+
+def test_maintenance_cannot_cross_an_inflight_retry_permission(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    # Hold the same relation lock acquired when a retry inserts its private
+    # permission. Maintenance must refuse rather than ignore this new evidence.
+    with _owner_connection(capacity_guard_database) as retry:
+        retry.execute(text(
+            "LOCK TABLE loom_capacity_guard.trial_retry_mutation_permits IN ROW EXCLUSIVE MODE"
+        ))
+        with pytest.raises(DBAPIError) as busy:
+            with _owner_connection(capacity_guard_database) as maintenance:
+                maintenance.execute(text("SET LOCAL lock_timeout='250ms'"))
+                maintenance.execute(text(_AUTHORITY_REBIND_LOCK_STATEMENT))
+        assert busy.value.orig.sqlstate == "55P03"
+        assert "could not obtain lock" in str(busy.value.orig)

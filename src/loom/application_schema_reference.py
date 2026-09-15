@@ -83,7 +83,7 @@ def application_reference_postgres_image(*, postgres_major: int = 16) -> str:
 
 def application_schema_reference(
     *, profile: ApplicationSchemaProfile = "legacy-owner", postgres_major: int = 16,
-    revision: ApplicationSchemaRevision = "0146/guard_0033",
+    revision: ApplicationSchemaRevision = "0146/guard_0034",
 ) -> ApplicationSchemaReference:
     """Select one bundled profile, never a caller-selected digest."""
     profiles: tuple[ApplicationSchemaProfile, ...] = (
@@ -116,7 +116,9 @@ def application_schema_reference(
             "a4457cf147a7d554b8f81aae84f29d167d8ba95c8387154ac3af4e7f8b2f6958",
         ),
     }
-    if revision == "0146/guard_0033":
+    # Independently generated on both majors for all six profiles: guard_0034
+    # changes only private guard objects, retaining this exact public inventory.
+    if revision in {"0146/guard_0033", "0146/guard_0034"}:
         digests = {
             16: (
                 "38f0a05a37c60f8fab04fdfe2b79d8670fcbeed20f2d658ca7b3a14353529242",
@@ -161,7 +163,7 @@ def application_schema_reference(
         guard_head=guard_head,
         postgres_image=image,
         postgres_major=postgres_major,
-        object_count={"0146/guard_0033": 7228, "0142/guard_0033": 7227, "0134/guard_0030": 6736}[revision]
+        object_count={"0146/guard_0034": 7228, "0146/guard_0033": 7228, "0142/guard_0033": 7227, "0134/guard_0030": 6736}[revision]
         + (0 if profile in {"legacy-owner", "staging-readonly-legacy-owner", "cnpg-staging-legacy-owner"} else 2),
         inventory_sha256=digests[postgres_major][profiles.index(profile)],
     )
@@ -169,7 +171,7 @@ def application_schema_reference(
 
 def require_application_schema_reference(
     observed: ApplicationSchemaInventory, *, profile: ApplicationSchemaProfile = "legacy-owner",
-    revision: ApplicationSchemaRevision = "0146/guard_0033",
+    revision: ApplicationSchemaRevision = "0146/guard_0034",
 ) -> None:
     """Compare only; caller still owns trusted role binding, quiescence and locks."""
     if type(observed.postgres_major) is not int or observed.postgres_major not in {16, 17}:
@@ -200,6 +202,8 @@ def application_schema_revision(
     *, public_revision: str | None, guard_revision: str | None,
 ) -> ApplicationSchemaRevision:
     """Select using a protected original checkpoint, never a new live observation."""
+    if (public_revision, guard_revision) == ("0146", "guard_0034"):
+        return "0146/guard_0034"
     if (public_revision, guard_revision) == ("0146", "guard_0033"):
         return "0146/guard_0033"
     if (public_revision, guard_revision) == ("0142", "guard_0033"):

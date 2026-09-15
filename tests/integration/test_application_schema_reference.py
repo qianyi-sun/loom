@@ -18,7 +18,7 @@ from loom.application_schema_reference import (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("revision", ["0146/guard_0033", "0142/guard_0033", "0134/guard_0030"])
+@pytest.mark.parametrize("revision", ["0146/guard_0034", "0146/guard_0033", "0142/guard_0033", "0134/guard_0030"])
 @pytest.mark.parametrize("postgres_major", [16, 17])
 @pytest.mark.parametrize("profile", ["legacy-owner", "sealed-owner", "staging-readonly-legacy-owner", "staging-readonly-sealed-owner", "cnpg-staging-legacy-owner", "cnpg-staging-sealed-owner"])
 async def test_bundled_reference_matches_independent_actual_provisioning(

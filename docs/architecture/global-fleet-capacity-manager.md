@@ -465,7 +465,8 @@ can satisfy its preconditions.
 These observations are not trusted reference artifacts or ownership-transfer
 receipts. The runtime package now bundles separate PostgreSQL-major-bound
 legacy-owner and sealed-owner references for the reviewed pairs
-`0134` / `guard_0030`, `0142` / `guard_0033` and `0146` / `guard_0033`.
+`0134` / `guard_0030`, `0142` / `guard_0033`, `0146` / `guard_0033` and
+`0146` / `guard_0034`.
 The 0142 pair includes the publication/keyset, task-source, personal
 membership, incarnation-storage and build-platform objects introduced by
 application migrations `0135`–`0142`. The current 0146 pair additionally includes
@@ -476,6 +477,33 @@ native-reader fence (`guard_0031`) and typed-terminal importer (`guard_0032`);
 it does not replace either upstream security boundary. Both PostgreSQL
 majors have independently generated pins; PostgreSQL 17 uses a pinned vanilla
 17.4 image, not an observation of the live CNPG database.
+The `guard_0034` retry migration changes only private guard objects. All six
+public reference profiles were independently regenerated on both majors and
+retain the `0146` / `guard_0033` public shape; the migration markers remain
+distinct and historical checkpoint selection remains explicit.
+
+After the legacy trial writer is frozen, only the credential-validated protected
+retry function can issue a private, one-use retry permission. It binds the
+transaction/backend, frozen writer/epoch/operation, registration/authority,
+trial/attempt/generation and exact worker/claim. The existing statement trigger
+requires that permission for UPDATE; the existing AFTER-row accounting trigger
+checks the full new row against the old row plus the permitted changes and
+consumes the permission. An optional node-setup attempt refund has its own
+permission. Suppressed, extra-row or extra-column changes fail the transaction;
+quota, lifecycle and successor changes roll back with it. Validation relies on
+the attested trigger chain's transactional effects, not arbitrary externally
+side-effecting triggers. Retry takes the runtime lock before authentication and
+uses nonblocking conflicting locks, so a competing operation is refused and
+must retry its whole transaction rather than deadlock during a lock upgrade.
+
+These consumed permissions remain private evidence; they do not advance the
+frozen legacy mutation ledger. Authority reassignment locks and inventories the
+permission table, and downgrade refuses retained evidence. There is no broad
+role exemption, caller-set session flag or new public trigger authority. This
+is retry continuity only: it does not authorize frozen submissions, ordinary
+state/results, cancellation, demand projection or recovery, and does not by
+itself make the fleet ready for a live writer freeze or activation.
+
 Catalog SQL selects `daticulocale` on 16 and `datlocale` on 17 before
 parsing; the canonical field remains `icu_locale` and hashes include the major.
 The existing protected
