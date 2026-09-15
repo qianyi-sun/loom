@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import json
 import os
+import stat
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -598,6 +599,79 @@ def test_publisher_exact_replay_preserves_the_published_inode(tmp_path: Path) ->
         first.st_ino,
         first.st_ctime_ns,
     )
+
+
+def test_publisher_process_exit_after_publication_leaves_replayable_authority(
+    tmp_path: Path,
+) -> None:
+    """A real process exit must not leave a permanently rejected two-link inode."""
+    module = _authority_module()
+    publication = _publication(tmp_path)
+    authority_root = tmp_path / "owner-authority"
+    authority_root.mkdir(mode=0o700)
+    authority_path = authority_root / "issue-906.json"
+    publisher = module.InstalledExecutionAuthorityPublisher(
+        path=authority_path, expected_uid=os.geteuid(), expected_gid=os.getegid(),
+    )
+    child = os.fork()
+    if child == 0:
+        # Stop the old implementation immediately after its link syscall, or
+        # the atomic implementation before its publication-directory fsync.
+        # os._exit deliberately skips exception cleanup and Python finalizers.
+        link = os.link
+        sync = os.fsync
+
+        def exit_after_link(*args, **kwargs):
+            link(*args, **kwargs)
+            os._exit(73)
+
+        def exit_before_directory_sync(descriptor):
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                os._exit(73)
+            sync(descriptor)
+
+        os.link = exit_after_link
+        os.fsync = exit_before_directory_sync
+        try:
+            publisher(publication)
+        finally:
+            os._exit(74)
+
+    _, status = os.waitpid(child, 0)
+    assert os.waitstatus_to_exitcode(status) == 73
+    assert authority_path.stat().st_nlink == 1
+    assert module.InstalledExecutionAuthorityReader(
+        path=authority_path, expected_uid=os.geteuid(), expected_gid=os.getegid(),
+    )() == publication
+    assert publisher(publication) == publication
+
+
+def test_publisher_exact_replay_syncs_directory_before_acknowledgement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replay must finish durability work omitted by a lost publication reply."""
+    module = _authority_module()
+    publication = _publication(tmp_path)
+    authority_root = tmp_path / "owner-authority"
+    authority_root.mkdir(mode=0o700)
+    publisher = module.InstalledExecutionAuthorityPublisher(
+        path=authority_root / "issue-906.json",
+        expected_uid=os.geteuid(), expected_gid=os.getegid(),
+    )
+    publisher(publication)
+    synced_directories = []
+    sync = os.fsync
+
+    def record_sync(descriptor):
+        metadata = os.fstat(descriptor)
+        if stat.S_ISDIR(metadata.st_mode):
+            synced_directories.append((metadata.st_dev, metadata.st_ino))
+        sync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", record_sync)
+    assert publisher(publication) == publication
+    directory = authority_root.stat()
+    assert (directory.st_dev, directory.st_ino) in synced_directories
 
 
 def test_publisher_rejects_changed_replay_without_replacing_authority(tmp_path: Path) -> None:
