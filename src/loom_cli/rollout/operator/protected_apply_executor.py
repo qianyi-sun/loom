@@ -12,11 +12,20 @@ import json
 import os
 import subprocess
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
+from loom.application_database_admission import (
+    ApplicationDatabaseHandoffBackend,
+    reclose_application_database_for_handoff_recovery,
+    reopen_application_database_for_handoff_recovery,
+    require_application_database_drained,
+)
+from loom.application_database_connection import ApplicationDatabaseConnection
+from loom.application_handoff_completion import ApplicationHandoffDatabaseOutcome
 from loom_cli.rollout.external_supervisor_controller import (
     parse_external_supervisor_controller_bindings,
 )
@@ -28,6 +37,8 @@ from loom_cli.rollout.final_gate_readiness import FinalGateResult
 from loom_cli.rollout.preflight_contract import CheckOperation
 
 from .final_gate_plan import FinalGatePlan
+from .installed_application_migration import InstalledApplicationMigrationFactory
+from .protected_application_admission_recovery import ApplicationAdmissionRecoveryRecord
 from .protected_apply_journal import (
     ComponentObservation,
     ComponentState,
@@ -35,6 +46,7 @@ from .protected_apply_journal import (
     ProtectedApplyComponent,
     ProtectedApplyJournal,
 )
+from .protected_cnpg_operator_admission import CNPGOperatorIdentity
 from .protected_environment_state_component import (
     ProtectedEnvironmentStateComponent,
     ProtectedEnvironmentStateTransport,
@@ -67,14 +79,42 @@ from .protected_gb10_component import (
 )
 from .protected_manifest_component import KubernetesProtectedManifestComponent
 from .protected_migration_component import KubernetesProtectedMigrationComponent
+from .protected_peer_database_connection import (
+    PeerDatabaseConnection,
+    PeerDatabaseTransportError,
+)
 from .protected_production_defaults_component import (
     HttpxProductionDefaultsTransport,
     KubernetesProtectedProductionDefaultsComponent,
     ProductionDefaultsTransport,
 )
+from .protected_staging_capacity_runtime import KubernetesProtectedStagingCapacityRuntime
+from .staging_mutation_guard import MutationGuardEvidence
 
 PROTECTED_KUBECONFIG_PATH = Path("/var/lib/loom-staging-rollout/kubeconfig")
 _MAX_OUTPUT_BYTES = 1024 * 1024
+_STAGING_PEER_DATABASE_COMMAND = (
+    "kubectl",
+    "--namespace",
+    "loom-staging",
+    "exec",
+    "-i",
+    "service/loom-postgres-rw",
+    "--",
+    "sh",
+    "-ceu",
+    # Staging is PG17. Prevent LOGIN callbacks before the first peer query;
+    # the peer refuses any existing event policy, then restores DDL handling.
+    "PGOPTIONS='-c event_triggers=off' exec psql -U postgres -d loom -qAtX -v ON_ERROR_STOP=1",
+)
+_STAGING_PEER_MAINTENANCE_COMMAND = (
+    *_STAGING_PEER_DATABASE_COMMAND[:-1],
+    "PGOPTIONS='-c event_triggers=off' exec psql -U postgres -d postgres -qAtX -v ON_ERROR_STOP=1",
+)
+_STAGING_PEER_TEMPLATE_COMMAND = (
+    *_STAGING_PEER_DATABASE_COMMAND[:-1],
+    "PGOPTIONS='-c event_triggers=off' exec psql -U postgres -d template1 -qAtX -v ON_ERROR_STOP=1",
+)
 _EXTERNAL_SUPERVISOR_CONTROLLER_ORDER = (
     "gx10-01c7",
     "TRT-EAI-OLDLAB-1",
@@ -185,12 +225,275 @@ class SubprocessProtectedApplyCommandRunner:
         return {
             "HOME": "/var/lib/loom-staging-rollout",
             "KUBECONFIG": str(self.kubeconfig),
+            # CLI preferences must not rewrite protected commands or add output.
+            "KUBECTL_KUBERC": "false",
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "PYTHONDONTWRITEBYTECODE": "1",
             "XDG_RUNTIME_DIR": f"/run/user/{uid}",
         }
+
+    def inspect_staging_cnpg_operator(self, identity: CNPGOperatorIdentity) -> Mapping[str, object]:
+        """Use only the installed dedicated host observer, with no personal-key fallback."""
+        from .protected_cnpg_operator_transport import inspect_staging_cnpg_operator
+
+        return inspect_staging_cnpg_operator(identity)
+
+    def open_staging_peer_database(self) -> PeerDatabaseConnection:
+        """Open the fixed bounded peer channel for admitted installed code only.
+
+        This does not admit a release or authorize a handoff. The protected
+        caller supplies its existing service identity, durable operation and
+        preconditions; no candidate-selected target or credentials are accepted.
+        The returned context manager owns cleanup, and exposes exact backend
+        identity for recovery. Local process retirement never proves rollback.
+        """
+        return self._open_staging_peer(database="loom")
+
+    def prepare_staging_application_database(
+        self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal,
+        connection: ApplicationDatabaseConnection, guard: MutationGuardEvidence,
+    ) -> ApplicationAdmissionRecoveryRecord:
+        """Prepare and close the initial SQL phase inside the admitted handoff.
+
+        The caller retains the original peer and guard and supplies enclosing
+        process/input/writer admission. This is not a standalone deployment or a
+        component terminal; later phases still retire clients and restore service.
+        """
+        from .protected_application_database_preparation import (
+            prepare_protected_application_database,
+        )
+
+        return prepare_protected_application_database(
+            plan, journal=journal, runner=self, connection=connection, guard=guard,
+        )
+
+    def complete_staging_application_database(
+        self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal,
+        connection: PeerDatabaseConnection, guard: MutationGuardEvidence,
+    ) -> ApplicationHandoffDatabaseOutcome:
+        """Complete the journal-bound SQL phases under the enclosing handoff authority.
+
+        External process/DDL/workload exclusion and harmful SQL retirement remain
+        enclosing component requirements. Database success cannot release a fence
+        or the retained guard before actual workload recovery is verified.
+        """
+        from .protected_application_database_completion import (
+            complete_protected_application_database,
+        )
+
+        return complete_protected_application_database(
+            plan, journal=journal, runner=self, connection=connection, guard=guard,
+        )
+
+    def recover_and_complete_staging_application_database(
+        self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal,
+        guard: MutationGuardEvidence,
+    ) -> ApplicationHandoffDatabaseOutcome:
+        """Recover one journaled peer and finish SQL without resealing a restored login.
+
+        Retains the same original external authority and guard. This fixed
+        operation performs no CNPG/workload recovery or component completion.
+        A successful database outcome leaves admission open; uncertain failures
+        attempt guarded reclosure only while roles remain sealed. An already
+        restored role refuses that cleanup rather than being silently resealed.
+        """
+        from loom.application_handoff_completion import application_handoff_recovery_login_enabled
+
+        from .protected_application_credential_recovery import (
+            recover_application_runtime_credential,
+        )
+        from .protected_application_database_completion import _require_completion_authority
+
+        original = _require_completion_authority(plan, journal=journal, guard=guard)
+        assert original.coordination_guard is not None
+        credential = recover_application_runtime_credential(plan, journal=journal, runner=self)
+        records = journal.read_application_handoff_recoveries()
+        ordinal = len(records) if records and records[-1][1] is None else len(records) + 1
+        journal.prepare_application_handoff_recovery(ordinal=ordinal)
+        prior = records[ordinal - 2][1] if ordinal > 1 else None
+        lost = prior.handoff_backend if prior is not None else original.handoff_backend
+        completed = False
+        try:
+            with self.open_staging_peer_maintenance_database() as maintenance:
+                restored = application_handoff_recovery_login_enabled(
+                    maintenance, target=original.target, handoff_backend=lost,
+                    coordination_guard=original.coordination_guard, provisioner_role="postgres",
+                )
+                if not restored:
+                    reclose_application_database_for_handoff_recovery(
+                        maintenance, target=original.target, provisioner_role="postgres",
+                        handoff_backend=lost, coordination_guard=original.coordination_guard,
+                        runtime_password=credential.password,
+                    )
+                    reopen_application_database_for_handoff_recovery(
+                        maintenance, target=original.target, provisioner_role="postgres",
+                        handoff_backend=lost, coordination_guard=original.coordination_guard,
+                        runtime_password=credential.password,
+                    )
+                with self.open_staging_peer_database() as peer:
+                    identity = peer.backend_identity
+                    if identity.database != original.target.database or identity.session_user != "postgres":
+                        raise PeerDatabaseTransportError("application completion recovery peer changed")
+                    backend = ApplicationDatabaseHandoffBackend(
+                        identity.backend_pid, identity.backend_started_at, identity.system_identifier,
+                        identity.server_started_at, identity.database_oid,
+                    )
+                    journal.record_application_handoff_replacement(ordinal=ordinal, handoff_backend=backend)
+                    if not restored:
+                        reclose_application_database_for_handoff_recovery(
+                            maintenance, target=original.target, provisioner_role="postgres",
+                            handoff_backend=backend, coordination_guard=original.coordination_guard,
+                            runtime_password=credential.password,
+                        )
+                    # Completion owns a fresh maintenance transport and requires
+                    # cluster-wide client retirement. Retire this recovery peer
+                    # before opening that transport, retaining the handoff/guard.
+                    maintenance.close()
+                    outcome = self.complete_staging_application_database(
+                        plan, journal=journal, connection=peer, guard=guard,
+                    )
+                    completed = True
+                    return outcome
+        finally:
+            if not completed:
+                # Fresh maintenance also reconciles a poisoned/lost transport.
+                # LOGIN restoration is deliberately never undone speculatively:
+                # its exact source/schema reconciliation happens on the next retry.
+                with self.open_staging_peer_maintenance_database() as cleanup:
+                    reclose_application_database_for_handoff_recovery(
+                        cleanup, target=original.target, provisioner_role="postgres",
+                        handoff_backend=lost, coordination_guard=original.coordination_guard,
+                        runtime_password=credential.password,
+                    )
+
+    def issue_staging_manager_replacement(
+        self, *, journal: ProtectedApplyJournal, runtime_password: str | None = None,
+    ) -> bool:
+        """Issue once under the enclosing admitted handoff; never claim retirement.
+
+        The enclosing installed component must retain exclusive administrator
+        and original supervised guard authority. No CLI or candidate-selected
+        transport target is exposed. Reconciliation is mandatory on every result.
+        """
+        from .protected_cnpg_manager_transport import issue_staging_manager_replacement
+
+        return issue_staging_manager_replacement(self, journal=journal, runtime_password=runtime_password)
+
+    def open_staging_peer_maintenance_database(self) -> PeerDatabaseConnection:
+        """Keep fixed maintenance access available while application admission is closed.
+
+        Same installed authority, environment and transport bounds as the handoff
+        peer. No caller-selected database, credential or command is accepted.
+        The protected operation must supply its exact journaled application target.
+        """
+        return self._open_staging_peer(database="postgres")
+
+    def open_staging_peer_template_database(self) -> PeerDatabaseConnection:
+        """Read the only other supported connectable database's executable profile."""
+        return self._open_staging_peer(database="template1")
+
+    def _open_staging_peer(self, *, database: Literal["loom", "postgres", "template1"]) -> PeerDatabaseConnection:
+        environment = dict(self.environment)
+        commands = {"loom": _STAGING_PEER_DATABASE_COMMAND,
+                    "postgres": _STAGING_PEER_MAINTENANCE_COMMAND,
+                    "template1": _STAGING_PEER_TEMPLATE_COMMAND}
+        if database not in commands:
+            raise PeerDatabaseTransportError("protected peer database is unsupported")
+        command = self._validate_invocation(
+            commands[database],
+            env=environment,
+            input_payload=None,
+            timeout_seconds=30,
+        )
+        try:
+            process = subprocess.Popen(
+                command,
+                env=environment,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+        except OSError:
+            raise PeerDatabaseTransportError("protected peer process failed safely") from None
+        connection = PeerDatabaseConnection(process)
+        identity = connection.backend_identity
+        if (
+            connection.info.server_version // 10000 != 17
+            or identity.database != database
+            or identity.session_user != "postgres"
+        ):
+            connection.close()
+            raise PeerDatabaseTransportError("protected peer identity does not match staging")
+        return connection
+
+    @contextmanager
+    def recover_staging_peer_database(
+        self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal, ordinal: int,
+        runtime_password: str | None = None,
+    ) -> Iterator[PeerDatabaseConnection]:
+        """Compose same-guard lost-peer recovery for an active protected component.
+
+        This is not a deployed component or release admission. The enclosing
+        operation must independently retain workload/DDL/process exclusion and
+        continuously supervise the ORIGINAL guard. Only sealed, closed-database
+        work is allowed in the yielded scope; LOGIN restoration/release belongs
+        to the later complete safe-outcome composer. No discovered peer is adopted.
+        """
+        journal.require_application_credential_context(plan)
+        original = journal.read_application_admission_recovery()
+        if original is None or original.target.database != "loom" or original.coordination_guard is None:
+            raise PeerDatabaseTransportError("protected peer recovery requires original staging admission and guard")
+        records = journal.read_application_handoff_recoveries()
+        if (type(ordinal) is not int or ordinal < len(records)
+                or (records and ordinal == len(records) and records[-1][1] is not None)):
+            raise PeerDatabaseTransportError("protected peer recovery requires pending or successor ordinal")
+        journal.prepare_application_handoff_recovery(ordinal=ordinal)
+        prior = records[ordinal - 2][1] if ordinal > 1 else None
+        lost = prior.handoff_backend if prior is not None else original.handoff_backend
+        with self.open_staging_peer_maintenance_database() as maintenance:
+            def reclose() -> None:
+                reclose_application_database_for_handoff_recovery(
+                    maintenance, target=original.target, provisioner_role="postgres", handoff_backend=lost,
+                    coordination_guard=original.coordination_guard, runtime_password=runtime_password,
+                )
+
+            # Reconcile both sides of a lost reopen ACK before admitting a process.
+            # This commits closure but never signals or adopts surviving sessions.
+            try:
+                reclose()
+                reopen_application_database_for_handoff_recovery(
+                    maintenance, target=original.target, provisioner_role="postgres", handoff_backend=lost,
+                    coordination_guard=original.coordination_guard, runtime_password=runtime_password,
+                )
+                with self.open_staging_peer_database() as peer:
+                    identity = peer.backend_identity
+                    if identity.database != original.target.database or identity.session_user != "postgres":
+                        raise PeerDatabaseTransportError("protected recovery peer identity changed")
+                    backend = ApplicationDatabaseHandoffBackend(
+                        identity.backend_pid, identity.backend_started_at, identity.system_identifier,
+                        identity.server_started_at, identity.database_oid,
+                    )
+                    journal.record_application_handoff_replacement(ordinal=ordinal, handoff_backend=backend)
+                    reclose()
+                    require_application_database_drained(
+                        maintenance, target=original.target, provisioner_role="postgres", handoff_backend=backend,
+                        coordination_guard=original.coordination_guard, runtime_password=runtime_password,
+                    )
+                    yield peer
+            finally:
+                # Even failed startup/publication or a lost reopen ACK must attempt
+                # guarded closure. The prior maintenance transport may be poisoned;
+                # fresh maintenance serializes with an in-flight ALTER, even when
+                # its committed snapshot still says closed. Lock timeout is refusal,
+                # not evidence of remote retirement or successful cleanup.
+                with self.open_staging_peer_maintenance_database() as cleanup:
+                    reclose_application_database_for_handoff_recovery(
+                        cleanup, target=original.target, provisioner_role="postgres", handoff_backend=lost,
+                        coordination_guard=original.coordination_guard, runtime_password=runtime_password,
+                    )
 
     def capture_stdout(
         self,
@@ -205,6 +508,40 @@ class SubprocessProtectedApplyCommandRunner:
             input_payload=None,
             timeout_seconds=timeout_seconds,
         )
+
+    def probe_cnpg_input_fence(
+        self, *, intent_digest: str, target_pooler_names: tuple[str, ...],
+    ) -> bool:
+        """Require exact fence/binding denial, not generic subprocess failure.
+
+        Only fixed server-dry-run requests are executed. A False result means a
+        request was accepted; other failures are sanitized and raised. The caller
+        still owns the protected journal, policy identities and writer exclusion.
+        """
+        from .protected_cnpg_input_fence import cnpg_input_fence_probe_commands
+
+        for policy_name, argv, payload in cnpg_input_fence_probe_commands(
+            intent_digest=intent_digest, target_pooler_names=target_pooler_names,
+        ):
+            command = self._validate_invocation(
+                argv, env=self.environment, input_payload=payload, timeout_seconds=30,
+            )
+            try:
+                result = subprocess.run(command, check=False, capture_output=True,
+                                        input=payload, timeout=30, env=dict(self.environment))
+            except (OSError, subprocess.SubprocessError):
+                raise RuntimeError("CNPG input fence probe transport failed safely") from None
+            if len(result.stdout) > self.max_output_bytes or len(result.stderr) > self.max_output_bytes:
+                raise RuntimeError("CNPG input fence probe response exceeded its bound")
+            if result.returncode == 0:
+                return False
+            expected = (f"ValidatingAdmissionPolicy '{policy_name}' with binding '{policy_name}' "
+                        "denied request: loom-cnpg-fence: protected handoff input is frozen").encode()
+            if (result.returncode != 1 or result.stdout
+                    or not result.stderr.startswith(b"Error from server (Forbidden):")
+                    or expected not in result.stderr):
+                raise RuntimeError("CNPG input fence probe did not prove expected denial")
+        return True
 
     def capture_stdout_with_input(
         self,
@@ -323,6 +660,23 @@ class SubprocessProtectedApplyCommandRunner:
         return command
 
 
+def _application_components(
+    plan: FinalGatePlan, *, runner: ProtectedApplyCommandRunner, service_uid: int,
+    container_registry: str, factory: InstalledApplicationMigrationFactory | None,
+    journal: ProtectedApplyJournal | None,
+) -> tuple[ProtectedApplyComponent, ...]:
+    if factory is None:
+        return (KubernetesProtectedMigrationComponent(runner=runner, environment=runner.environment,
+            service_uid=service_uid, container_registry=container_registry).component(plan),)
+    if journal is None or requires_legacy_epoch_bootstrap(plan):
+        raise ValueError("installed application handoff requires original journal and existing epoch authority")
+    components = factory.components(plan, journal=journal, ordinal=2)
+    if tuple(component.component_id for component in components) != (
+            "application-ownership-handoff", "database-migration"):
+        raise ValueError("installed application component order changed")
+    return components
+
+
 @dataclass(frozen=True, slots=True)
 class MigrationEpochProtectedApplyExecutor:
     """Execute the exact migration and epoch claim through one component journal."""
@@ -349,6 +703,7 @@ class MigrationEpochProtectedApplyExecutor:
         default_factory=HttpxProductionDefaultsTransport
     )
     container_registry: str = ""
+    application_factory: InstalledApplicationMigrationFactory | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -377,6 +732,39 @@ class MigrationEpochProtectedApplyExecutor:
     ) -> FinalGateResult:
         if check_id != "final.protected-apply" or operation is not CheckOperation.APPLY:
             raise ValueError("protected apply executor operation is invalid")
+        journal = ProtectedApplyJournal(
+            self.state_root, request_id=plan.request_id, attempt_number=plan.attempt_number,
+            service_uid=self.service_uid,
+        )
+        components = self.build_components(plan, journal=journal)
+        terminals = journal.execute(plan, components)
+        observed_epoch = max(terminal.observed_epoch for terminal in terminals.values())
+        if observed_epoch != plan.starting_mutation_epoch + 1:
+            raise RuntimeError("protected apply component chain did not advance one epoch")
+        return FinalGateResult(
+            check_id=check_id,
+            operation=operation,
+            candidate_sha=plan.candidate_sha,
+            attestation_digest=plan.attestation_digest,
+            observed_epoch=observed_epoch,
+            evidence_digest=_terminal_evidence_digest(terminals),
+            protected_mutation=True,
+            blockers={},
+        )
+
+    def build_components(
+        self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal,
+    ) -> tuple[ProtectedApplyComponent, ...]:
+        """Build the full original chain without classification or mutation.
+
+        Active handoff closures and the enclosing executor share this exact journal.
+        Early recovery must use the same chain and original ordinal, even when
+        surrounding component database reads are temporarily unavailable.
+        """
+        if (journal.request_id != plan.request_id or journal.attempt_number != plan.attempt_number
+                or journal.service_uid != self.service_uid
+                or journal.attempt_root != self.state_root / "requests" / plan.request_id / "attempts" / str(plan.attempt_number)):
+            raise ValueError("protected apply component journal binding changed")
         environment = self.runner.environment
         if environment.get("KUBECONFIG") is None:
             raise ValueError("protected apply executor command environment is invalid")
@@ -404,13 +792,9 @@ class MigrationEpochProtectedApplyExecutor:
             runner=self.runner,
             environment=environment,
         ).component(plan)
-        migration = KubernetesProtectedMigrationComponent(
-            runner=self.runner,
-            environment=environment,
-            service_uid=self.service_uid,
-            container_registry=self.container_registry,
-        ).component(plan)
-        staging_capacity = self._staging_capacity_components(plan, epoch.classify)
+        application = _application_components(plan, runner=self.runner, service_uid=self.service_uid,
+            container_registry=self.container_registry, factory=self.application_factory, journal=journal)
+        staging_capacity = self._staging_capacity_components(plan, epoch.classify, journal=journal)
         manifests = KubernetesProtectedManifestComponent(
             runner=self.runner,
             environment=environment,
@@ -460,7 +844,7 @@ class MigrationEpochProtectedApplyExecutor:
         components = (
             (
                 supervisor_reconciliation,
-                migration,
+                *application,
                 epoch,
                 *staging_capacity,
                 manifests,
@@ -476,7 +860,7 @@ class MigrationEpochProtectedApplyExecutor:
             else (
                 supervisor_reconciliation,
                 epoch,
-                migration,
+                *application,
                 *staging_capacity,
                 manifests,
                 external_supervisor_database,
@@ -488,35 +872,18 @@ class MigrationEpochProtectedApplyExecutor:
                 *external_supervisors,
             )
         )
-        terminals = ProtectedApplyJournal(
-            self.state_root,
-            request_id=plan.request_id,
-            attempt_number=plan.attempt_number,
-            service_uid=self.service_uid,
-        ).execute(plan, components)
-        observed_epoch = max(terminal.observed_epoch for terminal in terminals.values())
-        if observed_epoch != plan.starting_mutation_epoch + 1:
-            raise RuntimeError("protected apply component chain did not advance one epoch")
-        return FinalGateResult(
-            check_id=check_id,
-            operation=operation,
-            candidate_sha=plan.candidate_sha,
-            attestation_digest=plan.attestation_digest,
-            observed_epoch=observed_epoch,
-            evidence_digest=_terminal_evidence_digest(terminals),
-            protected_mutation=True,
-            blockers={},
-        )
+        return components
 
     def _staging_capacity_components(
         self,
         plan: FinalGatePlan,
         epoch_guard: Callable[[FinalGatePlan], ComponentObservation],
+        *, journal: ProtectedApplyJournal | None = None,
     ) -> tuple[ProtectedApplyComponent, ...]:
-        components = self.staging_capacity_runtime.components(
-            plan,
-            epoch_guard=epoch_guard,
-        )
+        if isinstance(self.staging_capacity_runtime, KubernetesProtectedStagingCapacityRuntime):
+            components = self.staging_capacity_runtime.components(plan, epoch_guard=epoch_guard, journal=journal)
+        else:
+            components = self.staging_capacity_runtime.components(plan, epoch_guard=epoch_guard)
         if tuple(component.component_id for component in components) != (
             _staging_capacity_component_order(plan)
         ):
@@ -552,6 +919,7 @@ class KubernetesProtectedConvergenceExecutor:
         default_factory=HttpxProductionDefaultsTransport
     )
     container_registry: str = ""
+    application_factory: InstalledApplicationMigrationFactory | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -612,14 +980,13 @@ class KubernetesProtectedConvergenceExecutor:
             environment=environment,
             epoch_guard=epoch.classify,
         )
-        staging_capacity = self._staging_capacity_components(plan, epoch.classify)
+        journal = None if self.application_factory is None else self.application_factory.new_journal(plan)
+        staging_capacity = self._staging_capacity_components(plan, epoch.classify, journal=journal)
+        application = _application_components(plan, runner=self.runner, service_uid=self.service_uid,
+            container_registry=self.container_registry, factory=self.application_factory,
+            journal=journal)
         observations = {
-            "database-migration": KubernetesProtectedMigrationComponent(
-                runner=self.runner,
-                environment=environment,
-                service_uid=self.service_uid,
-                container_registry=self.container_registry,
-            ).classify(plan),
+            **{component.component_id: component.classify(plan) for component in application},
             "mutation-epoch-claim": epoch.classify(plan),
             "staging-manifests": KubernetesProtectedManifestComponent(
                 runner=self.runner,
@@ -686,6 +1053,7 @@ class KubernetesProtectedConvergenceExecutor:
         if observations["external-supervisor-transition-cleanup"].observed_epoch != expected_epoch:
             blockers["external-supervisor-transition-cleanup"] = "protected-epoch-not-exact"
         for component_id in (
+            *(component.component_id for component in application),
             *staging_capacity_component_ids,
             *credential_component_ids,
             *external_component_ids,
@@ -707,11 +1075,12 @@ class KubernetesProtectedConvergenceExecutor:
         self,
         plan: FinalGatePlan,
         epoch_guard: Callable[[FinalGatePlan], ComponentObservation],
+        *, journal: ProtectedApplyJournal | None = None,
     ) -> tuple[ProtectedApplyComponent, ...]:
-        components = self.staging_capacity_runtime.components(
-            plan,
-            epoch_guard=epoch_guard,
-        )
+        if isinstance(self.staging_capacity_runtime, KubernetesProtectedStagingCapacityRuntime):
+            components = self.staging_capacity_runtime.components(plan, epoch_guard=epoch_guard, journal=journal)
+        else:
+            components = self.staging_capacity_runtime.components(plan, epoch_guard=epoch_guard)
         if tuple(component.component_id for component in components) != (
             _staging_capacity_component_order(plan)
         ):

@@ -32,6 +32,7 @@ from loom_capacity_agent.contracts import (
 )
 from loom_capacity_guard.contracts import GuardFenceV1, canonical_bytes
 from loom_capacity_guard.schema_startup import capacity_guard_schema_head
+from loom_cli.rollout.application_migration_contract import APPLICATION_OWNER_ROLE
 
 from .final_gate_plan import FinalGatePlan
 from .postgres_sql import single_line_sql
@@ -110,6 +111,7 @@ _AUTHORITY_REBIND_ACTIVITY_TABLES = (
     "protected_runtime_trial_submissions",
     "trial_attempts",
     "trial_requirements",
+    "trial_writer_mutations",
 )
 _AUTHORITY_REBIND_ACTIVITY_UNION = " UNION ALL ".join(
     f"SELECT 1 AS present FROM loom_capacity_guard.{table_name}"
@@ -124,6 +126,7 @@ _AUTHORITY_REBIND_LOCK_TABLES = tuple(
             "agent_runtime_authority",
             "audit_events",
             "authority_state",
+            "trial_writer_fence",
             "capacity_guard_alembic_version",
             "claim_guard_activation",
             "executable_admission_authority",
@@ -134,6 +137,9 @@ _AUTHORITY_REBIND_LOCK_TABLES = tuple(
 )
 _AUTHORITY_REBIND_LOCK_SQL = ", ".join(
     f"loom_capacity_guard.{table_name}" for table_name in _AUTHORITY_REBIND_LOCK_TABLES
+)
+_AUTHORITY_REBIND_LOCK_STATEMENT = (
+    f"LOCK TABLE {_AUTHORITY_REBIND_LOCK_SQL} IN ACCESS EXCLUSIVE MODE NOWAIT;"
 )
 _AUTHORITY_REBIND_TRIGGER_PREDICATE = """
     (
@@ -217,8 +223,16 @@ _AUTHORITY_BINDING_AUDIT_MODEL_TYPES: dict[str, type[GuardFenceV1] | type[AgentR
 }
 _AUTHORITY_REBIND_FOUNDATION_PREDICATE = f"""
     (SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version)
-      = 'guard_0034'
+      = 'guard_0035'
     AND NOT EXISTS ({_AUTHORITY_REBIND_ACTIVITY_UNION})
+    AND (SELECT count(*) FROM loom_capacity_guard.trial_writer_fence) = 1
+    AND EXISTS (
+      SELECT 1 FROM loom_capacity_guard.trial_writer_fence
+      WHERE singleton_id = 1 AND writer_incarnation IS NULL
+        AND writer_epoch = 1 AND subject_id IS NULL
+        AND registration IS NULL AND authority_binding IS NULL
+        AND high_water = 0 AND frozen IS FALSE AND freeze_operation_id IS NULL
+    )
     AND (SELECT count(*) FROM loom_capacity_guard.agent_reporter_state) = 1
     AND EXISTS (
       SELECT 1
@@ -758,6 +772,11 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
     recovery_plan_reader: Callable[[FinalGatePlan, str, str, str], FinalGatePlan | None] | None = (
         None
     )
+    application_owner_role: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.application_owner_role, str) or self.application_owner_role not in {"", APPLICATION_OWNER_ROLE}:
+            raise ValueError("protected capacity application owner selection is invalid")
 
     def classify(self, plan: FinalGatePlan) -> tuple[ComponentState, str]:
         try:
@@ -811,6 +830,8 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         return ComponentState.DRIFTED
 
     def apply(self, plan: FinalGatePlan) -> None:
+        if self.application_owner_role:
+            raise RuntimeError("separated owner capacity bootstrap requires the retained lifecycle")
         seed = self.seed_reader()
         payload = self._manifest(plan, seed)
         before = self._snapshot(plan, seed=seed, manifest=payload)
@@ -1136,7 +1157,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             "authority": expected_fence.model_dump(mode="json"),
             "database_privileges": {
                 "loom_cap_staging_agent": {
-                    "acl": [{"grantable": False, "grantor": "loom", "privilege": "CONNECT"}],
+                    "acl": [{"grantable": False, "grantor": self.application_owner_role or "loom", "privilege": "CONNECT"}],
                     "connect": True,
                     "create": False,
                     "temporary": False,
@@ -1154,7 +1175,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                     "temporary": False,
                 },
                 "loom_cap_staging_observer": {
-                    "acl": [{"grantable": False, "grantor": "loom", "privilege": "CONNECT"}],
+                    "acl": [{"grantable": False, "grantor": self.application_owner_role or "loom", "privilege": "CONNECT"}],
                     "connect": True,
                     "create": False,
                     "temporary": False,
@@ -1166,7 +1187,7 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
                     "temporary": False,
                 },
                 "loom_cap_staging_runtime": {
-                    "acl": [{"grantable": False, "grantor": "loom", "privilege": "CONNECT"}],
+                    "acl": [{"grantable": False, "grantor": self.application_owner_role or "loom", "privilege": "CONNECT"}],
                     "connect": True,
                     "create": False,
                     "temporary": False,
@@ -1180,6 +1201,18 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
             ),
             "runtime_role": "loom_cap_staging_runtime",
         }
+        if not durable_runtime_credentials and self.application_owner_role:
+            # A retained retry preserves already durable ordinary credentials.
+            # Admit either live lifetime for these three unprivileged logins;
+            # elevated migrator credentials must still have retired entirely.
+            observed_roles = details.get("roles")
+            expected_roles = expected_details["roles"]
+            assert isinstance(expected_roles, dict)
+            if isinstance(observed_roles, dict):
+                for role in ("loom_cap_staging_agent", "loom_cap_staging_observer", "loom_cap_staging_runtime"):
+                    observed_role = observed_roles.get(role)
+                    if isinstance(observed_role, dict) and observed_role.get("credential_validity") == "infinite":
+                        expected_roles[role]["credential_validity"] = "infinite"
         sealed_details = dict(expected_details)
         sealed_details["active_protected_sessions"] = {name: 0 for name in protected_role_names}
         sealed_roles = _expected_roles(sealed=True)
@@ -2333,10 +2366,13 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         """
 
     def _rebind_legacy_authority(
-        self,
-        plan: FinalGatePlan,
-        seed: Mapping[str, object],
+        self, plan: FinalGatePlan, seed: Mapping[str, object],
     ) -> None:
+        self._run_peer_payload(self._legacy_authority_rebind_payload(plan, seed))
+
+    def _legacy_authority_rebind_payload(
+        self, plan: FinalGatePlan, seed: Mapping[str, object],
+    ) -> bytes:
         target_fence, target_registration, legacy_fence, legacy_registration = (
             self._authority_rebind_bindings(plan, seed)
         )
@@ -2376,7 +2412,9 @@ class KubernetesProtectedStagingCapacityDatabaseComponent:
         repaired_authority = sql.Literal(str(target_authority)).as_string()
         payload = f"""\
 BEGIN;
-LOCK TABLE {_AUTHORITY_REBIND_LOCK_SQL} IN ACCESS EXCLUSIVE MODE;
+SET LOCAL lock_timeout='1s';
+SET LOCAL statement_timeout='30s';
+{_AUTHORITY_REBIND_LOCK_STATEMENT}
 DO $loom$
 BEGIN
     IF current_user <> 'postgres'
@@ -2452,7 +2490,7 @@ END
 $loom$;
 COMMIT;
 """.encode("ascii")
-        self._run_peer_payload(payload)
+        return payload
 
     def _restore_runtime_credentials(
         self,
@@ -2485,7 +2523,7 @@ COMMIT;
         payload = f"""\
 BEGIN;
 -- protected staging capacity authority runtime restore
-LOCK TABLE {_AUTHORITY_REBIND_LOCK_SQL} IN ACCESS EXCLUSIVE MODE;
+{_AUTHORITY_REBIND_LOCK_STATEMENT}
 DO $loom$
 BEGIN
     IF current_user <> 'postgres'
@@ -2575,6 +2613,8 @@ COMMIT;
         self._run_peer_payload(payload)
 
     def _arm_transient_migrator(self, seed: Mapping[str, object]) -> None:
+        if self.application_owner_role:
+            raise RuntimeError("separated owner capacity bootstrap requires the retained lifecycle")
         migrator_password = sql.Literal(
             _seed_credential(seed, "migrator_database_password")
         ).as_string()

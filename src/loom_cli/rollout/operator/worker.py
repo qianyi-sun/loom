@@ -47,6 +47,7 @@ from .envelope import (
 )
 from .failure_diagnostics import unclassified_failure_diagnostic
 from .final_admission_store import FinalAdmissionStore
+from .final_gate_plan import FinalGatePlan, FinalGatePlanStore
 from .final_gate_store import FinalGateExecutionStore
 from .installed_backup_retention import converge_verified_backup_candidate
 from .lifecycle import LifecycleCoordinator
@@ -60,13 +61,22 @@ from .model import (
     validate_safe_identifier,
 )
 from .policy import sanitized_child_environment
+from .protected_application_guard_retention import (
+    _read_pending_retention,
+    retained_application_guard_for_resume,
+)
+from .protected_apply_journal import ComponentTerminal
 from .protected_apply_recovery import find_advanced_epoch_attempt
 from .redaction import redact_rollout_text
 from .resume_runtime_upgrade import (
     AdmittedResumeRuntimeUpgrade,
     build_installed_resume_runtime_upgrade_authority,
 )
-from .staging_mutation_guard import MutationGuardManager
+from .staging_mutation_guard import (
+    MutationGuardEvidence,
+    MutationGuardManager,
+    MutationGuardRetainedError,
+)
 from .store import RequestStore
 from .systemd import MUTATION_GUARD_CLIENT_OPERATION_TIMEOUT_SECONDS, SystemdUserManager
 
@@ -341,6 +351,38 @@ class _AttestationReader(Protocol):
     def read(self, digest: str) -> PreflightAttestation: ...
 
 
+class _ApplicationRecoveryExecutor(Protocol):
+    def __call__(self, plan: FinalGatePlan, *, guard: MutationGuardEvidence) -> ComponentTerminal | None: ...
+
+
+def _recover_pending_application_before_admission(
+    envelope: DriverEnvelope, *, attestation: PreflightAttestation, state_root: Path,
+    service_uid: int, recover: _ApplicationRecoveryExecutor,
+) -> None:
+    pending = _read_pending_retention(state_root, request_id=envelope.request_id, service_uid=service_uid)
+    if pending is None:
+        return
+    if (not envelope.resume or envelope.resolved_tree is None
+            or pending.intent.attempt_number >= envelope.attempt_number):
+        raise ValueError("application early recovery requires the original prior attempt")
+    guard = retained_application_guard_for_resume(state_root, request_id=envelope.request_id,
+        service_uid=service_uid, recovery_attempt=pending.intent.attempt_number,
+        candidate_sha=envelope.resolved_sha, candidate_tree=envelope.resolved_tree,
+        attestation_digest=envelope.preflight_attestation_sha256,
+        starting_mutation_epoch=attestation.bindings.staging_mutation_epoch)
+    if guard is None:
+        return
+    plan = FinalGatePlanStore(state_root, request_id=envelope.request_id,
+        attempt_number=pending.intent.attempt_number, service_uid=service_uid).read()
+    terminal = recover(plan, guard=guard)
+    if terminal is not None and (terminal.intent_digest != pending.intent.intent_digest
+            or terminal.component_id != pending.intent.component_id
+            or terminal.observed_epoch != plan.starting_mutation_epoch + 1):
+        raise RuntimeError("application early recovery terminal changed")
+    if _read_pending_retention(state_root, request_id=envelope.request_id, service_uid=service_uid, guard=guard) is not None:
+        raise RuntimeError("application early recovery has not completed")
+
+
 def _admit_final_attempt(
     envelope: DriverEnvelope,
     *,
@@ -348,6 +390,7 @@ def _admit_final_attempt(
     attestation_store: _AttestationReader,
     state_root: Path,
     service_uid: int,
+    recover_pending_application: Callable[[DriverEnvelope, PreflightAttestation], None] | None = None,
 ) -> FinalAttestationAdmission:
     """Persist initial admission or re-admit one proven post-apply resume."""
     candidate = CandidateBinding(
@@ -361,6 +404,8 @@ def _admit_final_attempt(
         approved_base_sha=envelope.approved_base_sha,
     )
     attestation = attestation_store.read(envelope.preflight_attestation_sha256)
+    if recover_pending_application is not None:
+        recover_pending_application(envelope, attestation)
     current_store = FinalAdmissionStore(
         state_root,
         request_id=envelope.request_id,
@@ -555,7 +600,7 @@ def _run_attempt_owned(
     dependencies: WorkerDependencies,
     *,
     signals: _SignalController | None = None,
-    release_guard: Callable[[], None],
+    release_guard: Callable[[], bool],
 ) -> int:
     """Run one immutable attempt while holding the full-driver lifecycle lock."""
     pointer = ActivePointer(
@@ -719,7 +764,12 @@ def _run_attempt_owned(
                 ),
             )
             return_code = 1
-        release_guard()
+        if not release_guard() and return_code == 0:
+            terminal_event = _event(
+                envelope, dependencies=dependencies, event="attempt_failed", status="failed",
+                reason="application_handoff_pending",
+            )
+            return_code = 1
         dependencies.store.append_event(terminal_event)
         dependencies.lifecycle.release_active(running_pointer)
         return return_code
@@ -736,10 +786,16 @@ def run_attempt(
     guard_owned = False
     release_attempted = False
 
-    def release_guard() -> None:
+    def release_guard() -> bool:
         nonlocal release_attempted
         release_attempted = True
-        _release_mutation_guard(dependencies, envelope.request_id)
+        try:
+            _release_mutation_guard(dependencies, envelope.request_id)
+        except MutationGuardRetainedError:
+            # Record failure/cancellation while preserving the original guard.
+            # This condition cannot publish success or prove guard survival.
+            return False
+        return True
 
     try:
         guard_owned = True
@@ -761,6 +817,7 @@ def run_attempt(
         ):
             raise ValueError("staging mutation guard binding drifted")
         expected_mutation_epoch = original.mutation_epoch
+        retained_guard = None
         if envelope.resume and dependencies.state_root is not None:
             recovery_attempt = find_advanced_epoch_attempt(
                 dependencies.state_root,
@@ -773,6 +830,21 @@ def run_attempt(
             )
             if recovery_attempt is not None:
                 expected_mutation_epoch += 1
+            retained_guard = retained_application_guard_for_resume(
+                dependencies.state_root, request_id=envelope.request_id,
+                service_uid=os.geteuid(), recovery_attempt=recovery_attempt,
+                candidate_sha=envelope.resolved_sha, candidate_tree=envelope.resolved_tree,
+                attestation_digest=envelope.preflight_attestation_sha256,
+                starting_mutation_epoch=original.mutation_epoch,
+            )
+        if retained_guard is not None:
+            read_epoch = getattr(_mutation_guard(dependencies), "observe_retained_epoch", None)
+            if evidence != retained_guard or not callable(read_epoch):
+                raise ValueError("staging mutation guard original identity is unavailable")
+            observed_epoch = read_epoch(retained_guard)
+            if type(observed_epoch) is not int or observed_epoch != expected_mutation_epoch:
+                raise ValueError("staging mutation guard live epoch drifted")
+            expected_mutation_epoch = retained_guard.mutation_epoch
         if evidence.mutation_epoch != expected_mutation_epoch:
             raise ValueError("staging mutation guard binding drifted")
         return _run_attempt_owned(
@@ -1186,6 +1258,20 @@ def _default_dependencies(
             argv.append("--resume")
         return dispatch(argv)
 
+    def recover_application(envelope: DriverEnvelope, attestation: PreflightAttestation) -> None:
+        from .installed_final_gate_executor import InstalledFinalGateExecutor
+
+        def recover(plan: FinalGatePlan, *, guard: MutationGuardEvidence) -> ComponentTerminal | None:
+            authority = (build_installed_resume_runtime_upgrade_authority(control_config, service_uid=service_uid,
+                run=lambda argv: _run(argv, environment=child_environment))
+                if control_config.source_mode == "merged-dev" else None)
+            executor = InstalledFinalGateExecutor(config=control_config, service_uid=service_uid,
+                service_gid=service_gid, resume_runtime_upgrade=authority)
+            return executor.recover_pending_application_operation(plan, guard=guard)
+
+        _recover_pending_application_before_admission(envelope, attestation=attestation,
+            state_root=config.state_root, service_uid=service_uid, recover=recover)
+
     def final_admission(envelope: DriverEnvelope) -> FinalAttestationAdmission:
         return _admit_final_attempt(
             envelope,
@@ -1193,6 +1279,7 @@ def _default_dependencies(
             attestation_store=composition.attestation_store,
             state_root=config.state_root,
             service_uid=service_uid,
+            recover_pending_application=recover_application,
         )
 
     def post_apply_plan(

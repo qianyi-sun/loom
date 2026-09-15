@@ -569,7 +569,51 @@ def test_installed_protected_dispatch_binds_fixed_candidate_and_supervisor_trans
     assert staging_capacity.service_uid == os.geteuid()
     assert staging_capacity.service_gid == os.getegid()
     assert staging_capacity.container_registry == ""
+    assert callable(staging_capacity.database_component_factory)
+    from loom_cli.rollout.operator.installed_application_migration import (
+        InstalledApplicationMigrationFactory,
+    )
+    factory = captured["application_factory"]
+    assert isinstance(factory, InstalledApplicationMigrationFactory)
+    assert factory.handoff.config == executor.config and factory.handoff.runner is staging_capacity.runner
+    assert factory.handoff.successor_source(plan, factory.new_journal(plan)) is None
     assert captured["service_uid"] == os.geteuid()
+
+
+@pytest.mark.parametrize("drift", [None, "guard", "epoch"])
+def test_installed_early_recovery_verifies_live_guard_before_original_chain(tmp_path, monkeypatch, drift):
+    from tests.loom_cli.rollout.operator.test_application_guard_retention import _guard
+
+    executor, plan = _executor(tmp_path), _bound_plan(tmp_path)
+    guard = _guard(plan)
+    calls = []
+    components = (object(), object())
+    terminal = object()
+
+    def recover(candidate, chain, *, guard):
+        assert candidate == plan and chain is components
+        calls.append("recover")
+        return terminal
+
+    journal = SimpleNamespace(recover_pending_application_operation=recover)
+    factory = SimpleNamespace(new_journal=lambda candidate: journal,
+        handoff=SimpleNamespace(completed_guard=lambda candidate: None if drift == "guard" else guard),
+        epoch=lambda candidate: plan.starting_mutation_epoch + (2 if drift == "epoch" else 1))
+
+    def build(candidate, *, journal):
+        assert candidate == plan
+        calls.append("build")
+        return components
+
+    apply_executor = SimpleNamespace(application_factory=factory, build_components=build)
+    monkeypatch.setattr(InstalledFinalGateExecutor, "build_protected_apply_executor", lambda self, candidate: apply_executor)
+    if drift:
+        with pytest.raises(RuntimeError, match="guard or epoch"):
+            executor.recover_pending_application_operation(plan, guard=guard)
+        assert calls == []
+    else:
+        assert executor.recover_pending_application_operation(plan, guard=guard) is terminal
+        assert calls == ["build", "recover"]
 
 
 def test_schema_seven_dispatch_binds_both_fixed_controller_prerequisite_transports(

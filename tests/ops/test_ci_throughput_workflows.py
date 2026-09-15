@@ -2014,6 +2014,11 @@ def test_python_test_shards_are_complete_and_non_overlapping() -> None:
         "tests/integration/test_capacity_manager_execution_store.py",
         "tests/integration/test_capacity_final_release_witness.py",
         "tests/integration/test_capacity_typed_terminal_sql.py",
+        "tests/integration/test_application_handoff_completion.py",
+        "tests/integration/test_application_completed_authority.py",
+        "tests/integration/test_application_capacity_bootstrap_runtime.py",
+        "tests/integration/test_application_schema_reference.py",
+        "tests/integration/test_application_migrator_provision.py",
     } <= set(integration_shards[1])
     auth_path = "tests/integration/test_username_password_auth.py"
     schema_path = "tests/integration/test_username_password_schema.py"
@@ -2053,10 +2058,11 @@ def test_root_test_shard_timeout_has_bounded_growth_headroom() -> None:
 def test_integration_shard_timeout_has_bounded_growth_headroom() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
 
-    # Run34616503769 shard1 was cancelled at99% by its40-minute job limit,
-    # while still making normal test progress. Preserve room for completion,
-    # coverage upload and cleanup without reducing the selected test set.
-    assert 50 <= workflow["jobs"]["integration"]["timeout-minutes"] <= 60
+    # Run35011189004 shard2 exhausted 90 minutes while still progressing at70%.
+    # The remaining suffix took nine minutes in run34925212036. Preserve every
+    # test and allow bounded headroom for growth, coverage and runner variation;
+    # per-test timeouts remain unchanged.
+    assert 110 <= workflow["jobs"]["integration"]["timeout-minutes"] <= 120
 
 
 def test_ci_supports_merge_queue_merge_group_event() -> None:

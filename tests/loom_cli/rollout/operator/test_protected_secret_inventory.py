@@ -103,11 +103,55 @@ def test_inventory_records_required_and_optional_secret_presence(
         ("loom-dev", "loom-capacity-execution-operator", False),
         ("loom-dev", "loom-capacity-executor-gb10", False),
         ("loom-dev", "loom-capacity-executor-oldlab", False),
+        ("loom-staging", "loom-postgres-cnpg-credentials", False),
     ]
     assert set(inventory.exported_objects) == {
         item["filename"] for item in record["secrets"] if item["present"]
     }
     assert all(item["sha256"] is None for item in record["secrets"] if not item["present"])
+
+
+def test_new_inventory_accounts_for_cnpg_and_legacy_inventory_remains_readable(tmp_path):
+    inventory, path = _persist_inventory(tmp_path / "secrets", runtime=False, agent=False)
+    record = json.loads(inventory.inventory_payload)
+    assert record["schema_version"] == 2
+    assert any(item["name"] == "loom-postgres-cnpg-credentials" for item in record["secrets"])
+    legacy = {
+        "schema_version": 1,
+        "secrets": [
+            item for item in record["secrets"] if item["name"] != "loom-postgres-cnpg-credentials"
+        ],
+    }
+    path.write_text(json.dumps(legacy, sort_keys=True, separators=(",", ":")) + "\n")
+    observed = inspect_secret_inventory(path.parent, expected_owner_uid=os.geteuid())
+    assert json.loads(observed.inventory_payload)["schema_version"] == 1
+    # Do not infer a new observed absence from an old schema's missing entry.
+    assert "loom-postgres-cnpg-credentials" not in observed.inventory_payload.decode()
+
+
+def test_cnpg_secret_identity_must_be_stable_during_backup():
+    observations = _observations(runtime=False, agent=False)
+    identity = ("loom-staging", "loom-postgres-cnpg-credentials")
+    assert identity in observations
+    observations[identity] = (
+        _secret(*identity),
+        _secret(*identity, uid="22222222-2222-4222-8222-222222222222"),
+    )
+    with pytest.raises(SecretInventoryError, match="changed during acquisition"):
+        build_secret_inventory(observations)
+
+
+@pytest.mark.parametrize("schema", [True, 2])
+def test_new_inventory_cannot_omit_cnpg_observation(tmp_path, schema):
+    inventory, path = _persist_inventory(tmp_path / "secrets", runtime=False, agent=False)
+    record = json.loads(inventory.inventory_payload)
+    record["schema_version"] = schema
+    record["secrets"] = [
+        item for item in record["secrets"] if item["name"] != "loom-postgres-cnpg-credentials"
+    ]
+    path.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+    with pytest.raises(SecretInventoryError):
+        inspect_secret_inventory(path.parent, expected_owner_uid=os.geteuid())
 
 
 def test_inventory_rejects_absent_required_or_changing_identity() -> None:

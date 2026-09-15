@@ -54,7 +54,7 @@ class ProtectedSecretSpec:
         return f"protected-{self.namespace}-{self.name}.json"
 
 
-PROTECTED_SECRET_SPECS = (
+_LEGACY_SECRET_SPECS = (
     ProtectedSecretSpec("loom-dev", "loom-capacity-manager", True),
     ProtectedSecretSpec("loom-staging", "loom-capacity-agent", False),
     ProtectedSecretSpec("loom-staging", "loom-protected-worker-runtime", False),
@@ -62,7 +62,12 @@ PROTECTED_SECRET_SPECS = (
     ProtectedSecretSpec("loom-dev", "loom-capacity-executor-gb10", False),
     ProtectedSecretSpec("loom-dev", "loom-capacity-executor-oldlab", False),
 )
+PROTECTED_SECRET_SPECS = (
+    *_LEGACY_SECRET_SPECS,
+    ProtectedSecretSpec("loom-staging", "loom-postgres-cnpg-credentials", False),
+)
 _SPECS_BY_IDENTITY = {(item.namespace, item.name): item for item in PROTECTED_SECRET_SPECS}
+_LEGACY_SPECS_BY_IDENTITY = {(item.namespace, item.name): item for item in _LEGACY_SECRET_SPECS}
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,7 +241,7 @@ def build_secret_inventory(
         )
     inventory_payload = (
         json.dumps(
-            {"schema_version": 1, "secrets": records},
+            {"schema_version": 2, "secrets": records},
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -317,10 +322,14 @@ def inspect_secret_inventory(root: Path, *, expected_owner_uid: int) -> SecretIn
     records = value.get("secrets")
     if (
         set(value) != {"schema_version", "secrets"}
-        or value["schema_version"] != 1
+        or type(value["schema_version"]) is not int
+        or value["schema_version"] not in {1, 2}
         or not isinstance(records, list)
     ):
         raise SecretInventoryError("protected Secret inventory schema is invalid")
+    # Old checkpoints remain readable, but their missing CNPG entry is UNKNOWN,
+    # not an observed absence. New cutover admission must require schema 2.
+    specs = _LEGACY_SPECS_BY_IDENTITY if value["schema_version"] == 1 else _SPECS_BY_IDENTITY
     seen: set[tuple[str, str]] = set()
     expected_files = set(_STAGING_SECRET_FILES) | {_INVENTORY_FILENAME}
     exported: dict[str, bytes] = {}
@@ -345,7 +354,7 @@ def inspect_secret_inventory(root: Path, *, expected_owner_uid: int) -> SecretIn
         if not all(isinstance(item, str) for item in identity) or identity in seen:
             raise SecretInventoryError("protected Secret inventory has duplicate identity")
         seen.add(identity)  # type: ignore[arg-type]
-        spec = _SPECS_BY_IDENTITY.get(identity)  # type: ignore[arg-type]
+        spec = specs.get(identity)  # type: ignore[arg-type]
         if spec is None or type(record.get("present")) is not bool:
             raise SecretInventoryError("protected Secret inventory identity is invalid")
         if not record["present"]:
@@ -370,7 +379,7 @@ def inspect_secret_inventory(root: Path, *, expected_owner_uid: int) -> SecretIn
             raise SecretInventoryError("protected Secret exported-object digest does not match")
         exported[spec.filename] = payload
         expected_files.add(spec.filename)
-    if len(records) != len(PROTECTED_SECRET_SPECS) or seen != set(_SPECS_BY_IDENTITY):
+    if len(records) != len(specs) or seen != set(specs):
         raise SecretInventoryError("protected Secret inventory identity set is invalid")
     if filenames != expected_files:
         raise SecretInventoryError("protected Secret inventory file set is invalid")

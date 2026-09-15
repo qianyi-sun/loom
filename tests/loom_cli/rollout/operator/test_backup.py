@@ -210,6 +210,7 @@ class RecordingRunner:
                 "loom-capacity-execution-operator",
                 "loom-capacity-executor-gb10",
                 "loom-capacity-executor-oldlab",
+                "loom-postgres-cnpg-credentials",
             }:
                 return b""
             return json.dumps(
@@ -429,7 +430,8 @@ def test_critical_checkpoint_records_inventory_without_minio_payload_copy(
     assert len(inventory_document["inventory_root"]) == 64
     assert all("port-forward" not in argv for argv in runner.argvs)
     assert json.loads((bundle / "database-authority.json").read_bytes())["configuration_epoch"] == 9
-    assert runner.timeouts == [600.0, *([30.0] * 15)]
+    assert runner.timeouts == [600.0, *([30.0] * 17)]
+    assert sum("loom-postgres-cnpg-credentials" in argv for argv in runner.argvs) == 2
 
 
 @pytest.mark.parametrize(

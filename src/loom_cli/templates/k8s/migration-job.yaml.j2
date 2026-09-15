@@ -32,13 +32,21 @@ spec:
   # migration failure in a single retry rather than a stuck loop).
   backoffLimit: 1
   activeDeadlineSeconds: 600
+{% if not application_owner_role %}
   ttlSecondsAfterFinished: 600
+{% endif %}
   template:
     metadata:
       labels:
         app: loom-migration
     spec:
       restartPolicy: Never
+{% if application_owner_role %}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext: {{ application_authority.podSecurityContext | tojson }}
+      volumes: {{ application_authority.volumes | tojson }}
+{% endif %}
       containers:
         - name: migrate
           image: {{ image_reference }}
@@ -49,6 +57,11 @@ spec:
             - migrations/alembic.ini
             - upgrade
             - head
+{% if application_owner_role %}
+          env: {{ application_authority.env | tojson }}
+          securityContext: {{ application_authority.containerSecurityContext | tojson }}
+          volumeMounts: {{ application_authority.volumeMounts | tojson }}
+{% else %}
           env:
             # Alembic reads LOOM_DB_URL per migrations/env.py; the
             # control-plane uses LOOM_CP_DB_URL. Reusing the same
@@ -62,6 +75,7 @@ spec:
                 secretKeyRef:
                   name: loom-secrets
                   key: cp-db-url
+{% endif %}
           resources:
             requests: { cpu: 100m, memory: 128Mi }
             limits: { cpu: 500m, memory: 512Mi }
