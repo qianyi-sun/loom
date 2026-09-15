@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -121,10 +122,21 @@ async def test_publish_local_benchmark_uploads_and_registers(
     assert stats.inserted == 1
     assert stats.updated == 0
     assert stats.unchanged == 0
-    assert stats.uploaded_objects == 2
+    assert stats.uploaded_objects == 3
     assert stats.source_prefix == "s3://loom-benchmarks/team-evals/"
     assert ("loom-benchmarks", f"{revision_prefix}task.toml") in store.objects
     assert ("loom-benchmarks", f"{revision_prefix}instruction.md") in store.objects
+    manifest_key = f"{revision_prefix}service-execution-input.json"
+    assert ("loom-benchmarks", manifest_key) in store.objects
+    manifest_body = store.objects[("loom-benchmarks", manifest_key)]
+    expected_sei = {
+        "schema_version": "loom.service-execution-input.v1",
+        "manifest_uri": f"s3://loom-benchmarks/{manifest_key}",
+        "manifest_sha256": "sha256:" + hashlib.sha256(manifest_body).hexdigest(),
+        "file_count": 2,
+        "total_bytes": len((task_dir / "task.toml").read_bytes())
+        + len((task_dir / "instruction.md").read_bytes()),
+    }
 
     engine = create_async_engine(postgres_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -154,6 +166,7 @@ async def test_publish_local_benchmark_uploads_and_registers(
             assert task.checksum == expected_checksum
             assert task.source_provenance == {
                 "bundle_file_metadata_sha256": f"sha256:{metadata_digest}",
+                "service_execution_input": expected_sei,
             }
     finally:
         async with factory() as session:

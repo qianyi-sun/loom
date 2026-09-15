@@ -199,6 +199,39 @@ def build_service_execution_input_manifest(
     )
 
 
+def prepare_service_execution_input_manifest(
+    bundle_dir: Path,
+    *,
+    task_checksum: str,
+    bucket: str,
+    manifest_key: str,
+) -> tuple[bytes, dict[str, Any]]:
+    """Build canonical manifest bytes and the ``source_provenance`` binding.
+
+    Shared by TaskSet materialization and benchmark ``publish-local`` so both
+    catalog parents attach the same ``service_execution_input`` shape (#1978).
+    Does not upload; callers put ``body`` at ``manifest_key``.
+    """
+
+    if not manifest_key or manifest_key.endswith("/"):
+        raise ValueError("manifest_key must be a non-empty object key")
+    manifest = build_service_execution_input_manifest(
+        bundle_dir,
+        task_checksum=task_checksum,
+    )
+    body = manifest.canonical_bytes()
+    provenance = {
+        "service_execution_input": {
+            "schema_version": "loom.service-execution-input.v1",
+            "manifest_uri": f"s3://{bucket}/{manifest_key}",
+            "manifest_sha256": "sha256:" + hashlib.sha256(body).hexdigest(),
+            "file_count": len(manifest.files),
+            "total_bytes": sum(item.size_bytes for item in manifest.files),
+        },
+    }
+    return body, provenance
+
+
 def service_execution_input_binding(
     provenance: dict[str, Any],
 ) -> ServiceExecutionInputBindingV1 | None:
@@ -694,6 +727,7 @@ __all__ = [
     "build_service_execution_input_manifest",
     "compile_service_execution_plan",
     "load_service_execution_runtime_profile",
+    "prepare_service_execution_input_manifest",
     "service_execution_input_binding",
     "validate_task_resource_requests",
 ]
