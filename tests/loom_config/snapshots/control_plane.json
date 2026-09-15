@@ -114,6 +114,11 @@
     "default": "PydanticUndefined",
     "required": true
   },
+  "protected_trial_cutover_enabled": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
   "protected_worker_runtime_db_url_file": {
     "annotation": "pathlib.Path | None",
     "default": "None",
@@ -352,6 +357,11 @@
   "task_image_builder_lease_seconds": {
     "annotation": "<class 'float'>",
     "default": "300.0",
+    "required": false
+  },
+  "task_image_execution_config_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
     "required": false
   },
   "task_image_registry_grace_hours": {

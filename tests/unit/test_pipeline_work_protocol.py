@@ -370,14 +370,15 @@ def cleanup_proof() -> dict[str, Any]:
     }
 
 
-def test_work_claim_request_and_union_are_closed_and_discriminated() -> None:
+@pytest.mark.parametrize("kinds", [["trial"], ["trial", "execution_attempt"]])
+def test_work_claim_request_and_union_are_closed_and_discriminated(kinds) -> None:
     request = WorkClaimRequestV1.model_validate(
         {
             "schema_version": "loom.work-claim-request.v1",
             "worker_id": WORKER_ID,
             "capability_snapshot_digest": D0,
             "free_slots": 1,
-            "supported_work_kinds": ["trial", "execution_attempt"],
+            "supported_work_kinds": kinds,
         }
     )
     assert request.free_slots == 1

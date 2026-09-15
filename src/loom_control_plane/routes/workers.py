@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -11,11 +13,12 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
-from sqlalchemy import null, text, update
+from sqlalchemy import exists, null, select, text, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import verify_bearer_token
-from loom.db.schema import Worker
+from loom.db.schema import TaskImageMaterialization, TrialTaskImageMaterialization, Worker
 from loom.integrations.terminalgen.authority import (
     TERMINALGEN_POOL_POLICIES,
     TerminalGenAuthorityError,
@@ -72,6 +75,9 @@ from loom_control_plane.slurm_worker_jobs import (
     lock_slurm_worker_job_for_registration,
     parse_slurm_worker_registration_provenance,
 )
+from loom_control_plane.task_image_execution import TaskImageExecutionService
+from loom_task_image_authority.execution_delivery import SignedTrialClaim, SignedWorkClaim
+from loom_task_image_authority.execution_grant import LegacyExecutionClaim
 
 router = APIRouter()
 
@@ -191,7 +197,7 @@ UPDATE trials t
        failure_reason = (:failure_reason)::text,
        failure_message = (:failure_message)::text,
        attempt_count = CASE
-           WHEN (:failure_reason)::text = 'node_setup_health'
+           WHEN (:failure_reason)::text IN ('node_setup_health', 'task_image_admission_unavailable')
            THEN GREATEST(t.attempt_count - 1, 0)
            ELSE t.attempt_count
        END,
@@ -204,7 +210,7 @@ UPDATE trials t
    AND t.started_at IS NULL
    AND q.team_id = t.team_id
    AND (
-       (:failure_reason)::text = 'node_setup_health'
+       (:failure_reason)::text IN ('node_setup_health', 'task_image_admission_unavailable')
        OR t.attempt_count < q.max_attempts_ceiling
    )
  RETURNING t.id;
@@ -357,6 +363,8 @@ async def claim_any_work(
     protected_worker_claim: ProtectedBodyWorkerClaim,
     authorization: str | None = Header(default=None),
 ) -> Response:
+    execution_service = getattr(request.app.state, "task_image_execution", None)
+    execution_claim: LegacyExecutionClaim | None = None
     try:
         claim_request = WorkClaimRequestV1.model_validate(payload, strict=False)
     except ValidationError as exc:
@@ -445,6 +453,10 @@ async def claim_any_work(
                 worker_gpu_vendors=worker_gpu,
                 worker_network_policies=worker_network,
                 worker_backends=worker_backends,
+                allow_signed_task_images=(
+                    isinstance(execution_service, TaskImageExecutionService)
+                    and execution_service.native_ready_enabled
+                ),
             )
         except WorkClaimConflictError as exc:
             await session.rollback()
@@ -456,11 +468,28 @@ async def claim_any_work(
         claim_payload: TrialClaimV1 | ExecutionAttemptClaimV1
         if row["work_kind"] == "trial":
             try:
-                task_image_materialization = await get_trial_task_image_execution_grant(
-                    session,
-                    trial_id=row["id"],
-                    cpu_arches=worker_cpu_arches,
+                native = bool(row["task_image_reader_arch"]) and await session.scalar(
+                    select(exists().where(
+                        TrialTaskImageMaterialization.trial_id == row["id"],
+                        TrialTaskImageMaterialization.materialization_id == TaskImageMaterialization.id,
+                        TaskImageMaterialization.cpu_arch == row["task_image_reader_arch"],
+                        TaskImageMaterialization.ready_publication_operation_id.is_not(None),
+                    ))
                 )
+                if native:
+                    execution_claim = LegacyExecutionClaim.model_validate(dict(
+                        kind="legacy", trial_id=str(row["id"]), team_id=str(row["team_id"]),
+                        worker_id=str(claim_request.worker_id),
+                        worker_lease_epoch=row["worker_lease_epoch"],
+                        trial_attempt_count=row["attempt_count"], claim_id=str(row["claim_id"]),
+                    ))
+                    task_image_materialization = None
+                else:
+                    task_image_materialization = await get_trial_task_image_execution_grant(
+                        session,
+                        trial_id=row["id"],
+                        cpu_arches=worker_cpu_arches,
+                    )
             except RuntimeError:
                 await session.rollback()
                 return Response(status_code=204)
@@ -780,6 +809,27 @@ async def claim_any_work(
             payload=claim_payload,
         )
         await session.commit()
+    if execution_claim is not None:
+        assert isinstance(execution_service, TaskImageExecutionService)
+        try:
+            delivery = await execution_service.issue(claim=execution_claim, worker_token_hash=ctx.token_hash)
+        except (ValueError, PermissionError, TimeoutError, ConnectionError, SQLAlchemyError, asyncio.CancelledError) as error:
+            try:
+                await execution_service.refund_undelivered_claim(claim=execution_claim, worker_token_hash=ctx.token_hash)
+            except (ValueError, PermissionError, TimeoutError, ConnectionError, SQLAlchemyError):
+                # Reclaim remains the durable fallback if the database or
+                # worker authority changed. Never overwrite a started claim.
+                logging.getLogger(__name__).warning("task_image_claim_refund_unavailable")
+            if isinstance(error, asyncio.CancelledError):
+                raise
+            raise HTTPException(status_code=503, detail="task_image_grant_unavailable") from None
+        signed_payload = SignedTrialClaim.model_validate(dict(
+            claim_payload.model_dump(mode="python", exclude_none=False),
+            task_image_execution=delivery,
+        ))
+        return JSONResponse(SignedWorkClaim(
+            schema_version="loom.work-claim.v1", work_kind="trial", payload=signed_payload,
+        ).model_dump(mode="json", by_alias=True, exclude_none=False), headers={"Cache-Control": "no-store"})
     return JSONResponse(envelope.model_dump(mode="json", exclude_none=False))
 
 
@@ -1138,10 +1188,11 @@ async def register_worker(
         ):
             raise HTTPException(status_code=409, detail="input_cache_capacity_drift")
         capacity_bytes, reserved_bytes, ready_bytes = snapshot_cache
-        if supported_work_kinds != ["trial", "execution_attempt"]:
+        trial_image_reader = supported_work_kinds == ["trial"] and "task-image-execution-v2" in capability_snapshot.container_runtime_features
+        if supported_work_kinds != ["trial", "execution_attempt"] and not trial_image_reader:
             raise HTTPException(
                 status_code=400,
-                detail="canonical capability snapshots require execution_attempt support",
+                detail="canonical capability snapshots require execution_attempt support or a signed Trial reader",
             )
         expected_gpu_vendor = "nvidia" if capability_snapshot.gpu_devices else "none"
         projected_network_policies = {
@@ -1199,7 +1250,7 @@ async def register_worker(
                 raise HTTPException(status_code=409, detail="gpu_worker_pool_contract_drift")
         elif raw_allocation_evidence is not None:
             raise HTTPException(status_code=400, detail="cpu_worker_has_gpu_allocation")
-        elif pool_name not in {"behavior-cpu-data", *TERMINALGEN_POOL_POLICIES}:
+        elif not trial_image_reader and pool_name not in {"behavior-cpu-data", *TERMINALGEN_POOL_POLICIES}:
             raise HTTPException(status_code=409, detail="cpu_worker_pool_contract_drift")
         capability_identity = capability_snapshot.model_dump(mode="json")
     elif raw_allocation_evidence is not None:

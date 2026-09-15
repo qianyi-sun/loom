@@ -267,6 +267,11 @@ python_type = "bool"
 default     = false
 description = "Disable legacy control-plane controllers and unadmitted mutation routes during the protected original-trial cutover. Requires protected_worker_runtime_db_url_file. Independent service, pipeline, lifecycle, and host writer retirement must still be proved by the rollout."
 
+[service_config.task_image_execution_config_file]
+used_by     = ["control-plane", "worker"]
+python_type = "Path"
+description = "Optional owner-only release configuration for signed task-image execution. Workers load only a public execution root and fixed purpose; the control plane additionally loads a fixed mTLS signer connection. Absent keeps the legacy reader path. Protected-worker composition is unsupported."
+
 [service_config.log_level]
 used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]
 python_type = "LogLevel"

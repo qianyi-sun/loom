@@ -1,4 +1,4 @@
-"""Two fixed signing policies over independently read, committed public authority.
+"""Fixed signing policies over independently read, committed public authority.
 
 The authenticated publication verifier remains responsible for OCI build facts.
 This service checks configured provenance selection and current signing authority;
@@ -15,12 +15,29 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
+from uuid import UUID
 
 from pydantic import TypeAdapter
-from sqlalchemy import text
+from sqlalchemy import exists, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from loom.db.schema import TaskImageExecutionGrant, TaskImageExecutionStart
 from loom_task_image_authority.contracts import Identifier
+from loom_task_image_authority.execution_grant import (
+    EXECUTION_GRANT_DOMAIN,
+    MAX_EXECUTION_GRANT_BYTES,
+    ExecutionGrantEnvelope,
+    LegacyExecutionClaim,
+    TaskImageExecutionGrantV2,
+    _decode,
+    canonical_execution_grant_bytes,
+    verify_execution_grant,
+    verify_execution_grant_input,
+)
+from loom_task_image_authority.execution_signing_request import (
+    ExecutionSigningRequest,
+    decode_execution_signing_request,
+)
 from loom_task_image_authority.keyset_signing_request import (
     KeysetSigningRequest,
     canonical_keyset_signing_request,
@@ -31,6 +48,8 @@ from loom_task_image_authority.publication_contracts import (
     PublicationEnvelope,
     PublicationUnsignedInput,
     canonical_publication_bytes,
+    decode_publication_envelope,
+    decode_publication_statement,
     decode_unsigned_input,
 )
 from loom_task_image_authority.publication_keyset import (
@@ -198,6 +217,81 @@ class SignerPolicy:
             if after != before:
                 raise ValueError("keyset authority changed during signing")
             verify_publication_keyset(wire, trust_root=self._root, expected_state=before.proposed_state, now=self._clock())
+            return wire
+
+    async def _read_execution(
+        self, request: ExecutionSigningRequest,
+    ) -> tuple[TaskImageExecutionGrantV2, StoredPublicationKeyset, bytes | None]:
+        async with self._engine.connect() as connection:
+            await connection.execution_options(isolation_level="READ COMMITTED")
+            async with AsyncSession(connection, expire_on_commit=False) as session, session.begin():
+                await session.execute(text("SET LOCAL search_path=pg_catalog,public,pg_temp"))
+                await session.execute(text(
+                    "SELECT pg_catalog.set_config('statement_timeout', :bound, true), "
+                    "pg_catalog.set_config('idle_in_transaction_session_timeout', :bound, true)"
+                ), {"bound": f"{math.ceil(self._timeout * 1000)}ms"})
+                prepared = await prepare_keyset(session, trust_root=self._root)
+                stored = await read_keyset(session, trust_root=self._root,
+                    expected_state=prepared.previous_state, clock=self._clock)
+                # Grant and start mutation triggers take the already-held state
+                # lock first. SELECT suffices: no worker/Trial access or new
+                # UPDATE privileges are needed by the private-key process.
+                row = await session.get(TaskImageExecutionGrant, (UUID(request.grant_id), request.revision))
+                if row is None or row.revoked_at is not None or row.grant_sha256 != request.grant_sha256:
+                    raise ValueError("execution signing preparation is absent, revoked or substituted")
+                grant = _decode(row.canonical_grant, TaskImageExecutionGrantV2, MAX_EXECUTION_GRANT_BYTES)
+                latest = await session.scalar(select(TaskImageExecutionGrant.revision)
+                    .where(TaskImageExecutionGrant.claim_id == row.claim_id)
+                    .order_by(TaskImageExecutionGrant.revision.desc()).limit(1))
+                consumed = await session.scalar(select(exists().where(TaskImageExecutionStart.claim_id == row.claim_id)))
+                if (
+                    not isinstance(grant.claim, LegacyExecutionClaim) or consumed
+                    or latest != request.revision or grant.revision != request.revision
+                    or grant.grant_id != request.grant_id
+                    or grant.claim.claim_id != str(row.claim_id)
+                    or grant.claim.trial_id != str(row.trial_id) or grant.claim.worker_id != str(row.worker_id)
+                    or hashlib.sha256(row.canonical_grant).hexdigest() != request.grant_sha256
+                    or grant.keyset_version != row.keyset_version
+                    or grant.keyset_version != stored.state.keyset_version
+                    or grant.revocation_epoch != stored.state.revocation_epoch
+                    or grant.keyset_sha256 != stored.snapshot_sha256
+                ):
+                    raise ValueError("execution signing preparation is stale or inconsistent")
+                retained_wire = row.canonical_envelope
+        verify_execution_grant_input(
+            canonical_grant=canonical_execution_grant_bytes(grant), plan_wire=request.frozen_plan.encode(),
+            publication_wires=tuple(item.encode() for item in request.publications), keyset_wire=stored.wire,
+            trust_root=self._root, expected_claim=grant.claim, expected_purpose=grant.purpose,
+            expected_shadow_campaign_id=grant.shadow_campaign_id, now=self._clock(),
+        )
+        for publication in request.publications:
+            unsigned = decode_publication_statement(decode_publication_envelope(publication.encode()).canonical_statement.encode()).unsigned_input()
+            if PublicationSelection.from_unsigned(unsigned) not in self._selections:
+                raise ValueError("execution publication provenance selection is not configured")
+        return grant, stored, retained_wire
+
+    async def sign_execution(self, canonical_request: bytes) -> bytes:
+        request = decode_execution_signing_request(canonical_request)
+        async with asyncio.timeout(self._timeout):
+            before, stored, retained = await self._read_execution(request)
+            canonical = canonical_execution_grant_bytes(before)
+            if retained is None:
+                signature = await self._execution.sign(EXECUTION_GRANT_DOMAIN + canonical)
+                wire = canonical_execution_grant_bytes(ExecutionGrantEnvelope(
+                    canonical_grant=canonical.decode(), grant_sha256=request.grant_sha256,
+                    key_id=self._root.key_id, algorithm="Ed25519", signature=_b64(signature),
+                ))
+            else:
+                wire = retained
+            after, current, saved = await self._read_execution(request)
+            if before != after or stored != current or (saved is not None and saved != wire):
+                raise ValueError("execution authority changed during signing")
+            verify_execution_grant(
+                wire=wire, plan_wire=request.frozen_plan.encode(),
+                publication_wires=tuple(item.encode() for item in request.publications), keyset_wire=stored.wire,
+                trust_root=self._root, expected_claim=before.claim, expected_purpose=before.purpose,
+                expected_shadow_campaign_id=before.shadow_campaign_id, now=self._clock(),
+            )
             return wire
 
     def _key(self, prepared: KeysetPreparation) -> PublicationKeyRecord:

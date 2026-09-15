@@ -43,6 +43,9 @@ class Policy:
     async def sign_publication(self, wire):
         return await self._call("publication", wire)
 
+    async def sign_execution(self, wire):
+        return await self._call("execution", wire)
+
 
 @asynccontextmanager
 async def service(tmp_path, *, limits=None, operations=None):
@@ -52,7 +55,7 @@ async def service(tmp_path, *, limits=None, operations=None):
     ca_path.write_bytes(ca.public_bytes(serialization.Encoding.PEM))
     server_cert, server_key = _identity(tmp_path, "localhost", ca_key, ca, server=True)
     identities, grants = {}, {}
-    for name in ("keyset", "publication", "stranger"):
+    for name in ("keyset", "publication", "execution", "stranger"):
         cert, key = _identity(tmp_path, name, ca_key, ca, server=False)
         identities[name] = dict(ca_file=ca_path, client_cert_file=cert, client_key_file=key)
         if name != "stranger":
@@ -98,6 +101,28 @@ async def test_real_peer_certificate_pins_separate_the_two_fixed_operations(tmp_
                 with pytest.raises(ValueError):
                     await client.sign_keyset(rfc8785.dumps(payload()), maximum_reply_bytes=131072)
         assert [kind for kind, _ in policy.calls] == ["keyset", "publication"]
+
+
+async def test_execution_signing_has_a_distinct_authenticated_operation(tmp_path):
+    from tests.unit.test_task_image_execution_grant import fixture
+
+    payload, _, values = fixture()
+    wire = rfc8785.dumps(dict(
+        schema="loom.task-image-execution-signing-request/v1", grant_id=payload["grant_id"],
+        revision=payload["revision"], grant_sha256=hashlib.sha256(rfc8785.dumps(payload)).hexdigest(),
+        frozen_plan=values["plan_wire"].decode(), publications=[item.decode() for item in values["publication_wires"]],
+    ))
+    transport = importlib.import_module("loom_task_image_authority.publication_transport")
+    assert hasattr(transport, "HTTPSExecutionSigner"), "fixed execution signing transport missing"
+    async with service(tmp_path) as (_, policy, identities):
+        for name in ("keyset", "publication", "stranger"):
+            async with transport.HTTPSExecutionSigner(**identities[name]) as client:
+                with pytest.raises(ValueError):
+                    await client.sign_execution(wire, maximum_reply_bytes=524288)
+        assert not policy.calls
+        async with transport.HTTPSExecutionSigner(**identities["execution"]) as client:
+            assert await client.sign_execution(wire, maximum_reply_bytes=524288) == b'{}'
+        assert policy.calls == [("execution", wire)]
 
 
 @pytest.mark.parametrize("extra", [
