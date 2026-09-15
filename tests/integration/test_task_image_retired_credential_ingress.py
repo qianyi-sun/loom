@@ -35,19 +35,22 @@ async def _prepared_insert(factory, issuer):
     return attempt.id, values
 
 
-async def _retire(factory, attempt_id):
+async def _observe_setup(factory, attempt_id, instant):
     # Retirement is setup for the direct-ingress assertion, not the behavior
     # under test. A loaded runner can let PostgreSQL abort the bounded setup
     # transaction. Retry that exact known rollback once in a fresh transaction;
     # never relax the production timeout or retry ambiguous/other failures.
+    for retry in range(2):
+        try:
+            return await observe(factory, attempt_id, instant)
+        except DBAPIError as error:
+            if retry or getattr(error.orig, "sqlstate", None) != "25P03":
+                raise
+
+
+async def _retire(factory, attempt_id):
     for instant in (NOW + timedelta(hours=1), NOW + timedelta(hours=25)):
-        for retry in range(2):
-            try:
-                result = await observe(factory, attempt_id, instant)
-                break
-            except DBAPIError as error:
-                if retry or getattr(error.orig, "sqlstate", None) != "25P03":
-                    raise
+        result = await _observe_setup(factory, attempt_id, instant)
     assert result.status == "retired"
 
 
@@ -80,7 +83,6 @@ def _expire_setup_once(monkeypatch, factory, expire_call):
     module = store()
     original = module.revalidate_retirement_inventory
     expired_backends = []
-
     calls = 0
 
     async def expire_first_setup_transaction(session, *, prepared):
@@ -129,11 +131,11 @@ async def test_stale_snapshot_cannot_hide_committed_retirement(
     factory = registry_authority_session
     attempt_id, values = await _prepared_insert(factory, registry_issuer)
     expired_backends = _expire_setup_once(monkeypatch, factory, expire_call)
-    await observe(factory, attempt_id, NOW + timedelta(hours=1))
+    await _observe_setup(factory, attempt_id, NOW + timedelta(hours=1))
     async with factory() as stale:
         await stale.execute(text(f"SET TRANSACTION ISOLATION LEVEL {isolation}"))
         assert (await stale.get(TaskImageAttemptRetention, attempt_id)).retired_at is None
-        assert (await observe(factory, attempt_id, NOW + timedelta(hours=25))).status == "retired"
+        assert (await _observe_setup(factory, attempt_id, NOW + timedelta(hours=25))).status == "retired"
         with pytest.raises(IntegrityError) as error:
             await _insert(stale, values)
         assert error.value.orig.diag.constraint_name == "task_image_registry_credentials_read_committed"
