@@ -328,14 +328,47 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute(
-        "LOCK TABLE loom_capacity_guard.trial_retry_mutation_permits IN ACCESS EXCLUSIVE MODE NOWAIT"
-    )
+    op.execute("""
+        DO $retirement$
+        DECLARE
+          v_relation oid := 'loom_capacity_guard.trial_retry_mutation_permits'::regclass;
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_catalog.pg_class
+             WHERE oid = v_relation AND relkind = 'r' AND NOT relispartition
+               AND relowner = current_user::regrole::oid
+          ) THEN
+            RAISE EXCEPTION 'frozen retry retirement relation ownership changed'
+              USING ERRCODE = '42501';
+          END IF;
+          -- Neither LOCK nor the later retained-evidence read may recurse into
+          -- another authority's descendants. Stabilize the parent first.
+          LOCK TABLE ONLY loom_capacity_guard.trial_retry_mutation_permits
+            IN ACCESS EXCLUSIVE MODE NOWAIT;
+          IF 'loom_capacity_guard.trial_retry_mutation_permits'::regclass::oid <> v_relation
+             OR NOT EXISTS (
+               SELECT 1 FROM pg_catalog.pg_class
+                WHERE oid = v_relation AND relkind = 'r' AND NOT relispartition
+                  AND relowner = current_user::regrole::oid
+             ) THEN
+            RAISE EXCEPTION 'frozen retry retirement relation ownership changed'
+              USING ERRCODE = '42501';
+          END IF;
+          IF EXISTS (
+            SELECT 1 FROM pg_catalog.pg_inherits
+             WHERE inhparent = v_relation OR inhrelid = v_relation
+          ) THEN
+            RAISE EXCEPTION 'frozen retry retirement inheritance is unsupported'
+              USING ERRCODE = '55000';
+          END IF;
+        END
+        $retirement$;
+    """)
     retained = (
         op.get_bind()
         .execute(
             sa.text(
-                "SELECT EXISTS (SELECT 1 FROM loom_capacity_guard.trial_retry_mutation_permits)"
+                "SELECT EXISTS (SELECT 1 FROM ONLY loom_capacity_guard.trial_retry_mutation_permits)"
             )
         )
         .scalar_one()
