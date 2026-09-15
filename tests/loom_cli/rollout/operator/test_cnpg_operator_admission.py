@@ -2,6 +2,7 @@
 
 import copy
 import json
+import os
 from uuid import uuid4
 
 import pytest
@@ -165,6 +166,10 @@ def test_host_binary_observation_reads_actual_bytes_and_refuses_inflight_change(
     elif change == 'size':
         executable.write_bytes(expected + b'x')
     elif change == 'during-read':
+        # A same-size rewrite can share the creation timestamp on a coarse
+        # filesystem clock. Give the real write a distinct starting mtime.
+        before = executable.stat()
+        os.utime(executable, ns=(before.st_atime_ns, before.st_mtime_ns - 10_000_000_000))
         digest = host.hashlib.file_digest
         def changed(stream, algorithm):
             result = digest(stream, algorithm)
