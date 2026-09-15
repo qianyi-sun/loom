@@ -110,7 +110,14 @@ async def test_guard_schema_startup_returns_numeric_head(
 ) -> None:
     engine = create_async_engine(_value(capacity_guard_database, "migrator_url"))
     try:
-        assert await assert_capacity_guard_schema_at_head(engine) == 34
+        head = await assert_capacity_guard_schema_at_head(engine)
+        assert type(head) is int
+        async with engine.connect() as connection:
+            revision = (await connection.execute(text(
+                "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+            ))).scalar_one()
+        # Compare to the actual migrated database, not a second stale head pin.
+        assert revision == f"guard_{head:04d}"
     finally:
         await engine.dispose()
 
