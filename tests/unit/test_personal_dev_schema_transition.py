@@ -380,6 +380,7 @@ def test_transition_preparation_binds_backup_graph_and_exact_migration_job(
         "0144",
         "0145",
         "0146",
+        "0147",
         "0148",
     ]
     assert (
