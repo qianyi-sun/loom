@@ -81,3 +81,29 @@ async def test_online_deadline_cancels_and_joins_transport(tmp_path):
         with pytest.raises(TimeoutError):
             await subject.authorize()
     assert closed.is_set()
+
+
+@pytest.mark.parametrize("configured,actual", [
+    ("http://cp.example", "http://cp.example"),
+    ("https://cp.example", "https://different.example"),
+    ("https://cp.example", "http://cp.example"),
+    ("https://user:password@cp.example", "https://user:password@cp.example"),
+])
+async def test_start_requires_authenticated_configured_origin_before_sending_token(
+    tmp_path, configured, actual,
+):
+    payload, kwargs = evidence(tmp_path)
+    sent = []
+
+    def handle(request):
+        sent.append(request)
+        return httpx.Response(503)
+
+    async with httpx.AsyncClient(
+        base_url=actual, transport=httpx.MockTransport(handle),
+    ) as http:
+        client = HttpControlPlaneClient(configured, "worker-token", _client=http)
+        subject = consumer(tmp_path, payload, kwargs, client.consume_task_image_execution_start)
+        with pytest.raises(ValueError, match="HTTPS|origin"):
+            await subject.authorize()
+    assert sent == []
