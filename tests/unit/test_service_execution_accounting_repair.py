@@ -322,18 +322,24 @@ async def test_timed_out_archive_converges_four_failed_calls_then_late_9191_toke
             "size_bytes": len(body), "sha256": "sha256:" + repair._digest(body), "media_type": "application/json"})
     rows = [{"id": str(uuid4()), "trial_id": str(case.trial.id), "step_id": "agent",
              "dialect": "openai_facade", "model": "glm-5.2", "input_tokens": 0, "output_tokens": 0,
-             "cost_usd": 0, "rate_card_hash": "test", "provider_extras": {"_loom_call_status": "failed"},
+             "cost_usd": 0, "rate_card_hash": "test",
+             "provider_extras": {"_loom_call_status": "failed", "_loom_usage_status": "missing",
+                                 "_loom_failure_category": "upstream_timeout"},
              "call_status": "failed", "captured_at": now.isoformat(), "attempt": 1} for _ in range(4)]
     monkeypatch.setattr(repair, "read_service_execution_llm_calls", AsyncMock(side_effect=lambda *a, **k: copy.deepcopy(rows)))
     first = await repair.repair_accounting(**case.kwargs, apply=True)
     assert first["usage"]["call_count"] == 4
     assert first["usage"]["totals"]["input_tokens"] == 0
+    assert first["usage"]["missing_usage_call_count"] == first["usage"]["failed_call_count"] == 4
     source_before = copy.deepcopy(case.artifact.storage["source_evidence"])
     rows.append({**rows[0], "id": str(uuid4()), "input_tokens": 999, "output_tokens": 8192,
                  "provider_extras": {}, "call_status": "completed", "finish_reason": "length"})
     second = await repair.repair_accounting(**case.kwargs, apply=True)
     assert second["status"] == "corrected" and second["gateway_call_count"] == 5
     assert second["usage"]["call_count"] == 5
+    assert second["usage"]["missing_usage_call_count"] == 4
+    assert second["usage"]["failed_call_count"] == 4
+    assert second["usage"]["partial_usage_call_count"] == 0
     assert second["usage"]["totals"]["input_tokens"] + second["usage"]["totals"]["output_tokens"] == 9191
     assert case.artifact.storage["source_evidence"] == source_before
     atif_bucket, atif_key = case.trial.trajectory_index["atif_uri"][5:].split("/", 1)
@@ -343,6 +349,17 @@ async def test_timed_out_archive_converges_four_failed_calls_then_late_9191_toke
     assert case.events[-1].payload["final_state"] == "failed"
     calls = [event for event in case.events if event.kind == LLMCallEvent.model_fields["kind"].default]
     assert len(calls) == 5
+    failed = [event.payload for event in calls if event.payload["call_status"] == "failed"]
+    assert len(failed) == 4
+    assert all(event["usage_status"] == "missing" and event["failure_category"] == "upstream_timeout"
+               for event in failed)
+    known = [event.payload for event in calls if event.payload["call_status"] == "completed"]
+    assert len(known) == 1 and known[0]["usage_status"] is None
+    ledger_record = next(item for item in case.artifact.storage["files"]
+                         if item["relative_path"] == "accounting/gateway-calls.json")
+    exported_calls = json.loads(case.store.objects[(ledger_record["bucket"], ledger_record["key"])])["calls"]
+    assert sum(call["provider_extras"].get("_loom_usage_status") == "missing" for call in exported_calls) == 4
+    assert sum(call["provider_extras"].get("_loom_failure_category") == "upstream_timeout" for call in exported_calls) == 4
     original_count, commits = len(case.store.objects), case.commits
     third = await repair.repair_accounting(**case.kwargs, apply=True)
     assert third["status"] == "already_corrected"
