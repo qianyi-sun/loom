@@ -19,6 +19,7 @@ from loom_capacity_executor.config import ImmutablePoolManifest
 from loom_capacity_executor.launch_renderer import canonical_launch_policy_digest
 from loom_capacity_executor.runtime import (
     ActivationRuntimeArtifactV2,
+    ActivationRuntimeDocumentV2,
     ApprovedLaunchProfileSetV2,
     RuntimeAssemblyError,
     canonical_approved_profiles_digest,
@@ -594,9 +595,9 @@ def render_capacity_pool_executor_active_manifest_sha256(
 def _validate_active_runtime_artifact(
     profile: CapacityPoolExecutorProfile,
     pool: CapacityPoolExecutorBinding,
-    artifact: ActivationRuntimeArtifactV2,
+    artifact: ActivationRuntimeArtifactV2 | ActivationRuntimeDocumentV2,
 ) -> str:
-    if not isinstance(artifact, ActivationRuntimeArtifactV2):
+    if not isinstance(artifact, (ActivationRuntimeArtifactV2, ActivationRuntimeDocumentV2)):
         raise TypeError("activation runtime artifact is invalid")
     execution = artifact.execution
     if (
@@ -660,7 +661,7 @@ def _validate_active_runtime_artifact(
 def render_capacity_pool_executor_active_config(
     profile: CapacityPoolExecutorProfile,
     pool_id: Literal["gb10", "oldlab"] | str,
-    artifact: ActivationRuntimeArtifactV2,
+    artifact: ActivationRuntimeArtifactV2 | ActivationRuntimeDocumentV2,
 ) -> str:
     """Render one positive controller-local config bound to an activation artifact."""
 
@@ -684,7 +685,7 @@ def render_capacity_pool_executor_active_config(
 def render_capacity_pool_executor_active_service_environment(
     profile: CapacityPoolExecutorProfile,
     pool_id: Literal["gb10", "oldlab"] | str,
-    artifact: ActivationRuntimeArtifactV2,
+    artifact: ActivationRuntimeArtifactV2 | ActivationRuntimeDocumentV2,
 ) -> str:
     """Render the non-secret environment for the separately enabled active timer."""
 

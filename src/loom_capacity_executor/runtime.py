@@ -11,7 +11,7 @@ import secrets
 import stat
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -223,8 +223,8 @@ class _ResolvedAdmissionBinding:
     database_url: bytes
 
 
-class _ActivationRuntimeArtifactBaseV2(StrictV2Model):
-    """Local identity/path inputs shared by distinct activation wire contracts."""
+class _ActivationRuntimeDocumentBaseV2(StrictV2Model):
+    """Portable identity inputs shared by controller runtime contracts."""
 
     execution: ExecutionContextV2
     pool_id: Literal["gb10", "oldlab"]
@@ -252,6 +252,25 @@ class _ActivationRuntimeArtifactBaseV2(StrictV2Model):
         if isinstance(value, dict):
             return SlurmAuthorityV2.model_validate_json(json.dumps(value, allow_nan=False))
         return value
+
+class ActivationRuntimeDocumentV2(_ActivationRuntimeDocumentBaseV2):
+    """Portable activation inputs; construction grants no local execution authority."""
+
+    admission_directory: Annotated[str, Field(min_length=1, max_length=4096)]
+    admission_directory_sha256: Digest
+
+    @field_validator("handoff_directory", "state_directory", "journal_file", "admission_directory")
+    @classmethod
+    def _canonical_remote_path(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if ("\0" in value or not path.is_absolute() or value == "/"
+                or value.startswith("//") or ".." in path.parts or str(path) != value):
+            raise ValueError("runtime path must be canonical and absolute")
+        return value
+
+
+class _ActivationRuntimeArtifactBaseV2(_ActivationRuntimeDocumentBaseV2):
+    """Controller-local artifacts additionally require owned private paths."""
 
     @field_validator("handoff_directory", "state_directory")
     @classmethod
@@ -840,6 +859,7 @@ class RoutedExecutableAdmissionClient:
 
 __all__ = [
     "ActivationRuntimeArtifactV2",
+    "ActivationRuntimeDocumentV2",
     "AdmissionBindingDirectoryV2",
     "AdmissionBindingEntryV2",
     "AdmissionBindingResolutionError",
