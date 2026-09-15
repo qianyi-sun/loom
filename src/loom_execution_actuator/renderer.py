@@ -15,6 +15,7 @@ from loom.execution_image_admission import (
     validate_execution_image_admission_bundle,
 )
 from loom.execution_runtime_contract import (
+    ContainerResourcesV1,
     ExecutionRuntimePlanV1,
     ProbeV1,
     RuntimeComposition,
@@ -59,13 +60,21 @@ def _required_positive(requirements: dict[str, Any], key: str) -> int:
     return value
 
 
-def _resources(*, cpu_millis: int, memory_mib: int, storage_mib: int) -> dict[str, Any]:
+def _resources(
+    *, cpu_millis: int, memory_mib: int, storage_mib: int,
+    request: ContainerResourcesV1 | None = None,
+) -> dict[str, Any]:
     values = {
         "cpu": f"{cpu_millis}m",
         "memory": f"{memory_mib}Mi",
         "ephemeral-storage": f"{storage_mib}Mi",
     }
-    return {"requests": values.copy(), "limits": values.copy()}
+    requested = values.copy() if request is None else {
+        "cpu": f"{request.cpu_millis}m",
+        "memory": f"{request.memory_mib}Mi",
+        "ephemeral-storage": f"{request.ephemeral_storage_mib}Mi",
+    }
+    return {"requests": requested, "limits": values.copy()}
 
 
 def _security_context(*, read_only_root: bool = True) -> dict[str, Any]:
@@ -92,7 +101,9 @@ def _probe(value: ProbeV1) -> dict[str, Any]:
     return result
 
 
-def _sidecar(value: SidecarContainerV1) -> dict[str, Any]:
+def _sidecar(
+    value: SidecarContainerV1, *, request: ContainerResourcesV1 | None = None,
+) -> dict[str, Any]:
     result = {
         "name": value.role_name,
         "image": value.image_ref,
@@ -103,6 +114,7 @@ def _sidecar(value: SidecarContainerV1) -> dict[str, Any]:
             cpu_millis=value.resources.cpu_millis,
             memory_mib=value.resources.memory_mib,
             storage_mib=value.resources.ephemeral_storage_mib,
+            request=request,
         ),
         "restartPolicy": "Always",
         "startupProbe": _probe(value.startup_probe),
@@ -163,9 +175,9 @@ def render_execution_job(
     image_ref = requirements.get("image_ref")
     if not isinstance(image_ref, str) or not _DIGEST_IMAGE.fullmatch(image_ref):
         raise ActuatorContractError("execution image must be immutable by sha256 digest")
-    cpu_millis = _required_positive(requirements, "cpu_millis")
-    memory_mib = _required_positive(requirements, "memory_mib")
-    storage_mib = _required_positive(requirements, "ephemeral_storage_mib")
+    _required_positive(requirements, "cpu_millis")
+    _required_positive(requirements, "memory_mib")
+    _required_positive(requirements, "ephemeral_storage_mib")
     plan = _runtime_plan(lease)
     current_time = (now or datetime.now(UTC)).astimezone(UTC)
     try:
@@ -216,9 +228,10 @@ def render_execution_job(
         ]
     )
     resources = _resources(
-        cpu_millis=cpu_millis,
-        memory_mib=memory_mib,
-        storage_mib=storage_mib,
+        cpu_millis=plan.execution_resources.cpu_millis,
+        memory_mib=plan.execution_resources.memory_mib,
+        storage_mib=plan.execution_resources.ephemeral_storage_mib,
+        request=plan.container_request("execution"),
     )
     plan_payload = canonical_document(plan.canonical_payload())
     encoded_plan = base64.urlsafe_b64encode(plan_payload).rstrip(b"=").decode("ascii")
@@ -241,7 +254,8 @@ def render_execution_job(
             "securityContext": _security_context(),
             "volumeMounts": [runtime_mount],
         },
-        *[_sidecar(sidecar) for sidecar in plan.sidecars],
+        *[_sidecar(sidecar, request=plan.container_request(sidecar.role_name))
+          for sidecar in plan.sidecars],
     ]
     output_mib = max(
         1,

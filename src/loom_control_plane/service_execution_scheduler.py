@@ -38,8 +38,14 @@ from loom_control_plane.service_execution import reserve_trial_execution
 _LOG = logging.getLogger(__name__)
 _RESERVATION_REQUEST_NAMESPACE = UUID("aaf78d09-4268-4dc5-81ee-4c2408ce2611")
 
+
+class ServiceExecutionConfigurationError(ValueError):
+    """A known per-Trial configuration cannot run under this scheduler's bounds."""
+
+
 _NEXT_SERVICE_TRIAL = text("""
 SELECT t.id,
+       t.task_id,
        t.attempt_count,
        task_definition.checksum AS task_checksum,
        task_definition.config AS task_config,
@@ -96,7 +102,10 @@ def _deadline(
         phase_seconds += plan.verifier.timeout_seconds
     requested_seconds = phase_seconds + plan.termination_grace_seconds + 600
     if requested_seconds > maximum_seconds:
-        raise ValueError("service-execution runtime exceeds the scheduler deadline bound")
+        raise ServiceExecutionConfigurationError(
+            "service-execution runtime exceeds the scheduler deadline bound: "
+            f"requested_seconds={requested_seconds}, maximum_seconds={maximum_seconds}"
+        )
     return now + timedelta(seconds=requested_seconds)
 
 
@@ -169,6 +178,20 @@ async def reserve_next_service_execution(
                     maximum_deadline_seconds=maximum_deadline_seconds,
                     current_time=current_time,
                 )
+        except ServiceExecutionConfigurationError as exc:
+            # The candidate savepoint has rolled back. This queued failure owns
+            # no attempt, lease, admission slot or spend; leave transient and
+            # unexpected errors on their existing retry paths.
+            await session.execute(update(Trial).where(
+                Trial.id == row["id"], Trial.state == "queued",
+                Trial.cancellation_requested_at.is_(None),
+            ).values(
+                state="failed", failure_reason="service_execution_configuration_invalid",
+                failure_message=str(exc), finished_at=current_time, next_attempt_at=None,
+            ))
+            _LOG.warning("service_execution_configuration_invalid", extra={
+                "trial_id": str(row["id"]), "reason": str(exc),
+            })
         except ExecutionProvisioningBlockedError as exc:
             delay = max(1, min(300, exc.retry_after_seconds))
             await session.execute(
@@ -228,6 +251,8 @@ async def _reserve_service_candidate(
                          else dict(row["task_source_provenance"] or {}))
     binding = task.service_execution
     if binding is not None:
+        if (row["batch_runtime_profile"] or {}).get("task_resource_requests", {}).get(row["task_id"]):
+            raise ValueError("task resource requests require automatic native execution")
         if binding.logical_pool_id != pool_id:
             raise ValueError("queued service-execution task binding drift")
         runtime_plan = bind_service_execution_runtime_plan(
@@ -242,6 +267,7 @@ async def _reserve_service_candidate(
         if runtime_profile.logical_pool_id != pool_id:
             raise ValueError("queued service-execution runtime profile pool drift")
         runtime_plan = compile_service_execution_plan(
+            task_id=row["task_id"],
             task=task,
             trial=TrialConfig.model_validate(row["trial_config"]),
             task_revision_sha256=task_revision,
@@ -249,6 +275,9 @@ async def _reserve_service_candidate(
             task_image_grant=grant,
             profile=runtime_profile,
         )
+    deadline_at = _deadline(
+        runtime_plan, now=current_time, maximum_seconds=maximum_deadline_seconds,
+    )
     targets = await _ready_targets(
         session,
         environment=environment,
@@ -288,11 +317,7 @@ async def _reserve_service_candidate(
                     runtime_contract=runtime_plan,
                     image_admission_keyring=image_admission_keyring,
                     routing_reason=ExecutionRoutingReason.PREEXISTING_ASSIGNMENT,
-                    deadline_at=_deadline(
-                        runtime_plan,
-                        now=current_time,
-                        maximum_seconds=maximum_deadline_seconds,
-                    ),
+                    deadline_at=deadline_at,
                     now=current_time,
                 )
         except ExecutionProvisioningBlockedError as exc:

@@ -7,10 +7,17 @@ import re
 from datetime import datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from loom.execution_contract import VerifierTopology, WorkloadRequirementsV1
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
@@ -53,6 +60,45 @@ class ContainerResourcesV1(_Strict):
     cpu_millis: int = Field(gt=0, le=128_000)
     memory_mib: int = Field(gt=0, le=1_048_576)
     ephemeral_storage_mib: int = Field(gt=0, le=1_048_576)
+
+
+class _ContainerResourceRequestsV1(ContainerResourcesV1):
+    model_config = ConfigDict(strict=True)
+
+
+class ExecutionResourceRequestsV1(_Strict):
+    """Optional scheduling requests; the task's executable limits stay intact."""
+
+    controller: _ContainerResourceRequestsV1 | None = None
+    task_sandbox: _ContainerResourceRequestsV1 | None = None
+    verifier_sandbox: _ContainerResourceRequestsV1 | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unconfigured_roles(self, handler: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = handler(self)
+        return {role: value for role, value in payload.items() if value is not None}
+
+    @model_validator(mode="after")
+    def _nonempty(self) -> ExecutionResourceRequestsV1:
+        if all(value is None for value in (
+            self.controller, self.task_sandbox, self.verifier_sandbox,
+        )):
+            raise ValueError("resource requests must configure at least one container")
+        return self
+
+    def validate_limits(
+        self, *, controller: ContainerResourcesV1, task: ContainerResourcesV1,
+    ) -> None:
+        for role, requested, limit in (
+            ("controller", self.controller, controller),
+            ("task_sandbox", self.task_sandbox, task),
+            ("verifier_sandbox", self.verifier_sandbox, task),
+        ):
+            if requested is not None and any(
+                getattr(requested, field) > getattr(limit, field)
+                for field in ContainerResourcesV1.model_fields
+            ):
+                raise ValueError(f"{role} resource requests exceed hard limits")
 
 
 class ProcessPhaseV1(_Strict):
@@ -223,6 +269,8 @@ class ExecutionRuntimePlanV1(_Strict):
     run_as_group: int = Field(default=65532, gt=0, le=2_147_483_647)
     fs_group: int = Field(default=65532, gt=0, le=2_147_483_647)
     task_resources: ContainerResourcesV1
+    controller_resources: ContainerResourcesV1 | None = None
+    resource_requests: ExecutionResourceRequestsV1 | None = None
     workspace_mib: int = Field(gt=0, le=1_048_576)
     runtime_volume_mib: int = Field(gt=0, le=4096)
     termination_grace_seconds: int = Field(default=30, ge=1, le=300)
@@ -303,6 +351,35 @@ class ExecutionRuntimePlanV1(_Strict):
             if any(item not in known for item in sidecar.depends_on):
                 raise ValueError("sidecar dependencies must reference earlier sidecars")
             known.add(sidecar.role_name)
+        if self.controller_resources is not None:
+            sandboxes = [sidecar for sidecar in self.sidecars if sidecar.private_sandbox]
+            if (
+                self.agent_image_ref is None
+                or self.execution_role != "attempt"
+                or self.composition != RuntimeComposition.INIT_PAYLOAD
+                or {sidecar.role_name for sidecar in sandboxes}
+                != {"task-sandbox", "verifier-sandbox"}
+            ):
+                raise ValueError("controller resources require an isolated attempt controller")
+            if any(sidecar.resources != self.task_resources for sidecar in sandboxes):
+                raise ValueError("controller sizing must preserve task and verifier resources")
+            if (self.controller_resources.ephemeral_storage_mib
+                    != self.task_resources.ephemeral_storage_mib):
+                raise ValueError("controller sizing must preserve task-derived storage")
+        if self.resource_requests is not None:
+            sandboxes = [sidecar for sidecar in self.sidecars if sidecar.private_sandbox]
+            if (
+                self.agent_image_ref is None
+                or self.execution_role != "attempt"
+                or self.composition != RuntimeComposition.INIT_PAYLOAD
+                or {sidecar.role_name for sidecar in sandboxes}
+                != {"task-sandbox", "verifier-sandbox"}
+                or any(sidecar.resources != self.task_resources for sidecar in sandboxes)
+            ):
+                raise ValueError("resource requests require an isolated attempt controller")
+            self.resource_requests.validate_limits(
+                controller=self.execution_resources, task=self.task_resources,
+            )
         source_paths = [item.source_path for item in self.output_declarations]
         bundle_paths = [item.relative_path for item in self.output_declarations]
         if len(source_paths) != len(set(source_paths)) or len(bundle_paths) != len(
@@ -314,6 +391,10 @@ class ExecutionRuntimePlanV1(_Strict):
     def canonical_payload(self) -> dict[str, object]:
         payload = self.model_dump(mode="json")
         # Keep existing published plans byte-compatible when new fields are unused.
+        if self.controller_resources is None:
+            payload.pop("controller_resources")
+        if self.resource_requests is None:
+            payload.pop("resource_requests")
         if self.agent_image_ref is None:
             payload.pop("agent_image_ref")
         if self.task_image_materialization_id is None:
@@ -322,6 +403,20 @@ class ExecutionRuntimePlanV1(_Strict):
             if not sidecar["private_sandbox"]:
                 sidecar.pop("private_sandbox")
         return payload
+
+    @property
+    def execution_resources(self) -> ContainerResourcesV1:
+        return self.controller_resources or self.task_resources
+
+    def container_request(self, role_name: str) -> ContainerResourcesV1:
+        """Resolve the same requests for rendering, admission, and finance."""
+        if role_name == "execution":
+            requested = self.resource_requests.controller if self.resource_requests else None
+            return requested or self.execution_resources
+        sidecar = next(item for item in self.sidecars if item.role_name == role_name)
+        field = {"task-sandbox": "task_sandbox", "verifier-sandbox": "verifier_sandbox"}.get(role_name)
+        requested = getattr(self.resource_requests, field) if self.resource_requests and field else None
+        return requested or sidecar.resources
 
     def published_image_refs(self) -> tuple[str, ...]:
         """Images executed with platform trust, separate from prepared task sandboxes.
@@ -347,17 +442,19 @@ class ExecutionRuntimePlanV1(_Strict):
 def runtime_pod_resources(plan: ExecutionRuntimePlanV1) -> ContainerResourcesV1:
     """Effective Kubernetes request: materializer runs before native sidecars."""
 
+    requests = [plan.container_request("execution"), *(
+        plan.container_request(sidecar.role_name) for sidecar in plan.sidecars
+    )]
     return ContainerResourcesV1(
         cpu_millis=max(
-            50, plan.task_resources.cpu_millis + sum(s.resources.cpu_millis for s in plan.sidecars)
+            50, sum(item.cpu_millis for item in requests)
         ),
         memory_mib=max(
-            64, plan.task_resources.memory_mib + sum(s.resources.memory_mib for s in plan.sidecars)
+            64, sum(item.memory_mib for item in requests)
         ),
         ephemeral_storage_mib=max(
             32,
-            plan.task_resources.ephemeral_storage_mib
-            + sum(s.resources.ephemeral_storage_mib for s in plan.sidecars),
+            sum(item.ephemeral_storage_mib for item in requests),
         ),
     )
 
@@ -495,6 +592,7 @@ def validate_runtime_plan_requirements(
 
 __all__ = [
     "ContainerResourcesV1",
+    "ExecutionResourceRequestsV1",
     "ExecutionRuntimePlanV1",
     "ExecutionRuntimeResultV1",
     "ProbeV1",

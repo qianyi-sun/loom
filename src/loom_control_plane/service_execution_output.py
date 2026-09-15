@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -70,6 +70,7 @@ class ServiceExecutionPeerV1(_Strict):
 
 class ServiceExecutionTokenRequestV1(ServiceExecutionPeerV1):
     ttl_seconds: int = Field(default=480, gt=0, le=_MAX_TOKEN_TTL_SECONDS)
+    attempt_deadline_wall_clock: AwareDatetime | None = None
 
 
 class ServiceExecutionOutputFileV1(_Strict):
@@ -360,15 +361,28 @@ async def mint_service_execution_peer_token(
     lease: ServiceExecutionLease,
     ttl_seconds: int,
     signing_key: str,
+    attempt_deadline_wall_clock: datetime | None = None,
     now: datetime | None = None,
 ) -> tuple[str, datetime, UUID]:
     current_time = now or datetime.now(UTC)
-    if ttl_seconds > _MAX_TOKEN_TTL_SECONDS:
+    if ttl_seconds <= 0 or ttl_seconds > _MAX_TOKEN_TTL_SECONDS:
         raise ServiceExecutionBrokerError("service_execution_ttl_exceeded")
     plan = _runtime_plan(lease)
     trial = await session.get(Trial, lease.trial_id)
     if trial is None or trial.team_id != lease.team_id:
         raise ServiceExecutionBrokerError("trial_identity_drift")
+    # A rolling old runtime gets the existing lease cutoff; new runtimes pass
+    # their actual phase deadline. Neither can extend the admitted lease.
+    deadline = lease.deadline_at
+    if attempt_deadline_wall_clock is not None:
+        if (
+            attempt_deadline_wall_clock.tzinfo is None
+            or attempt_deadline_wall_clock.utcoffset() is None
+        ):
+            raise ServiceExecutionBrokerError("execution_deadline_invalid")
+        deadline = min(deadline, attempt_deadline_wall_clock)
+    if deadline <= current_time:
+        raise ServiceExecutionBrokerError("execution_deadline_elapsed")
     step_jwt_id = uuid4()
     token = mint_step_jwt(
         team_id=lease.team_id,
@@ -379,6 +393,8 @@ async def mint_service_execution_peer_token(
         provider_connection_id=trial.provider_connection_id,
         provider_connection_id_bound=True,
         step_jwt_id=step_jwt_id,
+        issued_at=current_time,
+        attempt_deadline_wall_clock=deadline,
         service_execution_lease_id=lease.id,
         service_execution_generation=lease.generation,
         service_execution_role=cast(Any, lease.execution_role),
@@ -402,6 +418,7 @@ async def mint_service_execution_peer_token(
                 "execution_role": lease.execution_role,
                 "runtime_contract_sha256": lease.runtime_contract_sha256,
                 "expires_in_seconds": ttl_seconds,
+                "attempt_deadline_wall_clock": deadline.isoformat(),
                 "provider_connection_id": (
                     str(trial.provider_connection_id) if trial.provider_connection_id else None
                 ),

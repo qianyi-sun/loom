@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -52,6 +52,15 @@ def llm_call_row_to_event(
         messages=[],
         response=ChatMessage(role="assistant", content=""),
         finish_reason="synthetic",
+        call_status=("failed" if row.get("call_status") == "failed"
+                     or extras.get("_loom_call_status") == "failed" else "completed"),
+        usage_status=(extras.get("_loom_usage_status")
+                      if extras.get("_loom_usage_status") in ("missing", "partial") else None),
+        failure_category=(extras.get("_loom_failure_category")
+                          if extras.get("_loom_failure_category") in (
+                              "upstream_timeout", "upstream_transport", "upstream_http_4xx",
+                              "upstream_http_5xx", "upstream_http_error", "attempt_deadline_reached",
+                          ) else None),
         input_tokens=int(row.get("input_tokens") or 0),
         cached_input_tokens=int(
             _numeric_counter(extras.get("cache_read_input_tokens"))
@@ -97,3 +106,17 @@ def _captured_at(raw: Any) -> datetime:
 
 def _numeric_counter(raw: Any) -> int | float:
     return raw if isinstance(raw, int | float) and not isinstance(raw, bool) else 0
+
+
+def llm_call_diagnostic_counts(calls: Iterable[LLMCallEvent]) -> dict[str, int]:
+    """Expose incomplete accounting separately from reported numeric totals.
+
+    Omit all-zero diagnostics so historical healthy source usage documents
+    retain their exact shape at the materializer's validation boundary.
+    """
+    counts = {"failed_call_count": 0, "missing_usage_call_count": 0, "partial_usage_call_count": 0}
+    for call in calls:
+        counts["failed_call_count"] += int(call.call_status == "failed")
+        counts["missing_usage_call_count"] += int(call.usage_status == "missing")
+        counts["partial_usage_call_count"] += int(call.usage_status == "partial")
+    return counts if any(counts.values()) else {}

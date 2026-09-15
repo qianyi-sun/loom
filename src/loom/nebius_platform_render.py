@@ -80,6 +80,7 @@ def validate_environment(config: dict[str, Any]) -> None:
             "regional_execution_targets",
             "public_gateway_ipv4",
             "task_image_builder",
+            "service_execution_scheduler_max_deadline_sec",
         }
         != expected
     ):
@@ -186,6 +187,9 @@ def validate_environment(config: dict[str, Any]) -> None:
         type(config["max_concurrent"]) is not int or config["max_concurrent"] < 1
     ):
         raise NebiusPlatformError("max_concurrent must be positive or null for quota-following")
+    deadline = config.get("service_execution_scheduler_max_deadline_sec", 7200)
+    if type(deadline) is not int or deadline <= 0:
+        raise NebiusPlatformError("service_execution_scheduler_max_deadline_sec must be a positive integer")
     if policy["max_nodes"] > 100:
         raise NebiusPlatformError(
             "max_nodes exceeds the native node-group technical maximum of 100"
@@ -986,14 +990,15 @@ def _execution_documents(
             if not doc or doc["kind"] in {"Namespace", "PodDisruptionBudget"}:
                 continue
             doc = _replace_tree(doc, replacements)
-            if doc["kind"] == "ClusterRole":
+            if doc["kind"] == "ClusterRole" and filename == "nebius-capacity-collector.yaml":
                 doc["rules"].append(
                     {"apiGroups": ["apps"], "resources": ["daemonsets"], "verbs": ["get", "list"]}
                 )
             if doc["kind"] in {"ClusterRole", "ClusterRoleBinding"}:
-                doc["metadata"]["name"] = ex + "-collector"
+                role_name = ex + ("-collector" if filename == "nebius-capacity-collector.yaml" else "-actuator-usage")
+                doc["metadata"]["name"] = role_name
                 if doc["kind"] == "ClusterRoleBinding":
-                    doc["roleRef"]["name"] = ex + "-collector"
+                    doc["roleRef"]["name"] = role_name
             if doc["kind"] == "NetworkPolicy":
                 for rule in doc["spec"].get("egress", []):
                     for peer in rule.get("to", []):
@@ -1171,7 +1176,7 @@ def _regional_documents(
                     )
             primary.append(doc)
         elif kind in {"RoleBinding", "ClusterRoleBinding"}:
-            role = "actuator" if kind == "RoleBinding" else "collector"
+            role = "actuator" if kind == "RoleBinding" or name.endswith("-actuator-usage") else "collector"
             doc["subjects"] = [
                 {"kind": "User", "apiGroup": "rbac.authorization.k8s.io", "name": identities[role]}
             ]
@@ -1528,6 +1533,9 @@ def build_platform(
                     "LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED": "true",
                     "LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT": config["environment"],
                     "LOOM_CP_SERVICE_EXECUTION_SCHEDULER_POOL_ID": "nebius-cpu",
+                    "LOOM_CP_SERVICE_EXECUTION_SCHEDULER_MAX_DEADLINE_SEC": config.get(
+                        "service_execution_scheduler_max_deadline_sec", 7200
+                    ),
                     "LOOM_CP_SERVICE_EXECUTION_MATERIALIZER_ENABLED": "true",
                     "LOOM_CP_SERVICE_EXECUTION_SOURCE_RETENTION_SEC": 86400,
                     "LOOM_CP_SLURM_WORKER_CONTROLLER_ENABLED": "false",

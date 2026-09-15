@@ -69,7 +69,10 @@ def load_render(
             if row["kind"] == "Namespace":
                 namespace = metadata["name"]
             if row["kind"] in {"ClusterRole", "ClusterRoleBinding"}:
-                if metadata["name"] != config["execution_namespace"] + "-collector":
+                if metadata["name"] not in {
+                    config["execution_namespace"] + "-collector",
+                    config["execution_namespace"] + "-actuator-usage",
+                }:
                     raise DeploymentError(
                         "cluster resource does not belong to the integration target"
                     )

@@ -39,13 +39,16 @@ The branches independently used revisions `0133`–`0135` for different changes.
 `dev` keeps its published history through `0143`; the Nebius reward projection,
 zero-quota observation and native-build observation migrations are appended as
 `0144`, `0145` and `0146`. Fresh databases and existing `dev` databases upgrade
-through that single chain.
+through that single chain. Nebius subsequently added native resource usage at `0136`;
+`dev` preserves its worker-claim migration at `0147` and appends native usage as `0148`.
+The deployed Nebius series through `d07718e2` is retained by the conversion candidate.
 
-An existing isolated-branch Nebius database at `0133`, `0134` or `0135` is **not**
+An existing isolated-branch Nebius database at `0133`, `0134`, `0135` or `0136` is **not**
 a database at the corresponding `dev` revision. Do not run this checkout's
 normal upgrade against it or stamp it to a `dev` revision: that could skip
-required schema changes. Moving an existing Nebius deployment requires a
-separately prepared and tested lineage conversion, with backup/restore evidence,
+required schema changes. Moving an existing Nebius deployment requires
+the [qualified lineage conversion](../ops/nebius-lineage-conversion.md), with
+backup/restore evidence,
 before selecting this `dev` candidate for deployment. Keep the previous
 branch-bound candidate for that deployment until the conversion is qualified.
 

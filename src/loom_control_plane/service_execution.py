@@ -95,6 +95,9 @@ _DESIRED_TO_COMMAND = {
 }
 _REVOCATION_STATES = frozenset({"cancel", "timeout", "retry", "delete_pending"})
 _RESOURCE_RELEASE_DEADLINE = timedelta(minutes=5)
+_NATIVE_TERMINAL_FAILURES = frozenset(
+    {"failed", "oom_killed", "evicted", "node_lost", "deadline_exceeded"}
+)
 _ALLOWED_DESIRED_TRANSITIONS = {
     "create": frozenset({"start", "cancel", "timeout", "retry", "delete_pending"}),
     "start": frozenset({"finalize", "cancel", "timeout", "retry", "delete_pending"}),
@@ -1575,13 +1578,27 @@ async def record_execution_event(
                 "deadline_exceeded",
             }
         ):
-            lease.error_class = (
-                "transient"
-                if normalized_state in {"missing", "unschedulable", "evicted", "node_lost"}
-                else "permanent"
+            # Once the exact Pod has explained its failure, its disappearance
+            # leaves only a generic Job failure. Do not erase that explanation.
+            preserve_pod_failure = (
+                normalized_state == "failed"
+                and payload.get("reason") == "BackoffLimitExceeded"
+                and payload.get("pod_uid") is None
+                and lease.pod_uid is not None
+                and lease.job_uid is not None
+                and payload.get("job_uid") == lease.job_uid
+                and lease.error_code in _NATIVE_TERMINAL_FAILURES - {"failed"}
             )
-            lease.error_code = normalized_state
-            lease.error_message = _bounded_optional_text(payload.get("message"), 2000, "message")
+            if not preserve_pod_failure:
+                lease.error_class = (
+                    "transient"
+                    if normalized_state in {"missing", "unschedulable", "evicted", "node_lost"}
+                    else "permanent"
+                )
+                lease.error_code = normalized_state
+                lease.error_message = _bounded_optional_text(
+                    payload.get("message"), 2000, "message"
+                )
         elif lease.finalized_at is None and lease.desired_state != "retry":
             lease.error_class = None
             lease.error_code = None
@@ -1879,6 +1896,99 @@ async def finalize_committed_service_execution(
         session,
         lease_id=lease.id,
         expected_generation=lease.generation,
+        desired_state="delete_pending",
+        now=observed_at,
+    )
+    return True
+
+
+async def finalize_failed_service_execution(
+    session: AsyncSession,
+    *,
+    lease_id: UUID,
+    generation: int,
+    observed_at: datetime,
+) -> bool:
+    """Close a native terminal failure after the bounded late-output window.
+
+    Leave create/start authoritative during that window so an upload already in
+    flight can commit its real result. Reconciliation reuses the first durable
+    terminal observation, including after restart; it never refreshes the timer.
+    """
+
+    lease = await session.get(ServiceExecutionLease, lease_id, with_for_update=True)
+    if lease is None:
+        raise ServiceExecutionConflict("execution lease not found")
+    if lease.generation != generation:
+        raise ServiceExecutionFenceError("execution generation is stale")
+    if (
+        lease.execution_role != "attempt"
+        or lease.desired_state not in {"create", "start"}
+        or lease.revoked_at is not None
+        or lease.finalized_at is not None
+        or lease.observed_state != "failed"
+        or lease.output_commit_state not in {"not_started", "uploading"}
+        or lease.error_code not in _NATIVE_TERMINAL_FAILURES
+    ):
+        return False
+    failure = await session.scalar(
+        select(ServiceExecutionEvent)
+        .where(
+            ServiceExecutionEvent.lease_id == lease.id,
+            ServiceExecutionEvent.generation == generation,
+            ServiceExecutionEvent.event_kind == "kubernetes_observed",
+            ServiceExecutionEvent.payload_json["normalized_state"].astext.in_(
+                _NATIVE_TERMINAL_FAILURES
+            ),
+        )
+        .order_by(ServiceExecutionEvent.ordinal)
+        .limit(1)
+    )
+    if failure is None or observed_at < failure.observed_at + _RESOURCE_RELEASE_DEADLINE:
+        return False
+    trial = await session.get(Trial, lease.trial_id, with_for_update=True)
+    if (
+        trial is None
+        or trial.attempt_count != lease.attempt
+        or trial.state not in {"claimed", "running"}
+    ):
+        return False
+    reason = (
+        failure.payload_json.get("reason")
+        if failure.payload_json.get("normalized_state") == lease.error_code
+        else None
+    ) or lease.error_code
+    message = f"Native execution failed ({reason}) before durable runtime output was committed."
+    if lease.error_message:
+        message += f" {lease.error_message}"
+    await record_execution_event(
+        session,
+        lease_id=lease.id,
+        generation=generation,
+        ordinal=lease.last_event_ordinal + 1,
+        event_kind="failed",
+        payload={
+            "error_class": lease.error_class,
+            "error_code": lease.error_code,
+            "error_message": message,
+        },
+        observed_at=observed_at,
+    )
+    # The lease lock serializes this decision with the output commit projection.
+    # Keep any upload session for diagnostics; no reward or artifact is invented.
+    lease.output_commit_state = "unavailable"
+    lease.output_generation = lease.resource_generation
+    lease.output_unavailable_reason = "native_execution_failed"
+    lease.finalized_at = observed_at
+    lease.observed_state = "finalized"
+    trial.state = "failed"
+    trial.failure_reason = "native_execution_failed"
+    trial.failure_message = message
+    trial.finished_at = observed_at
+    await enqueue_execution_transition(
+        session,
+        lease_id=lease.id,
+        expected_generation=generation,
         desired_state="delete_pending",
         now=observed_at,
     )

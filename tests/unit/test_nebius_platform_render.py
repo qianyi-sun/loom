@@ -11,12 +11,41 @@ from loom.nebius_platform_render import NebiusPlatformError, build_platform, wri
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize("maximum", [None, 14400])
+def test_scheduler_deadline_can_cover_long_task_phase_timeouts(
+    platform_inputs: tuple, maximum: int | None,
+) -> None:
+    config, candidate, profile = platform_inputs
+    if maximum is not None:
+        config["service_execution_scheduler_max_deadline_sec"] = maximum
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    control_plane = next(
+        doc for doc in files["40-services.yaml"]
+        if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "loom-control-plane"
+    )
+    env = {
+        item["name"]: item.get("value")
+        for item in control_plane["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_MAX_DEADLINE_SEC"] == str(maximum or 7200)
+
+
+@pytest.mark.parametrize("maximum", [0, -1, True, "14400", 14400.5])
+def test_scheduler_deadline_requires_positive_integer(platform_inputs: tuple, maximum: object) -> None:
+    config, candidate, profile = platform_inputs
+    config["service_execution_scheduler_max_deadline_sec"] = maximum
+    with pytest.raises(NebiusPlatformError, match="service_execution_scheduler_max_deadline_sec"):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
+@pytest.mark.parametrize("concurrency", [1, 2])
 def test_native_builds_share_the_actuator_but_have_an_isolated_namespace(
-    platform_inputs: tuple,
+    platform_inputs: tuple, concurrency: int,
 ) -> None:
     config, candidate, profile = platform_inputs
     config["task_image_builder"] = {
-        "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images"
+        "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
+        "max_concurrent": concurrency,
     }
     files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
     namespaces = {doc["metadata"]["name"]: doc for doc in files["00-namespaces.yaml"]}
@@ -50,8 +79,13 @@ def test_native_builds_share_the_actuator_but_have_an_isolated_namespace(
         rule["verbs"] for rule in role["rules"] if rule["resources"] == ["pods"]
     )
     quota = next(doc for doc in build_docs if doc["kind"] == "ResourceQuota")
-    assert quota["spec"]["hard"]["requests.ephemeral-storage"] == "16384Mi"
-    assert quota["spec"]["hard"]["count/configmaps"] == "2"
+    assert settings["max_concurrent"] == concurrency
+    assert quota["spec"]["hard"]["pods"] == str(concurrency)
+    assert quota["spec"]["hard"]["count/jobs.batch"] == str(concurrency)
+    assert quota["spec"]["hard"]["requests.cpu"] == f"{1000 * concurrency}m"
+    assert quota["spec"]["hard"]["requests.memory"] == f"{2048 * concurrency}Mi"
+    assert quota["spec"]["hard"]["requests.ephemeral-storage"] == f"{16384 * concurrency}Mi"
+    assert quota["spec"]["hard"]["count/configmaps"] == str(concurrency + 1)
     network = next(doc for doc in build_docs if doc["kind"] == "NetworkPolicy")
     assert network["spec"]["ingress"] == []
     public = network["spec"]["egress"][1]
@@ -502,11 +536,14 @@ def test_execution_quota_uses_native_envelope_and_namespace_control_requests(
         "requests.ephemeral-storage": "8192000Mi",
     }
     # Cold-template discovery adds no mutation or cloud privileges.
-    role = next(doc for doc in docs if doc["kind"] == "ClusterRole")
+    role = next(doc for doc in docs if doc["kind"] == "ClusterRole" and doc["metadata"]["name"].endswith("-collector"))
     assert {"apiGroups": ["apps"], "resources": ["daemonsets"], "verbs": ["get", "list"]} in role[
         "rules"
     ]
     assert all(set(rule["verbs"]) <= {"get", "list"} for rule in role["rules"])
+    usage = next(doc for doc in docs if doc["kind"] == "ClusterRole" and doc["metadata"]["name"].endswith("-actuator-usage"))
+    assert usage["rules"] == [{"apiGroups": [""], "resources": ["nodes/proxy"], "verbs": ["get"]}]
+    assert len({(doc["kind"], doc["metadata"]["name"]) for doc in docs}) == len(docs)
 
 
 def test_execution_quota_preserves_explicit_lower_limits(platform_inputs: tuple) -> None:
@@ -609,6 +646,8 @@ def test_regional_manifests_separate_native_roles_from_primary_processes(
     assert {doc["subjects"][0]["name"] for doc in bindings} == set(
         target["service_account_ids"].values()
     )
+    usage_binding = next(doc for doc in bindings if doc["metadata"]["name"].endswith("-actuator-usage"))
+    assert usage_binding["subjects"][0]["name"] == target["service_account_ids"]["actuator"]
     assert all(
         doc["subjects"]
         == [

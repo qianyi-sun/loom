@@ -172,15 +172,20 @@ async def openai_chat_facade(
     }
     # #190 PR-C2: per-connection egress proxy when LOOM_GW_EGRESS_PROXY_URL set.
     upstream: httpx.AsyncClient = await request.app.state.egress_client_pool.get(connection_id)
+    upstream_attempted = False
+
+    async def send_upstream() -> httpx.Response:
+        nonlocal upstream_attempted
+        timeout = upstream_timeout(request, settings.upstream_timeout_sec)
+        upstream_attempted = True
+        return await upstream.post(
+            upstream_url, json=upstream_payload, headers=dispatch_request_headers(upstream_headers),
+            timeout=timeout, follow_redirects=False,
+        )
+
     try:
         outcome = await send_with_retry(
-            lambda: upstream.post(
-                upstream_url,
-                json=upstream_payload,
-                headers=dispatch_request_headers(upstream_headers),
-                timeout=upstream_timeout(request, settings.upstream_timeout_sec),
-                follow_redirects=False,
-            ),
+            send_upstream,
             settings=settings,
             dialect="facade_openai",
             deadline=request_attempt_deadline(request),
@@ -192,6 +197,13 @@ async def openai_chat_facade(
         )
         upstream_response = outcome.response
     except AttemptDeadlineReachedError as exc:
+        if upstream_attempted:
+            await record_facade_failed_call(
+                request=request, ctx=ctx, row=row, dialect=_FACADE_DIALECT,
+                model=payload["model"], request_payload=payload,
+                failure_category="attempt_deadline_reached",
+                failure_error_type=type(exc).__name__, correlation=correlation,
+            )
         raise_deadline_http_exception(exc)
     except httpx.TimeoutException as e:
         await record_facade_failed_call(

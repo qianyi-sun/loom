@@ -224,3 +224,60 @@ def test_safe_export_preserves_failed_retry_usage_without_provider_logs():
     event = llm_call_row_to_event(safe, trial_id=row.trial_id, seq=0)
     assert event.attempt == 2 and event.output_tokens == 2
     assert event.thinking_tokens == 2
+
+
+def test_unknown_usage_survives_typed_events_usage_and_atif_without_private_extras():
+    trial, trial_id, _native, rows = _case()
+    failed = {
+        **rows[0], "input_tokens": 0, "output_tokens": 0, "cost_usd": 0,
+        "provider_extras": {
+            "_loom_call_status": "failed", "_loom_usage_status": "missing",
+            "_loom_failure_category": "upstream_timeout", "private": "secret",
+        },
+    }
+    partial = {**rows[1], "provider_extras": {"_loom_usage_status": "partial"}}
+    events = reconcile_terminus_ledger([], [failed, partial], trial, trial_id)
+    # Exercise the durable JSON boundary, not just live Python attributes.
+    restored = [LLMCallEvent.model_validate_json(event.model_dump_json()) for event in events]
+    assert restored[0].call_status == "failed"
+    assert restored[0].usage_status == "missing"
+    assert restored[0].failure_category == "upstream_timeout"
+    assert restored[0].provider_extras == {}
+    assert restored[1].call_status == "completed" and restored[1].usage_status == "partial"
+    usage = terminus_usage(restored, trial)
+    assert usage["failed_call_count"] == usage["missing_usage_call_count"] == 1
+    assert usage["partial_usage_call_count"] == 1
+    assert usage["totals"]["input_tokens"] == partial["input_tokens"]
+    from loom.models.trajectory import TrialEndEvent, TrialStartEvent
+    canonical = [
+        TrialStartEvent(trial_id=trial_id, step_id="agent", seq=0, emitted_at=datetime.now(UTC),
+                        task_id="task", agent_name="terminus-2", agent_mode="in-box"),
+        *restored,
+        TrialEndEvent(trial_id=trial_id, step_id="agent", seq=3, emitted_at=datetime.now(UTC),
+                      final_state="failed"),
+    ]
+    for agent_name in ("terminus-2", "generic"):
+        atif = json.loads(build_canonical_atif(canonical, task_id="task",
+                                               agent_name=agent_name, agent_version="2"))
+        diagnostics = atif["accounting"] if agent_name == "terminus-2" else atif["steps"][0]["metrics"]
+        assert diagnostics["failed_call_count"] == diagnostics["missing_usage_call_count"] == 1
+        assert diagnostics["partial_usage_call_count"] == 1
+        assert "secret" not in json.dumps(atif)
+
+
+def test_projection_rejects_unbounded_status_strings_without_relaxing_counter_contract():
+    trial, trial_id, _events, rows = _case()
+    row = {**rows[0], "provider_extras": {
+        "_loom_usage_status": "private-debug", "_loom_failure_category": "private-debug",
+        "reasoning_tokens": 2,
+    }}
+    event = llm_call_row_to_event(row, trial_id=trial_id, seq=0)
+    assert event.call_status == "completed" and event.usage_status is None
+    assert event.failure_category is None and event.provider_extras == {"reasoning_tokens": 2}
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        LLMCallEvent.model_validate({**event.model_dump(), "usage_status": "private-debug"})
+    with pytest.raises(ValidationError):
+        LLMCallEvent.model_validate({**event.model_dump(), "provider_extras": {"string": "secret"}})
+    # Existing healthy source usage documents retain the old shape.
+    assert "missing_usage_call_count" not in terminus_usage([event], trial)
