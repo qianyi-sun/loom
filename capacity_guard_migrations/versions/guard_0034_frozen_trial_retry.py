@@ -9,6 +9,11 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from capacity_guard_migrations.trial_pending_cancel import (
+    install_pending_cancellation,
+    uninstall_pending_cancellation,
+)
+
 revision: str = "guard_0034"
 down_revision: str | None = "guard_0033"
 branch_labels: str | None = None
@@ -204,10 +209,20 @@ def upgrade() -> None:
           trial_id uuid NOT NULL,
           protected_attempt_id uuid NOT NULL,
           execution_generation bigint NOT NULL CHECK (execution_generation > 0),
-          worker_id uuid NOT NULL,
-          worker_incarnation uuid NOT NULL,
-          claim_operation_id uuid NOT NULL,
-          operation text NOT NULL CHECK (operation IN ('claim', 'retry', 'refund')),
+          worker_id uuid,
+          worker_incarnation uuid,
+          claim_operation_id uuid,
+          cancellation_transition_id uuid,
+          operation text NOT NULL CHECK (operation IN ('claim', 'retry', 'refund', 'pending_cancel')),
+          CONSTRAINT trial_mutation_permit_actor_binding CHECK (
+            (operation = 'pending_cancel' AND worker_id IS NULL
+             AND worker_incarnation IS NULL AND claim_operation_id IS NULL
+             AND cancellation_transition_id IS NOT NULL)
+            OR
+            (operation <> 'pending_cancel' AND worker_id IS NOT NULL
+             AND worker_incarnation IS NOT NULL AND claim_operation_id IS NOT NULL
+             AND cancellation_transition_id IS NULL)
+          ),
           old_binding jsonb NOT NULL,
           changes jsonb NOT NULL,
           observed_old_row jsonb,
@@ -388,6 +403,7 @@ def upgrade() -> None:
     _rewrite(f"{_SCHEMA}.account_trial_writer_mutation()", [(_FROZEN, _AFTER)], upgrading=True)
     _rewrite(_RETRY, _retry_replacements(), upgrading=True)
     _rewrite(_CLAIM, _claim_replacements(), upgrading=True)
+    install_pending_cancellation(_rewrite)
 
 
 def downgrade() -> None:
@@ -438,6 +454,7 @@ def downgrade() -> None:
     )
     if retained:
         raise RuntimeError("frozen retry permission evidence requires protected retirement")
+    uninstall_pending_cancellation(_rewrite)
     _rewrite(_CLAIM, _claim_replacements(), upgrading=False)
     _rewrite(_RETRY, _retry_replacements(), upgrading=False)
     _rewrite(f"{_SCHEMA}.account_trial_writer_mutation()", [(_FROZEN, _AFTER)], upgrading=False)
