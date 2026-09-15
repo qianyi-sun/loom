@@ -185,12 +185,20 @@ Preparing the same content again after cache retirement uses the current upload
 location; ready cache reuse preserves its existing frozen source.
 
 Native preparation reads ordinary TaskSet file modes from the frozen
-`service_execution_input` manifest already published by TaskSet materialization.
+`service_execution_input` manifest already published by TaskSet materialization
+(and, as of #1978, by benchmark `publish-local` using the same binding shape).
 It verifies that binding and the transferred bundle revision; ordinary uploads
-do not need the benchmark publisher's `.loom-bundle-files.v1.json` sidecar.
-Benchmark sources without an input-manifest binding retain the sidecar path.
+do not need the benchmark publisher's `.loom-bundle-files.v1.json` sidecar when
+`source_provenance.service_execution_input` is present. Benchmark sources
+without an input-manifest binding retain the sidecar path.
 A missing or corrupt bound manifest fails preparation; it does not fall back to
 unbound modes or a different source revision.
+
+> **Catalog decoupling (#1978):** `immutable_task_input_unavailable` is no longer
+> TaskSet-only. Emitting the binding on `publish-local` does **not** by itself make
+> Harbor/GB10 packs Nebius-schedulable — remaining contract fields (arch, resource
+> limits, gateway-only, verifier path/identity, etc.) and AMD64 task-image
+> adaptation are separate.
 
 Native Terminus execution keeps a declared dedicated Docker build-context
 directory and its Dockerfile in the controller's frozen inputs. They are used
