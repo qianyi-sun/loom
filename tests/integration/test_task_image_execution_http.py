@@ -2,6 +2,7 @@
 
 import hashlib
 import importlib
+from datetime import timedelta
 from uuid import UUID, uuid4
 
 import httpx
@@ -59,11 +60,14 @@ async def test_provisional_scheduler_claim_does_not_wait_on_publication_signing_
         await engine.dispose()
 
 
-async def setup(factory, issuer, tmp_path, monkeypatch):
+async def setup(factory, issuer, tmp_path, monkeypatch, *, time_shift=None):
     name = "loom_control_plane.task_image_execution"
     assert importlib.util.find_spec(name) is not None, "bounded control-plane execution service missing"
     module = importlib.import_module(name)
     _, policy, _, common, engine = await signer_setup(factory, issuer, tmp_path, monkeypatch)
+    original_clock = common["clock"]
+    clock = lambda: original_clock() + timedelta(seconds=time_shift[0] if time_shift else 0)
+    policy._clock = clock
     token_hash = hashlib.sha256(RAW_TOKEN.encode()).digest()
     async with factory.begin() as session:
         session.add(Token(token_hash=token_hash, type="worker", scopes=["worker:claim", "worker:report"], issued_at=common["clock"]()))
@@ -74,7 +78,7 @@ async def setup(factory, issuer, tmp_path, monkeypatch):
             return await policy.sign_execution(request)
 
     service = module.TaskImageExecutionService(engine, trust_root=common["trust_root"],
-        purpose="production", shadow_campaign_id=None, signer=Signer(), clock=common["clock"])
+        purpose="production", shadow_campaign_id=None, signer=Signer(), clock=clock)
     delivery = await service.issue(claim=common["claim"], worker_token_hash=token_hash)
     async with factory.begin() as session:
         row = (await session.scalars(select(TaskImageExecutionGrant))).one()
@@ -85,6 +89,51 @@ async def setup(factory, issuer, tmp_path, monkeypatch):
     app.state.session_factory = factory
     app.include_router(importlib.import_module("loom_control_plane.routes.task_image_execution").router)
     return app, service, request, engine
+
+
+@pytest.mark.parametrize("change", ["expired", "near-expiry", "consumed", "stale-claim", "wrong-digest", "revoked-token"])
+async def test_authenticated_refresh_preserves_claim_and_never_reopens_consumed_start(
+    registry_authority_session, registry_issuer, tmp_path, monkeypatch, change,
+):
+    from loom_task_image_authority.execution_refresh import ExecutionRefreshRequest
+    from loom_task_image_authority.execution_grant import verify_execution_grant
+
+    factory, shift = registry_authority_session, [0]
+    app, service, old, engine = await setup(factory, registry_issuer, tmp_path, monkeypatch, time_shift=shift)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="https://control-plane.test") as http:
+            client = HttpControlPlaneClient(base_url="https://control-plane.test", token=RAW_TOKEN, _client=http)
+            if change == "consumed":
+                await client.consume_task_image_execution_start(old)
+            elif change == "stale-claim":
+                async with factory.begin() as session:
+                    await session.execute(update(Trial).values(legacy_claim_id=uuid4()))
+            elif change == "wrong-digest":
+                old = old.model_copy(update={"envelope_sha256": "a" * 64})
+            elif change == "revoked-token":
+                async with factory.begin() as session:
+                    await session.execute(update(Token).values(revoked_at=service._clock()))
+            shift[0] = 100 if change == "near-expiry" else 121
+            request = ExecutionRefreshRequest.model_validate(dict(schema="loom.task-image-execution-refresh-request/v1", previous=old))
+            if change not in {"expired", "near-expiry"}:
+                with pytest.raises(httpx.HTTPStatusError):
+                    await client.refresh_task_image_execution(request)
+                return
+            delivery = await client.refresh_task_image_execution(request)
+            current = verify_execution_grant(wire=delivery.grant_envelope.encode(), plan_wire=delivery.frozen_plan.encode(),
+                publication_wires=tuple(item.encode() for item in delivery.publications), keyset_wire=delivery.keyset.encode(),
+                trust_root=service._root, expected_claim=old.claim, expected_purpose="production", expected_shadow_campaign_id=None, now=service._clock())
+            assert current.grant.grant_id == old.grant_id and current.grant.revision == old.revision + 1
+            # A lost refresh acknowledgement may replay current issuance, but
+            # cannot consume the previous revision or recover a lost start.
+            assert await client.refresh_task_image_execution(request) == delivery
+            with pytest.raises(httpx.HTTPStatusError):
+                await client.consume_task_image_execution_start(old)
+            await client.consume_task_image_execution_start(start_request(current.grant, delivery.grant_envelope.encode()))
+            with pytest.raises(httpx.HTTPStatusError):
+                await client.refresh_task_image_execution(request)
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.parametrize("reader", ["v2", "legacy", "disabled", "digest-drift", "signer-unavailable"])
