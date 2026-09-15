@@ -347,10 +347,6 @@ def render_staging_attachment(
     revision = {"loom.ca/nebius-configuration-revision": value["configuration_revision"]}
     actuator_docs = list(yaml.safe_load_all(actuator))
     for doc in actuator_docs:
-        if doc["kind"] in {"ClusterRole", "ClusterRoleBinding"}:
-            doc["metadata"]["name"] += "-staging"
-        if doc["kind"] == "ClusterRoleBinding":
-            doc["roleRef"]["name"] += "-staging"
         if doc["kind"] == "Deployment":
             doc["spec"]["template"]["metadata"].setdefault("annotations", {}).update(revision)
             container = doc["spec"]["template"]["spec"]["containers"][0]
