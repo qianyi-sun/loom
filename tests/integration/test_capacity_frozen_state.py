@@ -134,7 +134,8 @@ def test_frozen_progress_rejects_unadmitted_input(capacity_guard_database, monke
 
 
 @pytest.mark.parametrize("interference", ["extra_column", "suppress"])
-def test_frozen_progress_rolls_back_unapproved_trigger_effects(capacity_guard_database, monkeypatch, tmp_path, interference):
+@pytest.mark.parametrize("report_state", ["running", "pre-start-heartbeat"])
+def test_frozen_progress_rolls_back_unapproved_trigger_effects(capacity_guard_database, monkeypatch, tmp_path, interference, report_state):
     database = capacity_guard_database
     seeded = _seed_claimed_protected_trial(database, monkeypatch, tmp_path)
     engine = create_engine(_value(database, "admin_url"))
@@ -152,7 +153,7 @@ def test_frozen_progress_rolls_back_unapproved_trigger_effects(capacity_guard_da
         initial = asyncio.run(_initialize(database, registration=seeded.worker.registration))
         asyncio.run(_freeze(database, initial["writer_incarnation"], uuid4()))
         with pytest.raises(ProtectedWorkerSessionRejected):
-            asyncio.run(_report(database, seeded))
+            asyncio.run(_report(database, seeded, extra={"state": report_state}))
         with engine.connect() as connection:
             assert connection.execute(text("SELECT to_jsonb(t) FROM public.trials t WHERE id = :id"),
                                       {"id": seeded.trial_id}).scalar_one() == before

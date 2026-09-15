@@ -214,7 +214,7 @@ def upgrade() -> None:
           claim_operation_id uuid,
           cancellation_transition_id uuid,
           adoption_operation_id uuid,
-          operation text NOT NULL CHECK (operation IN ('claim', 'retry', 'refund', 'state', 'output', 'pending_cancel', 'adopt')),
+          operation text NOT NULL CHECK (operation IN ('claim', 'retry', 'refund', 'state', 'output', 'pending_cancel', 'adopt', 'heartbeat')),
           CONSTRAINT trial_mutation_permit_actor_binding CHECK (
             (operation = 'pending_cancel' AND worker_id IS NULL
              AND worker_incarnation IS NULL AND claim_operation_id IS NULL

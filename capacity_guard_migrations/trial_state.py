@@ -29,6 +29,13 @@ _NEW = """          ELSIF p_operation = 'state' THEN
                OR (v_old->>'state' = 'materializing' AND p_changes->>'state' NOT IN ('succeeded','failed')) THEN
               RAISE EXCEPTION 'frozen progress row transition changed' USING ERRCODE = '55000';
             END IF;
+          ELSIF p_operation = 'heartbeat' THEN
+            IF v_old->>'state' IS DISTINCT FROM 'claimed'
+               OR v_old->>'worker_id' IS DISTINCT FROM p_worker::text
+               OR v_old->'started_at' IS DISTINCT FROM 'null'::jsonb
+               OR p_changes IS DISTINCT FROM jsonb_build_object('pre_start_heartbeat_at', now()) THEN
+              RAISE EXCEPTION 'frozen heartbeat row transition changed' USING ERRCODE = '55000';
+            END IF;
           ELSE
             RAISE EXCEPTION 'frozen retry operation is unavailable' USING ERRCODE = '55000';"""
 
@@ -65,11 +72,21 @@ def install_state_reporting(rewrite: Callable[..., None]) -> None:
              OR NOT (p_report ?& ARRAY['trial_id','state','result','failure_reason','failure_message',
                                       'execution_lease_id','execution_generation','expected','family'])
              OR jsonb_typeof(p_report->'trial_id') IS DISTINCT FROM 'string'
-             OR p_report->>'state' NOT IN ('running','materializing','succeeded','failed','cancelled')
+             OR p_report->>'state' NOT IN ('running','materializing','succeeded','failed','cancelled','pre-start-heartbeat')
              OR jsonb_typeof(p_report->'state') IS DISTINCT FROM 'string'
              OR jsonb_typeof(p_report->'failure_reason') NOT IN ('string','null')
              OR jsonb_typeof(p_report->'failure_message') NOT IN ('string','null') THEN
             RAISE EXCEPTION 'protected progress request is malformed' USING ERRCODE = '22023';
+          END IF;
+          IF p_report->>'state' = 'pre-start-heartbeat' AND (
+               p_report->'result' IS DISTINCT FROM 'null'::jsonb
+               OR p_report->'failure_reason' IS DISTINCT FROM 'null'::jsonb
+               OR p_report->'failure_message' IS DISTINCT FROM 'null'::jsonb
+               OR p_report->'expected' IS DISTINCT FROM 'null'::jsonb
+               OR p_report->'family' IS DISTINCT FROM 'null'::jsonb
+               OR (p_report->>'execution_lease_id' IS NULL) IS DISTINCT FROM
+                  (p_report->>'execution_generation' IS NULL)) THEN
+            RAISE EXCEPTION 'protected heartbeat inputs are malformed' USING ERRCODE = '22023';
           END IF;
           -- Serialize before shared authentication locks can require an upgrade.
           PERFORM 1 FROM loom_capacity_guard.agent_runtime_authority
@@ -98,6 +115,8 @@ def install_state_reporting(rewrite: Callable[..., None]) -> None:
              AND runtime.not_before IS NOT DISTINCT FROM trial.next_attempt_at
              AND (trial.state IN ('claimed','running') OR trial.state = 'materializing'
                   AND p_report->>'state' IN ('succeeded','failed')) AND trial.worker_id = p_worker_id
+             AND (p_report->>'state' <> 'pre-start-heartbeat'
+                  OR trial.state = 'claimed' AND trial.started_at IS NULL)
              AND attempt.claim_state = 'queued' AND head.lifecycle_state = 'assigned' AND NOT head.executable
              AND assignment.operation = 'assign' AND assignment.previous_state = 'pending-unassigned'
              AND assignment.lifecycle_state = 'assigned' AND assignment.transition_sequence = head.transition_sequence
@@ -175,6 +194,23 @@ def install_state_reporting(rewrite: Callable[..., None]) -> None:
           END IF;
           IF NOT FOUND AND p_report->>'execution_lease_id' IS NOT NULL THEN
             RAISE EXCEPTION 'protected progress execution lease is unavailable' USING ERRCODE = '55000';
+          END IF;
+          IF p_report->>'state' = 'pre-start-heartbeat' THEN
+            v_changes := jsonb_build_object('pre_start_heartbeat_at', now());
+            v_permit := loom_capacity_guard.authorize_frozen_trial_update(
+              v_current.trial_id, v_current.protected_attempt_id, v_current.execution_generation,
+              p_worker_id, (v_session->>'worker_incarnation')::uuid,
+              v_current.claim_operation_id, 'heartbeat', v_changes);
+            UPDATE public.trials AS trial
+               SET pre_start_heartbeat_at = (v_changes->>'pre_start_heartbeat_at')::timestamptz
+             WHERE trial.id = v_current.trial_id AND trial.worker_id = p_worker_id
+               AND trial.state = 'claimed' AND trial.started_at IS NULL;
+            IF NOT FOUND THEN
+              RAISE EXCEPTION 'protected heartbeat update lost its row' USING ERRCODE = '55000';
+            END IF;
+            PERFORM loom_capacity_guard.assert_frozen_trial_mutation_consumed(v_permit);
+            RETURN jsonb_build_object('trial_id', v_current.trial_id,
+                                     'pre_start_heartbeat_at', v_changes->'pre_start_heartbeat_at');
           END IF;
           v_changes := jsonb_build_object(
             'state', p_report->>'state',
