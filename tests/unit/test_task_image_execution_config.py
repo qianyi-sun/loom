@@ -142,10 +142,29 @@ def test_configured_control_plane_owns_signer_and_engine_on_all_exits(tmp_path, 
         async def __aexit__(self, *_):
             disposed.append("signer")
 
+    class KeysetSigner(Signer):
+        async def __aexit__(self, *_):
+            assert not any(task.get_name() == "loom-cp-task-image-keyset-renewal" and not task.done() for task in asyncio.all_tasks())
+            disposed.append("keyset-signer")
+
+    class Publisher:
+        ready = True
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def run(self):
+            await asyncio.Event().wait()
+
+        def stop(self):
+            self.ready = False
+
     async def idle(**_):
         await asyncio.Event().wait()
 
     monkeypatch.setattr(admission, "HTTPSExecutionSigner", Signer)
+    monkeypatch.setattr(admission, "HTTPSKeysetSigner", KeysetSigner)
+    monkeypatch.setattr(admission, "TaskImageKeysetPublisher", Publisher)
     monkeypatch.setattr(cp_app, "create_async_engine", lambda *a, **k: engine)
     monkeypatch.setattr(cp_app, "_assert_schema_startup", AsyncMock(side_effect=ValueError("fixture schema failure") if case == "schema-failure" else None))
     monkeypatch.setattr(cp_app, "build_s3_client", lambda **_: object())
@@ -171,8 +190,8 @@ def test_configured_control_plane_owns_signer_and_engine_on_all_exits(tmp_path, 
     else:
         with pytest.raises(ValueError, match="fixture"):
             enter()
-    assert disposed == (["signer", "database"] if case in {"normal", "later-startup-failure", "partial-background-failure"} else ["database"])
-    assert len(arguments) == (0 if case == "schema-failure" else 1)
+    assert disposed == (["keyset-signer", "signer", "database"] if case in {"normal", "later-startup-failure", "partial-background-failure"} else ["database"])
+    assert len(arguments) == (0 if case == "schema-failure" else 1 if case == "signer-open-failure" else 2)
     if arguments:
         assert arguments[0]["origin"] == data["signer"]["origin"]
         assert arguments[0]["client_key_file"].name == "client.key"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI
@@ -74,6 +74,7 @@ from loom_control_plane.task_image_execution import (
     TaskImageExecutionService,
     configured_execution_service,
 )
+from loom_control_plane.task_lifecycle import cancel_and_drain_tasks as _cancel_and_drain_tasks
 from loom_control_plane.worker_pool_autoscaler import (
     run_worker_pool_autoscaler_loop,
 )
@@ -93,25 +94,6 @@ def _load_admin_secret_verifier(
 
 async def _assert_schema_startup(engine: AsyncEngine) -> int:
     return await assert_schema_at_head(engine, db_url_env_var="LOOM_CP_DB_URL")
-
-
-async def _cancel_and_drain_tasks(
-    tasks: Sequence[asyncio.Task[None] | None],
-    *,
-    grace_seconds: float = 5.0,
-) -> None:
-    active_tasks = tuple(task for task in tasks if task is not None)
-    if not active_tasks:
-        return
-    for task in active_tasks:
-        task.cancel()
-    _done, pending = await asyncio.wait(active_tasks, timeout=grace_seconds)
-    for task in pending:
-        task.cancel()
-    results = await asyncio.gather(*active_tasks, return_exceptions=True)
-    for result in results:
-        if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
-            raise result
 
 
 def create_app(

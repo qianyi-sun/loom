@@ -6,8 +6,9 @@ source-to-start consumption are connected through authenticated shared claims.
 The backend journals grant revisions, signs committed preparations and serializes
 one-use HTTP consumption with current token, worker/claim and revocation authority.
 Standard entrypoints accept explicit release-owned public roots and fixed signer
-connections. Host signing service/root provisioning and runtime keyset renewal
-remain incomplete. This implementation is not live activation evidence.
+connections, with bounded runtime keyset renewal and native-only readiness gating.
+Host signing service/root provisioning remains incomplete. This implementation
+is not live activation evidence.
 
 This document covers the keyset, distribution, dedicated signer and
 execution-evidence contracts of the
@@ -179,7 +180,27 @@ factory loads its configuration before startup and owns signer cancellation and
 close. Competing injected trust/factories and protected-worker configuration are
 rejected. Application shutdown, including partial startup, drains admitted
 background work before closing signer clients and database engines. These paths
-do not provision credentials, install signing services or yet renew expiring keysets.
+do not provision credentials or install signing services.
+
+The configured control plane owns a public-keyset renewal loop using the same
+fixed mTLS connection settings and a separately pinned `keyset` operation. Its
+signer peer policy must allow both `execution` and `keyset`; no signing keys enter
+the control plane. Every thirty seconds, the loop authenticates the retained
+snapshot and renews when no more than 150 seconds remain. A pass has a ten-second
+deadline including database checkout, locks, signing and commits. Preparation
+commits before signing outside database locks; finalization rechecks current
+authority in a fresh transaction. Concurrent replicas may publish the same exact
+snapshot or lose the authority race safely. No renewal extends historical bytes.
+Returned keysets need more than 150 seconds of remaining root-bounded validity.
+
+Native readiness starts false and requires a running renewal task plus an
+authenticated signed snapshot with more than thirty seconds of remaining validity.
+Signer/database outages retry without stopping the control plane or Phase 1;
+expired authority, expired roots and an exited renewal task disable native claims.
+Readiness is only an admission hint: issuance and start still recheck durable
+authority. Shutdown sets persistent stop intent, cancels renewal, allows a
+five-second grace then follows up cancellation and joins before closing clients
+and engines. This also handles an operation that consumes its first cancellation.
 
 ## Signed keyset
 
@@ -592,11 +613,14 @@ signing, exact replay, key-insert serialization, unsupported isolation, cached o
 pending state, unchanged expiry and rollback on expiration during persistence.
 These are local contract tests, not live distribution or native acceptance.
 
-The dedicated signing service policy and distributor are implemented but not
-provisioned or runtime-composed. The durable complete-grant issuer, actual source-byte
-binding, worker reader and serialized one-use start/revocation still require
-implementation and integration. Production remains
-disabled pending those gates, genuine shadow isolation, both native containment
+The dedicated signing policy, durable complete-grant issuer, source-byte binding,
+worker reader, serialized one-use start/revocation and runtime renewal are
+implemented and opt-in composed, but are not provisioned or live-verified.
+Renewal tests cover signed worker refresh/start across expiry, signer outage and
+recovery, concurrent signing without held database locks, commit/lock failures,
+readiness and cancellation-resistant shutdown. They do not establish native
+provider acceptance. Production remains disabled pending release integration,
+provisioning, genuine shadow isolation, both native containment
 and scheduling campaigns, Phase 1 continuity, incident acceptance, rollback and
 soak. No private signing keys, live state changes or runtime defaults are supplied
 by this increment.

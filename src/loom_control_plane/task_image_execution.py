@@ -15,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from loom.auth import verify_bearer_token
 from loom.db.schema import Token
+from loom_control_plane.task_image_keyset_renewal import TaskImageKeysetPublisher
+from loom_control_plane.task_lifecycle import cancel_and_drain_tasks as _cancel_and_drain_tasks
 from loom_task_image_authority.contracts import BuildPurpose
 from loom_task_image_authority.execution_config import ExecutionAdmissionSettings
 from loom_task_image_authority.execution_delivery import TaskImageExecutionDelivery
@@ -32,15 +34,23 @@ from loom_task_image_authority.execution_store import (
 )
 from loom_task_image_authority.publication_contracts import CanonicalUUID
 from loom_task_image_authority.publication_keyset import ExecutionGrantTrustRoot, _instant
-from loom_task_image_authority.publication_transport import HTTPSExecutionSigner
+from loom_task_image_authority.publication_transport import HTTPSExecutionSigner, HTTPSKeysetSigner
 
 
 @asynccontextmanager
 async def configured_execution_service(engine: AsyncEngine, settings: ExecutionAdmissionSettings) -> AsyncIterator[TaskImageExecutionService]:
     """Own the fixed mTLS client's cancellation/close through application shutdown."""
-    async with HTTPSExecutionSigner(**settings.signer.model_dump()) as signer:
-        yield TaskImageExecutionService(engine, trust_root=settings.root.trust_root(), purpose=settings.purpose,
-                                        shadow_campaign_id=settings.shadow_campaign_id, signer=signer)
+    async with (HTTPSExecutionSigner(**settings.signer.model_dump()) as signer,
+                HTTPSKeysetSigner(**settings.signer.model_dump()) as keyset_signer):
+        publisher = TaskImageKeysetPublisher(engine, trust_root=settings.root.trust_root(), signer=keyset_signer)
+        renewal = asyncio.create_task(publisher.run(), name="loom-cp-task-image-keyset-renewal")
+        try:
+            yield TaskImageExecutionService(engine, trust_root=settings.root.trust_root(), purpose=settings.purpose,
+                shadow_campaign_id=settings.shadow_campaign_id, signer=signer,
+                keyset_ready=lambda: not renewal.done() and publisher.ready)
+        finally:
+            publisher.stop()
+            await _cancel_and_drain_tasks((renewal,))
 
 
 class ExecutionSigner(Protocol):
@@ -64,6 +74,7 @@ class TaskImageExecutionService:
         self, engine: AsyncEngine, *, trust_root: ExecutionGrantTrustRoot,
         purpose: BuildPurpose, shadow_campaign_id: str | None, signer: ExecutionSigner,
         clock: Callable[[], datetime] = _clock, timeout_seconds: float = 10.0,
+        keyset_ready: Callable[[], bool] | None = None,
     ) -> None:
         trust_root.__post_init__()
         TypeAdapter(BuildPurpose).validate_python(purpose, strict=True)
@@ -77,6 +88,7 @@ class TaskImageExecutionService:
             raise ValueError("invalid fixed execution admission configuration")
         self._engine, self._root, self._purpose = engine, trust_root, purpose
         self._campaign, self._signer, self._clock, self._timeout = shadow_campaign_id, signer, clock, timeout_seconds
+        self._keyset_ready = keyset_ready
 
     @property
     def timeout_seconds(self) -> float:
@@ -85,7 +97,7 @@ class TaskImageExecutionService:
     @property
     def native_ready_enabled(self) -> bool:
         # The shared production readiness journal does not advertise shadows.
-        return self._purpose == "production"
+        return self._purpose == "production" and (self._keyset_ready is None or self._keyset_ready())
 
     @asynccontextmanager
     async def _connection(self) -> AsyncIterator[AsyncSession]:
