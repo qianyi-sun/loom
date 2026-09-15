@@ -142,7 +142,8 @@ async def test_signed_claim_preparation_and_start_stay_bound(tmp_path, monkeypat
             assert not task_dir.exists()
 
 
-async def test_shared_claim_parser_preserves_signed_wire_and_trusted_context(tmp_path, monkeypatch):
+@pytest.mark.parametrize("pipeline", [True, False])
+async def test_shared_claim_parser_preserves_signed_wire_and_trusted_context(tmp_path, monkeypatch, pipeline):
     grant, kwargs = evidence(tmp_path)
     raw_delivery = delivery(kwargs)
     payload = dict(
@@ -168,11 +169,12 @@ async def test_shared_claim_parser_preserves_signed_wire_and_trusted_context(tmp
         pool=RunnerPool(max_concurrent=1), settings=settings, cp_client=cp,
         gateway_client=None, object_store=None, worker_id=UUID(grant["claim"]["worker_id"]),
         capability_snapshot_digest="sha256:" + "1" * 64,
-        pipeline_run=AsyncMock(), vllm_registry=WorkerVLLMRegistry(enabled=False),
+        pipeline_run=AsyncMock() if pipeline else None, vllm_registry=WorkerVLLMRegistry(enabled=False),
         read_setup_health=_healthy_setup_node, execution_trust=trust,
     ) == 1
     assert spawn.call_args.kwargs["payload"]["task_image_execution"] == raw_delivery
     assert spawn.call_args.kwargs["execution_trust"] is trust
+    assert cp.claim_work.call_args.kwargs["supported_work_kinds"] == (["trial", "execution_attempt"] if pipeline else ["trial"])
 
 
 async def test_release_trust_cannot_enable_legacy_body_capability_claims(tmp_path):
@@ -222,10 +224,11 @@ async def test_registration_advertises_execution_reader_only_with_explicit_trust
         container_runtime_features=["loom-secret-tmpfs-v1"], gpu_devices=[],
         input_cache_capacity_bytes=0, input_cache_reserved_bytes=0, input_cache_ready_bytes=0)
     monkeypatch.setattr(ml, "_pipeline_registration_payload", lambda _: {"capability_snapshot": snapshot})
+    monkeypatch.setattr(ml, "_trial_execution_registration_payload", lambda _: {"capability_snapshot": snapshot}, raising=False)
     cp = SimpleNamespace(register=AsyncMock(return_value={"worker_id": "fixture"}))
     call = dict(cp_client=cp, settings=settings, pipeline_enabled=case != "no-pipeline",
                 execution_trust=trust if case != "v1" else None)
-    if case in {"no-pipeline", "http", "protected"}:
+    if case in {"http", "protected"}:
         with pytest.raises(ValueError):
             await ml._register_worker_with_retry(**call)
         cp.register.assert_not_called()
@@ -233,7 +236,20 @@ async def test_registration_advertises_execution_reader_only_with_explicit_trust
         await ml._register_worker_with_retry(**call)
         registered = cp.register.call_args.kwargs
         checked = WorkerCapabilitySnapshotV1.model_validate_json(json.dumps(registered["capability_snapshot"]))
-        assert ("task-image-execution-v2" in checked.container_runtime_features) is (case == "v2")
-        if case == "v2":
+        assert ("task-image-execution-v2" in checked.container_runtime_features) is (case != "v1")
+        if case != "v1":
             assert registered["capability_snapshot_digest"] == checked.digest
-        assert registered["supported_work_kinds"] == ["trial", "execution_attempt"]
+        assert registered["supported_work_kinds"] == (["trial"] if case == "no-pipeline" else ["trial", "execution_attempt"])
+
+
+def test_trial_only_reader_measures_native_host_without_pipeline_capabilities(tmp_path, monkeypatch):
+    monkeypatch.setattr(ml, "_host_cpu_arch", lambda: "arm64")
+    monkeypatch.setattr(ml, "_pipeline_registration_payload", Mock(side_effect=AssertionError("Pipeline must remain disabled")))
+    values = ml._trial_execution_registration_payload(SimpleNamespace(trajectory_cache_dir=tmp_path, pool_name="gb10"))
+    snapshot = values["capability_snapshot"]
+    assert snapshot["cpu_arch"] == "arm64"
+    assert snapshot["cpu_cores"] > 0 and snapshot["memory_bytes"] > 0 and snapshot["scratch_bytes"] > 0
+    assert snapshot["container_runtime_features"] == []  # Added only after release trust/HTTPS validation.
+    assert snapshot["gpu_devices"] == []
+    assert snapshot["input_cache_capacity_bytes"] == 0
+    assert values["capabilities"][0]["cpu_arch"] == "arm64"

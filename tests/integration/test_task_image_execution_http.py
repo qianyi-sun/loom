@@ -158,7 +158,7 @@ async def test_authenticated_refresh_preserves_claim_and_never_reopens_consumed_
         await engine.dispose()
 
 
-@pytest.mark.parametrize("reader", ["v2", "legacy", "disabled", "digest-drift", "signer-unavailable"])
+@pytest.mark.parametrize("reader", ["v2", "trial-only", "legacy", "disabled", "digest-drift", "signer-unavailable"])
 async def test_shared_claim_delivers_signed_native_images_only_to_registered_v2_reader(
     registry_authority_session, registry_issuer, tmp_path, monkeypatch, reader,
 ):
@@ -178,6 +178,8 @@ async def test_shared_claim_delivers_signed_native_images_only_to_registered_v2_
                 retry_after_sec=0,
             ))
             worker = await session.get(Worker, UUID(claim.worker_id))
+            if reader == "trial-only":
+                worker.supported_work_kinds = ["trial"]
             if reader in {"legacy", "digest-drift"}:
                 snapshot = dict(worker.capability_snapshot_json)
                 if reader == "legacy":
@@ -206,7 +208,8 @@ async def test_shared_claim_delivers_signed_native_images_only_to_registered_v2_
                     trial = await session.get(Trial, UUID(claim.trial_id))
                     assert trial.state == "queued" and trial.attempt_count == 0
             else:
-                body = await client.claim_work(worker_id=UUID(claim.worker_id), capability_snapshot_digest=digest, free_slots=1)
+                body = await client.claim_work(worker_id=UUID(claim.worker_id), capability_snapshot_digest=digest, free_slots=1,
+                    supported_work_kinds=["trial"] if reader == "trial-only" else ["trial", "execution_attempt"])
                 import json
 
                 signed = SignedWorkClaim.model_validate_json(json.dumps(body))
