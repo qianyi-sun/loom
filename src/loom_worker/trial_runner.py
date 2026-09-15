@@ -150,9 +150,13 @@ class LocalTrialRunner:
     runtime_identity_labels: tuple[tuple[str, str], ...] = ()
     slurm_allocated_gpus: int = -1
     slurm_gpu_device_ids: tuple[str, ...] = ()
+    # Trusted image consumers supply an online, bounded, one-use authority call.
+    # None preserves the existing non-V2 runner. It is not an offline grant.
+    start_authorization: Callable[[], Awaitable[bool]] | None = None
 
     def __post_init__(self) -> None:
         self._active_agent: AgentRuntime | None = None
+        self._start_authorization_attempted = False
 
     async def interrupt_attempt(self) -> None:
         """Best-effort stop of attempt-owned agent resources on ownership revoke.
@@ -169,6 +173,16 @@ class LocalTrialRunner:
         await close()
 
     async def run(self) -> TrialResult:
+        if self.start_authorization is not None:
+            # Set before the first await: concurrent calls, a lost response and
+            # cancellation must not retry possibly committed one-use authority.
+            if self._start_authorization_attempted:
+                raise RuntimeError("trial start authorization already attempted")
+            self._start_authorization_attempted = True
+            if await self.start_authorization() is not True:
+                raise RuntimeError("trial start authorization refused")
+        # The gate precedes factories, bridges, sidecars, tokens and vLLM launch.
+        # On denial there are no runner-owned resources that need cleanup.
         driver = self.driver_factory()
 
         # #188 / Phase B: per-trial sandbox bridge + singleton attach.
