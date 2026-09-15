@@ -13,6 +13,7 @@ from loom.db.schema import (
     ServiceExecutionTarget,
     TaskImageCapacityWait,
     TaskImageMaterialization,
+    TaskImageMaterializationAttempt,
 )
 from loom_control_plane.task_image_materializations import has_nebius_task_image_demand
 from loom_execution_capacity_collector.contracts import CapacityPlacement, ResourceTotals
@@ -90,7 +91,10 @@ async def _eligible(session: AsyncSession, wait: TaskImageCapacityWait, now: dat
 
 
 async def read_capacity_waits(
-    session: AsyncSession, *, now: datetime, claiming_materialization_id: UUID | None = None,
+    session: AsyncSession, *, now: datetime,
+    claiming_attempt: TaskImageMaterializationAttempt | None = None,
+    claiming_target: ServiceExecutionTarget | None = None,
+    claiming_resources: ResourceTotals | None = None,
 ) -> list[TaskImageCapacityWait]:
     """Caller holds capacity lock; older builders precede younger builders.
 
@@ -101,7 +105,18 @@ async def read_capacity_waits(
     rows = list((await session.scalars(select(TaskImageCapacityWait)
                 .where(TaskImageCapacityWait.expires_at > now)
                 .order_by(TaskImageCapacityWait.first_waited_at, TaskImageCapacityWait.target_id))).all())
+    claiming_materialization_id = claiming_attempt.materialization_id if claiming_attempt else None
     own = next((row for row in rows if row.materialization_id == claiming_materialization_id), None)
+    # A new epoch or changed resource/target envelope is a new queue entry.
+    # The savepoint has advanced exactly one epoch only for an unchanged wait.
+    if own is not None and (
+        claiming_attempt is None or claiming_target is None
+        or own.lease_epoch + 1 != claiming_attempt.lease_epoch
+        or own.target_id != claiming_target.id or own.pool_id != claiming_target.logical_pool_id
+        or wait_resources(own) != claiming_resources
+        or own.renewed_at > now + timedelta(seconds=60)
+    ):
+        own = None
     cutoff = (own.first_waited_at, own.target_id) if own else None
     result = []
     for row in rows:
@@ -140,7 +155,7 @@ async def remember_capacity_wait(
             existing.renewed_at, existing.expires_at = candidate.renewed_at, candidate.expires_at
             await session.flush()
             return
-        if await _eligible(session, existing, now):
+        if existing.materialization_id != materialization_id and await _eligible(session, existing, now):
             return  # One live waiting head per target; do not replace its order.
         await session.delete(existing)
         await session.flush()

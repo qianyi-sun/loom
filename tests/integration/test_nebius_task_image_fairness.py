@@ -213,7 +213,7 @@ async def test_wait_protects_a_scarce_admission_slot_without_consuming_it(waitin
     await _free(sessions, target, now, quota_nodes=2)
     async with sessions() as session, session.begin():
         setattr(await session.get(ExecutionCapacityPolicy, target.target_id), limit, 1)
-    with pytest.raises(ExecutionProvisioningBlockedError, match="pending_limit|create_rate"):
+    with pytest.raises(ExecutionProvisioningBlockedError, match=r"pending_limit|create_rate"):
         async with sessions() as session, session.begin():
             await _reserve(session, trial_id=trial_id, target=target, now=now + timedelta(seconds=2))
     await controller.run_once()
@@ -275,7 +275,7 @@ async def test_concurrent_controller_replicas_consume_one_wait_once(waiting_buil
 
 @pytest.fixture
 async def two_waiting_builds(waiting_build):
-    first, sessions, first_kube, image_id, builder_trial_id, _, target, now = waiting_build
+    first, sessions, _, image_id, _, _, target, now = waiting_build
     async with sessions() as session, session.begin():
         _, second_target = await _seed_ready_trial(session, now=now)
         image = await session.get(TaskImageMaterialization, image_id)

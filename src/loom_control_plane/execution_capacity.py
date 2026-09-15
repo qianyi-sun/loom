@@ -571,15 +571,14 @@ async def admit_capacity_resources(
     native_active = [row for row in native if not row.released and row.attempt_id != exclude_native_attempt_id]
     from loom_control_plane.task_image_capacity_wait import read_capacity_waits, wait_resources
 
-    claiming_materialization_id = None
+    claiming = None
     if exclude_native_attempt_id is not None:
         claiming = await session.get(TaskImageMaterializationAttempt, exclude_native_attempt_id)
-        if claiming is not None:
-            claiming_materialization_id = claiming.materialization_id
     # Previously committed authority precedes later waiting work. Revalidation
     # remains subject to genuine reservations and provider/cleanup evidence.
     waiting = [] if already_reserved else await read_capacity_waits(
-        session, now=current_time, claiming_materialization_id=claiming_materialization_id,
+        session, now=current_time, claiming_attempt=claiming,
+        claiming_target=target, claiming_resources=resources,
     )
 
     def native_demands(target_id: str, *, include_waits: bool = True) -> list[tuple[str, ResourceTotals]]:
