@@ -412,6 +412,13 @@ async def test_controller_delivery_retains_identity_before_send_and_recovers_aft
                 sent.append(raw)
                 receipt = await receiver.receive(raw)
                 if lose_reply:
+                    from loom_capacity_executor.native_bootstrap_delivery import native_delivery_directory
+                    directory = native_delivery_directory(delivery.node, delivery.lease.reference)
+                    await consume_bootstrap_handoff(directory, delivery.lease.reference,
+                        delivery.physical, delivery.admission, now=lambda: delivery.now)
+                    claim_bootstrap_handoff_launch(directory, delivery.lease.reference,
+                        delivery.physical, delivery.admission, now=lambda: delivery.now)
+                    delivery.admission.current = None
                     raise ConnectionError("lost delivery reply")
                 return receipt
 
@@ -459,7 +466,7 @@ async def test_controller_delivery_refuses_changed_configuration_on_retry(delive
             clients={delivery.physical.binding.node_ids[0]: Client()}, now=lambda: delivery.now)
         with pytest.raises(ConnectionError):
             await NativeBootstrapOutbox(**arguments, configuration_sha256="a" * 64).deliver(delivery.physical)
-        with pytest.raises(RuntimeError, match="changed"):
+        with pytest.raises(ValueError, match="changed"):
             await NativeBootstrapOutbox(**arguments, configuration_sha256="b" * 64).deliver(delivery.physical)
         assert len(sent) == 1
 
