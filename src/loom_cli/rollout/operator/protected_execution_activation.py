@@ -215,6 +215,10 @@ class ProtectedExecutionActivation:
         if (contexts[0] != contexts[1] or contexts[0].execution_state != "active"
                 or contexts[0].executable_new_capacity_ceiling != 1 or admissions[0] != admissions[1]):
             raise ValueError("activation requires one shared retained one-slot authority")
+        policy = self.artifact.execution_policy
+        if (contexts[0].executable_new_capacity_ceiling != policy.executable_new_capacity_ceiling
+                or contexts[0].executable_new_capacity_rate_per_minute != policy.executable_new_capacity_rate_per_minute):
+            raise ValueError("activation policy capacity differs from prepared limits")
         if len(_wire(self._inputs())) > _MAX_RECORD_BYTES:
             raise ValueError("activation retained inputs exceed journal bound")
 
