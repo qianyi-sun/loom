@@ -79,12 +79,26 @@ class LostAcknowledgementError(RuntimeError):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("observation", ["autovacuum", "retired", "unretired"])
 @pytest.mark.parametrize("refusal", ["trigger", "trigger-code", "unrelated-code", "sessions", "prepared"])
-async def test_handoff_retries_rolled_back_quiescence_when_current_work_is_admitted(transfer_database, monkeypatch, observation, refusal):  # noqa: F811
+async def test_handoff_retries_rolled_back_quiescence_when_current_work_is_admitted(transfer_database, monkeypatch, observation, refusal, early_quiescence=False):  # noqa: F811
     from loom import application_handoff_completion as module
     from loom.application_ownership_transfer import ApplicationOwnershipTransferError
 
     transfer = module.transfer_application_ownership
     calls = []
+    early_refusals = []
+    if early_quiescence:
+        from loom.application_database_admission import ApplicationDatabaseAdmissionError
+
+        drained = module.require_application_database_drained
+
+        def initial_quiescence(connection, **kwargs):
+            drained(connection, **kwargs)
+            if not early_refusals:
+                early_refusals.append(1)
+                raise ApplicationDatabaseAdmissionError("application database sessions are not drained")
+
+        monkeypatch.setattr(module, "require_application_database_drained", initial_quiescence)
+
     def interrupted(connection, **kwargs):
         transfer(connection, **kwargs)
         calls.append(1)
@@ -112,6 +126,23 @@ async def test_handoff_retries_rolled_back_quiescence_when_current_work_is_admit
                 module.complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
             assert len(calls) == 1
             assert peer.execute("SELECT datdba FROM pg_database WHERE datname=current_database()").fetchone() == (arguments["target"].owner_oid,)
+    assert early_refusals == ([1] if early_quiescence else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("observation,refusal", [
+    ("unretired", "unrelated-code"),
+    ("unretired", "trigger-code"),
+    ("autovacuum", "trigger-code"),
+])
+async def test_injected_transfer_refusal_does_not_classify_preliminary_drain(
+    transfer_database, monkeypatch, observation, refusal,
+):
+    # A legitimate initial drain retry must reach the separately injected
+    # transfer failure. The classifier double represents that failure only.
+    await test_handoff_retries_rolled_back_quiescence_when_current_work_is_admitted(
+        transfer_database, monkeypatch, observation, refusal, early_quiescence=True,
+    )
 
 
 class InterruptCommit:
