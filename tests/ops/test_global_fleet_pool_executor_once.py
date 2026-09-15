@@ -2045,3 +2045,26 @@ async def test_activation_validation_rejects_drain_before_local_validation(tmp_p
     monkeypatch.setattr(once, "build_executable_runtime", forbidden)
     with pytest.raises(ExecutorConfigError, match="exact active context"):
         await run_daemon_once(config, activation_runtime_artifact=tmp_path / "activation.json", validate_activation_only=True)
+
+
+def test_controller_entrypoint_hardens_before_loading_private_configuration():
+    source = '''
+import ctypes
+import resource
+import sys
+from loom_capacity_pool_controller import runtime
+libc = ctypes.CDLL(None)
+assert libc.prctl(4, 1, 0, 0, 0) == 0
+
+def observe(*args, **kwargs):
+    assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
+    assert libc.prctl(3, 0, 0, 0, 0) == 0
+    raise SystemExit(0)
+
+runtime.PoolExecutorConfig.from_files = observe
+sys.argv = ["controller", "--config", "/not-opened", "--expected-manifest-sha256", "a"*64,
+            "--activation-runtime-artifact", "/not-opened-either"]
+runtime.main()
+'''
+    result = subprocess.run([sys.executable, "-c", source], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
