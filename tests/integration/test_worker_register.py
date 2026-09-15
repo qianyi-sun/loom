@@ -116,6 +116,28 @@ def test_register_persists_worker_capacity_and_pool(
     assert row[1] == "gb10"
 
 
+@pytest.mark.parametrize("case", ["x86_64", "arm64", "no-reader", "wrong-digest"])
+def test_ordinary_trial_only_registration_keeps_measured_signed_reader_identity(app, worker_token, case):
+    from loom.models.worker_capabilities import WorkerCapabilitySnapshotV1
+
+    arch = "arm64" if case == "arm64" else "x86_64"
+    snapshot = WorkerCapabilitySnapshotV1.model_validate(dict(schema_version="loom.worker-capabilities.v1",
+        cpu_arch=arch, cpu_cores=2, memory_bytes=4096, scratch_bytes=4096,
+        network_profiles=["gateway", "none"], container_runtime_features=[] if case == "no-reader" else ["task-image-execution-v2"],
+        gpu_devices=[], input_cache_capacity_bytes=0, input_cache_reserved_bytes=0, input_cache_ready_bytes=0))
+    with TestClient(app) as client:
+        response = client.post("/workers/register", headers={"Authorization": f"Bearer {worker_token}"}, json=dict(
+            hostname="ordinary-worker", version="test", capabilities=[dict(_VALID_CAP, cpu_arch=arch, network_policies=["public", "allowlist", "no-network"])],
+            supported_work_kinds=["trial"], pool_name="gb10" if arch == "arm64" else "oldlab", max_concurrent=2,
+            capability_snapshot=snapshot.model_dump(mode="json"), capability_snapshot_digest="sha256:" + "0" * 64 if case == "wrong-digest" else snapshot.digest))
+    if case in {"no-reader", "wrong-digest"}:
+        assert response.status_code in {400, 409}
+    else:
+        assert response.status_code == 200, response.text
+        assert response.json()["supported_work_kinds"] == ["trial"]
+        assert response.json()["capability_snapshot_digest"] == snapshot.digest
+
+
 def test_register_persists_closed_input_cache_capacity_snapshot(
     app,
     worker_token,

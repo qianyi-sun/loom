@@ -19,7 +19,7 @@ def module():
 
 
 @asynccontextmanager
-async def role_engine(database):
+async def role_engine(database, *, execution=False):
     role, password = "signer_" + uuid4().hex, secrets.token_hex(24)
     async with database[0].begin() as connection:
         await connection.execute(text(f"CREATE ROLE {role} LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '{password}'"))
@@ -27,6 +27,8 @@ async def role_engine(database):
         await connection.execute(text(f"GRANT SELECT ON task_image_publication_state, task_image_publication_keys, task_image_publication_keysets, task_image_publication_keyset_members TO {role}"))
         await connection.execute(text(f"GRANT UPDATE(singleton_id) ON task_image_publication_state TO {role}"))
         await connection.execute(text(f"GRANT UPDATE(key_id) ON task_image_publication_keys TO {role}"))
+        if execution:
+            await connection.execute(text(f"GRANT SELECT ON task_image_execution_grants, task_image_execution_starts TO {role}"))
     engine = create_async_engine(database[0].url.set(username=role, password=password))
     try:
         yield engine, role
@@ -46,6 +48,33 @@ async def test_exact_effective_column_grants_and_immutable_triggers_pass(databas
 async def test_database_owner_or_superuser_is_not_a_signer_identity(database):
     with pytest.raises(ValueError):
         await module().verify_signer_database_role(database[0])
+
+
+async def test_execution_signer_requires_read_only_journals_and_exact_triggers(database):
+    async with role_engine(database, execution=True) as (engine, role):
+        await module().verify_signer_database_role(engine, execution_enabled=True)
+        # Extra execution authority is not silently accepted by legacy service.
+        with pytest.raises(ValueError):
+            await module().verify_signer_database_role(engine)
+        async with database[0].begin() as connection:
+            await connection.execute(text(f"GRANT UPDATE(grant_id) ON task_image_execution_grants TO {role}"))
+        with pytest.raises(ValueError):
+            await module().verify_signer_database_role(engine, execution_enabled=True)
+
+
+@pytest.mark.parametrize("change", ["missing-read", "missing-fence", "grant-rewrite", "receipt-rewrite", "trial-lock"])
+async def test_execution_journal_drift_refuses_startup(database, change):
+    async with role_engine(database, execution=True) as (engine, role):
+        async with database[0].begin() as connection:
+            await connection.execute(text({
+                "missing-read": f"REVOKE SELECT ON task_image_execution_starts FROM {role}",
+                "missing-fence": "ALTER TABLE task_image_execution_grants DISABLE TRIGGER execution_journal_state_lock",
+                "grant-rewrite": "CREATE OR REPLACE FUNCTION public.loom_execution_grant_fill_once() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog AS 'BEGIN RETURN NEW; END'",
+                "receipt-rewrite": "ALTER TABLE task_image_execution_starts DISABLE TRIGGER execution_start_no_update",
+                "trial-lock": f"GRANT UPDATE(id) ON trials TO {role}",
+            }[change]))
+        with pytest.raises(ValueError):
+            await module().verify_signer_database_role(engine, execution_enabled=True)
 
 
 @pytest.mark.parametrize("change", [

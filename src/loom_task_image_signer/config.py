@@ -74,7 +74,7 @@ class SignerSettings(_Closed):
     execution: ExecutionSettings
     publication: KeySettings
     selections: Annotated[tuple[PublicationSelection, ...], Field(min_length=1, max_length=128)]
-    peer_operations: Annotated[dict[Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")], tuple[Literal["keyset", "publication"], ...]], Field(min_length=1, max_length=128)]
+    peer_operations: Annotated[dict[Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")], tuple[Literal["keyset", "publication", "execution"], ...]], Field(min_length=1, max_length=128)]
     limits: SignerServerLimits = SignerServerLimits()
     policy_timeout_seconds: Annotated[float, Field(gt=0, le=10)] = 5.0
     keyset_lifetime_seconds: Annotated[int, Field(ge=1, le=900)] = 300

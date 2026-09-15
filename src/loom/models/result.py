@@ -36,6 +36,7 @@ class FailureReason(StrEnum):
     TRAJECTORY_FLUSH_FAILED = "trajectory_flush_failed"
     OUTPUT_UNAVAILABLE = "output_unavailable"
     TASK_IMAGE_BUILD_TIMEOUT = "task_image_build_timeout"
+    TASK_IMAGE_ADMISSION_UNAVAILABLE = "task_image_admission_unavailable"
     NODE_SETUP_HEALTH = "node_setup_health"
     TASK_COMPATIBILITY = "task_compatibility"
     EXHAUSTED_RETRIES = "exhausted_retries"

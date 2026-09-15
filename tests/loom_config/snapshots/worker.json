@@ -334,6 +334,11 @@
     "default": "300.0",
     "required": false
   },
+  "task_image_execution_config_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
   "token": {
     "annotation": "<class 'pydantic.types.SecretStr'>",
     "default": "PydanticUndefined",

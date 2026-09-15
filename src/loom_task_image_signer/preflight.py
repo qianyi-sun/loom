@@ -1,6 +1,6 @@
 """Read-only startup checks for the dedicated signer's effective SQL boundary.
 
-Pins are SHA-256 of exact function bodies in immutable migrations 0135/0138.
+Pins are SHA-256 of exact function bodies in migrations 0135/0138/0148.
 Changing the authority implementation requires a reviewed release and new pins,
 not accepting a hash supplied by the database under inspection.
 """
@@ -24,6 +24,20 @@ _FUNCTIONS = {
     "task_image_publication_preserve_state": "1bb4701b72dab3d7592138aab2ed7f8fda03b6cab6d8dcba04e336e6389512b9",
     "task_image_publication_preserve_key": "10b53c9e45c65d7972c17274320c5ec0cea62df992579e2b6d7c0585b1f40c14",
     "task_image_keyset_preserve_audit": "e63ff2f17cbda9c5c2bae12faece7bee860f8df3eb6df06611aca7027c55afad",
+    "loom_execution_journal_lock": "e0a7b1f45fb1e0781ec3f46748eb368af9378fc73ba0795546554e82b600eada",
+    "loom_execution_journal_immutable": "37a9357edf88d2a795058ca4ca74bfff0673c18f5533f467f8e6983af768117d",
+    "loom_execution_grant_fill_once": "cf3e9d5b98cd71ef21e3425ac401c5cbf46e4aa1c1733681e35257f02a638d81",
+}
+
+_EXECUTION_TRIGGERS = {
+    (table, "execution_journal_state_lock", 22, "loom_execution_journal_lock")
+    for table in ("task_image_execution_grants", "task_image_execution_starts")
+} | {
+    (table, "execution_journal_no_erasure", 42, "loom_execution_journal_immutable")
+    for table in ("task_image_execution_grants", "task_image_execution_starts")
+} | {
+    ("task_image_execution_grants", "execution_grant_fill_once", 19, "loom_execution_grant_fill_once"),
+    ("task_image_execution_starts", "execution_start_no_update", 18, "loom_execution_journal_immutable"),
 }
 _TRIGGERS = {
     ("task_image_publication_state", "task_image_publication_state_preserve", 27, "task_image_publication_preserve_state"),
@@ -34,13 +48,20 @@ _TRIGGERS = {
 }
 
 
-async def verify_signer_database_role(engine: AsyncEngine) -> None:
+async def verify_signer_database_role(engine: AsyncEngine, *, execution_enabled: bool = False) -> None:
     """No grants/DDL/writes; fail closed before a production listener is opened.
 
     This verifies direct effective table/column access, role/ownership and the
     exact authority triggers. The trusted database administrator and release
     process remain part of the service's trust boundary.
     """
+    if type(execution_enabled) is not bool:
+        raise ValueError("explicit execution signer capability required")
+    tables = dict(_TABLES)
+    expected_triggers = set(_TRIGGERS)
+    if execution_enabled:
+        tables.update(task_image_execution_grants=None, task_image_execution_starts=None)
+        expected_triggers.update(_EXECUTION_TRIGGERS)
     async with asyncio.timeout(5), engine.connect() as connection:
         await connection.execution_options(isolation_level="READ COMMITTED")
         async with connection.begin():
@@ -85,7 +106,7 @@ async def verify_signer_database_role(engine: AsyncEngine) -> None:
                 raise ValueError("signer database inventory exceeds preflight bound")
             admitted = set()
             for row in rows:
-                expected = row["nspname"] == "public" and row["relname"] in _TABLES
+                expected = row["nspname"] == "public" and row["relname"] in tables
                 if row["owned"] or row["writable"]:
                     raise ValueError("signer database has table write/ownership privilege")
                 if expected:
@@ -94,7 +115,7 @@ async def verify_signer_database_role(engine: AsyncEngine) -> None:
                     admitted.add(row["relname"])
                 elif row["readable"] or row["any_column"]:
                     raise ValueError("signer database can access an unrelated relation")
-            if admitted != set(_TABLES):
+            if admitted != set(tables):
                 raise ValueError("signer authority tables are missing")
             columns = (await connection.execute(text("""
                 SELECT c.relname,a.attname,
@@ -104,9 +125,9 @@ async def verify_signer_database_role(engine: AsyncEngine) -> None:
                 JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
                 WHERE n.nspname='public' AND c.relname=ANY(:names)
                   AND a.attnum>0 AND NOT a.attisdropped ORDER BY c.relname,a.attnum
-            """), {"names": list(_TABLES)})).mappings().all()
+            """), {"names": list(tables)})).mappings().all()
             for column in columns:
-                if column["other_write"] or column["updatable"] != (_TABLES[column["relname"]] == column["attname"]):
+                if column["other_write"] or column["updatable"] != (tables[column["relname"]] == column["attname"]):
                     raise ValueError("signer column privileges differ from exact locking grants")
             triggers = (await connection.execute(text("""
                 SELECT c.relname,t.tgname,t.tgtype,t.tgenabled,t.tgdeferrable,t.tginitdeferred,
@@ -118,12 +139,12 @@ async def verify_signer_database_role(engine: AsyncEngine) -> None:
                 JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace
                 JOIN pg_catalog.pg_language lang ON lang.oid=p.prolang
                 WHERE n.nspname='public' AND c.relname=ANY(:names) AND NOT t.tgisinternal LIMIT 17
-            """), {"names": list(_TABLES)})).mappings().all()
+            """), {"names": list(tables)})).mappings().all()
             actual = {(row["relname"], row["tgname"], row["tgtype"], row["proname"]) for row in triggers}
-            if actual != _TRIGGERS or len(triggers) != len(_TRIGGERS):
+            if actual != expected_triggers or len(triggers) != len(expected_triggers):
                 raise ValueError("signer authority trigger set changed")
             for row in triggers:
-                search_path = "search_path=pg_catalog" if row["proname"] == "task_image_keyset_preserve_audit" else "search_path=pg_catalog, public"
+                search_path = "search_path=pg_catalog" if row["proname"] == "task_image_keyset_preserve_audit" or row["proname"].startswith("loom_execution_") else "search_path=pg_catalog, public"
                 if (
                     row["tgenabled"] != "O" or row["tgdeferrable"] or row["tginitdeferred"]
                     or not row["no_qual"] or row["tgnargs"] or row["pronargs"]

@@ -19,6 +19,8 @@ from urllib.parse import urlsplit
 import h11
 
 from loom_task_image_authority.config import _validate_https_origin
+from loom_task_image_authority.execution_grant import MAX_EXECUTION_GRANT_ENVELOPE_BYTES
+from loom_task_image_authority.execution_signing_request import decode_execution_signing_request
 from loom_task_image_authority.keyset_signing_request import decode_keyset_signing_request
 from loom_task_image_authority.publication_contracts import (
     MAX_SIGNER_REPLY_BYTES,
@@ -283,4 +285,16 @@ class HTTPSKeysetSigner(_HTTPSFixedSigner):
         decode_keyset_signing_request(canonical_request)
         return await self._request(
             canonical_request, maximum_reply_bytes=maximum_reply_bytes, target=b"/v1/keysets/sign",
+        )
+
+
+class HTTPSExecutionSigner(_HTTPSFixedSigner):
+    """Fixed committed-grant operation; signature and live start checks remain mandatory."""
+
+    async def sign_execution(self, canonical_request: bytes, *, maximum_reply_bytes: int) -> bytes:
+        if type(maximum_reply_bytes) is not int or not 0 < maximum_reply_bytes <= MAX_EXECUTION_GRANT_ENVELOPE_BYTES:
+            raise ValueError("invalid execution signer reply limit")
+        decode_execution_signing_request(canonical_request)
+        return await self._request(
+            canonical_request, maximum_reply_bytes=maximum_reply_bytes, target=b"/v1/executions/sign",
         )
