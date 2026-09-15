@@ -1370,6 +1370,26 @@ refuses. This is only the database portion of handoff evidence: workload recover
 original-guard continuity and safe fence release still require the enclosing
 protected component.
 
+`seal_application_runtime_for_cutover` closes new runtime logins again under an
+actual bound coordination guard. It validates the same separated schema and role
+identities, commits only `NOLOGIN`, and preserves the exact existing SCRAM verifier,
+memberships and grants. The original credential must match, including on replay;
+guard loss before commit rolls back the seal. Existing sessions survive this
+operation. The enclosing cutover must stop workloads, close database admission
+and retire those sessions before publishing writer closure. This internal phase
+does not by itself establish the fleet freeze or authorize successor activation.
+
+`retire_application_runtime_sessions` then uses the protected maintenance peer
+under closed database admission. It verifies the saved database and role OIDs,
+sealed successor ownership, matching retained runtime credential, absent role
+memberships and foreign dependencies, and the actual guard before signalling.
+Cluster-wide startup locks are checked before fresh session statistics; prepared
+work or runtime sessions in another database refuse. Every signal matches the
+role OID, database OID, PID and backend start time, with guard revalidation between
+signals. Replay observes disappearance without dropping the runtime role or
+changing its grants or verifier. This proves retirement only for that runtime;
+the enclosing operation must still reconcile privileged SQL and host writers.
+
 Admission and ownership transfer retain strict password-absence defaults. An
 explicit `runtime_password`, recovered from the protected original credential,
 allows only a matching bounded SCRAM verifier on the still-`NOLOGIN` former

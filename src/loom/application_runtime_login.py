@@ -101,6 +101,32 @@ def restore_application_runtime_login(
     )
 
 
+def seal_application_runtime_for_cutover(
+    connection: ApplicationDatabaseConnection,
+    *,
+    owner_role: str,
+    role_bindings: Mapping[str, str],
+    password: str,
+    target: ApplicationDatabaseAdmissionTarget,
+    coordination_guard: ApplicationDatabaseCoordinationGuard,
+    schema_acl_profile: ApplicationSchemaAclProfile = "application-only",
+    schema_revision: ApplicationSchemaRevision = "0147/guard_0036",
+) -> None:
+    """Commit NOLOGIN for the exact separated runtime, preserving its verifier.
+
+    The enclosing cutover must retain the original credential and target, exclude
+    role/DDL writers, and stop workloads before retiring sessions. This changes no
+    password, memberships or grants and does not signal already connected clients.
+    Original/successor guard admission belongs to that enclosing durable operation;
+    this transaction verifies the supplied exact live guard before and after DDL.
+    """
+    if not isinstance(coordination_guard, ApplicationDatabaseCoordinationGuard):
+        raise ApplicationRuntimeLoginError("application runtime cutover requires a bound guard")
+    _application_runtime_login(connection, owner_role=owner_role, role_bindings=role_bindings,
+        password=password, target=target, schema_acl_profile=schema_acl_profile,
+        schema_revision=schema_revision, restore=False, seal=True, coordination_guard=coordination_guard)
+
+
 def _application_runtime_login(
     connection: ApplicationDatabaseConnection,
     *,
@@ -112,6 +138,7 @@ def _application_runtime_login(
     schema_revision: ApplicationSchemaRevision,
     restore: bool,
     coordination_guard: ApplicationDatabaseCoordinationGuard | None,
+    seal: bool = False,
 ) -> ApplicationRuntimeLoginState:
     profile = application_schema_profile(ownership="sealed-owner", acl_profile=schema_acl_profile)
     aliases = {
@@ -148,7 +175,7 @@ def _application_runtime_login(
     if target.owner_role != runtime or target.successor_role != owner_role:
         raise ApplicationRuntimeLoginError("application runtime login saved role identity changed")
     with connection.transaction():
-        if not restore:
+        if not restore and not seal:
             connection.execute("SET TRANSACTION READ ONLY")
         connection.execute("SELECT pg_catalog.set_config('search_path','pg_catalog,pg_temp',true)")
         if connection.execute(
@@ -233,6 +260,23 @@ def _application_runtime_login(
                 runtime,
             )
         ).fetchone()
+        if seal:
+            if (state is None or type(state[0]) is not bool or state[2] is not True
+                or not matches_application_scram(password, state[1])):
+                raise ApplicationRuntimeLoginError("application runtime cutover credential state changed")
+            if state[0]:
+                try:
+                    connection.execute(sql.SQL("ALTER ROLE {} NOLOGIN").format(sql.Identifier(runtime)))
+                except psycopg.Error:
+                    raise ApplicationRuntimeLoginError("application runtime cutover seal failed") from None
+            if connection.execute(application_sql(
+                "SELECT rolcanlogin,rolpassword,rolvaliduntil IS NULL OR rolvaliduntil='infinity'::pg_catalog.timestamptz "
+                "FROM pg_catalog.pg_authid WHERE rolname={}", runtime,
+            )).fetchone() != (False, state[1], True):
+                raise ApplicationRuntimeLoginError("application runtime cutover seal was not exact")
+            if coordination_guard is not None:
+                _require_coordination_guard(connection, target, coordination_guard)
+            return ApplicationRuntimeLoginState.SEALED
         if (
             state is not None
             and state[0] is True
