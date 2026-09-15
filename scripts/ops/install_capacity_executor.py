@@ -25,7 +25,6 @@ from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path, PurePosixPath
 from typing import IO, TYPE_CHECKING, Concatenate, ParamSpec, Protocol, TypeVar
-from uuid import uuid4
 
 from loom_cli.rollout.operator.installed_execution_authority import (
     _publish_authority_without_replace,
@@ -38,6 +37,7 @@ from loom_cli.rollout.operator.protected_capacity_execution_preparation_componen
     PreparedControllerEvidence,
     PreparedControllerRequest,
 )
+from loom_cli.rollout.operator.protected_controller_admission import ADMISSION_CA_PATH
 from loom_cli.rollout.operator.protected_controller_discovery import (
     ControllerDiscoveryEvidence,
     ControllerDiscoveryRequest,
@@ -1937,14 +1937,60 @@ class ControllerInstaller:
         if path.exists() or path.is_symlink():
             raise CapacityExecutorInstallError("controller mutation conflicts with retained active operation")
 
-    def _publish_active_input(self, absolute: Path, payload: bytes, *, uid: int, gid: int) -> None:
-        self._private_directory_evidence(absolute.parent, uid=uid, gid=gid)
+    def _publish_active_input(self, absolute: Path, payload: bytes, *, uid: int, gid: int, mode: int = 0o600) -> None:
+        if mode == 0o644 and absolute == Path(ADMISSION_CA_PATH) and (uid, gid) == (self.context.authority_uid, self.context.authority_gid):
+            self._ensure_authority_tree(absolute.parent)
+        elif mode == 0o600:
+            self._private_directory_evidence(absolute.parent, uid=uid, gid=gid)
+        else:
+            raise CapacityExecutorInstallError("active controller publication mode is invalid")
         path = self._path(absolute)
         directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        temporary = f".{path.name}.{uuid4().hex}.tmp"
         try:
-            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory)
+            try:
+                current_payload = self._read_private_input(absolute, uid=uid, gid=gid, mode=mode)
+            except FileNotFoundError:
+                pass
+            else:
+                if current_payload != payload:
+                    raise CapacityExecutorInstallError("active controller publication conflicts with retained evidence")
+                os.fsync(directory)
+                os.close(directory)
+                return
+        except BaseException:
+            os.close(directory)
+            raise
+        temporary = f".{path.name}.{hashlib.sha256(payload).hexdigest()}.tmp"
+        try:
+            # A killed publisher may leave this exact operation-derived staging
+            # name. Recover only a private regular prefix of the intended bytes;
+            # foreign names, links and conflicting content remain untouched.
+            try:
+                pending = os.open(temporary, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+            else:
+                with os.fdopen(pending, "rb") as stream:
+                    metadata = os.fstat(stream.fileno())
+                    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                            or stat.S_IMODE(metadata.st_mode) not in {0o600, mode}
+                            or (metadata.st_uid, metadata.st_gid) not in {
+                                (uid, gid), (os.geteuid(), os.getegid())}
+                            or metadata.st_size > len(payload)
+                            or not payload.startswith(stream.read(len(payload) + 1))):
+                        raise CapacityExecutorInstallError("active controller staging file conflicts with retained evidence")
+                current = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino):
+                    raise CapacityExecutorInstallError("active controller staging identity changed")
+                os.unlink(temporary, dir_fd=directory)
+                os.fsync(directory)
+        except BaseException:
+            os.close(directory)
+            raise
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode, dir_fd=directory)
             with os.fdopen(descriptor, "wb") as stream:
+                os.fchmod(stream.fileno(), mode)
                 os.fchown(stream.fileno(), uid, gid)
                 stream.write(payload)
                 stream.flush()
@@ -1953,7 +1999,7 @@ class ControllerInstaller:
                 _publish_authority_without_replace(directory, temporary, path.name)
             except FileExistsError:
                 pass
-            if self._read_private_input(absolute, uid=uid, gid=gid) != payload:
+            if self._read_private_input(absolute, uid=uid, gid=gid, mode=mode) != payload:
                 raise CapacityExecutorInstallError("active controller publication conflicts with retained evidence")
             os.fsync(directory)
         finally:
@@ -1984,6 +2030,32 @@ class ControllerInstaller:
             for unit, state in authority.unit_file_state.items()
         )
 
+    def _active_admission_material(self, request: ActiveControllerRequest, authority: _PreparedLocalAuthority) -> list[tuple[Path, bytes, int, int, int]]:
+        if request.admission is None:
+            return []
+        return [(Path(absolute), payload, authority.uid, authority.gid, 0o600)
+            for absolute, payload in request.admission.files(request.document).items()] + [
+                (Path(ADMISSION_CA_PATH), request.admission.ca_certificate, self.context.authority_uid, self.context.authority_gid, 0o644)]
+
+    def _require_active_admission(self, request: ActiveControllerRequest, authority: _PreparedLocalAuthority) -> None:
+        if request.admission is None:
+            return
+        for child in ("admission", "admission-credentials", "handoff"):
+            self._private_directory_evidence(Path(request.document.state_directory) / child, uid=authority.uid, gid=authority.gid)
+        trust = self._path(Path(ADMISSION_CA_PATH).parent)
+        metadata = trust.stat(follow_symlinks=False)
+        if (not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o755
+                or metadata.st_uid != self.context.authority_uid or metadata.st_gid != self.context.authority_gid):
+            raise CapacityExecutorInstallError("active admission trust directory is unsafe")
+        for absolute, expected, uid, gid, mode in self._active_admission_material(request, authority):
+            if self._read_private_input(absolute, uid=uid, gid=gid, mode=mode) != expected:
+                raise CapacityExecutorInstallError("active admission material changed")
+        for child in ("admission", "admission-credentials"):
+            directory = Path(request.document.state_directory) / child
+            expected_names = {Path(path).name for path in request.admission.files(request.document) if Path(path).parent == directory}
+            if {path.name for path in self._path(directory).iterdir()} != expected_names:
+                raise CapacityExecutorInstallError("active admission directory contains unexpected files")
+
     def _observe_active(self, request: ActiveControllerRequest) -> ActiveControllerEvidence | None:
         authority = self._active_prerequisite(request)
         try:
@@ -1991,6 +2063,18 @@ class ControllerInstaller:
         except FileNotFoundError:
             if not self._active_units_stopped(authority):
                 raise CapacityExecutorInstallError("active controller units have no retained operation") from None
+            if request.admission is not None:
+                for child in ("admission", "admission-credentials", "handoff"):
+                    directory = Path(request.document.state_directory) / child
+                    try:
+                        self._private_directory_evidence(directory, uid=authority.uid, gid=authority.gid)
+                    except FileNotFoundError:
+                        continue
+                    if any(self._path(directory).iterdir()):
+                        raise CapacityExecutorInstallError("active admission files have no retained operation") from None
+                trust = self._path(Path(ADMISSION_CA_PATH))
+                if trust.exists() or trust.is_symlink():
+                    raise CapacityExecutorInstallError("active admission trust has no retained operation") from None
             for absolute in request.files:
                 try:
                     self._read_private_input(Path(absolute), uid=authority.uid, gid=authority.gid)
@@ -2012,6 +2096,12 @@ class ControllerInstaller:
             if value != expected:
                 raise CapacityExecutorInstallError("active controller installed files changed")
             installed[absolute] = hashlib.sha256(value).hexdigest()
+        try:
+            self._require_active_admission(request, authority)
+        except FileNotFoundError:
+            if not self._active_units_stopped(authority):
+                raise CapacityExecutorInstallError("active admission running files are incomplete") from None
+            return None
         return ActiveControllerEvidence(
             operation_id=request.operation_id, pool_id=request.pool_id,
             request_sha256=request.request_sha256, transport_authority_sha256=request.transport_authority_sha256,
@@ -2032,6 +2122,11 @@ class ControllerInstaller:
                                    uid=self.context.authority_uid, gid=self.context.authority_gid)
             self._publish_active_input(self._active_marker_path(), request.to_bytes(),
                                        uid=self.context.authority_uid, gid=self.context.authority_gid)
+            if request.admission is not None:
+                for child in ("admission", "admission-credentials", "handoff"):
+                    self._ensure_private_child_directory(Path(request.document.state_directory) / child, uid=authority.uid, gid=authority.gid)
+                for material_path, payload, uid, gid, mode in self._active_admission_material(request, authority):
+                    self._publish_active_input(material_path, payload, uid=uid, gid=gid, mode=mode)
             for absolute, payload in request.files.items():
                 self._publish_active_input(Path(absolute), payload, uid=authority.uid, gid=authority.gid)
             evidence = self._observe_active(request)
@@ -2062,6 +2157,7 @@ class ControllerInstaller:
             authority = self._active_prerequisite(request)
             config_path = Path(request.prepared.prerequisite.binding.config_file)
             result = self._run_as_service(
+                *(("/usr/bin/env", f"PGSSLROOTCERT={ADMISSION_CA_PATH}") if request.admission is not None else ()),
                 str(authority.release_root / "venv/bin/python"), "-I", "-B", "-m", "loom_capacity_pool_controller",
                 "--config", str(config_path.with_name(f"{request.pool_id}-active.json")),
                 "--expected-manifest-sha256", request.document.immutable_manifest_sha256,
@@ -2110,7 +2206,7 @@ class ControllerInstaller:
         self._private_directory_evidence(absolute, uid=uid, gid=gid)
         _fsync_directory(parent)
 
-    def _read_private_input(self, absolute: Path, *, uid: int, gid: int) -> bytes:
+    def _read_private_input(self, absolute: Path, *, uid: int, gid: int, mode: int = 0o600) -> bytes:
         path = self._path(absolute)
         try:
             descriptor = os.open(
@@ -2127,7 +2223,7 @@ class ControllerInstaller:
             before = os.fstat(descriptor)
             if (
                 not stat.S_ISREG(before.st_mode)
-                or stat.S_IMODE(before.st_mode) != 0o600
+                or stat.S_IMODE(before.st_mode) != mode
                 or before.st_uid != uid
                 or before.st_gid != gid
                 or before.st_nlink != 1

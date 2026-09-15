@@ -7,6 +7,7 @@ import ipaddress
 import json
 import re
 import tomllib
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Literal, cast
 from urllib.parse import urlsplit
@@ -1162,7 +1163,7 @@ def _manager_router_deployment(
             ipaddress.ip_network(cidr).network_address.compressed,
         )
     ]
-    return {
+    document: dict[str, Any] = {
         "apiVersion": "apps/v1",
         "kind": "Deployment",
         "metadata": _router_metadata(_MANAGER_ROUTER_NAME),
@@ -1223,6 +1224,16 @@ def _manager_router_deployment(
             },
         },
     }
+    database_router = deepcopy(document["spec"]["template"]["spec"]["containers"][0])
+    database_router["name"] = "executor-admission"
+    database_router["args"] = ["--purpose", "executor-admission", *allowed_client_arguments]
+    database_router["ports"] = [{"name": "admission-tls", "containerPort": 31432,
+        "hostPort": 31432, "hostIP": _MANAGER_ROUTER_HOST, "protocol": "TCP"}]
+    for probe in ("startupProbe", "readinessProbe", "livenessProbe"):
+        if probe in database_router:
+            database_router[probe]["tcpSocket"]["port"] = 31432
+    document["spec"]["template"]["spec"]["containers"].append(database_router)
+    return document
 
 
 def _manager_deployment(
@@ -1754,7 +1765,7 @@ def _manager_router_network_policies(
     external_manager_client_cidrs: tuple[str, ...],
 ) -> list[dict[str, Any]]:
     router_selector = {"matchLabels": {"app.kubernetes.io/name": _MANAGER_ROUTER_NAME}}
-    return [
+    policies: list[dict[str, Any]] = [
         {
             "apiVersion": "networking.k8s.io/v1",
             "kind": "NetworkPolicy",
@@ -1826,6 +1837,20 @@ def _manager_router_network_policies(
             },
         },
     ]
+    policies[1]["spec"]["ingress"][0]["ports"].append({"protocol": "TCP", "port": 31432})
+    policies[2]["spec"]["egress"].append({
+        "to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "loom-staging"}},
+            "podSelector": {"matchLabels": {"cnpg.io/cluster": "loom-postgres", "cnpg.io/instanceRole": "primary"}}}],
+        "ports": [{"protocol": "TCP", "port": 5432}],
+    })
+    policies.append({
+        "apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+        "metadata": {"name": "capacity-executor-admission-ingress", "namespace": "loom-staging", "labels": dict(_MANAGED_LABELS)},
+        "spec": {"podSelector": {"matchLabels": {"cnpg.io/cluster": "loom-postgres"}}, "policyTypes": ["Ingress"],
+            "ingress": [{"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": _MANAGER_ROUTER_NAMESPACE}},
+                "podSelector": router_selector}], "ports": [{"protocol": "TCP", "port": 5432}]}]},
+    })
+    return policies
 
 
 def render_capacity_control_plane_manifests(

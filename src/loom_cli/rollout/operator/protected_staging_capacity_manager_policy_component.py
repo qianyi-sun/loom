@@ -228,6 +228,7 @@ class KubernetesProtectedStagingCapacityManagerPolicyComponent:
             ("Namespace", "", "loom-capacity-router"),
             next(key for key in sources.resources if key[0] == "ConfigMap"),
             _MANAGER_INGRESS_IDENTITY,
+            ("NetworkPolicy", "loom-staging", "capacity-executor-admission-ingress"),
             (
                 "NetworkPolicy",
                 "loom-capacity-router",
@@ -663,7 +664,7 @@ def build_manager_policy_resource_documents(
     authority_incarnation: UUID,
     principal_registry: bytes,
 ) -> Mapping[ResourceIdentity, dict[str, object]]:
-    """Select only the eight policy/router resources from the canonical renderer."""
+    """Select only the nine policy/router resources from the canonical renderer."""
 
     _validate_source(
         plan,
@@ -701,6 +702,7 @@ def build_manager_policy_resource_documents(
         ("Deployment", "loom-dev", "loom-capacity-manager"),
         ("Deployment", "loom-capacity-router", "loom-capacity-manager-router"),
         ("NetworkPolicy", "loom-dev", "capacity-manager-ingress"),
+        ("NetworkPolicy", "loom-staging", "capacity-executor-admission-ingress"),
         (
             "NetworkPolicy",
             "loom-capacity-router",

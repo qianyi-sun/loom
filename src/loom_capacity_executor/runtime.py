@@ -118,12 +118,14 @@ class AdmissionBindingEntryV2(StrictV2Model):
     @field_validator("database_url_file")
     @classmethod
     def _absolute_url_file(cls, value: str) -> str:
-        path = Path(value)
+        # This is a portable binding. The controller resolver performs the
+        # owner/mode/nonsymlink read before opening any database connection.
+        path = PurePosixPath(value)
         if (
             "\0" in value
             or not path.is_absolute()
-            or path == Path("/")
-            or path.is_symlink()
+            or path == PurePosixPath("/")
+            or value.startswith("//") or str(path) != value
             or ".." in path.parts
         ):
             raise ValueError("database URL file must be a canonical absolute path")

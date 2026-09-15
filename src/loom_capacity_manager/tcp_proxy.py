@@ -144,12 +144,15 @@ def _private_client_ip(value: str) -> IPAddress:
     return address
 
 
-async def _serve(allowed_client_ips: frozenset[IPAddress]) -> None:
+async def _serve(allowed_client_ips: frozenset[IPAddress], *, purpose: str = "manager") -> None:
+    if purpose not in {"manager", "executor-admission"}:
+        raise ValueError("TCP proxy purpose is invalid")
+    admission = purpose == "executor-admission"
     server = await start_tcp_proxy(
         listen_host=_LISTEN_HOST,
-        listen_port=_LISTEN_PORT,
-        upstream_host=_UPSTREAM_HOST,
-        upstream_port=_UPSTREAM_PORT,
+        listen_port=31432 if admission else _LISTEN_PORT,
+        upstream_host="loom-postgres-rw.loom-staging.svc.cluster.local" if admission else _UPSTREAM_HOST,
+        upstream_port=5432 if admission else _UPSTREAM_PORT,
         allowed_client_ips=allowed_client_ips,
     )
     async with server:
@@ -158,6 +161,7 @@ async def _serve(allowed_client_ips: frozenset[IPAddress]) -> None:
 
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Run the private capacity-manager TCP router")
+    parser.add_argument("--purpose", choices=("manager", "executor-admission"), default="manager")
     parser.add_argument(
         "--allowed-client-ip",
         action="append",
@@ -169,7 +173,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     if len(allowed_client_ips) != len(arguments.allowed_client_ip):
         parser.error("allowed client IPs must be unique")
     try:
-        asyncio.run(_serve(allowed_client_ips))
+        asyncio.run(_serve(allowed_client_ips, purpose=arguments.purpose))
     except KeyboardInterrupt:  # pragma: no cover - process shutdown
         pass
 

@@ -1806,9 +1806,12 @@ staging `files/ca.crt` consumer paths. Secret-copy ownership and exact-mode
 validation remain mandatory; no root init or extra capability is required.
 
 When an execution policy is rendered, the same immutable manager image also
-runs a byte-transparent TCP router pinned to OLDLAB1. It binds only
-`192.168.50.103:31443` and forwards to the still-ClusterIP-only manager Service;
-the router never terminates TLS. The one host-port exception lives in a
+runs a byte-transparent TCP router pinned to OLDLAB1. It binds
+`192.168.50.103:31443` for the still-ClusterIP-only manager Service and
+`192.168.50.103:31432` for the staging CNPG primary. Separate fixed-purpose
+containers forward each route without terminating TLS. PostgreSQL ingress
+admits only this router namespace and pod selector on port 5432; the installed
+manager-policy component owns and creates that rule before starting the router. The one host-port exception lives in a
 dedicated namespace because the manager namespace retains Restricted Pod
 Security. That router namespace is default-deny, and the pod remains non-root,
 read-only, capability-free, and without a service-account token. Both its
@@ -1818,6 +1821,20 @@ router pod on port 8443, not those source IPs directly. Broader, public,
 duplicate, special, missing, or policy-free CIDRs fail before YAML is emitted.
 Transport admission does not replace manager-terminated mTLS and independently
 bound bearer principal scopes.
+
+Controller SQL admission uses the existing executor role after its retained
+issuance component has completed. The installed source derives the URL from
+that component's saved credential and binds the current CNPG CA, staging subject
+incarnation, configuration, deployment, and candidate generations. The URL
+retains the certificate DNS hostname and `sslmode=verify-full`, with a single
+`hostaddr` selecting the private relay. Root-owned operation evidence precedes
+publication of service-owned private credential and admission files. The public
+CA resides under the root-owned release trust directory; both service startup
+and pre-enable validation receive its fixed `PGSSLROOTCERT` path. Partial
+publication recovers only the exact operation-derived temporary file, preserving
+the credential across process death. Exact replay creates no temporary file.
+These files remain inert until the separately bound activation operation enables
+the active timer.
 
 The schema migration writes a canonical seed event beside its generated
 bootstrap authority UUID. A reviewed replacement requires that one pristine

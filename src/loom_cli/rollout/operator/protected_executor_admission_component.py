@@ -18,6 +18,7 @@ from loom.application_schema_reference import (
     ApplicationSchemaProfile,
     require_application_schema_reference,
 )
+from loom_capacity_manager.contracts import SubjectConfigurationV1
 
 from .final_gate_plan import FinalGatePlan
 from .protected_application_admission_recovery import (
@@ -34,6 +35,10 @@ from .protected_apply_journal import (
     ProtectedApplyJournalError,
 )
 from .protected_capacity_bootstrap_component import ProtectedCapacityBootstrapComponent
+from .protected_controller_admission import (
+    ControllerAdmissionBundle,
+    build_controller_admission_bundle,
+)
 from .protected_executor_admission_journal import (
     EXECUTOR_ADMISSION_COMPONENT_ID,
     ExecutorAdmissionJournal,
@@ -116,6 +121,31 @@ class ProtectedExecutorAdmissionComponent:
     def _evidence(self, record: ExecutorAdmissionRecord) -> str:
         return admission_record_digest({"plan_digest": self.bootstrap.plan.plan_digest,
             "admission_digest": record.digest, "profile": "cnpg-staging-executor-admission"})
+
+    def controller_admission(self, plan: FinalGatePlan, *, subject: SubjectConfigurationV1,
+                             state_directory: str, protected_admission_sha256: str) -> ControllerAdmissionBundle:
+        """Read completed issuance and current bound CA without issuing or rotating."""
+        context = self._context(plan)
+        saved = self._journal().read()
+        if saved is None or not saved[1] or self._terminal(saved[0]) is None:
+            raise RuntimeError("controller admission requires completed executor issuance")
+        if self.classify(plan).state is not ComponentState.EXACT:
+            raise RuntimeError("controller admission executor authority is not exact")
+        inputs = self.bootstrap.inputs_source()
+        seed = self.bootstrap.seed_source()
+        if (inputs.digest() != context[1]
+                or seed.get("subject_id") != str(subject.subject_id)
+                or seed.get("subject_incarnation") != str(subject.subject_incarnation)
+                or seed.get("reporter_incarnation") != str(subject.demand_reporter_incarnation)):
+            raise RuntimeError("controller admission source binding changed")
+        bundle = build_controller_admission_bundle(saved[0], subject=subject,
+            state_directory=state_directory, protected_admission_sha256=protected_admission_sha256,
+            ca_certificate=inputs.ca.certificate)
+        if (self._context(plan) != context or self._journal().read() != saved
+                or self._terminal(saved[0]) is None or self.bootstrap.inputs_source() != inputs
+                or self.bootstrap.seed_source() != seed):
+            raise RuntimeError("controller admission source changed during derivation")
+        return bundle
 
     def _retain(self, guard: MutationGuardEvidence) -> None:
         journal, plan = self.bootstrap.journal, self.bootstrap.plan

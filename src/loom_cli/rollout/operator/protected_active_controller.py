@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from types import MappingProxyType
 from uuid import UUID
@@ -28,6 +28,7 @@ from .protected_capacity_execution_preparation_component import (
     PreparedControllerRequest,
     prepared_executor_profile_sha256,
 )
+from .protected_controller_admission import ADMISSION_CA_PATH, ControllerAdmissionBundle
 
 _MAX_BYTES = 4 * 1024 * 1024
 
@@ -47,6 +48,7 @@ class ActiveControllerRequest:
     prepared: PreparedControllerRequest
     profile: CapacityPoolExecutorProfile
     document: ActivationRuntimeDocumentV2
+    admission: ControllerAdmissionBundle | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if (
@@ -90,6 +92,9 @@ class ActiveControllerRequest:
         }
         if dict(prepared.files) != expected_prepared:
             raise ValueError("active controller prepared files differ from the bound profile")
+        if self.admission is not None:
+            admission = ControllerAdmissionBundle.from_dict(self.admission.to_dict())
+            admission.files(document)
         # These renderers validate all execution, profile, manifest and Slurm bindings.
         _ = self.files
         if len(self.to_bytes()) > _MAX_BYTES:
@@ -116,9 +121,9 @@ class ActiveControllerRequest:
                 str(
                     config.with_name(f"{self.pool_id}-activation-runtime.json")
                 ): canonical_executable_bytes(self.document),
-                "/etc/loom-capacity-executor/active-service.env": render_capacity_pool_executor_active_service_environment(
+                "/etc/loom-capacity-executor/active-service.env": (render_capacity_pool_executor_active_service_environment(
                     self.profile, self.pool_id, self.document
-                ).encode("ascii"),
+                ) + (f"PGSSLROOTCERT={ADMISSION_CA_PATH}\n" if self.admission is not None else "")).encode("ascii"),
             }
         )
 
@@ -134,6 +139,7 @@ class ActiveControllerRequest:
                 "prepared": json.loads(self.prepared.to_bytes()),
                 "profile": self.profile.model_dump(mode="json"),
                 "document": self.document.model_dump(mode="json"),
+                **({"admission": self.admission.to_dict()} if self.admission is not None else {}),
             }
         )
 
@@ -145,8 +151,8 @@ class ActiveControllerRequest:
             value = json.loads(payload)
             if (
                 not isinstance(value, dict)
-                or set(value)
-                != {"schema_version", "operation_id", "prepared", "profile", "document"}
+                or set(value) not in ({"schema_version", "operation_id", "prepared", "profile", "document"},
+                    {"schema_version", "operation_id", "prepared", "profile", "document", "admission"})
                 or not isinstance(value["operation_id"], str)
                 or type(value["schema_version"]) is not int
                 or value["schema_version"] != 1
@@ -162,6 +168,7 @@ class ActiveControllerRequest:
                 document=ActivationRuntimeDocumentV2.model_validate_json(
                     json.dumps(value["document"])
                 ),
+                admission=ControllerAdmissionBundle.from_dict(value["admission"]) if "admission" in value else None,
             )
         except (TypeError, KeyError, UnicodeError) as exc:
             raise ValueError("active controller request is invalid") from exc

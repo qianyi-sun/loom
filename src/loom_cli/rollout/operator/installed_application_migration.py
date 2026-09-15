@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 
+from loom_capacity_manager.contracts import SubjectConfigurationV1
+
 from .final_gate_plan import FinalGatePlan
 from .installed_application_handoff import InstalledApplicationHandoffFactory
 from .protected_application_guard_retention import _read_pending_retention
@@ -27,6 +29,7 @@ from .protected_apply_journal import (
     ProtectedApplyJournal,
 )
 from .protected_capacity_bootstrap_component import ProtectedCapacityBootstrapComponent
+from .protected_controller_admission import ControllerAdmissionBundle
 from .protected_epoch_component import KubernetesProtectedEpochComponent
 from .protected_executor_admission_component import ProtectedExecutorAdmissionComponent
 from .protected_staging_capacity_database_component import (
@@ -120,6 +123,17 @@ class InstalledApplicationMigrationFactory:
         bootstrap = self.build_capacity(plan, journal=journal, ordinal=5, handoff_ordinal=2,
             base=base, seed_source=seed_source)
         return ProtectedExecutorAdmissionComponent(bootstrap, 14).component()
+
+    def controller_admission(self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal,
+                             base: KubernetesProtectedStagingCapacityDatabaseComponent,
+                             seed_source: Callable[[], Mapping[str, object]], subject: SubjectConfigurationV1,
+                             state_directory: str, protected_admission_sha256: str) -> ControllerAdmissionBundle:
+        if plan.schema_version != 7:
+            raise ValueError("installed controller admission requires execution preparation")
+        bootstrap = self.build_capacity(plan, journal=journal, ordinal=5, handoff_ordinal=2,
+            base=base, seed_source=seed_source)
+        return ProtectedExecutorAdmissionComponent(bootstrap, 14).controller_admission(plan,
+            subject=subject, state_directory=state_directory, protected_admission_sha256=protected_admission_sha256)
 
     def build_capacity(self, plan: FinalGatePlan, *, journal: ProtectedApplyJournal, ordinal: int,
                        handoff_ordinal: int, base: KubernetesProtectedStagingCapacityDatabaseComponent,
