@@ -74,9 +74,9 @@ class LostAcknowledgementError(RuntimeError):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("autovacuum", [False, True])
+@pytest.mark.parametrize("observation", ["autovacuum", "retired", "unretired"])
 @pytest.mark.parametrize("refusal", ["trigger", "sessions", "prepared"])
-async def test_handoff_retries_rolled_back_quiescence_only_for_autovacuum(transfer_database, monkeypatch, autovacuum, refusal):  # noqa: F811
+async def test_handoff_retries_rolled_back_quiescence_when_current_work_is_admitted(transfer_database, monkeypatch, observation, refusal):  # noqa: F811
     from loom import application_handoff_completion as module
     from loom.application_ownership_transfer import ApplicationOwnershipTransferError
 
@@ -94,9 +94,10 @@ async def test_handoff_retries_rolled_back_quiescence_only_for_autovacuum(transf
             connection.execute("DO $$ BEGIN RAISE EXCEPTION 'application trigger handoff requires quiescent legacy authority' "
                 "USING ERRCODE='55000'; END $$")
     monkeypatch.setattr(module, "transfer_application_ownership", interrupted)
-    monkeypatch.setattr(module, "_autovacuum_active", lambda *args, **kwargs: autovacuum, raising=False)
+    if observation != "retired":
+        monkeypatch.setattr(module, "_quiescence_retry_admitted", lambda *args, **kwargs: observation == "autovacuum")
     with _closed(transfer_database) as (peer, maintenance, _guard_peer, arguments):
-        if autovacuum and refusal != "prepared":
+        if observation != "unretired" and refusal != "prepared":
             module.complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
             assert len(calls) == 2
         else:
@@ -341,3 +342,16 @@ async def test_revision_marker_drift_refuses_before_ownership_change(transfer_da
             complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
         target = arguments["target"]
         assert peer.execute("SELECT datdba,datallowconn FROM pg_database WHERE oid=%s", (target.database_oid,)).fetchone() == (target.owner_oid, False)
+
+
+@pytest.mark.asyncio
+async def test_quiescence_retry_requires_retirement_in_other_databases(transfer_database):  # noqa: F811
+    from loom.application_handoff_completion import _quiescence_retry_admitted
+
+    with _closed(transfer_database) as (_peer, maintenance, _guard, arguments):
+        authority = {key: arguments[key] for key in ("target", "handoff_backend", "coordination_guard")}
+        authority["provisioner"] = next(role for role, alias in arguments["role_bindings"].items() if alias == "provisioner")
+        with psycopg.connect(transfer_database[0], dbname=maintenance.info.dbname, autocommit=True):
+            with pytest.raises(RuntimeError, match="client work"):
+                _quiescence_retry_admitted(maintenance, **authority)
+        assert _quiescence_retry_admitted(maintenance, **authority)
