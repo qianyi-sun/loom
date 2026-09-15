@@ -165,7 +165,7 @@ def complete_application_handoff_database(
                         "application ownership requires reconciled sessions",
                         "application trigger handoff requires quiescent legacy authority"}
                         or time.monotonic() >= deadline
-                        or not _autovacuum_active(maintenance, target=target, handoff_backend=handoff_backend,
+                        or not _quiescence_retry_admitted(maintenance, target=target, handoff_backend=handoff_backend,
                             coordination_guard=coordination_guard, provisioner=provisioner)):
                     raise
                 # ALLOW_CONNECTIONS does not exclude autovacuum. A refused SQL
@@ -193,7 +193,7 @@ def complete_application_handoff_database(
     return ApplicationHandoffDatabaseOutcome(target, coordination_guard)
 
 
-def _autovacuum_active(
+def _quiescence_retry_admitted(
     maintenance: ApplicationDatabaseConnection, *, target: ApplicationDatabaseAdmissionTarget,
     handoff_backend: ApplicationDatabaseHandoffBackend,
     coordination_guard: ApplicationDatabaseCoordinationGuard, provisioner: str,
