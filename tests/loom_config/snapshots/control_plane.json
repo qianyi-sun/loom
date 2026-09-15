@@ -119,6 +119,11 @@
     "default": "None",
     "required": false
   },
+  "task_image_execution_config_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
   "service_execution_materializer_claim_ttl_sec": {
     "annotation": "<class 'float'>",
     "default": "300.0",

@@ -26,11 +26,29 @@ import jwt
 
 from loom.models.resource_usage import TrialResourceUsageReport
 from loom.pipeline.live_preview import LivePreviewRecordV1, validate_preview_jpeg
+from loom_task_image_authority.execution_delivery import TaskImageExecutionDelivery
+from loom_task_image_authority.execution_grant import _canonical_object
+from loom_task_image_authority.execution_refresh import (
+    MAX_EXECUTION_DELIVERY_BYTES,
+    ExecutionRefreshRequest,
+)
+from loom_task_image_authority.execution_start import ExecutionStartReceipt, ExecutionStartRequest
 from loom_worker.trial_cancellation_watchdog import TrialOwnershipSnapshot
 
 EXECUTOR_WORKER_CREDENTIAL_HEADER = "X-Loom-Executor-Worker-Credential"
 _MAX_STEP_TOKEN_TTL_SEC = 30_000
 _STEP_TOKEN_DEADLINE_GRACE_SEC = 300
+
+
+def validate_task_image_execution_origin(base_url: str) -> httpx.URL:
+    """Require server-authenticated authority before any trusted-worker token use."""
+    origin = httpx.URL(base_url)
+    if (
+        origin.scheme != "https" or not origin.host
+        or origin.userinfo or origin.query or origin.fragment
+    ):
+        raise ValueError("online execution start requires an authenticated HTTPS origin")
+    return origin
 
 
 def _parse_wall_clock_timestamp(value: object, *, field_name: str) -> datetime:
@@ -403,6 +421,66 @@ class HttpControlPlaneClient:
                 return None
             r.raise_for_status()
             return r.json()  # type: ignore[no-any-return]
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def refresh_task_image_execution(self, request: ExecutionRefreshRequest) -> TaskImageExecutionDelivery:
+        """Fetch fresh signed evidence, without consuming or retrying a start."""
+        request = ExecutionRefreshRequest.model_validate(request.model_dump(mode="json", by_alias=True, exclude_none=True))
+        origin = validate_task_image_execution_origin(self.base_url)
+        client, owned = self._http()
+        try:
+            if str(client.base_url).rstrip("/") != str(origin).rstrip("/"):
+                raise ValueError("execution refresh client origin differs from configuration")
+            async with client.stream(
+                "POST", f"/trials/{request.previous.claim.trial_id}/task-image/refresh",
+                headers=self.request_headers, json=request.model_dump(mode="json", by_alias=True, exclude_none=True), follow_redirects=False,
+            ) as response:
+                response.raise_for_status()
+                if response.status_code != 200:
+                    raise ValueError("execution refresh did not return signed delivery")
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(body) + len(chunk) > MAX_EXECUTION_DELIVERY_BYTES:
+                        raise ValueError("execution refresh delivery exceeds byte ceiling")
+                    body.extend(chunk)
+                _canonical_object(bytes(body), MAX_EXECUTION_DELIVERY_BYTES)
+                return TaskImageExecutionDelivery.model_validate_json(bytes(body))
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def consume_task_image_execution_start(
+        self, request: ExecutionStartRequest,
+    ) -> ExecutionStartReceipt:
+        """Single authenticated attempt; a missing acknowledgement is not replayable.
+
+        The caller owns the end-to-end start deadline, including local evidence
+        verification. A receipt is returned only for a fresh committed consume,
+        never a generic 200/idempotency replay. No redirect can select an issuer.
+        """
+        _ = request.digest
+        origin = validate_task_image_execution_origin(self.base_url)
+        client, owned = self._http()
+        try:
+            if str(client.base_url).rstrip("/") != str(origin).rstrip("/"):
+                raise ValueError("online execution start client origin differs from configuration")
+            async with client.stream(
+                "POST", f"/trials/{request.claim.trial_id}/task-image/start",
+                headers=self.request_headers,
+                json=request.model_dump(mode="json", by_alias=True, exclude_none=True),
+                follow_redirects=False,
+            ) as response:
+                response.raise_for_status()
+                if response.status_code != 201:
+                    raise ValueError("online start did not acknowledge a fresh consume")
+                chunks = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(chunks) + len(chunk) > 8192:
+                        raise ValueError("execution start receipt exceeds byte ceiling")
+                    chunks.extend(chunk)
+                return ExecutionStartReceipt.model_validate(_canonical_object(bytes(chunks), 8192))
         finally:
             if owned:
                 await client.aclose()

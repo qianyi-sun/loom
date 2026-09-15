@@ -61,6 +61,12 @@ ALLOWED_AUTHORITY_IMPORTS = {
 # composition becomes available to the authority API or its other modules.
 ALLOWED_AUTHORITY_MODULE_IMPORTS = {
     "execution_grant.py": {"loom.models.task"},
+    # Shared-queue delivery reuses the existing closed wire schemas, not the
+    # scheduler or worker runtime. The store verifies the persisted capability
+    # snapshot with the same canonical bytes used during worker registration.
+    # These exact pure dependencies are not admitted to the authority API.
+    "execution_delivery.py": {"loom.pipeline.spec", "loom.pipeline.work_protocol"},
+    "execution_store.py": {"loom.models.worker_capabilities", "loom.pipeline.keys"},
     "publication_set.py": {"loom.models.task"},
     "bundle_capability.py": {"loom.task_image_bundle_manifest"},
     "bundle_s3_backend.py": {"loom.task_image_bundle_manifest", "loom.trajectory.storage"},
@@ -149,6 +155,19 @@ def test_adapter_dependencies_are_scoped_to_reviewed_modules(module, imports) ->
     assert _unexpected_authority_imports(imports, source=Path("other") / module) == imports
     unreviewed = {"boto3", "botocore.session", "botocore.client", "xml.etree.ElementTree"}
     assert _unexpected_authority_imports(unreviewed, source=AUTHORITY_ROOT / module) == unreviewed
+
+
+@pytest.mark.parametrize("module", ["execution_delivery.py", "execution_store.py"])
+def test_execution_adapters_do_not_admit_worker_or_scheduler_runtime(module: str) -> None:
+    forbidden = {
+        "loom_control_plane.scheduler.claim",
+        "loom_worker.main_loop",
+        "loom_worker.control_plane_client",
+        "loom.pipeline.orchestrator",
+        "docker",
+        "subprocess",
+    }
+    assert _unexpected_authority_imports(forbidden, source=AUTHORITY_ROOT / module) == forbidden
 
 
 def test_only_the_dedicated_authority_api_imports_the_projection_store() -> None:

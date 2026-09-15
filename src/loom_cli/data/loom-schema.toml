@@ -261,6 +261,11 @@ python_type = "Path"
 # no required, no default → `Path | None = None`
 description = "Owner-only file containing the least-privileged PostgreSQL URL used to register and validate protected staging worker sessions. When configured, worker mutation routes require the protected worker credential header."
 
+[service_config.task_image_execution_config_file]
+used_by     = ["control-plane", "worker"]
+python_type = "Path"
+description = "Optional owner-only release configuration for signed task-image execution. Workers load only a public execution root and fixed purpose; the control plane additionally loads a fixed mTLS signer connection. Absent keeps the legacy reader path. Protected-worker composition is unsupported."
+
 [service_config.log_level]
 used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]
 python_type = "LogLevel"

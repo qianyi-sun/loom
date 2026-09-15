@@ -4173,6 +4173,93 @@ class TaskImagePublicationEnvelope(Base):
     revocation_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
+class TaskImageExecutionGrant(Base):
+    """Immutable preparation, fill-once signature and monotonic revocation.
+
+    Trial/worker UUIDs are historical identities, not permanent live-object
+    retention pins. Admission rechecks their actual current locked rows.
+    """
+
+    __tablename__ = "task_image_execution_grants"
+    __table_args__ = (
+        UniqueConstraint("claim_id", "revision", name="exec_grants_claim_revision_unique"),
+        UniqueConstraint("grant_id", "revision", "claim_id", name="exec_grants_start_binding_unique"),
+        CheckConstraint(
+            "grant_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND claim_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND revision BETWEEN 1 AND 9007199254740991", name="exec_grants_identity_check",
+        ),
+        CheckConstraint(
+            "octet_length(canonical_grant) BETWEEN 1 AND 262144 "
+            "AND grant_sha256 = encode(sha256(canonical_grant), 'hex') "
+            "AND ((canonical_envelope IS NULL AND envelope_sha256 IS NULL) "
+            "OR (canonical_envelope IS NOT NULL AND envelope_sha256 IS NOT NULL "
+            "AND octet_length(canonical_envelope) BETWEEN 1 AND 524288 "
+            "AND envelope_sha256 = encode(sha256(canonical_envelope), 'hex')))",
+            name="exec_grants_bytes_check",
+        ),
+        CheckConstraint(
+            "isfinite(created_at) AND (revoked_at IS NULL OR "
+            "(isfinite(revoked_at) AND revoked_at >= created_at))", name="exec_grants_time_check",
+        ),
+        Index("exec_grants_trial_idx", "trial_id", "claim_id", "revision"),
+    )
+    grant_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    revision: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    claim_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    trial_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    worker_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    operation_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("task_image_publication_jobs.operation_id", ondelete="RESTRICT"), nullable=False,
+    )
+    keyset_version: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("task_image_publication_keysets.keyset_version", ondelete="RESTRICT"), nullable=False,
+    )
+    canonical_grant: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    grant_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    canonical_envelope: Mapped[bytes | None] = mapped_column(LargeBinary)
+    envelope_sha256: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+
+
+class TaskImageExecutionStart(Base):
+    """One immutable consume per claim, including across grant refreshes."""
+
+    __tablename__ = "task_image_execution_starts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["grant_id", "revision", "claim_id"],
+            ["task_image_execution_grants." + name for name in ("grant_id", "revision", "claim_id")],
+            name="exec_starts_grant_fkey", ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "start_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND request_sha256 ~ '^[0-9a-f]{64}$'", name="exec_starts_identity_check",
+        ),
+        CheckConstraint(
+            "octet_length(canonical_receipt) BETWEEN 1 AND 8192 "
+            "AND receipt_sha256 = encode(sha256(canonical_receipt), 'hex')", name="exec_starts_bytes_check",
+        ),
+        CheckConstraint(
+            "isfinite(consumed_at) AND isfinite(expires_at) "
+            "AND date_trunc('second', consumed_at) = consumed_at "
+            "AND date_trunc('second', expires_at) = expires_at "
+            "AND expires_at > consumed_at AND expires_at <= consumed_at + interval '30 seconds'",
+            name="exec_starts_time_check",
+        ),
+    )
+    claim_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    grant_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    start_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False, unique=True)
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    canonical_receipt: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    receipt_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    consumed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
 class TaskImagePublicationEvidence(Base):
     """Append-only publication evidence for one exact materialization attempt."""
 
