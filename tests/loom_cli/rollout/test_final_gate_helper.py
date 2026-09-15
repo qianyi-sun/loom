@@ -328,7 +328,7 @@ def test_activation_command_refuses_unbound_document_inputs(tmp_path, monkeypatc
 @pytest.mark.parametrize("drift", [None, "hash", "path", "mode", "symlink", "missing", "extra", "no-documents", "key"])
 def test_activation_command_binds_private_native_material(tmp_path, monkeypatch, capsys, drift):
     _, path, digest = _prepared(tmp_path, monkeypatch)
-    owner, documents, source, source_digest = _activation_documents(tmp_path, path, native=True)
+    owner, _documents, source, source_digest = _activation_documents(tmp_path, path, native=True)
     material = {pool: request.native_delivery_material for pool, request in owner.requests.items()}
     payload = {pool: value.to_dict() for pool, value in material.items()}
     if drift == "missing":
@@ -336,7 +336,9 @@ def test_activation_command_binds_private_native_material(tmp_path, monkeypatch,
     elif drift == "extra":
         payload["unbound"] = payload["gb10"]
     elif drift == "key":
-        from loom_cli.rollout.operator.protected_native_delivery_material import NativeDeliveryMaterial
+        from loom_cli.rollout.operator.protected_native_delivery_material import (
+            NativeDeliveryMaterial,
+        )
         payload["oldlab"] = NativeDeliveryMaterial(b"a" * 64, b"b" * 64, b"c" * 64).to_dict()
     material_path = path.with_name("execution-activation-native-material.json")
     raw = json.dumps(payload).encode()

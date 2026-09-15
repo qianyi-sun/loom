@@ -129,7 +129,7 @@ def test_installed_activation_uses_verified_candidate_and_fixed_controller_chann
             assert active == {"gb10": gb10, "oldlab": oldlab}
             checkpoint_guard()
         def execute(self, bound, **kwargs):
-            assert bound == plan and kwargs == {"documents": documents}
+            assert bound == plan and kwargs == {"documents": documents, "native_material": None}
             calls.append("activate")
             return result
     from loom_cli.rollout import final_gate_helper

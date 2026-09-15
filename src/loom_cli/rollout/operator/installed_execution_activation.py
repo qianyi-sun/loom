@@ -14,7 +14,6 @@ from .final_gate_plan import FinalGatePlan
 from .installed_application_migration import InstalledApplicationMigrationFactory
 from .protected_active_controller import ActiveControllerRequest
 from .protected_apply_journal import ComponentState
-from .protected_native_delivery_material import NativeDeliveryMaterial
 from .protected_execution_activation import (
     ActivationManagerClient,
     ActivationPreparedTransport,
@@ -23,6 +22,7 @@ from .protected_execution_activation import (
     ProtectedExecutionActivation,
 )
 from .protected_execution_preparation_journal import ExecutionPreparationRecoveryState
+from .protected_native_delivery_material import NativeDeliveryMaterial
 from .protected_staging_capacity_manager_configuration_component import (
     derive_protected_staging_capacity_configuration,
 )

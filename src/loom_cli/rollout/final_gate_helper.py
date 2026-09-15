@@ -25,6 +25,7 @@ from loom_cli.rollout.operator.backup import VerifiedBackup
 from loom_cli.rollout.operator.checkpoint_lease import inspect_critical_checkpoint
 from loom_cli.rollout.operator.final_gate_plan import FinalGatePlan
 from loom_cli.rollout.operator.model import DriverEnvelope
+from loom_cli.rollout.operator.protected_native_delivery_material import NativeDeliveryMaterial
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_contract import CheckOperation
 
@@ -183,7 +184,8 @@ def _record(result: FinalGateResult) -> Mapping[str, object]:
 
 class ActivationExecute(Protocol):
     def __call__(self, plan: FinalGatePlan, *,
-                 documents: Mapping[str, ActivationRuntimeDocumentV2] | None = None) -> ExecutionContextV2: ...
+                 documents: Mapping[str, ActivationRuntimeDocumentV2] | None = None,
+                 native_material: Mapping[str, NativeDeliveryMaterial] | None = None) -> ExecutionContextV2: ...
 
 
 def _load_activation_documents(path: Path | None, expected_digest: str | None, *,
@@ -205,19 +207,46 @@ def _load_activation_documents(path: Path | None, expected_digest: str | None, *
         for pool, value in documents.items()}
 
 
+def _load_native_material(path: Path | None, expected_digest: str | None, *, plan_path: Path,
+                          documents: Mapping[str, ActivationRuntimeDocumentV2] | None,
+                          ) -> Mapping[str, NativeDeliveryMaterial] | None:
+    if path is None and expected_digest is None:
+        if documents is not None and any(document.native_delivery is not None for document in documents.values()):
+            raise ValueError("native activation requires bound private material")
+        return None
+    if (documents is None or path != plan_path.with_name("execution-activation-native-material.json")
+            or expected_digest is None or _SHA256_RE.fullmatch(expected_digest) is None):
+        raise ValueError("native material path or digest is invalid")
+    assert path is not None
+    payload = read_trusted_file(path, service_uid=os.geteuid(), private=True,
+        max_bytes=1024 * 1024, require_nonempty=True).payload
+    if hashlib.sha256(payload).hexdigest() != expected_digest:
+        raise ValueError("native material digest changed")
+    values = _strict_json_object(payload)
+    if not values or set(values) != {pool for pool, document in documents.items() if document.native_delivery is not None}:
+        raise ValueError("native material must cover exactly the native pools")
+    material = {pool: NativeDeliveryMaterial.from_dict(value) for pool, value in values.items()}
+    for pool, entry in material.items():
+        entry.files(documents[pool])
+    return material
+
+
 def _activate(args: argparse.Namespace, execute: ActivationExecute | None) -> int:
     # The immutable plan/envelope/artifacts remain mandatory. Fresh checkpoint
     # admission lives inside the installed forward guard, so its failure after
     # activation cannot prevent compensation using the retained exact authority.
     plan = _load_plan(args.plan, args.plan_sha256, verify_checkpoint=False)
     documents = _load_activation_documents(args.documents, args.documents_sha256, plan_path=args.plan)
+    native_material = _load_native_material(args.native_material, args.native_material_sha256,
+        plan_path=args.plan, documents=documents)
     if execute is None:
         from loom_cli.rollout.operator.installed_final_gate_executor import (
             build_installed_final_gate_executor,
         )
 
         execute = build_installed_final_gate_executor().activate_prepared_execution
-    result = execute(plan, documents=documents)
+    result = (execute(plan, documents=documents, native_material=native_material)
+        if native_material is not None else execute(plan, documents=documents))
     result = ExecutionContextV2.model_validate_json(result.model_dump_json())
     if result.execution_state not in {"active", "drain-only"}:
         raise ValueError("activation result is not a completed transition")
@@ -239,6 +268,8 @@ def _parser() -> argparse.ArgumentParser:
     activation.add_argument("--plan-sha256", required=True)
     activation.add_argument("--documents", type=Path)
     activation.add_argument("--documents-sha256")
+    activation.add_argument("--native-material", type=Path)
+    activation.add_argument("--native-material-sha256")
     return parser
 
 

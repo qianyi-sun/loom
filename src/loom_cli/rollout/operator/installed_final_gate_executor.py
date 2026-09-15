@@ -96,6 +96,7 @@ from .protected_gb10_external_supervisor_transport import (
     build_fixed_gb10_external_supervisor_transport,
 )
 from .protected_gb10_transport import build_fixed_gb10_ssh_transport
+from .protected_native_delivery_material import NativeDeliveryMaterial
 from .protected_pool_credential_transport import (
     ProtectedPoolCredentialTransport,
     build_fixed_gb10_pool_credential_transport,
@@ -530,7 +531,8 @@ class InstalledFinalGateExecutor:
         )
 
     def activate_prepared_execution(self, plan: FinalGatePlan, *,
-                                    documents: Mapping[str, ActivationRuntimeDocumentV2] | None = None) -> ExecutionContextV2:
+                                    documents: Mapping[str, ActivationRuntimeDocumentV2] | None = None,
+                                    native_material: Mapping[str, NativeDeliveryMaterial] | None = None) -> ExecutionContextV2:
         """Execute the separately admitted cutover from this verified installed runner."""
         installed, config = self._validate_plan(plan)
         if plan.schema_version != 7:
@@ -551,7 +553,7 @@ class InstalledFinalGateExecutor:
         from loom_cli.rollout.final_gate_helper import _verify_checkpoint
 
         return InstalledExecutionActivation(runtime, application, active,
-            checkpoint_guard=lambda: _verify_checkpoint(plan)).execute(plan, documents=documents)
+            checkpoint_guard=lambda: _verify_checkpoint(plan)).execute(plan, documents=documents, native_material=native_material)
 
     def _application_factory(
         self, config: OperatorConfig, runner: SubprocessProtectedApplyCommandRunner, container_registry: str,

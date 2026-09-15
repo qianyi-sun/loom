@@ -102,7 +102,9 @@ def test_installed_native_activation_delivers_bound_material_and_retains_recover
     with pytest.raises(RuntimeError, match="controller enable failed"):
         source.execute(owner.plan, documents=documents, native_material=material)
     assert observed == ["gb10", "oldlab"]
-    from loom_cli.rollout.operator.protected_execution_activation import ProtectedExecutionActivation
+    from loom_cli.rollout.operator.protected_execution_activation import (
+        ProtectedExecutionActivation,
+    )
     retained = ProtectedExecutionActivation.resume(plan=owner.plan, artifact=owner.artifact,
         journal=owner.journal, manager=owner.manager, prepared=controllers, active=controllers,
         dependency_guard=lambda: None)

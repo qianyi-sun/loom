@@ -1960,8 +1960,14 @@ The installed `loom-staging-rollout-final-gate activate-prepared` command takes
 `--plan` and `--plan-sha256`. Initial activation additionally takes `--documents`
 and `--documents-sha256`; the private file must be named
 `execution-activation-documents.json` beside the exact attempt's plan and contain
-both typed pool documents. Recovery omits both document arguments and uses the
-retained inputs. The command verifies immutable plan, envelope and artifacts;
+both typed pool documents. Native activation also takes `--native-material` and
+`--native-material-sha256`, naming the private, owner-checked
+`execution-activation-native-material.json` beside that plan. Its map contains
+exactly the native pools, each with canonical base64 `ca`, `certificate`, and
+`private_key` entries bound to the corresponding document's TLS hashes. All
+material is validated before controller admission issuance or controller effects;
+private bytes are retained with the activation inputs and never printed.
+Recovery omits document and material arguments and uses the retained inputs. The command verifies immutable plan, envelope and artifacts;
 the installed forward guard checks checkpoint freshness before every forward
 step. Expired backup admission therefore refuses new effects without blocking
 saved-authority drain. Output contains the execution context and plan digest;
