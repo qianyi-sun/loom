@@ -60,7 +60,7 @@
     },
     {
       "path": "src/loom_task_image_builder_guard/slurm.py",
-      "sha256": "446fc17d1d5adbd2a47d80584ff4a6b45a57f56c3001c23a660470674a5c4a8b"
+      "sha256": "f57beb227450f6247c628f450e8ba5eae516d08390a0c82352878a036f3edad8"
     },
     {
       "path": "src/loom_task_image_builder_guard/storage.py",
