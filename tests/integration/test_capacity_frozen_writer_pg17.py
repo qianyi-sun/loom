@@ -20,6 +20,9 @@ from tests.integration.test_capacity_frozen_output import (
 from tests.integration.test_capacity_frozen_output import (
     test_protected_output_publishes_artifact_and_lifecycle_atomically as test_output,
 )
+from tests.integration.test_capacity_frozen_pending_cancel import (
+    test_user_pending_cancellation_and_replay_survive_frozen_writer as test_pending_cancel,
+)
 from tests.integration.test_capacity_frozen_state import (
     test_authenticated_state_report_survives_trial_writer_freeze as test_state,
 )
@@ -62,5 +65,6 @@ __all__ = [
     "test_output",
     "test_output_rejection",
     "test_output_versions",
+    "test_pending_cancel",
     "test_state",
 ]

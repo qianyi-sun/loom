@@ -489,7 +489,10 @@ one-use mutation permissions. They bind the
 transaction/backend, frozen writer/epoch/operation, registration/authority,
 trial/attempt/generation and exact worker/claim. Pending cancellation instead
 requires an unclaimed protected attempt and records absent worker/claim identities
-explicitly; only that operation permits those identity columns to be null. The existing statement trigger
+explicitly, alongside its actual cancellation lifecycle transition ID; only that
+operation permits those identity columns to be null. Its private issuer runs after
+the cancel lifecycle event is inserted and verifies that exact current head, team,
+attempt and absence of an executable claim before permitting the public update. The existing statement trigger
 requires that permission for UPDATE; the existing AFTER-row accounting trigger
 checks the full new row against the old row plus the permitted changes and
 consumes the permission. An optional node-setup attempt refund has its own

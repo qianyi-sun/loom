@@ -55,6 +55,7 @@ _GUARD_MIGRATION_RESOURCES = {
     "capacity_guard_migrations/env.py",
     "capacity_guard_migrations/trial_state.py",
     "capacity_guard_migrations/trial_output.py",
+    "capacity_guard_migrations/trial_pending_cancel.py",
     "capacity_guard_migrations/script.py.mako",
     "capacity_guard_migrations/versions/__init__.py",
     "capacity_guard_migrations/versions/guard_0001_protected_admission_foundation.py",
