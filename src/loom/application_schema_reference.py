@@ -38,7 +38,7 @@ ApplicationSchemaProfile = Literal[
     "cnpg-staging-sealed-owner",
     "cnpg-staging-executor-admission",
 ]
-ApplicationSchemaRevision = Literal["0146/guard_0034", "0146/guard_0033", "0142/guard_0033", "0134/guard_0030"]
+ApplicationSchemaRevision = Literal["0146/guard_0035", "0146/guard_0033", "0142/guard_0033", "0134/guard_0030"]
 
 ApplicationSchemaAclProfile = Literal["application-only", "staging-readonly", "cnpg-staging"]
 
@@ -84,15 +84,15 @@ def application_reference_postgres_image(*, postgres_major: int = 16) -> str:
 
 def application_schema_reference(
     *, profile: ApplicationSchemaProfile = "legacy-owner", postgres_major: int = 16,
-    revision: ApplicationSchemaRevision = "0146/guard_0034",
+    revision: ApplicationSchemaRevision = "0146/guard_0035",
 ) -> ApplicationSchemaReference:
     """Select one bundled profile, never a caller-selected digest."""
     if profile == "cnpg-staging-executor-admission":
-        if revision != "0146/guard_0034":
+        if revision != "0146/guard_0035":
             raise ApplicationSchemaReferenceError("executor admission reference revision is unsupported")
         image = application_reference_postgres_image(postgres_major=postgres_major)
         return ApplicationSchemaReference(
-            format_version=1, profile=profile, application_head="0146", guard_head="guard_0034",
+            format_version=1, profile=profile, application_head="0146", guard_head="guard_0035",
             postgres_image=image, postgres_major=postgres_major, object_count=7230,
             inventory_sha256={
                 16: "f726c37671efa7510e921c438de58fe41c655c271cf1f18e55e459289e07e476",
@@ -150,7 +150,7 @@ def application_schema_reference(
             ),
         }
     # Freshly provisioned state/output owner grants; historical pins stay separate.
-    if revision == "0146/guard_0034":
+    if revision == "0146/guard_0035":
         digests = {
             16: (
                 "7d7aea22d77247ba6027ca58c6e7e249ca14c945d2965eea64a66f0a991250e6",
@@ -195,7 +195,7 @@ def application_schema_reference(
         guard_head=guard_head,
         postgres_image=image,
         postgres_major=postgres_major,
-        object_count={"0146/guard_0034": 7228, "0146/guard_0033": 7228, "0142/guard_0033": 7227, "0134/guard_0030": 6736}[revision]
+        object_count={"0146/guard_0035": 7228, "0146/guard_0033": 7228, "0142/guard_0033": 7227, "0134/guard_0030": 6736}[revision]
         + (0 if profile in {"legacy-owner", "staging-readonly-legacy-owner", "cnpg-staging-legacy-owner"} else 2),
         inventory_sha256=digests[postgres_major][profiles.index(profile)],
     )
@@ -203,7 +203,7 @@ def application_schema_reference(
 
 def require_application_schema_reference(
     observed: ApplicationSchemaInventory, *, profile: ApplicationSchemaProfile = "legacy-owner",
-    revision: ApplicationSchemaRevision = "0146/guard_0034",
+    revision: ApplicationSchemaRevision = "0146/guard_0035",
 ) -> None:
     """Compare only; caller still owns trusted role binding, quiescence and locks."""
     if type(observed.postgres_major) is not int or observed.postgres_major not in {16, 17}:
@@ -219,8 +219,8 @@ def require_application_schema_reference(
 
 def application_schema_revisions(revision: ApplicationSchemaRevision) -> tuple[str, str]:
     """Only reviewed migration pairs can select a reference recipe."""
-    if revision == "0146/guard_0034":
-        return "0146", "guard_0034"
+    if revision == "0146/guard_0035":
+        return "0146", "guard_0035"
     if revision == "0146/guard_0033":
         return "0146", "guard_0033"
     if revision == "0142/guard_0033":
@@ -234,8 +234,8 @@ def application_schema_revision(
     *, public_revision: str | None, guard_revision: str | None,
 ) -> ApplicationSchemaRevision:
     """Select using a protected original checkpoint, never a new live observation."""
-    if (public_revision, guard_revision) == ("0146", "guard_0034"):
-        return "0146/guard_0034"
+    if (public_revision, guard_revision) == ("0146", "guard_0035"):
+        return "0146/guard_0035"
     if (public_revision, guard_revision) == ("0146", "guard_0033"):
         return "0146/guard_0033"
     if (public_revision, guard_revision) == ("0142", "guard_0033"):

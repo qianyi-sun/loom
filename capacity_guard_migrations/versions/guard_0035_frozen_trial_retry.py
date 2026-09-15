@@ -1,6 +1,6 @@
 """Permit authenticated, transaction-bound claim and retry through a frozen fence.
 
-Revision ID: guard_0034
+Revision ID: guard_0035
 Revises: guard_0033
 """
 
@@ -14,8 +14,8 @@ from capacity_guard_migrations.trial_pending_cancel import (
     uninstall_pending_cancellation,
 )
 
-revision: str = "guard_0034"
-down_revision: str | None = "guard_0033"
+revision: str = "guard_0035"
+down_revision: str | None = "guard_0034"
 branch_labels: str | None = None
 depends_on: str | None = None
 

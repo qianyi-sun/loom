@@ -1,6 +1,6 @@
 """Authenticate trial progress and its frozen-writer permission in one transaction.
 
-Installed as part of the unreleased guard_0034 trial-writer permission migration.
+Installed as part of the unreleased guard_0035 trial-writer permission migration.
 """
 
 from __future__ import annotations

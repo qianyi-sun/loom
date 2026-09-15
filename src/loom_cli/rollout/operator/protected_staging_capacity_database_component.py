@@ -259,7 +259,7 @@ _AUTHORITY_BINDING_AUDIT_MODEL_TYPES: dict[str, type[GuardFenceV1] | type[AgentR
 }
 _AUTHORITY_REBIND_FOUNDATION_PREDICATE = f"""
     (SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version)
-      = 'guard_0034'
+      = 'guard_0035'
     AND ({_RETRY_PERMIT_RELATION_PREDICATE})
     AND ({_ADOPTION_RELATION_PREDICATE})
     AND NOT EXISTS ({_AUTHORITY_REBIND_ACTIVITY_UNION})

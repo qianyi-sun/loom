@@ -1,4 +1,4 @@
-"""Atomic protected output publication, installed by unreleased guard_0034."""
+"""Atomic protected output publication, installed by unreleased guard_0035."""
 
 from __future__ import annotations
 

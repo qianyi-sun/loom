@@ -200,7 +200,7 @@ async def test_retirement_refuses_changed_trigger_identity(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0034"
+                == "guard_0035"
             )
             assert (
                 observer.execute(
