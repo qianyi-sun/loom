@@ -544,6 +544,40 @@ class SubprocessProtectedApplyCommandRunner:
                 raise RuntimeError("CNPG input fence probe did not prove expected denial")
         return True
 
+    def probe_legacy_writer_fence(
+        self, *, intent_digest: str, replica_set_name: str,
+    ) -> bool:
+        """Require exact fence/binding denial, not generic subprocess failure.
+
+        Only fixed server-dry-run requests are executed. A False result means a
+        request was accepted; other failures are sanitized and raised. The caller
+        still owns the protected journal, policy identities and writer exclusion.
+        """
+        from .protected_legacy_writer_fence import legacy_writer_fence_probe_commands
+
+        for policy_name, argv, payload in legacy_writer_fence_probe_commands(
+            intent_digest=intent_digest, replica_set_name=replica_set_name,
+        ):
+            command = self._validate_invocation(
+                argv, env=self.environment, input_payload=payload, timeout_seconds=30,
+            )
+            try:
+                result = subprocess.run(command, check=False, capture_output=True,
+                                        input=payload, timeout=30, env=dict(self.environment))
+            except (OSError, subprocess.SubprocessError):
+                raise RuntimeError("legacy writer fence probe transport failed safely") from None
+            if len(result.stdout) > self.max_output_bytes or len(result.stderr) > self.max_output_bytes:
+                raise RuntimeError("legacy writer fence probe response exceeded its bound")
+            if result.returncode == 0:
+                return False
+            expected = (f"ValidatingAdmissionPolicy '{policy_name}' with binding '{policy_name}' "
+                        "denied request: loom-legacy-writer-retirement: legacy writer cannot resume").encode()
+            if (result.returncode != 1 or result.stdout
+                    or not result.stderr.startswith(b"Error from server (Forbidden):")
+                    or expected not in result.stderr):
+                raise RuntimeError("legacy writer fence probe did not prove expected denial")
+        return True
+
     def capture_stdout_with_input(
         self,
         argv: Sequence[str],

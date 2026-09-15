@@ -116,3 +116,34 @@ def render_legacy_writer_fence(*, intent_digest: str, control_plane_image: str) 
           {"name": "pod", "expression": "object.spec"}])
     result.extend(lifecycle_retirement_documents(intent_digest))
     return tuple(result)
+
+
+def legacy_writer_fence_probe_commands(*, intent_digest: str, replica_set_name: str,
+                                     ) -> tuple[tuple[str, tuple[str, ...], bytes | None], ...]:
+    """Fixed server dry runs; the caller binds an existing inventoried ReplicaSet."""
+    lifecycle_retirement_documents(intent_digest)
+    prefixes = "|".join(re.escape(name) for name in (*_RETIRED, *_SUCCESSORS))
+    if not isinstance(replica_set_name, str) or re.fullmatch(f"(?:{prefixes})-[a-z0-9][a-z0-9-]{{0,62}}", replica_set_name) is None:
+        raise ValueError("legacy writer fence probe ReplicaSet is invalid")
+    prefix = ("kubectl", "--namespace=loom-staging")
+    flags = ("--dry-run=server", "--output=json", "--request-timeout=30s")
+    result = []
+    def add(suffix: str, command: tuple[str, ...], document: dict[str, object] | None = None) -> None:
+        payload = json.dumps(document, sort_keys=True, separators=(",", ":")).encode() if document is not None else None
+        result.append((f"loom-legacy-writer-{intent_digest[:24]}-{suffix}", prefix + command + flags, payload))
+    add("scale", ("scale", "deployment/loom-service", "--replicas=1"))
+    add("deployments", ("patch", "deployment/loom-service", "--type=merge", '--patch={"spec":{"replicas":1}}'))
+    name = f"loom-service-fence-probe-{intent_digest[:12]}"
+    pod: dict[str, object] = {"containers": [{"name": "retired-probe", "image": "invalid.example/retired-probe:never-run"}]}
+    add("replicasets", ("create", "--filename=-"), {
+        "apiVersion": "apps/v1", "kind": "ReplicaSet", "metadata": {"name": name},
+        "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "loom-service"}},
+            "template": {"metadata": {"labels": {"app": "loom-service"}}, "spec": pod}},
+    })
+    add("replicaset-scale", ("scale", "replicaset/" + replica_set_name, "--replicas=1"))
+    add("pods", ("create", "--filename=-"), {"apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": name, "labels": {"app": "loom-service"}}, "spec": pod})
+    add("lifecycle", ("create", "--filename=-"), {"apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {"name": f"{_CRONJOB}-fence-probe-{intent_digest[:12]}"},
+        "spec": {"suspend": False, "template": {"spec": {**pod, "restartPolicy": "Never"}}}})
+    return tuple(result)

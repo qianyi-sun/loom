@@ -40,6 +40,10 @@ def test_old_writers_cannot_resume_but_exact_successor_can_run(tmp_path):
         for namespace in ("loom-staging", "foreign"):
             core.create_namespace({"metadata": {"name": namespace}})
         apps.create_namespaced_deployment("loom-staging", _deployment("loom-service", replicas=0))
+        retired_rs = _deployment("loom-service", replicas=0)
+        retired_rs["kind"] = "ReplicaSet"
+        retired_rs["metadata"].update(name="loom-service-retired-probe", labels={"app": "loom-service"})
+        apps.create_namespaced_replica_set("loom-staging", retired_rs)
         documents = render_legacy_writer_fence(intent_digest="b" * 64, control_plane_image=_CP_IMAGE)
         from loom_cli.rollout.operator.protected_apply_executor import (
             SubprocessProtectedApplyCommandRunner,
@@ -67,6 +71,11 @@ def test_old_writers_cannot_resume_but_exact_successor_can_run(tmp_path):
         assert len(retained) == 12 and installation.install() == retained
         assert installation.observe() == retained
         deadline = time.monotonic() + 30
+        while not installation.runner.probe_legacy_writer_fence(intent_digest="b" * 64,
+                replica_set_name="loom-service-retired-probe"):
+            assert time.monotonic() < deadline, "not every permanent policy is enforcing"
+            time.sleep(0.1)
+        assert installation.observe() == retained
         while True:
             try:
                 apps.patch_namespaced_deployment_scale("loom-service", "loom-staging", {"spec": {"replicas": 1}}, dry_run="All")
