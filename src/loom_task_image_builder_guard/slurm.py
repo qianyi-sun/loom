@@ -14,6 +14,7 @@ import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
@@ -36,6 +37,7 @@ _ENVIRONMENT = {
     "LC_ALL": "C",
     "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
     "PYTHONDONTWRITEBYTECODE": "1",
+    "TZ": "UTC",
 }
 
 
@@ -147,9 +149,7 @@ class PinnedCommandRunner:
                         except ProcessLookupError:
                             pass
                         except OSError as exc:
-                            raise GuardError(
-                                "command_descendant_cleanup_failed"
-                            ) from exc
+                            raise GuardError("command_descendant_cleanup_failed") from exc
                 finally:
                     for descriptor in descendants:
                         os.close(descriptor)
@@ -216,11 +216,7 @@ class PinnedCommandRunner:
                     except OSError as exc:
                         raise GuardError("command_descendant_check_failed") from exc
                     confirmed = process_session(pid)
-                    if (
-                        confirmed is None
-                        or confirmed[0] == b"Z"
-                        or confirmed[1] != session_id
-                    ):
+                    if confirmed is None or confirmed[0] == b"Z" or confirmed[1] != session_id:
                         os.close(descriptor)
                         continue
                     descendants.append(descriptor)
@@ -347,9 +343,7 @@ class PinnedCommandRunner:
             self.progress()
             try:
                 try:
-                    returncode, stdout_payload, stderr_payload = self._bounded_output(
-                        process
-                    )
+                    returncode, stdout_payload, stderr_payload = self._bounded_output(process)
                 except BaseException:
                     self._terminate(process)
                     raise
@@ -519,10 +513,17 @@ class SlurmInspector:
             "Comment",
             "Requeue",
             "Restarts",
+            "SubmitTime",
         }
         if not required.issubset(control):
             raise GuardError("slurm_controller_invalid")
         if control["JobId"] != job_id:
+            raise GuardError("slurm_controller_invalid")
+        try:
+            submitted = datetime.strptime(control["SubmitTime"], "%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            raise GuardError("slurm_controller_invalid") from None
+        if submitted.isoformat() != control["SubmitTime"]:
             raise GuardError("slurm_controller_invalid")
         controller_state = control["JobState"]
         if controller_state not in states:
@@ -574,9 +575,10 @@ class SlurmInspector:
                     "--noheader",
                     "--parsable2",
                     "--allocations",
+                    "--duplicates",
                     f"--jobs={job_id}",
                     "--format=JobIDRaw,State,User,Group,Account,Cluster,Partition,QOS,"
-                    "AllocCPUS,ReqMem,AllocTRES,NodeList,Comment",
+                    "AllocCPUS,ReqMem,AllocTRES,NodeList,Submit,Comment",
                 ),
             )
         )
@@ -584,7 +586,7 @@ class SlurmInspector:
         if len(rows) != 1:
             raise GuardError("slurm_accounting_invalid")
         values = rows[0].split("|")
-        if len(values) != 14 or values[-1] != "":
+        if len(values) != 14:
             raise GuardError("slurm_accounting_invalid")
         (
             acct_job,
@@ -599,8 +601,8 @@ class SlurmInspector:
             request_memory,
             allocated_tres,
             nodes,
+            submit_time,
             comment,
-            _empty,
         ) = values
         try:
             accounting_cpus = int(alloc_cpus)
@@ -619,7 +621,13 @@ class SlurmInspector:
             or partition != self.policy.partition
             or qos != self.policy.qos
             or nodes != self.node_name
-            or comment != control["Comment"]
+            # In Slurm 23.11, accounting gets the comment at completion only
+            # and only with job_comment enabled. Bind the accounting incarnation
+            # through exact submission time instead of requiring absent data.
+            # The live controller must still carry the exact grant UUID, and a
+            # conflicting nonempty accounting comment always fails closed.
+            or submit_time != control["SubmitTime"]
+            or (comment and comment != control["Comment"])
             or accounting_cpus != cpus
             or accounting_memory != memory_mib
             or tres_cpus != cpus
@@ -629,7 +637,7 @@ class SlurmInspector:
         facts = SlurmFacts(
             job_id=job_id,
             node_name=self.node_name,
-            comment=comment,
+            comment=control["Comment"],
             account=account,
             partition=partition,
             qos=qos,
