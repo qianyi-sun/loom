@@ -87,7 +87,10 @@ def test_peer_protocol_failure_is_sanitized_poisoned_and_reaped(monkeypatch, mod
         stderr=subprocess.PIPE,
         bufsize=0,
     )
-    connection = peer.PeerDatabaseConnection(process, query_timeout_seconds=0.25)
+    connection = peer.PeerDatabaseConnection(process)
+    # Only the adversarial exchange needs a short deadline. Applying it during
+    # constructor admission tests process scheduling instead of this protocol.
+    monkeypatch.setattr(connection, "_query_timeout", 0.25)
     monkeypatch.setattr(peer, "_MAX_OUTPUT_BYTES", 4096)
     try:
         with pytest.raises(peer.PeerDatabaseTransportError) as caught:
