@@ -9,7 +9,9 @@ import pytest
 
 
 def test_cgroup_retirement_distinguishes_live_and_exited_systemd_processes():
-    from loom_cli.rollout.operator.protected_legacy_controller_process import controller_cgroup_empty
+    from loom_cli.rollout.operator.protected_legacy_controller_process import (
+        controller_cgroup_empty,
+    )
 
     if not os.path.exists("/sys/fs/cgroup"):
         pytest.skip("Linux cgroup filesystem is unavailable")
