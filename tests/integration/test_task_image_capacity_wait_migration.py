@@ -140,3 +140,22 @@ def test_wait_upgrade_refuses_busy_parent_without_partial_schema(wait_migration,
     command.upgrade(config, "0149")
     with engine.connect() as check:
         assert check.scalar(text("SELECT version_num FROM alembic_version")) == "0149"
+
+
+@pytest.mark.parametrize("busy_table", [
+    "task_image_capacity_waits", "execution_targets", "task_image_materializations",
+])
+@pytest.mark.timeout(10, func_only=True)
+def test_wait_downgrade_refuses_busy_table_without_partial_schema(wait_migration, busy_table):
+    config, engine, _ = wait_migration
+    with engine.begin() as busy:
+        # DROP removes FK triggers on both parents, requiring locks even for an
+        # empty child table. Ordinary readers must cause NOWAIT refusal too.
+        busy.execute(text(f"SELECT 1 FROM {busy_table} LIMIT 1"))
+        with pytest.raises(DBAPIError, match="could not obtain lock"):
+            command.downgrade(config, "0148")
+        with engine.connect() as check:
+            assert check.scalar(text("SELECT version_num FROM alembic_version")) == "0149"
+            assert check.scalar(text("SELECT to_regclass('task_image_capacity_waits')")) is not None
+    command.downgrade(config, "0148")
+    command.upgrade(config, "0149")
