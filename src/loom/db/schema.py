@@ -2696,6 +2696,36 @@ class TaskImageMaterialization(Base):
     )
 
 
+class TaskImageCapacityWait(Base):
+    """Renewable waiting head, never an attempt or permission to create a Pod."""
+
+    __tablename__ = "task_image_capacity_waits"
+    __table_args__ = (
+        UniqueConstraint("materialization_id", name="task_image_capacity_waits_materialization_key"),
+        CheckConstraint("lease_epoch >= 0", name="task_image_capacity_waits_epoch_check"),
+        CheckConstraint("cpu_millis > 0 AND memory_mib > 0 AND storage_mib > 0",
+                        name="task_image_capacity_waits_resources_check"),
+        CheckConstraint("expires_at > renewed_at AND renewed_at >= first_waited_at "
+                        "AND expires_at <= renewed_at + interval '120 seconds'",
+                        name="task_image_capacity_waits_lifetime_check"),
+    )
+    target_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("execution_targets.id", ondelete="CASCADE"), primary_key=True,
+    )
+    materialization_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("task_image_materializations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    pool_id: Mapped[str] = mapped_column(Text, nullable=False)
+    cpu_millis: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    memory_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    storage_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    first_waited_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    renewed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
 class TaskImageBuildGrant(Base):
     """One recoverable held-job authority with one submission invocation."""
 

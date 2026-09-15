@@ -818,11 +818,11 @@ addresses. Private registries, private package services, ARM/GPU and nested host
 container requirements need an explicit supported path; they must not fall back
 to a legacy host.
 
-The hard process limit is set **before** entering rootlesskit and inherited by
-Dockerfile processes. Linux counts the mapped processes against the parent UID;
-concurrent Pods sharing that host UID can have less available process capacity.
-Verify this startup contract on the actual native node before enabling untrusted
-builds. A successful local test alone is not native isolation acceptance.
+The shell sets `RLIMIT_NPROC` **before** entering RootlessKit. This per-UID limit
+is not evidence of a hard aggregate Pod/cgroup process bound; namespace mappings
+and concurrent Pods must be evaluated on the actual node. Phase 2 requires a
+verified cgroup process limit as well as hard scratch containment. A successful
+local test or an ephemeral-storage eviction limit does not establish either.
 
 Build CPU, RAM, ephemeral storage and pending/create slots use the same capacity
 admission lock and placement/quota observations as Trials. Reservations remain
@@ -830,6 +830,14 @@ until the matching Job and Pods have disappeared, including after failure,
 cancellation, lease expiry and actuator restart. Attempt metadata retains the
 Job/Pod identity, phase observations and bounded diagnostic output. No model
 request is needed to test preparation or a Dockerfile failure.
+
+If admission rejects a valid native build, the controller rolls back its claim
+but retains a 120-second renewable capacity waiting head. New trial admissions
+account for that head before consuming remaining capacity; unsupported,
+cancelled, expired or superseded work does not fence admission. Waiting does not
+increment build attempts or create/cost counters. Deploy the matching controller
+and all capacity writers before claiming live fairness. See the
+[native fairness contract](../architecture/nebius-primary-platform.md#native-task-image-capacity-fairness).
 
 Kubernetes may omit default-false host namespace and volume-mount flags and
 canonicalize volume sizes (for example, `7168Mi` to `7Gi`). The native controller
