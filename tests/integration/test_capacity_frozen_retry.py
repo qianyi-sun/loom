@@ -125,7 +125,7 @@ def test_authenticated_retry_survives_trial_writer_freeze(
                     text(
                         "SELECT permit_id, state, writer_incarnation, freeze_operation_id, trial_id, "
                         "protected_attempt_id, worker_id, operation "
-                        "FROM loom_capacity_guard.trial_retry_mutation_permits ORDER BY operation"
+                        "FROM loom_capacity_guard.trial_mutation_permits ORDER BY operation"
                     )
                 )
                 .mappings()
@@ -162,7 +162,7 @@ def test_authenticated_retry_survives_trial_writer_freeze(
                 async with _control_session(database, isolation="SERIALIZABLE") as owner:
                     await owner.execute(
                         text(
-                            "SELECT loom_capacity_guard.assert_frozen_retry_consumed(CAST(:permit AS uuid))"
+                            "SELECT loom_capacity_guard.assert_frozen_trial_mutation_consumed(CAST(:permit AS uuid))"
                         ),
                         {"permit": permits[0]["permit_id"]},
                     )
@@ -192,10 +192,10 @@ def test_frozen_retry_does_not_grant_legacy_or_private_permission(
     asyncio.run(_freeze(database, initial["writer_incarnation"], uuid4()))
     queries = {
         "direct-update": "UPDATE public.trials SET submit_priority = 999 WHERE id = :trial",
-        "private-read": "SELECT * FROM loom_capacity_guard.trial_retry_mutation_permits",
-        "private-write": "DELETE FROM loom_capacity_guard.trial_retry_mutation_permits",
+        "private-read": "SELECT * FROM loom_capacity_guard.trial_mutation_permits",
+        "private-write": "DELETE FROM loom_capacity_guard.trial_mutation_permits",
         "private-issuer": (
-            "SELECT loom_capacity_guard.authorize_frozen_retry_update("
+            "SELECT loom_capacity_guard.authorize_frozen_trial_update("
             "CAST(:trial AS uuid), CAST(:attempt AS uuid), 1, CAST(:worker AS uuid), "
             "CAST(:worker AS uuid), CAST(:attempt AS uuid), 'retry', '{}'::jsonb)"
         ),
@@ -300,7 +300,7 @@ def test_frozen_retry_refuses_unapproved_changes_and_rolls_back_atomically(
             }
             assert (
                 connection.execute(
-                    text("SELECT count(*) FROM loom_capacity_guard.trial_retry_mutation_permits")
+                    text("SELECT count(*) FROM loom_capacity_guard.trial_mutation_permits")
                 ).scalar_one()
                 == 0
             )
@@ -372,7 +372,7 @@ def test_frozen_retry_wrong_credential_cannot_create_a_permission(
         with engine.connect() as connection:
             assert (
                 connection.execute(
-                    text("SELECT count(*) FROM loom_capacity_guard.trial_retry_mutation_permits")
+                    text("SELECT count(*) FROM loom_capacity_guard.trial_mutation_permits")
                 ).scalar_one()
                 == 0
             )
@@ -453,7 +453,7 @@ def test_frozen_retry_is_exactly_once_under_concurrency(
                 == 1
             )
             assert connection.execute(
-                text("SELECT state FROM loom_capacity_guard.trial_retry_mutation_permits")
+                text("SELECT state FROM loom_capacity_guard.trial_mutation_permits")
             ).scalars().all() == ["consumed"]
             assert (
                 connection.execute(

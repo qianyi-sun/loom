@@ -1,4 +1,4 @@
-"""Permit only authenticated, transaction-bound retry through a frozen trial fence.
+"""Permit authenticated, transaction-bound claim and retry through a frozen fence.
 
 Revision ID: guard_0034
 Revises: guard_0033
@@ -16,12 +16,13 @@ depends_on: str | None = None
 
 _SCHEMA = "loom_capacity_guard"
 _RETRY = f"{_SCHEMA}.retry_staging_claimed_trial(uuid,text,jsonb)"
+_CLAIM = f"{_SCHEMA}.claim_staging_assigned_trial(uuid,text,jsonb)"
 _FROZEN = """          IF v_fence.frozen THEN
             RAISE EXCEPTION 'legacy trial writer is frozen' USING ERRCODE = '55000';
           END IF;"""
 _STATEMENT = """          IF v_fence.frozen AND (
             TG_OP <> 'UPDATE' OR NOT EXISTS (
-              SELECT 1 FROM loom_capacity_guard.trial_retry_mutation_permits AS permit
+              SELECT 1 FROM loom_capacity_guard.trial_mutation_permits AS permit
                WHERE permit.transaction_id = pg_catalog.pg_current_xact_id()
                  AND permit.backend_pid = pg_catalog.pg_backend_pid()
                  AND permit.state = 'issued'
@@ -36,7 +37,7 @@ _AFTER = """          IF v_fence.frozen THEN
             IF TG_OP <> 'UPDATE' THEN
               RAISE EXCEPTION 'legacy trial writer is frozen' USING ERRCODE = '55000';
             END IF;
-            UPDATE loom_capacity_guard.trial_retry_mutation_permits AS permit
+            UPDATE loom_capacity_guard.trial_mutation_permits AS permit
                SET state = 'consumed',
                    observed_old_row = pg_catalog.to_jsonb(OLD),
                    observed_new_row = pg_catalog.to_jsonb(NEW)
@@ -86,7 +87,7 @@ def _retry_replacements() -> list[tuple[str, str]]:
              SET state = 'protected-pending',"""
     refund_update = """            UPDATE public.trials AS trial
                SET attempt_count = trial.attempt_count - 1"""
-    issue = """          v_retry_permit := loom_capacity_guard.authorize_frozen_retry_update(
+    issue = """          v_retry_permit := loom_capacity_guard.authorize_frozen_trial_update(
             v_current.trial_id, v_current.protected_attempt_id,
             v_current.execution_generation, p_worker_id,
             (v_session->>'worker_incarnation')::uuid, v_current.claim_operation_id,
@@ -96,7 +97,7 @@ def _retry_replacements() -> list[tuple[str, str]]:
               'failure_message', NULLIF(p_retry_request->>'failure_message', ''),
               'next_attempt_at', v_next_attempt_at));
 """
-    refund = """            v_retry_permit := loom_capacity_guard.authorize_frozen_retry_update(
+    refund = """            v_retry_permit := loom_capacity_guard.authorize_frozen_trial_update(
               v_current.trial_id, v_current.protected_attempt_id,
               v_current.execution_generation, p_worker_id,
               (v_session->>'worker_incarnation')::uuid, v_current.claim_operation_id,
@@ -105,7 +106,7 @@ def _retry_replacements() -> list[tuple[str, str]]:
     first_done = "          v_next_attempt_count := v_current.attempt_count;"
     refund_done = """          INSERT INTO loom_capacity_guard.trial_attempts
             (protected_attempt_id, trial_id, execution_generation,"""
-    check = "          PERFORM loom_capacity_guard.assert_frozen_retry_consumed(v_retry_permit);\n"
+    check = "          PERFORM loom_capacity_guard.assert_frozen_trial_mutation_consumed(v_retry_permit);\n"
     return [
         # Serialize before authentication takes shared claim/authority locks.
         # Otherwise concurrent callers can each block the other's upgrade.
@@ -144,9 +145,54 @@ def _retry_replacements() -> list[tuple[str, str]]:
     ]
 
 
+def _claim_replacements() -> list[tuple[str, str]]:
+    update = """          UPDATE public.trials AS trial
+             SET state = 'claimed',"""
+    issue = """          v_claim_permit := loom_capacity_guard.authorize_frozen_trial_update(
+            v_candidate.id, v_candidate.protected_attempt_id,
+            v_candidate.execution_generation, p_worker_id, v_worker.worker_incarnation,
+            v_operation_id, 'claim', jsonb_build_object(
+              'state', 'claimed', 'worker_id', p_worker_id,
+              'claimed_at', statement_timestamp(), 'pre_start_heartbeat_at', NULL,
+              'failure_reason', NULL, 'failure_message', NULL,
+              'attempt_count', v_candidate.attempt_count + 1));
+
+"""
+    return [
+        ("          v_claimed record;", "          v_claimed record;\n          v_claim_permit uuid;"),
+        (
+            "          v_session := loom_capacity_guard.assert_staging_worker_session(",
+            """          PERFORM 1 FROM loom_capacity_guard.agent_runtime_authority
+           WHERE singleton_id = 1 FOR UPDATE NOWAIT;
+          v_session := loom_capacity_guard.assert_staging_worker_session(""",
+        ),
+        (
+            """          -- Serialize readiness publication, manager lifecycle mutation, and
+          -- the executable claim against the same protected writer mutex.
+          PERFORM 1 FROM loom_capacity_guard.agent_runtime_authority
+           WHERE singleton_id = 1 FOR UPDATE;
+""",
+            "          -- The protected writer mutex was taken before authentication.\n",
+        ),
+        ("           FOR UPDATE OF worker\n", "           FOR UPDATE OF worker NOWAIT\n"),
+        ("           FOR KEY SHARE OF event, job;", "           FOR KEY SHARE OF event, job NOWAIT;"),
+        (
+            "           WHERE state.intent_id = v_worker.intent_id\n           FOR UPDATE;",
+            "           WHERE state.intent_id = v_worker.intent_id\n           FOR UPDATE NOWAIT;",
+        ),
+        (update, issue + update),
+        (
+            "          RETURN jsonb_build_object(\n            'trial_id', v_claimed.id,",
+            """          PERFORM loom_capacity_guard.assert_frozen_trial_mutation_consumed(v_claim_permit);
+          RETURN jsonb_build_object(
+            'trial_id', v_claimed.id,""",
+        ),
+    ]
+
+
 def upgrade() -> None:
     op.execute("""
-        CREATE TABLE loom_capacity_guard.trial_retry_mutation_permits (
+        CREATE TABLE loom_capacity_guard.trial_mutation_permits (
           permit_id uuid PRIMARY KEY,
           transaction_id xid8 NOT NULL,
           backend_pid integer NOT NULL CHECK (backend_pid > 0),
@@ -161,21 +207,21 @@ def upgrade() -> None:
           worker_id uuid NOT NULL,
           worker_incarnation uuid NOT NULL,
           claim_operation_id uuid NOT NULL,
-          operation text NOT NULL CHECK (operation IN ('retry', 'refund')),
+          operation text NOT NULL CHECK (operation IN ('claim', 'retry', 'refund')),
           old_binding jsonb NOT NULL,
           changes jsonb NOT NULL,
           observed_old_row jsonb,
           observed_new_row jsonb,
           state text NOT NULL DEFAULT 'issued' CHECK (state IN ('issued', 'consumed'))
         );
-        CREATE UNIQUE INDEX trial_retry_one_pending_per_transaction
-          ON loom_capacity_guard.trial_retry_mutation_permits(transaction_id, backend_pid)
+        CREATE UNIQUE INDEX trial_mutation_one_pending_per_transaction
+          ON loom_capacity_guard.trial_mutation_permits(transaction_id, backend_pid)
           WHERE state <> 'consumed';
-        CREATE UNIQUE INDEX trial_retry_one_operation_per_transaction
-          ON loom_capacity_guard.trial_retry_mutation_permits(transaction_id, backend_pid, trial_id, operation);
-        REVOKE ALL ON TABLE loom_capacity_guard.trial_retry_mutation_permits FROM PUBLIC;
+        CREATE UNIQUE INDEX trial_mutation_one_operation_per_transaction
+          ON loom_capacity_guard.trial_mutation_permits(transaction_id, backend_pid, trial_id, operation);
+        REVOKE ALL ON TABLE loom_capacity_guard.trial_mutation_permits FROM PUBLIC;
 
-        CREATE FUNCTION loom_capacity_guard.guard_retry_mutation_permit()
+        CREATE FUNCTION loom_capacity_guard.guard_trial_mutation_permit()
         RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
         AS $function$
         BEGIN
@@ -198,14 +244,14 @@ def upgrade() -> None:
           RETURN NEW;
         END
         $function$;
-        CREATE TRIGGER trial_retry_permit_retained_row
-          BEFORE UPDATE OR DELETE ON loom_capacity_guard.trial_retry_mutation_permits
-          FOR EACH ROW EXECUTE FUNCTION loom_capacity_guard.guard_retry_mutation_permit();
-        CREATE TRIGGER trial_retry_permit_retained_truncate
-          BEFORE TRUNCATE ON loom_capacity_guard.trial_retry_mutation_permits
-          FOR EACH STATEMENT EXECUTE FUNCTION loom_capacity_guard.guard_retry_mutation_permit();
+        CREATE TRIGGER trial_mutation_permit_retained_row
+          BEFORE UPDATE OR DELETE ON loom_capacity_guard.trial_mutation_permits
+          FOR EACH ROW EXECUTE FUNCTION loom_capacity_guard.guard_trial_mutation_permit();
+        CREATE TRIGGER trial_mutation_permit_retained_truncate
+          BEFORE TRUNCATE ON loom_capacity_guard.trial_mutation_permits
+          FOR EACH STATEMENT EXECUTE FUNCTION loom_capacity_guard.guard_trial_mutation_permit();
 
-        CREATE FUNCTION loom_capacity_guard.authorize_frozen_retry_update(
+        CREATE FUNCTION loom_capacity_guard.authorize_frozen_trial_update(
           p_trial uuid, p_attempt uuid, p_generation bigint, p_worker uuid,
           p_worker_incarnation uuid, p_claim uuid, p_operation text, p_changes jsonb
         ) RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
@@ -261,7 +307,23 @@ def upgrade() -> None:
           ) THEN
             RAISE EXCEPTION 'frozen retry exact claim is unavailable' USING ERRCODE = '55000';
           END IF;
-          IF p_operation = 'retry' THEN
+          IF p_operation = 'claim' THEN
+            IF v_old->>'state' IS DISTINCT FROM 'protected-pending'
+               OR v_old->'worker_id' IS DISTINCT FROM 'null'::jsonb
+               OR v_old->'started_at' IS DISTINCT FROM 'null'::jsonb
+               OR v_old->'cancellation_requested_at' IS DISTINCT FROM 'null'::jsonb
+               OR NOT EXISTS (
+                 SELECT 1 FROM loom_capacity_guard.executable_claim_leases AS claim
+                  WHERE claim.operation_id = p_claim AND claim.lease_state = 'live'
+                    AND claim.executable)
+               OR p_changes IS DISTINCT FROM pg_catalog.jsonb_build_object(
+                 'state', 'claimed', 'worker_id', p_worker,
+                 'claimed_at', statement_timestamp(), 'pre_start_heartbeat_at', NULL,
+                 'failure_reason', NULL, 'failure_message', NULL,
+                 'attempt_count', (v_old->>'attempt_count')::integer + 1) THEN
+              RAISE EXCEPTION 'frozen claim row transition changed' USING ERRCODE = '55000';
+            END IF;
+          ELSIF p_operation = 'retry' THEN
             IF v_old->>'state' IS DISTINCT FROM 'claimed'
                OR v_old->>'worker_id' IS DISTINCT FROM p_worker::text
                OR v_old->'started_at' IS DISTINCT FROM 'null'::jsonb
@@ -277,7 +339,7 @@ def upgrade() -> None:
             IF v_old->>'state' IS DISTINCT FROM 'protected-pending'
                OR v_old->'worker_id' IS DISTINCT FROM 'null'::jsonb
                OR NOT EXISTS (
-                 SELECT 1 FROM loom_capacity_guard.trial_retry_mutation_permits AS previous
+                 SELECT 1 FROM loom_capacity_guard.trial_mutation_permits AS previous
                   WHERE previous.transaction_id = pg_catalog.pg_current_xact_id()
                     AND previous.backend_pid = pg_catalog.pg_backend_pid()
                     AND previous.trial_id = p_trial AND previous.claim_operation_id = p_claim
@@ -290,7 +352,7 @@ def upgrade() -> None:
           ELSE
             RAISE EXCEPTION 'frozen retry operation is unavailable' USING ERRCODE = '55000';
           END IF;
-          INSERT INTO loom_capacity_guard.trial_retry_mutation_permits
+          INSERT INTO loom_capacity_guard.trial_mutation_permits
             (permit_id, transaction_id, backend_pid, writer_incarnation, writer_epoch,
              freeze_operation_id, authority_binding, registration, trial_id,
              protected_attempt_id, execution_generation, worker_id, worker_incarnation,
@@ -304,12 +366,12 @@ def upgrade() -> None:
         END
         $function$;
 
-        CREATE FUNCTION loom_capacity_guard.assert_frozen_retry_consumed(p_permit uuid)
+        CREATE FUNCTION loom_capacity_guard.assert_frozen_trial_mutation_consumed(p_permit uuid)
         RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
         AS $function$
         BEGIN
           IF p_permit IS NOT NULL AND NOT EXISTS (
-            SELECT 1 FROM loom_capacity_guard.trial_retry_mutation_permits AS permit
+            SELECT 1 FROM loom_capacity_guard.trial_mutation_permits AS permit
              WHERE permit.permit_id = p_permit AND permit.state = 'consumed'
                AND permit.transaction_id = pg_catalog.pg_current_xact_id()
                AND permit.backend_pid = pg_catalog.pg_backend_pid()
@@ -318,20 +380,21 @@ def upgrade() -> None:
           END IF;
         END
         $function$;
-        REVOKE ALL ON FUNCTION loom_capacity_guard.guard_retry_mutation_permit() FROM PUBLIC;
-        REVOKE ALL ON FUNCTION loom_capacity_guard.authorize_frozen_retry_update(uuid,uuid,bigint,uuid,uuid,uuid,text,jsonb) FROM PUBLIC;
-        REVOKE ALL ON FUNCTION loom_capacity_guard.assert_frozen_retry_consumed(uuid) FROM PUBLIC;
+        REVOKE ALL ON FUNCTION loom_capacity_guard.guard_trial_mutation_permit() FROM PUBLIC;
+        REVOKE ALL ON FUNCTION loom_capacity_guard.authorize_frozen_trial_update(uuid,uuid,bigint,uuid,uuid,uuid,text,jsonb) FROM PUBLIC;
+        REVOKE ALL ON FUNCTION loom_capacity_guard.assert_frozen_trial_mutation_consumed(uuid) FROM PUBLIC;
     """)
     _rewrite(f"{_SCHEMA}.lock_trial_writer_statement()", [(_FROZEN, _STATEMENT)], upgrading=True)
     _rewrite(f"{_SCHEMA}.account_trial_writer_mutation()", [(_FROZEN, _AFTER)], upgrading=True)
     _rewrite(_RETRY, _retry_replacements(), upgrading=True)
+    _rewrite(_CLAIM, _claim_replacements(), upgrading=True)
 
 
 def downgrade() -> None:
     op.execute("""
         DO $retirement$
         DECLARE
-          v_relation oid := 'loom_capacity_guard.trial_retry_mutation_permits'::regclass;
+          v_relation oid := 'loom_capacity_guard.trial_mutation_permits'::regclass;
         BEGIN
           IF NOT EXISTS (
             SELECT 1 FROM pg_catalog.pg_class
@@ -343,9 +406,9 @@ def downgrade() -> None:
           END IF;
           -- Neither LOCK nor the later retained-evidence read may recurse into
           -- another authority's descendants. Stabilize the parent first.
-          LOCK TABLE ONLY loom_capacity_guard.trial_retry_mutation_permits
+          LOCK TABLE ONLY loom_capacity_guard.trial_mutation_permits
             IN ACCESS EXCLUSIVE MODE NOWAIT;
-          IF 'loom_capacity_guard.trial_retry_mutation_permits'::regclass::oid <> v_relation
+          IF 'loom_capacity_guard.trial_mutation_permits'::regclass::oid <> v_relation
              OR NOT EXISTS (
                SELECT 1 FROM pg_catalog.pg_class
                 WHERE oid = v_relation AND relkind = 'r' AND NOT relispartition
@@ -368,19 +431,20 @@ def downgrade() -> None:
         op.get_bind()
         .execute(
             sa.text(
-                "SELECT EXISTS (SELECT 1 FROM ONLY loom_capacity_guard.trial_retry_mutation_permits)"
+                "SELECT EXISTS (SELECT 1 FROM ONLY loom_capacity_guard.trial_mutation_permits)"
             )
         )
         .scalar_one()
     )
     if retained:
         raise RuntimeError("frozen retry permission evidence requires protected retirement")
+    _rewrite(_CLAIM, _claim_replacements(), upgrading=False)
     _rewrite(_RETRY, _retry_replacements(), upgrading=False)
     _rewrite(f"{_SCHEMA}.account_trial_writer_mutation()", [(_FROZEN, _AFTER)], upgrading=False)
     _rewrite(f"{_SCHEMA}.lock_trial_writer_statement()", [(_FROZEN, _STATEMENT)], upgrading=False)
     op.execute("""
-        DROP FUNCTION loom_capacity_guard.assert_frozen_retry_consumed(uuid);
-        DROP FUNCTION loom_capacity_guard.authorize_frozen_retry_update(uuid,uuid,bigint,uuid,uuid,uuid,text,jsonb);
-        DROP TABLE loom_capacity_guard.trial_retry_mutation_permits;
-        DROP FUNCTION loom_capacity_guard.guard_retry_mutation_permit();
+        DROP FUNCTION loom_capacity_guard.assert_frozen_trial_mutation_consumed(uuid);
+        DROP FUNCTION loom_capacity_guard.authorize_frozen_trial_update(uuid,uuid,bigint,uuid,uuid,uuid,text,jsonb);
+        DROP TABLE loom_capacity_guard.trial_mutation_permits;
+        DROP FUNCTION loom_capacity_guard.guard_trial_mutation_permit();
     """)
