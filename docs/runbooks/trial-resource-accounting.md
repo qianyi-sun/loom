@@ -63,7 +63,12 @@ returns `items: []` plus aggregate `telemetry_status: unavailable`.
 
 ## Capacity calibration
 
-Do not change slot limits from a small smoke. Collect at least 1,000
+A bounded, explicit per-Batch request comparison may use a sampled cohort via
+[the native Terminus request override](nebius-terminus2.md#compare-measured-scheduling-requests).
+Keep hard limits and fleet defaults unchanged and report incomplete telemetry.
+This comparison does not establish generally calibrated slot limits.
+
+For fleet-wide defaults, do not change slot limits from a small smoke. Collect at least 1,000
 representative trials over at least two weeks and include one 100-200 concurrent
 batch. Exclude or separately report trials whose telemetry is not complete.
 Group by workload class, architecture, backend, image/candidate and resource

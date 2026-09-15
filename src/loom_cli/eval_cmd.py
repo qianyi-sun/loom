@@ -102,8 +102,8 @@ def _build_agent_model(
     }
 
 
-def _load_task_filter_json(raw: str) -> dict[str, Any]:
-    """Parse --task-filter argument. JSON string or @path/to/file."""
+def _load_task_filter_json(raw: str, *, flag: str = "--task-filter") -> dict[str, Any]:
+    """Parse an object argument from a JSON string or @path/to/file."""
     if raw.startswith("@"):
         path = raw[1:]
         try:
@@ -111,24 +111,28 @@ def _load_task_filter_json(raw: str) -> dict[str, Any]:
                 data = json.load(f)
         except OSError as exc:
             raise argparse.ArgumentTypeError(
-                f"--task-filter @{path}: {exc}",
+                f"{flag} @{path}: {exc}",
             ) from exc
         except json.JSONDecodeError as exc:
             raise argparse.ArgumentTypeError(
-                f"--task-filter @{path}: invalid JSON: {exc}",
+                f"{flag} @{path}: invalid JSON: {exc}",
             ) from exc
     else:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise argparse.ArgumentTypeError(
-                f"--task-filter: invalid JSON: {exc}",
+                f"{flag}: invalid JSON: {exc}",
             ) from exc
     if not isinstance(data, dict):
         raise argparse.ArgumentTypeError(
-            "--task-filter must be a JSON object",
+            f"{flag} must be a JSON object",
         )
     return cast(dict[str, Any], data)
+
+
+def _load_task_resource_requests(raw: str) -> dict[str, Any]:
+    return _load_task_filter_json(raw, flag="--task-resource-requests")
 
 
 def _load_combinations_json(raw: str) -> list[dict[str, Any]]:
@@ -780,6 +784,9 @@ def _batch_create(args: argparse.Namespace) -> int:
                 payload["n_per_task"] = args.n_per_task
             if args.backend is not None:
                 payload["backend"] = args.backend
+            resource_requests = getattr(args, "task_resource_requests", None)
+            if resource_requests is not None:
+                payload["task_resource_requests"] = resource_requests
             if args.description is not None:
                 payload["description"] = args.description
             resp = c.post("/api/v1/batches", json=payload)
@@ -1593,6 +1600,15 @@ def dispatch(argv: list[str]) -> int:
         help="Number of trials per task (1–100).",
     )
     p_bc.add_argument("--backend", default=None, help="Worker backend (default: server default).")
+    p_bc.add_argument(
+        "--task-resource-requests",
+        type=_load_task_resource_requests,
+        default=None,
+        help=(
+            "Native Terminus scheduling requests keyed by task ID, as JSON or @file.json. "
+            "Each entry binds the existing task revision; task hard limits stay unchanged."
+        ),
+    )
     p_bc.add_argument(
         "--storage-preflight-evidence",
         default=None,

@@ -57,10 +57,12 @@ from loom.security.redaction import redact_mapping, redact_text
 from loom.service_execution_backend import NEBIUS_BACKEND, NEBIUS_LOGICAL_POOL_ID
 from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
+    TaskExecutionResourceRequestsV1,
     automatic_service_execution_rejections,
     freeze_agent_runtime_releases,
     load_service_execution_runtime_profile,
     runtime_profile_rejections,
+    validate_task_resource_requests,
 )
 from loom_llm_gateway.rate_card import (
     COST_META_CONFIDENCE_KEY,
@@ -249,6 +251,9 @@ class _CreateBatch(BaseModel):
     budget_policy: Literal["none", "soft", "hard"] = "none"
     budget_confirmed: bool = False
     model_switch_plan_mode: Literal["inherit", "resample"] | None = None
+    task_resource_requests: dict[str, TaskExecutionResourceRequestsV1] = Field(
+        default_factory=dict, max_length=5000,
+    )
 
 
 class _AdminCreateBatchOnBehalf(_CreateBatch):
@@ -405,6 +410,55 @@ def _reject_submission(
 ) -> NoReturn:
     SUBMISSION_REJECTS_TOTAL.labels(reason=reason).inc()
     raise HTTPException(status_code=status_code, detail=detail)
+
+
+async def _freeze_task_resource_requests(
+    session: Any,
+    *,
+    backend: str,
+    task_ids: Sequence[str],
+    trial_config: dict[str, Any],
+    combinations: Sequence[Combination | dict[str, Any]],
+    profile: ServiceExecutionRuntimeProfileV1 | None,
+    overrides: dict[str, TaskExecutionResourceRequestsV1],
+) -> ServiceExecutionRuntimeProfileV1 | None:
+    """Freeze explicit per-Batch requests without changing task limits or defaults."""
+    if not overrides:
+        if profile is not None and profile.task_resource_requests:
+            return profile.model_copy(update={"task_resource_requests": {}})
+        return profile
+    if backend != NEBIUS_BACKEND or profile is None:
+        raise HTTPException(status_code=400, detail="task_resource_requests requires native Nebius execution")
+    if not set(overrides).issubset(task_ids):
+        raise HTTPException(status_code=400, detail="task_resource_requests contains an unselected task")
+    selections = [
+        {**trial_config, "agent_name": item.agent_name, "agent_version": item.agent_version,
+         "agent_model": item.agent_model.model_dump(mode="json") if item.agent_model is not None else None}
+        for raw in combinations
+        for item in (raw if isinstance(raw, Combination) else Combination.model_validate(raw),)
+    ] or [trial_config]
+    if any(item.get("agent_name") != "terminus-2" for item in selections):
+        raise HTTPException(status_code=400, detail="task_resource_requests supports only terminus-2")
+    rows = (await session.execute(
+        select(Task.id, Task.checksum, Task.config).where(Task.id.in_(list(overrides))),
+    )).all()
+    if {str(row[0]) for row in rows} != set(overrides):
+        raise HTTPException(status_code=400, detail="task_resource_requests task is missing")
+    try:
+        trials = [TrialConfig.model_validate(item) for item in selections]
+        for task_id, checksum, raw_task in rows:
+            task = TaskConfig.model_validate(raw_task)
+            if task.service_execution is not None:
+                raise ValueError("task_resource_requests requires automatic native execution")
+            for trial in trials:
+                validate_task_resource_requests(
+                    task=task, trial=trial, profile=profile,
+                    task_revision_sha256="sha256:" + checksum.removeprefix("sha256:"),
+                    override=overrides[str(task_id)],
+                )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return profile.model_copy(update={"task_resource_requests": dict(overrides)})
 
 
 async def _reject_if_backend_cannot_execute_or_cold_start(
@@ -929,6 +983,7 @@ def _serialize(
         "expected_trial_count": b.expected_trial_count,
         "n_per_task": b.n_per_task,
         "backend": b.backend,
+        "task_resource_requests": (runtime_profile or {}).get("task_resource_requests", {}),
         "service_execution_runtime_profile": (
             {
                 "candidate_sha": runtime_profile["candidate_sha"],
@@ -1293,6 +1348,11 @@ async def _create_batch_record(
         trial_config=trial_config,
         combinations=payload.combinations,
         runtime_profile_json=request.app.state.settings.service_execution_runtime_profile_json,
+    )
+    service_execution_runtime_profile = await _freeze_task_resource_requests(
+        s, backend=payload.backend, task_ids=valid_task_ids,
+        trial_config=trial_config, combinations=payload.combinations,
+        profile=service_execution_runtime_profile, overrides=payload.task_resource_requests,
     )
 
     # Reject structurally incompatible agent/task pairs instead of fanning
@@ -2803,6 +2863,16 @@ async def rerun_failed_batch(
         runtime_profile_json=runtime_profile_json,
         resolve_versions=request_payload.use_current_runtime,
         automatic_only=request_payload.use_current_runtime,
+    )
+    inherited_requests = (b.service_execution_runtime_profile or {}).get("task_resource_requests", {})
+    service_execution_runtime_profile = await _freeze_task_resource_requests(
+        s, backend=b.backend, task_ids=valid_rerun_task_ids,
+        trial_config=rerun_trial_config, combinations=combinations,
+        profile=service_execution_runtime_profile,
+        overrides={
+            task_id: TaskExecutionResourceRequestsV1.model_validate(value)
+            for task_id, value in inherited_requests.items() if task_id in valid_rerun_task_ids
+        },
     )
     agent_task_pairs: list[tuple[str, str]] = []
     for target in targets:
