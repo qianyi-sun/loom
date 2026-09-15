@@ -693,6 +693,9 @@ handoff/migration pair after the epoch claim, preserving their original ordinals
 Before ordinary final admission reads, the worker resolves the original pending
 operation and invokes its installed recovery path under the same acknowledged
 guard. It requires a matching terminal and completed retention before proceeding.
+Peer-loss recovery retires its maintenance connection before completion opens
+its own, preserving the original guard and replacement handoff peer while
+enforcing cluster-wide client retirement.
 Normal prefix and convergence observations require later owner grants to have
 retired; they do not adopt active memberships as successor authority.
 
