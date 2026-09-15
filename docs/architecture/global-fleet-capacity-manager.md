@@ -1554,9 +1554,15 @@ never-started container of the pinned operator image. It does not derive trusted
 bytes from mutable Cluster status or the target volume; either executable mismatch
 refuses before the replacement transport. Its control proves that removing a managed role from the desired Cluster
 does not retire an already queued role change. Its replacement case observes a
-different `/proc/1/exe` inode with identical executable bytes, disappearance of the
-old queued role backend in the `postgres` database, preservation of NOLOGIN, and
-the same original application backend, postmaster start time, and advisory lock.
+different `/proc/1/exe` inode with identical executable bytes and the same original
+application backend, postmaster start time, and advisory lock while queued work
+finishes. It observes retirement of the old SQL backend after releasing the test's
+catalog lock; it does not assume that replacing the manager cancels accepted SQL
+before that lock is released. Separate PostgreSQL 16/17 regressions close a blocked
+client's socket, verify that protected handoff still rejects its surviving backend,
+and show that its queued role change can commit after unlock. A manager replacement
+receipt is therefore not SQL-retirement evidence: the protected completion path
+must continue to reject surviving or unknown client work across all databases.
 An HTTP EOF or replacement of `/controller/manager` alone is not success evidence.
 
 A separate disposable startup case seals the application role with `NOLOGIN` and
