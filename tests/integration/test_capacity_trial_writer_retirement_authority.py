@@ -353,6 +353,7 @@ def test_helper_provisioning_rejects_drift_and_rolls_back_the_transaction(
 @pytest.mark.parametrize(
     ("parent", "refusal_message"),
     [
+        ("loom_capacity_guard.trial_retry_mutation_permits", "inheritance is unsupported"),
         ("loom_capacity_guard.trial_writer_mutations", "inheritance crosses authority"),
         ("public.trials", "inheritance is unsupported"),
     ],
