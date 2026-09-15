@@ -302,12 +302,14 @@ class ProtectedExecutionPrerequisiteRuntimeSource:
             or staging_acknowledgement.protected_admission_sha256 != protected_admission_sha256
         ):
             raise ValueError("execution prerequisite staging admission drifted")
+        # A registered writer may freeze before its first committed mutation.
+        # Preserve that zero cursor; identity and non-placeholder evidence remain required.
         if any(
-            acknowledgement.legacy_writer_high_water < 1
+            acknowledgement.legacy_writer_high_water < 0
             or acknowledgement.acknowledgement_sha256 == "0" * 64
             for acknowledgement in authority.subject_acknowledgements
         ) or any(
-            fence.high_water < 1 or fence.freeze_evidence_sha256 == "0" * 64
+            fence.high_water < 0 or fence.freeze_evidence_sha256 == "0" * 64
             for fence in authority.legacy_writer_fences
         ):
             raise ValueError("execution prerequisite legacy high-water authority drifted")
