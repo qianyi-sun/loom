@@ -136,6 +136,7 @@ type plan struct {
 	Main                       phase                      `json:"main"`
 	VerifierExecution          string                     `json:"verifier_execution"`
 	Verifier                   *phase                     `json:"verifier"`
+	VerifierAfterAgentTimeout  bool                       `json:"verifier_after_agent_timeout,omitempty"`
 	Sidecars                   []sidecar                  `json:"sidecars"`
 	MaxLogBytesPerStream       int64                      `json:"max_log_bytes_per_stream"`
 	MaxArtifactBytes           int64                      `json:"max_artifact_bytes"`
@@ -280,6 +281,11 @@ func (p plan) validate() error {
 			return err
 		}
 		known[item.RoleName] = true
+	}
+	if p.VerifierAfterAgentTimeout && (p.ExecutionRole != "attempt" ||
+		p.Composition != "init_payload" || p.AgentImageRef == nil ||
+		p.VerifierExecution != "in_attempt" || !known["task-sandbox"] || !known["verifier-sandbox"]) {
+		return fmt.Errorf("timeout verification requires an isolated attempt controller and in-attempt verifier")
 	}
 	if p.ControllerResources != nil || p.ResourceRequests != nil {
 		if p.ControllerResources != nil {

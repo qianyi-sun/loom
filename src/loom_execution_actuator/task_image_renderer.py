@@ -312,13 +312,13 @@ def render_task_image_job(
         "terminationMessagePath": "/dev/termination-log",
         "terminationMessagePolicy": "File",
     }
-    # emptyDir limits are not reservations. These phases run sequentially;
-    # prepare/publish clear their own temporary archives, and each completed
-    # builder clears its snapshots. At 16 GiB: shared=7, builder=7, each
-    # trusted tmp=4 GiB. Peak shared+builder leaves 2 GiB for container logs;
-    # publisher has space for a 3 GiB OCI extraction after builder cleanup.
+    # Separate volumes preserve the trusted prepare/publish boundary. Let the
+    # untrusted build use the existing total budget for either scratch or output
+    # instead of evicting it at an arbitrary 7/7 GiB split. Kubelet accounts for
+    # all disk-backed emptyDirs, writable layers and logs against the unchanged
+    # aggregate Pod limit; these volume maxima are not extra reservations.
     phase_mib = config.ephemeral_storage_mib // 4
-    build_mib = config.ephemeral_storage_mib * 7 // 16
+    build_mib = config.ephemeral_storage_mib
     volumes: list[dict[str, Any]] = [
         {"name": "claim", "configMap": {"name": name, "defaultMode": 0o444}},
         *(

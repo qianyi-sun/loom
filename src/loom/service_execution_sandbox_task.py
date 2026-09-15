@@ -9,8 +9,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import shlex
+import signal
 import sys
 import tomllib
 from glob import escape
@@ -19,6 +21,7 @@ from uuid import UUID
 
 import httpx
 
+from loom.attempt_deadline import AttemptDeadline
 from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
 from loom.errors import AgentError, DriverError
 from loom.models.capabilities import Capabilities
@@ -95,51 +98,98 @@ async def _execution_identity(gateway: str) -> tuple[UUID, UUID]:
     return UUID(envelope["trial_id"]), UUID(envelope["team_id"])
 
 
+class AgentTimeoutFinalizedError(TimeoutError):
+    """Agent deadline reached; quiescence and verifier handoff completed safely."""
+
+
 async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> None:
+    raw_deadline = os.environ.get("LOOM_EXECUTION_PHASE_DEADLINE")
+    deadline = AttemptDeadline.from_wall_deadline(float(raw_deadline)) if raw_deadline else None
+    grace = float(os.environ.get("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "30"))
+    if not math.isfinite(grace) or grace <= 0:
+        raise ServiceExecutionTaskError("termination grace must be finite and positive")
     gateway = os.environ["LOOM_GATEWAY_URL"]
-    trial_id, team_id = await _execution_identity(gateway)
     driver = sandbox_driver("task-sandbox", task)
-    await driver.start()
     output = workspace / ".loom/agent"
     output.mkdir(parents=True, exist_ok=True)
+    trial_id = None
+    agent_entered = False
+    timed_out = False
+    finalizing = False
+    termination_signals = 0
+    loop = asyncio.get_running_loop()
+    phase_task = asyncio.current_task()
+
+    def terminate() -> None:
+        nonlocal termination_signals
+        termination_signals += 1
+        # The local deadline may already have initiated cleanup just before Go
+        # delivers SIGTERM. Do not interrupt that same cleanup a second time.
+        if termination_signals == 1 and finalizing and deadline is not None and deadline.reached:
+            return
+        if phase_task is not None:
+            phase_task.cancel()
+
+    if deadline is not None:
+        loop.add_signal_handler(signal.SIGTERM, terminate)
     try:
-        await materialize_workspace(
-            driver=driver, task_dir=workspace, dst=task.environment.workdir, policy=_POLICY,
-            excluded_paths=_agent_input_exclusions(task),
-        )
-        instruction = _safe_workspace_path(workspace, str(task.steps[0].instruction_file)).read_text()
         try:
-            await run_terminus2(
-                driver=driver, workspace=output, task_config=task, trial_config=trial,
-                trial_id=trial_id, team_id=team_id, instruction=instruction, gateway_url=gateway,
-            )
+            async with asyncio.timeout(deadline.remaining() if deadline else None):
+                trial_id, team_id = await _execution_identity(gateway)
+                await driver.start()
+                await materialize_workspace(
+                    driver=driver, task_dir=workspace, dst=task.environment.workdir, policy=_POLICY,
+                    excluded_paths=_agent_input_exclusions(task),
+                )
+                instruction = _safe_workspace_path(
+                    workspace, str(task.steps[0].instruction_file),
+                ).read_text()
+                agent_entered = True
+                await run_terminus2(
+                    driver=driver, workspace=output, task_config=task, trial_config=trial,
+                    trial_id=trial_id, team_id=team_id, instruction=instruction, gateway_url=gateway,
+                    deadline=deadline,
+                )
+        except (TimeoutError, asyncio.CancelledError):
+            if deadline is None or not deadline.reached or not agent_entered:
+                raise
+            timed_out = True
         finally:
-            # Accounting uses the trusted local trajectory, so retain it even
-            # if the later sandbox cleanup or workspace snapshot fails.
-            try:
-                trace = output / "trajectory.jsonl"
-                if trace.exists():
-                    events = parse_terminus_events(trace.read_bytes(), trial=trial, trial_id=trial_id)
-                    _write_json_atomic(output / "usage.json", terminus_usage(events, trial))
-            finally:
-                # Quiesce even if local accounting fails. A failed quiescence
-                # still prevents workspace export and verifier handoff.
-                await driver.stop_processes()
-            archive = workspace / ".loom/workspace.tar"
-            await _export_workspace_archive(driver, task.environment.workdir, archive)
-            await asyncio.to_thread(_strip_private_entries, archive, _POLICY)
-            await asyncio.to_thread(_validate_workspace_archive, archive, _POLICY)
-        paths = json.loads(os.environ["LOOM_TASK_ARTIFACTS_JSON"])
-        for path in paths:
-            destination = _safe_workspace_path(workspace / ".loom/collected", path)
-            try:
-                await driver.download(task.environment.workdir / path, destination)
-            except (DriverError, FileNotFoundError):
-                # Go checks required declarations after the verifier phase,
-                # preserving reward/feedback even when a required file is absent.
-                print(f"task artifact unavailable: {path}", file=sys.stderr)
+            finalizing = True
+            # This budget permits only local accounting, quiescence and a
+            # validated workspace snapshot. It never extends the agent deadline.
+            remaining = max(0, deadline.monotonic_deadline + grace - loop.time()) if deadline else None
+            async with asyncio.timeout(remaining):
+                try:
+                    if agent_entered:
+                        try:
+                            trace = output / "trajectory.jsonl"
+                            if trace.exists() and trial_id is not None:
+                                events = parse_terminus_events(
+                                    trace.read_bytes(), trial=trial, trial_id=trial_id,
+                                )
+                                _write_json_atomic(output / "usage.json", terminus_usage(events, trial))
+                        finally:
+                            await driver.stop_processes()
+                        archive = workspace / ".loom/workspace.tar"
+                        await _export_workspace_archive(driver, task.environment.workdir, archive)
+                        await asyncio.to_thread(_strip_private_entries, archive, _POLICY)
+                        await asyncio.to_thread(_validate_workspace_archive, archive, _POLICY)
+                        for path in json.loads(os.environ["LOOM_TASK_ARTIFACTS_JSON"]):
+                            destination = _safe_workspace_path(workspace / ".loom/collected", path)
+                            try:
+                                await driver.download(task.environment.workdir / path, destination)
+                            except (DriverError, FileNotFoundError):
+                                print(f"task artifact unavailable: {path}", file=sys.stderr)
+                finally:
+                    await driver.stop()
+        # A successful agent may use the grace period for its snapshot. Once
+        # that handoff completes, acknowledge the expired Go phase with 124 too.
+        if timed_out or (agent_entered and deadline is not None and deadline.reached):
+            raise AgentTimeoutFinalizedError("agent deadline reached; verifier handoff completed")
     finally:
-        await driver.stop()
+        if deadline is not None:
+            loop.remove_signal_handler(signal.SIGTERM)
 
 
 async def run_verifier(workspace: Path, task: TaskConfig, trial: TrialConfig) -> None:
@@ -206,6 +256,9 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except AgentTimeoutFinalizedError:
+        print("agent timed out; verified workspace handoff retained", file=sys.stderr)
+        raise SystemExit(124) from None
     except Exception as exc:
         # HTTP exceptions can embed response/request details; never persist them.
         message = f"isolated execution failed ({type(exc).__name__})"

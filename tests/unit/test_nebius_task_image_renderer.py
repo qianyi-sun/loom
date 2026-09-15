@@ -184,11 +184,13 @@ def test_job_bounds_resources_and_only_builder_has_rootless_exceptions(inputs) -
         for volume in pod["volumes"]
         if "emptyDir" in volume
     }
-    assert sizes == {"build": 7168, "builder-tmp": 7168, "prepare-tmp": 4096, "publish-tmp": 4096}
-    # Independent volume maxima are not simultaneous reservations: each phase
-    # leaves headroom under the unchanged aggregate Pod ephemeral limit.
-    for scratch in ("builder-tmp", "prepare-tmp", "publish-tmp"):
-        assert sizes["build"] + sizes[scratch] < inputs["config"].ephemeral_storage_mib
+    assert sizes == {"build": 16384, "builder-tmp": 16384, "prepare-tmp": 4096, "publish-tmp": 4096}
+    # A build can use >7 GiB scratch plus a small output without a volume
+    # eviction. Aggregate Pod accounting still enforces the same 16 GiB.
+    assert 8192 < sizes["builder-tmp"]
+    assert 8192 + 1024 < inputs["config"].ephemeral_storage_mib
+    assert all(container["resources"]["limits"]["ephemeral-storage"] == "16384Mi"
+               for container in pod["initContainers"] + pod["containers"])
     assert sizes["build"] > 512 + 1024 + 1024 + 3072
     assert sizes["prepare-tmp"] > 1024 and sizes["publish-tmp"] > 3072
     private_tmp = {
@@ -364,7 +366,7 @@ def test_minimum_budget_rejects_guaranteed_phase_space_exhaustion(inputs) -> Non
     pod = job["spec"]["template"]["spec"]
     volumes = {volume["name"]: volume for volume in pod["volumes"]}
     assert volumes["publish-tmp"]["emptyDir"]["sizeLimit"] == "8192Mi"
-    assert volumes["build"]["emptyDir"]["sizeLimit"] == "14336Mi"
+    assert volumes["build"]["emptyDir"]["sizeLimit"] == "32768Mi"
     assert pod["containers"][0]["resources"]["limits"]["ephemeral-storage"] == "32768Mi"
 
 
