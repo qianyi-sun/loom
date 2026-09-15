@@ -16,9 +16,8 @@ _IMAGE = "registry.example.test/loom-control-plane@sha256:" + "a" * 64
 
 
 class Runner:
-    environment = {}
-
     def __init__(self):
+        self.environment = {}
         self.objects = {}
         self.creates = 0
         self.lose_reply = False

@@ -1976,6 +1976,16 @@ It is separate from prepared convergence and does not re-run the rollout's
 prepared-only verification after activation. Trusted worker launch material and
 complete legacy writer closure remain required before live execution.
 
+Permanent legacy-writer admission policies use a separate
+`legacy-writer-fence-journals` namespace. The protected installer records absence
+before creating each fixed policy/binding, retains its UID and exact specification,
+and checks completed type checking. Recovery can reconcile a lost creation reply
+under the enclosing exclusive policy authority; it refuses unowned objects,
+replacement UIDs, changed policies, and disappearance of an already retained object.
+It never removes or overwrites policies, including on failure. This acquisition
+record still requires live admission probes and independent process/SQL retirement
+before it can contribute to the complete writer-freeze publication.
+
 The schema migration writes a canonical seed event beside its generated
 bootstrap authority UUID. A reviewed replacement requires that one pristine
 seed and writes an append-only binding event in the same locked transaction.

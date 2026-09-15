@@ -1,6 +1,7 @@
 """Permanent old-writer admission refusal in a disposable Kubernetes API."""
 
 import copy
+import os
 import time
 
 import pytest
@@ -25,7 +26,7 @@ def _deployment(name, *, image=_CP_IMAGE, cutover=False, replicas=1):
 
 
 @pytest.mark.timeout(240)
-def test_old_writers_cannot_resume_but_exact_successor_can_run():
+def test_old_writers_cannot_resume_but_exact_successor_can_run(tmp_path):
     from kubernetes import client
     from kubernetes.client.exceptions import ApiException
 
@@ -40,11 +41,31 @@ def test_old_writers_cannot_resume_but_exact_successor_can_run():
             core.create_namespace({"metadata": {"name": namespace}})
         apps.create_namespaced_deployment("loom-staging", _deployment("loom-service", replicas=0))
         documents = render_legacy_writer_fence(intent_digest="b" * 64, control_plane_image=_CP_IMAGE)
-        for document in documents:
-            if document["kind"] == "ValidatingAdmissionPolicy":
-                admission.create_validating_admission_policy(document)
-            else:
-                admission.create_validating_admission_policy_binding(document)
+        from loom_cli.rollout.operator.protected_apply_executor import (
+            SubprocessProtectedApplyCommandRunner,
+        )
+        from loom_cli.rollout.operator.protected_legacy_writer_fence_installation import (
+            LegacyWriterFenceInstallation,
+            LegacyWriterFenceJournal,
+        )
+        result = container.exec(["cat", "/etc/rancher/k3s/k3s.yaml"])
+        assert result.exit_code == 0
+        kubeconfig = tmp_path / "disposable-kubeconfig"
+        kubeconfig.write_text(result.output.decode().replace("https://127.0.0.1:6443",
+            f"https://127.0.0.1:{container.get_exposed_port(6443)}"))
+        kubeconfig.chmod(0o600)
+        class DisposableRunner(SubprocessProtectedApplyCommandRunner):
+            @property
+            def environment(self):
+                return {**super().environment, "KUBECONFIG": str(kubeconfig)}
+        state = tmp_path / "fence-state"
+        state.mkdir(mode=0o700)
+        installation = LegacyWriterFenceInstallation(
+            LegacyWriterFenceJournal(state, "disposable-fence", 1, os.geteuid()),
+            DisposableRunner(), "b" * 64, _CP_IMAGE, lambda: None)
+        retained = installation.install()
+        assert len(retained) == 12 and installation.install() == retained
+        assert installation.observe() == retained
         deadline = time.monotonic() + 30
         while True:
             try:
