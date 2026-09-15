@@ -7,6 +7,7 @@ from datetime import datetime
 from uuid import uuid4
 
 import psycopg
+from psycopg import sql
 import pytest
 from psycopg.pq import TransactionStatus
 from sqlalchemy.engine import make_url
@@ -612,3 +613,14 @@ def test_peer_leading_comments_preserve_query_rows(peer_postgres):
         assert connection.execute(
             "/* outer /* nested */ comment */ -- line\rSELECT 42"
         ).fetchone() == (42,)
+
+
+def test_peer_preserves_bounded_handoff_quiescence_code_without_diagnostics(peer_postgres):
+    private = "private-quiescence-" + uuid4().hex
+    with _peer(peer_postgres) as connection:
+        with pytest.raises(psycopg.Error) as caught:
+            with connection.transaction():
+                connection.execute(sql.SQL("DO $$ BEGIN RAISE EXCEPTION {} USING ERRCODE='55L01'; END $$").format(sql.Literal(private)))
+        assert caught.value.sqlstate == "55L01"
+        assert private not in str(caught.value) and private not in repr(caught.value)
+        assert connection.execute("SELECT 9").fetchone() == (9,)

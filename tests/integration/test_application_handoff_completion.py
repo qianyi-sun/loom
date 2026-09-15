@@ -78,7 +78,7 @@ class LostAcknowledgementError(RuntimeError):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("observation", ["autovacuum", "retired", "unretired"])
-@pytest.mark.parametrize("refusal", ["trigger", "sessions", "prepared"])
+@pytest.mark.parametrize("refusal", ["trigger", "trigger-code", "unrelated-code", "sessions", "prepared"])
 async def test_handoff_retries_rolled_back_quiescence_when_current_work_is_admitted(transfer_database, monkeypatch, observation, refusal):  # noqa: F811
     from loom import application_handoff_completion as module
     from loom.application_ownership_transfer import ApplicationOwnershipTransferError
@@ -89,7 +89,10 @@ async def test_handoff_retries_rolled_back_quiescence_when_current_work_is_admit
         transfer(connection, **kwargs)
         calls.append(1)
         if len(calls) == 1:
-            if refusal != "trigger":
+            if refusal in {"trigger-code", "unrelated-code"}:
+                code = "55L01" if refusal == "trigger-code" else "55000"
+                connection.execute(f"DO $$ BEGIN RAISE EXCEPTION 'unclassified private diagnostic' USING ERRCODE='{code}'; END $$")
+            elif refusal != "trigger":
                 raise ApplicationOwnershipTransferError(
                     "application ownership requires reconciled sessions" if refusal == "sessions"
                     else "application ownership has prepared transactions"
@@ -100,11 +103,11 @@ async def test_handoff_retries_rolled_back_quiescence_when_current_work_is_admit
     if observation != "retired":
         monkeypatch.setattr(module, "_quiescence_retry_admitted", lambda *args, **kwargs: observation == "autovacuum")
     with _closed(transfer_database) as (peer, maintenance, _guard_peer, arguments):
-        if observation != "unretired" and refusal != "prepared":
+        if observation != "unretired" and refusal not in {"prepared", "unrelated-code"}:
             module.complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
             assert len(calls) == 2
         else:
-            error = psycopg.errors.ObjectNotInPrerequisiteState if refusal == "trigger" else ApplicationOwnershipTransferError
+            error = psycopg.Error if refusal in {"trigger", "trigger-code", "unrelated-code"} else ApplicationOwnershipTransferError
             with pytest.raises(error):
                 module.complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
             assert len(calls) == 1
