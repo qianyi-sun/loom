@@ -39,8 +39,30 @@ async def test_failed_fixture_write_preserves_exception_and_safe_diagnostics(mon
     assert "OOMKilled" in " ".join(error.__notes__)
     expected_status = inner_status if inner_status in {"0", "1", "255"} else "unavailable"
     assert "disposable kubectl exit status: " + expected_status in error.__notes__
-    assert any(note.startswith("disposable kubectl stderr: bytes=") for note in error.__notes__)
+    assert any(note.startswith("disposable kubectl stderr: chars=") for note in error.__notes__)
     assert all(secret not in " ".join(error.__notes__) for secret in ("do-not-log", "private-fixture-name"))
+
+
+@pytest.mark.parametrize("stderr", ["", "do-not-log" * 2000])
+async def test_fixture_stderr_metadata_is_bounded_and_never_echoes_content(monkeypatch, stderr):
+    error = DevInstanceRuntimeError("original")
+
+    class Runner:
+        async def run(self, argv, **kwargs):
+            if "sh" in argv:
+                raise error
+            if "head" in argv and not argv[-1].endswith(".status"):
+                assert argv[-2] == "8193"
+                return CommandResult(stderr[:8193], "")
+            raise DevInstanceRuntimeError("diagnostic unavailable")
+
+    monkeypatch.setattr(fixture, "AsyncCommandRunner", Runner)
+    with pytest.raises(DevInstanceRuntimeError) as raised:
+        await fixture._ContainerKubectl("a" * 64).run(["kubectl", "get", "namespace"])
+    assert raised.value is error
+    assert "do-not-log" not in " ".join(error.__notes__)
+    assert f"disposable kubectl stderr: chars={min(len(stderr), 8192)}; at-read-limit={len(stderr) >= 8192}" in error.__notes__
+    assert "disposable kubectl exit status: unavailable" in error.__notes__
 
 
 @pytest.mark.parametrize("stderr,label", [
