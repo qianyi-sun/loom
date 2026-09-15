@@ -11,8 +11,10 @@ import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+from loom_capacity_executor.runtime import ActivationRuntimeDocumentV2
+from loom_capacity_manager.executable_contracts import ExecutionContextV2
 from loom_cli.cluster_config import load_cluster_config
 from loom_cli.rollout.external_supervisor_readiness import (
     STAGING_ROLLOUT_EXECUTION_HOST,
@@ -29,13 +31,19 @@ from .final_smoke_executor import FinalSmokeExecutor
 from .final_summary_executor import FinalSummaryExecutor
 from .installed_application_handoff import InstalledApplicationHandoffFactory
 from .installed_application_migration import InstalledApplicationMigrationFactory
+from .installed_execution_activation import InstalledExecutionActivation
 from .installed_execution_authority import (
     InstalledExecutionAuthorityReader,
     InstalledExecutionAuthoritySource,
     KubernetesExecutionWitnessExportsSource,
+    capture_current_execution_authority,
 )
 from .installed_rollout_capacity_refresh import (
     build_installed_rollout_capacity_refresh,
+)
+from .protected_active_controller_transport import (
+    build_fixed_gb10_active_controller_transport,
+    build_fixed_oldlab_active_controller_transport,
 )
 from .protected_apply_executor import (
     KubernetesProtectedConvergenceExecutor,
@@ -61,6 +69,7 @@ from .protected_controller_prerequisite_transport import (
 from .protected_environment_state_component import (
     HttpxProtectedEnvironmentStateTransport,
 )
+from .protected_execution_activation import ActiveControllerTransport
 from .protected_execution_preparation_dependency import (
     ProtectedExecutionPreparationDependencyGuard,
 )
@@ -411,7 +420,7 @@ class InstalledFinalGateExecutor:
             def execution_authority_source(
                 desired: ProtectedStagingDesiredConfiguration,
             ) -> ProtectedExecutionPrerequisiteAuthority:
-                return InstalledExecutionAuthoritySource(
+                source = InstalledExecutionAuthoritySource(
                     publication_reader=InstalledExecutionAuthorityReader(
                         path=_EXECUTION_AUTHORITY_PUBLICATION,
                         expected_uid=self.service_uid,
@@ -427,7 +436,12 @@ class InstalledFinalGateExecutor:
                     witness_exports_source=KubernetesExecutionWitnessExportsSource(
                         protected_runner
                     ),
-                )(desired)
+                )
+                with open_protected_capacity_manager_client(
+                    runner=protected_runner, credentials_root=staging_capacity.credentials_root,
+                    service_uid=self.service_uid, service_gid=self.service_gid,
+                ) as client:
+                    return capture_current_execution_authority(source, desired=desired, manager=client)
 
             execution_preparation_dependency_guard = (
                 ProtectedExecutionPreparationDependencyGuard(
@@ -514,6 +528,27 @@ class InstalledFinalGateExecutor:
             container_registry=container_registry,
             application_factory=application_factory,
         )
+
+    def activate_prepared_execution(self, plan: FinalGatePlan, *,
+                                    documents: Mapping[str, ActivationRuntimeDocumentV2] | None = None) -> ExecutionContextV2:
+        """Execute the separately admitted cutover from this verified installed runner."""
+        installed, config = self._validate_plan(plan)
+        if plan.schema_version != 7:
+            raise ValueError("installed activation requires execution preparation")
+        executor = self._build_protected_apply_executor(plan, installed, config)
+        runtime = cast(KubernetesProtectedStagingCapacityRuntime, executor.staging_capacity_runtime)
+        application = executor.application_factory
+        if application is None:
+            raise RuntimeError("installed activation issuance source is unavailable")
+        artifact = runtime._read_execution_prerequisite(plan)
+        controller = build_fixed_gb10_external_supervisor_transport(candidate_sha=plan.candidate_sha,
+            candidate_tree=plan.candidate_tree, run=self._controller_prerequisite_run)
+        active: dict[str, ActiveControllerTransport] = {
+            "gb10": build_fixed_gb10_active_controller_transport(controller=controller),
+            "oldlab": build_fixed_oldlab_active_controller_transport(image=artifact.executor_profile_seed.executor_image,
+                run=self._controller_prerequisite_run),
+        }
+        return InstalledExecutionActivation(runtime, application, active).execute(plan, documents=documents)
 
     def _application_factory(
         self, config: OperatorConfig, runner: SubprocessProtectedApplyCommandRunner, container_registry: str,

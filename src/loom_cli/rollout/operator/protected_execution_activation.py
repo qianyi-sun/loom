@@ -226,10 +226,28 @@ class ProtectedExecutionActivation:
     def expected(self) -> ExecutionContextV2:
         return self.requests["gb10"].document.execution
 
+    @classmethod
+    def resume(cls, *, plan: FinalGatePlan, artifact: ProtectedExecutionPrerequisiteArtifact,
+               journal: ExecutionActivationJournal, manager: ActivationManagerClient,
+               prepared: Mapping[str, ActivationPreparedTransport], active: Mapping[str, ActiveControllerTransport],
+               dependency_guard: Callable[[], None]) -> ProtectedExecutionActivation:
+        """Recover private inputs without reissuing credentials or opening forward sources."""
+        value = journal.read("inputs.intent.json")
+        if value is None or set(value) != {"schema_version", "plan_digest", "artifact_sha256", "subject", "controllers"}:
+            raise RuntimeError("activation retained inputs are unavailable")
+        controllers = value["controllers"]
+        if not isinstance(controllers, dict) or set(controllers) != set(_POOLS):
+            raise RuntimeError("activation retained controllers are invalid")
+        owner = cls(plan, artifact, {pool: ActiveControllerRequest.from_bytes(_wire(controllers[pool])) for pool in _POOLS},
+            journal, manager, prepared, active, dependency_guard,
+            SubjectConfigurationV1.model_validate_json(_wire(value["subject"])))
+        owner._retained_guard()
+        return owner
+
     def _inputs(self) -> dict[str, object]:
         return {"schema_version": 1, "plan_digest": self.plan.plan_digest,
             "artifact_sha256": self.artifact.artifact_sha256,
-            "subject_sha256": canonical_digest(self.subject),
+            "subject": self.subject.model_dump(mode="json"),
             "controllers": {pool: json.loads(self.requests[pool].to_bytes()) for pool in _POOLS}}
 
     def _guard(self) -> None:

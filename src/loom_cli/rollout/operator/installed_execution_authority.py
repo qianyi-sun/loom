@@ -8,6 +8,7 @@ import json
 import os
 import re
 import stat
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -24,6 +25,7 @@ from loom_capacity_guard.contracts import canonical_digest
 from loom_capacity_manager.contracts import canonical_digest as canonical_manager_digest
 from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
+    ExecutionContextV2,
     LegacyWriterFenceV2,
     SubjectExecutionAcknowledgementV2,
 )
@@ -35,6 +37,7 @@ from loom_control_plane.global_execution_fence import (
     parse_global_execution_witness_export,
 )
 
+from .protected_capacity_manager_client import ProtectedExecutionPreparationStatus
 from .protected_controller_discovery import (
     ControllerDiscoveryEvidence,
     ControllerDiscoveryRequest,
@@ -824,17 +827,36 @@ class InstalledExecutionAuthoritySource:
         self,
         desired: ProtectedStagingDesiredConfiguration,
     ) -> ProtectedExecutionPrerequisiteAuthority:
+        return self._capture(desired, execution=None)
+
+    def capture_during_execution(self, desired: ProtectedStagingDesiredConfiguration, *,
+                                 execution: ExecutionContextV2) -> ProtectedExecutionPrerequisiteAuthority:
+        """Verify current signed state while preserving the original prerequisite binding.
+
+        The caller brackets this capture with authenticated manager readback of
+        the full context. Witnesses cover epoch/state/ceiling, not writer or
+        manifest identity. This path grants no legacy scale-up authority.
+        """
+        execution = ExecutionContextV2.model_validate_json(execution.model_dump_json())
+        return self._capture(desired, execution=execution)
+
+    def _capture(self, desired: ProtectedStagingDesiredConfiguration, *,
+                 execution: ExecutionContextV2 | None) -> ProtectedExecutionPrerequisiteAuthority:
         if not isinstance(desired, ProtectedStagingDesiredConfiguration):
             raise TypeError("installed execution desired configuration is invalid")
         first_publication = self.publication_reader()
         if not isinstance(first_publication, InstalledExecutionAuthorityPublication):
             raise ValueError("installed execution owner publication is invalid")
+        if execution is not None and (
+                str(execution.authority_incarnation) != first_publication.executor_profile_seed.authority_incarnation
+                or execution.trusted_fleet_release_sha256 != first_publication.executor_profile_seed.trusted_fleet_release_sha256):
+            raise ValueError("installed execution context differs from owner publication")
         first_credentials = self.credential_bundle_reader()
         if not isinstance(first_credentials, ExecutionCredentialBundle):
             raise ValueError("installed execution credential authority is invalid")
         discoveries = self._discover_controllers(first_publication)
-        first_witnesses = self._witness_semantics(first_publication)
-        second_witnesses = self._witness_semantics(first_publication)
+        first_witnesses = self._witness_semantics(first_publication, execution=execution)
+        second_witnesses = self._witness_semantics(first_publication, execution=execution)
         second_discoveries = self._discover_controllers(first_publication)
         second_credentials = self.credential_bundle_reader()
         second_publication = self.publication_reader()
@@ -892,6 +914,7 @@ class InstalledExecutionAuthoritySource:
     def _witness_semantics(
         self,
         publication: InstalledExecutionAuthorityPublication,
+        *, execution: ExecutionContextV2 | None = None,
     ) -> Mapping[str, str]:
         exports = self.witness_exports_source()
         if (
@@ -904,31 +927,45 @@ class InstalledExecutionAuthoritySource:
         if observed_at.tzinfo is None or observed_at.utcoffset() is None:
             raise ValueError("installed execution witness clock is invalid")
         semantics: dict[str, str] = {}
+        pending = False
         for pool_id in _POOL_ORDER:
             try:
                 witness = parse_global_execution_witness_export(
                     exports[pool_id],
                     expected_manager_public_key_sha256=(publication.manager_public_key_sha256),
                 )
-                assert_legacy_scale_up_allowed(
-                    witness,
-                    expected_authority="global-capacity-manager",
-                    expected_pool_id=pool_id,
-                    now=observed_at,
-                )
+                if witness.signing_key_id != publication.manager_signing_key_id:
+                    raise GlobalExecutionFenceError("installed execution witness signer drifted")
+                if execution is None:
+                    assert_legacy_scale_up_allowed(witness, expected_authority="global-capacity-manager",
+                        expected_pool_id=pool_id, now=observed_at)
+                else:
+                    if (witness.authority != "global-capacity-manager" or witness.pool_id != pool_id
+                            or witness.expires_at <= observed_at):
+                        raise GlobalExecutionFenceError("execution witness authority or freshness changed")
+                    exact = (witness.execution_epoch == execution.execution_epoch
+                        and witness.execution_state == execution.execution_state
+                        and witness.executable_new_capacity_ceiling == execution.executable_new_capacity_ceiling)
+                    predecessor = witness.executable_new_capacity_ceiling == 0 and (
+                        (execution.execution_state == "prepared" and witness.execution_state == "shadow"
+                        and witness.execution_epoch == 0)
+                        or (execution.execution_state == "active" and witness.execution_state == "prepared"
+                        and witness.execution_epoch == execution.execution_epoch))
+                    if not exact and not predecessor:
+                        raise GlobalExecutionFenceError("execution witness differs from current manager authority")
+                    pending |= not exact
             except GlobalExecutionFenceError as exc:
                 raise ValueError("installed execution witness is invalid") from exc
-            if witness.signing_key_id != publication.manager_signing_key_id:
-                raise ValueError("installed execution witness signer drifted")
             semantics[pool_id] = hashlib.sha256(
                 _canonical_json(
                     {
                         "authority": witness.authority,
-                        "executable_new_capacity_ceiling": (
-                            witness.executable_new_capacity_ceiling
-                        ),
-                        "execution_epoch": witness.execution_epoch,
-                        "execution_state": witness.execution_state,
+                        # The artifact retains the original shadow/key binding.
+                        # Current signed state was checked above; normalization
+                        # preserves that immutable binding across its transition.
+                        "executable_new_capacity_ceiling": 0,
+                        "execution_epoch": 0,
+                        "execution_state": "shadow",
                         "manager_public_key_sha256": (publication.manager_public_key_sha256),
                         "pool_id": witness.pool_id,
                         "schema_version": 1,
@@ -936,6 +973,8 @@ class InstalledExecutionAuthoritySource:
                     }
                 ).rstrip(b"\n")
             ).hexdigest()
+        if pending:
+            raise ExecutionWitnessPendingError("installed execution witness publication is pending")
         return MappingProxyType(semantics)
 
     @staticmethod
@@ -1061,6 +1100,46 @@ class InstalledExecutionAuthoritySource:
                 or publication.manager_client_cidrs[pool_id] != discovery.manager_client_cidr
             ):
                 raise ValueError("installed execution controller profile drifted")
+
+
+class ExecutionWitnessPendingError(ValueError):
+    """A trusted immediate predecessor witness awaits asynchronous publication."""
+
+
+class ExecutionContextReader(Protocol):
+    def get_execution_preparation_status(self) -> ProtectedExecutionPreparationStatus: ...
+
+
+def capture_current_execution_authority(source: InstalledExecutionAuthoritySource, *,
+                                       desired: ProtectedStagingDesiredConfiguration,
+                                       manager: ExecutionContextReader,
+                                       monotonic: Callable[[], float] = time.monotonic,
+                                       sleep: Callable[[float], None] = time.sleep) -> ProtectedExecutionPrerequisiteAuthority:
+    """Wait for signed publication with the full authenticated context pinned.
+
+    The publisher runs every ten seconds. Only a valid immediate predecessor
+    can wait, for at most thirty seconds; no forward effects occur during wait.
+    Signature, freshness and epoch failures retain their immediate refusal.
+    """
+    before = manager.get_execution_preparation_status().readiness.execution
+    deadline = monotonic() + 30.0
+    while True:
+        if manager.get_execution_preparation_status().readiness.execution != before:
+            raise RuntimeError("installed execution context changed during authority capture")
+        try:
+            observed = (source(desired) if before is None
+                else source.capture_during_execution(desired, execution=before))
+        except ExecutionWitnessPendingError:
+            if manager.get_execution_preparation_status().readiness.execution != before:
+                raise RuntimeError("installed execution context changed during authority capture") from None
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise ValueError("installed execution witness did not converge before deadline") from None
+            sleep(min(1.0, remaining))
+            continue
+        if manager.get_execution_preparation_status().readiness.execution != before:
+            raise RuntimeError("installed execution context changed during authority capture")
+        return observed
 
 
 def _manager_digest(value: object) -> str:

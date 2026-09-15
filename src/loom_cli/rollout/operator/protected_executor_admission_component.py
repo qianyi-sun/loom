@@ -44,6 +44,7 @@ from .protected_executor_admission_journal import (
     ExecutorAdmissionJournal,
     ExecutorAdmissionRecord,
 )
+from .protected_staging_capacity_database_component import derive_staging_reporter_incarnation
 from .staging_mutation_guard import MutationGuardEvidence
 
 
@@ -136,7 +137,11 @@ class ProtectedExecutorAdmissionComponent:
         if (inputs.digest() != context[1]
                 or seed.get("subject_id") != str(subject.subject_id)
                 or seed.get("subject_incarnation") != str(subject.subject_incarnation)
-                or seed.get("reporter_incarnation") != str(subject.demand_reporter_incarnation)):
+                or subject.configuration_generation != plan.starting_mutation_epoch + 1
+                or subject.deployment_generation != plan.starting_mutation_epoch + 1
+                or subject.candidate_generation != plan.starting_mutation_epoch + 1
+                or derive_staging_reporter_incarnation(seed.get("reporter_incarnation"),
+                    target_generation=plan.starting_mutation_epoch + 1) != subject.demand_reporter_incarnation):
             raise RuntimeError("controller admission source binding changed")
         bundle = build_controller_admission_bundle(saved[0], subject=subject,
             state_directory=state_directory, protected_admission_sha256=protected_admission_sha256,

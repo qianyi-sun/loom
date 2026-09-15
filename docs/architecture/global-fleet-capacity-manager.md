@@ -1851,8 +1851,26 @@ checks retire a positively uncommitted prepared epoch if its retained readiness
 expires or changes, preserving the abort request across lost replies. A delayed
 activation that wins the manager's transition lock is drained instead. A retired
 preparation requires a successor preparation; its old activation intent is never
-rewritten. The coordinator still requires the installed source and trusted worker launch material to
-be composed before live execution.
+rewritten.
+
+The installed final-gate executor exposes a separate activation operation. Its
+source reads the completed preparation journal and published profile, derives
+both admission bundles from retained issuance, and builds fixed controller
+transports. Recovery reconstructs requests from the private inputs before
+opening issuance or desired-configuration sources, so failed forward dependencies
+do not prevent an already selected drain. Admission compares the seed's reporter
+incarnation after applying the same generation derivation as manager configuration;
+the bootstrap seed and retained credential remain unchanged.
+
+Forward observation checks the exact authenticated manager context and existing
+resource manifests for the current phase. Prepared execution requires the increase
+freeze; active execution requires its release. Signed witnesses must match current
+epoch, state and ceiling, while their historical shadow/key digest remains the
+immutable prerequisite binding. Only an authenticated immediate predecessor may
+wait up to thirty seconds for the asynchronous publisher, with the full manager
+context pinned throughout. Changed keys, epochs, expired witnesses and a missed
+deadline refuse forward progress. The operator command and trusted worker launch
+material still require composition before live execution.
 
 The schema migration writes a canonical seed event beside its generated
 bootstrap authority UUID. A reviewed replacement requires that one pristine

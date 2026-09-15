@@ -8,7 +8,7 @@ import ipaddress
 import json
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -19,6 +19,7 @@ import yaml  # type: ignore[import-untyped]
 from cryptography import x509
 
 from loom_capacity_manager.executable_contracts import (
+    ExecutionContextV2,
     canonical_executable_digest,
 )
 from loom_cli.capacity_control_plane import (
@@ -218,6 +219,34 @@ class KubernetesProtectedStagingCapacityManagerPolicyComponent:
         except (OSError, RuntimeError, UnicodeError, ValueError, KeyError):
             return ComponentState.DRIFTED, _hash_json({"status": "observation-failed"})
         return snapshot.state, snapshot.evidence_digest
+
+    def classify_execution(self, plan: FinalGatePlan, *, execution: ExecutionContextV2) -> tuple[ComponentState, str]:
+        """Observe existing resources under one exact execution; expose no apply path."""
+        execution = ExecutionContextV2.model_validate_json(execution.model_dump_json())
+        def prepared_status() -> Mapping[str, object]:
+            observed = dict(self.manager_status_reader())
+            prerequisite = self.prerequisite_reader(plan)
+            policy = prerequisite.execution_policy
+            expected = {"authority_incarnation": str(execution.authority_incarnation),
+                "writer_epoch": execution.writer_epoch, "configuration_epoch": execution.configuration_epoch,
+                "execution_epoch": execution.execution_epoch, "execution_manifest_sha256": execution.execution_manifest_sha256,
+                "execution_state": execution.execution_state,
+                "executable_new_capacity_ceiling": execution.executable_new_capacity_ceiling}
+            if (execution.execution_state not in {"prepared", "active"}
+                    or any(observed.get(key) != value for key, value in expected.items())
+                    or observed.get("increase_freeze") is not (execution.execution_state == "prepared")
+                    or execution.trusted_fleet_release_sha256 != policy.trusted_fleet_release_sha256
+                    or (execution.execution_state == "active" and (
+                        execution.executable_new_capacity_ceiling != policy.executable_new_capacity_ceiling
+                        or execution.executable_new_capacity_rate_per_minute != policy.executable_new_capacity_rate_per_minute))):
+                raise ValueError("protected manager runtime execution changed")
+            # Resource manifests do not change at activation. Reuse their
+            # existing observer and the original prepared-manifest validator
+            # after independently checking every mutable execution field.
+            return {**observed, "execution_state": "prepared", "executable_new_capacity_ceiling": 0,
+                "increase_freeze": True}
+        state, evidence = replace(self, manager_status_reader=prepared_status).classify(plan)
+        return state, _hash_json({"resources": evidence, "execution": canonical_executable_digest(execution)})
 
     def apply(self, plan: FinalGatePlan) -> None:
         sources = self._sources(plan)
