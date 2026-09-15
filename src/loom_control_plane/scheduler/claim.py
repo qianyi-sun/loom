@@ -30,9 +30,13 @@ from hashlib import sha256
 from typing import Any
 from uuid import UUID, uuid4
 
+from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from loom.models.worker_capabilities import WorkerCapabilitySnapshotV1
+from loom.pipeline.keys import canonical_digest, canonical_document
 
 # The family predicate uses ``task_sequence[current_index + 1]`` because
 # Postgres arrays are 1-indexed while ``current_index`` counts from 0.
@@ -276,6 +280,7 @@ SELECT w.id,
        w.drain_state,
        w.supported_work_kinds,
        w.capability_snapshot_digest,
+       w.capability_snapshot_json,
        w.auth_token_hash,
        w.lease_epoch,
        (
@@ -322,7 +327,8 @@ WITH candidates AS (
           WHERE task_image_link.trial_id = t.id
             AND task_image.cpu_arch = ANY(:worker_cpu_arches)
             AND task_image.state = 'ready'
-            AND task_image.ready_publication_operation_id IS NULL
+            AND (task_image.ready_publication_operation_id IS NULL
+                 OR (:allow_signed_task_images AND task_image.cpu_arch = :signed_cpu_arch))
        )
        OR (
          NOT EXISTS (
@@ -878,7 +884,9 @@ WITH candidates AS (
             NULL::uuid AS pipeline_run_id, t.legacy_claim_id AS claim_id,
             NULL::bigint AS lease_epoch, NULL::timestamptz AS lease_expires_at,
             t.task_id, t.config, t.requires_caps, t.attempt_count,
-            t.provider_connection_id, t.family_key, t.batch_id
+            t.provider_connection_id, t.family_key, t.batch_id,
+            (:signed_cpu_arch)::text AS task_image_reader_arch,
+            (:worker_lease_epoch)::bigint AS worker_lease_epoch
 ), claimed_attempt AS (
   UPDATE execution_attempts a
      SET state = 'claimed', worker_id = (:worker_id)::uuid,
@@ -895,7 +903,8 @@ WITH candidates AS (
             a.lease_epoch, a.lease_expires_at, NULL::text AS task_id,
             NULL::jsonb AS config, NULL::jsonb AS requires_caps,
             a.attempt_number, NULL::uuid AS provider_connection_id,
-            NULL::text AS family_key, NULL::uuid AS batch_id
+            NULL::text AS family_key, NULL::uuid AS batch_id,
+            NULL::text AS task_image_reader_arch, NULL::bigint AS worker_lease_epoch
 ), acceptance_consume AS (
   UPDATE pipeline_acceptance_preflight_prerequisites fence
      SET state = 'consumed',
@@ -942,9 +951,15 @@ async def claim_work(
     worker_gpu_vendors: list[str],
     worker_network_policies: list[str],
     worker_backends: list[str] | None = None,
+    allow_signed_task_images: bool = False,
 ) -> tuple[RowMapping, str | None] | None:
     """Atomically select one Trial or ExecutionAttempt from the shared queue."""
 
+    if type(allow_signed_task_images) is not bool:
+        raise WorkClaimConflictError("invalid_execution_reader_selection")
+    # Selection is provisional, not publication/execution authority. Commit
+    # these worker/Trial locks before the separate state-first issuance phase;
+    # neither signer I/O nor immutable grant preparation runs in this transaction.
     guard = (
         (await session.execute(_WORKER_CLAIM_GUARD_SQL, {"worker_id": worker_id}))
         .mappings()
@@ -968,6 +983,22 @@ async def claim_work(
     if int(guard["active_count"]) >= int(guard["max_concurrent"]):
         raise WorkClaimConflictError("worker_capacity_exhausted")
 
+    signed_cpu_arch = ""
+    if allow_signed_task_images:
+        raw = guard["capability_snapshot_json"] or {}
+        if "task-image-execution-v2" in raw.get("container_runtime_features", []):
+            try:
+                snapshot = WorkerCapabilitySnapshotV1.model_validate_json(canonical_document(raw))
+            except (ValueError, ValidationError):
+                raise WorkClaimConflictError("execution_reader_capability_invalid") from None
+            if (
+                canonical_digest(snapshot.model_dump(mode="json")) != guard["capability_snapshot_digest"]
+                or registered_kinds != ["trial", "execution_attempt"]
+                or snapshot.cpu_arch not in worker_cpu_arches
+            ):
+                raise WorkClaimConflictError("execution_reader_capability_drift")
+            signed_cpu_arch = snapshot.cpu_arch
+
     raw_lease_token = secrets.token_urlsafe(32)
     params: dict[str, Any] = {
         "worker_id": worker_id,
@@ -979,6 +1010,9 @@ async def claim_work(
         "worker_backends": worker_backends or ["docker"],
         "claim_id": uuid4(),
         "lease_token_digest": sha256(raw_lease_token.encode()).hexdigest(),
+        "allow_signed_task_images": bool(signed_cpu_arch),
+        "signed_cpu_arch": signed_cpu_arch,
+        "worker_lease_epoch": guard["lease_epoch"],
     }
     result = (await session.execute(_WORK_CLAIM_SQL, params)).mappings().one_or_none()
     if result is None:

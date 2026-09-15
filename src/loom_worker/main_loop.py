@@ -54,7 +54,7 @@ from loom.models.result import FailureReason
 from loom.models.task import TaskConfig
 from loom.models.trial import RetryPolicy, RetryReason, TrialConfig
 from loom.models.types import ModelSpec
-from loom.models.worker_capabilities import GpuDeviceCapabilityV1
+from loom.models.worker_capabilities import GpuDeviceCapabilityV1, WorkerCapabilitySnapshotV1
 from loom.pipeline.keys import canonical_document
 from loom.pipeline.work_protocol import ExecutionAttemptClaimV1, WorkClaimV1
 from loom.retry import next_attempt_at
@@ -589,6 +589,7 @@ async def run_worker(
             cp_client=cp_client,
             settings=settings,
             pipeline_enabled=pipeline_enabled,
+            execution_trust=execution_trust,
             pipeline_cache_fields=(
                 production_runtime.registration_cache_fields()
                 if production_runtime is not None
@@ -751,7 +752,13 @@ async def _register_worker_with_retry(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     pipeline_enabled: bool = False,
     pipeline_cache_fields: Mapping[str, int] | None = None,
+    execution_trust: WorkerExecutionTrust | None = None,
 ) -> dict[str, Any]:
+    if execution_trust is not None:
+        execution_trust.__post_init__()
+        validate_task_image_execution_origin(str(settings.control_plane_url))
+        if not pipeline_enabled or settings.executor_worker_credential is not None:
+            raise ValueError("execution reader requires the authenticated legacy shared-queue assembly")
     register_kwargs: dict[str, Any] = {
         "hostname": _worker_hostname(settings.hostname),
         "version": "0.0.1",
@@ -785,6 +792,14 @@ async def _register_worker_with_retry(
             )
         )
         register_kwargs.update(registration)
+        if execution_trust is not None:
+            raw_snapshot = dict(registration["capability_snapshot"])
+            raw_snapshot["container_runtime_features"] = sorted({
+                *raw_snapshot["container_runtime_features"], "task-image-execution-v2",
+            })
+            snapshot = WorkerCapabilitySnapshotV1.model_validate_json(json.dumps(raw_snapshot))
+            register_kwargs["capability_snapshot"] = snapshot.model_dump(mode="json")
+            register_kwargs["capability_snapshot_digest"] = snapshot.digest
     return await retry_startup_dependency(
         lambda: cp_client.register(**register_kwargs),
         operation_name="worker control-plane registration",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -54,6 +54,7 @@ from loom_control_plane.routes import (
     service_executions,
     state,
     step_tokens,
+    task_image_execution,
     task_image_materializations,
     tasks,
     trajectory,
@@ -69,6 +70,7 @@ from loom_control_plane.service_execution_materializer import (
 from loom_control_plane.service_execution_scheduler import (
     run_service_execution_scheduler_loop,
 )
+from loom_control_plane.task_image_execution import TaskImageExecutionService
 from loom_control_plane.worker_pool_autoscaler import (
     run_worker_pool_autoscaler_loop,
 )
@@ -108,7 +110,12 @@ async def _cancel_and_drain_tasks(
             raise result
 
 
-def create_app(settings: ControlPlaneSettings) -> FastAPI:
+def create_app(
+    settings: ControlPlaneSettings, *,
+    task_image_execution_factory: Callable[[AsyncEngine], TaskImageExecutionService] | None = None,
+) -> FastAPI:
+    if task_image_execution_factory is not None and settings.protected_worker_runtime_db_url_file is not None:
+        raise ValueError("signed legacy execution cannot replace protected worker authority")
     source_config = ServiceExecutionSourceConfig.from_settings(settings)
 
     @asynccontextmanager
@@ -159,6 +166,9 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
 
         app.state.settings = settings
         app.state.session_factory = session_factory
+        app.state.task_image_execution = (
+            task_image_execution_factory(engine) if task_image_execution_factory is not None else None
+        )
         app.state.admin_secret_verifier = admin_secret_verifier
         app.state.minio_client = minio_client
         app.state.protected_worker_session_store = protected_worker_session_store
@@ -380,6 +390,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
     app.include_router(step_tokens.router)
     app.include_router(trial_cache.router)
     app.include_router(task_image_materializations.router)
+    app.include_router(task_image_execution.router)
     # /metrics: standard prometheus_client ASGI app. Mounted at the
     # top-level for prometheus scrapers (operator-supplied
     # ServiceMonitor / PodMonitor uses the default `/metrics` path).

@@ -14,10 +14,49 @@ from loom_task_image_authority.execution_grant import TaskImageExecutionGrantV2
 from loom_worker.control_plane_client import HttpControlPlaneClient
 from tests.integration.test_task_image_execution_signer import setup as signer_setup
 from tests.integration.test_task_image_execution_store import start_request
-from tests.integration.test_task_image_publication_jobs import registry_authority_session as registry_authority_session
-from tests.integration.test_task_image_registry_credentials import registry_issuer as registry_issuer
+from tests.integration.test_task_image_publication_jobs import (
+    registry_authority_session as registry_authority_session,
+)
+from tests.integration.test_task_image_registry_credentials import (
+    registry_issuer as registry_issuer,
+)
 
 RAW_TOKEN = "disposable-execution-worker-token"
+
+
+async def test_provisional_scheduler_claim_does_not_wait_on_publication_signing_fence(
+    registry_authority_session, registry_issuer, tmp_path, monkeypatch,
+):
+    import asyncio
+
+    from loom_control_plane.routes.workers import _REQUEUE_TRIAL_RETRY_SQL
+    from loom_control_plane.scheduler.claim import claim_work
+
+    factory = registry_authority_session
+    _, _, request, engine = await setup(factory, registry_issuer, tmp_path, monkeypatch)
+    claim = request.claim
+    try:
+        async with factory.begin() as session:
+            await session.execute(_REQUEUE_TRIAL_RETRY_SQL, dict(
+                trial_id=UUID(claim.trial_id), worker_id=UUID(claim.worker_id),
+                failure_reason="node_setup_health", failure_message="disposable fixture requeue", retry_after_sec=0,
+            ))
+            worker = await session.get(Worker, UUID(claim.worker_id))
+            digest = worker.capability_snapshot_digest
+        async with engine.begin() as blocker:
+            await blocker.execute(text("SELECT singleton_id FROM task_image_publication_state FOR UPDATE"))
+            async with asyncio.timeout(1), factory.begin() as session:
+                result = await claim_work(session, worker_id=UUID(claim.worker_id),
+                    capability_snapshot_digest=digest, worker_token_hash=hashlib.sha256(RAW_TOKEN.encode()).digest(),
+                    supported_work_kinds=["trial", "execution_attempt"], free_slots=1,
+                    worker_os=["linux"], worker_cpu_arches=["arm64"], worker_gpu_vendors=["none"],
+                    worker_network_policies=["public"], allow_signed_task_images=True)
+                assert result is not None
+                assert result[0]["claim_id"] != UUID(claim.claim_id)
+        # Selection is only a provisional claim. It never signs, reads a
+        # mutable image snapshot, or consumes runtime authority under its locks.
+    finally:
+        await engine.dispose()
 
 
 async def setup(factory, issuer, tmp_path, monkeypatch):
@@ -27,7 +66,7 @@ async def setup(factory, issuer, tmp_path, monkeypatch):
     _, policy, _, common, engine = await signer_setup(factory, issuer, tmp_path, monkeypatch)
     token_hash = hashlib.sha256(RAW_TOKEN.encode()).digest()
     async with factory.begin() as session:
-        session.add(Token(token_hash=token_hash, type="worker", scopes=["worker:claim", "worker:report"]))
+        session.add(Token(token_hash=token_hash, type="worker", scopes=["worker:claim", "worker:report"], issued_at=common["clock"]()))
         await session.execute(update(Worker).where(Worker.id == UUID(common["claim"].worker_id)).values(auth_token_hash=token_hash))
 
     class Signer:
@@ -43,8 +82,77 @@ async def setup(factory, issuer, tmp_path, monkeypatch):
     request = start_request(grant, delivery.grant_envelope.encode())
     app = FastAPI()
     app.state.task_image_execution = service
+    app.state.session_factory = factory
     app.include_router(importlib.import_module("loom_control_plane.routes.task_image_execution").router)
     return app, service, request, engine
+
+
+@pytest.mark.parametrize("reader", ["v2", "legacy", "disabled", "digest-drift", "signer-unavailable"])
+async def test_shared_claim_delivers_signed_native_images_only_to_registered_v2_reader(
+    registry_authority_session, registry_issuer, tmp_path, monkeypatch, reader,
+):
+    from loom.pipeline.keys import canonical_digest
+    from loom_control_plane.routes.workers import _REQUEUE_TRIAL_RETRY_SQL, router
+    from loom_task_image_authority.execution_delivery import SignedWorkClaim
+
+    factory = registry_authority_session
+    app, service, old_request, engine = await setup(factory, registry_issuer, tmp_path, monkeypatch)
+    app.include_router(router)
+    claim = old_request.claim
+    try:
+        async with factory.begin() as session:
+            await session.execute(_REQUEUE_TRIAL_RETRY_SQL, dict(
+                trial_id=UUID(claim.trial_id), worker_id=UUID(claim.worker_id),
+                failure_reason="node_setup_health", failure_message="disposable fixture requeue",
+                retry_after_sec=0,
+            ))
+            worker = await session.get(Worker, UUID(claim.worker_id))
+            if reader in {"legacy", "digest-drift"}:
+                snapshot = dict(worker.capability_snapshot_json)
+                if reader == "legacy":
+                    snapshot["container_runtime_features"] = []
+                else:
+                    snapshot["cpu_cores"] += 1
+                worker.capability_snapshot_json = snapshot
+                if reader == "legacy":
+                    worker.capability_snapshot_digest = canonical_digest(snapshot)
+            digest = worker.capability_snapshot_digest
+        if reader == "disabled":
+            app.state.task_image_execution = None
+        if reader == "signer-unavailable":
+            async def unavailable(*args, **kwargs):
+                raise ConnectionError("disposable signer unavailable")
+
+            service._signer.sign_execution = unavailable
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="https://control-plane.test") as http:
+            client = HttpControlPlaneClient(base_url="https://control-plane.test", token=RAW_TOKEN, _client=http)
+            if reader in {"legacy", "disabled"}:
+                assert await client.claim_work(worker_id=UUID(claim.worker_id), capability_snapshot_digest=digest, free_slots=1) is None
+            elif reader in {"digest-drift", "signer-unavailable"}:
+                with pytest.raises(httpx.HTTPStatusError):
+                    await client.claim_work(worker_id=UUID(claim.worker_id), capability_snapshot_digest=digest, free_slots=1)
+                async with factory.begin() as session:
+                    trial = await session.get(Trial, UUID(claim.trial_id))
+                    assert trial.state == "queued" and trial.attempt_count == 0
+            else:
+                body = await client.claim_work(worker_id=UUID(claim.worker_id), capability_snapshot_digest=digest, free_slots=1)
+                import json
+
+                signed = SignedWorkClaim.model_validate_json(json.dumps(body))
+                delivery = signed.payload.task_image_execution
+                assert delivery.claim.claim_id != claim.claim_id
+                assert delivery.claim.trial_attempt_count == claim.trial_attempt_count
+                assert signed.payload.task_image_materialization is None
+                envelope = json.loads(delivery.grant_envelope)
+                grant = TaskImageExecutionGrantV2.model_validate_json(envelope["canonical_grant"])
+                receipt = await client.consume_task_image_execution_start(start_request(grant, delivery.grant_envelope.encode()))
+                assert receipt.request_sha256 != old_request.digest
+                # The previous claim's otherwise valid signed evidence cannot
+                # consume authority after a refundable scheduler re-claim.
+                with pytest.raises(httpx.HTTPStatusError):
+                    await client.consume_task_image_execution_start(old_request)
+    finally:
+        await engine.dispose()
 
 
 async def test_actual_worker_client_receives_only_committed_fresh_start(

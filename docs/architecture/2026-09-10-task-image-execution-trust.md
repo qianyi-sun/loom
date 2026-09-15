@@ -1,13 +1,12 @@
 # Task-image execution trust
 
 Status: signed-keyset, complete publication-set and signed V2 execution-evidence
-verification, durable distribution adapter and dedicated signer service/client
-implemented; an opt-in existing-worker consumer composes source verification and
-an online start client. The backend now journals grant revisions and serializes
-one-use consumption with current claim and revocation authority. Host signing
-service provisioning, capability-gated server delivery and
-the HTTP start route remain uncomposed.
-The consumer is not activation evidence.
+verification, durable distribution, dedicated signer and opt-in existing-worker
+source-to-start consumption are connected through authenticated shared claims.
+The backend journals grant revisions, signs committed preparations and serializes
+one-use HTTP consumption with current token, worker/claim and revocation authority.
+Host signing service/root provisioning and standard release-entrypoint configuration
+remain incomplete. This implementation is not live activation evidence.
 
 This document covers the keyset, distribution, dedicated signer and
 execution-evidence contracts of the
@@ -26,6 +25,13 @@ authenticated shared-queue path; the legacy body-capability endpoint cannot
 enable it. The assembly rejects a non-HTTPS control-plane URL before registration
 or other worker effects, protecting the bearer used by both claim and start.
 Default worker assembly and existing V1 claims remain unchanged.
+
+The explicit trusted assembly advertises `task-image-execution-v2` in its measured
+and digest-checked registration snapshot. This currently requires the existing
+dual-kind Pipeline/shared-queue assembly and refuses a protected-worker credential;
+it does not install a protected-claim adapter or make Trial-only workers advertise
+Pipeline support. Capability advertisement requires the configured root and HTTPS,
+not a response field or a task-selected boolean.
 
 `TaskImageExecutionDelivery` carries bounded original grant, plan, publication
 and keyset envelopes plus the scheduler-stamped legacy claim identity. The
@@ -60,11 +66,10 @@ directory after denial or cancellation.
 The request binds grant UUID/revision, full envelope digest, exact claim and
 keyset digest/version/revocation epoch. Its receipt binds the canonical request
 digest, unique start UUID and a validity interval of at most thirty seconds.
-This client-side latch is **not** durable one-use enforcement: the server must
-serialize consumption with current worker/claim, grant revision and publication
-revocation authority and reject duplicate consumes even after process restart.
-No server route, composed grant issuer, capability advertisement, root installation or
-production readiness change is supplied by this consumer. Existing signed V2
+The client-side latch is **not** durable one-use enforcement; the server additionally
+serializes consumption with current worker/claim, grant revision and publication
+revocation authority and rejects duplicates even after process restart.
+No root installation or production activation is supplied by this opt-in path. Existing signed V2
 evidence still requires genuine Slurm provenance; this is not yet a Nebius
 publication adapter or a native AMD64/ARM64 acceptance result.
 
@@ -93,6 +98,41 @@ not replayed as a successful start. The API must bound checkout/transaction/comm
 time and commit before returning `201`; the store's return alone is not durable
 HTTP success. Database race tests exercise both duplicate consumption and a start
 waiting behind revocation, but do not establish live native build acceptance.
+
+`TaskImageExecutionService` owns connection-checkout, authentication, statement,
+idle-transaction, signing and commit deadlines. The ordinary bearer helper owns
+an internal commit, so it runs in a separate authentication session. Each actual
+admission transaction independently locks and rechecks the worker Token with
+`FOR SHARE` before publication state, worker and Trial. Token revocation cannot
+race between that final check and consume. No authentication helper commits away
+held admission locks. `/trials/{trial_id}/task-image/start` accepts a bounded,
+duplicate-free request and returns canonical, noncacheable `201` only after commit.
+Deferred commit failure, lock timeout, revoked token, wrong scope/path, cancellation
+and replay do not produce a successful start acknowledgement.
+
+`create_app(task_image_execution_factory=...)` provides explicit opt-in composition
+using the app's own database engine, and rejects simultaneous protected-worker
+runtime configuration. Without that factory the start route is unavailable and
+the shared scheduler retains native-publication exclusion. With it, native-ready
+selection requires the exact registered reader capability and native architecture;
+the request body cannot opt a worker in. Selection is only provisional and retains
+ordinary worker/Trial lock ordering: it does not wait on the global publication
+fence. Commit releases those locks before state-first grant preparation and external
+signing. The signed response stamps the scheduler's fresh claim UUID, worker epoch,
+team and attempt. Old readers still use the unchanged V1 snapshot path.
+
+Failed issuance compensates only the same unstarted, unconsumed claim through the
+existing retry transition, records `task_image_admission_unavailable`, refunds the
+attempt and applies a thirty-second backoff. Claim identity and audit history remain
+retained. If authority changed or the database is unavailable, ordinary reclaim is
+the fallback; compensation never rewrites a started, cancelled or replacement claim.
+Tests exercise a refundable re-claim through the actual shared HTTP route and worker
+client, and reject the earlier claim's otherwise valid signed evidence.
+
+Release wiring, a worker-accessible grant-refresh path for preparation that outlives
+the initial grant, protected-reader composition and live native acceptance remain
+separate unfinished boundaries. The store's revision support alone does not supply
+an online refresh protocol.
 
 ## Signed keyset
 

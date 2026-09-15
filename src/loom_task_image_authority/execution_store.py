@@ -120,7 +120,7 @@ async def lock_execution_claim(
         or trial.worker_id != worker.id or trial.team_id != UUID(checked.team_id)
         or trial.legacy_claim_id != UUID(checked.claim_id)
         or trial.attempt_count != checked.trial_attempt_count
-        or trial.requires_caps.get("cpu_arch", snapshot.cpu_arch) != snapshot.cpu_arch
+        or trial.requires_caps.get("cpu_arch", "x86_64") not in {snapshot.cpu_arch, "any"}
     ):
         raise ValueError("execution trial claim is stale or no longer pre-start")
     consumed = await session.scalar(select(exists().where(

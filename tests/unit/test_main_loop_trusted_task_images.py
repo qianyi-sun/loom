@@ -177,3 +177,35 @@ async def test_release_trust_rejects_http_before_worker_registration(tmp_path, m
             SimpleNamespace(control_plane_url="http://cp.example"), execution_trust=trust,
         )
     effects.assert_not_called()
+
+
+@pytest.mark.parametrize("case", ["v2", "v1", "no-pipeline", "http", "protected"])
+async def test_registration_advertises_execution_reader_only_with_explicit_trust(tmp_path, monkeypatch, case):
+    from loom.models.worker_capabilities import WorkerCapabilitySnapshotV1
+
+    _, kwargs = evidence(tmp_path)
+    m = importlib.import_module("loom_worker.task_image_execution")
+    trust = m.WorkerExecutionTrust(root=kwargs["trust_root"], purpose="production", shadow_campaign_id=None)
+    settings = SimpleNamespace(hostname="worker", max_concurrent=1, pool_name="fixture",
+        executor_worker_credential="present" if case == "protected" else None,
+        control_plane_url="http://cp.example" if case == "http" else "https://cp.example")
+    snapshot = dict(schema_version="loom.worker-capabilities.v1", cpu_arch="x86_64", cpu_cores=2,
+        memory_bytes=1024, scratch_bytes=1024, network_profiles=["gateway"],
+        container_runtime_features=["loom-secret-tmpfs-v1"], gpu_devices=[],
+        input_cache_capacity_bytes=0, input_cache_reserved_bytes=0, input_cache_ready_bytes=0)
+    monkeypatch.setattr(ml, "_pipeline_registration_payload", lambda _: {"capability_snapshot": snapshot})
+    cp = SimpleNamespace(register=AsyncMock(return_value={"worker_id": "fixture"}))
+    call = dict(cp_client=cp, settings=settings, pipeline_enabled=case != "no-pipeline",
+                execution_trust=trust if case != "v1" else None)
+    if case in {"no-pipeline", "http", "protected"}:
+        with pytest.raises(ValueError):
+            await ml._register_worker_with_retry(**call)
+        cp.register.assert_not_called()
+    else:
+        await ml._register_worker_with_retry(**call)
+        registered = cp.register.call_args.kwargs
+        checked = WorkerCapabilitySnapshotV1.model_validate_json(json.dumps(registered["capability_snapshot"]))
+        assert ("task-image-execution-v2" in checked.container_runtime_features) is (case == "v2")
+        if case == "v2":
+            assert registered["capability_snapshot_digest"] == checked.digest
+        assert registered["supported_work_kinds"] == ["trial", "execution_attempt"]
