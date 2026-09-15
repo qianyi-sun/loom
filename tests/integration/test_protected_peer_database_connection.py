@@ -169,8 +169,10 @@ def test_journaled_fixed_peer_recovery_retries_without_adopting_old_connections(
 
                 monkeypatch.setattr(os, "read", read)
 
-                def open_peer(_runner, *, maintenance):
-                    peer = _peer(peer_postgres, "postgres" if maintenance else "loom")
+                def open_peer(_runner, *, database):
+                    assert database in {"postgres", "loom"}
+                    maintenance = database == "postgres"
+                    peer = _peer(peer_postgres, database)
                     exchange = peer._exchange
 
                     def exchange_with_lost_ack(statement, *, returns_rows):
