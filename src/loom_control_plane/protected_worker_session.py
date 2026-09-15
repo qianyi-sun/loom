@@ -532,6 +532,24 @@ class ProtectedWorkerSessionStore:
             raise ProtectedWorkerSessionRejected("protected progress rejected") from exc
         return None if value is None else _mapping(value)
 
+    async def publish_trial_output(
+        self, *, worker_id: UUID, worker_credential: str, report: Mapping[str, object],
+    ) -> Mapping[str, Any] | None:
+        """Authenticate and apply one output report under the same SQL transaction."""
+        try:
+            async with self._session_factory() as session, session.begin():
+                value = (await session.execute(
+                    text("SELECT loom_capacity_guard.publish_staging_trial_output("
+                         ":worker_id, :credential, CAST(:report AS jsonb))"),
+                    {"worker_id": worker_id, "credential": worker_credential,
+                     "report": json.dumps(dict(report), sort_keys=True, separators=(",", ":"))},
+                )).scalar_one()
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) == "42501":
+                raise ProtectedWorkerSessionAuthenticationRejected("protected output authentication rejected") from exc
+            raise ProtectedWorkerSessionRejected("protected output rejected") from exc
+        return None if value is None else _mapping(value)
+
     @asynccontextmanager
     async def assert_session(
         self,
@@ -673,6 +691,32 @@ async def protected_body_worker_claim(
         worker_credential=worker_credential,
         store=store,
     )
+
+
+async def protected_body_worker_output_session(
+    request: Request,
+    worker_credential: str | None = Header(default=None, alias=EXECUTOR_WORKER_CREDENTIAL_HEADER),
+) -> AsyncIterator[ProtectedWorkerSession | None]:
+    """Preauthenticate output; its write transaction must independently authenticate."""
+    store: ProtectedWorkerSessionStore | None = getattr(request.app.state, "protected_worker_session_store", None)
+    if store is None and worker_credential is None:
+        yield None
+        return
+    if store is None:
+        raise HTTPException(status_code=503, detail="protected worker runtime unavailable")
+    if worker_credential is None:
+        raise HTTPException(status_code=401, detail="protected worker session rejected")
+    try:
+        payload = await request.json()
+        worker_id = UUID(str(payload["worker_id"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="worker_id required") from exc
+    try:
+        authenticated = await store.authenticate_session(worker_id=worker_id, worker_credential=worker_credential)
+    except ProtectedWorkerSessionRejected as exc:
+        raise HTTPException(status_code=401, detail="protected worker session rejected") from exc
+    request.state.protected_worker_session = authenticated
+    yield authenticated
 
 
 async def protected_body_worker_state_session(
@@ -962,4 +1006,8 @@ ProtectedTrialWorkerSession = Annotated[
 ProtectedQueryWorkerSession = Annotated[
     ProtectedWorkerSession | None,
     Depends(protected_query_worker_session),
+]
+
+ProtectedBodyWorkerOutputSession = Annotated[
+    ProtectedWorkerSession | None, Depends(protected_body_worker_output_session),
 ]

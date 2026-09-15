@@ -190,6 +190,10 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
         try:
             with environment_admin_engine.begin() as connection:
                 connection.exec_driver_sql(f"GRANT USAGE ON SCHEMA public TO {quoted_owner}")
+                from loom.capacity_trial_output_sql import protected_trial_output_owner_grants
+
+                for grant in protected_trial_output_owner_grants(owner_role):
+                    connection.exec_driver_sql(grant.as_string())
                 connection.exec_driver_sql(
                     f"GRANT REFERENCES (id) ON TABLE public.trials TO {quoted_owner}"
                 )

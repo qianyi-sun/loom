@@ -207,7 +207,7 @@ def upgrade() -> None:
           worker_id uuid NOT NULL,
           worker_incarnation uuid NOT NULL,
           claim_operation_id uuid NOT NULL,
-          operation text NOT NULL CHECK (operation IN ('claim', 'retry', 'refund', 'state')),
+          operation text NOT NULL CHECK (operation IN ('claim', 'retry', 'refund', 'state', 'output')),
           old_binding jsonb NOT NULL,
           changes jsonb NOT NULL,
           observed_old_row jsonb,
@@ -392,6 +392,9 @@ def upgrade() -> None:
     from capacity_guard_migrations.trial_state import install_state_reporting
 
     install_state_reporting(_rewrite)
+    from capacity_guard_migrations.trial_output import install_output_reporting
+
+    install_output_reporting(_rewrite)
 
 
 def downgrade() -> None:
@@ -442,8 +445,10 @@ def downgrade() -> None:
     )
     if retained:
         raise RuntimeError("frozen retry permission evidence requires protected retirement")
+    from capacity_guard_migrations.trial_output import uninstall_output_reporting
     from capacity_guard_migrations.trial_state import uninstall_state_reporting
 
+    uninstall_output_reporting(_rewrite)
     uninstall_state_reporting(_rewrite)
     _rewrite(_CLAIM, _claim_replacements(), upgrading=False)
     _rewrite(_RETRY, _retry_replacements(), upgrading=False)
