@@ -130,7 +130,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             ("PATCH", "/trials/{trial_id}/trajectory_index"),
             ("POST", "/trials/{trial_id}/events"),
             ("PUT", "/trials/{trial_id}/resource-usage"),
-            ("POST", "/artifacts/upload-url"), ("POST", "/step-tokens"),
+            ("POST", "/artifacts/upload-url"), ("POST", "/admin/step-tokens"),
             ("POST", "/api/v1/internal/trial-cache/claim"),
             ("POST", "/api/v1/internal/trial-cache/{cache_key}/refresh"),
             ("DELETE", "/api/v1/internal/trial-cache/{cache_key}"),
