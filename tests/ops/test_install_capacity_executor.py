@@ -2295,3 +2295,26 @@ def test_controller_credential_wire_operation_is_canonical_bounded_and_secret_sa
         )
     message = str(malformed.value)
     assert all(value.decode("ascii") not in message for value in payload.files.values())
+
+
+@pytest.mark.parametrize("operation", ["discover", "prerequisite"])
+@pytest.mark.parametrize("visibility", ["jobs", "all", "", "none\nPrivateData = jobs"])
+def test_controller_authority_refuses_hidden_or_ambiguous_scheduler_jobs(tmp_path, operation, visibility):
+    request = _controller_request(tmp_path)
+    runner = FakeHostRunner(tmp_path)
+    runner.group_present = runner.user_present = True
+    original = runner.run
+    def run(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if tuple(argv[-2:]) == ("show", "config"):
+            return CommandResult(0, f"ClusterName = {runner.slurm_cluster}\nPrivateData = {visibility}\n")
+        return result
+    runner.run = run
+    installer = ControllerInstaller(context=_context(tmp_path), runner=runner,
+        machine="x86_64", hostname="TRT-EAI-OLDLAB-1", effective_uid=0)
+    with pytest.raises(CapacityExecutorInstallError, match="job visibility"):
+        if operation == "discover":
+            installer.discover_controller(ControllerDiscoveryRequest(
+                schema_version=1, pool_id="oldlab", transport_authority_sha256="8" * 64))
+        else:
+            installer._local_authority(request)

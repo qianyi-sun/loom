@@ -1417,3 +1417,24 @@ def test_inventory_carries_nonzero_journal_checkpoint() -> None:
 
     assert reports.executable_inventory.journal_checkpoint_sequence == 1
     assert reports.executable_inventory.journal_checkpoint_digest == "1" * 64
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["before", "after"])
+@pytest.mark.parametrize("visibility", ["jobs", "all", "", "none\nPrivateData = jobs", "none\nClusterName = foreign"])
+async def test_capture_refuses_hidden_or_ambiguous_jobs_before_reporting(phase, visibility):
+    nodes, jobs = _documents()
+    reads = []
+    class Runner:
+        async def run(self, command):
+            reads.append(command)
+            if command == "config":
+                current = visibility if ((phase == "before") == (reads.count("config") == 1)) else "none"
+                return f"ClusterName = trt-gb10\nPrivateData = {current}\n".encode()
+            return json.dumps(nodes if command == "nodes" else jobs).encode()
+    with pytest.raises(ValueError, match="job visibility"):
+        await capture_slurm_capacity_reports(Runner(), policy=_policy(), binding=_binding(),
+            source_observed_at=datetime(2026, 8, 15, 12, 0, tzinfo=UTC))
+    assert reads.count("config") == (1 if phase == "before" else 2)
+    if phase == "before":
+        assert reads == ["config"]
