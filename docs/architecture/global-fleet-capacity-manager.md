@@ -1731,7 +1731,12 @@ returning evidence; NOWAIT refusals roll back before a retry with the same retai
 writer and operation IDs. Readback counts committed ledger rows, including a valid
 zero, and never substitutes sequence values or fabricated per-route counters.
 The prerequisite publisher accepts evidenced zero cursors while refusing placeholder
-acknowledgement/freeze hashes. This adapter still needs the enclosing installed
+acknowledgement/freeze hashes.
+The GB10 broker admits the activation request's bounded SQL admission and native
+TLS material, checks their byte hashes and executor binding, and accepts exactly
+the requested native TLS file receipts. The trusted candidate installer still
+validates the complete typed credential, route and output-path contracts before
+host I/O; the broker exposes no arbitrary command or file-map operation. This adapter still needs the enclosing installed
 cutover command and runtime retirement composition.
 
 This interception is not complete cutover authority. The enclosing installed freeze
