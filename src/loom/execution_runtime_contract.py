@@ -278,6 +278,7 @@ class ExecutionRuntimePlanV1(_Strict):
     main: ProcessPhaseV1
     verifier_execution: VerifierExecution
     verifier: ProcessPhaseV1 | None = None
+    verifier_after_agent_timeout: bool = False
     sidecars: tuple[SidecarContainerV1, ...] = Field(default=(), max_length=32)
     max_log_bytes_per_stream: int = Field(default=10 * 1024 * 1024, gt=0, le=100 * 1024 * 1024)
     max_artifact_bytes: int = Field(default=1024 * 1024 * 1024, gt=0, le=10 * 1024**3)
@@ -351,6 +352,15 @@ class ExecutionRuntimePlanV1(_Strict):
             if any(item not in known for item in sidecar.depends_on):
                 raise ValueError("sidecar dependencies must reference earlier sidecars")
             known.add(sidecar.role_name)
+        if self.verifier_after_agent_timeout and (
+            self.execution_role != "attempt"
+            or self.composition != RuntimeComposition.INIT_PAYLOAD
+            or self.agent_image_ref is None
+            or self.verifier_execution != "in_attempt"
+            or {sidecar.role_name for sidecar in self.sidecars if sidecar.private_sandbox}
+            != {"task-sandbox", "verifier-sandbox"}
+        ):
+            raise ValueError("timeout verification requires an isolated attempt controller and in-attempt verifier")
         if self.controller_resources is not None:
             sandboxes = [sidecar for sidecar in self.sidecars if sidecar.private_sandbox]
             if (
@@ -391,6 +401,8 @@ class ExecutionRuntimePlanV1(_Strict):
     def canonical_payload(self) -> dict[str, object]:
         payload = self.model_dump(mode="json")
         # Keep existing published plans byte-compatible when new fields are unused.
+        if not self.verifier_after_agent_timeout:
+            payload.pop("verifier_after_agent_timeout")
         if self.controller_resources is None:
             payload.pop("controller_resources")
         if self.resource_requests is None:

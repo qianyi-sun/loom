@@ -172,3 +172,88 @@ def test_complete_output_declarations_are_confined_and_unique() -> None:
             kind="task_artifact",
             required=True,
         )
+
+
+def _timeout_verifier_plan() -> ExecutionRuntimePlanV1:
+    probe = ProbeV1(kind="exec", argv=("/bin/true",))
+    sandboxes = tuple(
+        SidecarContainerV1(
+            role_name=name,
+            image_ref=_IMAGE,
+            argv=("/bin/true",),
+            resources=_RESOURCES,
+            startup_probe=probe,
+            readiness_probe=probe,
+            private_sandbox=True,
+        )
+        for name in ("task-sandbox", "verifier-sandbox")
+    )
+    return _plan(
+        agent_image_ref=_IMAGE,
+        sidecars=sandboxes,
+        verifier_after_agent_timeout=True,
+    )
+
+
+def test_timeout_verification_opt_in_round_trip_and_legacy_payload() -> None:
+    legacy = _plan()
+    payload = legacy.canonical_payload()
+    assert "verifier_after_agent_timeout" not in payload
+    assert ExecutionRuntimePlanV1.model_validate(
+        {**payload, "verifier_after_agent_timeout": False}
+    ).canonical_payload() == payload
+    assert not ExecutionRuntimePlanV1.model_validate(payload).verifier_after_agent_timeout
+
+    enabled = _timeout_verifier_plan()
+    payload = enabled.canonical_payload()
+    assert payload["verifier_after_agent_timeout"] is True
+    loaded = ExecutionRuntimePlanV1.model_validate(payload)
+    assert loaded.verifier_after_agent_timeout
+    assert loaded.main.timeout_seconds == enabled.main.timeout_seconds
+    assert loaded.verifier == enabled.verifier
+
+
+@pytest.mark.parametrize(
+    ("changes", "reason"),
+    [
+        ({"composition": "precomposed"}, "isolated attempt controller"),
+        ({"agent_image_ref": None}, "agent image reference"),
+        ({"sidecars": []}, "isolated attempt controller"),
+        ({"verifier_execution": "skipped", "verifier": None}, "in-attempt verifier"),
+        ({"verifier_execution": "separate_execution", "verifier": None}, "in-attempt verifier"),
+        ({"verifier": None}, "requires a verifier phase"),
+        (
+            {
+                "execution_role": "verifier",
+                "main": _phase("verifier").model_dump(mode="json"),
+                "verifier_execution": "skipped",
+                "verifier": None,
+            },
+            "isolated attempt controller",
+        ),
+    ],
+)
+def test_timeout_verification_rejects_unsafe_topology(
+    changes: dict[str, object], reason: str
+) -> None:
+    payload = _timeout_verifier_plan().canonical_payload()
+    payload.update(changes)
+    with pytest.raises(ValidationError, match=reason):
+        ExecutionRuntimePlanV1.model_validate(payload)
+
+
+@pytest.mark.parametrize("missing_role", ["task-sandbox", "verifier-sandbox"])
+def test_timeout_verification_requires_both_private_sandboxes(missing_role: str) -> None:
+    payload = _timeout_verifier_plan().canonical_payload()
+    payload["sidecars"] = [
+        item for item in payload["sidecars"] if item["role_name"] != missing_role
+    ]
+    with pytest.raises(ValidationError, match="isolated attempt controller"):
+        ExecutionRuntimePlanV1.model_validate(payload)
+
+    payload = _timeout_verifier_plan().canonical_payload()
+    for item in payload["sidecars"]:
+        if item["role_name"] == missing_role:
+            item["private_sandbox"] = False
+    with pytest.raises(ValidationError, match="private mounts"):
+        ExecutionRuntimePlanV1.model_validate(payload)

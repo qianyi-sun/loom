@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -165,6 +166,7 @@ func runPlan(
 	if p.Verifier != nil {
 		phases = append(phases, *p.Verifier)
 	}
+	var agentTimeout error
 	for ordinal, item := range phases {
 		evidence, err := runPhase(
 			ctx, item, ordinal+1, workspace, outputRoot,
@@ -173,11 +175,29 @@ func runPlan(
 		)
 		result.Phases = append(result.Phases, evidence)
 		if err != nil {
+			// Exit 124 is the trusted controller's acknowledgement that an
+			// expired agent is quiescent and its workspace handoff is complete.
+			// A deadline alone (or a forced kill) is never a safe handoff.
+			if p.VerifierAfterAgentTimeout && item.Role == "agent" &&
+				evidence.TimedOut && evidence.ExitCode == 124 && ctx.Err() == nil {
+				agentTimeout = err
+				result.PartialEvidence = true
+				continue
+			}
 			result.Status = classifyFailure(ctx, evidence)
+			if agentTimeout != nil && ctx.Err() == nil {
+				result.Status = "timed_out"
+				err = errors.Join(agentTimeout, err)
+			}
 			result.PartialEvidence = true
 			result.FinishedAt = time.Now().UTC()
 			return result, err
 		}
+	}
+	if agentTimeout != nil {
+		result.Status = "timed_out"
+		result.FinishedAt = time.Now().UTC()
+		return result, agentTimeout
 	}
 	result.Status = "succeeded"
 	result.FinishedAt = time.Now().UTC()
@@ -242,6 +262,10 @@ func runPhase(
 	for name, value := range trustedEnvironment {
 		environment[name] = value
 	}
+	// The Python controller and Gateway use this same cutoff. Do not let
+	// process startup reset the agent's full task-owned allowance.
+	environment["LOOM_EXECUTION_PHASE_DEADLINE"] = strconv.FormatFloat(float64(deadline.UnixNano())/1e9, 'f', 9, 64)
+	environment["LOOM_EXECUTION_TERMINATION_GRACE_SECONDS"] = strconv.FormatFloat(terminationGrace.Seconds(), 'f', -1, 64)
 	names := make([]string, 0, len(environment))
 	for name := range environment {
 		names = append(names, name)
@@ -278,7 +302,7 @@ func runPhase(
 	finished := time.Now().UTC()
 	evidence := phaseEvidence{
 		Role: item.Role, Ordinal: ordinal, StartedAt: started, FinishedAt: finished,
-		ExitCode: 0, TimedOut: errors.Is(phaseCtx.Err(), context.DeadlineExceeded),
+		ExitCode: 0, TimedOut: errors.Is(phaseCtx.Err(), context.DeadlineExceeded) || !finished.Before(deadline),
 		Stdout: stdout.evidence(filepath.Base(stdoutPath)), Stderr: stderr.evidence(filepath.Base(stderrPath)),
 	}
 	if err != nil {

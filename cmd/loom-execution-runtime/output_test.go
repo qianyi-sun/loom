@@ -86,6 +86,19 @@ func TestCaptureDeclaredOutputsFailsClosedOnMissingTrajectory(t *testing.T) {
 	}
 }
 
+func TestTimeoutCaptureKeepsVerifierRewardWithMissingNativeArtifact(t *testing.T) {
+	workspace, output := t.TempDir(), t.TempDir()
+	p := completeOutputPlan(workspace)
+	writeWorkspaceOutput(t, workspace, ".loom/verifier/output.json", `{"rewards":{"passed":0}}`)
+	result := resultManifest{Status: "timed_out", PartialEvidence: true}
+	if err := captureDeclaredOutputs(p, workspace, output, &result); err == nil {
+		t.Fatal("missing required artifacts lost their error")
+	}
+	if reward, ok := result.VerifierRewards["passed"]; !ok || reward != 0 || result.Status != "timed_out" {
+		t.Fatalf("partial timeout lost valid reward or failure: %#v", result)
+	}
+}
+
 func TestCaptureDeclaredOutputsRejectsWorkspaceSymlink(t *testing.T) {
 	workspace, output := t.TempDir(), t.TempDir()
 	p := completeOutputPlan(workspace)

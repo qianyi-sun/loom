@@ -216,6 +216,29 @@ it does not recommend retrying the model to fix a Dockerfile. Cancellation befor
 execution has the same expected zero-call treatment. A genuine agent failure
 without calls still retains the missing-usage diagnostic.
 
+Builder scratch and build output use separate volumes, each able to consume the
+existing total ephemeral-storage budget (16 GiB in the integration profile).
+They no longer divide that budget into fixed 7 GiB partitions. The aggregate Pod
+limit and reservation remain unchanged; volume maxima are not extra capacity.
+Private prepare/publish temporary storage stays separate. Before deleting a
+failed Job, the actuator retains bounded, sanitized Pod and Job diagnostics on
+the build attempt, distinguishing storage eviction, OOM, deadline and command
+failure. Exit 137 alone is not classified as OOM.
+
+The native Terminus controller shares the execution runtime's absolute agent
+deadline, including initialization. At expiry it stops agent work and uses only
+the existing termination grace for local usage/native artifacts, process
+quiescence and a validated workspace snapshot. If all handoff and cleanup steps
+finish, controller exit 124 permits the private verifier to evaluate the partial
+workspace with its own original deadline. Cancellation, forced kill, setup
+timeout or failed cleanup never permits this continuation. The Trial remains
+failed with `timed_out`, even when the verifier returns a numeric reward; that
+reward and available artifacts remain available for diagnosis.
+
+Harbor startup uses packaged LiteLLM metadata with build-time fallback, described
+in [the controller image guide](../../deploy/harbor-runtime.md). It does not
+download a price table during the agent's execution budget.
+
 ## What changes from old staging
 
 The original instruction and `tests/test_outputs.py` are copied byte for byte.

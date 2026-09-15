@@ -209,6 +209,7 @@ async def test_db_scan_recovers_missing_acknowledged_job_without_recreating_same
     row, attempts = await rows(sessions, image_id)
     assert row.state == "queued" and row.failure_reason == "build_job_missing"
     assert attempts[0].native_build["capacity_released_at"]
+    assert attempts[0].native_build["failure_reason"] == "build_job_missing"
     assert kube.ensure_calls == 1
 
 
@@ -384,3 +385,61 @@ async def test_expired_lease_is_not_renewed_and_cleanup_retains_capacity_until_g
     await controller.run_once()
     row, attempts = await rows(sessions, image_id)
     assert row.lease_expires_at == expired and attempts[0].native_build["capacity_released_at"]
+
+
+@pytest.mark.parametrize("cause,expected,retryable", [
+    ("storage", "build_storage_exceeded", False),
+    ("oom", "build_oom_killed", False),
+    ("deadline", "build_deadline_exceeded", True),
+    ("exit137", "build_build_failed", False),
+])
+async def test_native_failure_preserves_reason_before_cleanup(controller_setup, cause, expected, retryable):
+    controller, sessions, team_id, kube = controller_setup
+    image_id, _ = await seed_image(sessions, team_id)
+    await controller.run_once()
+    kube.finish(failed_phase="build")
+    job = next(iter(kube.jobs.values()))
+    pod_status = job["pods"][0]["status"]
+    terminated = pod_status["initContainerStatuses"][0]["state"]["terminated"]
+    terminated.update(exitCode=137, reason="OOMKilled" if cause == "oom" else "Error")
+    if cause == "storage":
+        pod_status.update(phase="Failed", reason="Evicted",
+                          message='Usage of EmptyDir volume "builder-tmp" exceeds the limit "7Gi". token=eviction-secret')
+    if cause == "deadline":
+        job["status"]["conditions"] = [{"type": "Failed", "status": "True", "reason": "DeadlineExceeded",
+                                           "message": "Job reached its deadline password=deadline-secret"}]
+    await controller.run_once()
+    row, attempts = await rows(sessions, image_id)
+    assert row.failure_reason == expected
+    assert row.state == ("queued" if retryable else "failed")
+    native = attempts[0].native_build
+    assert native["failure_reason"] == expected
+    if cause == "storage":
+        assert 'builder-tmp' in row.failure_message
+        assert native["pod_status"]["reason"] == "Evicted"
+    assert "eviction-secret" not in json.dumps(native)
+    assert "deadline-secret" not in json.dumps(native)
+    await controller.run_once()
+    native = (await rows(sessions, image_id))[1][0].native_build
+    assert native["capacity_released_at"] and native["failure_reason"] == expected
+
+
+async def test_expired_attempt_saves_last_pod_observation_before_deleting(controller_setup):
+    controller, sessions, team_id, kube = controller_setup
+    image_id, _ = await seed_image(sessions, team_id)
+    await controller.run_once()
+    kube.finish(failed_phase="build")
+    job = next(iter(kube.jobs.values()))
+    job["pods"][0]["status"].update(phase="Failed", reason="Evicted",
+                                   message='Usage of EmptyDir volume "builder-tmp" exceeds the limit "7Gi".')
+    _, attempts = await rows(sessions, image_id)
+    async with sessions() as session, session.begin():
+        attempt = await session.get(TaskImageMaterializationAttempt, attempts[0].id)
+        attempt.native_build = {**attempt.native_build, "deadline_at": (datetime.now(UTC) - timedelta(seconds=1)).isoformat()}
+    await controller.run_once()
+    row, attempts = await rows(sessions, image_id)
+    native = attempts[0].native_build
+    assert row.failure_reason == "build_deadline_exceeded"
+    assert native["capacity_released_at"]
+    assert native["pod_status"]["reason"] == "Evicted"
+    assert native["failure_reason"] == "build_deadline_exceeded"

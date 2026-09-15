@@ -672,6 +672,7 @@ def _compile_terminus_plan(
         ), output_declarations=tuple(outputs), sidecars=tuple(sidecars),
         main=phase("agent", "terminus-2", agent_timeout),
         verifier_execution="in_attempt",
+        verifier_after_agent_timeout=True,
         verifier=phase("verifier", "verify-sandbox", verifier_timeout),
         max_log_bytes_per_stream=profile.max_log_bytes_per_stream,
         max_artifact_bytes=profile.max_artifact_bytes,
