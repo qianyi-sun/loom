@@ -138,7 +138,10 @@ def cnpg_probe(tmp_path, pinned_manager, request):
     manifest = response.text.replace(original_image, _OPERATOR)
     staging = getattr(request, "param", None) == "staging-profile"
     namespace, cluster_name = ("loom-staging", "loom-postgres") if staging else ("default", "probe")
-    container = _start_k3s(node_name="trt-eai-oldlab-4" if staging else None)
+    # Nested kubelet sees the host filesystem; a proportional reserve can
+    # evict this disposable operator despite hundreds of GiB remaining.
+    container = _start_k3s(node_name="trt-eai-oldlab-4" if staging else None,
+                           ephemeral_storage_floor="2Gi")
     try:
         result = _eventually(
             lambda: container.exec(["cat", "/etc/rancher/k3s/k3s.yaml"]),
