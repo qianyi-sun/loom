@@ -2944,3 +2944,21 @@ def test_staging_global_cutover_retires_only_legacy_trial_supervisors() -> None:
     for pool in ("task-image-builder-gb10", "task-image-builder-oldlab"):
         assert supervisors[pool]["enabled"] is True
         assert supervisors[pool]["active"] is True
+
+
+@pytest.mark.parametrize("policy_enabled", [False, True])
+@pytest.mark.parametrize("authority", [False, True])
+def test_retained_trial_supervisor_requires_disabled_policy_and_allocation_authority(policy_enabled, authority):
+    blockers = staging_gb10_external_activation_blockers(
+        environment="staging",
+        autoscaler_policies=[{"pool_name": "gb10", "actuator": "slurm", "enabled": policy_enabled,
+            "disabled_reason": "protected_global_trial_cutover", "external_runner": True}],
+        prerequisites={"materialize": True, "pools": ["gb10"],
+            "retained_inactive_supervisor_pools": ["gb10"],
+            "require_external_allocation_authority": authority},
+        supervisors=[{"pool_name": "gb10", "enabled": False, "active": False}],
+    )
+    assert ("external_slurm_gb10_supervisor_activation_incomplete" in blockers) is policy_enabled
+    assert ("external_slurm_allocation_authority_requirement_missing" in blockers) is (not authority)
+    if not policy_enabled and authority:
+        assert blockers == ()
