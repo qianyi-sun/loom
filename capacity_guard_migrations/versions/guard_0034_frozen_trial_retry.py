@@ -17,6 +17,7 @@ depends_on: str | None = None
 _SCHEMA = "loom_capacity_guard"
 _RETRY = f"{_SCHEMA}.retry_staging_claimed_trial(uuid,text,jsonb)"
 _CLAIM = f"{_SCHEMA}.claim_staging_assigned_trial(uuid,text,jsonb)"
+_CANCEL = f"{_SCHEMA}.cancel_protected_runtime_pending_trial(uuid,uuid)"
 _FROZEN = """          IF v_fence.frozen THEN
             RAISE EXCEPTION 'legacy trial writer is frozen' USING ERRCODE = '55000';
           END IF;"""
@@ -190,6 +191,29 @@ def _claim_replacements() -> list[tuple[str, str]]:
     ]
 
 
+def _cancel_replacements() -> list[tuple[str, str]]:
+    return [
+        ("          v_runtime_role text;", "          v_runtime_role text;\n          v_cancel_permit uuid;"),
+        ("           WHERE singleton_id = 1 FOR UPDATE;", "           WHERE singleton_id = 1 FOR UPDATE NOWAIT;"),
+        ("           FOR UPDATE OF trial, head\n", "           FOR UPDATE OF trial, head NOWAIT\n"),
+        ("           FOR KEY SHARE OF runtime, attempt, lifecycle;", "           FOR KEY SHARE OF runtime, attempt, lifecycle NOWAIT;"),
+        ("            INSERT INTO loom_capacity_guard.attempt_lifecycle_events\n",
+         """            v_cancel_permit := loom_capacity_guard.authorize_frozen_trial_update(
+              v_current.trial_id, v_current.protected_attempt_id, v_current.execution_generation,
+              NULL, NULL, NULL, 'pending_cancel', jsonb_build_object(
+                'state', 'cancelled', 'cancellation_requested_at', v_cancelled_at,
+                'cancellation_observed_at', v_cancelled_at, 'finished_at', v_cancelled_at));
+            INSERT INTO loom_capacity_guard.attempt_lifecycle_events
+"""),
+        ("            RETURN pg_catalog.jsonb_build_object(\n              'trial_id', v_current.trial_id,\n              'state', 'cancelled',\n              'replayed', false",
+         """            PERFORM loom_capacity_guard.assert_frozen_trial_mutation_consumed(v_cancel_permit);
+            RETURN pg_catalog.jsonb_build_object(
+              'trial_id', v_current.trial_id,
+              'state', 'cancelled',
+              'replayed', false"""),
+    ]
+
+
 def upgrade() -> None:
     op.execute("""
         CREATE TABLE loom_capacity_guard.trial_mutation_permits (
@@ -204,10 +228,12 @@ def upgrade() -> None:
           trial_id uuid NOT NULL,
           protected_attempt_id uuid NOT NULL,
           execution_generation bigint NOT NULL CHECK (execution_generation > 0),
-          worker_id uuid NOT NULL,
-          worker_incarnation uuid NOT NULL,
-          claim_operation_id uuid NOT NULL,
-          operation text NOT NULL CHECK (operation IN ('claim', 'retry', 'refund', 'state', 'output')),
+          worker_id uuid,
+          worker_incarnation uuid,
+          claim_operation_id uuid,
+          operation text NOT NULL CHECK (operation IN ('claim', 'retry', 'refund', 'state', 'output', 'pending_cancel')),
+          CHECK ((operation = 'pending_cancel' AND worker_id IS NULL AND worker_incarnation IS NULL AND claim_operation_id IS NULL)
+                 OR (operation <> 'pending_cancel' AND worker_id IS NOT NULL AND worker_incarnation IS NOT NULL AND claim_operation_id IS NOT NULL)),
           old_binding jsonb NOT NULL,
           changes jsonb NOT NULL,
           observed_old_row jsonb,
@@ -294,7 +320,7 @@ def upgrade() -> None:
                    'cancellation_requested_at', trial.cancellation_requested_at)
             INTO v_old FROM public.trials AS trial
            WHERE trial.id = p_trial FOR UPDATE NOWAIT;
-          IF v_old IS NULL OR NOT EXISTS (
+          IF v_old IS NULL OR (p_operation <> 'pending_cancel' AND NOT EXISTS (
             SELECT 1 FROM loom_capacity_guard.executable_claim_leases AS claim
             JOIN loom_capacity_guard.trial_attempts AS attempt
               ON attempt.protected_attempt_id = claim.protected_attempt_id
@@ -304,10 +330,34 @@ def upgrade() -> None:
                AND claim.execution_generation = p_generation AND attempt.trial_id = p_trial
                AND claim.worker_id = p_worker AND claim.worker_incarnation = p_worker_incarnation
                AND claim.subject_id = v_fence.subject_id
-          ) THEN
+          )) THEN
             RAISE EXCEPTION 'frozen retry exact claim is unavailable' USING ERRCODE = '55000';
           END IF;
-          IF p_operation = 'claim' THEN
+          IF p_operation = 'pending_cancel' THEN
+            IF p_worker IS NOT NULL OR p_worker_incarnation IS NOT NULL OR p_claim IS NOT NULL
+               OR v_old->>'state' IS DISTINCT FROM 'protected-pending'
+               OR v_old->'worker_id' IS DISTINCT FROM 'null'::jsonb
+               OR v_old->'started_at' IS DISTINCT FROM 'null'::jsonb
+               OR v_old->'cancellation_requested_at' IS DISTINCT FROM 'null'::jsonb
+               OR p_changes IS DISTINCT FROM jsonb_build_object(
+                    'state', 'cancelled', 'cancellation_requested_at', statement_timestamp(),
+                    'cancellation_observed_at', statement_timestamp(), 'finished_at', statement_timestamp())
+               OR NOT EXISTS (
+                 SELECT 1 FROM loom_capacity_guard.protected_runtime_trial_submissions runtime
+                 JOIN loom_capacity_guard.trial_attempts attempt
+                   ON attempt.protected_attempt_id = runtime.protected_attempt_id AND attempt.trial_id = runtime.trial_id
+                  AND attempt.attempt_sequence = runtime.attempt_sequence
+                 JOIN loom_capacity_guard.attempt_lifecycle_heads head ON head.protected_attempt_id = attempt.protected_attempt_id
+                 WHERE runtime.trial_id = p_trial AND attempt.protected_attempt_id = p_attempt
+                   AND attempt.execution_generation = p_generation AND attempt.claim_state = 'queued'
+                   AND runtime.public_attempt_count = (v_old->>'attempt_count')::integer
+                   AND head.lifecycle_state IN ('pending-unassigned','assigned') AND NOT head.executable
+                   AND NOT EXISTS (SELECT 1 FROM loom_capacity_guard.executable_claim_leases claim
+                                   WHERE claim.protected_attempt_id = attempt.protected_attempt_id)
+               ) THEN
+              RAISE EXCEPTION 'frozen pending cancellation is not exact' USING ERRCODE = '55000';
+            END IF;
+          ELSIF p_operation = 'claim' THEN
             IF v_old->>'state' IS DISTINCT FROM 'protected-pending'
                OR v_old->'worker_id' IS DISTINCT FROM 'null'::jsonb
                OR v_old->'started_at' IS DISTINCT FROM 'null'::jsonb
@@ -388,6 +438,7 @@ def upgrade() -> None:
     _rewrite(f"{_SCHEMA}.account_trial_writer_mutation()", [(_FROZEN, _AFTER)], upgrading=True)
     _rewrite(_RETRY, _retry_replacements(), upgrading=True)
     _rewrite(_CLAIM, _claim_replacements(), upgrading=True)
+    _rewrite(_CANCEL, _cancel_replacements(), upgrading=True)
 
     from capacity_guard_migrations.trial_state import install_state_reporting
 
@@ -450,6 +501,7 @@ def downgrade() -> None:
 
     uninstall_output_reporting(_rewrite)
     uninstall_state_reporting(_rewrite)
+    _rewrite(_CANCEL, _cancel_replacements(), upgrading=False)
     _rewrite(_CLAIM, _claim_replacements(), upgrading=False)
     _rewrite(_RETRY, _retry_replacements(), upgrading=False)
     _rewrite(f"{_SCHEMA}.account_trial_writer_mutation()", [(_FROZEN, _AFTER)], upgrading=False)

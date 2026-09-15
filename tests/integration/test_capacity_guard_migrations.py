@@ -895,9 +895,15 @@ def test_guard_owner_has_only_bounded_public_submission_privileges(
                         "has_table_privilege(:owner, 'public.data_lifecycle_authorities', "
                         "'REFERENCES') AS can_reference_lifecycle_table, "
                         "has_column_privilege(:owner, 'public.data_lifecycle_authorities', "
-                        "'id', 'REFERENCES') AS can_reference_lifecycle_id"
+                        "'id', 'REFERENCES') AS can_reference_lifecycle_id, "
+                        "has_table_privilege(:owner, 'public.artifacts', 'UPDATE') AS can_update_artifact_table, "
+                        "has_column_privilege(:owner, 'public.artifacts', 'storage', 'UPDATE') AS can_update_artifact_storage, "
+                        "has_column_privilege(:owner, 'public.artifacts', 'actor_user_id', 'UPDATE') AS can_update_artifact_actor, "
+                        "has_column_privilege(:owner, 'public.data_lifecycle_authorities', 'state', 'UPDATE') AS can_change_lifecycle_state, "
+                        "has_any_column_privilege(:runtime, 'public.artifacts', 'UPDATE') AS runtime_can_update_artifacts, "
+                        "has_any_column_privilege(:runtime, 'public.trials', 'UPDATE') AS runtime_can_update_trials"
                     ),
-                    {"owner": owner},
+                    {"owner": owner, "runtime": _value(capacity_guard_database, "runtime_role")},
                 )
                 .mappings()
                 .one()
@@ -920,10 +926,16 @@ def test_guard_owner_has_only_bounded_public_submission_privileges(
             "can_insert_lifecycle_table": False,
             "can_insert_lifecycle_environment": True,
             "can_select_lifecycle_id": True,
-            "can_select_lifecycle_environment": False,
+            "can_select_lifecycle_environment": True,
             "can_insert_lifecycle_deletion_token": False,
             "can_reference_lifecycle_table": False,
             "can_reference_lifecycle_id": True,
+            "can_update_artifact_table": False,
+            "can_update_artifact_storage": True,
+            "can_update_artifact_actor": False,
+            "can_change_lifecycle_state": False,
+            "runtime_can_update_artifacts": False,
+            "runtime_can_update_trials": False,
         }
     finally:
         engine.dispose()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -229,6 +229,17 @@ def test_frozen_terminal_report_commits_family_decision(capacity_guard_database,
                     "CREATE TRIGGER suppress_family_state BEFORE UPDATE ON public.batch_family_state "
                     "FOR EACH ROW EXECUTE FUNCTION public.suppress_family_state();"
                 )
+        sibling_id = None
+        if decision in {"skip", "abort"}:
+            with TestClient(seeded.app) as client:
+                submitted = client.post("/trials", headers={"Authorization": f"Bearer {seeded.submit_token}"},
+                    json={"task_id": trial["task_id"], "required_worker_pool": "oldlab",
+                          "config": {"agent_name": "oracle", "agent_model": None}})
+            assert submitted.status_code == 201, submitted.text
+            sibling_id = UUID(submitted.json()["trial_id"])
+            with engine.begin() as connection:
+                connection.execute(text("UPDATE public.trials SET batch_id = :batch, family_key = 'family' WHERE id = :id"),
+                                   {"batch": batch_id, "id": sibling_id})
         if interference == "stale":
             report = ProtectedWorkerSessionStore.report_trial_state
 
@@ -252,6 +263,10 @@ def test_frozen_terminal_report_commits_family_decision(capacity_guard_database,
             assert connection.execute(text("SELECT state FROM public.trials WHERE id = :id"), {"id": seeded.trial_id}).scalar_one() == (
                 "failed" if interference is None else "claimed")
             assert connection.execute(text("SELECT count(*) FROM loom_capacity_guard.trial_writer_mutations")).scalar_one() == 0
+            if sibling_id is not None:
+                assert connection.execute(text("SELECT state FROM public.trials WHERE id = :id"),
+                                          {"id": sibling_id}).scalar_one() == (
+                    "cancelled" if interference is None else "protected-pending")
             if interference is not None:
                 assert connection.execute(text("SELECT count(*) FROM loom_capacity_guard.trial_mutation_permits")).scalar_one() == 0
                 assert connection.execute(text("SELECT count(*) FROM loom_capacity_guard.executable_claim_terminal_events")).scalar_one() == 0
