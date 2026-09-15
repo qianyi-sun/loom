@@ -179,7 +179,9 @@ async def test_wait_reuses_compatible_native_allocatable_history(waiting_build):
                            now=now + timedelta(seconds=2))
 
 
-@pytest.mark.parametrize("occupant", ["managed", "foreign"])
+@pytest.mark.parametrize("occupant", [
+    "managed", "foreign", "duplicate", "overdrawn", "unready", "unschedulable", "deleting",
+])
 async def test_wait_can_use_observed_managed_drain_without_cold_sample(native_build_setup, occupant):
     controller, sessions, kube, _, _, trial_id, target, now = native_build_setup
     occupied = placement_fixture(target_id=target.target_id, nodes=1, used_nodes=1,
@@ -188,16 +190,25 @@ async def test_wait_can_use_observed_managed_drain_without_cold_sample(native_bu
     occupied["node_group"]["template"]["preset"] = "new-template-without-sample"
     node = occupied["nodes"][0]
     node["used_pod_slots"] = 1
-    if occupant == "managed":
+    if occupant != "foreign":
         node["managed_pods"] = [{"uid": "occupied-pod", "lease_id": "occupied-lease", "generation": 1,
                                  "requests": node["requested"].copy()}]
+    if occupant == "duplicate":
+        node["managed_pods"] *= 2
+        node["used_pod_slots"] = 2
+    elif occupant == "overdrawn":
+        node["managed_pods"][0]["requests"]["cpu_millis"] += 1
+    elif occupant == "unready":
+        node["ready"] = False
+    elif occupant in {"unschedulable", "deleting"}:
+        node[occupant] = True
     async with sessions() as session, session.begin():
         await _record(session, target.target_id, now + timedelta(milliseconds=2), occupied)
     await controller.run_once()
     async with sessions() as session:
         wait = await session.get(TaskImageCapacityWait, target.target_id)
         assert (wait is not None) == (occupant == "managed")
-    if occupant == "foreign":
+    if occupant != "managed":
         return  # No evidence that unknown resident/DaemonSet overhead can drain.
     free = placement_fixture(target_id=target.target_id, nodes=1, used_nodes=1, quota_nodes=1)
     free["template_samples"] = []
