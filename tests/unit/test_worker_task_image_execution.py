@@ -113,7 +113,9 @@ async def test_verified_grant_cannot_run_a_different_runtime(tmp_path, change):
     if change == "image":
         subject.task_image = "local-agent-layer:latest"
     elif change == "task":
-        subject.task_config.environment.workdir = "/untrusted"
+        raw = subject.task_config.model_dump(mode="json")
+        raw["environment"]["workdir"] = "/untrusted"
+        subject.task_config = TaskConfig.model_validate(raw)
     elif change == "arch":
         subject.cpu_arch = "arm64"
     else:
