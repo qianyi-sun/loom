@@ -1401,6 +1401,20 @@ administrator connection in `postgres` refuses completion without being signalle
 No phase reopens admission. Durable admission of a replacement peer after peer
 loss and successor startup remain responsibilities of the enclosing operation.
 
+`LegacyDatabaseCutover` retains that SQL operation in separate immutable
+`legacy-database-cutover-journals`. Its scope binds the plan, original credential
+source digest, target, actual coordination guard and schema/role profile. Each
+peer receipt precedes any cutover SQL, and bounded replacement intents chain to
+the preceding exact peer. Recovery refuses surviving previous or unknown peers;
+for a sealed runtime it recloses admission, retires runtime sessions, proves
+client retirement, and briefly reopens only to record the fixed replacement peer.
+A lost reopen reply triggers serialized reclosure through fresh maintenance.
+Completed replay only observes closed admission and retired sessions; it never
+signals a newly resumed runtime. The original ownership-handoff journal remains
+untouched. The enclosing installed factory must supply the completed-handoff
+target and continuously checked policy, workload and host exclusion; this module
+does not yet constitute the full installed fleet cutover command.
+
 Admission and ownership transfer retain strict password-absence defaults. An
 explicit `runtime_password`, recovered from the protected original credential,
 allows only a matching bounded SCRAM verifier on the still-`NOLOGIN` former
