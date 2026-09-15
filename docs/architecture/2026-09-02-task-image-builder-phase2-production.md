@@ -296,6 +296,23 @@ and compares Slurm controller/accounting facts with the grant. A dead peer,
 changed inode, re-exec, job mismatch, supplementary privileged group, or stale
 controller response aborts before projection.
 
+Slurm 23.11 accounting readback uses `sacct --parsable2 --duplicates`: no extra
+trailing delimiter is expected, and multiple allocation records fail closed.
+The controller's exact grant comment remains mandatory. The accounting record
+is tied to that same job incarnation by matching its canonical submission time,
+identity, cluster, placement, resources and state. Its comment may be empty:
+Slurm sends that field only at job completion and only when
+`AccountingStoreFlags=job_comment` is enabled. A conflicting nonempty comment
+is still rejected. Both pinned commands run with UTC time formatting; unknown,
+invalid or mismatched submission times are refused. This read-only compatibility
+does not require changing the cluster's accounting storage policy and does not
+establish native containment or mutation-time job-ID safety.
+
+Pinned references: Slurm `slurm-23-11-4-1`
+[`sacct.1`](https://github.com/SchedMD/slurm/blob/slurm-23-11-4-1/doc/man/man1/sacct.1)
+and
+[`jobacct_storage_p_job_complete`](https://github.com/SchedMD/slurm/blob/slurm-23-11-4-1/src/plugins/accounting_storage/slurmdbd/accounting_storage_slurmdbd.c).
+
 The containment root is a descendant of the exact Slurm batch-task cgroup. The
 guard never moves `slurmstepd`, writes an ancestor/sibling cgroup, or attaches a
 program to a Slurm daemon. It applies the grant's positive PID and I/O ceilings
