@@ -787,6 +787,8 @@ class ProtectedExternalSupervisorTransport(Protocol):
 
     def reconcile_compensations(self) -> None: ...
 
+    def observe_processes(self, artifact: ExternalSupervisorArtifact) -> dict[str, object]: ...
+
 
 @dataclass(frozen=True, slots=True)
 class AtomicUserUnitStore:
@@ -1768,6 +1770,33 @@ class FixedExternalSupervisorTransport:
             predecessor_manifest=predecessor_manifest,
             compensation_blockers=self.store.compensation_blockers(),
         )
+
+    def observe_processes(self, artifact: ExternalSupervisorArtifact) -> dict[str, object]:
+        from .protected_application_admission_recovery import admission_record_digest
+        from .protected_legacy_controller_process import (
+            observe_legacy_controller_processes,
+            validate_controller_process_observation,
+        )
+
+        canonical = self.store.read_canonical()
+        supervisors = [item for item in artifact.supervisors if item.pool_name in {"oldlab", "gb10"}]
+        environment = getattr(self.control, "environment", None)
+        if (canonical is None or canonical.artifact_digest != artifact.artifact_digest
+            or canonical.candidate_sha != artifact.candidate_sha or canonical.candidate_tree != artifact.candidate_tree
+            or canonical.unit_dir != str(self.unit_dir) or len(supervisors) != 1
+            or not isinstance(environment, Mapping) or self.store.compensation_blockers()):
+            raise RuntimeError("legacy controller process canonical authority changed")
+        supervisor = supervisors[0]
+        process = observe_legacy_controller_processes(pool=supervisor.pool_name,
+            expected_unit_sha256=artifact.unit_sha256[supervisor.service_name],
+            read_unit=self.store.read_unit, environment=environment)
+        if self.store.read_canonical() != canonical or self.store.compensation_blockers():
+            raise RuntimeError("legacy controller process canonical authority changed")
+        value: dict[str, object] = {"schema_version": 1, "candidate_sha": artifact.candidate_sha,
+            "candidate_tree": artifact.candidate_tree, "artifact_digest": artifact.artifact_digest,
+            "canonical_digest": canonical.evidence_digest, "process_evidence": process}
+        return validate_controller_process_observation(
+            {**value, "evidence_sha256": admission_record_digest(value)}, artifact)
 
     def reconcile_compensations(self) -> None:
         """Converge crash prefixes to the identity selected by canonical authority."""

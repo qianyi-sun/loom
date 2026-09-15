@@ -835,6 +835,7 @@ def _parse_request(payload: bytes) -> dict[str, object]:
     common = {"candidate_sha", "candidate_tree", "operation", "schema_version"}
     expected = {
         "observe": common | {"artifact", "predecessor_authority"},
+        "observe_processes": common | {"artifact", "predecessor_authority"},
         "apply": common
         | {
             "artifact",
@@ -870,6 +871,8 @@ def _parse_request(payload: bytes) -> dict[str, object]:
         or set(value) != expected[operation]
     ):
         raise BrokerError("GB10 external supervisor request fields are invalid")
+    if operation == "observe_processes" and value["predecessor_authority"] is not None:
+        raise BrokerError("GB10 process observation requires current canonical authority")
     candidate_sha = value.get("candidate_sha")
     candidate_tree = value.get("candidate_tree")
     if (

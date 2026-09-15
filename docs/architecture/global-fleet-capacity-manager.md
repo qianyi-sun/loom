@@ -1415,6 +1415,19 @@ untouched. The enclosing installed factory must supply the completed-handoff
 target and continuously checked policy, workload and host exclusion; this module
 does not yet constitute the full installed fleet cutover command.
 
+Controller process retirement has a separate read-only `observe_processes`
+transport operation. It binds the current canonical supervisor artifact and unit
+hash to two stable systemd observations, the exact unit fragment, boot identity,
+and cgroup-v2 population. An inactive main process alone is insufficient: pending
+manager jobs, control processes, populated child cgroups, delegation, changed
+drop-ins, or a changed unit definition refuse retirement evidence. Fixed OLDLAB
+and GB10 transports expose this read without changing existing canonical records.
+The GB10 broker must be refreshed from the reviewed merged source to admit the
+new operation. This evidence covers the two staging trial-pool supervisor
+processes only; timer shutdown and previously accepted Slurm/SQL work still need
+their own retirement evidence. Independent builder services are not stopped by
+this operation.
+
 Admission and ownership transfer retain strict password-absence defaults. An
 explicit `runtime_password`, recovered from the protected original credential,
 allows only a matching bounded SCRAM verifier on the still-`NOLOGIN` former
