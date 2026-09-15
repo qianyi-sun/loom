@@ -50,7 +50,7 @@ async def seed(factory):
 
 @pytest.mark.parametrize("change", [
     "valid", "token", "claim", "epoch", "attempt", "worker", "team",
-    "released", "running", "cancelled", "draining", "old_reader", "capability_drift",
+    "released", "running", "cancelled", "draining", "old_reader", "capability_drift", "trial_arch", "worker_arch",
 ])
 async def test_locked_execution_claim_uses_current_registered_authority(
     isolated_migration_postgres_url, change,
@@ -77,9 +77,16 @@ async def test_locked_execution_claim_uses_current_registered_authority(
                     trial.state = {"released": "queued", "running": "running", "cancelled": "cancelled"}[change]
                 elif change == "draining":
                     worker.drain_state = "draining"
+                elif change == "trial_arch":
+                    trial.requires_caps = dict(trial.requires_caps, cpu_arch="arm64")
+                elif change == "worker_arch":
+                    worker.capabilities = [dict(cap, cpu_arch="arm64") for cap in worker.capabilities]
                 else:
                     snapshot = dict(worker.capability_snapshot_json)
-                    snapshot["container_runtime_features"] = []
+                    if change == "old_reader":
+                        snapshot["container_runtime_features"] = []
+                    else:
+                        snapshot["cpu_cores"] = 3
                     worker.capability_snapshot_json = snapshot
                     if change == "old_reader":
                         worker.capability_snapshot_digest = canonical_digest(snapshot)

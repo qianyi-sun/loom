@@ -3,8 +3,10 @@
 Status: signed-keyset, complete publication-set and signed V2 execution-evidence
 verification, durable distribution adapter and dedicated signer service/client
 implemented; an opt-in existing-worker consumer composes source verification and
-an online start client. Host signing service provisioning, grant issuance,
-capability-gated server delivery and durable online consumption remain uncomposed.
+an online start client. The backend now journals grant revisions and serializes
+one-use consumption with current claim and revocation authority. Host signing
+service provisioning, execution signing, capability-gated server delivery and
+the HTTP start route remain uncomposed.
 The consumer is not activation evidence.
 
 This document covers the keyset, distribution, dedicated signer and
@@ -61,10 +63,36 @@ digest, unique start UUID and a validity interval of at most thirty seconds.
 This client-side latch is **not** durable one-use enforcement: the server must
 serialize consumption with current worker/claim, grant revision and publication
 revocation authority and reject duplicate consumes even after process restart.
-No server route, grant issuer, capability advertisement, root installation or
+No server route, composed grant issuer, capability advertisement, root installation or
 production readiness change is supplied by this consumer. Existing signed V2
 evidence still requires genuine Slurm provenance; this is not yet a Nebius
 publication adapter or a native AMD64/ARM64 acceptance result.
+
+## Durable execution admission
+
+Migration `0148` retains immutable grant revisions and one-use start receipts.
+Consumption is unique by the scheduler's fresh claim UUID, across grant refreshes
+and worker/control-plane restarts. Audit references retain publication and keyset
+history without pinning the mutable Trial or worker row against ordinary cleanup.
+Signed envelopes are fill-once; grants may be revoked but never unrevoked. Used
+receipts cannot be rewritten, deleted or truncated; downgrade refuses history.
+
+`execution_store` locks publication state, then worker, then Trial, preserving the
+existing worker-before-Trial claim ordering. It independently verifies the bearer
+hash, worker epoch, registered and digest-checked V2 capability, native architecture,
+exact pre-start claim and cancellation state. Current strong source admission,
+signed-ready materialization, completed publication set and root-verified keyset
+are reread before issuance, finalization and consumption.
+
+Preparation persists an unsigned immutable request. The caller must commit it
+before external signing, then finalize in a fresh transaction against current
+authority. Refresh increments the revision without changing the grant identity,
+publication or purpose; older revisions cannot start. Consumption retains a
+bounded receipt under the same revocation fence. A second request is rejected,
+not replayed as a successful start. The API must bound checkout/transaction/commit
+time and commit before returning `201`; the store's return alone is not durable
+HTTP success. Database race tests exercise both duplicate consumption and a start
+waiting behind revocation, but do not establish live native build acceptance.
 
 ## Signed keyset
 
