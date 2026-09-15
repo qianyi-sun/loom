@@ -1615,6 +1615,9 @@ async def test_executor_surface_convergence_preserves_exact_protected_runtime_fu
     )
 
     expected = {
+        "adopt_protected_runtime_trial_projection",
+        "report_staging_trial_state",
+        "publish_staging_trial_output",
         "assert_staging_worker_session",
         "cancel_protected_runtime_pending_trial",
         "claim_staging_assigned_trial",
@@ -1922,10 +1925,15 @@ async def test_capacity_role_convergence_grants_only_required_reference_columns(
             "has_column_privilege(%s, 'public.data_lifecycle_authorities', "
             "'id', 'SELECT'), "
             "has_column_privilege(%s, 'public.data_lifecycle_authorities', "
-            "'environment', 'SELECT')",
-            (owner, owner, owner, owner, owner, owner, owner),
+            "'environment', 'SELECT'), "
+            "has_column_privilege(%s, 'public.data_lifecycle_authorities', "
+            "'environment', 'UPDATE'), "
+            "has_table_privilege(%s, 'public.data_lifecycle_authorities', 'DELETE')",
+            (owner, owner, owner, owner, owner, owner, owner, owner, owner),
         )
-        assert await privileges.fetchone() == (True, False, False, True, True, True, False)
+        # Protected output publication reads lifecycle scope, but cannot rewrite
+        # that scope or delete the retained authority.
+        assert await privileges.fetchone() == (True, False, False, True, True, True, True, False, False)
 
 
 @pytest.mark.asyncio

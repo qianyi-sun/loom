@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import Batch, DataLifecycleAuthority, Trial
@@ -26,6 +27,8 @@ from tests.integration.test_capacity_trial_writer_fence import _freeze, _initial
 async def test_adoption_preserves_original_batch_trial_and_retention(
     capacity_guard_database: dict[str, object], frozen: bool, drift: str | None,
     rewrite_trigger: bool = False,
+    concurrent: bool = False,
+    replay_drift: str | None = None,
 ) -> None:
     database = capacity_guard_database
     registration = await _initialize_guard(database)
@@ -118,7 +121,40 @@ async def test_adoption_preserves_original_batch_trial_and_retention(
                             f"SELECT count(*) FROM loom_capacity_guard.{relation} WHERE trial_id=:trial"
                         ), parameters).scalar_one() == 0
                 return
-            receipt = await store.adopt_legacy_trial(**request)
+            if concurrent:
+                results = await asyncio.gather(
+                    store.adopt_legacy_trial(**request), store.adopt_legacy_trial(**request),
+                    return_exceptions=True,
+                )
+                receipts = []
+                for result in results:
+                    if isinstance(result, Exception):
+                        assert isinstance(result, ProtectedTrialSubmissionError)
+                        assert result.__cause__.orig.sqlstate in {"40001", "55P03"}
+                    else:
+                        receipts.append(result)
+                assert receipts
+                initial_receipts = [value for value in receipts if not value.replayed]
+                assert len(initial_receipts) == 1
+                receipt = initial_receipts[0]
+            else:
+                receipt = await store.adopt_legacy_trial(**request)
+            if replay_drift is not None:
+                def corrupt_requirements(conn, cursor, statement, parameters, context, executemany):
+                    if "adopt_protected_runtime_trial_projection" in statement:
+                        parameters = dict(parameters)
+                        parameters[replay_drift] = (
+                            b"{}" if replay_drift == "requirements_payload" else "0" * 64
+                        )
+                    return statement, parameters
+
+                event.listen(engine.sync_engine, "before_cursor_execute", corrupt_requirements, retval=True)
+                try:
+                    with pytest.raises(ProtectedTrialSubmissionError) as rejected:
+                        await store.adopt_legacy_trial(**request)
+                    assert rejected.value.__cause__.orig.sqlstate == "22023"
+                finally:
+                    event.remove(engine.sync_engine, "before_cursor_execute", corrupt_requirements)
             replay = await store.adopt_legacy_trial(**request)
             with pytest.raises(ProtectedTrialSubmissionError):
                 await store.adopt_legacy_trial(**(request | {"operation_id": uuid4()}))
@@ -158,4 +194,23 @@ async def test_frozen_adoption_rejects_trigger_rewrite_and_rolls_back_every_proj
 ) -> None:
     await test_adoption_preserves_original_batch_trial_and_retention(
         capacity_guard_database, frozen=True, drift=None, rewrite_trigger=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_frozen_adoption_has_one_origin_and_replayable_receipt(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    await test_adoption_preserves_original_batch_trial_and_retention(
+        capacity_guard_database, frozen=True, drift=None, concurrent=True,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("argument", ["requirements_payload", "requirements_digest"])
+async def test_frozen_adoption_replay_rejects_changed_requirements_arguments(
+    capacity_guard_database: dict[str, object], argument: str,
+) -> None:
+    await test_adoption_preserves_original_batch_trial_and_retention(
+        capacity_guard_database, frozen=True, drift=None, replay_drift=argument,
     )

@@ -162,6 +162,12 @@ def install_trial_adoption(rewrite: Callable[..., None]) -> None:
     call = f"          v_receipt := {S}.submit_inert_trial_projection("
     evidence = f"""          PERFORM {S}.assert_inert_agent_binding(p_agent_incarnation,p_payload,p_canonical_payload,p_payload_digest);
           PERFORM {S}.assert_inert_agent_binding(p_agent_incarnation,p_protected_payload,p_protected_canonical_payload,p_protected_payload_digest);
+          IF p_requirements_payload IS NULL
+             OR octet_length(p_requirements_payload) > 8388608
+             OR p_requirements_digest IS DISTINCT FROM p_payload->>'requirements_digest'
+             OR encode(sha256(p_requirements_payload), 'hex') IS DISTINCT FROM p_requirements_digest THEN
+            RAISE EXCEPTION 'legacy adoption requirements payload is invalid' USING ERRCODE='22023';
+          END IF;
           SELECT * INTO v_adoption FROM {S}.trial_adoptions
            WHERE operation_id=p_operation_id OR trial_id=(p_payload->>'trial_id')::uuid FOR KEY SHARE NOWAIT;
           IF FOUND THEN

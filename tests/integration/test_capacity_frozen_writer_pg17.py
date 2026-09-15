@@ -32,6 +32,15 @@ from tests.integration.test_capacity_frozen_state import (
 from tests.integration.test_capacity_frozen_state import (
     test_materializing_terminal_report_closes_exact_claim as test_materializing,
 )
+from tests.integration.test_capacity_legacy_trial_adoption import (
+    test_frozen_adoption_rejects_trigger_rewrite_and_rolls_back_every_projection as test_adoption_rollback,
+)
+from tests.integration.test_capacity_legacy_trial_adoption import (
+    test_frozen_adoption_replay_rejects_changed_requirements_arguments as test_adoption_replay,
+)
+from tests.integration.test_capacity_legacy_trial_adoption_route import (
+    test_team_authenticated_adoption_replays_original_id_and_publishes_readiness as test_adoption_readiness,
+)
 
 
 @pytest.fixture(scope="session")
@@ -59,6 +68,9 @@ def _require_postgres_17(capacity_guard_database):
 
 
 __all__ = [
+    "test_adoption_readiness",
+    "test_adoption_replay",
+    "test_adoption_rollback",
     "test_claim",
     "test_family",
     "test_materializing",

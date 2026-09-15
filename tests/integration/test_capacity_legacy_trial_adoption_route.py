@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from loom.db.schema import DataLifecycleAuthority, Task, Token, Trial, User
+from loom.db.schema import DataLifecycleAuthority, Task, Team, Token, Trial, User
 from loom_capacity_agent.store import capture_lifecycle_demand_observation
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
@@ -32,6 +32,8 @@ def test_team_authenticated_adoption_replays_original_id_and_publishes_readiness
     team_id, task_id = _seed_trial_inputs(database)
     user_id, trial_id, lifecycle_id, operation_id = (uuid4() for _ in range(4))
     token = f"loom_team_{uuid4().hex}"
+    foreign_token = f"loom_team_{uuid4().hex}"
+    foreign_team = uuid4()
     submitted_at = datetime.now(UTC) - timedelta(days=2)
     engine = create_engine(_value(database, "admin_url"))
     try:
@@ -43,6 +45,11 @@ def test_team_authenticated_adoption_replays_original_id_and_publishes_readiness
             connection.execute(Token.__table__.insert().values(
                 token_hash=hashlib.sha256(token.encode()).digest(), type="team", scopes=["submit"],
                 team_id=team_id, created_by_user_id=user_id, issued_at=datetime.now(UTC),
+            ))
+            connection.execute(Team.__table__.insert().values(id=foreign_team, name=f"foreign-{foreign_team}"))
+            connection.execute(Token.__table__.insert().values(
+                token_hash=hashlib.sha256(foreign_token.encode()).digest(), type="team", scopes=["submit"],
+                team_id=foreign_team, created_by_user_id=user_id, issued_at=datetime.now(UTC),
             ))
             connection.execute(Task.__table__.update().where(Task.id == task_id).values(config={
                 "schema_version": "1", "task": {"id": task_id, "name": task_id},
@@ -78,6 +85,9 @@ def test_team_authenticated_adoption_replays_original_id_and_publishes_readiness
             path = f"/trials/{trial_id}/adopt-protected"
             body = {"operation_id": str(operation_id)}
             assert client.post(path, json=body).status_code == 401
+            assert client.post(path, headers={"Authorization": f"Bearer {foreign_token}"}, json=body).status_code == 403
+            with engine.connect() as connection:
+                assert connection.execute(text("SELECT count(*) FROM loom_capacity_guard.trial_adoptions")).scalar_one() == 0
             response = client.post(path, headers={"Authorization": f"Bearer {token}"}, json=body)
             assert response.status_code == 200, response.text
             replay = client.post(path, headers={"Authorization": f"Bearer {token}"}, json=body)

@@ -418,6 +418,9 @@ def upgrade() -> None:
     from capacity_guard_migrations.trial_adoption import install_trial_adoption
 
     install_trial_adoption(_rewrite)
+    from capacity_guard_migrations.trial_demand import install_trial_demand
+
+    install_trial_demand(_rewrite)
     install_pending_cancellation(_rewrite)
 
 
@@ -470,9 +473,11 @@ def downgrade() -> None:
     if retained:
         raise RuntimeError("frozen retry permission evidence requires protected retirement")
     from capacity_guard_migrations.trial_adoption import uninstall_trial_adoption
+    from capacity_guard_migrations.trial_demand import uninstall_trial_demand
     from capacity_guard_migrations.trial_output import uninstall_output_reporting
     from capacity_guard_migrations.trial_state import uninstall_state_reporting
 
+    uninstall_trial_demand(_rewrite)
     uninstall_trial_adoption(_rewrite)
     uninstall_pending_cancellation(_rewrite)
     uninstall_output_reporting(_rewrite)

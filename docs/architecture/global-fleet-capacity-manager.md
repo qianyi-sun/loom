@@ -515,9 +515,9 @@ frozen legacy mutation ledger. Authority reassignment locks and inventories the
 permission table, and downgrade refuses retained evidence. There is no broad
 role exemption, caller-set session flag or new public trigger authority. This
 covers protected claim/retry, state reports, output publication, unclaimed
-cancellation and explicit adoption of untouched legacy trials. It does not authorize ordinary writers or frozen submissions,
-demand projection or recovery, and does not by itself make the fleet ready for
-activation.
+cancellation and explicit adoption of untouched legacy trials. It does not
+authorize ordinary writers, frozen new submissions or recovery, and does not
+by itself make the fleet ready for activation.
 
 An authenticated `POST /api/v1/trials/{trial_id}/adopt-protected` accepts an
 `operation_id` UUID and requires an administrator or a same-team bearer token
@@ -538,6 +538,14 @@ columns needed to reject prior claim/heartbeat/failure history. Runtime credenti
 receive only the named adoption function. Existing task-image preparation and
 guard-owned readiness validation run before the endpoint reports readiness;
 adoption itself does not bypass prerequisite validation or activate capacity.
+
+Protected demand capture reads the public projection without temporarily changing
+trial state. The existing checks still validate runtime readiness, attempt and
+retry bindings before reporting demand. The private capture normalizes an atomic
+origin's `protected-pending` state in its query result only; the public row and
+frozen legacy mutation counter remain unchanged. A pending public row cannot
+resolve a contradictory terminal lifecycle blocker. Reporter sequence and
+protected lifecycle writes retain their existing authority and transaction checks.
 
 State reports validate the executor credential and exact live claim inside the
 same serializable transaction as the public transition. Terminal-result and
