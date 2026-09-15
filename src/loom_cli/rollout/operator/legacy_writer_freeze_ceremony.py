@@ -199,7 +199,9 @@ class LegacyWriterFreezeCeremony:
                 Literal["b9ec5d44880251d00237463a9f534199087a13f9056107078b3bac2d2d7fb1e1"],
                 LEGACY_MUTATION_INVENTORY_DIGEST,
             ),
-            writer_cursors=before.writer_cursors,
+            # Draining may commit final writes. Both inert records must bind the
+            # actual frozen cursor, not the earlier active observation.
+            writer_cursors=frozen.writer_cursors,
         )
         freeze = LegacyCompatibilityFreezeV1(
             **self.binding.registration.model_dump(mode="python"),
@@ -275,7 +277,13 @@ class LegacyWriterFreezeCeremony:
         if len(before.observations) != len(frozen.observations):
             raise ValueError("legacy writer changed while freezing")
         for first, second in zip(before.observations, frozen.observations, strict=True):
-            if first.cursor != second.cursor or first.runtime_kind != second.runtime_kind:
+            if (
+                first.runtime_kind != second.runtime_kind
+                or first.cursor.model_copy(update={"high_water": second.cursor.high_water})
+                != second.cursor
+                or second.cursor.high_water < first.cursor.high_water
+                or (first.runtime_state == "frozen" and first != second)
+            ):
                 raise ValueError("legacy writer changed while freezing")
             if second.runtime_state != "frozen":
                 raise ValueError(

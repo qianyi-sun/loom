@@ -9,6 +9,7 @@ from threading import Thread
 import pytest
 
 from tests.integration import test_task_image_builder_phase2c_flow as flow
+from tests.support import guard_fixture
 
 
 class ProbeInterrupted(BaseException):
@@ -54,7 +55,7 @@ async def test_external_probe_interruption_retires_guard(
         raise interruption
 
     monkeypatch.setattr(flow, "_service", capture_service)
-    monkeypatch.setattr(flow, "Thread", capture_thread)
+    monkeypatch.setattr(guard_fixture, "Thread", capture_thread)
     monkeypatch.setattr(flow.subprocess, "run", interrupted_probe)
     try:
         with pytest.raises(type(interruption)):

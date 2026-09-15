@@ -176,3 +176,73 @@ def test_run_once_reconciles_and_tears_down_stale(
 
     assert applied == 1
     assert stops == ["loom-job-999.slice"]  # the job that left the queue
+
+
+@pytest.mark.parametrize("observation", ["lookup-error", "missing-memory", "protected", "suspended", "completing"])
+def test_unadmitted_present_job_is_not_positive_cleanup_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, observation: str,
+) -> None:
+    """An admission failure must not tear down a still-existing allocation."""
+    _make_job_cgroup(tmp_path / "cgroup", "123")
+    calls: list[tuple[str, ...]] = []
+
+    def route(_config: guard.GuardConfig, args) -> str:
+        calls.append(tuple(args))
+        if args[0] == "squeue":
+            comment = "a" * 43 if observation == "protected" else "loom-cgroup-v1:pids=3072"
+            return f"123|{comment}"
+        if args[0] == "scontrol":
+            if observation == "lookup-error":
+                raise guard.GuardError("temporary controller readback failure")
+            memory = "" if observation == "missing-memory" else ",mem=16000M"
+            state = {"suspended": "SUSPENDED", "completing": "COMPLETING"}.get(observation, "RUNNING")
+            return f"JobId=123 AllocTRES=cpu=4{memory},node=1 JobState={state}"
+        if args[1] == "list-units":
+            return "loom-job-123.slice loaded active active\nloom-job-999.slice loaded active active"
+        return ""
+
+    monkeypatch.setattr(guard, "_run", route)
+
+    assert guard.run_once(_config(tmp_path)) == 0
+    assert [args[2] for args in calls if args[:2] == ("systemctl", "stop")] == ["loom-job-999.slice"]
+    assert not any(args[:2] == ("systemctl", "set-property") for args in calls)
+    # Cleanup's presence inventory includes more than only RUNNING jobs.
+    assert any(args[0] == "squeue" and "--states=all" in args for args in calls)
+
+
+def test_queue_failure_cannot_teardown_any_slice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def route(_config: guard.GuardConfig, args) -> str:
+        calls.append(tuple(args))
+        if args[0] == "squeue":
+            raise guard.GuardError("queue unavailable")
+        raise AssertionError("failed discovery must not proceed to mutation")
+
+    monkeypatch.setattr(guard, "_run", route)
+    with pytest.raises(guard.GuardError, match="queue unavailable"):
+        guard.run_once(_config(tmp_path))
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("state", ["COMPLETED", "CANCELLED", "FAILED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "BOOT_FAIL", "DEADLINE", "REVOKED"])
+def test_terminal_legacy_job_retained_in_queue_does_not_preserve_orphan_slice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str,
+) -> None:
+    """Slurm MinJobAge retains terminal rows after their allocation is released."""
+    calls: list[tuple[str, ...]] = []
+
+    def route(_config: guard.GuardConfig, args) -> str:
+        calls.append(tuple(args))
+        if args[0] == "squeue":
+            return "123|loom-cgroup-v1:pids=3072"
+        if args[0] == "scontrol":
+            return f"JobId=123 AllocTRES=cpu=4,mem=16000M,node=1 JobState={state}"
+        if args[1] == "list-units":
+            return "loom-job-123.slice loaded active active"
+        return ""
+
+    monkeypatch.setattr(guard, "_run", route)
+    assert guard.run_once(_config(tmp_path)) == 0
+    assert ("systemctl", "stop", "loom-job-123.slice") in calls
+    assert not any(args[:2] == ("systemctl", "set-property") for args in calls)

@@ -252,6 +252,17 @@ Database restore rehearsal and legacy writer freeze execution remain #906
 inputs. Their immutable digests are already bound in the owner policy and
 preparation manifest; this package does not claim to generate those facts.
 
+The owner-side `LegacyWriterFreezeCeremony` consumes runtime observations from
+the real writer freezer. An active writer may finish committed mutations while
+draining, so its final frozen high-water may increase but must not regress.
+Writer identity, incarnation, epoch, authority, and runtime kind must remain
+unchanged. Both persisted compatibility records bind the final frozen cursor,
+not the pre-drain observation. An already-frozen observation must remain exact,
+and a further capture after persistence must still match before publication.
+Exact retries retain the selected operation identities and final cursor. This
+consumer does not implement runtime interception, restart fencing, or durable
+freeze-intent recovery; those remain required before live activation.
+
 ## Verification
 
 The implementation must prove:

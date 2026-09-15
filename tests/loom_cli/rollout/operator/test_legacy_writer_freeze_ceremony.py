@@ -195,13 +195,13 @@ async def test_ceremony_freezes_stable_writers_and_publishes_exact_owner_evidenc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("field,value", [("writer_epoch", 99), ("high_water", 18)])
-async def test_ceremony_rejects_writer_epoch_or_high_water_drift(
+@pytest.mark.parametrize("field,value", [("writer_epoch", 99), ("high_water", 16)])
+async def test_ceremony_rejects_writer_epoch_drift_or_regressing_high_water(
     tmp_path: Path,
     field: str,
     value: object,
 ) -> None:
-    """Catch admitting a writer that issued or reincarnated during the freeze boundary."""
+    """Catch admitting a reincarnated writer or losing committed mutation history."""
     module = _ceremony_module()
     base = _publication(tmp_path)
     runtime = _Runtime(module, base.subject_freezes[0])
@@ -224,6 +224,92 @@ async def test_ceremony_rejects_writer_epoch_or_high_water_drift(
     with pytest.raises(ValueError, match="changed while freezing"):
         await ceremony.execute()
 
+    assert store.preparation is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_first_persistence", [False, True])
+async def test_ceremony_persists_final_drained_cursor_and_replays_exactly(
+    tmp_path: Path, fail_first_persistence: bool
+) -> None:
+    module = _ceremony_module()
+    base = _publication(tmp_path)
+
+    class _DrainingRuntime(_Runtime):
+        def freeze(self, snapshot) -> None:
+            # A final transaction commits while shutdown waits for the writer.
+            super().freeze(snapshot)
+            self.changed_field = ("high_water", 18)
+
+    class _InterruptedStore(_FenceStore):
+        fail_once = fail_first_persistence
+
+        async def prepare(self, preparation):
+            if self.fail_once:
+                self.fail_once = False
+                raise RuntimeError("persistence interrupted after runtime freeze")
+            return await super().prepare(preparation)
+
+    runtime = _DrainingRuntime(module, base.subject_freezes[0])
+    store = _InterruptedStore()
+    authority_root = tmp_path / "execution-authority"
+    authority_root.mkdir(mode=0o700)
+    authority_path = authority_root / "issue-906.json"
+    binding = _binding(module, base.subject_freezes[0])
+    ceremony = module.LegacyWriterFreezeCeremony(
+        binding=binding,
+        runtime_source=runtime,
+        runtime_freezer=runtime,
+        fence_store=store,
+        publication_factory=_publication_factory(module, base),
+        publisher=module.InstalledExecutionAuthorityPublisher(
+            path=authority_path,
+            expected_uid=os.geteuid(),
+            expected_gid=os.getegid(),
+        ),
+    )
+
+    if fail_first_persistence:
+        with pytest.raises(RuntimeError, match="persistence interrupted"):
+            await ceremony.execute()
+        assert runtime.state == "frozen"
+        assert not authority_path.exists()
+    first = await ceremony.execute()
+    inode = authority_path.stat(follow_symlinks=False).st_ino
+    second = await ceremony.execute()
+
+    assert second == first
+    assert authority_path.stat(follow_symlinks=False).st_ino == inode
+    assert store.preparation.writer_cursors == runtime.capture().writer_cursors
+    assert store.preparation.writer_cursors[0].high_water == 18
+    assert store.freeze_evidence.writer_cursors[0].high_water == 18
+    assert store.freeze_evidence.preparation_id == binding.preparation_id
+    assert store.freeze_evidence.freeze_id == binding.freeze_id
+    assert first.subject_acknowledgements[0].legacy_writer_high_water == 18
+
+
+@pytest.mark.asyncio
+async def test_ceremony_rejects_progress_from_an_already_frozen_writer(tmp_path: Path) -> None:
+    module = _ceremony_module()
+    base = _publication(tmp_path)
+    runtime = _Runtime(module, base.subject_freezes[0])
+    runtime.state = "frozen"
+    store = _FenceStore()
+
+    def invalid_freezer(_snapshot) -> None:
+        runtime.changed_field = ("high_water", 18)
+
+    ceremony = module.LegacyWriterFreezeCeremony(
+        binding=_binding(module, base.subject_freezes[0]),
+        runtime_source=runtime,
+        runtime_freezer=invalid_freezer,
+        fence_store=store,
+        publication_factory=_publication_factory(module, base),
+        publisher=lambda publication: publication,
+    )
+
+    with pytest.raises(ValueError, match="changed while freezing"):
+        await ceremony.execute()
     assert store.preparation is None
 
 

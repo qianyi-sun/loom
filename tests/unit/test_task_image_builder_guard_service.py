@@ -229,6 +229,7 @@ def test_terminal_slurm_observation_requires_matching_exact_terminal_facts(
             f"Comment={comment}",
             "Requeue=0",
             "Restarts=0",
+            "SubmitTime=2026-09-02T16:00:00",
         )
     ) + "\n"
     )
@@ -247,8 +248,8 @@ def test_terminal_slurm_observation_requires_matching_exact_terminal_facts(
             "32768M",
             "cpu=8,mem=32G,node=1,billing=8",
             "trt-gb10-1",
+            "2026-09-02T16:00:00",
             comment,
-            "",
         )
     ) + "\n"
     )

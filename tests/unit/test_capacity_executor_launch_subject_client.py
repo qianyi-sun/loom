@@ -1,5 +1,6 @@
 """Authenticated launch-subject responses must match the requested intent exactly."""
 
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import httpx
@@ -14,6 +15,7 @@ from loom_capacity_manager.launch_subject_contracts import (
 )
 from tests.unit.test_capacity_executor_client import _executable_registration
 from tests.unit.test_capacity_executor_typed_launch_renderer import typed_context
+from tests.unit.test_capacity_launch_subject_contract import current_application_observation
 
 
 @pytest.mark.parametrize("changed", (False, True))
@@ -104,6 +106,54 @@ async def test_launch_subject_client_requires_exact_intent_response(changed, lar
         else:
             assert await client.launch_subject(binding) == value
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("changed", (None, "intent", "expired", "future", "noncanonical", "oversize", "forbidden", "unavailable"))
+async def test_current_application_allocation_client_checks_fresh_exact_evidence(changed):
+    from loom_capacity_executor.client import ExecutorRejectedError
+    from loom_capacity_manager.launch_subject_contracts import (
+        canonical_current_application_allocation_bytes,
+    )
+
+    value = current_application_observation()
+    binding = value.subject.binding
+    registration = _executable_registration().model_copy(update={
+        "execution": ExecutionContextV2.model_validate(binding.execution.model_dump(exclude={"allocation_epoch", "executable"})),
+        "executor_id": binding.executor_id, "executor_incarnation": binding.executor_incarnation,
+        "pool_id": binding.pool_id, "pool_generation": binding.pool_generation,
+    })
+    if changed == "intent":
+        other = binding.model_copy(update={"intent_id": UUID(int=990001)})
+        value = value.model_copy(update={
+            "subject": value.subject.model_copy(update={"binding": other}),
+            "permit": value.permit.model_copy(update={"binding": other}),
+        })
+    if changed in {"expired", "future"}:
+        when = datetime.now(UTC) + timedelta(minutes=-1 if changed == "expired" else 1)
+        value = value.model_copy(update={
+            "permit_consumed_at": when - timedelta(seconds=1), "observed_at": when,
+            "expires_at": when + timedelta(seconds=10),
+            "permit": value.permit.model_copy(update={"expires_at": when + timedelta(seconds=15)}),
+        })
+
+    def handler(request):
+        assert request.url.path.endswith(f"/{binding.intent_id}/current-application-allocation")
+        assert request.headers["Authorization"] == "Bearer test-executor-secret"
+        payload = canonical_current_application_allocation_bytes(value)
+        if changed == "noncanonical":
+            payload = b" " + payload
+        if changed == "oversize":
+            payload = b"x" * (MAX_CONTRACT_BYTES + 1)
+        status = 403 if changed == "forbidden" else 503 if changed == "unavailable" else 200
+        return httpx.Response(status, content=payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = ExecutableCapacityExecutorClient(registration, manager_origin="https://manager.example.test", bearer_token="test-executor-secret", http_client=http)
+        if changed:
+            with pytest.raises(ExecutorRejectedError if changed == "forbidden" else ExecutorTransportError):
+                await client.current_application_allocation(binding)
+        else:
+            assert await client.current_application_allocation(binding) == value
 
 
 async def test_launch_subject_client_stops_reading_at_byte_bound():

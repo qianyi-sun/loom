@@ -15,7 +15,9 @@ COPY src/loom_capacity_pool_controller ./src/loom_capacity_pool_controller
 COPY src/loom_capacity_pool_executor ./src/loom_capacity_pool_executor
 COPY src/loom_cli ./src/loom_cli
 COPY src/loom_config ./src/loom_config
+COPY src/loom_control_plane/__init__.py src/loom_control_plane/slurm_job_cgroup.py ./src/loom_control_plane/
 COPY src/loom_llm_gateway ./src/loom_llm_gateway
+COPY src/loom_task_image_authority ./src/loom_task_image_authority
 COPY packages/loom-bundle-checksum ./packages/loom-bundle-checksum
 COPY scripts/ops/capacity_executor_release.py /release-tools/capacity_executor_release.py
 COPY scripts/ops/capacity_executor_release.py /release-inputs/installer/capacity_executor_release.py

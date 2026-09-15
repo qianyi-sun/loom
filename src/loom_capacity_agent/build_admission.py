@@ -1,14 +1,20 @@
 """Purpose-specific management/executor build admission envelopes."""
 
 import base64
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal, Self
 from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
 
 from loom_capacity_agent.admission import ExecutableReleaseRequestV2, ExecutableWorkerRegistrationV2
-from loom_capacity_manager.contracts import Digest, PositiveQuantity, Quantity, StrictV1Model
+from loom_capacity_manager.contracts import (
+    Digest,
+    PositiveQuantity,
+    Quantity,
+    StrictV1Model,
+    canonical_digest,
+)
 from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
     ExecutableIntentBindingV2,
@@ -63,6 +69,49 @@ class BuildClaimExchangeV1(StrictV1Model):
     claim: BuildClaimRequestV1
     worker_credential: str = Field(min_length=43, max_length=512,
         pattern=r"^[A-Za-z0-9_-]+$", repr=False)
+
+
+class BuildExecutionRequestV1(StrictV1Model):
+    """Fresh permission request; the retained claim alone cannot start a build."""
+
+    claim: BuildClaimRequestV1
+    challenge: UUID
+    source_binding_sha256: Digest
+
+
+class BuildExecutionExchangeV1(StrictV1Model):
+    request: BuildExecutionRequestV1
+    worker_credential: str = Field(min_length=43, max_length=512,
+        pattern=r"^[A-Za-z0-9_-]+$", repr=False)
+
+
+class BuildExecutionPermitV1(StrictV1Model):
+    """Short-lived current-claim permission, not runtime or release evidence.
+
+    The one-shot trusted runtime must subtract transport time using a local
+    elapsed clock captured before its request. Receipt arrival never starts a
+    fresh ten-second window. These bytes do not certify the installed sandbox.
+    """
+
+    request: BuildExecutionRequestV1
+    request_digest: Digest
+    issued_at: datetime
+    not_after: datetime
+    executable: Literal[True] = True
+
+    @field_validator("issued_at", "not_after")
+    @classmethod
+    def _aware_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("native execution permission requires timezone")
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def _bounded_permission(self) -> Self:
+        if (self.request_digest != canonical_digest(self.request)
+            or not timedelta(0) < self.not_after - self.issued_at <= timedelta(seconds=10)):
+            raise ValueError("native execution permission binding or lifetime changed")
+        return self
 
 
 class BuildArtifactV1(StrictV1Model):

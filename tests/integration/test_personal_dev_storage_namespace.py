@@ -25,6 +25,10 @@ _K3S = "rancher/k3s@sha256:08fdebd14db9ab7d5ea821d5bfa95d02341a6ef886842fcc8d9df
 def _failure_category(stderr):
     # Finite labels only: kubectl can quote Secret input, names or server URLs.
     lowered = stderr.lower()
+    if not lowered.strip():
+        return "empty-stderr"
+    if lowered.strip() == "eof" or lowered.rstrip().endswith(": eof"):
+        return "unexpected-eof"
     if 'namespaces "' in lowered and "not found" in lowered:
         return "namespace-not-found"
     for label, fragment in (
@@ -39,6 +43,13 @@ def _failure_category(stderr):
         ("connection-reset", "connection reset"),
         ("timeout", "timed out"),
         ("timeout", "deadline exceeded"),
+        ("timeout", "i/o timeout"),
+        ("timeout", "handshake timeout"),
+        ("http2-error", "http2:"),
+        ("request-cancelled", "context canceled"),
+        ("discovery-error", "the server doesn't have a resource type"),
+        ("resource-unavailable", "resource temporarily unavailable"),
+        ("file-descriptor-limit", "too many open files"),
         ("tls-error", "tls:"),
         ("certificate-error", "x509:"),
         ("container-stopped", "is not running"),
@@ -61,7 +72,8 @@ class _ContainerKubectl:
         # in this test-owned container and disappears when that container stops.
         command = ["docker", "exec", "-i", self.container_id, "sh", "-c",
             'loom_fixture_diag="$1"; shift; "$@" 2>"$loom_fixture_diag"; '
-            'loom_fixture_exit=$?; cat "$loom_fixture_diag" >&2; exit "$loom_fixture_exit"',
+            'loom_fixture_exit=$?; printf "%s" "$loom_fixture_exit" >"$loom_fixture_diag.status"; '
+            'cat "$loom_fixture_diag" >&2; exit "$loom_fixture_exit"',
             "loom-test-kubectl", diagnostic, "kubectl",
             "--kubeconfig=/etc/rancher/k3s/k3s.yaml", *argv[1:]]
         try:
@@ -69,10 +81,24 @@ class _ContainerKubectl:
         except DevInstanceRuntimeError as error:
             try:
                 captured = await AsyncCommandRunner().run(
-                    ["docker", "exec", self.container_id, "head", "-c", "8192", diagnostic], timeout_seconds=5)
-                error.add_note("disposable kubectl failure category: " + _failure_category(captured.stdout))
+                    ["docker", "exec", self.container_id, "head", "-c", "8193", diagnostic], timeout_seconds=5)
+                stderr = captured.stdout[:8192]
+                error.add_note("disposable kubectl failure category: " + _failure_category(stderr))
+                # Decoded characters, not exact bytes for non-UTF8 diagnostics.
+                error.add_note(f"disposable kubectl stderr: chars={len(stderr)}; at-read-limit={len(captured.stdout) >= 8192}")
             except DevInstanceRuntimeError:
                 error.add_note("disposable kubectl diagnostic unavailable")
+            inner_status = "unavailable"
+            try:
+                captured = await AsyncCommandRunner().run(
+                    ["docker", "exec", self.container_id, "head", "-c", "12", diagnostic + ".status"], timeout_seconds=5)
+                if captured.stdout in {str(value) for value in range(256)}:
+                    inner_status = captured.stdout
+            except DevInstanceRuntimeError:
+                pass
+            # A missing status differs from a nonzero kubectl exit: Docker exec
+            # or the shell may have failed before the command completed.
+            error.add_note("disposable kubectl exit status: " + inner_status)
             try:
                 state = await AsyncCommandRunner().run(["docker", "inspect", "--format",
                     '{"Running":{{.State.Running}},"OOMKilled":{{.State.OOMKilled}},"ExitCode":{{.State.ExitCode}}}',

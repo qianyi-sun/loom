@@ -252,6 +252,8 @@ source_paths = [
   "scripts/ops/capacity_executor_release.py",
   "scripts/ops/global_fleet_pool_executor_once.py",
   "scripts/ops/install_capacity_executor.py",
+  "src/loom_control_plane/__init__.py",
+  "src/loom_control_plane/slurm_job_cgroup.py",
   "src/loom/**",
   "src/loom_capacity_agent/**",
   "src/loom_capacity_executor/**",
@@ -262,6 +264,7 @@ source_paths = [
   "src/loom_cli/**",
   "src/loom_config/**",
   "src/loom_llm_gateway/**",
+  "src/loom_task_image_authority/**",
   "tests/integration/test_capacity_executor_image_runtime.py",
   "uv.lock",
 ]
@@ -307,6 +310,9 @@ source_paths = [
   "src/loom/personal_dev_candidate.py",
   "src/loom/personal_dev_sandbox_builder.py",
   "src/loom/personal_dev_source.py",
+  "deploy/personal-dev-builder/client-seccomp-v1.json",
+  "tests/integration/test_native_oci_kvm.py",
+  "tests/support/native_kvm/**",
 ]
 smoke_owner = "sandbox-network-conformance"
 scan_owner = "images"
@@ -739,6 +745,17 @@ attestation_owner = "runtime-payload-provenance"
 runtime_policy = "runtime-payload"
 
 [[components]]
+id = "native-rootless-build-fixture"
+kind = "runtime-payload-image"
+dockerfile = "tests/support/native_kvm/Dockerfile.rootless"
+build_context = "tests/support/native_kvm"
+source_paths = ["tests/support/native_kvm/**"]
+smoke_owner = "task-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
 id = "execution-runtime-fixture"
 kind = "runtime-payload-image"
 dockerfile = "tests/fixtures/execution_runtime_fixture/Dockerfile"
@@ -937,6 +954,7 @@ exclude_paths = [
   "tests/integration/test_execution_actuator_k3s.py",
   "tests/integration/test_nebius_platform_k3s.py",
   "tests/integration/test_behavior_pipeline_inputs.py",
+  "tests/integration/test_cnpg_observer_controller_permissions.py",
   "tests/integration/test_capacity_executor_image_runtime.py",
   "tests/integration/test_oldlab_controller_stdin.py",
   "tests/integration/test_task_image_builder_phase2c_flow.py",
@@ -953,6 +971,7 @@ exclude_paths = [
   "tests/integration/test_nebius_restore.py",
   "tests/integration/test_pipeline_multipart_minio.py",
   "tests/integration/test_native_build_artifact_minio.py",
+  "tests/integration/test_native_oci_kvm.py",
   "tests/integration/test_pipeline_core_fixture_image.py",
   "tests/integration/test_personal_dev_scanner_cache_image.py",
   "tests/integration/test_personal_dev_storage_running_pods.py",
@@ -961,6 +980,7 @@ exclude_paths = [
   "tests/integration/test_slurm_worker_exit_status_docker.py",
   "tests/integration/test_subprocess_agent_e2e.py",
   "tests/integration/test_task_image_distribution_auth.py",
+  "tests/integration/test_task_image_builder_phase2c_flow.py",
   "tests/integration/test_task_image_bundle_minio_signing.py",
   "tests/integration/test_task_image_native_source_http.py",
   "tests/integration/test_task_bundle_source_storage.py",
@@ -992,6 +1012,7 @@ id = "python-integration-docker"
 language = "python"
 lane = "integration-docker"
 include_paths = [
+  "tests/integration/test_cnpg_observer_controller_permissions.py",
   "tests/integration/test_capacity_executor_image_runtime.py",
   "tests/integration/test_oldlab_controller_stdin.py",
   "tests/integration/test_task_image_builder_phase2c_flow.py",
@@ -1008,6 +1029,7 @@ include_paths = [
   "tests/integration/test_nebius_restore.py",
   "tests/integration/test_pipeline_multipart_minio.py",
   "tests/integration/test_native_build_artifact_minio.py",
+  "tests/integration/test_native_oci_kvm.py",
   "tests/integration/test_pipeline_core_fixture_image.py",
   "tests/integration/test_personal_dev_scanner_cache_image.py",
   "tests/integration/test_personal_dev_storage_running_pods.py",
@@ -1016,6 +1038,7 @@ include_paths = [
   "tests/integration/test_slurm_worker_exit_status_docker.py",
   "tests/integration/test_subprocess_agent_e2e.py",
   "tests/integration/test_task_image_distribution_auth.py",
+  "tests/integration/test_task_image_builder_phase2c_flow.py",
   "tests/integration/test_task_image_bundle_minio_signing.py",
   "tests/integration/test_task_image_native_source_http.py",
   "tests/integration/test_task_bundle_source_storage.py",

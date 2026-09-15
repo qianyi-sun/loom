@@ -11,7 +11,8 @@ from tests.integration import test_personal_dev_storage_namespace as fixture
 
 
 @pytest.mark.parametrize("conflict", [False, True])
-async def test_failed_fixture_write_preserves_exception_and_safe_diagnostics(monkeypatch, conflict):
+@pytest.mark.parametrize("inner_status", ["1", "0", "255", "-1", "256", "secret", "", "1\nprivate"])
+async def test_failed_fixture_write_preserves_exception_and_safe_diagnostics(monkeypatch, conflict, inner_status):
     error = (KubernetesResourceVersionConflictError if conflict else DevInstanceRuntimeError)("original")
     calls = []
 
@@ -21,6 +22,8 @@ async def test_failed_fixture_write_preserves_exception_and_safe_diagnostics(mon
             if "sh" in argv:
                 raise error
             if "head" in argv:
+                if argv[-1].endswith(".status"):
+                    return CommandResult(inner_status, "")
                 return CommandResult('Error from server (NotFound): namespaces "private-fixture-name" not found', "")
             if "inspect" in argv:
                 return CommandResult('{"Running":true,"OOMKilled":false,"ExitCode":0}', "")
@@ -34,7 +37,49 @@ async def test_failed_fixture_write_preserves_exception_and_safe_diagnostics(mon
     assert len([argv for argv, _ in calls if "sh" in argv]) == 1
     assert "namespace-not-found" in " ".join(error.__notes__)
     assert "OOMKilled" in " ".join(error.__notes__)
+    expected_status = inner_status if inner_status in {"0", "1", "255"} else "unavailable"
+    assert "disposable kubectl exit status: " + expected_status in error.__notes__
+    assert any(note.startswith("disposable kubectl stderr: chars=") for note in error.__notes__)
     assert all(secret not in " ".join(error.__notes__) for secret in ("do-not-log", "private-fixture-name"))
+
+
+@pytest.mark.parametrize("stderr", ["", "do-not-log" * 2000])
+async def test_fixture_stderr_metadata_is_bounded_and_never_echoes_content(monkeypatch, stderr):
+    error = DevInstanceRuntimeError("original")
+
+    class Runner:
+        async def run(self, argv, **kwargs):
+            if "sh" in argv:
+                raise error
+            if "head" in argv and not argv[-1].endswith(".status"):
+                assert argv[-2] == "8193"
+                return CommandResult(stderr[:8193], "")
+            raise DevInstanceRuntimeError("diagnostic unavailable")
+
+    monkeypatch.setattr(fixture, "AsyncCommandRunner", Runner)
+    with pytest.raises(DevInstanceRuntimeError) as raised:
+        await fixture._ContainerKubectl("a" * 64).run(["kubectl", "get", "namespace"])
+    assert raised.value is error
+    assert "do-not-log" not in " ".join(error.__notes__)
+    assert f"disposable kubectl stderr: chars={min(len(stderr), 8192)}; at-read-limit={len(stderr) >= 8192}" in error.__notes__
+    assert "disposable kubectl exit status: unavailable" in error.__notes__
+
+
+@pytest.mark.parametrize("stderr,label", [
+    ("", "empty-stderr"),
+    ("error: EOF", "unexpected-eof"),
+    ('Get "https://private.example": EOF', "unexpected-eof"),
+    ("error: http2: client connection lost", "http2-error"),
+    ("error: net/http: TLS handshake timeout", "timeout"),
+    ("error: dial tcp: i/o timeout", "timeout"),
+    ("error: context canceled", "request-cancelled"),
+    ("error: the server doesn't have a resource type private", "discovery-error"),
+    ("error: resource temporarily unavailable", "resource-unavailable"),
+    ("error: too many open files", "file-descriptor-limit"),
+    ("unknown do-not-log", "unclassified"),
+])
+def test_fixture_classifies_transport_failures_without_echoing_server_content(stderr, label):
+    assert fixture._failure_category(stderr) == label
 
 
 async def test_successful_fixture_command_returns_exact_production_result(monkeypatch):

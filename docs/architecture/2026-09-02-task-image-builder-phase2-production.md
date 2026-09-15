@@ -201,6 +201,27 @@ the interpreter, guard file, BPF object, and loader as one pinned unit.
 
 ## Projection authority and durable state
 
+`TaskImageBuildSubmissionCoordinator` owns the short submission transaction. It
+accepts only a grant UUID, reconstructs stored V2 authority, checks the configured
+environment and exact provider policy, and commits the locked one-invocation
+transition before entering the provider. Concurrent callers, a lost commit
+acknowledgement, transport error, cancellation or restart never restore that
+invocation. A canonical returned job number is an advisory receipt only: the
+grant stays `submitting` until independent authoritative inventory binds it.
+Even a crash after commit but before send recovers through inventory, not a
+second submission. No transaction or grant lock is held across provider I/O.
+
+This coordinator is not a production Slurm command runner and is not wired into
+capacity reconciliation. The DB-bearing controller must remain separate from
+the dedicated allocation/submission UID. A protected fixed helper still needs
+pinned commands, scrubbed environment and descriptors, dispatch-time authority,
+exact inventory, and durable outstanding-command/replacement-issuance fencing.
+Coroutine cancellation or an empty inventory does not prove a remote command
+has settled. Binding, release authorization versus observed release, scoped
+cancellation and expired/revoked cleanup remain separate integration work. The
+checked-in provider stays disabled until those boundaries and native acceptance
+are complete.
+
 Submission state and credential state are deliberately separate. The existing
 `TaskImageBuildGrant` continues to record `issued -> submitting -> bound ->
 released|revoked`. A new immutable authority binding adds:
@@ -274,6 +295,23 @@ path, hashes the opened file, verifies `SO_PEERCRED`, reads cgroup membership,
 and compares Slurm controller/accounting facts with the grant. A dead peer,
 changed inode, re-exec, job mismatch, supplementary privileged group, or stale
 controller response aborts before projection.
+
+Slurm 23.11 accounting readback uses `sacct --parsable2 --duplicates`: no extra
+trailing delimiter is expected, and multiple allocation records fail closed.
+The controller's exact grant comment remains mandatory. The accounting record
+is tied to that same job incarnation by matching its canonical submission time,
+identity, cluster, placement, resources and state. Its comment may be empty:
+Slurm sends that field only at job completion and only when
+`AccountingStoreFlags=job_comment` is enabled. A conflicting nonempty comment
+is still rejected. Both pinned commands run with UTC time formatting; unknown,
+invalid or mismatched submission times are refused. This read-only compatibility
+does not require changing the cluster's accounting storage policy and does not
+establish native containment or mutation-time job-ID safety.
+
+Pinned references: Slurm `slurm-23-11-4-1`
+[`sacct.1`](https://github.com/SchedMD/slurm/blob/slurm-23-11-4-1/doc/man/man1/sacct.1)
+and
+[`jobacct_storage_p_job_complete`](https://github.com/SchedMD/slurm/blob/slurm-23-11-4-1/src/plugins/accounting_storage/slurmdbd/accounting_storage_slurmdbd.c).
 
 The containment root is a descendant of the exact Slurm batch-task cgroup. The
 guard never moves `slurmstepd`, writes an ancestor/sibling cgroup, or attaches a

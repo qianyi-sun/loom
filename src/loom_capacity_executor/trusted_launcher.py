@@ -17,10 +17,16 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import (
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from loom_capacity_agent.admission import PhysicalJobBindingV2
 from loom_capacity_executor.bootstrap_handoff import (
@@ -31,6 +37,8 @@ from loom_capacity_executor.bootstrap_handoff import (
     resolve_bootstrap_handoff_physical_binding,
 )
 from loom_capacity_executor.build_admission_client import BuildAdmissionExecutorV1
+from loom_capacity_executor.native_application_admission import ApplicationBootstrapAdmission
+from loom_capacity_executor.native_worker_container import NativeWorkerContainerPolicyV2
 from loom_capacity_executor.native_worker_handoff import (
     NATIVE_WORKER_HANDOFF_ENV,
     NativeWorkerHandoffV1,
@@ -40,7 +48,11 @@ from loom_capacity_executor.pinned_admission_transport import PinnedAdmissionFil
 from loom_capacity_executor.runtime import RoutedExecutableAdmissionClient
 from loom_capacity_executor.slurm_contracts import SlurmExecutableIdentityV2, SlurmFileIdentityV2
 from loom_capacity_executor.typed_admission import TypedAdmissionRouter
-from loom_capacity_manager.executable_contracts import StrictV2Model, canonical_executable_bytes
+from loom_capacity_manager.executable_contracts import (
+    StrictV2Model,
+    canonical_executable_bytes,
+    canonical_executable_digest,
+)
 
 WORKER_CREDENTIAL_ENV = "LOOM_EXECUTOR_WORKER_CREDENTIAL"
 _MAX_TRUSTED_CONFIG_BYTES = 64 * 1024
@@ -105,6 +117,17 @@ class TrustedLauncherConfigV2(StrictV2Model):
     candidate_executable: TrustedCandidateExecutableV2
     candidate_image_digest: Annotated[str, Field(max_length=512, pattern=_IMAGE_DIGEST_PATTERN)]
     candidate_argv: Annotated[tuple[str, ...], Field(min_length=1, max_length=128)]
+    native_worker: NativeWorkerContainerPolicyV2 | None = None
+    typed_application_executor: BuildAdmissionExecutorV1 | None = None
+
+    @model_serializer(mode="wrap")
+    def _preserve_legacy_wire(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        payload = cast(dict[str, Any], handler(self))
+        if self.native_worker is None:
+            payload.pop("native_worker", None)
+        if self.typed_application_executor is None:
+            payload.pop("typed_application_executor", None)
+        return payload
 
     @field_validator("handoff_directory", "admission_directory")
     @classmethod
@@ -123,6 +146,10 @@ class TrustedLauncherConfigV2(StrictV2Model):
     def _candidate_binding(self) -> TrustedLauncherConfigV2:
         if self.candidate_argv[0] != self.candidate_executable.path:
             raise ValueError("trusted launcher candidate argv differs from executable identity")
+        if self.native_worker is not None and self.candidate_argv != (self.candidate_executable.path,):
+            raise ValueError("native trusted launcher accepts no candidate command suffix")
+        if self.typed_application_executor is not None and self.native_worker is None:
+            raise ValueError("typed node bootstrap requires the native worker branch")
         return self
 
 
@@ -131,6 +158,12 @@ class NativeTrustedLauncherConfigV3(TrustedLauncherConfigV2):
 
     schema_version: Literal[3] = 3  # type: ignore[assignment]
     executor: BuildAdmissionExecutorV1
+
+    @model_validator(mode="after")
+    def _build_only(self) -> NativeTrustedLauncherConfigV3:
+        if self.native_worker is not None or self.typed_application_executor is not None:
+            raise ValueError("personal-build launcher refuses application native policy")
+        return self
 
     @field_validator("schema_version", mode="before")
     @classmethod
@@ -438,6 +471,13 @@ def _load_trusted_config(identity: SlurmFileIdentityV2) -> TrustedLauncherConfig
         raise BootstrapHandoffError("trusted launcher config is invalid") from exc
 
 
+def _launcher_admission(config: TrustedLauncherConfigV2, legacy_factory: _AdmissionFactory) -> object:
+    if config.typed_application_executor is not None:
+        return ApplicationBootstrapAdmission(Path(config.admission_directory),
+            expected_sha256=config.admission_directory_sha256, executor=config.typed_application_executor)
+    return legacy_factory(Path(config.admission_directory), expected_directory_sha256=config.admission_directory_sha256)
+
+
 async def run_trusted_launcher(
     argv: Sequence[str],
     *,
@@ -506,12 +546,16 @@ async def run_trusted_launcher_process(
             admission = typed_admission_factory(Path(config.admission_directory),
                 expected_sha256=config.admission_directory_sha256, executor=config.executor)
         else:
-            admission = admission_factory(
-                Path(config.admission_directory),
-                expected_directory_sha256=config.admission_directory_sha256,
+            admission = _launcher_admission(config, admission_factory)
+        handoff_directory = Path(config.handoff_directory)
+        if config.native_worker is not None:
+            from loom_capacity_executor.native_bootstrap_delivery import (
+                wait_native_bootstrap_delivery,
             )
+
+            handoff_directory = await wait_native_bootstrap_delivery(handoff_directory, args.bootstrap_handoff, now=now)
         physical = resolve_bootstrap_handoff_physical_binding(
-            Path(config.handoff_directory),
+            handoff_directory,
             args.bootstrap_handoff,
             operation_id=operation_id,
             slurm_job_id=slurm_job_id,
@@ -519,6 +563,26 @@ async def run_trusted_launcher_process(
             trusted_launcher_release_sha256=release_sha256,
             now=now,
         )
+        if config.native_worker is not None:
+            from loom_capacity_executor.native_bootstrap_delivery import (
+                read_native_delivery_receipt,
+            )
+            from loom_capacity_executor.native_worker_container import FixedDockerCLI
+            from loom_capacity_executor.native_worker_launch import run_native_worker_on_host
+
+            delivery = read_native_delivery_receipt(handoff_directory, args.bootstrap_handoff)
+            if (delivery.physical_binding_sha256 != canonical_executable_digest(physical)
+                or delivery.target_node not in physical.binding.node_ids):
+                raise BootstrapHandoffError("native bootstrap delivery physical scope differs")
+            await run_native_worker_on_host(
+                directory=handoff_directory, reference=args.bootstrap_handoff,
+                physical=physical, admission=admission, policy=config.native_worker,
+                cli=FixedDockerCLI(executable=f"/proc/self/fd/{candidate_descriptor}",
+                    descriptor=candidate_descriptor,
+                    config_directory=config.native_worker.docker_config_directory),
+                image_digest=config.candidate_image_digest, now=now,
+            )
+            return
         await exec_bootstrap_handoff_candidate(
             Path(config.handoff_directory),
             args.bootstrap_handoff,
