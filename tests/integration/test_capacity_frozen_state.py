@@ -157,3 +157,28 @@ def test_frozen_progress_rolls_back_unapproved_trigger_effects(capacity_guard_da
             assert connection.execute(text("SELECT count(*) FROM loom_capacity_guard.trial_writer_mutations")).scalar_one() == 0
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize("frozen", [False, True])
+def test_materializing_terminal_report_closes_exact_claim(capacity_guard_database, monkeypatch, tmp_path, frozen):
+    database = capacity_guard_database
+    seeded = _seed_claimed_protected_trial(database, monkeypatch, tmp_path)
+    initial = asyncio.run(_initialize(database, registration=seeded.worker.registration))
+    if frozen:
+        asyncio.run(_freeze(database, initial["writer_incarnation"], uuid4()))
+    with TestClient(seeded.app, raise_server_exceptions=False) as client:
+        materializing = client.patch(f"/trials/{seeded.trial_id}/state", headers=seeded.claim_headers,
+            json={"worker_id": str(seeded.worker.worker.worker_id), "state": "materializing"})
+        assert materializing.status_code == 200, materializing.text
+        terminal = client.patch(f"/trials/{seeded.trial_id}/state", headers=seeded.claim_headers,
+            json={"worker_id": str(seeded.worker.worker.worker_id), "state": "failed", "failure_reason": "agent_error"})
+        assert terminal.status_code == 200, terminal.text
+    engine = create_engine(_value(database, "admin_url"))
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(text(
+                "SELECT count(*) FROM loom_capacity_guard.executable_claim_terminal_events "
+                "WHERE protected_attempt_id = :attempt"),
+                {"attempt": seeded.first_attempt["protected_attempt_id"]}).scalar_one() == 1
+    finally:
+        engine.dispose()
