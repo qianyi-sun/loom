@@ -17,12 +17,19 @@ from loom_capacity_agent.build_admission import (
     BuildSourceContextV1,
 )
 from loom_capacity_agent.build_artifact_stream import BuildArtifactUploadReceiptV1
+from loom_capacity_agent.native_recovery import (
+    NativeInstalledAttemptV2,
+    NativeRecoveryPreparationV1,
+)
+from loom_capacity_agent.native_recovery_execution import BuildExecutionPermitV2
+from loom_capacity_agent.native_recovery_publication import NativeRecoveryReceiptV1
 from loom_capacity_executor.native_allocated_io import scoped_native_allocated_io
 from loom_capacity_executor.native_build_source import NativeStagedBuildSource
 from loom_capacity_executor.native_outer_build import run_native_outer_build
 from loom_capacity_executor.native_rootless_runtime import (
     NativeRootlessSpecV1,
     NativeRootlessSpecV2,
+    NativeRootlessSpecV3,
     exec_native_rootless_runtime,
     read_native_rootless_spec,
 )
@@ -111,6 +118,7 @@ async def main():
     # Trusted disposable material preparation needs the same static UID mapping
     # to restore rootfs capabilities. It starts no feature/runtime process.
     material_v2 = "-v2" in json.loads(Path("/fixtures/identity.json").read_bytes())["root_stop"]
+    recovery = "-recovery" in json.loads(Path("/fixtures/identity.json").read_bytes())["root_stop"]
     runtime_workspace, state, bundles = paths()
     if material_v2:
         runtime_workspace.parent.mkdir(mode=0o700)
@@ -129,6 +137,15 @@ async def main():
             max_unpacked_bytes=1024**3, max_entries=100000,
             client_seccomp=seccomp.decode(), client_seccomp_sha256=hashlib.sha256(seccomp).hexdigest(),
             tmp_bytes=64 * 1024**2, buildkit_state_bytes=1024**3))
+        if recovery:
+            # Synthetic protected host facts only; actual complete UID/GID maps,
+            # private directory identity and launch handshake are production code.
+            preparation = NativeRecoveryPreparationV1.model_validate_json(Path("/fixtures/preparation.json").read_bytes())
+            metadata = runtime_workspace.parent.stat()
+            preparation = preparation.model_copy(update={"locator": preparation.locator.model_copy(update={
+                "directory": str(runtime_workspace.parent), "device": metadata.st_dev, "inode": metadata.st_ino})})
+            spec = NativeRootlessSpecV3.model_validate({**spec.model_dump(), "schema_version": 3,
+                "recovery_preparation": preparation})
         wire = canonical_executable_bytes(spec)
     else:
         subprocess.run(["/usr/bin/rootlesskit", "--net=none", "--subid-source=static",
@@ -143,9 +160,35 @@ async def main():
     workspace.mkdir(mode=0o700)
 
     class FixtureClient:
-        calls = 0
+        def __init__(self):
+            self.calls = 0
+            self.publications = []
+
+        async def publish_recovery(self, request, *, worker_credential):
+            assert recovery and worker_credential == "x" * 43 and request.claim == claim
+            assert not (runtime_workspace.parent / "material").exists(), "material preceded committed recovery"
+            if self.publications:
+                assert len(self.publications) == 1 and isinstance(request.record, NativeInstalledAttemptV2)
+                assert request.record.preparation == self.publications[0].record
+                assert request.record.runtime_spec_sha256 == hashlib.sha256(wire).hexdigest()
+                assert request.record.uid_map[0].outside == request.record.gid_map[0].outside == 1000
+            else:
+                assert request.record == spec.recovery_preparation
+            self.publications.append(request)
+            return NativeRecoveryReceiptV1(request=request, request_digest=canonical_digest(request))
+
+        async def authorize_recovery_execution(self, request, *, worker_credential):
+            assert recovery and len(self.publications) == 2 and worker_credential == "x" * 43
+            assert request.recovery_finalization_sha256 == canonical_digest(self.publications[-1])
+            self.calls += 1
+            if expiry and self.calls > 1 and Path("/result/live-step").exists():
+                await asyncio.Future()
+            now = datetime.now(UTC)
+            return BuildExecutionPermitV2(request=request, request_digest=hashlib.sha256(canonical_executable_bytes(request)).hexdigest(),
+                issued_at=now, not_after=now + timedelta(seconds=10))
 
         async def authorize_execution(self, request, *, worker_credential):
+            assert not recovery, "recovery runtime downgraded execution authority"
             assert worker_credential == "x" * 43
             self.calls += 1
             if expiry and self.calls > 1 and (not material_v2 or Path("/result/live-step").exists()):
@@ -187,6 +230,8 @@ async def main():
         async with scoped_native_allocated_io(claim=claim,
             source=NativeStagedBuildSource(context, Path("/fixtures/input/source.tar")),
             client=FixtureClient(), worker_credential="x" * 43) as owner:
+            if recovery:
+                await owner.prepare_recovery(spec.recovery_preparation)
             outcome = await run_native_outer_build(owner, spec_path=spec_path, expected_sha256=hashlib.sha256(wire).hexdigest(),
                 artifact_workspace=workspace, timeout_seconds=120)
         if observer is not None:
@@ -196,6 +241,8 @@ async def main():
             observer.kill()
             await asyncio.wait_for(observer.wait(), 5)
     assert (outcome.request.artifact is None) is expiry
+    if recovery:
+        print("native-recovery-finalization-bound-before-material", flush=True)
     if not expiry:
         print("native-supervised-build-completed", flush=True)
     if material_v2:

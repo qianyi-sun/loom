@@ -24,6 +24,10 @@ from loom_capacity_agent.build_admission import (
     BuildExecutionPermitV1,
     BuildExecutionRequestV1,
 )
+from loom_capacity_agent.native_recovery_execution import (
+    BuildExecutionPermitV2,
+    BuildExecutionRequestV2,
+)
 from loom_capacity_executor.native_execution_deadline import NativeExecutionDeadline
 from loom_capacity_manager.contracts import StrictV1Model, canonical_bytes
 
@@ -32,12 +36,12 @@ _MAX_FRAME = 64 * 1024
 
 class NativeAuthorityRequest(StrictV1Model):
     kind: Literal["authorize"] = "authorize"
-    request: BuildExecutionRequestV1
+    request: Annotated[BuildExecutionRequestV1 | BuildExecutionRequestV2, Field(discriminator="schema_version")]
 
 
 class NativeAuthorityPermission(StrictV1Model):
     kind: Literal["permit"] = "permit"
-    permit: BuildExecutionPermitV1
+    permit: Annotated[BuildExecutionPermitV1 | BuildExecutionPermitV2, Field(discriminator="schema_version")]
 
 
 class NativeAuthorityStop(StrictV1Model):
@@ -127,6 +131,7 @@ def _drain_authority(channel: socket.socket, guard: NativeExecutionDeadline) -> 
 def supervise_native_execution(
     claim: BuildClaimRequestV1, *, source_binding_sha256: str, authority: socket.socket,
     broker_channel: socket.socket, broker_process: subprocess.Popen[bytes],
+    recovery_finalization_sha256: str | None = None,
 ) -> NativeSupervisionResult:
     """Own the broker's lifetime while preserving the caller's IO channel.
 
@@ -144,7 +149,8 @@ def supervise_native_execution(
     try:
         _configure(authority)
         _configure(broker_channel)
-        guard = NativeExecutionDeadline(claim, source_binding_sha256=source_binding_sha256)
+        guard = NativeExecutionDeadline(claim, source_binding_sha256=source_binding_sha256,
+            recovery_finalization_sha256=recovery_finalization_sha256)
         with selectors.DefaultSelector() as selector:
             selector.register(authority, selectors.EVENT_READ, "authority")
             selector.register(broker_channel, selectors.EVENT_READ, "broker")
