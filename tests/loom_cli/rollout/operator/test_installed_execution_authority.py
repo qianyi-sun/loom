@@ -9,7 +9,7 @@ import stat
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import ClassVar
 from uuid import UUID
 
@@ -459,6 +459,83 @@ class _DiscoveryTransport:
 
     def discover(self, _request):
         return self.evidence
+
+
+@pytest.mark.parametrize("state", ["prepared", "active", "drain-only"])
+def test_installed_authority_verifies_signed_witness_after_execution_transition(tmp_path, state):
+    from loom_capacity_manager.executable_contracts import ExecutionContextV2
+    module = _authority_module()
+    desired, publication, bundle, discoveries, exports, now = _installed_source_inputs(tmp_path)
+    source = module.InstalledExecutionAuthoritySource(
+        publication_reader=lambda: publication,
+        controller_transports={pool: _DiscoveryTransport(value) for pool, value in discoveries.items()},
+        credential_bundle_reader=lambda: bundle, witness_exports_source=lambda: exports, now=lambda: now)
+    original = source(desired)
+    execution = ExecutionContextV2(authority_incarnation=UUID(publication.executor_profile_seed.authority_incarnation),
+        writer_epoch=11, configuration_epoch=desired.original.snapshot.configuration_epoch,
+        execution_epoch=7, execution_manifest_sha256="b" * 64, execution_state=state,
+        executable_new_capacity_ceiling=1 if state == "active" else 0,
+        executable_new_capacity_rate_per_minute=1 if state == "active" else 0,
+        trusted_fleet_release_sha256=publication.executor_profile_seed.trusted_fleet_release_sha256)
+    def publish(**changes):
+        for pool in ("gb10", "oldlab"):
+            values = dict(private_key=ed25519.Ed25519PrivateKey.from_private_bytes(b"m" * 32),
+                signing_key_id=publication.manager_signing_key_id, pool_id=pool,
+                execution_epoch=execution.execution_epoch, execution_state=execution.execution_state,
+                executable_new_capacity_ceiling=execution.executable_new_capacity_ceiling,
+                expires_at=now + timedelta(seconds=20))
+            values.update(changes)
+            exports[pool] = build_global_execution_witness_export(**values)
+    publish()
+    with pytest.raises(ValueError, match="witness"):
+        source(desired)
+    assert source.capture_during_execution(desired, execution=execution) == original
+    class Manager:
+        changed = False
+        reads = 0
+        def get_execution_preparation_status(self):
+            self.reads += 1
+            context = execution.model_copy(update={"writer_epoch": execution.writer_epoch + 1}) if self.changed and self.reads > 1 else execution
+            return SimpleNamespace(readiness=SimpleNamespace(execution=context))
+    manager = Manager()
+    assert module.capture_current_execution_authority(source, desired=desired, manager=manager) == original
+    manager = Manager()
+    manager.changed = True
+    with pytest.raises(RuntimeError, match="context changed"):
+        module.capture_current_execution_authority(source, desired=desired, manager=manager)
+    if state in {"prepared", "active"}:
+        def lag():
+            publish(execution_state="shadow" if state == "prepared" else "prepared",
+                execution_epoch=0 if state == "prepared" else execution.execution_epoch,
+                executable_new_capacity_ceiling=0)
+        lag()
+        waited = []
+        def converge(seconds):
+            waited.append(seconds)
+            publish()
+        assert module.capture_current_execution_authority(source, desired=desired, manager=Manager(),
+            sleep=converge) == original
+        assert waited == [1.0]
+        lag()
+        clock = iter([0.0, 0.0, 31.0])
+        with pytest.raises(ValueError, match=r"witness.*converge"):
+            module.capture_current_execution_authority(source, desired=desired, manager=Manager(),
+                monotonic=lambda: next(clock), sleep=lambda _: None)
+        changed = Manager()
+        changed.changed = True
+        with pytest.raises(RuntimeError, match="context changed"):
+            module.capture_current_execution_authority(source, desired=desired, manager=changed,
+                sleep=lambda _: pytest.fail("must reject context change before waiting"))
+        # Signature failure is not asynchronous publication lag.
+        publish(private_key=ed25519.Ed25519PrivateKey.from_private_bytes(b"x" * 32))
+        with pytest.raises(ValueError, match="witness"):
+            module.capture_current_execution_authority(source, desired=desired, manager=Manager(),
+                sleep=lambda _: pytest.fail("must reject an untrusted signature immediately"))
+    for changes in ({"execution_epoch": 8}, {"expires_at": now - timedelta(seconds=1)},
+                    {"execution_state": "shadow", "execution_epoch": 0, "executable_new_capacity_ceiling": 0}):
+        publish(**changes)
+        with pytest.raises(ValueError, match="witness"):
+            source.capture_during_execution(desired, execution=execution)
 
 
 class _WitnessRunner:

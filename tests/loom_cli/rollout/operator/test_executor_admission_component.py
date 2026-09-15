@@ -120,19 +120,36 @@ def test_issuance_retains_credential_before_effect_and_recovers_original_commit(
 
     from sqlalchemy.engine import make_url
 
-    from tests.capacity_fixtures import subject_configuration
+    from loom_cli.rollout.operator.protected_staging_capacity_manager_configuration_component import (
+        derive_protected_staging_capacity_configuration,
+    )
     from tests.loom_cli.rollout.operator.test_application_migration_ca import _ca
-    subject = subject_configuration(tier_id="staging", subject_id=uuid5(NAMESPACE_URL, "loom:staging:capacity-subject"),
-        subject_incarnation=uuid5(NAMESPACE_URL, "loom:staging:capacity-subject:v1"))
+    from tests.loom_cli.rollout.operator.test_protected_staging_capacity_manager_configuration_component import (
+        _active_document,
+        _live_fleet,
+        _seed,
+    )
+    seed = {**_seed(), "subject_id": str(uuid5(NAMESPACE_URL, "loom:staging:capacity-subject")),
+        "subject_incarnation": str(uuid5(NAMESPACE_URL, "loom:staging:capacity-subject:v1"))}
+    subject = derive_protected_staging_capacity_configuration(
+        active_document=_active_document(_live_fleet(), ()), seed_values=seed,
+        target_generation=plan.starting_mutation_epoch + 1).staging_subject
+    assert str(subject.demand_reporter_incarnation) != seed["reporter_incarnation"]
     inputs.ca = SimpleNamespace(certificate=_ca())
     Bootstrap.inputs_source = staticmethod(lambda: inputs)
-    Bootstrap.seed_source = staticmethod(lambda: {"subject_id": str(subject.subject_id),
-        "subject_incarnation": str(subject.subject_incarnation), "reporter_incarnation": str(subject.demand_reporter_incarnation)})
+    Bootstrap.seed_source = staticmethod(lambda: dict(seed))
     bundle = owner.controller_admission(plan, subject=subject, state_directory="/var/lib/loom-capacity-executor",
         protected_admission_sha256="a" * 64)
     assert make_url(bundle.database_url.decode()).password == issued[0]
     assert bundle.issuance_digest == saved_journal.read()[0].digest
     assert len(calls) == (2 if interrupt in {"after-retention", "after-sql-commit"} else 1)
+    for changes in ({"demand_reporter_incarnation": uuid5(NAMESPACE_URL, "wrong-reporter")},
+            {"configuration_generation": subject.configuration_generation + 1},
+            {"deployment_generation": subject.deployment_generation + 1},
+            {"candidate_generation": subject.candidate_generation + 1}):
+        with pytest.raises(RuntimeError, match="source binding"):
+            owner.controller_admission(plan, subject=subject.model_copy(update=changes),
+                state_directory="/var/lib/loom-capacity-executor", protected_admission_sha256="a" * 64)
     (saved_journal.root / "terminal.json").unlink()
     with pytest.raises(RuntimeError):
         owner.controller_admission(plan, subject=subject, state_directory="/var/lib/loom-capacity-executor",

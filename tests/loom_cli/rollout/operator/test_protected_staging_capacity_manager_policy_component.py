@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 from loom_capacity_manager.executable_contracts import (
+    ExecutionContextV2,
     ExecutionPreparationV2,
     canonical_executable_bytes,
     canonical_executable_digest,
@@ -713,6 +714,24 @@ def test_policy_component_keeps_exact_artifact_bound_prepared_runtime_exact(
     )
 
     assert component.classify(plan)[0] is ComponentState.EXACT
+
+    active = ExecutionContextV2(authority_incarnation=authority.authority_incarnation,
+        writer_epoch=writer_epoch, configuration_epoch=configuration_epoch, execution_epoch=1,
+        execution_manifest_sha256=canonical_executable_digest(request), execution_state="active",
+        executable_new_capacity_ceiling=request.requested_ceiling,
+        executable_new_capacity_rate_per_minute=request.requested_rate_per_minute,
+        trusted_fleet_release_sha256=request.trusted_fleet_release_sha256)
+    cluster.status.update(execution_state="active", executable_new_capacity_ceiling=request.requested_ceiling,
+        increase_freeze=False)
+    assert component.classify(plan)[0] is ComponentState.DRIFTED
+    assert component.classify_execution(plan, execution=active)[0] is ComponentState.EXACT
+    for field, value in (("writer_epoch", writer_epoch + 1), ("execution_epoch", 2),
+                         ("execution_manifest_sha256", "f" * 64), ("executable_new_capacity_ceiling", 0),
+                         ("increase_freeze", True)):
+        previous = cluster.status[field]
+        cluster.status[field] = value
+        assert component.classify_execution(plan, execution=active)[0] is ComponentState.DRIFTED
+        cluster.status[field] = previous
 
     cluster.status["execution_manifest_sha256"] = "f" * 64
     assert component.classify(plan)[0] is ComponentState.DRIFTED

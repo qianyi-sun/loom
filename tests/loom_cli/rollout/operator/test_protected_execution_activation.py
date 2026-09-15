@@ -479,3 +479,18 @@ def test_unknown_journal_record_refuses_before_effects(tmp_path):
     with pytest.raises(RuntimeError, match="inventory"):
         owner.execute()
     assert calls == []
+
+
+def test_resume_recovers_exact_private_inputs_without_forward_source(tmp_path):
+    owner, manager, controls, calls = fixture(tmp_path)
+    controls["oldlab"].fail = True
+    with pytest.raises(RuntimeError, match="controller enable failed"):
+        owner.execute()
+    def forbidden():
+        raise AssertionError("forward source must not be reopened for drain")
+    resumed = ProtectedExecutionActivation.resume(plan=owner.plan, artifact=owner.artifact,
+        journal=owner.journal, manager=manager, prepared=controls, active=controls, dependency_guard=forbidden)
+    assert resumed.requests == owner.requests
+    assert resumed.subject == owner.subject
+    assert resumed.execute().execution_state == "drain-only"
+    assert calls.count(("manager", "activate")) == 1

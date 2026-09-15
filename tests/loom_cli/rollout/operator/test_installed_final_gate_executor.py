@@ -87,6 +87,55 @@ def _bound_plan(tmp_path: Path) -> FinalGatePlan:
     )
 
 
+def test_installed_activation_uses_verified_candidate_and_fixed_controller_channels(tmp_path, monkeypatch):
+    executor = _executor(tmp_path)
+    plan = _execution_plan(tmp_path)
+    config = executor.config
+    verified = object()
+    artifact = SimpleNamespace(executor_profile_seed=SimpleNamespace(executor_image="immutable-executor"))
+    runtime = SimpleNamespace(_read_execution_prerequisite=lambda bound: artifact if bound == plan else None)
+    application = object()
+    built = SimpleNamespace(staging_capacity_runtime=runtime, application_factory=application)
+    calls = []
+    def validate(self, bound):
+        assert self is executor and bound == plan
+        calls.append("verify")
+        return verified, config
+    def build(self, bound, install, effective):
+        assert (bound, install, effective) == (plan, verified, config)
+        calls.append("build")
+        return built
+    monkeypatch.setattr(InstalledFinalGateExecutor, "_validate_plan", validate)
+    monkeypatch.setattr(InstalledFinalGateExecutor, "_build_protected_apply_executor", build)
+    controller, gb10, oldlab = object(), object(), object()
+    def gb10_controller(**kwargs):
+        assert kwargs == {"candidate_sha": plan.candidate_sha, "candidate_tree": plan.candidate_tree,
+            "run": executor._controller_prerequisite_run}
+        return controller
+    def gb10_active(**kwargs):
+        assert kwargs == {"controller": controller}
+        return gb10
+    def oldlab_active(**kwargs):
+        assert kwargs == {"image": "immutable-executor", "run": executor._controller_prerequisite_run}
+        return oldlab
+    monkeypatch.setattr(installed_module, "build_fixed_gb10_external_supervisor_transport", gb10_controller)
+    monkeypatch.setattr(installed_module, "build_fixed_gb10_active_controller_transport", gb10_active)
+    monkeypatch.setattr(installed_module, "build_fixed_oldlab_active_controller_transport", oldlab_active)
+    documents = {"gb10": object(), "oldlab": object()}
+    result = object()
+    class Activation:
+        def __init__(self, bound_runtime, bound_application, active):
+            assert bound_runtime is runtime and bound_application is application
+            assert active == {"gb10": gb10, "oldlab": oldlab}
+        def execute(self, bound, **kwargs):
+            assert bound == plan and kwargs == {"documents": documents}
+            calls.append("activate")
+            return result
+    monkeypatch.setattr(installed_module, "InstalledExecutionActivation", Activation)
+    assert executor.activate_prepared_execution(plan, documents=documents) is result
+    assert calls == ["verify", "build", "activate"]
+
+
 def _executor(tmp_path: Path) -> InstalledFinalGateExecutor:
     plan = _bound_plan(tmp_path)
     config = replace(
@@ -841,6 +890,9 @@ def test_schema_seven_dispatch_binds_both_fixed_controller_prerequisite_transpor
     class _ManagerClient:
         def get_configuration(self) -> object:
             return active_configuration
+
+        def get_execution_preparation_status(self) -> object:
+            return SimpleNamespace(readiness=SimpleNamespace(execution=None))
 
     class _ManagerClientContext:
         def __enter__(self) -> object:
