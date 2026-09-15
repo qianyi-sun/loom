@@ -13,8 +13,8 @@ from loom_cli.rollout.operator.protected_execution_preparation_journal import (
 from tests.loom_cli.rollout.operator.test_protected_execution_activation import fixture
 
 
-def installed(tmp_path, monkeypatch):
-    owner, manager, controllers, calls = fixture(tmp_path)
+def installed(tmp_path, monkeypatch, *, native=False):
+    owner, manager, controllers, calls = fixture(tmp_path, native=native)
     observed = []
     manager.get_configuration = lambda: {}
     @contextmanager
@@ -93,3 +93,38 @@ def test_installed_activation_checkpoint_expiry_prevents_forward_but_not_drain(t
     assert expired_source.execute(owner.plan).execution_state == "drain-only"
     assert calls.count(("manager", "activate")) == 1
     assert manager.execution.execution_state == "drain-only"
+
+
+def test_installed_native_activation_delivers_bound_material_and_retains_recovery(tmp_path, monkeypatch):
+    source, owner, _, controllers, calls, observed, documents, _ = installed(tmp_path, monkeypatch, native=True)
+    material = {pool: request.native_delivery_material for pool, request in owner.requests.items()}
+    controllers["oldlab"].fail = True
+    with pytest.raises(RuntimeError, match="controller enable failed"):
+        source.execute(owner.plan, documents=documents, native_material=material)
+    assert observed == ["gb10", "oldlab"]
+    from loom_cli.rollout.operator.protected_execution_activation import ProtectedExecutionActivation
+    retained = ProtectedExecutionActivation.resume(plan=owner.plan, artifact=owner.artifact,
+        journal=owner.journal, manager=owner.manager, prepared=controllers, active=controllers,
+        dependency_guard=lambda: None)
+    assert {pool: request.native_delivery_material for pool, request in retained.requests.items()} == material
+    assert source.execute(owner.plan).execution_state == "drain-only"
+    assert calls.count(("manager", "activate")) == 1
+
+
+@pytest.mark.parametrize("drift", ["missing", "extra", "hash", "non-native"])
+def test_installed_native_material_is_validated_before_issuance(tmp_path, monkeypatch, drift):
+    from dataclasses import replace
+    source, owner, _, _, calls, observed, documents, _ = installed(tmp_path, monkeypatch, native=drift != "non-native")
+    from loom_cli.rollout.operator.protected_native_delivery_material import NativeDeliveryMaterial
+    material = {pool: request.native_delivery_material for pool, request in owner.requests.items()}
+    if drift == "missing":
+        material.pop("oldlab")
+    elif drift == "extra":
+        material["unbound"] = material["gb10"]
+    elif drift == "hash":
+        material["oldlab"] = replace(material["oldlab"], private_key=b"wrong" * 64)
+    else:
+        material = {"gb10": NativeDeliveryMaterial(b"a" * 64, b"b" * 64, b"c" * 64)}
+    with pytest.raises(ValueError, match="native"):
+        source.execute(owner.plan, documents=documents, native_material=material)
+    assert calls == observed == []

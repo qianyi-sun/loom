@@ -115,13 +115,13 @@ class Manager(_Manager):
         return ExecutionAuthorityV2.model_validate_json(self.execution.model_dump_json())
 
 
-def fixture(tmp_path, *, policy_ceiling=1, policy_rate=1):
+def fixture(tmp_path, *, policy_ceiling=1, policy_rate=1, native=False):
     requests, controls, calls = {}, {}, []
     ca = None
     for pool in ("gb10", "oldlab"):
         path = tmp_path / pool
         path.mkdir()
-        request = _request(path, prerequisite=_controller_request(path, pool))
+        request = _request(path, prerequisite=_controller_request(path, pool), native=native)
         admission = _bundle(request.document)
         if ca is None:
             ca = admission.ca_certificate
