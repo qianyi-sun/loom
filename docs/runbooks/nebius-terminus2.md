@@ -87,8 +87,59 @@ publishing plans with the new field. The 1-vCPU/2-GiB controller baseline retain
 the allocation exercised by the ordinary-task acceptance; it is not derived
 from a low point-in-time usage sample. Further reductions require evidence from
 startup, Harbor processing, workspace handoff and output publication, including
-memory peaks and CPU throttling. Both resource requests and limits use the
-configured values.
+memory peaks and CPU throttling. By default, resource requests and limits use the
+configured values. The scoped override below changes only scheduling requests.
+
+## Compare measured scheduling requests
+
+After collecting a representative baseline, a native Terminus Batch can opt into
+per-task requests without editing task inputs, rebuilding task images or lowering
+hard limits. This supports a bounded same-cohort comparison; it does not establish
+a fleet-wide calibrated default. Keep task/model parameters, limits and retries
+fixed, compare packing and node-hours, and retain resource completeness, OOM,
+eviction and latency evidence. Sampled storage excludes read-only image layers;
+include node filesystem/image-cache headroom when selecting requests.
+
+Pass `--task-resource-requests @requests.json` to `loom eval batch create`, or the
+same `task_resource_requests` object to `POST /api/v1/batches`. The JSON is keyed
+by selected task ID. For example (illustrative values, not a sizing recommendation):
+
+```json
+{
+  "local/example-task": {
+    "task_revision_sha256": "sha256:<existing task checksum>",
+    "requests": {
+      "controller": {
+        "cpu_millis": 1000,
+        "memory_mib": 2048,
+        "ephemeral_storage_mib": 2048
+      }
+    }
+  }
+}
+```
+
+Each configured role (`controller`, `task_sandbox`, `verifier_sandbox`) requires
+positive integer CPU millicores, memory MiB and ephemeral-storage MiB, each no
+higher than its existing hard limit. Unlisted roles and tasks keep their default
+requests. The task checksum identifies which measured revision the values apply
+to; a mismatch is rejected. Overrides require automatic native `terminus-2`
+execution. They are rejected for unselected tasks, other backends/agents and
+explicit precompiled task bindings.
+
+Requests are frozen on the Batch and exposed by its ordinary detail API. They do
+not change deployment defaults, task revisions, container limits, workspace or
+output bounds. Kubernetes placement, admission reservations and request-based cost
+allocation all use the same effective Pod requests. Cost allocation is not the
+provider's settled bill. Rerunning failed cases preserves requests for the selected
+subset, including with `--use-current-runtime`, and validates them against the
+selected runtime's limits. To remove an override, create a new Batch without it.
+
+Deploy the matching Python services, actuator and Go runtime before submitting an
+override; older runtime binaries reject the new plan field. Existing default plans
+omit it and retain their previous behavior. Compare results before adopting these
+values for other workloads; broader calibration remains in the
+[resource-accounting runbook](trial-resource-accounting.md#capacity-calibration).
 
 ## Dockerfile task prerequisites
 

@@ -40,6 +40,7 @@ _RESERVATION_REQUEST_NAMESPACE = UUID("aaf78d09-4268-4dc5-81ee-4c2408ce2611")
 
 _NEXT_SERVICE_TRIAL = text("""
 SELECT t.id,
+       t.task_id,
        t.attempt_count,
        task_definition.checksum AS task_checksum,
        task_definition.config AS task_config,
@@ -228,6 +229,8 @@ async def _reserve_service_candidate(
                          else dict(row["task_source_provenance"] or {}))
     binding = task.service_execution
     if binding is not None:
+        if (row["batch_runtime_profile"] or {}).get("task_resource_requests", {}).get(row["task_id"]):
+            raise ValueError("task resource requests require automatic native execution")
         if binding.logical_pool_id != pool_id:
             raise ValueError("queued service-execution task binding drift")
         runtime_plan = bind_service_execution_runtime_plan(
@@ -242,6 +245,7 @@ async def _reserve_service_candidate(
         if runtime_profile.logical_pool_id != pool_id:
             raise ValueError("queued service-execution runtime profile pool drift")
         runtime_plan = compile_service_execution_plan(
+            task_id=row["task_id"],
             task=task,
             trial=TrialConfig.model_validate(row["trial_config"]),
             task_revision_sha256=task_revision,
