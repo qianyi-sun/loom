@@ -30,6 +30,7 @@ from loom_capacity_executor.runtime import (
     build_executable_runtime,
     load_activation_runtime_artifact,
     retained_drain_execution_matches,
+    validate_executable_runtime_inputs,
 )
 from loom_capacity_executor.slurm_backend import AsyncSlurmBackend
 from loom_capacity_executor.slurm_contracts import SlurmAuthorityV2
@@ -54,7 +55,7 @@ _PREPARED_REGISTRATION_NAMESPACE = UUID("0dbdb949-f40e-5ae4-92ac-ee986992a3a2")
 
 @dataclass(frozen=True, slots=True)
 class ExecutorOnceResult:
-    mode: Literal["drain-only", "inventory-only", "scale-up", "validate-only"]
+    mode: Literal["drain-only", "inventory-only", "scale-up", "validate-only", "activation-validated"]
 
 
 def build_executable_client(config: PoolExecutorConfig) -> ExecutableCapacityExecutorClient:
@@ -87,6 +88,7 @@ async def run_daemon_once(
     pool_id: str | None = None,
     validate_only: bool = False,
     prepared_only: bool = False,
+    validate_activation_only: bool = False,
     inventory_policy: SlurmInventoryPolicy | None = None,
     activation_runtime_artifact: Path | None = None,
 ) -> ExecutorOnceResult:
@@ -96,7 +98,7 @@ async def run_daemon_once(
         raise TypeError("executor config must be PoolExecutorConfig")
     if pool_id is not None and not isinstance(pool_id, str):
         raise TypeError("pool argument must be a string or none")
-    if type(validate_only) is not bool or type(prepared_only) is not bool:
+    if any(type(mode) is not bool for mode in (validate_only, prepared_only, validate_activation_only)):
         raise TypeError("executor mode arguments must be booleans")
     if inventory_policy is not None and not isinstance(inventory_policy, SlurmInventoryPolicy):
         raise TypeError("inventory policy argument must be SlurmInventoryPolicy")
@@ -105,8 +107,8 @@ async def run_daemon_once(
     ):
         raise TypeError("activation runtime artifact argument must be Path")
     config.assert_pool(config.pool_id if pool_id is None else pool_id)
-    if validate_only and prepared_only:
-        raise ExecutorConfigError("validate-only and prepared-only modes are mutually exclusive")
+    if sum((validate_only, prepared_only, validate_activation_only)) > 1:
+        raise ExecutorConfigError("validate-only, prepared-only and activation validation modes are mutually exclusive")
     if prepared_only:
         if inventory_policy is None:
             raise ExecutorConfigError("prepared-only mode requires an inventory policy")
@@ -150,12 +152,18 @@ async def run_daemon_once(
             raise ExecutorConfigError("prepared authority requires prepared-only inventory runtime")
         assert activation_runtime_artifact is not None
         artifact = load_activation_runtime_artifact(activation_runtime_artifact)
+        if validate_activation_only:
+            validate_executable_runtime_inputs(config, artifact, current_context=current_context)
+            return ExecutorOnceResult("activation-validated")
         executor = build_executable_runtime(
             config,
             artifact,
             manager_client=client,
             current_context=current_context,
         )
+        # Assembly verified the artifact against the authenticated current
+        # context. Retain its active registration during drain replay too.
+        client.registration = executor.registration
         try:
             return await run_executor_once(
                 config,
@@ -562,6 +570,7 @@ def main() -> int:
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--validate-only", action="store_true")
     modes.add_argument("--prepared-only", action="store_true")
+    modes.add_argument("--validate-activation-only", action="store_true")
     parser.add_argument("--activation-runtime-artifact")
     parser.add_argument("--inventory-policy")
     parser.add_argument("--expected-inventory-policy-sha256")
@@ -600,6 +609,7 @@ def main() -> int:
             pool_id=args.pool,
             validate_only=args.validate_only,
             prepared_only=args.prepared_only,
+            validate_activation_only=args.validate_activation_only,
             inventory_policy=inventory_policy,
             activation_runtime_artifact=(
                 Path(args.activation_runtime_artifact)
@@ -617,6 +627,7 @@ async def _run_with_signals(
     pool_id: str | None,
     validate_only: bool,
     prepared_only: bool = False,
+    validate_activation_only: bool = False,
     inventory_policy: SlurmInventoryPolicy | None = None,
     activation_runtime_artifact: Path | None = None,
 ) -> ExecutorOnceResult:
@@ -641,6 +652,7 @@ async def _run_with_signals(
             pool_id=pool_id,
             validate_only=validate_only,
             prepared_only=prepared_only,
+            validate_activation_only=validate_activation_only,
             inventory_policy=inventory_policy,
             activation_runtime_artifact=activation_runtime_artifact,
         )

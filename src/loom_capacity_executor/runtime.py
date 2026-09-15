@@ -401,16 +401,11 @@ def _absolute_owner_path(value: str) -> Path:
     return path
 
 
-def build_executable_runtime(
-    config: PoolExecutorConfig,
-    artifact: ActivationRuntimeArtifactV2,
-    *,
-    manager_client: Any,
+def validate_executable_runtime_inputs(
+    config: PoolExecutorConfig, artifact: ActivationRuntimeArtifactV2, *,
     current_context: ExecutionContextV2,
-    admission_client_factory: _ClientFactory | None = None,
-    slurm_backend_factory: _SlurmFactory = AsyncSlurmBackend,
-) -> ExecutablePoolExecutor:
-    """Assemble one positive pool executor from exact local and activation bindings."""
+) -> None:
+    """Validate activation inputs without creating a journal, backend or worker."""
 
     if not isinstance(config, PoolExecutorConfig):
         raise RuntimeAssemblyError("executor config is invalid")
@@ -428,6 +423,21 @@ def build_executable_runtime(
         != artifact.admission_directory_sha256
     ):
         raise RuntimeAssemblyError("admission directory digest differs from activation artifact")
+
+
+def build_executable_runtime(
+    config: PoolExecutorConfig,
+    artifact: ActivationRuntimeArtifactV2,
+    *,
+    manager_client: Any,
+    current_context: ExecutionContextV2,
+    admission_client_factory: _ClientFactory | None = None,
+    slurm_backend_factory: _SlurmFactory = AsyncSlurmBackend,
+) -> ExecutablePoolExecutor:
+    """Assemble one positive pool executor from exact local and activation bindings."""
+
+    validate_executable_runtime_inputs(config, artifact, current_context=current_context)
+    admission_directory = Path(artifact.admission_directory)
     admission = (
         RoutedExecutableAdmissionClient(
             admission_directory,
@@ -873,5 +883,6 @@ __all__ = [
     "load_admission_binding_directory",
     "load_approved_launch_profile_set",
     "resolve_runtime_profile",
+    "validate_executable_runtime_inputs",
     "write_admission_binding_directory",
 ]

@@ -29,6 +29,7 @@ from loom_capacity_executor.runtime import (
     load_activation_runtime_artifact,
     load_approved_launch_profile_set,
     resolve_runtime_profile,
+    validate_executable_runtime_inputs,
     write_admission_binding_directory,
 )
 from loom_capacity_executor.slurm_contracts import (
@@ -470,6 +471,9 @@ def test_activation_runtime_artifact_builds_exact_executor_runtime(tmp_path: Pat
     artifact_path.write_bytes(canonical_executable_bytes(artifact))
     artifact_path.chmod(0o600)
     assert load_activation_runtime_artifact(artifact_path) == artifact
+    assert not config.journal_file.exists()
+    validate_executable_runtime_inputs(config, artifact, current_context=active)
+    assert not config.journal_file.exists()
 
     def slurm_factory(authority: SlurmAuthorityV2) -> object:
         seen.append(authority)

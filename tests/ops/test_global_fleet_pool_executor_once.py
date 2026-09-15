@@ -1301,9 +1301,11 @@ async def test_daemon_entry_constructs_client_and_executes_inert_journal_path(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("drain", [False, True])
 async def test_daemon_entry_fetches_current_context_loads_artifact_and_assembles_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    drain: bool,
 ) -> None:
     config = PoolExecutorConfig.from_files(executor_files(tmp_path).config)
     active = config.execution.model_copy(
@@ -1313,9 +1315,16 @@ async def test_daemon_entry_fetches_current_context_loads_artifact_and_assembles
             "executable_new_capacity_rate_per_minute": 1,
         }
     )
+    current = active.model_copy(update={
+        "execution_state": "drain-only", "writer_epoch": active.writer_epoch + 1,
+        "executable_new_capacity_ceiling": 0, "executable_new_capacity_rate_per_minute": 0,
+    }) if drain else active
     artifact_path = tmp_path / "activation-runtime.json"
     artifact = object()
-    executor = object()
+    class BuiltExecutor:
+        registration = config.registration.model_copy(update={"execution": active})
+
+    executor = BuiltExecutor()
 
     class ManagedClient(InventoryClient):
         async def __aenter__(self) -> ManagedClient:
@@ -1326,9 +1335,10 @@ async def test_daemon_entry_fetches_current_context_loads_artifact_and_assembles
 
         async def current_execution_context(self) -> object:
             self.events.append(("context", 0))
-            return active
+            return current
 
     managed = ManagedClient()
+    managed.registration = config.registration
     captured: dict[str, object] = {}
 
     def client_factory(_config: PoolExecutorConfig) -> InventoryClient:
@@ -1380,9 +1390,10 @@ async def test_daemon_entry_fetches_current_context_loads_artifact_and_assembles
     assert captured["artifact_path"] == artifact_path
     assert captured["artifact"] is artifact
     assert captured["manager_client"] is managed
-    assert captured["current_context"] == active
-    assert captured["authority"] == ExecutionAuthorityV2.model_validate(active.model_dump())
+    assert captured["current_context"] == current
+    assert captured["authority"] == ExecutionAuthorityV2.model_validate(current.model_dump())
     assert captured["executor"] is executor
+    assert managed.registration == executor.registration
 
 
 @pytest.mark.asyncio
@@ -1425,6 +1436,7 @@ def test_module_entrypoint_exposes_real_daemon_arguments() -> None:
     assert "--prepared-only" in result.stdout
     assert "--config" in result.stdout
     assert "--activation-runtime-artifact" in result.stdout
+    assert "--validate-activation-only" in result.stdout
     assert "--inventory-policy" in result.stdout
     assert "--expected-inventory-policy-sha256" in result.stdout
 
@@ -1455,6 +1467,7 @@ def test_module_entrypoint_loads_and_forwards_exact_prepared_inventory_policy(
         pool_id: str | None,
         validate_only: bool,
         prepared_only: bool,
+        validate_activation_only: bool,
         inventory_policy: SlurmInventoryPolicy | None,
         activation_runtime_artifact: Path | None,
     ) -> once.ExecutorOnceResult:
@@ -1462,6 +1475,7 @@ def test_module_entrypoint_loads_and_forwards_exact_prepared_inventory_policy(
         captured["pool_id"] = pool_id
         captured["validate_only"] = validate_only
         captured["prepared_only"] = prepared_only
+        captured["validate_activation_only"] = validate_activation_only
         captured["inventory_policy"] = inventory_policy
         captured["activation"] = activation_runtime_artifact
         return once.ExecutorOnceResult("inventory-only")
@@ -1498,6 +1512,7 @@ def test_module_entrypoint_loads_and_forwards_exact_prepared_inventory_policy(
         "pool_id": config.pool_id,
         "validate_only": False,
         "prepared_only": True,
+        "validate_activation_only": False,
         "inventory_policy": policy,
         "activation": None,
     }
@@ -1955,3 +1970,51 @@ async def test_full_slurm_authority_envelope_mismatch_is_rejected(
             await run_executor_once(config, client=manager, authority=authority, executor=executor)
     finally:
         journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reject", [False, True])
+async def test_activation_validation_reads_context_and_local_authority_without_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reject: bool,
+) -> None:
+    config = PoolExecutorConfig.from_files(executor_files(tmp_path).config)
+    active = config.execution.model_copy(update={
+        "execution_state": "active", "executable_new_capacity_ceiling": 1,
+        "executable_new_capacity_rate_per_minute": 1,
+    })
+    artifact = object()
+    events = []
+
+    class ManagedClient(InventoryClient):
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            events.append("closed")
+
+        async def current_execution_context(self):
+            events.append("context")
+            return active
+
+    def validate(actual_config, actual_artifact, *, current_context):
+        assert actual_config is config and actual_artifact is artifact
+        assert current_context == active
+        events.append("validated")
+        if reject:
+            raise ValueError("activation authority changed")
+
+    def no_execution(*args, **kwargs):
+        raise AssertionError("validation constructed or ticked an executor")
+
+    monkeypatch.setattr(once, "build_executable_client", lambda _: ManagedClient())
+    monkeypatch.setattr(once, "load_activation_runtime_artifact", lambda _: artifact)
+    monkeypatch.setattr(once, "validate_executable_runtime_inputs", validate, raising=False)
+    monkeypatch.setattr(once, "build_executable_runtime", no_execution)
+    monkeypatch.setattr(once, "run_executor_once", no_execution)
+    if reject:
+        with pytest.raises(ValueError, match="activation authority changed"):
+            await run_daemon_once(config, activation_runtime_artifact=tmp_path / "activation.json", validate_activation_only=True)
+    else:
+        result = await run_daemon_once(config, activation_runtime_artifact=tmp_path / "activation.json", validate_activation_only=True)
+        assert result.mode == "activation-validated"
+    assert events == ["context", "validated", "closed"]

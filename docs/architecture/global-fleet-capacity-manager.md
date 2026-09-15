@@ -268,6 +268,15 @@ active timers continue release cleanup and final inventory publication;
 retirement requires fresh retirement-safe checkpoints from both pools and
 every executable intent released.
 
+The operator renders controller activation files from a portable
+`ActivationRuntimeDocumentV2` without inspecting remote paths on its own host.
+The document validates canonical paths and execution/profile bindings; it cannot
+construct an executable runtime. Target-side `--validate-activation-only` checks
+real private artifact/admission files and the authenticated manager context
+without creating a journal or scheduler backend. Ordinary execution repeats
+those checks, then binds the manager client to the verified active registration,
+retaining that exact registration for drain replay.
+
 ## Dynamic personal subject projection
 
 After stable-route activation, the lifecycle service registers the personal
