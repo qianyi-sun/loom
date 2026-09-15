@@ -26,13 +26,14 @@ def wait_resources(wait: TaskImageCapacityWait) -> ResourceTotals:
 
 
 async def _realizable(
-    session: AsyncSession, *, target_id: str, resources: ResourceTotals, now: datetime,
+    session: AsyncSession, *, target_id: str, pool_id: str, resources: ResourceTotals, now: datetime,
 ) -> bool:
     from loom_control_plane.execution_capacity import _latest_observation, native_allocatable_sample
 
     target = await session.get(ServiceExecutionTarget, target_id)
     policy = await session.get(ExecutionCapacityPolicy, target_id)
     if (target is None or target.provider != "nebius" or target.desired_state != "active"
+            or target.logical_pool_id != pool_id
             or target.health_status != "healthy" or policy is None or not policy.enabled):
         return False
     if any(value > limit for value, limit in (
@@ -85,7 +86,7 @@ async def _eligible(session: AsyncSession, wait: TaskImageCapacityWait, now: dat
     ):
         return False
     return await _realizable(session, target_id=wait.target_id,
-                             resources=wait_resources(wait), now=now)
+                             pool_id=wait.pool_id, resources=wait_resources(wait), now=now)
 
 
 async def read_capacity_waits(
