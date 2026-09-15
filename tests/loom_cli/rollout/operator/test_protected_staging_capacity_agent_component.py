@@ -1241,7 +1241,7 @@ def test_agent_runtime_configuration_seals_the_exact_database_admission_digest(
 
     assert capacity_guard_schema_head() == ("guard_0034", 34)
     assert configuration.protected_admission_sha256 == (
-        "096fda0fa37268a3642a60f42d25a0fa484f2aaa010060188ef7bff528d288d4"
+        "49834efb59531f7431ff07b8675646479d2a14ab846da3aebff6553b5a7fe05a"
     )
 
 
@@ -1250,6 +1250,8 @@ def test_agent_runtime_configuration_seals_the_exact_database_admission_digest(
     [
         ("guard_0029", 29, "51b50234edf19102baf749776995846d5bc73ce0a9e3b1b4fe0d93bcced98fc9"),
         ("guard_0030", 30, "acc2da81b2a58f9d006622a3c83c9c2c4d327f9343fdb7cf1d31338fcc7338eb"),
+        ("guard_0033", 33, "096fda0fa37268a3642a60f42d25a0fa484f2aaa010060188ef7bff528d288d4"),
+        ("guard_0034", 34, "49834efb59531f7431ff07b8675646479d2a14ab846da3aebff6553b5a7fe05a"),
     ],
 )
 def test_agent_admission_digest_does_not_reuse_the_previous_guard_generation(
