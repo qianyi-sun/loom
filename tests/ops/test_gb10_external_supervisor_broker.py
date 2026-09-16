@@ -852,24 +852,28 @@ def test_containment_grace_expiry_force_kills_every_cgroup_process(
                 except ProcessLookupError:
                     pass
             observed_exit_after = time.monotonic() + observation_delay
-            deadline = time.monotonic() + 1.0
-            while any(process_is_live(pid) for pid in (process.pid, child_pid)):
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(0.001)
-            if not any(process_is_live(pid) for pid in (process.pid, child_pid)):
-                procs.write_text("", encoding="ascii")
-                events.write_text("populated 0\n", encoding="ascii")
         return subprocess.CompletedProcess(arguments, 0, "", "")
 
+    read_empty = broker._cgroup_is_empty
+
+    def cgroup_is_empty(path: Path) -> bool:
+        assert path == cgroup
+        # Model kernel-updated population on every observation. A one-time
+        # snapshot after SIGKILL can stay populated after both processes exit.
+        live = [pid for pid in (process.pid, child_pid) if process_is_live(pid)]
+        procs.write_text("".join(f"{pid}\n" for pid in live), encoding="ascii")
+        events.write_text(f"populated {int(bool(live))}\n", encoding="ascii")
+        return read_empty(path)
+
     monkeypatch.setattr(broker, "_systemctl", systemctl)
+    monkeypatch.setattr(broker, "_cgroup_is_empty", cgroup_is_empty)
     try:
         broker._terminate_and_verify_containment(
             unit_name=_TEST_UNIT_NAME,
             cgroup_path=cgroup,
             job_state_path=tmp_path / "missing.job.json",
             graceful_timeout=0.05,
-            forced_timeout=1.0,
+            # Use the production forced-exit budget for actual OS scheduling.
         )
         process.wait(timeout=2)
         assert not _pid_is_live(child_pid)
