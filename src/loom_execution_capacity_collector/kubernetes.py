@@ -110,6 +110,14 @@ def _condition(conditions: list[Any] | None, condition_type: str) -> Any | None:
     )
 
 
+def _node_draining(node: Any) -> bool:
+    # A cordon alone may be maintenance or startup; it does not prove a drain.
+    return getattr(node.metadata, "deletion_timestamp", None) is not None or any(
+        getattr(taint, "key", None) == "ToBeDeletedByClusterAutoscaler"
+        for taint in getattr(node.spec, "taints", None) or []
+    )
+
+
 def _node_ready(node: Any) -> bool:
     ready = _condition(getattr(node.status, "conditions", None), "Ready")
     return (
@@ -533,6 +541,7 @@ class InClusterKubernetesCapacityReader:
                 ready=_node_ready(node),
                 unschedulable=bool(getattr(node.spec, "unschedulable", False)),
                 deleting=getattr(node.metadata, "deletion_timestamp", None) is not None,
+                draining=_node_draining(node),
                 allocatable=_required_node_resources(node.status.allocatable, name="allocatable"),
                 requested=_add(*[_pod_request(pod) for pod in assigned]),
                 pod_slots=_positive_int(node.status.allocatable.get("pods"), name="node Pod slots"),

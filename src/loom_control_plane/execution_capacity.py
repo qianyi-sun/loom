@@ -102,6 +102,27 @@ def _normalized_pending_reasons(value: dict[str, int]) -> dict[str, int]:
     return dict(sorted(normalized.items()))
 
 
+def observed_node_activity(payload: dict[str, Any]) -> dict[str, int | None]:
+    """Project aggregate activity without exposing node or lease identities.
+
+    Occupied means at least one nonterminal managed execution/build Pod for
+    this target; infrastructure DaemonSets and unassigned Pods do not count.
+    Neither the provider target nor a reduced target proves an actual drain.
+    """
+    placement = payload.get("placement")
+    nodes = placement.get("nodes") if isinstance(placement, dict) else None
+    if not isinstance(nodes, list):
+        return {"occupied_nodes": None, "draining_nodes": None}
+    return {
+        "occupied_nodes": sum(bool(node["managed_pods"]) for node in nodes),
+        "draining_nodes": (
+            sum(node["draining"] for node in nodes)
+            if all(isinstance(node.get("draining"), bool) for node in nodes)
+            else None
+        ),
+    }
+
+
 def _normalized_node_states(
     value: dict[str, int] | None,
     *,
@@ -1064,6 +1085,7 @@ async def fetch_execution_capacity_status(
                             - observation.provider_used_storage_mib,
                         ),
                         "active_nodes": observation.active_nodes,
+                        **observed_node_activity(observation.observation_json),
                         "node_states": (
                             observation.observation_json.get("node_states")
                             if isinstance(observation.observation_json, dict)

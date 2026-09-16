@@ -422,13 +422,15 @@ async def _freeze_task_resource_requests(
     profile: ServiceExecutionRuntimeProfileV1 | None,
     overrides: dict[str, TaskExecutionResourceRequestsV1],
 ) -> ServiceExecutionRuntimeProfileV1 | None:
-    """Freeze explicit per-Batch requests without changing task limits or defaults."""
-    if not overrides:
-        if profile is not None and profile.task_resource_requests:
-            return profile.model_copy(update={"task_resource_requests": {}})
-        return profile
+    """Freeze selected deployment policy plus explicit overrides at submission.
+
+    The same API resolves browser and CLI submissions. Deployment defaults are
+    keyed by exact task identity/revision, never inferred from a previous Batch.
+    """
     if backend != NEBIUS_BACKEND or profile is None:
-        raise HTTPException(status_code=400, detail="task_resource_requests requires native Nebius execution")
+        if overrides:
+            raise HTTPException(status_code=400, detail="task_resource_requests requires native Nebius execution")
+        return profile
     if not set(overrides).issubset(task_ids):
         raise HTTPException(status_code=400, detail="task_resource_requests contains an unselected task")
     selections = [
@@ -437,12 +439,20 @@ async def _freeze_task_resource_requests(
         for raw in combinations
         for item in (raw if isinstance(raw, Combination) else Combination.model_validate(raw),)
     ] or [trial_config]
-    if any(item.get("agent_name") != "terminus-2" for item in selections):
+    terminus_only = all(item.get("agent_name") == "terminus-2" for item in selections)
+    if overrides and not terminus_only:
         raise HTTPException(status_code=400, detail="task_resource_requests supports only terminus-2")
+    requests = {
+        task_id: entry for task_id, entry in profile.task_resource_requests.items()
+        if task_id in task_ids and terminus_only
+    }
+    requests.update(overrides)
+    if not requests:
+        return profile.model_copy(update={"task_resource_requests": {}})
     rows = (await session.execute(
-        select(Task.id, Task.checksum, Task.config).where(Task.id.in_(list(overrides))),
+        select(Task.id, Task.checksum, Task.config).where(Task.id.in_(list(requests))),
     )).all()
-    if {str(row[0]) for row in rows} != set(overrides):
+    if {str(row[0]) for row in rows} != set(requests):
         raise HTTPException(status_code=400, detail="task_resource_requests task is missing")
     try:
         trials = [TrialConfig.model_validate(item) for item in selections]
@@ -454,11 +464,11 @@ async def _freeze_task_resource_requests(
                 validate_task_resource_requests(
                     task=task, trial=trial, profile=profile,
                     task_revision_sha256="sha256:" + checksum.removeprefix("sha256:"),
-                    override=overrides[str(task_id)],
+                    override=requests[str(task_id)],
                 )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return profile.model_copy(update={"task_resource_requests": dict(overrides)})
+    return profile.model_copy(update={"task_resource_requests": requests})
 
 
 async def _reject_if_backend_cannot_execute_or_cold_start(

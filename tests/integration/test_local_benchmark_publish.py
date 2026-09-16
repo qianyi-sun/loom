@@ -108,7 +108,9 @@ async def test_publish_local_benchmark_uploads_and_registers(
     task_dir = root / "tasks" / "alpha"
     expected_checksum = task_checksum(task_dir)
     metadata_digest = bundle_file_metadata_sha256(task_dir).removeprefix("sha256:")
-    revision_prefix = f"team-evals/alpha/.loom-revisions/{expected_checksum}/{metadata_digest}/"
+    revision_prefix = (
+        f"team-evals/alpha/.loom-revisions-v2/{expected_checksum}/{metadata_digest}/bundle/"
+    )
 
     stats = await publish_local_benchmark(
         root,
@@ -126,7 +128,7 @@ async def test_publish_local_benchmark_uploads_and_registers(
     assert stats.source_prefix == "s3://loom-benchmarks/team-evals/"
     assert ("loom-benchmarks", f"{revision_prefix}task.toml") in store.objects
     assert ("loom-benchmarks", f"{revision_prefix}instruction.md") in store.objects
-    manifest_key = f"{revision_prefix}service-execution-input.json"
+    manifest_key = f"{revision_prefix.removesuffix('bundle/')}service-execution-input.json"
     assert ("loom-benchmarks", manifest_key) in store.objects
     manifest_body = store.objects[("loom-benchmarks", manifest_key)]
     expected_sei = {
@@ -168,6 +170,15 @@ async def test_publish_local_benchmark_uploads_and_registers(
                 "bundle_file_metadata_sha256": f"sha256:{metadata_digest}",
                 "service_execution_input": expected_sei,
             }
+            # Audit/worker materialization must see exactly the published task
+            # files, not publication metadata added after the bundle upload.
+            downloaded = tmp_path / "downloaded"
+            await store.download_prefix(
+                bucket="loom-benchmarks",
+                prefix=task.source.removeprefix("s3://loom-benchmarks/"),
+                out_dir=downloaded,
+            )
+            assert task_checksum(downloaded) == task.checksum
     finally:
         async with factory() as session:
             await session.execute(
@@ -244,8 +255,8 @@ async def test_failed_database_commit_does_not_overwrite_live_task_bundle(
 
         assert store.objects[("loom-benchmarks", before_key)] == b"do alpha\n"
         revised_key = (
-            "team-evals/alpha/.loom-revisions/"
-            f"{revised_checksum}/{revised_metadata_digest}/instruction.md"
+            "team-evals/alpha/.loom-revisions-v2/"
+            f"{revised_checksum}/{revised_metadata_digest}/bundle/instruction.md"
         )
         assert store.objects[("loom-benchmarks", revised_key)] == b"do revised alpha\n"
     finally:
@@ -325,8 +336,8 @@ async def test_mode_only_revision_does_not_overwrite_live_transport_metadata(
 
         assert store.objects[("loom-benchmarks", before_metadata_key)] == before_metadata
         revised_metadata_key = (
-            "team-evals/alpha/.loom-revisions/"
-            f"{before_checksum}/{revised_metadata_digest}/"
+            "team-evals/alpha/.loom-revisions-v2/"
+            f"{before_checksum}/{revised_metadata_digest}/bundle/"
             f"{BUNDLE_FILE_METADATA_NAME}"
         )
         assert store.objects[("loom-benchmarks", revised_metadata_key)] != before_metadata
@@ -423,11 +434,11 @@ async def test_publish_local_explicit_flatten_override_records_evidence(
             ).scalar_one()
             source_prefix = task.source.removeprefix("s3://loom-benchmarks/")
             revision_prefix = (
-                f"source-useful-compat/app-path-missing/.loom-revisions/{task.checksum}/"
+                f"source-useful-compat/app-path-missing/.loom-revisions-v2/{task.checksum}/"
             )
             assert source_prefix.startswith(revision_prefix)
             metadata_digest = source_prefix.removeprefix(revision_prefix).removesuffix(
-                "/",
+                "/bundle/",
             )
             assert len(metadata_digest) == 64
             assert set(metadata_digest) <= set("0123456789abcdef")
