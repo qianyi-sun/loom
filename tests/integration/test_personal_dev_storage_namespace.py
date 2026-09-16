@@ -34,6 +34,7 @@ def _failure_category(stderr):
     for label, fragment in (
         ("namespace-terminating", "namespace is being terminated"),
         ("resource-conflict", "the object has been modified"),
+        ("request-rejected", "the server rejected our request"),
         ("already-exists", "already exists"),
         ("not-found", "notfound"),
         ("forbidden", "forbidden"),

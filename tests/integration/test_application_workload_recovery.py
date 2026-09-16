@@ -29,6 +29,7 @@ from tests.integration.test_application_ownership_transfer import (
     transfer_postgres_url,  # noqa: F401
 )
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.integration.test_personal_dev_storage_namespace import _failure_category
 from tests.loom_cli.rollout.operator.test_application_admission_recovery import _component
 from tests.loom_cli.rollout.operator.test_application_guard_retention import _guard, _setup
 
@@ -37,7 +38,17 @@ _NAMESPACE = "loom-staging"
 
 
 def _run_disposable_kubectl(run, argv, **kwargs):
-    return run(argv, **kwargs)
+    reply = run(argv, **kwargs)
+    if reply.returncode:
+        # The production runner deliberately hides subprocess output. Keep the
+        # disposable fixture diagnostic finite, without echoing objects or
+        # retrying a write whose acknowledgement may have been lost.
+        category = _failure_category(reply.stderr[:8192].decode(errors="replace"))
+        raise RuntimeError(
+            f"disposable workload kubectl failed: category={category}; "
+            f"exit={reply.returncode}; stderr-bytes={len(reply.stderr)}"
+        )
+    return reply
 
 
 def _wait(predicate, diagnostic):
