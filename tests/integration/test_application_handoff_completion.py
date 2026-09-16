@@ -203,3 +203,275 @@ async def test_completion_recovers_each_committed_phase_with_original_guard(tran
     url, owner, _bindings = transfer_database
     with _closed(transfer_database) as (peer, maintenance, guard, arguments):
         arguments["schema_revision"] = ("0134/guard_0030" if request.node.callspec.params["transfer_database"] == "baseline" else "0148/guard_0036")
+        if request.node.callspec.params["transfer_database"] in {"cnpg", "baseline"}:
+            arguments["schema_acl_profile"] = "cnpg-staging"
+        original_backend = guard.info.backend_pid
+        original_server = guard.execute("SELECT pg_postmaster_start_time()").fetchone()
+        if interruption:
+            channel = InterruptCommit(maintenance if interruption == "reopen" else peer, interruption)
+            with pytest.raises(LostAcknowledgementError, match=interruption):
+                complete_application_handoff_database(
+                    peer if interruption == "reopen" else channel,
+                    maintenance=channel if interruption == "reopen" else maintenance, **arguments,
+                )
+            assert channel.interrupted
+        for _ in range(2):
+            outcome = complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
+            assert outcome.target == arguments["target"]
+            assert outcome.coordination_guard == arguments["coordination_guard"]
+            assert guard.info.backend_pid == original_backend
+            assert guard.execute("SELECT pg_postmaster_start_time()").fetchone() == original_server
+            from loom_cli.rollout.operator.staging_mutation_guard import _HEALTH_SQL
+            assert guard.execute(_HEALTH_SQL).fetchone() == (original_backend, True)
+        with psycopg.connect(url, user=arguments["target"].owner_role,
+                             password=arguments["password"], autocommit=True) as runtime:
+            assert runtime.execute("SELECT count(*) FROM public.trials").fetchone() == (0,)
+            for query in (
+                "ALTER TABLE public.trials DISABLE TRIGGER ALL",
+                "UPDATE public.alembic_version SET version_num='wrong'",
+                sql.SQL("SET ROLE {}").format(sql.Identifier(owner)),
+            ):
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    runtime.execute(query)
+
+
+@pytest.mark.asyncio
+async def test_completion_refuses_lost_guard_before_database_mutation(transfer_database):  # noqa: F811
+    from loom.application_handoff_completion import complete_application_handoff_database
+
+    with _closed(transfer_database) as (peer, maintenance, guard, arguments):
+        assert guard.execute("SELECT pg_advisory_unlock(5498691230183247727)").fetchone() == (True,)
+        with pytest.raises(RuntimeError, match="coordination guard"):
+            complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
+        assert peer.execute("SELECT pg_get_userbyid(datdba),datallowconn FROM pg_database WHERE datname=current_database()").fetchone() == (arguments["target"].owner_role, False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["reopen", "login"])
+async def test_guard_loss_inside_final_mutation_rolls_back_that_phase(transfer_database, phase):  # noqa: F811
+    from loom.application_handoff_completion import complete_application_handoff_database
+
+    with _closed(transfer_database) as (peer, maintenance, guard, arguments):
+        class LoseGuard(InterruptCommit):
+            def execute(self, query):
+                result = super().execute(query)
+                if self.armed:
+                    self.armed = False
+                    assert guard.execute("SELECT pg_advisory_unlock(5498691230183247727)").fetchone() == (True,)
+                return result
+
+        channel = LoseGuard(maintenance if phase == "reopen" else peer, phase)
+        with pytest.raises(RuntimeError, match="coordination guard"):
+            complete_application_handoff_database(
+                peer if phase == "reopen" else channel,
+                maintenance=channel if phase == "reopen" else maintenance, **arguments,
+            )
+        assert peer.execute("SELECT pg_get_userbyid(datdba),datallowconn FROM pg_database WHERE datname=current_database()").fetchone() == (arguments["target"].successor_role, phase == "login")
+        assert peer.execute("SELECT rolcanlogin,rolpassword FROM pg_authid WHERE oid=%s", (arguments["target"].owner_oid,)).fetchone() == (False, None)
+
+
+@pytest.mark.asyncio
+async def test_restored_replay_preserves_unknown_password_and_rejects_schema_drift(transfer_database):  # noqa: F811
+    from loom.application_handoff_completion import complete_application_handoff_database
+
+    with _closed(transfer_database) as (peer, maintenance, _guard, arguments):
+        complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
+        before = peer.execute("SELECT rolcanlogin,rolpassword FROM pg_authid WHERE oid=%s", (arguments["target"].owner_oid,)).fetchone()
+        with pytest.raises(RuntimeError, match="credential"):
+            complete_application_handoff_database(peer, maintenance=maintenance,
+                                                  **{**arguments, "password": "a-different-password"})
+        peer.execute("CREATE TABLE public.unexpected_handoff_object(id integer)")
+        with pytest.raises(RuntimeError, match="trusted reference"):
+            complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
+        assert peer.execute("SELECT rolcanlogin,rolpassword FROM pg_authid WHERE oid=%s", (arguments["target"].owner_oid,)).fetchone() == before
+        assert peer.execute("SELECT datallowconn FROM pg_database WHERE datname=current_database()").fetchone() == (True,)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("loss", [None, "before", "after-alter", "wrong-peer", "wrong-password"])
+async def test_guarded_seal_preserves_original_login_when_guard_or_peer_changes(transfer_database, loss):  # noqa: F811
+    from dataclasses import replace
+
+    from loom.application_login_sealing import seal_guarded_application_login
+
+    with _closed(transfer_database) as (peer, _maintenance_peer, guard, arguments):
+        target = arguments["target"]
+        peer.execute(sql.SQL("ALTER ROLE {} LOGIN INHERIT PASSWORD {}").format(
+            sql.Identifier(target.owner_role), sql.Literal(arguments["password"])))
+        before = peer.execute("SELECT oid,rolcanlogin,rolinherit,rolpassword FROM pg_authid WHERE rolname=%s",
+                              (target.owner_role,)).fetchone()
+        changed = []
+
+        class LoseGuard:
+            info = peer.info
+            transaction = peer.transaction
+
+            def execute(self, query):
+                rendered = query if isinstance(query, str) else query.as_string(peer)
+                result = peer.execute(query)
+                if rendered.startswith("ALTER ROLE "):
+                    changed.append(True)
+                    if loss == "after-alter":
+                        assert guard.execute("SELECT pg_advisory_unlock(5498691230183247727)").fetchone() == (True,)
+                return result
+
+        if loss == "before":
+            assert guard.execute("SELECT pg_advisory_unlock(5498691230183247727)").fetchone() == (True,)
+        backend = arguments["handoff_backend"]
+        if loss == "wrong-peer":
+            backend = replace(backend, pid=backend.pid + 1)
+        kwargs = dict(database=target.database, role=target.owner_role,
+                      provisioner_role=next(role for role, alias in arguments["role_bindings"].items() if alias == "provisioner"),
+                      handoff_backend=backend, coordination_guard=arguments["coordination_guard"],
+                      runtime_password="unrelated-password" if loss == "wrong-password" else arguments["password"])
+        if loss:
+            with pytest.raises(RuntimeError, match=r"guard|peer|password"):
+                seal_guarded_application_login(LoseGuard(), **kwargs)
+            assert peer.execute("SELECT oid,rolcanlogin,rolinherit,rolpassword FROM pg_authid WHERE rolname=%s",
+                                (target.owner_role,)).fetchone() == before
+            assert changed == ([True] if loss == "after-alter" else [])
+        else:
+            for _ in range(2):
+                seal_guarded_application_login(LoseGuard(), **kwargs)
+            assert peer.execute("SELECT oid,rolcanlogin,rolinherit,rolpassword FROM pg_authid WHERE rolname=%s",
+                                (target.owner_role,)).fetchone() == (before[0], False, False, None)
+            assert guard.execute("SELECT pg_backend_pid()").fetchone() == (arguments["coordination_guard"].backend.pid,)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("loss", [None, "before", "after-alter", "wrong-peer"])
+async def test_guarded_closure_rolls_back_on_original_guard_loss(transfer_database, loss):  # noqa: F811
+    from dataclasses import replace
+
+    from loom.application_database_admission import close_guarded_application_database_admission
+
+    with _closed(transfer_database) as (peer, maintenance, guard, arguments):
+        target = arguments["target"]
+        maintenance.execute(sql.SQL("ALTER DATABASE {} ALLOW_CONNECTIONS true").format(sql.Identifier(target.database)))
+        changed = []
+
+        class LoseGuard:
+            info = maintenance.info
+            transaction = maintenance.transaction
+
+            def execute(self, query):
+                rendered = query if isinstance(query, str) else query.as_string(maintenance)
+                result = maintenance.execute(query)
+                if rendered.startswith("ALTER DATABASE "):
+                    changed.append(True)
+                    if loss == "after-alter":
+                        assert guard.execute("SELECT pg_advisory_unlock(5498691230183247727)").fetchone() == (True,)
+                return result
+
+        if loss == "before":
+            assert guard.execute("SELECT pg_advisory_unlock(5498691230183247727)").fetchone() == (True,)
+        backend = arguments["handoff_backend"]
+        if loss == "wrong-peer":
+            backend = replace(backend, pid=backend.pid + 10000)
+        kwargs = dict(target=target,
+                      provisioner_role=next(role for role, alias in arguments["role_bindings"].items() if alias == "provisioner"),
+                      handoff_backend=backend, coordination_guard=arguments["coordination_guard"],
+                      runtime_password=arguments["password"])
+        if loss:
+            with pytest.raises(RuntimeError, match=r"guard|peer"):
+                close_guarded_application_database_admission(LoseGuard(), **kwargs)
+            assert peer.execute("SELECT datallowconn FROM pg_database WHERE datname=%s", (target.database,)).fetchone() == (True,)
+            assert changed == ([True] if loss == "after-alter" else [])
+        else:
+            for _ in range(2):
+                close_guarded_application_database_admission(LoseGuard(), **kwargs)
+            assert peer.execute("SELECT datallowconn FROM pg_database WHERE datname=%s", (target.database,)).fetchone() == (False,)
+            assert changed == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transfer_database", ["cnpg", "baseline"], indirect=True)
+@pytest.mark.parametrize("marker", ["public.alembic_version", "loom_capacity_guard.capacity_guard_alembic_version"])
+async def test_revision_marker_drift_refuses_before_ownership_change(transfer_database, marker, request):  # noqa: F811
+    from loom.application_handoff_completion import complete_application_handoff_database
+
+    with _closed(transfer_database) as (peer, maintenance, _guard, arguments):
+        arguments.update(schema_acl_profile="cnpg-staging", schema_revision=(
+            "0134/guard_0030" if request.node.callspec.params["transfer_database"] == "baseline" else "0148/guard_0036"))
+        peer.execute("UPDATE " + marker + " SET version_num='unexpected'")
+        with pytest.raises(RuntimeError, match="revision"):
+            complete_application_handoff_database(peer, maintenance=maintenance, **arguments)
+        target = arguments["target"]
+        assert peer.execute("SELECT datdba,datallowconn FROM pg_database WHERE oid=%s", (target.database_oid,)).fetchone() == (target.owner_oid, False)
+
+
+@pytest.mark.asyncio
+async def test_quiescence_retry_requires_retirement_in_other_databases(transfer_database):  # noqa: F811
+    from loom.application_handoff_completion import _quiescence_retry_admitted
+
+    with _closed(transfer_database) as (_peer, maintenance, _guard, arguments):
+        authority = {key: arguments[key] for key in ("target", "handoff_backend", "coordination_guard")}
+        authority["provisioner"] = next(role for role, alias in arguments["role_bindings"].items() if alias == "provisioner")
+        with psycopg.connect(transfer_database[0], dbname=maintenance.info.dbname, autocommit=True):
+            with pytest.raises(RuntimeError, match="client work"):
+                _quiescence_retry_admitted(maintenance, **authority)
+        assert _quiescence_retry_admitted(maintenance, **authority)
+
+
+@pytest.mark.asyncio
+async def test_disconnected_queued_writer_still_blocks_handoff(transfer_database):  # noqa: F811
+    """A closed controller socket does not retire PostgreSQL's accepted SQL."""
+    from loom.application_handoff_completion import _quiescence_retry_admitted
+
+    with _closed(transfer_database) as (peer, maintenance, guard, arguments):
+        authority = {key: arguments[key] for key in ("target", "handoff_backend", "coordination_guard")}
+        authority["provisioner"] = next(role for role, alias in arguments["role_bindings"].items() if alias == "provisioner")
+        original_guard = guard.info.backend_pid
+        role = "queued_disconnect_" + uuid4().hex[:12]
+        queued_pid = None
+
+        def wait_for_retirement():
+            if queued_pid is None:
+                return
+            deadline = time.monotonic() + 10
+            while maintenance.execute(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=%s)", (queued_pid,),
+            ).fetchone() != (False,):
+                assert time.monotonic() < deadline, "owned probe backend did not finish"
+                time.sleep(0.05)
+
+        peer.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(role)))
+        try:
+            with psycopg.connect(transfer_database[0], dbname=maintenance.info.dbname,
+                                 autocommit=True) as queued, ThreadPoolExecutor(max_workers=1) as executor:
+                queued_pid = queued.info.backend_pid
+                assert queued.execute("SHOW client_connection_check_interval").fetchone() == ("0",)
+                with peer.transaction():
+                    peer.execute("LOCK TABLE pg_authid IN SHARE MODE")
+                    pending = executor.submit(queued.execute,
+                        sql.SQL("ALTER ROLE {} LOGIN").format(sql.Identifier(role)))
+                    deadline = time.monotonic() + 10
+                    while maintenance.execute(
+                        "SELECT wait_event_type FROM pg_stat_activity WHERE pid=%s", (queued_pid,),
+                    ).fetchone() != ("Lock",):
+                        assert time.monotonic() < deadline, "owned probe did not queue"
+                        time.sleep(0.05)
+                    # Abruptly closing this disposable client's socket models
+                    # exec winning the race against asynchronous cancellation.
+                    with socket.socket(fileno=os.dup(queued.pgconn.socket)) as wire:
+                        wire.shutdown(socket.SHUT_RDWR)
+                    with pytest.raises(psycopg.OperationalError):
+                        pending.result(timeout=5)
+                    assert maintenance.execute(
+                        "SELECT wait_event_type FROM pg_stat_activity WHERE pid=%s", (queued_pid,),
+                    ).fetchone() == ("Lock",)
+                    with pytest.raises(RuntimeError, match="client work"):
+                        _quiescence_retry_admitted(maintenance, **authority)
+                # The original guard remains usable while the accepted SQL
+                # commits after unlock; disconnected is not equivalent to cancelled.
+                wait_for_retirement()
+                assert maintenance.execute(
+                    "SELECT rolcanlogin FROM pg_roles WHERE rolname=%s", (role,),
+                ).fetchone() == (True,)
+                assert guard.info.backend_pid == original_guard
+                assert _quiescence_retry_admitted(maintenance, **authority)
+        finally:
+            # Even a failed assertion must not race DROP ROLE against the
+            # disconnected backend whose accepted ALTER ROLE is still finishing.
+            wait_for_retirement()
+            peer.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))

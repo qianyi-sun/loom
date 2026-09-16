@@ -59,3 +59,89 @@ async def test_recovery_completes_without_reclosing_a_restored_database(
         monkeypatch.setattr(completion, "transfer_application_ownership", refuse_once)
     password = "ab" * 16
     plan, live = _sources(tmp_path, password=password, schema_revision="0148/guard_0036")
+    journal = _journal(tmp_path)
+    for path in (tmp_path / "state", tmp_path / "state/requests", journal.attempt_root.parent.parent, journal.attempt_root.parent):
+        path.chmod(0o700)
+    evidence = _guard(plan)
+    request = dict(request_id=plan.request_id, candidate_sha=plan.candidate_sha,
+                   candidate_tree=plan.candidate_tree, generation=evidence.generation)
+    with _closed(transfer_database, request=request) as (original_peer, maintenance, database_guard, arguments):
+        arguments["password"] = password
+        arguments["schema_acl_profile"] = "cnpg-staging"
+        values = evidence.to_dict()
+        values.pop("schema_version")
+        values.pop("evidence_digest")
+        values["database_backend_pid"] = database_guard.info.backend_pid
+        evidence = MutationGuardEvidence.build(**values)
+        if interruption == "restored":
+            complete_application_handoff_database(original_peer, maintenance=maintenance, **arguments)
+        # The installed recovery owns its maintenance transport. A fixture
+        # inspection connection must not survive its cluster-wide retirement.
+        maintenance.close()
+        if interruption != "live-old-peer":
+            original_peer.close()
+        if interruption == "guard-loss":
+            assert database_guard.execute("SELECT pg_advisory_unlock(5498691230183247727)").fetchone() == (True,)
+        class Runner(_Runner):
+            fail_login_ack = interruption == "login-ack"
+            def open_staging_peer_maintenance_database(self):
+                return _peer(transfer_postgres, "postgres")
+            def open_staging_peer_database(self):
+                return _peer(transfer_postgres, "loom")
+            def complete_staging_application_database(self, *args, **kwargs):
+                outcome = SubprocessProtectedApplyCommandRunner.complete_staging_application_database(self, *args, **kwargs)
+                if self.fail_login_ack:
+                    self.fail_login_ack = False
+                    raise RuntimeError("lost final completion acknowledgement")
+                return outcome
+        runner = Runner(live)
+        if interruption == "peer-publication":
+            publish = journal.record_application_handoff_replacement
+            failed = False
+            def interrupt_publish(**kwargs):
+                nonlocal failed
+                receipt = publish(**kwargs)
+                if not failed:
+                    failed = True
+                    raise RuntimeError("lost peer publication acknowledgement")
+                return receipt
+            monkeypatch.setattr(journal, "record_application_handoff_replacement", interrupt_publish)
+        outcomes = []
+        def apply(_):
+            journal.retain_application_guard(plan, guard=evidence)
+            application_guard_is_retained(tmp_path / "state", request_id=plan.request_id,
+                                          service_uid=os.getuid(), guard=evidence, acknowledge=True)
+            journal.record_application_admission_recovery(
+                target=arguments["target"], handoff_backend=arguments["handoff_backend"],
+                coordination_guard=arguments["coordination_guard"],
+            )
+            journal.prepare_application_manager_replacement(identity=_manager())
+            journal.begin_application_manager_replacement()
+            journal.record_application_manager_replacement(identity=replace(_manager(), executable_inode=101))
+            outcomes.append(recover(runner, plan, journal=journal, guard=evidence))
+            raise RuntimeError("workloads and CNPG fence remain pending")
+        if interruption in {"live-old-peer", "guard-loss"}:
+            with pytest.raises(RuntimeError, match=r"surviving or unknown peers|coordination guard"):
+                journal.execute(plan, [_component(apply)])
+            assert outcomes == []
+            assert not list(journal.root.rglob("application-handoff-*-peer.json"))
+            with psycopg.connect(transfer_database[0], dbname="postgres", autocommit=True) as inspection:
+                assert inspection.execute("SELECT datallowconn FROM pg_database WHERE datname='loom'").fetchone() == (False,)
+            return
+        if interruption in {"peer-publication", "login-ack"}:
+            with pytest.raises(RuntimeError):
+                journal.execute(plan, [_component(apply)])
+            assert outcomes == []
+        with pytest.raises(RuntimeError, match="workloads and CNPG"):
+            journal.execute(plan, [_component(apply)])
+        assert len(outcomes) == 1
+        if interruption == "quiescence":
+            assert len(retries) == 2
+        assert outcomes[0].target == arguments["target"]
+        assert database_guard.execute(_HEALTH_SQL).fetchone() == (evidence.database_backend_pid, True)
+        assert not list(journal.root.rglob("terminal.json"))
+        assert application_guard_is_retained(tmp_path / "state", request_id=plan.request_id, service_uid=os.getuid())
+        with psycopg.connect(transfer_database[0], user="loom", password=password, autocommit=True) as runtime:
+            assert runtime.execute("SELECT count(*) FROM public.trials").fetchone() == (0,)
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                runtime.execute("ALTER TABLE public.trials DISABLE TRIGGER ALL")
