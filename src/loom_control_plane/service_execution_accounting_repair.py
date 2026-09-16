@@ -29,6 +29,7 @@ from loom_control_plane.config import ControlPlaneSettings
 from loom_control_plane.service_execution_materializer import (
     build_canonical_atif,
     build_canonical_events,
+    read_exception_info,
 )
 from loom_control_plane.service_execution_task_snapshot import (
     resolve_service_execution_task_snapshot,
@@ -129,7 +130,8 @@ async def repair_accounting(
         raise ValueError("duplicate canonical bundle paths")
     inputs = {path: await _read_file(store, record, artifacts_bucket)
               for path, record in records.items()
-              if path in {*_PATHS, "result.json", "verifier/output.json", "accounting/gateway-calls.json"}}
+              if path in {*_PATHS, "result.json", "verifier/output.json", "accounting/gateway-calls.json",
+                          "diagnostics/agent-exception.json", "diagnostics/verifier-exception.json"}}
     runtime_result = ExecutionRuntimeResultV1.model_validate_json(inputs["result.json"])
     if "verifier/output.json" not in inputs and (
         outcome[0] == "succeeded" or runtime_result.status == "succeeded"
@@ -151,6 +153,7 @@ async def repair_accounting(
         runtime_result=runtime_result,
         trace_body=trace_body, verifier_body=inputs.get("verifier/output.json"),
         gateway_calls=rows,
+        exception_info=read_exception_info(runtime_result, inputs),
     )
     events_body = b"".join(event.model_dump_json().encode() + b"\n" for event in events)
     usage = terminus_usage(list(events), trial_config)

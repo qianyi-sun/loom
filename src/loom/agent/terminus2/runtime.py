@@ -29,7 +29,7 @@ from loom.agent.terminus2.model_switch import (
 from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA, LOOM_BRIDGE_REVISION
 from loom.attempt_deadline import AttemptDeadline, AttemptDeadlineExceededError
 from loom.driver.base import Driver
-from loom.errors import AgentError
+from loom.errors import AgentError, exception_info
 from loom.models.mcp import MCPConnection
 from loom.models.trajectory import (
     Terminus2EpisodeCheckpointEvent,
@@ -848,7 +848,8 @@ class LoomTerminus2Runtime:
         except Exception as exc:
             # Harbor tmux/session failures are bare RuntimeError; wrap so
             # step_runner keeps an actionable message (#1068).
-            raise AgentError(str(exc)) from exc
+            info = exception_info(exc)
+            raise AgentError(f"{info.exception_type}: {info.exception_message}") from exc
         finally:
             poll_stop.set()
             await poll_task

@@ -103,10 +103,28 @@ class CapabilityMismatchError(ConfigError):
 
 import re  # noqa: E402
 from collections.abc import Mapping  # noqa: E402
+from datetime import UTC, datetime  # noqa: E402
 
 from loom.driver.build_containment import ImageBuildForbiddenError  # noqa: E402
-from loom.models.result import FailureReason  # noqa: E402
+from loom.models.result import ExceptionInfo, FailureReason  # noqa: E402
 from loom.security.redaction import redact_text  # noqa: E402
+
+
+def exception_info(exc: BaseException) -> ExceptionInfo:
+    """Unwrap Loom's agent adapter without replacing an SDK's own identity.
+
+    Persist neither traceback locals nor arbitrary HTTP response structures.
+    Empty Harbor messages still carry the original exception class name.
+    """
+    seen: set[int] = set()
+    while isinstance(exc, AgentError) and exc.__cause__ is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        exc = exc.__cause__
+    name = type(exc).__name__
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,199}", name) is None:
+        name = "Exception"
+    message = redact_text(str(exc), limit=2000).strip() or name
+    return ExceptionInfo(exception_type=name, exception_message=message, occurred_at=datetime.now(UTC))
 
 # Patterns for internal URLs that must NOT appear in user-facing messages.
 _INTERNAL_URL_RE = re.compile(
