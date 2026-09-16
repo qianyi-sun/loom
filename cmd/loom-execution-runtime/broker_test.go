@@ -600,3 +600,85 @@ func TestRunPhasePublishesAndClearsBrokerDeadline(t *testing.T) {
 		t.Fatal("completed phase left model authority active")
 	}
 }
+
+func TestModelProxyCancelsInflightCallsWithRuntime(t *testing.T) {
+	started, aborted := make(chan struct{}), make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		close(started)
+		select {
+		case <-r.Context().Done():
+			close(aborted)
+		case <-time.After(2 * time.Second):
+		}
+	}))
+	defer upstream.Close()
+	root, _ := url.Parse(upstream.URL + "/internal/service-execution")
+	broker := &workloadBroker{root: root, client: upstream.Client(), token: "test-token", expires: time.Now().Add(time.Hour)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proxy, stop, err := broker.startProxy(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stop() }()
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		response, err := http.Post(proxy+"/v1/chat/completions", "application/json", strings.NewReader("{}"))
+		if err == nil {
+			response.Body.Close()
+		}
+	}()
+	<-started
+	cancel()
+	select {
+	case <-aborted:
+	case <-time.After(300 * time.Millisecond):
+		t.Error("runtime cancellation left the model request running")
+	}
+	<-finished
+}
+
+func TestSandboxAbortKeepsLedgerAvailableAndRejectsNewModelCalls(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "pod-token")
+	if err := os.WriteFile(tokenFile, []byte("pod-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/service-execution/llm-calls" {
+			t.Errorf("model work reached upstream after abort")
+		}
+		calls++
+		_, _ = w.Write([]byte(`{"items":[]}`))
+	}))
+	defer upstream.Close()
+	root, _ := url.Parse(upstream.URL + "/internal/service-execution")
+	broker := &workloadBroker{root: root, client: upstream.Client(), podTokenFile: tokenFile, identity: workloadIdentity{ExecutionRole: "attempt"}, token: "step-token", expires: time.Now().Add(time.Hour)}
+	lifetime, cancel := context.WithCancel(context.Background())
+	proxy, stop, err := broker.startProxy(context.Background(), lifetime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stop() }()
+	cancel()
+	for path, want := range map[string]int{"/v1/chat/completions": http.StatusServiceUnavailable, "/internal/loom/llm-calls": http.StatusOK} {
+		method := http.MethodGet
+		if path == "/v1/chat/completions" {
+			method = http.MethodPost
+		}
+		request, _ := http.NewRequest(method, proxy+path, nil)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != want {
+			t.Fatalf("%s got %d want %d", path, response.StatusCode, want)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("expected exactly one ledger request, got %d", calls)
+	}
+}

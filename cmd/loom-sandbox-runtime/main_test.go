@@ -59,6 +59,33 @@ func runExec(t *testing.T, client *http.Client, req execRequest) (int, execResul
 	return response.StatusCode, result
 }
 
+func TestHealthIdentityIsStableForOneServerAndChangesOnRestart(t *testing.T) {
+	identity := func(client *http.Client) string {
+		t.Helper()
+		response, err := client.Get("http://sandbox/health")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		var health struct {
+			Ready      bool   `json:"ready"`
+			InstanceID string `json:"instance_id"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&health); err != nil || !health.Ready || len(health.InstanceID) != 32 {
+			t.Fatalf("invalid sandbox identity: %#v %v", health, err)
+		}
+		return health.InstanceID
+	}
+	client := testClient(t)
+	first := identity(client)
+	if identity(client) != first {
+		t.Fatal("identity changed without a sandbox restart")
+	}
+	if identity(testClient(t)) == first {
+		t.Fatal("replacement sandbox reused the old identity")
+	}
+}
+
 func TestExecRealProcessAndBounds(t *testing.T) {
 	c := testClient(t)
 	uid := strconv.Itoa(os.Geteuid())

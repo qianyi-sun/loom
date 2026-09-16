@@ -355,13 +355,17 @@ class ExecutionActuator:
         self._validate_observation(lease, observation)
         if observation.job_uid is None:
             raise ActuatorContractError("cannot delete a Job without exact UID")
-        await self._close_output_before_delete(
-            lease,
-            now=now,
-            cancel_immediately=cancel_immediately,
-        )
         samples, diagnostic = await self._usage_samples(observation, now=now)
         async with self._sessions() as session:
+            # The delete path can be the first observer of a sandbox death.
+            # Persist its UID-bound status before Kubernetes removes the Pod.
+            await record_kubernetes_observation(
+                session,
+                lease_id=lease.id,
+                generation=lease.generation,
+                payload=observation.event_payload(),
+                observed_at=now,
+            )
             await self._persist_usage(
                 session,
                 lease=lease,
@@ -372,6 +376,11 @@ class ExecutionActuator:
                 diagnostic=diagnostic,
             )
             await session.commit()
+        await self._close_output_before_delete(
+            lease,
+            now=now,
+            cancel_immediately=cancel_immediately,
+        )
         with KUBERNETES_API_SECONDS.labels(operation="delete").time():
             await self._kubernetes.delete_job(
                 namespace=self._target.namespace,

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -64,6 +65,11 @@ func TestProcessStatusUsesEffectiveUIDAndRejectsInvalidInspection(t *testing.T) 
 		{"live", "State:\tS (sleeping)\nUid:\t0\t65532\t0\t0\n", "S", nil},
 		{"zombie", "State:\tZ (zombie)\nUid:\t65532\t65532\t65532\t65532\n", "Z", nil},
 		{"foreign_effective_uid", "State:\tS (sleeping)\nUid:\t65532\t65533\t65532\t65532\n", "", errCleanupProcessOwner},
+		{"external_probe_root", "State:\tS (sleeping)\nPPid:\t0\nUid:\t0\t0\t0\t0\n", "", nil},
+		{"external_probe_after_setuid", "State:\tR (running)\nPPid:\t0\nUid:\t65532\t65532\t65532\t65532\n", "", nil},
+		{"adopted_foreign_child", "State:\tZ (zombie)\nPPid:\t1\nUid:\t0\t0\t0\t0\n", "", errCleanupProcessOwner},
+		{"missing_parent", "State:\tS\nUid:\t65532\t65532\t65532\t65532\n", "", errCleanupProcRead},
+		{"invalid_parent", "State:\tS\nPPid:\t-1\nUid:\t65532\t65532\t65532\t65532\n", "", errCleanupProcRead},
 		{"missing_uid", "State:\tS (sleeping)\n", "", errCleanupProcRead},
 		{"missing_state", "Uid:\t65532\t65532\t65532\t65532\n", "", errCleanupProcRead},
 		{"truncated_uid", "State:\tS\nUid:\t65532\t65532\n", "", errCleanupProcRead},
@@ -74,6 +80,9 @@ func TestProcessStatusUsesEffectiveUIDAndRejectsInvalidInspection(t *testing.T) 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			directory := t.TempDir()
+			if !strings.Contains(tc.status, "PPid:") && tc.name != "missing_parent" {
+				tc.status += "PPid:\t1\n"
+			}
 			if err := os.WriteFile(filepath.Join(directory, "status"), []byte(tc.status), 0600); err != nil {
 				t.Fatal(err)
 			}

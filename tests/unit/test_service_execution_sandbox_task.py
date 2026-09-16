@@ -233,3 +233,106 @@ async def test_successful_agent_snapshot_crossing_deadline_still_hands_off(
         await module.run_agent(tmp_path, task, trial)
     assert driver.quiesced and driver.state == "stopped"
     assert (tmp_path / ".loom/workspace.tar").is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("report", [b'{"rewards":{"passed":0}}', b'{"rewards":'])
+async def test_verifier_cleanup_failure_retains_reports_without_success(
+    tmp_path, monkeypatch, capsys, report,
+):
+    from pydantic import ValidationError
+
+    from loom import service_execution_sandbox_task as module
+    from loom.errors import DriverError
+
+    task, trial, _ = _inputs()
+    cleanup_error = DriverError("cleanup-secret-must-not-be-printed")
+
+    class FailingCleanup(Sandbox):
+        stops = 0
+
+        async def stop_processes(self):
+            self.stops += 1
+            raise cleanup_error
+
+    driver = FailingCleanup()
+    monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
+
+    async def noop(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(module, "materialize_workspace", noop)
+    monkeypatch.setattr(module, "_import_workspace_archive", noop)
+
+    def verify(cmd, user, cwd, env):
+        driver.filesystem[PurePosixPath(env["LOOM_VERIFIER_OUTPUT"])] = report
+        driver.filesystem[PurePosixPath("/logs/verifier/ctrf.json")] = b'{"results":{}}'
+        return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0)
+
+    driver.exec_handler = verify
+    valid = report.endswith(b"}}")
+    with pytest.raises(DriverError if valid else ValidationError) as caught:
+        await run_verifier(tmp_path, task, trial)
+    if valid:
+        assert caught.value is cleanup_error
+    assert (tmp_path / ".loom/verifier/output.json").read_bytes() == report
+    assert (tmp_path / ".loom/verifier/ctrf.json").read_bytes() == b'{"results":{}}'
+    assert driver.stops == 1 and driver.state == "stopped"
+    stderr = capsys.readouterr().err
+    assert "cleanup-secret" not in stderr
+    if not valid:
+        assert "secondary verifier stop_processes failure (DriverError)" in stderr
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exec_raises", [False, True])
+async def test_verifier_primary_failure_survives_cleanup_and_driver_stop_failure(
+    tmp_path, monkeypatch, capsys, exec_raises,
+):
+    from loom import service_execution_sandbox_task as module
+    from loom.errors import DriverError
+
+    task, trial, _ = _inputs()
+    exec_error = DriverError("private-command-in-error")
+
+    class FailedDriver(Sandbox):
+        stops = 0
+        closed = False
+
+        async def stop_processes(self):
+            self.stops += 1
+            raise DriverError("private-cleanup-detail")
+
+        async def stop(self, **kwargs):
+            self.closed = True
+            raise DriverError("private-close-detail")
+
+    driver = FailedDriver()
+    monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
+
+    async def noop(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(module, "materialize_workspace", noop)
+    monkeypatch.setattr(module, "_import_workspace_archive", noop)
+
+    def verify(cmd, user, cwd, env):
+        if exec_raises:
+            raise exec_error
+        driver.filesystem[PurePosixPath(env["LOOM_VERIFIER_OUTPUT"])] = b'{"rewards":{"passed":0}}'
+        return ExecResult(return_code=1, stdout=b"", stderr=b"", duration_sec=0)
+
+    driver.exec_handler = verify
+    expected = DriverError if exec_raises else module.ServiceExecutionTaskError
+    with pytest.raises(expected) as caught:
+        await run_verifier(tmp_path, task, trial)
+    if exec_raises:
+        assert caught.value is exec_error
+    else:
+        assert str(caught.value) == "isolated verifier process failed"
+        assert json.loads((tmp_path / ".loom/verifier/output.json").read_bytes())["rewards"] == {"passed": 0}
+    assert driver.stops == 1 and driver.closed
+    stderr = capsys.readouterr().err
+    assert "private-" not in stderr
+    assert "secondary verifier stop_processes failure (DriverError)" in stderr
+    assert "secondary verifier stop failure (DriverError)" in stderr
