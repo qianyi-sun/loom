@@ -11,9 +11,10 @@ from tests.integration.test_application_workload_recovery import _run_disposable
     (b'Error from server (Conflict): private-name: the object has been modified', "resource-conflict"),
     (b'Get "https://private.example": EOF', "unexpected-eof"),
     (b'Error from server (Forbidden): private-token', "forbidden"),
+    (b'The request is invalid: the server rejected our request due to an error in our request', "request-rejected"),
     (b'private-unclassified' * 1000, "unclassified"),
     (b'', "empty-stderr"),
-], ids=["conflict", "eof", "forbidden", "bounded-unknown", "empty"])
+], ids=["conflict", "eof", "forbidden", "request-rejected", "bounded-unknown", "empty"])
 def test_failed_workload_fixture_write_has_safe_diagnostics_without_retry(stderr, category):
     calls = []
 
