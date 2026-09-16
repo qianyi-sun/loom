@@ -118,7 +118,7 @@ class LoomServiceSettings(BaseSettings):
     personal_dev_capacity_manager_pod_label: str = "loom-capacity-manager"
     personal_dev_capacity_manager_pod_label_key: str = "app.kubernetes.io/name"
     personal_dev_capacity_manager_port: int = 8443
-    personal_dev_capacity_pool_capabilities_json: str = "[{\"capability_id\":\"oldlab-x86-none\",\"pool_id\":\"oldlab\",\"operating_system\":\"linux\",\"cpu_architecture\":\"x86_64\",\"gpu_vendor\":\"none\",\"network_policies\":[\"public\"]},{\"capability_id\":\"gb10-arm-none\",\"pool_id\":\"gb10\",\"operating_system\":\"linux\",\"cpu_architecture\":\"arm64\",\"gpu_vendor\":\"none\",\"network_policies\":[\"public\"]}]"
+    personal_dev_capacity_pool_capabilities_json: str = "[{\"capability_id\":\"oldlab-x86-none\",\"pool_id\":\"oldlab\",\"operating_system\":\"linux\",\"cpu_architecture\":\"x86_64\",\"gpu_vendor\":\"none\",\"network_policies\":[\"public\"]}]"
     personal_dev_capacity_private_key_file: Path = Path("/var/run/loom-personal-dev-capacity/private-key.pem")
     personal_dev_global_live_instance_limit: int = 16
     personal_dev_native_builder_agent_image: str = ""

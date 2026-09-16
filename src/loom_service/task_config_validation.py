@@ -6,12 +6,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import ValidationError
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from loom.db.schema import Task
+from loom.execution_architecture import execution_cpu_arch
 from loom.models.task import TaskConfig
 
 
@@ -63,8 +63,9 @@ async def split_valid_task_configs(
     invalid: list[InvalidTaskConfig] = []
     for task_id in task_ids:
         try:
-            TaskConfig.model_validate(configs[task_id])
-        except ValidationError as exc:
+            config = TaskConfig.model_validate(configs[task_id])
+            execution_cpu_arch(config.environment.cpu_arch)
+        except ValueError as exc:
             invalid.append(
                 InvalidTaskConfig(
                     task_id=task_id,

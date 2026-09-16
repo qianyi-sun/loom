@@ -16,7 +16,7 @@ from uuid import UUID
 import tomli_w
 from pydantic import ValidationError
 
-from loom.driver.task_image import dockerfile_uses_runtime_arm64_fallback_base
+from loom.execution_architecture import execution_cpu_arch
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.task_checksum import task_checksum
 from loom.models.taskset import (
@@ -327,22 +327,6 @@ def _iter_bundle_task_tomls(task_root: Path) -> list[Path]:
     )
 
 
-def _promote_cpu_arch_if_runtime_fallback(
-    raw_cfg: dict[str, Any], bundle_dir: Path,
-) -> None:
-    env = raw_cfg.get("environment")
-    if not isinstance(env, dict) or "cpu_arch" in env:
-        return
-    dockerfile_rel = env.get("dockerfile")
-    if not isinstance(dockerfile_rel, str):
-        return
-    dockerfile_path = bundle_dir / dockerfile_rel
-    if dockerfile_path.is_file() and dockerfile_uses_runtime_arm64_fallback_base(
-        dockerfile_path,
-    ):
-        env["cpu_arch"] = "any"
-
-
 def _compatibility_issue_error(
     *,
     row_index: int,
@@ -453,8 +437,8 @@ def _materialize_bundle_upload(
                     with task_toml.open("rb") as f:
                         raw_cfg: dict[str, Any] = tomllib.load(f)
                     raw_cfg = normalize_terminal_bench_task_toml(raw_cfg)
-                    _promote_cpu_arch_if_runtime_fallback(raw_cfg, bundle_dir)
                     task_config = normalize_steps(TaskConfig.model_validate(raw_cfg))
+                    execution_cpu_arch(task_config.environment.cpu_arch)
                     rendered_task_id = task_config.task.id
                     short_id = _safe_task_segment(rendered_task_id)
                     if short_id in seen_short_ids:
@@ -694,6 +678,7 @@ def materialize_task_set(
                     has_evaluation_intent=has_evaluation,
                 )
                 task_config = normalize_steps(TaskConfig.model_validate(rendered))
+                execution_cpu_arch(task_config.environment.cpu_arch)
                 rendered_task_id = task_config.task.id
                 short_id = _safe_task_segment(rendered_task_id)
                 db_id = _db_task_id(

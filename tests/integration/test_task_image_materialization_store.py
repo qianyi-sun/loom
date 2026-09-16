@@ -89,7 +89,7 @@ async def test_ensure_enqueues_idempotent_architecture_snapshots(
         second = await ensure_task_image_materializations(session, task_row=task)
         await session.commit()
 
-        assert [row.cpu_arch for row in first] == ["x86_64", "arm64"]
+        assert [row.cpu_arch for row in first] == ["x86_64"]
         assert [row.id for row in second] == [row.id for row in first]
         assert all(row.state == "queued" for row in first)
         assert all(row.task_config == task.config for row in first)
@@ -100,7 +100,7 @@ async def test_ensure_enqueues_idempotent_architecture_snapshots(
                 TaskImageMaterialization.task_id == task_id
             )
         )
-        assert count == 2
+        assert count == 1
 
 
 async def test_publication_evidence_retains_identical_digest_across_attempt_leases(
@@ -121,7 +121,7 @@ async def test_publication_evidence_retains_identical_digest_across_attempt_leas
         first = await claim_task_image_materialization(
             session,
             builder_id="builder:first",
-            cpu_arch="arm64",
+            cpu_arch="x86_64",
         )
         assert first is not None
         assert (first.attempt_count, first.lease_epoch) == (1, 1)
@@ -150,7 +150,7 @@ async def test_publication_evidence_retains_identical_digest_across_attempt_leas
         second = await claim_task_image_materialization(
             session,
             builder_id="builder:second",
-            cpu_arch="arm64",
+            cpu_arch="x86_64",
         )
         assert second is not None
         assert second.id == first.id
@@ -269,15 +269,16 @@ async def test_new_task_checksum_creates_new_immutable_materializations(
         assert checksums == {original_checksum, replacement_checksum}
 
 
+@pytest.mark.parametrize("previous_state", ["retired", "retiring"])
 async def test_ensure_requeues_retired_images_and_marks_retiring_images_referenced(
     materialization_session: async_sessionmaker[AsyncSession],
+    previous_state: str,
 ) -> None:
     task_id = f"materialization/{uuid4()}"
-    checksum = "4" * 64
     old_reference = datetime.now(UTC) - timedelta(days=10)
     async with materialization_session() as session:
         await session.execute(
-            insert(Task).values(**_task_values(task_id=task_id, checksum=checksum))
+            insert(Task).values(**_task_values(task_id=task_id, checksum="4" * 64))
         )
         await session.commit()
         task = (await session.execute(select(Task).where(Task.id == task_id))).scalar_one()
@@ -286,20 +287,11 @@ async def test_ensure_requeues_retired_images_and_marks_retiring_images_referenc
             update(TaskImageMaterialization)
             .where(TaskImageMaterialization.id == created[0].id)
             .values(
-                state="retired",
+                state=previous_state,
                 attempt_count=3,
                 failure_reason="registry_retired",
                 failure_message="registry images were deleted",
-                last_referenced_at=old_reference,
-                unreferenced_at=old_reference,
-            )
-        )
-        await session.execute(
-            update(TaskImageMaterialization)
-            .where(TaskImageMaterialization.id == created[1].id)
-            .values(
-                state="retiring",
-                claimed_by="registry-gc-active",
+                claimed_by="registry-gc-active" if previous_state == "retiring" else None,
                 lease_epoch=2,
                 lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
                 last_referenced_at=old_reference,
@@ -311,16 +303,17 @@ async def test_ensure_requeues_retired_images_and_marks_retiring_images_referenc
         rows = await ensure_task_image_materializations(session, task_row=task)
         await session.commit()
 
-        assert rows[0].state == "queued"
-        assert rows[0].attempt_count == 0
-        assert rows[0].failure_reason is None
-        assert rows[0].failure_message is None
+        assert len(rows) == 1
         assert rows[0].unreferenced_at is None
         assert rows[0].last_referenced_at > old_reference
-        assert rows[1].state == "retiring"
-        assert rows[1].claimed_by == "registry-gc-active"
-        assert rows[1].unreferenced_at is None
-        assert rows[1].last_referenced_at > old_reference
+        if previous_state == "retired":
+            assert rows[0].state == "queued"
+            assert rows[0].attempt_count == 0
+            assert rows[0].failure_reason is None
+            assert rows[0].failure_message is None
+        else:
+            assert rows[0].state == "retiring"
+            assert rows[0].claimed_by == "registry-gc-active"
 
 
 async def test_same_checksum_cannot_rebind_frozen_task_snapshot(

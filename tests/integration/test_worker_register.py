@@ -337,3 +337,16 @@ def test_register_rejects_extra_keys(app, worker_token):  # type: ignore[no-unty
             json={"hostname": "h", "version": "v", "capabilities": [bad]},
         )
         assert r.status_code == 400
+
+
+def test_register_rejects_arm_without_creating_worker(app, worker_token, postgres_url):
+    engine = create_engine(postgres_url)
+    with TestClient(app) as client:
+        r = client.post("/workers/register", headers={"Authorization": f"Bearer {worker_token}"},
+            json={"hostname": "arm-rejected", "version": "0.1",
+                  "capabilities": [{**_VALID_CAP, "cpu_arch": "arm64"}]})
+    assert r.status_code == 400, r.text
+    assert "x86_64 only" in r.text
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM workers WHERE hostname='arm-rejected'")).scalar() == 0
+    engine.dispose()

@@ -181,9 +181,9 @@ Ordinary Nebius Batches can also queue a compatible Terminus-2 TaskSet whose
 primary environment specifies a Dockerfile. Import readiness means the task
 files and input manifest have been published; it does not mean the image has
 been built. The Trial waits for its linked x86_64 task-image materialization
-before reserving execution, consuming an attempt, or calling a model. An
-architecture-independent task may also have an arm64 prerequisite; that row
-does not block the x86_64 Nebius execution path. A failed x86_64 prerequisite
+before reserving execution, consuming an attempt, or calling a model.
+Architecture-independent (`any`) tasks build only x86_64 prerequisites. New ARM
+submissions/builds are rejected; historical ARM records remain readable. A failed x86_64 prerequisite
 finishes the waiting Trial with `task_image_build_failed` and no consumed attempt.
 
 `GET /api/v1/trials/{id}` exposes `task_environment_preparation` to the Trial's

@@ -303,7 +303,7 @@ async def test_register_writes_valid_task_config_from_vnext_manifest(
     TaskConfig.model_validate(row.config)
 
 
-async def test_register_enqueues_dockerfile_task_for_each_native_architecture(
+async def test_register_enqueues_any_architecture_dockerfile_task_for_x86_only(
     db: AsyncSession,
     postgres_url: str,
 ) -> None:
@@ -358,5 +358,5 @@ async def test_register_enqueues_dockerfile_task_for_each_native_architecture(
         .scalars()
         .all()
     )
-    assert [row.cpu_arch for row in rows] == ["x86_64", "arm64"]
+    assert [row.cpu_arch for row in rows] == ["x86_64"]
     assert all(row.state == "queued" for row in rows)

@@ -266,12 +266,12 @@ without observation on a full episode) fail closed via `CheckpointBridgeError`
 `terminus-2` does **not** use per-trial `AgentAdapter.install_script` layering.
 It requires the worker image built from the current `Dockerfile.worker`.
 
-## ARM64 / GB10
+## Execution architecture
 
-Task bundles that `FROM mictern2/terminus2-full:latest` trigger
-`_ensure_terminus_2_arm64_base_if_needed` on ARM64 workers (GB10 pool) before
-the task image build. See [service-mode.md](service-mode.md) § Runtime-fallback
-base image registry.
+New workloads and workers use x86_64 (`linux/amd64`). `cpu_arch = "any"`
+resolves to x86_64. The former GB10 ARM substitute-image build and importer
+promotion have been removed; ARM task declarations must be migrated explicitly.
+Historical ARM records remain readable, and ARM clients may submit remotely.
 
 ## Staging acceptance (Gate 3)
 
