@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from dataclasses import replace
 from uuid import uuid4
 
@@ -22,6 +23,13 @@ from tests.unit.test_personal_dev_storage_runtime_identity import _bound_claim
 _K3S = "rancher/k3s@sha256:08fdebd14db9ab7d5ea821d5bfa95d02341a6ef886842fcc8d9dfd0e9fa9e0cd"
 
 
+def _is_disposable_read_refusal(stderr):
+    lowered = stderr.lower()
+    return (len(lowered.splitlines()) == 1
+            and lowered.startswith("the connection to the server ")
+            and lowered.rstrip().endswith(" was refused - did you specify the right host or port?"))
+
+
 def _failure_category(stderr):
     # Finite labels only: kubectl can quote Secret input, names or server URLs.
     lowered = stderr.lower()
@@ -29,6 +37,8 @@ def _failure_category(stderr):
         return "empty-stderr"
     if lowered.strip() == "eof" or lowered.rstrip().endswith(": eof"):
         return "unexpected-eof"
+    if _is_disposable_read_refusal(stderr):
+        return "connection-refused"
     if 'namespaces "' in lowered and "not found" in lowered:
         return "namespace-not-found"
     for label, fragment in (
@@ -67,6 +77,30 @@ class _ContainerKubectl:
         self.last_failure_notes = []
 
     async def run(self, argv, *, stdin=None, timeout_seconds=120):
+        deadline = time.monotonic() + timeout_seconds
+        retry_deadline = None
+        remaining = timeout_seconds
+        while True:
+            try:
+                return await self._run_once(argv, stdin=stdin, timeout_seconds=remaining)
+            except DevInstanceRuntimeError as error:
+                # A just-started disposable API can briefly refuse a connection
+                # after /readyz passed. Only repeat the read, never a write or an
+                # ambiguous/authority failure. Keep the caller's original budget.
+                if argv[1:2] != ["get"] or not getattr(error, "_disposable_connection_refused", False):
+                    raise
+                now = time.monotonic()
+                if retry_deadline is None:
+                    retry_deadline = min(deadline, now + 5)
+                remaining = retry_deadline - now
+                if remaining <= 0:
+                    raise
+                await asyncio.sleep(min(0.1, remaining))
+                remaining = retry_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+
+    async def _run_once(self, argv, *, stdin=None, timeout_seconds=120):
         assert argv[0] == "kubectl"
         diagnostic = "/tmp/loom-test-kubectl-" + uuid4().hex
         # Preserve the production runner's exit handling and Conflict subtype.
@@ -83,6 +117,7 @@ class _ContainerKubectl:
             self.last_failure_notes = []
             return result
         except DevInstanceRuntimeError as error:
+            error._disposable_connection_refused = False
             current_failure_notes = []
 
             def note(message, failure=error):
@@ -96,7 +131,9 @@ class _ContainerKubectl:
                 captured = await AsyncCommandRunner().run(
                     ["docker", "exec", self.container_id, "head", "-c", "8193", diagnostic], timeout_seconds=5)
                 stderr = captured.stdout[:8192]
-                note("disposable kubectl failure category: " + _failure_category(stderr))
+                category = _failure_category(stderr)
+                error._disposable_connection_refused = _is_disposable_read_refusal(stderr)
+                note("disposable kubectl failure category: " + category)
                 # Decoded characters, not exact bytes for non-UTF8 diagnostics.
                 note(f"disposable kubectl stderr: chars={len(stderr)}; at-read-limit={len(captured.stdout) >= 8192}")
             except DevInstanceRuntimeError:
