@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from loom.dev_instance_runtime import CommandResult, DevInstanceRuntimeError
-from tests.integration import test_personal_dev_storage_running_pods as fixture
 from tests.integration import test_personal_dev_storage_namespace as namespace_fixture
+from tests.integration import test_personal_dev_storage_running_pods as fixture
 
 
 def test_disposable_storage_keeps_memory_and_inode_guards_with_absolute_disk_headroom():
@@ -51,7 +51,9 @@ async def test_readiness_timeout_retains_sanitized_probe_failure(monkeypatch):
     class Runner:
         async def run(self, argv, **kwargs):
             if "sh" in argv:
-                raise DevInstanceRuntimeError("private-credential-sentinel")
+                error = DevInstanceRuntimeError("private-credential-sentinel")
+                error.add_note("private-diagnostic-sentinel")
+                raise error
             if "head" in argv:
                 if argv[-1].endswith(".status"):
                     return CommandResult("1", "")
@@ -69,3 +71,4 @@ async def test_readiness_timeout_retains_sanitized_probe_failure(monkeypatch):
     assert "disposable kubectl exit status: 1" in notes
     assert '"Running": true' in notes and '"OOMKilled": false' in notes
     assert "private-credential-sentinel" not in notes and "private-server.example" not in notes
+    assert "private-diagnostic-sentinel" not in notes

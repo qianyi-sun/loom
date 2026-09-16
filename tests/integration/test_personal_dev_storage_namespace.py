@@ -63,6 +63,7 @@ def _failure_category(stderr):
 class _ContainerKubectl:
     def __init__(self, container_id):
         self.container_id = container_id
+        self.last_failure_notes = []
 
     async def run(self, argv, *, stdin=None, timeout_seconds=120):
         assert argv[0] == "kubectl"
@@ -77,17 +78,28 @@ class _ContainerKubectl:
             "loom-test-kubectl", diagnostic, "kubectl",
             "--kubeconfig=/etc/rancher/k3s/k3s.yaml", *argv[1:]]
         try:
-            return await AsyncCommandRunner().run(command, stdin=stdin, timeout_seconds=timeout_seconds)
+            result = await AsyncCommandRunner().run(command, stdin=stdin, timeout_seconds=timeout_seconds)
+            self.last_failure_notes = []
+            return result
         except DevInstanceRuntimeError as error:
+            current_failure_notes = []
+
+            def note(message, failure=error):
+                # Retain only diagnostics constructed here, never arbitrary
+                # exception text, for a readiness loop's outer deadline.
+                current_failure_notes.append(message)
+                self.last_failure_notes = current_failure_notes
+                failure.add_note(message)
+
             try:
                 captured = await AsyncCommandRunner().run(
                     ["docker", "exec", self.container_id, "head", "-c", "8193", diagnostic], timeout_seconds=5)
                 stderr = captured.stdout[:8192]
-                error.add_note("disposable kubectl failure category: " + _failure_category(stderr))
+                note("disposable kubectl failure category: " + _failure_category(stderr))
                 # Decoded characters, not exact bytes for non-UTF8 diagnostics.
-                error.add_note(f"disposable kubectl stderr: chars={len(stderr)}; at-read-limit={len(captured.stdout) >= 8192}")
+                note(f"disposable kubectl stderr: chars={len(stderr)}; at-read-limit={len(captured.stdout) >= 8192}")
             except DevInstanceRuntimeError:
-                error.add_note("disposable kubectl diagnostic unavailable")
+                note("disposable kubectl diagnostic unavailable")
             inner_status = "unavailable"
             try:
                 captured = await AsyncCommandRunner().run(
@@ -98,7 +110,7 @@ class _ContainerKubectl:
                 pass
             # A missing status differs from a nonzero kubectl exit: Docker exec
             # or the shell may have failed before the command completed.
-            error.add_note("disposable kubectl exit status: " + inner_status)
+            note("disposable kubectl exit status: " + inner_status)
             try:
                 state = await AsyncCommandRunner().run(["docker", "inspect", "--format",
                     '{"Running":{{.State.Running}},"OOMKilled":{{.State.OOMKilled}},"ExitCode":{{.State.ExitCode}}}',
@@ -107,9 +119,9 @@ class _ContainerKubectl:
                 if (isinstance(value, dict) and set(value) == {"Running", "OOMKilled", "ExitCode"}
                     and type(value["Running"]) is bool and type(value["OOMKilled"]) is bool
                     and type(value["ExitCode"]) is int):
-                    error.add_note("disposable container state: " + json.dumps(value, sort_keys=True))
+                    note("disposable container state: " + json.dumps(value, sort_keys=True))
             except (DevInstanceRuntimeError, ValueError):
-                error.add_note("disposable container state unavailable")
+                note("disposable container state unavailable")
             raise
 
 

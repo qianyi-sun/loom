@@ -51,6 +51,9 @@ async def _wait_ready_nodes(kubectl, *, timeout_seconds=120):
                 await asyncio.sleep(0.5)
     except TimeoutError as error:
         error.add_note("disposable k3s readiness: " + states)
+        if isinstance(kubectl.runner, _ContainerKubectl):
+            for note in kubectl.runner.last_failure_notes:
+                error.add_note(note)
         raise
 
 

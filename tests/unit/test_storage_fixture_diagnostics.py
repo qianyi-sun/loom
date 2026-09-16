@@ -92,5 +92,8 @@ async def test_successful_fixture_command_returns_exact_production_result(monkey
             return expected
 
     monkeypatch.setattr(fixture, "AsyncCommandRunner", Runner)
-    assert await fixture._ContainerKubectl("a" * 64).run(["kubectl", "get", "namespace"]) is expected
+    runner = fixture._ContainerKubectl("a" * 64)
+    runner.last_failure_notes = ["obsolete failure"]
+    assert await runner.run(["kubectl", "get", "namespace"]) is expected
+    assert runner.last_failure_notes == []
     assert len(calls) == 1
