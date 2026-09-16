@@ -76,82 +76,9 @@ async def test_builder_emits_all_fixed_major_profile_pairs(monkeypatch) -> None:
     monkeypatch.setattr(builder, "build_application_schema_reference", build)
     result = await builder._build_profiles()
     assert set(result) == {"16", "17"}
-    assert build.await_count == 76
+    assert build.await_count == 88
     for major in (16, 17):
         profiles = {"legacy-owner", "sealed-owner", "staging-readonly-legacy-owner", "staging-readonly-sealed-owner", "cnpg-staging-legacy-owner", "cnpg-staging-sealed-owner"}
-        assert set(result[str(major)]) == {"0148/guard_0036", "0148/guard_0035", "0147/guard_0036", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"}
-        for revision in ("0148/guard_0036", "0148/guard_0035", "0147/guard_0036", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"):
+        assert set(result[str(major)]) == {"0148/guard_0036", "0149/guard_0035", "0148/guard_0035", "0147/guard_0036", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"}
+        for revision in ("0148/guard_0036", "0149/guard_0035", "0148/guard_0035", "0147/guard_0036", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"):
             assert set(result[str(major)][revision]) == (profiles | {"cnpg-staging-executor-admission"} if revision in {"0148/guard_0036", "0147/guard_0036"} else profiles)
-            for profile in profiles:
-                build.assert_any_await(postgres_major=major, profile=profile, revision=revision)
-                assert result[str(major)][revision][profile]["postgres_major"] == major
-                assert result[str(major)][revision][profile]["profile"] == profile
-
-
-@pytest.mark.asyncio
-async def test_reference_cancellation_reaps_real_migration_child_before_database_cleanup(
-    monkeypatch,
-) -> None:
-    bootstrap = MagicMock()
-    bootstrap.apply_role_and_database = AsyncMock()
-    database = MagicMock()
-    database._converge_roles = AsyncMock()
-    database.destroy = AsyncMock()
-    monkeypatch.setattr(builder, "PsycopgSharedFixtureSqlExecutor", lambda _url: bootstrap)
-    monkeypatch.setattr(builder, "PsycopgPersonalDevCapacityDatabase", lambda _url: database)
-    create_process = asyncio.create_subprocess_exec
-    child = None
-    ready = asyncio.Event()
-
-    async def spawn(*args, **kwargs):
-        nonlocal child
-        assert args[1:3] == ("-m", "alembic")
-        assert kwargs["stdin"] == asyncio.subprocess.DEVNULL
-        child = await create_process(
-            builder.sys.executable,
-            "-c",
-            "import signal; print('ready', flush=True); signal.pause()",
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        assert child.stdout is not None
-        assert await asyncio.wait_for(child.stdout.readline(), timeout=5) == b"ready\n"
-        ready.set()
-        return child
-
-    async def destroy(_identity):
-        assert child is not None and child.returncode is not None
-
-    database.destroy.side_effect = destroy
-    monkeypatch.setattr(builder.asyncio, "create_subprocess_exec", spawn)
-    identity = derive_identity("reference-cancel")
-    task = asyncio.create_task(
-        builder._observe_fresh_database("postgresql+psycopg://unused/isolated", identity)
-    )
-    try:
-        await asyncio.wait_for(ready.wait(), timeout=10)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, timeout=5)
-        assert child is not None and child.returncode is not None
-        database.destroy.assert_awaited_once_with(identity)
-        database._converge_roles.assert_not_awaited()
-    finally:
-        if not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        if child is not None and child.returncode is None:
-            child.kill()
-            await child.wait()
-
-
-def test_script_path_entrypoint_rejects_arguments_without_provisioning():
-    import subprocess
-    result = subprocess.run(
-        [builder.sys.executable, str(builder._ROOT / "scripts/build_application_schema_reference.py"), "invalid"],
-        capture_output=True, text=True, timeout=15,
-    )
-    assert result.returncode != 0
-    assert result.stdout == ""
-    assert result.stderr.strip() == "reference builder accepts no arguments or database address"

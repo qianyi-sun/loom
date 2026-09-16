@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -106,12 +107,27 @@ async def test_malformed_or_oversized_receipt_fails_closed(tmp_path, reply):
             await subject.authorize()
 
 
-async def test_online_deadline_cancels_and_joins_transport(tmp_path):
+async def test_online_deadline_cancels_and_joins_transport(tmp_path, monkeypatch):
+    from loom_worker import task_image_execution
+
     payload, kwargs = evidence(tmp_path)
     closed = asyncio.Event()
+    started = asyncio.Event()
+    deadline = asyncio.timeout(None)
+
+    def online_timeout(seconds):
+        assert seconds == 0.05
+        return deadline
+
+    # Keep signed verification real, but expire the real asyncio deadline only
+    # after HTTP starts. Host speed must not select the pre-HTTP timeout path.
+    monkeypatch.setattr(task_image_execution, "asyncio", SimpleNamespace(timeout=online_timeout))
+    monkeypatch.setattr(task_image_execution, "time", SimpleNamespace(monotonic=lambda: 0.0))
 
     async def handle(_):
         try:
+            started.set()
+            deadline.reschedule(asyncio.get_running_loop().time())
             await asyncio.Event().wait()
         finally:
             closed.set()
@@ -125,7 +141,38 @@ async def test_online_deadline_cancels_and_joins_transport(tmp_path):
         subject.timeout_seconds = 0.05
         with pytest.raises(TimeoutError):
             await subject.authorize()
+        with pytest.raises(RuntimeError, match="already attempted"):
+            await subject.authorize()
+    assert started.is_set()
+    assert deadline.expired()
     assert closed.is_set()
+
+
+async def test_verification_deadline_refuses_before_starting_transport(tmp_path, monkeypatch):
+    from loom_worker import task_image_execution
+
+    payload, kwargs = evidence(tmp_path)
+    sent = []
+    readings = iter((0.0, 0.1))
+    monkeypatch.setattr(task_image_execution, "time", SimpleNamespace(
+        monotonic=lambda: next(readings, 0.1),
+    ))
+
+    def handle(request):
+        sent.append(request)
+        return httpx.Response(503)
+
+    async with httpx.AsyncClient(
+        base_url="https://cp.example", transport=httpx.MockTransport(handle),
+    ) as http:
+        client = HttpControlPlaneClient("https://cp.example", "worker-token", _client=http)
+        subject = consumer(tmp_path, payload, kwargs, client.consume_task_image_execution_start)
+        subject.timeout_seconds = 0.05
+        with pytest.raises(TimeoutError, match="verification exceeded deadline"):
+            await subject.authorize()
+        with pytest.raises(RuntimeError, match="already attempted"):
+            await subject.authorize()
+    assert sent == []
 
 
 @pytest.mark.parametrize("configured,actual", [

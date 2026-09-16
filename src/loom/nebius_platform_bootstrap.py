@@ -50,6 +50,7 @@ COMMON_EXECUTION_TABLES = (
 # Keep the Gateway's inventory independent: it may read task-image readiness,
 # but never acquires builder leases or writes publication evidence.
 ACTUATOR_TASK_IMAGE_WRITES = {
+    "task_image_capacity_waits": ("INSERT", "UPDATE", "DELETE"),
     "task_image_materializations": ("UPDATE",),
     "task_image_materialization_attempts": ("INSERT", "UPDATE"),
     "task_image_publication_evidence": ("INSERT",),
@@ -214,6 +215,7 @@ def bootstrap_database(config: dict[str, Any]) -> None:
                         "tasks",
                         "batches",
                         "task_image_materializations",
+                        "task_image_capacity_waits",
                         "task_image_materialization_attempts",
                         "task_image_publication_evidence",
                         "trial_task_image_materializations",

@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.schema import (
     ServiceExecutionTarget,
+    TaskImageCapacityWait,
     TaskImageMaterialization,
     TaskImageMaterializationAttempt,
 )
@@ -28,8 +29,10 @@ from loom.task_image_build_plan import derive_task_image_build_components
 from loom_control_plane.execution_capacity import (
     _CAPACITY_ADMISSION_LOCK,
     ExecutionProvisioningBlockedError,
+    native_build_resources,
 )
 from loom_control_plane.task_image_capacity import reserve_native_task_image_capacity
+from loom_control_plane.task_image_capacity_wait import remember_capacity_wait
 from loom_control_plane.task_image_materializations import (
     TaskImageCompletionError,
     claim_task_image_materialization,
@@ -341,46 +344,74 @@ class NativeTaskImageController:
     async def _claim(self) -> UUID | None:
         async with self.sessions() as session, session.begin():
             await session.execute(_CAPACITY_ADMISSION_LOCK)
-            target = await session.get(ServiceExecutionTarget, self.target.target_id)
-            if target is None or target.provider != "nebius" or target.desired_state != "active" or target.health_status != "healthy":
-                return None
-            if len(await self._outstanding(session)) >= self.settings.max_concurrent:
-                return None
-            row = await claim_task_image_materialization(session, builder_id=self.builder_id, cpu_arch="x86_64",
-                                                        nebius_pool_id=self.settings.pool_id)
-            if row is None:
-                return None
-            attempt = await session.scalar(select(TaskImageMaterializationAttempt).where(
-                TaskImageMaterializationAttempt.materialization_id == row.id,
-                TaskImageMaterializationAttempt.lease_epoch == row.lease_epoch,
-            ).with_for_update())
-            assert attempt is not None
+            waiting: tuple[UUID, int, dict[str, Any]] | None = None
             try:
-                claim = {**task_image_materialization_payload(row), **self.settings.runtime_configuration()}
-                components = derive_task_image_build_components(row.task_config)
-                cm, job = render_task_image_job(materialization_id=row.id, lease_epoch=row.lease_epoch,
-                                               claim=claim, components=components, target=self.target,
-                                               config=self.settings.job_config())
-            except (ValueError, TypeError, KeyError):
-                await self._fail(session, row, "build_input_unsupported", retryable=False,
-                                 message="Unsupported Dockerfile, context, architecture, or task build configuration")
+                # Keep the capacity lock outside the savepoint. Rejected work
+                # consumes no attempt, but a validated waiting head survives.
+                async with session.begin_nested():
+                    attempt = await self._prepare_claim(session)
+                    if attempt is None:
+                        return None
+                    assert attempt.native_build is not None
+                    waiting = (attempt.materialization_id, attempt.lease_epoch - 1,
+                               dict(attempt.native_build))
+                    attempt_id = attempt.id
+                    await reserve_native_task_image_capacity(session, attempt_id=attempt_id)
+                    wait = await session.get(TaskImageCapacityWait, self.target.target_id)
+                    if wait is not None and wait.materialization_id == attempt.materialization_id:
+                        await session.delete(wait)
+                    return attempt_id
+            except ExecutionProvisioningBlockedError:
+                if waiting is None:
+                    raise
+                materialization_id, lease_epoch, native = waiting
+                await remember_capacity_wait(
+                    session, target_id=self.target.target_id, materialization_id=materialization_id,
+                    lease_epoch=lease_epoch, pool_id=self.settings.pool_id,
+                    resources=native_build_resources(native), now=datetime.now(UTC),
+                )
                 return None
-            for metadata in (cm["metadata"], job["metadata"], job["spec"]["template"]["metadata"]):
-                metadata["labels"]["app.kubernetes.io/managed-by"] = _MANAGER
-                metadata.setdefault("annotations", {})["loom.openai.com/target-id"] = self.target.target_id
-            now = datetime.now(UTC)
-            attempt.native_build = {
-                "target_id": self.target.target_id, "namespace": self.settings.namespace,
-                "job_name": job["metadata"]["name"], "job_uid": None, "state": "reserved",
-                "resources": {"vcpu_millis": self.settings.cpu_millis, "memory_mib": self.settings.memory_mib,
-                              "storage_mib": self.settings.ephemeral_storage_mib},
-                "max_processes": self.settings.max_processes, "reserved_at": now.isoformat(),
-                "deadline_at": (now + timedelta(seconds=job["spec"]["activeDeadlineSeconds"])).isoformat(),
-                "configmap": cm, "job": job,
-            }
-            await session.flush()
-            await reserve_native_task_image_capacity(session, attempt_id=attempt.id)
-            return attempt.id
+
+    async def _prepare_claim(self, session: AsyncSession) -> TaskImageMaterializationAttempt | None:
+        target = await session.get(ServiceExecutionTarget, self.target.target_id)
+        if target is None or target.provider != "nebius" or target.desired_state != "active" or target.health_status != "healthy":
+            return None
+        if len(await self._outstanding(session)) >= self.settings.max_concurrent:
+            return None
+        row = await claim_task_image_materialization(session, builder_id=self.builder_id, cpu_arch="x86_64",
+                                                    nebius_pool_id=self.settings.pool_id)
+        if row is None:
+            return None
+        attempt = await session.scalar(select(TaskImageMaterializationAttempt).where(
+            TaskImageMaterializationAttempt.materialization_id == row.id,
+            TaskImageMaterializationAttempt.lease_epoch == row.lease_epoch,
+        ).with_for_update())
+        assert attempt is not None
+        try:
+            claim = {**task_image_materialization_payload(row), **self.settings.runtime_configuration()}
+            components = derive_task_image_build_components(row.task_config)
+            cm, job = render_task_image_job(materialization_id=row.id, lease_epoch=row.lease_epoch,
+                                           claim=claim, components=components, target=self.target,
+                                           config=self.settings.job_config())
+        except (ValueError, TypeError, KeyError):
+            await self._fail(session, row, "build_input_unsupported", retryable=False,
+                             message="Unsupported Dockerfile, context, architecture, or task build configuration")
+            return None
+        for metadata in (cm["metadata"], job["metadata"], job["spec"]["template"]["metadata"]):
+            metadata["labels"]["app.kubernetes.io/managed-by"] = _MANAGER
+            metadata.setdefault("annotations", {})["loom.openai.com/target-id"] = self.target.target_id
+        now = datetime.now(UTC)
+        attempt.native_build = {
+            "target_id": self.target.target_id, "namespace": self.settings.namespace,
+            "job_name": job["metadata"]["name"], "job_uid": None, "state": "reserved",
+            "resources": {"vcpu_millis": self.settings.cpu_millis, "memory_mib": self.settings.memory_mib,
+                          "storage_mib": self.settings.ephemeral_storage_mib},
+            "max_processes": self.settings.max_processes, "reserved_at": now.isoformat(),
+            "deadline_at": (now + timedelta(seconds=job["spec"]["activeDeadlineSeconds"])).isoformat(),
+            "configmap": cm, "job": job,
+        }
+        await session.flush()
+        return attempt
 
     def _owned(self, row: TaskImageMaterialization | None, attempt: TaskImageMaterializationAttempt) -> bool:
         return bool(row is not None and row.lease_epoch == attempt.lease_epoch and row.claimed_by == self.builder_id
