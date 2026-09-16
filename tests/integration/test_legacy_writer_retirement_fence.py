@@ -2,6 +2,7 @@
 
 import copy
 import os
+import ssl
 import time
 
 import pytest
@@ -10,6 +11,30 @@ from loom_cli.rollout.operator.protected_legacy_writer_fence import render_legac
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
 
 _CP_IMAGE = "registry.example.test/loom-control-plane@sha256:" + "a" * 64
+
+
+def _wait_for_old_writer_pods(core, *, timeout_seconds=90):
+    from urllib3.exceptions import MaxRetryError, SSLError
+
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, "disposable old writers did not start"
+        try:
+            old_pods = core.list_namespaced_pod(
+                "loom-staging", _request_timeout=min(5, remaining)).items
+        except MaxRetryError as exc:
+            # A newly started disposable API can close a TLS connection while
+            # the real pods are starting. Retry only this read and only EOF;
+            # certificate/admission failures and all writes retain their errors.
+            reason = exc.reason
+            if (not isinstance(reason, SSLError) or not reason.args
+                or not isinstance(reason.args[0], ssl.SSLEOFError)):
+                raise
+        else:
+            if len(old_pods) == 7 and all(value.status.phase == "Running" for value in old_pods):
+                return old_pods
+        time.sleep(min(0.2, max(0, deadline - time.monotonic())))
 
 
 def _deployment(name, *, image=_CP_IMAGE, cutover=False, replicas=1):
@@ -195,13 +220,7 @@ def test_separate_cutover_retires_real_pods_and_recovers_a_lost_patch(tmp_path):
         cron = batch.create_namespaced_cron_job("loom-staging", {"apiVersion": "batch/v1", "kind": "CronJob",
             "metadata": {"name": "loom-staging-data-lifecycle"}, "spec": {"suspend": True, "schedule": "0 0 * * *",
                 "jobTemplate": {"spec": {"template": {"spec": {**pod, "restartPolicy": "Never"}}}}}})
-        deadline = time.monotonic() + 90
-        while True:
-            old_pods = core.list_namespaced_pod("loom-staging").items
-            if len(old_pods) == 7 and all(value.status.phase == "Running" for value in old_pods):
-                break
-            assert time.monotonic() < deadline, "disposable old writers did not start"
-            time.sleep(0.2)
+        old_pods = _wait_for_old_writer_pods(core)
         old_uids = {value.metadata.uid for value in old_pods}
         rs = apps.list_namespaced_replica_set("loom-staging", label_selector="app=loom-service").items
         assert len(rs) == 1

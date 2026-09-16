@@ -98,6 +98,7 @@ async def test_successful_fixture_command_returns_exact_production_result(monkey
 
 def _retirement_reader_test(monkeypatch, values):
     from types import SimpleNamespace
+
     from tests.integration import test_legacy_writer_retirement_fence as retirement
 
     clock = [0.0]
@@ -118,6 +119,7 @@ def _retirement_reader_test(monkeypatch, values):
 
 def _tls_eof():
     import ssl
+
     from urllib3.exceptions import MaxRetryError, SSLError
 
     return MaxRetryError(None, "/pods", SSLError(ssl.SSLEOFError(8, "unexpected EOF")))
@@ -144,6 +146,7 @@ def test_retirement_startup_tls_eof_cannot_extend_deadline(monkeypatch):
 @pytest.mark.parametrize("kind", ["certificate", "authorization", "other-ssl", "other-transport"])
 def test_retirement_startup_does_not_retry_other_failures(monkeypatch, kind):
     import ssl
+
     from kubernetes.client.exceptions import ApiException
     from urllib3.exceptions import MaxRetryError, SSLError
 
