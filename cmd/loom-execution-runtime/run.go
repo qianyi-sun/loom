@@ -61,6 +61,7 @@ type resultManifest struct {
 	RuntimeBinarySHA256   string             `json:"runtime_binary_sha256"`
 	ExecutionClassID      string             `json:"execution_class_id"`
 	Status                string             `json:"status"`
+	FailureReason         string             `json:"failure_reason,omitempty"`
 	StartedAt             time.Time          `json:"started_at"`
 	FinishedAt            time.Time          `json:"finished_at"`
 	Phases                []phaseEvidence    `json:"phases"`
@@ -141,6 +142,7 @@ func runPlan(
 		TaskRevisionSHA256: p.TaskRevisionSHA256, TaskImageRef: p.TaskImageRef,
 		RuntimeImageRef: p.RuntimeImageRef, RuntimeBinarySHA256: p.RuntimeBinarySHA256,
 		ExecutionClassID: p.ExecutionClassID, Status: "running", StartedAt: started,
+		Phases: []phaseEvidence{},
 	}
 	result.ContainerRoles = []string{"execution", p.Main.Role}
 	for _, item := range p.Sidecars {
@@ -168,12 +170,24 @@ func runPlan(
 	}
 	var agentTimeout error
 	for ordinal, item := range phases {
+		if ctx.Err() != nil {
+			result.Status = classifyFailure(ctx, phaseEvidence{})
+			result.PartialEvidence = true
+			result.FinishedAt = time.Now().UTC()
+			if errors.Is(context.Cause(ctx), errSandboxLost) {
+				result.FailureReason = "sandbox_lost"
+			}
+			return result, context.Cause(ctx)
+		}
 		evidence, err := runPhase(
 			ctx, item, ordinal+1, workspace, outputRoot,
 			p.MaxLogBytesPerStream, time.Duration(p.TerminationGraceSec)*time.Second,
 			trustedEnvironment, phaseBoundary...,
 		)
 		result.Phases = append(result.Phases, evidence)
+		if errors.Is(context.Cause(ctx), errSandboxLost) {
+			err = context.Cause(ctx)
+		}
 		if err != nil {
 			// Exit 124 is the trusted controller's acknowledgement that an
 			// expired agent is quiescent and its workspace handoff is complete.
@@ -185,6 +199,10 @@ func runPlan(
 				continue
 			}
 			result.Status = classifyFailure(ctx, evidence)
+			if errors.Is(context.Cause(ctx), errSandboxLost) {
+				result.FailureReason = "sandbox_lost"
+				err = context.Cause(ctx)
+			}
 			if agentTimeout != nil && ctx.Err() == nil {
 				result.Status = "timed_out"
 				err = errors.Join(agentTimeout, err)
@@ -296,7 +314,7 @@ func runPhase(
 				_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 				<-waited
 			}
-			err = phaseCtx.Err()
+			err = context.Cause(phaseCtx)
 		}
 	}
 	finished := time.Now().UTC()
@@ -322,6 +340,9 @@ func runPhase(
 }
 
 func classifyFailure(ctx context.Context, evidence phaseEvidence) string {
+	if errors.Is(context.Cause(ctx), errSandboxLost) {
+		return "runtime_error"
+	}
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return "cancelled"
 	}

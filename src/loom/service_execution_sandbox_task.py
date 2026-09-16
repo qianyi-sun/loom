@@ -195,6 +195,22 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
 async def run_verifier(workspace: Path, task: TaskConfig, trial: TrialConfig) -> None:
     driver = sandbox_driver("verifier-sandbox", task)
     await driver.start()
+    failure: BaseException | None = None
+
+    def retain_failure(operation: str, exc: BaseException) -> None:
+        nonlocal failure
+        if failure is None:
+            failure = exc
+        else:
+            # Preserve the original phase error. Only the RPC adapter's fixed
+            # reason codes are safe to include; arbitrary exception text can
+            # carry commands, paths or credentials.
+            detail = f": {exc}" if isinstance(exc, SandboxRPCError) else ""
+            print(
+                f"secondary verifier {operation} failure ({type(exc).__name__}){detail}"[:256],
+                file=sys.stderr,
+            )
+
     try:
         await materialize_workspace(
             driver=driver, task_dir=workspace, dst=task.environment.workdir,
@@ -216,24 +232,36 @@ async def run_verifier(workspace: Path, task: TaskConfig, trial: TrialConfig) ->
         )
         sys.stdout.buffer.write(result.stdout)
         sys.stderr.buffer.write(result.stderr)
-        await driver.stop_processes()
         if result.return_code != 0:
-            raise ServiceExecutionTaskError("isolated verifier process failed")
+            retain_failure("exec", ServiceExecutionTaskError("isolated verifier process failed"))
+        # Capture already produced reports before cleanup can fail. These are
+        # partial evidence until both validation and cleanup succeed; returning
+        # a reward never changes a failed phase into successful execution.
         output = workspace / ".loom/verifier/output.json"
-        await driver.download(remote_output, output)
-        # Numeric zero is a valid evaluated result; missing/invalid feedback is not.
-        VerifierResult.model_validate_json(output.read_bytes())
+        try:
+            await driver.download(remote_output, output)
+            # Numeric zero is valid; missing/invalid feedback is not.
+            VerifierResult.model_validate_json(output.read_bytes())
+        except Exception as exc:
+            retain_failure("report", exc)
         try:
             await driver.download(PurePosixPath("/logs/verifier/ctrf.json"), output.with_name("ctrf.json"))
         except (DriverError, FileNotFoundError):
-            # The script verifier contract requires structured rewards. CTRF
-            # is an optional native report, not another acceptance gate.
+            # CTRF is an optional native report, not another acceptance gate.
             print("optional verifier CTRF report unavailable", file=sys.stderr)
+    except BaseException as exc:
+        retain_failure("execution", exc)
     finally:
         try:
             await driver.stop_processes()
-        finally:
+        except BaseException as exc:
+            retain_failure("stop_processes", exc)
+        try:
             await driver.stop()
+        except BaseException as exc:
+            retain_failure("stop", exc)
+    if failure is not None:
+        raise failure
 
 
 def main() -> None:

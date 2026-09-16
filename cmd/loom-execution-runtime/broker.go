@@ -240,7 +240,11 @@ func (b *workloadBroker) currentToken(ctx context.Context) (string, error) {
 	return b.token, nil
 }
 
-func (b *workloadBroker) startProxy(ctx context.Context) (string, func() error, error) {
+func (b *workloadBroker) startProxy(ctx context.Context, modelLifetime ...context.Context) (string, func() error, error) {
+	modelContext := ctx
+	if len(modelLifetime) > 0 {
+		modelContext = modelLifetime[0]
+	}
 	// Model calls follow the caller's phase lifetime and the Gateway's deadline.
 	// Keep the transport's connect/TLS bounds and the finite broker-operation client.
 	gatewayClient := *b.client
@@ -260,7 +264,16 @@ func (b *workloadBroker) startProxy(ctx context.Context) (string, func() error, 
 				http.Error(writer, "gateway route unavailable", http.StatusForbidden)
 				return
 			}
-			requestContext := request.Context()
+			// Stop model work immediately when the execution loses a private
+			// sandbox. Keep the ledger route alive for partial finalization.
+			if modelContext.Err() != nil {
+				http.Error(writer, "execution is no longer running", http.StatusServiceUnavailable)
+				return
+			}
+			requestContext, cancelRequest := context.WithCancel(request.Context())
+			stopCancellation := context.AfterFunc(modelContext, cancelRequest)
+			defer stopCancellation()
+			defer cancelRequest()
 			b.mu.Lock()
 			phaseDeadline, phaseBound := b.phaseDeadline, b.phaseBound
 			b.mu.Unlock()

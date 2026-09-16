@@ -28,3 +28,16 @@ func TestCleanupFailurePublishesOnlyFixedReason(t *testing.T) {
 		}
 	}
 }
+
+func TestCleanupOwnershipDiagnosticContainsOnlyKernelIdentity(t *testing.T) {
+	response := httptest.NewRecorder()
+	writeCleanupFailure(response, fmt.Errorf("private detail: %w", &processOwnerError{
+		PID: 31, ParentPID: 1, State: "S", ExpectedUID: 65532, ObservedUID: 65533,
+	}))
+	if response.Header().Get("X-Loom-Sandbox-Process") != "pid=31;ppid=1;state=S;uid=65533;expected_uid=65532" {
+		t.Fatalf("missing bounded process identity: %v", response.Header())
+	}
+	if response.Body.String() != "sandbox process cleanup failed\n" {
+		t.Fatal("unsafe cleanup detail in body")
+	}
+}

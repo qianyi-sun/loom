@@ -37,7 +37,16 @@ func stopProcesses(ctx context.Context) error {
 				continue
 			}
 			if err != nil {
+				var owner *processOwnerError
+				if errors.As(err, &owner) {
+					owner.PID = pid
+				}
 				return err
+			}
+			if state == "" {
+				// An external OCI exec/probe has a parent outside this PID
+				// namespace. It is not one of the runtime's task descendants.
+				continue
 			}
 			if state == "Z" {
 				// Reap orphan descendants adopted by this PID 1. Active execs are
@@ -60,8 +69,12 @@ func stopProcesses(ctx context.Context) error {
 	}
 }
 
-// Read State and effective UID from one proc status read. A proc directory's
-// getattr can succeed with root ownership after its task has been reaped.
+// Read ownership and state from one kernel proc status snapshot. PPid 0 means
+// the parent lives outside this PID namespace (for example a kubelet exec
+// probe, which briefly runs as root before OCI applies the container UID).
+// Return an empty state for these external processes: neither kill them nor
+// apply the task-child UID guard. Orphan task descendants are adopted by PID 1
+// and must still pass that guard. A missing/reaped proc entry is handled above.
 func sandboxProcessState(directory string, expectedUID int) (string, error) {
 	status, err := os.ReadFile(filepath.Join(directory, "status"))
 	if err != nil {
@@ -72,13 +85,24 @@ func sandboxProcessState(directory string, expectedUID int) (string, error) {
 	}
 	state := ""
 	var effectiveUID uint64
+	var parentPID uint64
 	haveUID := false
+	haveParent := false
 	for _, line := range strings.Split(string(status), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
 			continue
 		}
 		switch fields[0] {
+		case "PPid:":
+			if len(fields) != 2 {
+				return "", errCleanupProcRead
+			}
+			parentPID, err = strconv.ParseUint(fields[1], 10, 31)
+			if err != nil {
+				return "", errCleanupProcRead
+			}
+			haveParent = true
 		case "State:":
 			if len(fields) < 2 || len(fields[1]) != 1 {
 				return "", errCleanupProcRead
@@ -96,11 +120,14 @@ func sandboxProcessState(directory string, expectedUID int) (string, error) {
 			haveUID = true
 		}
 	}
-	if state == "" || !haveUID {
+	if state == "" || !haveUID || !haveParent {
 		return "", errCleanupProcRead
 	}
+	if parentPID == 0 {
+		return "", nil
+	}
 	if effectiveUID != uint64(expectedUID) {
-		return "", errCleanupProcessOwner
+		return "", &processOwnerError{State: state, ParentPID: parentPID, ExpectedUID: expectedUID, ObservedUID: effectiveUID}
 	}
 	return state, nil
 }
