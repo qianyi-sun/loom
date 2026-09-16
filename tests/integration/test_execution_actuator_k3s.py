@@ -268,6 +268,10 @@ def _start_k3s(*, node_name: str | None = None, ephemeral_storage_floor: str | N
                 "server",
                 "--disable=traefik",
                 "--disable=servicelb",
+                # Static disposable nodes need no cloud provider. K3s's cloud
+                # controller can exit during initial RBAC bootstrap and shut
+                # down the API after its discovery endpoint first responds.
+                "--disable-cloud-controller",
                 "--tls-san=127.0.0.1",
                 "--write-kubeconfig-mode=644",
                 *([] if node_name is None else [f"--node-name={node_name}"]),

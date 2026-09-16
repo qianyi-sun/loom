@@ -26,6 +26,7 @@ _BUSYBOX = "docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c
 _RUNNING_SERVER_ARGS = [
     "server", "--disable=traefik", "--disable=servicelb", "--disable=metrics-server",
     "--disable=local-storage", "--disable=coredns",
+    "--disable-cloud-controller",
     "--kubelet-arg=eviction-hard=memory.available<100Mi,nodefs.available<1Gi,imagefs.available<1Gi,nodefs.inodesFree<5%,imagefs.inodesFree<5%",
 ]
 

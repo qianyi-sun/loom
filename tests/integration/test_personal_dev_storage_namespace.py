@@ -117,6 +117,8 @@ class _ContainerKubectl:
 async def disposable_storage_kubectl():
     container = DockerContainer(_K3S).with_command([
         "server", "--disable-agent", "--disable=traefik", "--disable=servicelb",
+        # No cloud nodes/services; avoid unrelated cloud-controller RBAC startup.
+        "--disable-cloud-controller",
         "--disable=metrics-server", "--disable=local-storage", "--disable=coredns",
     ]).with_kwargs(privileged=True)
     try:
