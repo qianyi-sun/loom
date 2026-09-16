@@ -560,7 +560,7 @@ class _DatabaseRunner:
                 return b"absent\n"
             return b"loom_capacity_guard.capacity_guard_alembic_version\n"
         if "version_num" in joined:
-            return b"guard_0034\n"
+            return b"guard_0035\n"
         if "current_protected_runtime_registration" in joined:
             if self.protected_roles_sealed and not self.allow_sealed_runtime_impersonation:
                 raise RuntimeError("injected sealed runtime role")
@@ -1887,6 +1887,24 @@ def _database_component(
     return plan, runner, runtime.components(plan, epoch_guard=lambda _plan: epoch)[1]
 
 
+def test_capacity_database_observer_selects_separated_owner_grantor(tmp_path):
+    from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
+        _DatabaseState,
+    )
+
+    plan, runner, _ = _database_component(tmp_path, database_state="exact")
+    for role in ("loom_cap_staging_agent", "loom_cap_staging_observer", "loom_cap_staging_runtime"):
+        runner.protected_database_privileges[role]["acl"][0]["grantor"] = "loom_app_staging_owner"
+    base = KubernetesProtectedStagingCapacityDatabaseComponent(runner, "registry.example.test/loom", lambda: runner.seed,
+        application_owner_role="loom_app_staging_owner")
+    assert base._database_state(plan, runner.seed) is _DatabaseState.EXACT
+    legacy = replace(base, application_owner_role="")
+    assert legacy._database_state(plan, runner.seed) is not _DatabaseState.EXACT
+    protected = replace(base, runner=_NoCommandRunner(), seed_reader=lambda: pytest.fail("legacy seed read"))
+    with pytest.raises(RuntimeError, match="retained lifecycle"):
+        protected.apply(plan)
+
+
 def test_database_component_rejects_seed_authority_foreign_to_plan(tmp_path: Path) -> None:
     """Break caught: a downstream component trusting a seed changed after credential apply."""
     seed_runtime = _runtime(tmp_path)
@@ -2181,7 +2199,7 @@ async def test_database_manifest_runs_real_bootstrap_with_generation_reporter(
     observed: dict[str, object] = {}
 
     class Database:
-        def __init__(self, admin_url: str, *, transient_role_admin: bool) -> None:
+        def __init__(self, admin_url: str, *, transient_role_admin: bool, application_owner_binding=None) -> None:
             observed["admin_url"] = admin_url
             observed["transient_role_admin"] = transient_role_admin
 
@@ -4234,3 +4252,46 @@ def test_database_component_rejects_immutable_database_identity_drift(
     assert component.classify(plan).state is ComponentState.DRIFTED
     with pytest.raises(RuntimeError, match="state changed"):
         component.apply(plan)
+
+
+def test_capacity_runtime_selects_installed_database_lifecycle_without_legacy_wrapper(tmp_path):
+    plan = _plan(tmp_path)
+    source = _runtime(tmp_path)
+    calls = []
+    selected = source.components(plan, epoch_guard=lambda _: None)[1]
+    selected = replace(selected, terminal_recovery_authority=None)
+    from loom_cli.rollout.operator.protected_apply_journal import ProtectedApplyJournal
+    journal = ProtectedApplyJournal(source.state_root, request_id=plan.request_id, attempt_number=plan.attempt_number)
+    def database(bound, active_journal):
+        assert active_journal is journal
+        assert bound == plan
+        calls.append(bound)
+        return selected
+    source = replace(source, database_component_factory=database)
+    components = source.components(plan, epoch_guard=lambda _: pytest.fail("ordinary epoch read during construction"), journal=journal)
+    assert components[1] is selected and calls == [plan]
+    assert components[1].terminal_recovery_authority is None
+
+
+def test_legacy_authority_rebind_can_be_rendered_before_journaled_peer_dispatch(tmp_path):
+    plan, runner, _ = _database_component(tmp_path, database_state="exact")
+    runner.registration_overrides = {"authority_incarnation": "558afea6-2a37-55a1-9f7c-3399695da966"}
+    direct = KubernetesProtectedStagingCapacityDatabaseComponent(runner, "registry.example.test/loom", lambda: runner.seed)
+    before = list(runner.calls)
+    payload = direct._legacy_authority_rebind_payload(plan, runner.seed)
+    assert payload.startswith(b"BEGIN;") and payload.endswith(b"COMMIT;\n")
+    assert b"ACCESS EXCLUSIVE MODE NOWAIT" in payload
+    from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
+        _AUTHORITY_REBIND_AUDIT_HISTORY_SQL,
+        _AUTHORITY_REBIND_TRIGGER_SQL,
+    )
+    assert runner.registration_overrides
+    assert [call[-1] for call in runner.calls[len(before):]] == [
+        _AUTHORITY_REBIND_TRIGGER_SQL, _AUTHORITY_REBIND_AUDIT_HISTORY_SQL,
+    ]
+    # Legacy dispatch and retained dispatch must consume the same certified SQL.
+    observed = []
+    from unittest.mock import patch
+    with patch.object(type(direct), "_run_peer_payload", lambda self, value: observed.append(value)):
+        direct._rebind_legacy_authority(plan, runner.seed)
+    assert observed == [payload]

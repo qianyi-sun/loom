@@ -33,6 +33,8 @@ def _checkpoint(
     optional_protected_present: bool = False,
     unknown_database_url: str | None = None,
     opaque_binary_data: bytes | None = None,
+    cnpg_contract: str = "valid",
+    inventory_schema: int = 2,
 ) -> Path:
     root = tmp_path / "backup"
     root.mkdir(mode=0o700, parents=True)
@@ -134,6 +136,17 @@ def _checkpoint(
                         "postgres-user": base64.b64encode(b"live").decode(),
                     }
                 )
+            if spec.name == "loom-postgres-cnpg-credentials":
+                protected_data = {
+                    "username": base64.b64encode(b"loom").decode(),
+                    "password": base64.b64encode(b"live-cnpg-password").decode(),
+                }
+                if cnpg_contract == "missing":
+                    del protected_data["password"]
+                elif cnpg_contract == "extra":
+                    protected_data["unrecognized-credential"] = base64.b64encode(
+                        b"live-secret"
+                    ).decode()
             raw = (
                 json.dumps(
                     {
@@ -151,7 +164,9 @@ def _checkpoint(
                             "resourceVersion": "42",
                             "uid": "11111111-1111-4111-8111-111111111111",
                         },
-                        "type": "Opaque",
+                        "type": "kubernetes.io/basic-auth"
+                        if spec.name == "loom-postgres-cnpg-credentials" and cnpg_contract != "type"
+                        else "Opaque",
                     },
                     sort_keys=True,
                     separators=(",", ":"),
@@ -160,11 +175,25 @@ def _checkpoint(
             ).encode()
         observations[(spec.namespace, spec.name)] = (raw, raw)
     protected = build_secret_inventory(observations)
+    inventory_payload = protected.inventory_payload
+    if inventory_schema == 1:
+        legacy_inventory = json.loads(inventory_payload)
+        legacy_inventory["schema_version"] = 1
+        legacy_inventory["secrets"] = [
+            item
+            for item in legacy_inventory["secrets"]
+            if item["name"] != "loom-postgres-cnpg-credentials"
+        ]
+        inventory_payload = (
+            json.dumps(legacy_inventory, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
     _private_file(
         secrets / "protected-capacity-secret-inventory.json",
-        protected.inventory_payload,
+        inventory_payload,
     )
     for filename, payload in protected.exported_objects.items():
+        if inventory_schema == 1 and filename.endswith("-loom-postgres-cnpg-credentials.json"):
+            continue
         _private_file(secrets / filename, payload)
     authority = DatabaseAuthorityEvidence(
         public_schema_revision="0066",
@@ -287,6 +316,7 @@ def test_secret_artifact_reconstructs_present_optional_inventory_and_strips_live
         "loom-capacity-execution-operator",
         "loom-capacity-executor-gb10",
         "loom-capacity-executor-oldlab",
+        "loom-postgres-cnpg-credentials",
     )
     for document in documents:
         assert document["metadata"] == {
@@ -311,6 +341,54 @@ def test_secret_artifact_reconstructs_present_optional_inventory_and_strips_live
                 for value in decoded.values()
             )
             assert not any("live" in value for value in decoded.values())
+        if document["metadata"]["name"] == "loom-postgres-cnpg-credentials":
+            assert document["type"] == "kubernetes.io/basic-auth"
+            assert decoded == {"username": "loom_rehearsal", "password": "rehearsal-trust-only"}
+
+
+def test_legacy_checkpoint_rehearsal_keeps_cnpg_unobserved(tmp_path: Path) -> None:
+    manifest = _checkpoint(tmp_path, optional_protected_present=True, inventory_schema=1)
+    digest = backup_manifest_sha256(manifest, expected_owner_uid=os.geteuid())
+    inventory_path = manifest.parent / "secrets" / "protected-capacity-secret-inventory.json"
+    source_inventory = inventory_path.read_bytes()
+
+    artifact = build_rehearsal_secret_artifact(
+        manifest,
+        manifest_sha256=digest,
+        namespace="loom-rehearsal-" + "a" * 24,
+        database="loom_rehearsal_" + "a" * 24,
+        plan_digest="b" * 64,
+    )
+
+    documents = list(yaml.safe_load_all(artifact.payload))
+    assert len(documents) == 9  # Three staging Secrets and the original six protected identities.
+    assert "loom-postgres-cnpg-credentials" not in artifact.secret_names
+    assert b"live-cnpg-password" not in artifact.payload
+    assert {item["metadata"]["name"] for item in documents} == set(artifact.secret_names)
+    for document in documents:
+        for key, value in document["data"].items():
+            if key == "database-url" or key.endswith("-db-url") or key.endswith("-db-url-pool"):
+                assert base64.b64decode(value).decode() == (
+                    "postgresql+psycopg://loom_rehearsal@loom-postgres:5432/loom_rehearsal_"
+                    + "a" * 24
+                )
+    assert inventory_path.read_bytes() == source_inventory
+    assert json.loads(source_inventory)["schema_version"] == 1
+    assert b"loom-postgres-cnpg-credentials" not in source_inventory
+    assert backup_manifest_sha256(manifest, expected_owner_uid=os.geteuid()) == digest
+
+
+@pytest.mark.parametrize("contract", ["missing", "extra", "type"])
+def test_rehearsal_refuses_unknown_cnpg_credential_contract(tmp_path: Path, contract: str) -> None:
+    manifest = _checkpoint(tmp_path, optional_protected_present=True, cnpg_contract=contract)
+    with pytest.raises(ValueError, match="CNPG credential contract"):
+        build_rehearsal_secret_artifact(
+            manifest,
+            manifest_sha256=backup_manifest_sha256(manifest, expected_owner_uid=os.geteuid()),
+            namespace="loom-rehearsal-" + "a" * 24,
+            database="loom_rehearsal_" + "a" * 24,
+            plan_digest="b" * 64,
+        )
 
 
 def test_secret_artifact_fails_closed_on_manifest_or_secret_drift(tmp_path: Path) -> None:

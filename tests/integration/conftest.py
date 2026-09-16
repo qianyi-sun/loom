@@ -49,6 +49,7 @@ from loom.db.schema import (
     Token,
     Trial,
 )
+from loom.trial_writer_trigger_authority import trial_writer_trigger_retirement_ddl
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from tests.integration.minio_test_images import MINIO_TEST_IMAGE
@@ -191,6 +192,12 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                 connection.exec_driver_sql(f"GRANT USAGE ON SCHEMA public TO {quoted_owner}")
                 connection.exec_driver_sql(
                     f"GRANT REFERENCES (id) ON TABLE public.trials TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    f"GRANT TRIGGER ON TABLE public.trials TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    trial_writer_trigger_retirement_ddl(guard_owner=owner_role).as_string()
                 )
                 connection.exec_driver_sql(
                     "GRANT SELECT (id, team_id, task_id, config, state, requires_caps, "

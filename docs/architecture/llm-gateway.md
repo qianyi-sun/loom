@@ -57,6 +57,9 @@ provider authorization and routing, the Gateway commits a receipt before each
 direct upstream send. It rechecks the signed attempt deadline after that commit
 and before transport. Audit admission failure returns a secret-free
 `503 / dispatch_audit_unavailable` and sends nothing upstream.
+Admission failure logs contain the opaque request ID and only a fixed error
+category (`timeout`, `database`, or `other`), never driver messages, SQL binds,
+or exception tracebacks. The category diagnoses failure without relaxing admission.
 
 The internal join is `trial_id / step_id / agent_attempt_id / step_jwt_id`.
 The worker supervisor creates a new opaque attempt UUID for each real agent

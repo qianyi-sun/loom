@@ -14,6 +14,7 @@ from sqlalchemy import URL
 
 from loom.dev_instance import DevInstanceIdentity
 from loom.personal_dev_capacity_runtime import (
+    ApplicationOwnerBinding,
     CapacityDatabaseCredentials,
     CapacityDatabaseInstallation,
     PsycopgPersonalDevCapacityDatabase,
@@ -62,6 +63,7 @@ class ProtectedStagingDatabaseFactory(Protocol):
         admin_url: str,
         *,
         transient_role_admin: bool,
+        application_owner_binding: ApplicationOwnerBinding,
     ) -> ProtectedStagingDatabase: ...
 
 
@@ -292,7 +294,9 @@ async def bootstrap_staging_capacity_database(
             "sslrootcert": str(settings.database_ca_path),
         },
     ).render_as_string(hide_password=False)
-    return await database_factory(admin_url, transient_role_admin=True).converge_protected(
+    return await database_factory(admin_url, transient_role_admin=True, application_owner_binding=ApplicationOwnerBinding(
+        database="loom", runtime_role="loom", owner_role="loom_app_staging_owner",
+    )).converge_protected(
         identity=staging_capacity_identity(),
         credentials=seed.credentials,
         configuration=configuration,

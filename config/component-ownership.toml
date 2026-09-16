@@ -88,6 +88,14 @@ pins = [
   { path = "tests/integration/test_capacity_manager_execution_store.py", shard_index = 1 },
   { path = "tests/integration/test_capacity_final_release_witness.py", shard_index = 1 },
   { path = "tests/integration/test_capacity_typed_terminal_sql.py", shard_index = 1 },
+  # PR #1960 run 34925212036: shard 1 progressed to 78% at 90 minutes,
+  # while shard 2 finished in 54 minutes. These five complete PostgreSQL
+  # modules account for approximately 1,545 seconds in the shard-1 log.
+  { path = "tests/integration/test_application_handoff_completion.py", shard_index = 1 },
+  { path = "tests/integration/test_application_completed_authority.py", shard_index = 1 },
+  { path = "tests/integration/test_application_capacity_bootstrap_runtime.py", shard_index = 1 },
+  { path = "tests/integration/test_application_schema_reference.py", shard_index = 1 },
+  { path = "tests/integration/test_application_migrator_provision.py", shard_index = 1 },
 ]
 
 [[execution_policies]]
@@ -955,9 +963,13 @@ exclude_paths = [
   "tests/integration/test_nebius_platform_k3s.py",
   "tests/integration/test_behavior_pipeline_inputs.py",
   "tests/integration/test_cnpg_observer_controller_permissions.py",
+  "tests/integration/test_application_generation_resources_k3s.py",
   "tests/integration/test_capacity_executor_image_runtime.py",
   "tests/integration/test_oldlab_controller_stdin.py",
   "tests/integration/test_task_image_builder_phase2c_flow.py",
+  "tests/integration/test_cnpg_input_fence.py",
+  "tests/integration/test_application_workload_recovery.py",
+  "tests/integration/test_cnpg_manager_retirement.py",
   "tests/integration/test_docker_driver_exec.py",
   "tests/integration/test_docker_driver_exec_streaming.py",
   "tests/integration/test_docker_driver_healthcheck.py",
@@ -1013,9 +1025,13 @@ language = "python"
 lane = "integration-docker"
 include_paths = [
   "tests/integration/test_cnpg_observer_controller_permissions.py",
+  "tests/integration/test_application_generation_resources_k3s.py",
   "tests/integration/test_capacity_executor_image_runtime.py",
   "tests/integration/test_oldlab_controller_stdin.py",
   "tests/integration/test_task_image_builder_phase2c_flow.py",
+  "tests/integration/test_cnpg_input_fence.py",
+  "tests/integration/test_application_workload_recovery.py",
+  "tests/integration/test_cnpg_manager_retirement.py",
   "tests/integration/test_docker_driver_exec.py",
   "tests/integration/test_docker_driver_exec_streaming.py",
   "tests/integration/test_docker_driver_healthcheck.py",

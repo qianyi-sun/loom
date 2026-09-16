@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 
 from fastapi import Request
 from sqlalchemy import insert, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -151,9 +152,18 @@ class DispatchAudit:
                 receipt_id,
             )
             raise
-        except Exception:
-            # Never log the exception: driver messages may contain SQL binds.
-            logger.error("gateway_dispatch_admission_failed request_id=%s", self.state.request_id)
+        except Exception as exc:
+            # Only fixed categories are safe: exception text, driver details,
+            # SQL binds and tracebacks must never enter these logs.
+            category = (
+                "timeout" if isinstance(exc, TimeoutError)
+                else "database" if isinstance(exc, SQLAlchemyError)
+                else "other"
+            )
+            logger.error(
+                "gateway_dispatch_admission_failed request_id=%s error_category=%s",
+                self.state.request_id, category,
+            )
             raise DispatchAuditUnavailableError("gateway dispatch audit unavailable") from None
         self.state.receipt_ids.append(receipt_id)
         return receipt_id

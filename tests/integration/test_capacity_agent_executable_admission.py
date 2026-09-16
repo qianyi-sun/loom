@@ -2457,6 +2457,9 @@ async def test_guard_0020_downgrade_serializes_committing_executable_evidence(
         monkeypatch,
         application_name=application_name,
     )
+    # Keep exercising the older migration's blocking lock order separately
+    # from guard0034's new nonblocking whole-schema retirement boundary.
+    command.downgrade(config, "guard_0030")
 
     executor_engine = create_async_engine(
         make_url(_value(capacity_guard_database, "executor_url")),
@@ -2526,7 +2529,7 @@ async def test_guard_0020_downgrade_serializes_committing_executable_evidence(
             await downgrade_task
         await executor_engine.dispose()
 
-    assert version == "guard_0034"
+    assert version == "guard_0030"
     assert evidence == 1
 
 
@@ -2556,6 +2559,7 @@ async def test_guard_0020_downgrade_gates_new_executor_calls_before_evidence(
         monkeypatch,
         application_name=application_name,
     )
+    command.downgrade(config, "guard_0030")
     executor_engine = create_async_engine(
         make_url(_value(capacity_guard_database, "executor_url")),
         isolation_level="SERIALIZABLE",
@@ -2637,9 +2641,11 @@ async def test_guard_0020_downgrade_gates_new_executor_calls_before_evidence(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("starting_revision", ["guard_0030", "guard_0035"])
 async def test_guard_0020_downgrade_does_not_deadlock_terminal_projection(
     capacity_guard_database: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
+    starting_revision: str,
 ) -> None:
     """Catch downgrade holding claim state while waiting behind a terminal lease read."""
 
@@ -2659,6 +2665,8 @@ async def test_guard_0020_downgrade_does_not_deadlock_terminal_projection(
         monkeypatch,
         application_name=application_name,
     )
+    if starting_revision == "guard_0030":
+        command.downgrade(config, starting_revision)
     downgrade_task: asyncio.Task[None] | None = None
     terminal_task: asyncio.Task[InertAttemptTransitionV1] | None = None
     terminal_pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
@@ -2695,11 +2703,17 @@ async def test_guard_0020_downgrade_does_not_deadlock_terminal_projection(
             downgrade_task = asyncio.create_task(
                 asyncio.to_thread(command.downgrade, config, "guard_0019")
             )
-            assert await _application_waited_for_lock(
-                capacity_guard_database,
-                application_name=application_name,
-                task=downgrade_task,
-            )
+            if starting_revision == "guard_0030":
+                assert await _application_waited_for_lock(
+                    capacity_guard_database,
+                    application_name=application_name,
+                    task=downgrade_task,
+                )
+            else:
+                async with asyncio.timeout(10):
+                    with pytest.raises(DBAPIError, match="could not obtain lock") as busy:
+                        await downgrade_task
+                assert busy.value.orig.sqlstate == "55P03"
 
         downgrade_result, terminal_result = await asyncio.gather(
             downgrade_task,
@@ -2712,8 +2726,16 @@ async def test_guard_0020_downgrade_does_not_deadlock_terminal_projection(
         if terminal_task is not None and not terminal_task.done():
             await terminal_task
 
-    assert isinstance(downgrade_result, RuntimeError)
-    assert "cannot downgrade guard_0020" in str(downgrade_result)
+    if starting_revision == "guard_0030":
+        assert isinstance(downgrade_result, RuntimeError)
+        assert "cannot downgrade guard_0020" in str(downgrade_result)
+    else:
+        assert isinstance(downgrade_result, DBAPIError)
+        assert downgrade_result.orig.sqlstate == "55P03"
+        # The complete failed migration transaction has released every partial
+        # lock. Terminal work succeeds, and a fresh retry sees retained evidence.
+        with pytest.raises(RuntimeError, match="cannot downgrade guard_0020"):
+            await asyncio.to_thread(command.downgrade, config, "guard_0019")
     assert terminal_result == terminal
     assert await _claim_terminal_counts(capacity_guard_database) == (1, 1, 0)
 

@@ -530,7 +530,7 @@ def _mutation_guard_manager(
 ):
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir(mode=0o700)
-    config = replace(make_config(), runtime_root=runtime_root)
+    config = replace(make_config(), runtime_root=runtime_root, state_root=tmp_path / "state")
     runner = MutationGuardRunner(config, service_uid=os.getuid())
     generation_values = iter(generations or [GENERATION_ONE, GENERATION_TWO])
     manager = SystemdUserManager(
@@ -576,7 +576,7 @@ def test_mutation_guard_start_is_exact_sanitized_and_readiness_bound(tmp_path: P
     assert shlex.split(stop_post[0].removeprefix("ExecStopPost=")) == [
         "/usr/bin/env",
         "-i",
-        "HOME=/var/lib/loom-staging-rollout",
+        f"HOME={manager.config.state_root}",
         "USER=loom-rollout",
         "LOGNAME=loom-rollout",
         f"PATH={CANDIDATE_VENV}/bin:/usr/local/bin:/usr/bin:/bin",

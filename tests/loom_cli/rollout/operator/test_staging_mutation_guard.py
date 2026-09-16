@@ -56,7 +56,7 @@ _TREE_ANNOTATION = "loom.carin.dev/staging-mutation-guard-candidate-tree"
 def _config(tmp_path: Path):
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir(mode=0o700, exist_ok=True)
-    return replace(make_config(), runtime_root=runtime_root)
+    return replace(make_config(), runtime_root=runtime_root, state_root=tmp_path / "state")
 
 
 def test_candidate_resolution_accepts_root_owned_installer_repo(
@@ -1023,8 +1023,9 @@ def test_mutation_guard_manager_binds_live_unit_pid_candidate_and_request(tmp_pa
     assert manager.release(_REQUEST_ID).state == "released"
 
 
+@pytest.mark.parametrize("operation", ["acquire", "assert-ready"])
 def test_mutation_guard_manager_acquires_verified_historical_candidate_config(
-    tmp_path: Path,
+    tmp_path: Path, operation: str,
 ) -> None:
     config = _config(tmp_path)
     historical_sha = "c" * 40
@@ -1049,6 +1050,7 @@ def test_mutation_guard_manager_acquires_verified_historical_candidate_config(
         suspended_resource_version="11",
         state="ready",
     )
+    staging_mutation_guard._publish_evidence(config, ready, service_uid=os.getuid())
     starts: list[dict[str, object]] = []
 
     class Systemd:
@@ -1057,7 +1059,8 @@ def test_mutation_guard_manager_acquires_verified_historical_candidate_config(
             return ready
 
         def show_mutation_guard(self, request_id: str):  # type: ignore[no-untyped-def]
-            raise AssertionError(request_id)
+            assert request_id == _REQUEST_ID
+            return SimpleNamespace(is_running=True, main_pid=ready.guard_pid)
 
         def stop_mutation_guard(self, request_id: str, **bindings: object):  # type: ignore[no-untyped-def]
             raise AssertionError((request_id, bindings))
@@ -1073,6 +1076,12 @@ def test_mutation_guard_manager_acquires_verified_historical_candidate_config(
         ),
     )
 
+    if operation == "assert-ready":
+        with pytest.raises(MutationGuardError, match="binding drifted"):
+            manager.assert_ready(_REQUEST_ID)
+        assert manager.assert_ready(_REQUEST_ID, candidate_config=historical_config) == ready
+        assert starts == []
+        return
     assert manager.acquire(_REQUEST_ID, candidate_config=historical_config) == ready
     assert starts == [
         {
