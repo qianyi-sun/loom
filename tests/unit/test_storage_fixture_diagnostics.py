@@ -148,7 +148,12 @@ async def test_fixture_retries_connection_refusal_only_for_reads(monkeypatch, ve
         assert len(calls) == 1
 
 
-@pytest.mark.parametrize("stderr", ["forbidden", "x509: unknown authority", "unclassified-private"])
+@pytest.mark.parametrize("stderr", [
+    "forbidden", "x509: unknown authority", "unclassified-private",
+    "x509: certificate error; connection refused",
+    "forbidden: connection refused",
+    "warning: private\n" + _CONNECTION_REFUSED,
+])
 async def test_fixture_does_not_retry_other_read_failures(monkeypatch, stderr):
     calls, failures, _ = _refusing_fixture_runner(monkeypatch, stderr=stderr)
     with pytest.raises(DevInstanceRuntimeError) as raised:
