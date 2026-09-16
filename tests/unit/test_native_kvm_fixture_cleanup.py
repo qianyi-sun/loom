@@ -1,7 +1,8 @@
-"""The disposable primitive fixture joins its attached root before child deletion."""
+"""Disposable KVM fixtures retain reliable cleanup and liveness evidence."""
 
 import subprocess
 from importlib import import_module
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -43,3 +44,28 @@ def test_fixture_cleanup_joins_root_before_deleting_child_state(monkeypatch, bou
     else:
         module.cleanup_fixture_runtime(["runsc"], ["root", "child"], Root())
         assert events == ["wait", "child", "root", "list"]
+
+
+def test_killed_pulse_writer_preserves_last_complete_liveness_evidence(tmp_path, monkeypatch):
+    module = import_module("tests.support.native_kvm.lifecycle_probe")
+    pulse = tmp_path / "lifecycle-pulse"
+    module.publish_pulse(pulse, 1)
+
+    def interrupted_write(path, text, **kwargs):
+        # SIGKILL can land after open(O_TRUNC), before the first write.
+        with path.open("w"):
+            pass
+        raise InterruptedError("fixture writer killed after truncation")
+
+    monkeypatch.setattr(Path, "write_text", interrupted_write)
+    with pytest.raises(InterruptedError):
+        module.publish_pulse(pulse, 2)
+    assert pulse.read_bytes() == b"1"
+
+
+def test_fixture_pulse_advances_only_with_complete_positive_sequence(tmp_path):
+    module = import_module("tests.support.native_kvm.lifecycle_probe")
+    pulse = tmp_path / "lifecycle-pulse"
+    for sequence in (1, 9, 10):
+        module.publish_pulse(pulse, sequence)
+        assert int(pulse.read_bytes()) == sequence
