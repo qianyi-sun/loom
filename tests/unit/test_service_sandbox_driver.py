@@ -33,7 +33,8 @@ def driver_for(path: Path, *, limit: int = 1024) -> ServiceSandboxDriver:
 
 
 @pytest.mark.asyncio
-async def test_socket_rpc_exec_files_and_lifecycle(tmp_path: Path) -> None:
+@pytest.mark.parametrize("health", [{"ready": True}, {"ready": True, "instance_id": "a" * 32}])
+async def test_socket_rpc_exec_files_and_lifecycle(tmp_path: Path, health: dict) -> None:
     requests: list[tuple[str, str, bytes]] = []
     data = b""
 
@@ -47,7 +48,7 @@ async def test_socket_rpc_exec_files_and_lifecycle(tmp_path: Path) -> None:
         body = await reader.readexactly(length)
         requests.append((method, target, body))
         if target == "/health":
-            output = b'{"ready":true}'
+            output = json.dumps(health).encode()
         elif target == "/exec":
             output = json.dumps(
                 {

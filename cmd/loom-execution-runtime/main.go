@@ -61,21 +61,24 @@ func main() {
 			os.Exit(2)
 		}
 	}
+	executionContext, stopMonitor := monitorPrivateSandboxes(ctx, p)
+	defer stopMonitor()
 	broker.setPhaseDeadline(time.Time{})
-	proxyURL, stopProxy, err := broker.startProxy(ctx)
+	proxyURL, stopProxy, err := broker.startProxy(ctx, executionContext)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "start workload proxy:", err)
 		os.Exit(2)
 	}
 	defer func() { _ = stopProxy() }()
 	result, runErr := runPlan(
-		ctx,
+		executionContext,
 		p,
 		filepath.Clean(*workspace),
 		cleanOutput,
 		trustedGatewayEnvironment(proxyURL),
 		broker.setPhaseDeadline,
 	)
+	stopMonitor()
 	captureErr := captureDeclaredOutputs(p, filepath.Clean(*workspace), cleanOutput, &result)
 	if captureErr != nil {
 		result.FinishedAt = time.Now().UTC()

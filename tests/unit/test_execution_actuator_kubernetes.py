@@ -172,6 +172,133 @@ def test_kubernetes_status_normalization_is_exhaustive(
     assert observation.resource_version == "42"
 
 
+@pytest.mark.parametrize(
+    "reason,expected",
+    [("OOMKilled", NormalizedJobState.OOM_KILLED), ("Error", NormalizedJobState.FAILED)],
+)
+def test_restarted_native_sandbox_is_terminal_even_when_pod_is_running(reason, expected) -> None:
+    pod = _pod(phase="Running")
+    finished = datetime.now(UTC)
+    pod.metadata.resource_version = "44"
+    pod.status.init_container_statuses = [
+        _ns(
+            name="task-sandbox",
+            restart_count=1,
+            state=_ns(running=_ns(started_at=finished), terminated=None),
+            last_state=_ns(
+                terminated=_ns(
+                    reason=reason,
+                    exit_code=137,
+                    signal=9,
+                    started_at=finished - timedelta(seconds=20),
+                    finished_at=finished,
+                    message="secret=must-not-be-persisted",
+                )
+            ),
+        )
+    ]
+    observed = _normalize(_job(), [pod])
+    assert observed.normalized_state == expected
+    assert observed.reason == "SandboxRestarted"
+    assert observed.pod_resource_version == "44"
+    payload = observed.event_payload()
+    diagnostic = payload["container_diagnostics"][0]
+    assert diagnostic["name"] == "task-sandbox"
+    assert diagnostic["restart_count"] == 1
+    assert diagnostic["previous_termination"]["reason"] == reason
+    assert diagnostic["previous_termination"]["exit_code"] == 137
+    assert diagnostic["previous_termination"]["finished_at"] is not None
+    assert "must-not-be-persisted" not in json.dumps(payload)
+
+
+def test_normal_sidecar_shutdown_after_execution_is_not_sandbox_failure() -> None:
+    pod = _pod(phase="Succeeded")
+    pod.status.init_container_statuses = [
+        _ns(
+            name="task-sandbox",
+            restart_count=0,
+            state=_ns(terminated=_ns(reason="Error", exit_code=137, signal=9)),
+            last_state=_ns(terminated=None),
+        )
+    ]
+    assert _normalize(_job(), [pod]).normalized_state == NormalizedJobState.SUCCEEDED
+
+
+def test_sandbox_exit_before_execution_ended_retains_failure_cause() -> None:
+    pod = _pod(phase="Succeeded")
+    finished = datetime.now(UTC)
+    pod.status.container_statuses[0].state.terminated.finished_at = finished
+    pod.status.init_container_statuses = [
+        _ns(
+            name="task-sandbox",
+            restart_count=0,
+            state=_ns(
+                terminated=_ns(
+                    reason="OOMKilled", exit_code=137, finished_at=finished - timedelta(seconds=1)
+                )
+            ),
+            last_state=_ns(terminated=None),
+        )
+    ]
+    assert _normalize(_job(), [pod]).normalized_state == NormalizedJobState.OOM_KILLED
+    pod.status.init_container_statuses[0].state.terminated.finished_at = finished + timedelta(
+        seconds=1
+    )
+    assert _normalize(_job(), [pod]).normalized_state == NormalizedJobState.SUCCEEDED
+
+
+@pytest.mark.parametrize(
+    "restarts,known_after,expected",
+    [
+        (1, True, NormalizedJobState.SUCCEEDED),
+        (1, False, NormalizedJobState.FAILED),
+        (2, True, NormalizedJobState.FAILED),
+    ],
+)
+def test_only_proven_single_restart_after_execution_is_normal_teardown(
+    restarts, known_after, expected
+) -> None:
+    pod = _pod(phase="Succeeded")
+    finished = datetime.now(UTC)
+    pod.status.container_statuses[0].state.terminated.finished_at = finished
+    pod.status.init_container_statuses = [
+        _ns(
+            name="task-sandbox",
+            restart_count=restarts,
+            state=_ns(running=_ns(started_at=finished + timedelta(seconds=2))),
+            last_state=_ns(
+                terminated=_ns(
+                    reason="Error",
+                    exit_code=137,
+                    finished_at=finished + timedelta(seconds=1) if known_after else None,
+                )
+            ),
+        )
+    ]
+    observed = _normalize(_job(), [pod])
+    assert observed.normalized_state == expected
+    assert observed.container_diagnostics[1].restart_count == restarts
+
+
+def test_sandbox_death_before_execution_and_init_image_pull_are_observed() -> None:
+    pod = _pod()
+    pod.status.init_container_statuses = [
+        _ns(
+            name="task-sandbox",
+            restart_count=0,
+            state=_ns(terminated=_ns(reason="Error", exit_code=1)),
+            last_state=_ns(terminated=None),
+        )
+    ]
+    observed = _normalize(_job(), [pod])
+    assert observed.normalized_state == NormalizedJobState.FAILED
+    assert observed.reason == "SandboxTerminated"
+    pod.status.init_container_statuses[0].state = _ns(
+        waiting=_ns(reason="ErrImagePull", message="pull failed")
+    )
+    assert _normalize(_job(), [pod]).normalized_state == NormalizedJobState.IMAGE_PULL_BACKOFF
+
+
 def test_unschedulable_job_start_is_not_reported_as_pod_scheduled_or_started() -> None:
     job_started = datetime(2026, 9, 3, 5, 16, tzinfo=UTC)
     job = _job()
@@ -357,7 +484,9 @@ def test_actuator_manifest_is_namespace_scoped_and_active_for_development() -> N
     kinds = [document["kind"] for document in documents]
     assert "ClusterRoleBinding" in kinds
     usage_role = next(d for d in documents if d["kind"] == "ClusterRole")
-    assert usage_role["rules"] == [{"apiGroups": [""], "resources": ["nodes/proxy"], "verbs": ["get"]}]
+    assert usage_role["rules"] == [
+        {"apiGroups": [""], "resources": ["nodes/proxy"], "verbs": ["get"]}
+    ]
     quota = next(document for document in documents if document["kind"] == "ResourceQuota")
     assert quota["metadata"]["namespace"] == "loom-nebius-development"
     assert quota["spec"]["hard"] == {

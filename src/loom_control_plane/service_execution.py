@@ -1514,7 +1514,41 @@ async def record_execution_event(
         ):
             lease.pod_terminated_at = lease.pod_started_at
         lease.last_reconciled_at = observed_at
+        # Native sidecars may restart repeatedly before the Pod is removed.
+        # Keep the first observed loss for this exact Pod as the attempt cause;
+        # later status events still retain their own complete diagnostics.
+        first_sandbox_loss = None
+        if (
+            lease.finalized_at is None
+            and lease.desired_state != "retry"
+            and lease.error_code in _NATIVE_TERMINAL_FAILURES
+            and lease.pod_uid is not None
+            and lease.job_uid is not None
+            and payload.get("job_uid") == lease.job_uid
+            and payload.get("pod_uid") in {None, lease.pod_uid}
+        ):
+            first_sandbox_loss = await session.scalar(
+                select(ServiceExecutionEvent)
+                .where(
+                    ServiceExecutionEvent.lease_id == lease.id,
+                    ServiceExecutionEvent.generation == generation,
+                    ServiceExecutionEvent.ordinal < ordinal,
+                    ServiceExecutionEvent.event_kind == "kubernetes_observed",
+                    ServiceExecutionEvent.payload_json["job_uid"].astext == lease.job_uid,
+                    ServiceExecutionEvent.payload_json["pod_uid"].astext == lease.pod_uid,
+                    ServiceExecutionEvent.payload_json["reason"].astext.in_(
+                        {"SandboxRestarted", "SandboxTerminated"}
+                    ),
+                    ServiceExecutionEvent.payload_json["normalized_state"].astext.in_(
+                        _NATIVE_TERMINAL_FAILURES
+                    ),
+                )
+                .order_by(ServiceExecutionEvent.ordinal)
+                .limit(1)
+            )
         projected_state = observed_states[normalized_state]
+        if first_sandbox_loss is not None and normalized_state not in {"terminating", "deleted"}:
+            projected_state = "failed"
         if lease.finalized_at is not None:
             if lease.observed_state == "deleted" or normalized_state == "deleted":
                 projected_state = "deleted"
@@ -1523,7 +1557,13 @@ async def record_execution_event(
             else:
                 projected_state = "finalized"
         lease.observed_state = projected_state
-        if (
+        if first_sandbox_loss is not None:
+            lease.error_class = "permanent"
+            lease.error_code = first_sandbox_loss.payload_json["normalized_state"]
+            lease.error_message = _bounded_optional_text(
+                first_sandbox_loss.payload_json.get("message"), 2000, "message"
+            )
+        elif (
             lease.finalized_at is None
             and lease.desired_state != "retry"
             and normalized_state
@@ -1654,6 +1694,7 @@ async def record_kubernetes_observation(
             "job_uid": payload.get("job_uid"),
             "pod_uid": payload.get("pod_uid"),
             "resource_version": payload.get("resource_version"),
+            "pod_resource_version": payload.get("pod_resource_version"),
             "normalized_state": payload.get("normalized_state"),
         },
         persisted=False,

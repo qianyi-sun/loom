@@ -71,6 +71,25 @@ class NormalizedJobState(StrEnum):
     DELETED = "deleted"
 
 
+class ContainerTerminationDiagnostic(BaseModel):
+    """Native status facts only; never retain arbitrary container messages."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    reason: str | None = Field(default=None, max_length=64)
+    exit_code: int | None = None
+    signal: int | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class ContainerDiagnostic(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    name: str = Field(pattern=r"^(execution|task-sandbox|verifier-sandbox)$")
+    restart_count: int = Field(ge=0)
+    current_termination: ContainerTerminationDiagnostic | None = None
+    previous_termination: ContainerTerminationDiagnostic | None = None
+
+
 class KubernetesJobObservation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -86,6 +105,8 @@ class KubernetesJobObservation(BaseModel):
     pod_uid: str | None = Field(default=None, min_length=1, max_length=128)
     pod_ip: str | None = Field(default=None, min_length=3, max_length=45)
     resource_version: str | None = Field(default=None, min_length=1, max_length=128)
+    pod_resource_version: str | None = Field(default=None, min_length=1, max_length=128)
+    container_diagnostics: tuple[ContainerDiagnostic, ...] = Field(default=(), max_length=3)
     node_name: str | None = Field(default=None, min_length=1, max_length=253)
     scheduled_at: datetime | None = None
     started_at: datetime | None = None
