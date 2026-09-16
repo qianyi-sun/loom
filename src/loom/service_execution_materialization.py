@@ -667,6 +667,8 @@ def _compile_terminus_plan(
     for source, target, kind, required in (
         ("agent/trajectory.jsonl", "trajectory/events.jsonl", "trajectory", True),
         ("agent/usage.json", "accounting/usage.json", "usage", True),
+        ("agent/exception.json", "diagnostics/agent-exception.json", "agent_native", False),
+        ("verifier/exception.json", "diagnostics/verifier-exception.json", "verifier", False),
         ("agent/harbor/trajectory.json", "artifacts/harbor/trajectory.json", "agent_native", True),
         ("agent/harbor/recording.cast", "artifacts/harbor/recording.cast", "agent_native", False),
         ("workspace.tar", "artifacts/workspace.tar", "task_artifact", True),

@@ -171,6 +171,9 @@ async def test_phase_handoff_keeps_tests_private_and_quiesces_before_snapshot(
             await run_agent(tmp_path, task, trial)
         assert agent.quiesced and agent.state == "stopped"
         assert (tmp_path / ".loom/workspace.tar").exists()
+        info = json.loads((tmp_path / ".loom/agent/exception.json").read_text())
+        assert info["exception_type"] == "RuntimeError"
+        assert info["exception_message"] == "agent stopped"
         return
     await run_agent(tmp_path, task, trial)
     assert (tmp_path / ".loom/collected/answer.txt").read_bytes() == b"42"
@@ -189,6 +192,36 @@ async def test_phase_handoff_keeps_tests_private_and_quiesces_before_snapshot(
     await run_verifier(tmp_path, task, trial)
     assert verifier.quiesced and verifier.state == "stopped"
     assert json.loads((tmp_path / ".loom/verifier/output.json").read_bytes())["rewards"] == {"passed": 0}
+
+
+@pytest.mark.parametrize("phase", ["terminus-2", "verify-sandbox"])
+def test_phase_entrypoint_retains_sanitized_typed_failure(tmp_path, monkeypatch, phase):
+    import tomli_w
+
+    from loom import service_execution_sandbox_task as module
+    from loom.errors import AgentError
+
+    class ContextLengthExceededError(Exception):
+        pass
+
+    task, trial, _ = _inputs()
+    (tmp_path / "task.toml").write_text(tomli_w.dumps(task.model_dump(mode="json", exclude_none=True)))
+    monkeypatch.setenv("LOOM_TASK_TRIAL_JSON", trial.model_dump_json())
+    monkeypatch.setattr("sys.argv", ["sandbox-task", phase, "--workspace", str(tmp_path)])
+
+    async def fail(*args):
+        try:
+            raise ContextLengthExceededError("Bearer private-step-token")
+        except ContextLengthExceededError as exc:
+            raise AgentError("") from exc
+
+    monkeypatch.setattr(module, "run_agent" if phase == "terminus-2" else "run_verifier", fail)
+    with pytest.raises(AgentError):
+        module.main()
+    directory = "agent" if phase == "terminus-2" else "verifier"
+    body = (tmp_path / ".loom" / directory / "exception.json").read_text()
+    assert "private-step-token" not in body
+    assert json.loads(body)["exception_type"] == "ContextLengthExceededError"
 
 
 @pytest.mark.asyncio
