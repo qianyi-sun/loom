@@ -189,6 +189,174 @@ async def test_ordinary_submission_freezes_deployment_requests_through_pod_rende
             assert row.config == _automatic_service_execution_task_config(task_id)
 
 
+_NEBIUS_DEFAULT_REQUESTS = {
+    "controller": {"cpu_millis": 200, "memory_mib": 512, "ephemeral_storage_mib": 512},
+    "task_sandbox": {"cpu_millis": 600, "memory_mib": 1024, "ephemeral_storage_mib": 1024},
+    "verifier_sandbox": {"cpu_millis": 200, "memory_mib": 512, "ephemeral_storage_mib": 512},
+}
+
+
+def _set_default_requests(f, *, requests=None, task_requests=None):
+    profile = ServiceExecutionRuntimeProfileV1.model_validate({
+        **f["profile"].model_dump(mode="json"),
+        "default_task_resource_requests": requests or deepcopy(_NEBIUS_DEFAULT_REQUESTS),
+        "task_resource_requests": task_requests or {},
+    })
+    f["app"].state.settings = f["app"].state.settings.model_copy(update={
+        "service_execution_runtime_profile_json": profile.model_dump_json(),
+    })
+
+
+@pytest.mark.parametrize("with_combinations", [False, True])
+async def test_new_catalog_tasks_and_revisions_receive_default_requests_through_render(
+    native_resource_batch, with_combinations: bool,
+):
+    f = native_resource_batch
+    _set_default_requests(f)
+    payload = deepcopy(f["payload"])
+    payload.pop("task_resource_requests")
+    trial_config = deepcopy(payload["trial_config"])
+    if with_combinations:
+        payload["combinations"] = [{"agent_name": "terminus-2",
+            "agent_model": trial_config["agent_model"], "n_per_task": 1, "label": "default"}]
+        payload["trial_config"].pop("agent_name")
+        payload["trial_config"].pop("agent_model")
+    # Both task IDs are newly generated, with no task-map entry. A newly
+    # published revision must inherit the baseline without policy reapproval.
+    with f["sessions"]() as session:
+        session.get(Task, f["task_ids"][1]).checksum = "e" * 64
+        session.commit()
+        before = {row.id: (row.checksum, deepcopy(row.config)) for row in session.scalars(
+            select(Task).where(Task.id.in_(f["task_ids"])),
+        )}
+    expected = {task_id: {"task_revision_sha256": "sha256:" + revision,
+                         "requests": _NEBIUS_DEFAULT_REQUESTS}
+                for task_id, (revision, _) in before.items()}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=f["app"]), base_url="http://svc") as c:
+        headers = {"Authorization": "Bearer " + f["raw"]}
+        response = await c.post("/api/v1/batches", headers=headers, json=payload)
+        assert response.status_code == 201, response.text
+        batch_id = response.json()["batch_id"]
+        detail = await c.get("/api/v1/batches/" + batch_id, headers=headers)
+        assert detail.json()["task_resource_requests"] == expected
+    with f["sessions"]() as session:
+        batch = session.get(Batch, UUID(batch_id))
+        frozen = ServiceExecutionRuntimeProfileV1.model_validate(batch.service_execution_runtime_profile)
+        for task_id, (revision, raw_config) in before.items():
+            row = session.get(Task, task_id)
+            assert (row.checksum, row.config) == (revision, raw_config)
+            task = TaskConfig.model_validate(row.config)
+            plan = compile_service_execution_plan(
+                task=task, trial=TrialConfig.model_validate(trial_config), profile=frozen,
+                task_id=task_id, task_revision_sha256="sha256:" + row.checksum,
+                source_provenance=row.source_provenance,
+            )
+            assert runtime_pod_resources(plan).model_dump() == {
+                "cpu_millis": 1000, "memory_mib": 2048, "ephemeral_storage_mib": 2048,
+            }
+            pod = _render(plan, task)
+            containers = {row["name"]: row for row in
+                          [*pod["containers"], *pod["initContainers"][1:]]}
+            for name, role in (("execution", "controller"), ("task-sandbox", "task_sandbox"),
+                               ("verifier-sandbox", "verifier_sandbox")):
+                requested = _NEBIUS_DEFAULT_REQUESTS[role]
+                assert containers[name]["resources"]["requests"] == {
+                    "cpu": f"{requested['cpu_millis']}m",
+                    "memory": f"{requested['memory_mib']}Mi",
+                    "ephemeral-storage": f"{requested['ephemeral_storage_mib']}Mi",
+                }
+                assert containers[name]["resources"]["limits"]["ephemeral-storage"] == "2048Mi"
+
+
+@pytest.mark.parametrize("explicit_override", [False, True])
+async def test_task_policy_and_explicit_override_take_precedence_over_default(
+    native_resource_batch, explicit_override: bool,
+):
+    f = native_resource_batch
+    task_id = f["task_ids"][0]
+    configured = {"task_revision_sha256": "sha256:" + "c" * 64,
+                  "requests": deepcopy(_NEBIUS_DEFAULT_REQUESTS)}
+    configured["requests"]["controller"]["cpu_millis"] = 250
+    _set_default_requests(f, task_requests={task_id: configured})
+    payload = deepcopy(f["payload"])
+    payload.pop("task_resource_requests")
+    expected = deepcopy(configured)
+    if explicit_override:
+        expected["requests"]["controller"]["cpu_millis"] = 350
+        payload["task_resource_requests"] = {task_id: expected}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=f["app"]), base_url="http://svc") as c:
+        headers = {"Authorization": "Bearer " + f["raw"]}
+        response = await c.post("/api/v1/batches", headers=headers, json=payload)
+        assert response.status_code == 201, response.text
+        detail = await c.get("/api/v1/batches/" + response.json()["batch_id"], headers=headers)
+    assert detail.json()["task_resource_requests"] == {
+        task_id: expected, f["task_ids"][1]: {
+            "task_revision_sha256": "sha256:" + "c" * 64, "requests": _NEBIUS_DEFAULT_REQUESTS,
+        },
+    }
+
+
+@pytest.mark.parametrize("current_runtime", [False, True])
+async def test_default_policy_changes_do_not_rewrite_frozen_batch_or_rerun_requests(
+    native_resource_batch, current_runtime: bool,
+):
+    f = native_resource_batch
+    _set_default_requests(f)
+    payload = deepcopy(f["payload"])
+    payload.pop("task_resource_requests")
+    payload["task_filter"]["task_ids"] = [f["task_ids"][0]]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=f["app"]), base_url="http://svc") as c:
+        headers = {"Authorization": "Bearer " + f["raw"]}
+        response = await c.post("/api/v1/batches", headers=headers, json=payload)
+        assert response.status_code == 201, response.text
+        parent_id = response.json()["batch_id"]
+        with f["sessions"]() as session:
+            frozen_before = deepcopy(session.get(Batch, UUID(parent_id)).service_execution_runtime_profile)
+            session.add(Trial(id=uuid4(), task_id=f["task_ids"][0], team_id=f["team_id"],
+                batch_id=UUID(parent_id), state="failed", failure_reason="gateway_error",
+                config=payload["trial_config"], requires_caps={}, sample_idx=0, combination_idx=0,
+                submitted_at=datetime.now(UTC), finished_at=datetime.now(UTC)))
+            session.commit()
+        changed = deepcopy(_NEBIUS_DEFAULT_REQUESTS)
+        changed["controller"]["cpu_millis"] = 400
+        _set_default_requests(f, requests=changed)
+        rerun = await c.post("/api/v1/batches/" + parent_id + "/rerun-failed", headers=headers,
+                             json={"use_current_runtime": current_runtime})
+        assert rerun.status_code == 201, rerun.text
+        detail = await c.get("/api/v1/batches/" + rerun.json()["batch_id"], headers=headers)
+        assert detail.json()["task_resource_requests"] == frozen_before["task_resource_requests"]
+        fresh = await c.post("/api/v1/batches", headers=headers, json=payload)
+        assert fresh.status_code == 201, fresh.text
+        detail = await c.get("/api/v1/batches/" + fresh.json()["batch_id"], headers=headers)
+        assert detail.json()["task_resource_requests"][f["task_ids"][0]]["requests"] == changed
+    with f["sessions"]() as session:
+        assert session.get(Batch, UUID(parent_id)).service_execution_runtime_profile == frozen_before
+
+
+async def test_default_requests_reject_task_with_lower_limits_before_creating_batch(native_resource_batch):
+    f = native_resource_batch
+    _set_default_requests(f)
+    with f["sessions"]() as session:
+        task = session.get(Task, f["task_ids"][0])
+        config = deepcopy(task.config)
+        config["environment"]["storage_mb"] = 512
+        task.config = config
+        session.commit()
+        before = (session.scalar(select(func.count()).select_from(Batch)),
+                  session.scalar(select(func.count()).select_from(Trial)))
+    payload = deepcopy(f["payload"])
+    payload.pop("task_resource_requests")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=f["app"]), base_url="http://svc") as c:
+        response = await c.post("/api/v1/batches", headers={"Authorization": "Bearer " + f["raw"]},
+                                json=payload)
+    assert response.status_code == 400, response.text
+    assert "hard limits" in response.text
+    with f["sessions"]() as session:
+        assert (session.scalar(select(func.count()).select_from(Batch)),
+                session.scalar(select(func.count()).select_from(Trial))) == before
+        assert session.get(Task, f["task_ids"][0]).config == config
+
+
 @pytest.mark.parametrize("invalid", ["stale_revision", "exceeds_limit"])
 async def test_deployment_requests_cannot_apply_to_changed_task_limits_or_revision(
     native_resource_batch, invalid: str,

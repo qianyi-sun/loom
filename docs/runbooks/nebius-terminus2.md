@@ -55,54 +55,85 @@ supports Terminus-2. In **Task Sets → Submit Task Set**, select `manifest.yaml
 and `bundle.tar.gz`; the archive already includes its verifier, so leave the
 separate verifier and transform fields empty. Select `terminus-2` + `glm-5.2` when submitting a Trial;
 model/provider configuration and credentials stay in the Gateway. Catalog/model
-availability must be verified on the target environment. The task configuration
-starts with 2 vCPU, 4 GiB memory and 8 GiB storage for the task container. The
-verifier requests the same task resources. Newly published Nebius profiles set
-`controller_resources: {"cpu_millis": 1000, "memory_mib": 2048}` for the trusted
-Harbor controller, independently of the task's compute. This example therefore
-requests 5 vCPU and 10 GiB across the complete Pod. Controller storage remains
-task-derived (8 GiB here), as do the task/verifier allocations, workspace and
-output bounds. The Pod requests 24 GiB of temporary storage. The workspace,
-runtime and output emptyDir limits bound usage within that Pod budget; admission
-and cost reservation use the same request as native scheduling and observation,
-without adding those limits again. Existing reservations and historical cost
-records are not rewritten. The current
-16-vCPU/64-GiB node template can fit this Trial. CPU/RAM savings alone do not
-establish better packing when storage is the limiting resource. This is an
-initial allocation, not a promise for all 90 tasks; placement accounts for all
-containers and live regional quota. Agent and verifier each retain the original
-900-second timeout.
+availability must be verified on the target environment. The example source task
+keeps its 2-vCPU/4-GiB/8-GiB task and verifier hard limits and original phase
+timeouts. Published Nebius profiles keep separate controller limits through
+`controller_resources` (CPU and memory; storage remains task-derived). These are
+execution limits, not the ordinary scheduling reservation described below.
+Workspace, runtime and output emptyDir bounds remain unchanged. Existing frozen
+Batches, reservations and historical cost records are not rewritten.
 
-The deployment runtime profile's optional `controller_resources` contains only
-CPU and memory. Automatic native Terminus plans freeze it with task-derived
-storage. An absent setting preserves legacy task-sized controller behavior;
-existing frozen plans retain their original allocation and remain readable.
-Direct-completion plans do not use this setting. Explicit published harness
-versions retain their selected controller image. The runtime image supplies the
-Go plan reader; the selected Harbor image receives unchanged task/trial inputs
-and phase arguments, not the execution plan or deployment profile.
-The Python compiler, actuator,
-capacity admission and Go execution runtime must be deployed together before
-publishing plans with the new field. The 1-vCPU/2-GiB controller baseline retains
-the allocation exercised by the ordinary-task acceptance; it is not derived
-from a low point-in-time usage sample. Further reductions require evidence from
-startup, Harbor processing, workspace handoff and output publication, including
-memory peaks and CPU throttling. By default, resource requests and limits use the
-configured values. The scoped override below changes only scheduling requests.
+The runtime image supplies the Go plan reader; the selected Harbor image receives
+task/trial inputs and phase arguments. Explicit harness versions retain their
+selected controller image. Deploy matching Python services, actuator and Go
+runtime before submitting plans with resource requests. Generic profiles without
+a request template and existing frozen plans retain their previous behavior.
 
-## Compare measured scheduling requests
+## Persistent Nebius scheduling baseline
 
-After collecting a representative baseline, a native Terminus Batch can opt into
-per-task requests without editing task inputs, rebuilding task images or lowering
-hard limits. This supports a bounded same-cohort comparison; it does not establish
-a fleet-wide calibrated default. Keep task/model parameters, limits and retries
-fixed, compare packing and node-hours, and retain resource completeness, OOM,
-eviction and latency evidence. Sampled storage excludes read-only image layers;
-include node filesystem/image-cache headroom when selecting requests.
+Ordinary automatic native Terminus-2 submissions use a persistent baseline of
+**1 CPU / 2 GiB RAM / 2 GiB ephemeral storage per complete execution Pod**. It
+applies to future task IDs and revisions, including frontend, CLI and API
+submissions. It is a scheduling policy, not a claim that all workloads use less
+than these amounts or that every task has been empirically calibrated.
 
+The deployment environment's optional `default_task_resource_requests` holds the
+role template. If omitted, the Nebius renderer resolves and persists this value
+in both the environment ConfigMap and each published runtime profile:
+
+```json
+{
+  "default_task_resource_requests": {
+    "controller": {
+      "cpu_millis": 200,
+      "memory_mib": 512,
+      "ephemeral_storage_mib": 512
+    },
+    "task_sandbox": {
+      "cpu_millis": 600,
+      "memory_mib": 1024,
+      "ephemeral_storage_mib": 1024
+    },
+    "verifier_sandbox": {
+      "cpu_millis": 200,
+      "memory_mib": 512,
+      "ephemeral_storage_mib": 512
+    }
+  }
+}
+```
+
+An explicit configured template survives subsequent candidate releases. Each
+configured role requires positive integer CPU millicores, memory MiB and storage
+MiB. This template does not alter source task/container limits, workspace/output
+bounds, build scratch space, node image-cache storage, or the native node ceiling.
+The default requires compatible role limits. Submission rejects requests above
+current hard limits; for a task with lower limits, provide a compatible explicit
+override rather than silently raising its limits.
+
+At submission the Batch resolver binds the template to each selected automatic
+Terminus task's current source checksum. The resulting per-task requests are
+frozen on the Batch. The precedence is:
+
+1. Explicit per-task submission override.
+2. Environment `task_resource_requests` entry for that exact task revision.
+3. Environment `default_task_resource_requests` template.
+
+A higher-priority per-task entry replaces that task's request object; unlisted
+roles keep the existing role defaults rather than merging individual fields from
+the lower-priority template. Exact revision overrides remain strict: stale
+checksums and requests over limits are rejected. The general template binds new
+revisions at submission, so operators do not need to copy a calibrated cohort for
+each new task. Non-Terminus and explicitly precompiled execution configurations
+are not silently overridden. Existing Batches keep their frozen maps; reruns
+retain the selected parent requests even when choosing the current runtime.
+
+### Per-task measured overrides
+
+After collecting representative usage, use an override to compare scheduling
+requests for selected tasks without rebuilding images or changing hard limits.
 Pass `--task-resource-requests @requests.json` to `loom eval batch create`, or the
-same `task_resource_requests` object to `POST /api/v1/batches`. The JSON is keyed
-by selected task ID. For example (illustrative values, not a sizing recommendation):
+same `task_resource_requests` object to `POST /api/v1/batches`:
 
 ```json
 {
@@ -110,60 +141,38 @@ by selected task ID. For example (illustrative values, not a sizing recommendati
     "task_revision_sha256": "sha256:<existing task checksum>",
     "requests": {
       "controller": {
-        "cpu_millis": 1000,
-        "memory_mib": 2048,
-        "ephemeral_storage_mib": 2048
+        "cpu_millis": 200,
+        "memory_mib": 512,
+        "ephemeral_storage_mib": 512
+      },
+      "task_sandbox": {
+        "cpu_millis": 600,
+        "memory_mib": 1024,
+        "ephemeral_storage_mib": 1024
+      },
+      "verifier_sandbox": {
+        "cpu_millis": 200,
+        "memory_mib": 512,
+        "ephemeral_storage_mib": 512
       }
     }
   }
 }
 ```
 
-Each configured role (`controller`, `task_sandbox`, `verifier_sandbox`) requires
-positive integer CPU millicores, memory MiB and ephemeral-storage MiB, each no
-higher than its existing hard limit. Unlisted roles and tasks keep their default
-requests. The task checksum identifies which measured revision the values apply
-to; a mismatch is rejected. Overrides require automatic native `terminus-2`
-execution. They are rejected for unselected tasks, other backends/agents and
-explicit precompiled task bindings.
+To persist a deliberate task-specific override for ordinary users, place this map
+under `task_resource_requests` in the environment configuration. Remove obsolete
+cohort overrides when adopting the general baseline, or their higher precedence
+will intentionally preserve their previous requests. Overrides for unselected
+tasks, other backends/agents or explicit precompiled bindings are rejected.
 
-Requests are frozen on the Batch and exposed by its ordinary detail API. They do
-not change deployment defaults, task revisions, container limits, workspace or
-output bounds. Kubernetes placement, admission reservations and request-based cost
-allocation all use the same effective Pod requests. Cost allocation is not the
-provider's settled bill. Rerunning failed cases preserves requests for the selected
-subset, including with `--use-current-runtime`, and validates them against the
-selected runtime's limits. A new Batch without explicit overrides uses the
-deployment's approved per-task policy, if configured.
-
-### Adopt measured requests for ordinary submissions
-
-After approving a measured cohort, put the same task-ID keyed JSON object under
-`task_resource_requests` in the deployment's environment configuration. Keep this
-configuration with the other persistent environment settings, rather than editing
-the generated candidate or requiring every caller to supply the override. The
-platform renderer merges this policy into each new published runtime profile;
-ordinary frontend, CLI and API submissions all use the same Batch resolver.
-
-Only selected task IDs are frozen, with their exact measured source revisions.
-An explicit per-task submission override replaces that task's default. Unlisted
-tasks and non-Terminus submissions retain their normal allocations. A stale
-revision or a request exceeding current controller/task hard limits is rejected
-at submission; refresh the calibration deliberately rather than silently applying
-it to a changed task. Existing Batches keep their frozen requests. Reruns retain
-the parent's selected overrides even when choosing the current runtime.
-
-The Batch detail API exposes the resolved map as `task_resource_requests`; its
-page shows the configured per-task totals. Requests reserve scheduling capacity,
-not maximum consumption: hard limits, build scratch space, image storage and
-workspace/output bounds remain separate. Do not apply a measured cohort's
-1 CPU / 2 GiB / 500 MiB policy to unrelated tasks or revisions. No additional
-autoscaler, database table, or CI gate is needed to persist this policy.
-
-Deploy the matching Python services, actuator and Go runtime before submitting an
-override; older runtime binaries reject the new plan field. Existing default plans
-omit it and retain their previous behavior. Compare results before adopting these
-values for other workloads; broader calibration remains in the
+The Batch detail API exposes its resolved `task_resource_requests` map; the page
+shows per-task totals. Kubernetes placement, admission reservations and
+request-based cost allocation use the same effective Pod requests. Reservations
+are not maximum consumption, and request-based costs are not the provider bill.
+Compare packing and node-hours while retaining OOM, eviction, latency and
+resource-completeness evidence. Sampled task storage excludes read-only image
+layers; retain node filesystem/image-cache headroom. See the
 [resource-accounting runbook](trial-resource-accounting.md#capacity-calibration).
 
 ## Dockerfile task prerequisites

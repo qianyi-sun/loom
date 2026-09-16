@@ -120,6 +120,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     agent_image_ref: str | None = None
     agent_runtime_bindings: tuple[AgentRuntimeBindingV1, ...] = ()
     controller_resources: ControllerComputeResourcesV1 | None = None
+    default_task_resource_requests: ExecutionResourceRequestsV1 | None = None
     task_resource_requests: dict[str, TaskExecutionResourceRequestsV1] = Field(default_factory=dict)
     runtime_image_ref: str
     runtime_binary_sha256: str = Field(pattern=_SHA256.pattern)
@@ -137,6 +138,8 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
         payload: dict[str, Any] = handler(self)
         if not self.task_resource_requests:
             payload.pop("task_resource_requests", None)
+        if self.default_task_resource_requests is None:
+            payload.pop("default_task_resource_requests", None)
         return payload
 
     @model_validator(mode="after")
