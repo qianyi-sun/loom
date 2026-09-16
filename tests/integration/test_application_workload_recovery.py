@@ -36,6 +36,10 @@ _IMAGE = "docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73
 _NAMESPACE = "loom-staging"
 
 
+def _run_disposable_kubectl(run, argv, **kwargs):
+    return run(argv, **kwargs)
+
+
 def _wait(predicate, diagnostic):
     deadline = time.monotonic() + 120
     while not predicate():
@@ -139,7 +143,7 @@ async def test_real_workload_pause_and_sql_recovery_survive_lost_patch_ack(
                 assert argv[0] == "kubectl" and kwargs["env"] == runner.environment
                 assert "get" in argv or "patch" in argv
                 kwargs["env"] = {**kwargs["env"], "KUBECONFIG": str(config_path)}
-                reply = subprocess_run((kubectl, *argv[1:]), **kwargs)
+                reply = _run_disposable_kubectl(subprocess_run, (kubectl, *argv[1:]), **kwargs)
                 if "patch" in argv and reply.returncode == 0:
                     patched.append(argv[argv.index("patch") + 2])
                     if lost_ack[0]:
