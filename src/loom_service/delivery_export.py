@@ -31,6 +31,7 @@ from loom.resource_usage_store import resource_usage_response, row_to_report
 from loom.terminal_result_semantics import (
     explicit_skip_verifier,
     has_numeric_reward,
+    is_scored_agent_timeout,
     terminal_result_conflicts,
 )
 from loom.trajectory.object_identity import (
@@ -46,7 +47,7 @@ from loom_service.delivery_export_tb2_v2 import (
     resolve_verifier_artifacts,
 )
 
-SELECTION_RULE = "highest_priority_succeeded_by_task_sample_combination"
+SELECTION_RULE = "highest_priority_deliverable_by_task_sample_combination"
 SCHEMA_VERSION = "1"
 TERMINAL_BATCH_STATES = {"finished", "cancelled"}
 PAYLOAD_CHECKSUMS_FILE = "checksums/SHA256SUMS"
@@ -701,7 +702,12 @@ def _select_trials(
             key = _trial_coordinate(trial)
             if key in all_by_key:
                 all_by_key[key].append(trial)
-            if key not in main_keys or str(trial.state) != "succeeded":
+            if key not in main_keys or not (
+                str(trial.state) == "succeeded"
+                or is_scored_agent_timeout(
+                    state=str(trial.state), result=trial.result, failure_reason=trial.failure_reason
+                )
+            ):
                 continue
             priority = priority_by_batch[batch.id]
             current = selected_by_key.get(key)
@@ -749,7 +755,7 @@ def _select_trials(
     if unresolved:
         raise UnresolvedDeliveryTrialsError(
             {
-                "message": "batch family has unresolved platform failures",
+                "message": "batch family has attempts without complete delivery evidence",
                 "unresolved_trials": unresolved,
             }
         )
@@ -1030,6 +1036,7 @@ def _ledger_rows(selected: list[SelectedTrial]) -> list[dict[str, Any]]:
                 "selection_priority": item.priority,
                 "selection_source": item.selection_source,
                 "state": item.trial.state,
+                "failure_reason": item.trial.failure_reason,
                 "reward": item.reward,
                 "trajectory_bucket": item.trajectory.bucket,
                 "trajectory_key": item.trajectory.key,
@@ -1052,6 +1059,7 @@ def _csv_bytes(rows: list[dict[str, Any]]) -> bytes:
         "selection_priority",
         "selection_source",
         "state",
+        "failure_reason",
         "reward",
         "trajectory_bucket",
         "trajectory_key",
@@ -1920,18 +1928,17 @@ def _validate_typed_terminal_evidence(
                     "actual": terminal.final_state,
                 }
             )
-        if str(item.trial.state) == "succeeded" and terminal.failure_reason is not None:
+        expected_failure = getattr(item.trial, "failure_reason", None)
+        if terminal.failure_reason != expected_failure:
             conflicts.append(
                 {
                     "field": "trajectory.trial_end.failure_reason",
-                    "expected": None,
+                    "expected": expected_failure,
                     "actual": terminal.failure_reason,
                 }
             )
-        if (
-            str(item.trial.state) == "succeeded"
-            and not has_numeric_reward(terminal.reward)
-            and not explicit_skip_verifier(item.trial.config)
+        if not has_numeric_reward(terminal.reward) and not (
+            str(item.trial.state) == "succeeded" and explicit_skip_verifier(item.trial.config)
         ):
             conflicts.append(
                 {
@@ -2007,19 +2014,18 @@ def _validate_atif_terminal_evidence(*, client: Any, item: SelectedTrial) -> Non
             )
         error = metadata.get("error")
         failure_reason = error.get("failure_reason") if isinstance(error, dict) else None
-        if str(item.trial.state) == "succeeded" and failure_reason is not None:
+        expected_failure = getattr(item.trial, "failure_reason", None)
+        if failure_reason != expected_failure:
             conflicts.append(
                 {
                     "field": "atif.metadata.error.failure_reason",
-                    "expected": None,
+                    "expected": expected_failure,
                     "actual": failure_reason,
                 }
             )
         reward = metadata.get("reward")
-        if (
-            str(item.trial.state) == "succeeded"
-            and not has_numeric_reward(reward)
-            and not explicit_skip_verifier(item.trial.config)
+        if not has_numeric_reward(reward) and not (
+            str(item.trial.state) == "succeeded" and explicit_skip_verifier(item.trial.config)
         ):
             conflicts.append(
                 {
@@ -2506,6 +2512,20 @@ async def create_delivery_export(
         trajectories_bucket=settings.trajectories_bucket,
     )
     canonical_bundles = await _canonical_bundles_for_selected(session, selected)
+    # Scored deadlines are native attempts. Their reward alone is insufficient:
+    # require the committed canonical bundle before exporting their evidence.
+    missing_bundles = [
+        {"trial_id": str(item.trial.id), "kind": "trial_bundle"}
+        for item in selected
+        if str(item.trial.state) != "succeeded" and item.trial.id not in canonical_bundles
+    ]
+    if missing_bundles:
+        raise MissingDeliveryObjectsError(
+            {
+                "message": "scored timeout canonical bundle is unavailable",
+                "missing_objects": missing_bundles,
+            }
+        )
     object_validation = _head_delivery_objects(
         minio_client,
         selected,
