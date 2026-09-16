@@ -12,7 +12,6 @@ from loom.terminal_result_semantics import (
 
 def _scored_timeout_result() -> dict:
     return {
-        "state": "failed",
         "reward": {"passed": 0.0},
         "runtime_result": {
             "schema_version": "loom.execution-runtime-result.v1",
@@ -31,8 +30,13 @@ def _scored_timeout_result() -> dict:
 
 
 @pytest.mark.parametrize("with_setup", [False, True])
-def test_scored_deadline_keeps_truthful_failure_and_zero_reward(with_setup: bool) -> None:
+@pytest.mark.parametrize("embedded_state", [None, "failed"])
+def test_scored_deadline_keeps_truthful_failure_and_zero_reward(
+    with_setup: bool, embedded_state: str | None
+) -> None:
     result = _scored_timeout_result()
+    if embedded_state is not None:
+        result["state"] = embedded_state
     if with_setup:
         result["runtime_result"]["phases"].insert(
             0, {"role": "setup", "exit_code": 0, "timed_out": False}
@@ -56,6 +60,7 @@ def test_scored_deadline_keeps_truthful_failure_and_zero_reward(with_setup: bool
         "verifier_output_missing",
         "agent_not_timed_out",
         "cancelled",
+        "contradictory_state",
     ],
 )
 def test_cached_score_does_not_hide_incomplete_or_failed_execution(defect: str) -> None:
@@ -83,6 +88,8 @@ def test_cached_score_does_not_hide_incomplete_or_failed_execution(defect: str) 
         runtime["phases"][0].update(exit_code=1, timed_out=False)
     elif defect == "cancelled":
         state, reason = "cancelled", "cancelled"
+    elif defect == "contradictory_state":
+        result["state"] = "succeeded"
     assert not is_scored_agent_timeout(state=state, result=result, failure_reason=reason)
 
 

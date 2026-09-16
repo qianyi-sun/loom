@@ -65,7 +65,9 @@ def is_scored_agent_timeout(*, state: str, result: Any, failure_reason: Any) -> 
         return False
     runtime = result.get("runtime_result")
     if (
-        result.get("state") != "failed"
+        # Native finalization stores state on the Trial row; an embedded state
+        # is optional, but must agree when supplied by another result producer.
+        result.get("state") not in (None, "failed")
         or result.get("failure_reason") not in (None, "timed_out")
         or not isinstance(runtime, Mapping)
         or runtime.get("schema_version") != "loom.execution-runtime-result.v1"

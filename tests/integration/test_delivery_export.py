@@ -1481,9 +1481,9 @@ def _seed_scored_timeout(
     elif defect == "missing_output":
         outputs[0].update(state="missing", size_bytes=None, sha256=None)
     result: dict[str, object] = {
+        # Native finalization persists state/reason on Trial, not this projection
+        # (service_execution.finalize_committed_service_execution).
         "schema_version": "loom.service-execution-trial-result.v1",
-        "state": "failed",
-        "failure_reason": "timed_out",
         "aggregate_reward": 0.0,
         "reward": reward,
         "runtime_result": {
