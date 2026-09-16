@@ -316,7 +316,11 @@ async def test_runtime_cutover_seal_refuses_drift_and_rolls_back_on_guard_loss(t
         def require(*args, **kwargs):
             checked.append(True)
             if len(checked) == 2 and drift == "guard-loss":
-                guard.close()
+                # Wait for PostgreSQL to release the actual guard lock. Closing
+                # the client socket does not wait for server-side disconnection.
+                assert guard.execute(
+                    "SELECT pg_advisory_unlock(5498691230183247727)"
+                ).fetchone() == (True,)
             return check(*args, **kwargs)
         monkeypatch.setattr(module, "_require_coordination_guard", require)
         with pytest.raises(RuntimeError, match=r"credential state|coordination guard"):

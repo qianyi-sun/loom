@@ -124,22 +124,23 @@ def test_supervisor_stops_exact_broker_without_blocking_on_helpers(tmp_path, mon
 
         clock = time.clock_gettime_ns
         offset = [0]
-        selections = [0]
         target = ["pause", "buildkit", "client", "completion"].index(boundary.removeprefix("suspend-before-")) + 1
-        original_selector = module.selectors.DefaultSelector
+        receive = module._receive
+        transition = {
+            "pause": "permit", "buildkit": "pause-ready",
+            "client": "buildkit-ready", "completion": "client-succeeded",
+        }[boundary.removeprefix("suspend-before-")]
 
-        class SuspendSelector(original_selector):
-            def select(self, timeout=None):
-                events = super().select(timeout)
-                if events:
-                    selections[0] += 1
-                    if selections[0] == target:
-                        # Model resume with a ready packet after BOOTTIME has
-                        # jumped past expiry. Children retain their real clocks.
-                        offset[0] = 20_000_000_000
-                return events
+        def resume_with_packet(channel, models):
+            message = receive(channel, models)
+            if message.kind == transition:
+                # Bind suspension to the protocol boundary. The supervisor
+                # drains authority even when select did not report it, so
+                # counting ready select calls races with helper scheduling.
+                offset[0] = 20_000_000_000
+            return message
 
-        monkeypatch.setattr(module.selectors, "DefaultSelector", SuspendSelector)
+        monkeypatch.setattr(module, "_receive", resume_with_packet)
         monkeypatch.setattr(module.time, "clock_gettime_ns", lambda clock_id: clock(clock_id) + offset[0])
     started = time.monotonic()
     try:
