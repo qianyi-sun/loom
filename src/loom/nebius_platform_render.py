@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 import yaml  # type: ignore[import-untyped]
 
 from loom.execution_contract import NEBIUS_CPU_EXECUTION_CLASS_V1
+from loom.execution_runtime_contract import TaskExecutionResourceRequestsV1
 
 
 class NebiusPlatformError(ValueError):
@@ -81,12 +82,20 @@ def validate_environment(config: dict[str, Any]) -> None:
             "public_gateway_ipv4",
             "task_image_builder",
             "service_execution_scheduler_max_deadline_sec",
+            "task_resource_requests",
         }
         != expected
     ):
         raise NebiusPlatformError("platform configuration has missing or unknown fields")
     if type(config.get("public_tls_bootstrap", False)) is not bool:
         raise NebiusPlatformError("public_tls_bootstrap must be a boolean")
+    requests = config.get("task_resource_requests", {})
+    if not isinstance(requests, dict):
+        raise NebiusPlatformError("task_resource_requests must be a task-ID keyed object")
+    for task_id, entry in requests.items():
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise NebiusPlatformError("task_resource_requests requires nonempty task IDs")
+        TaskExecutionResourceRequestsV1.model_validate(entry)
     for key in (
         "namespace",
         "execution_namespace",
@@ -1243,6 +1252,10 @@ def build_platform(
 ) -> dict[str, list[dict[str, Any]]]:
     """Build Kubernetes resources from published image refs and environment settings."""
     validate_environment(config)
+    # Environment-owned calibration survives candidate publication. Freeze the
+    # chosen subset on each Batch, while keeping source task hard limits intact.
+    if "task_resource_requests" in config:
+        profile = {**profile, "task_resource_requests": config["task_resource_requests"]}
     if (
         candidate.get("source_ref") not in {"refs/heads/dev", "refs/heads/codex/nebius-main"}
         or candidate.get("repository") != "qianyi-sun/loom"

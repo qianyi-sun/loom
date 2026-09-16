@@ -133,7 +133,32 @@ output bounds. Kubernetes placement, admission reservations and request-based co
 allocation all use the same effective Pod requests. Cost allocation is not the
 provider's settled bill. Rerunning failed cases preserves requests for the selected
 subset, including with `--use-current-runtime`, and validates them against the
-selected runtime's limits. To remove an override, create a new Batch without it.
+selected runtime's limits. A new Batch without explicit overrides uses the
+deployment's approved per-task policy, if configured.
+
+### Adopt measured requests for ordinary submissions
+
+After approving a measured cohort, put the same task-ID keyed JSON object under
+`task_resource_requests` in the deployment's environment configuration. Keep this
+configuration with the other persistent environment settings, rather than editing
+the generated candidate or requiring every caller to supply the override. The
+platform renderer merges this policy into each new published runtime profile;
+ordinary frontend, CLI and API submissions all use the same Batch resolver.
+
+Only selected task IDs are frozen, with their exact measured source revisions.
+An explicit per-task submission override replaces that task's default. Unlisted
+tasks and non-Terminus submissions retain their normal allocations. A stale
+revision or a request exceeding current controller/task hard limits is rejected
+at submission; refresh the calibration deliberately rather than silently applying
+it to a changed task. Existing Batches keep their frozen requests. Reruns retain
+the parent's selected overrides even when choosing the current runtime.
+
+The Batch detail API exposes the resolved map as `task_resource_requests`; its
+page shows the configured per-task totals. Requests reserve scheduling capacity,
+not maximum consumption: hard limits, build scratch space, image storage and
+workspace/output bounds remain separate. Do not apply a measured cohort's
+1 CPU / 2 GiB / 500 MiB policy to unrelated tasks or revisions. No additional
+autoscaler, database table, or CI gate is needed to persist this policy.
 
 Deploy the matching Python services, actuator and Go runtime before submitting an
 override; older runtime binaries reject the new plan field. Existing default plans
@@ -194,11 +219,40 @@ without an input-manifest binding retain the sidecar path.
 A missing or corrupt bound manifest fails preparation; it does not fall back to
 unbound modes or a different source revision.
 
-> **Catalog decoupling (#1978):** `immutable_task_input_unavailable` is no longer
-> TaskSet-only. Emitting the binding on `publish-local` does **not** by itself make
-> Harbor/GB10 packs Nebius-schedulable — remaining contract fields (arch, resource
-> limits, gateway-only, verifier path/identity, etc.) and AMD64 task-image
-> adaptation are separate.
+Benchmark and TaskSet tasks use the same immutable input binding for Nebius
+Terminus admission. For a catalog suite, use `loom datasets publish-local` on
+the adapted benchmark folder; converting it into a TaskSet is unnecessary.
+Publication stores task files under
+`.loom-revisions-v2/<checksum>/<mode-digest>/bundle/` and the input manifest
+beside `bundle/`. The manifest is publication metadata, not another task file.
+This separation lets the ordinary bundle audit and native image builder consume
+the exact same revision.
+
+If a benchmark was published by the earlier implementation that stored
+`service-execution-input.json` inside the task prefix, republish the same local
+folder with the fixed CLI. It updates the catalog source and binding without
+changing task content or deleting old objects. Existing frozen Trials retain
+their original inputs; submit a new Trial after republishing. Verify the current
+catalog source with `loom datasets audit <benchmark-id> --verify-bundles` using
+the target database and object-store configuration.
+
+`publish-local` validates the general bundle schema and normalizes Harbor TOML;
+it does not silently rewrite a task's architecture, network access, verifier or
+resource contract for Nebius. Review these fields **before** publishing:
+
+| Contract | Nebius Terminus requirement |
+| --- | --- |
+| Architecture | Linux `x86_64` (or architecture-neutral `any`), no GPU; Dockerfile inputs must actually build for AMD64. |
+| Task environment | A supported Dockerfile when native preparation is enabled, or an admitted immutable image. |
+| Resource limits | Explicit `cpus`, `memory_mb`, and `storage_mb`; preserve requirements of the task. Scheduling requests are a separate policy. |
+| Network | `gateway-only` baseline policy; model access goes through the gateway. |
+| Workspace identity | `/app` or `/workspace`, default `agent` user, no custom agent/verifier user overrides. |
+| Verifier | Shared script verifier with an exact relative `verifier/...` path; no absolute path, glob or traversal. |
+| Execution shape | One step with an exact instruction path and supported environment features; private verifier isolation remains enabled. |
+
+Admission continues to reject incompatible fields with their specific reasons.
+Successful publication proves the catalog input is registered, not that every
+Harbor/GB10 task is Nebius-compatible or that its image has built successfully.
 
 Native Terminus execution keeps a declared dedicated Docker build-context
 directory and its Dockerfile in the controller's frozen inputs. They are used

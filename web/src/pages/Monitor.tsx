@@ -396,16 +396,20 @@ function NebiusExecutionBreakdown({
               <CountBox label="Executable now" value={`${profile?.immediate_executable_slots ?? 0} slots`} />
               <CountBox label="Scale headroom" value={`${profile?.configured_scale_headroom_slots ?? 0} slots`} />
               <CountBox label="Configured total" value={`${profile?.configured_total_fit_slots ?? 0} slots`} />
-              <CountBox label="Capacity-accounted nodes" value={`${observation?.active_nodes ?? 0} / ${target.policy?.max_nodes ?? 0}`} />
+              <CountBox label="Capacity-accounted nodes" value={`${observation?.active_nodes ?? "unknown"}`} />
               <CountBox label="Pending jobs" value={`${observation?.pending_jobs ?? 0}`} />
             </div>
             {observation?.node_states ? (
               <p className="mt-2 text-xs text-slate-600">
-                Nodes: desired {observation.node_states.desired} · creating {observation.node_states.creating} · ready {observation.node_states.ready} · failed {observation.node_states.failed} · deleting {observation.node_states.deleting}
+                Nodes: desired {observation.node_states.desired} · provisioning (estimated) {observation.node_states.creating} · ready {observation.node_states.ready} · occupied {observation.occupied_nodes ?? "unknown"} · draining {observation.draining_nodes ?? "unknown"} · stalled/not ready {observation.node_states.failed} · awaiting removal (estimated) {observation.node_states.deleting}
               </p>
             ) : null}
+            <p className="mt-2 text-xs text-slate-600">
+              Configured node maximum: {target.policy?.max_nodes ?? "unknown"}. Capacity-accounted nodes is the largest of Kubernetes inventory, provider actual nodes and provider target; it is not occupied nodes or quota. Occupied counts nodes hosting this target's execution or build Pods. Lifecycle counts can overlap. Task cancellation releases task resources before the autoscaler finishes reclaiming nodes.
+            </p>
             <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-600">
               <span>observed: {observation?.observed_at ? formatLocalDateTime(observation.observed_at) : "unavailable"}</span>
+              <span>fresh until: {observation?.fresh_until ? formatLocalDateTime(observation.fresh_until) : "unavailable"}</span>
               <span>autoscaler: {observation?.autoscaler_state ?? "unknown"}</span>
               <span>provider: {observation?.provider_capacity_state ?? "unknown"}</span>
               <span>quota: {Math.round((observation?.provider_used_vcpu_millis ?? 0) / 1000)} / {Math.round((observation?.provider_quota_vcpu_millis ?? 0) / 1000)} vCPU</span>

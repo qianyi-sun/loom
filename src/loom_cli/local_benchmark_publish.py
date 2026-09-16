@@ -163,12 +163,13 @@ async def publish_local_benchmark(
                     metadata_digest = bundle_file_metadata_sha256(staged).removeprefix(
                         "sha256:",
                     )
-                    prefix = _task_revision_prefix(
+                    revision_prefix = _task_revision_prefix(
                         entry.id,
                         rel,
                         checksum,
                         metadata_digest,
                     )
+                    prefix = f"{revision_prefix}bundle/"
                     source = f"s3://{bucket}/{prefix}"
                     uploaded_objects += await upload_task_dir(
                         store=object_store,
@@ -176,9 +177,10 @@ async def publish_local_benchmark(
                         prefix=prefix,
                         task_dir=staged,
                     )
-                    # #1978: same immutable input binding TaskSet materialization
-                    # attaches — keep metadata digest and add service_execution_input.
-                    manifest_key = f"{prefix}service-execution-input.json"
+                    # Publication metadata must stay outside the bundle prefix:
+                    # both ordinary materialization and the native builder require
+                    # its objects to match the task's original files exactly.
+                    manifest_key = f"{revision_prefix}service-execution-input.json"
                     manifest_body, sei_provenance = prepare_service_execution_input_manifest(
                         staged,
                         task_checksum=checksum,
@@ -292,7 +294,9 @@ def _task_revision_prefix(
     checksum: str,
     metadata_digest: str,
 ) -> str:
-    return f"{_task_prefix(benchmark_id, rel)}.loom-revisions/{checksum}/{metadata_digest}/"
+    # v1 mixed the input manifest with task files. A new namespace also repairs
+    # unchanged republishes without deleting or changing previously frozen inputs.
+    return f"{_task_prefix(benchmark_id, rel)}.loom-revisions-v2/{checksum}/{metadata_digest}/"
 
 
 async def _get_task(session, task_id: str):  # type: ignore[no-untyped-def]

@@ -117,6 +117,9 @@ the execution taint. The distinct node-role keeps integration nodes outside the 
 `node-role=execution` inventory. A dedicated execution group avoids competing autoscalers
 and duplicate quota accounting against the older development pool.
 
+For repeated expansion during node initialization, use the
+[read-only cold-start capture and bounded packing procedure](nebius-cold-start.md).
+
 Terraform owns the execution group's static autoscaling limit: the default is
 [the native API ceiling of 100 nodes](https://github.com/nebius/api/blob/main/nebius/mk8s/v1/node_group.proto),
 with explicit lower `integration_platform.execution_max_nodes` values preserved.
