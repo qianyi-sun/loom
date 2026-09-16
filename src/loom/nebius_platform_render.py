@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 import yaml  # type: ignore[import-untyped]
 
 from loom.execution_contract import NEBIUS_CPU_EXECUTION_CLASS_V1
-from loom.service_execution_materialization import TaskExecutionResourceRequestsV1
+from loom.execution_runtime_contract import TaskExecutionResourceRequestsV1
 
 
 class NebiusPlatformError(ValueError):

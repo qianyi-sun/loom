@@ -101,6 +101,13 @@ class ExecutionResourceRequestsV1(_Strict):
                 raise ValueError(f"{role} resource requests exceed hard limits")
 
 
+class TaskExecutionResourceRequestsV1(_Strict):
+    """Measured requests bound to a task revision; usable by offline renderers."""
+
+    task_revision_sha256: str = Field(pattern=_SHA256.pattern)
+    requests: ExecutionResourceRequestsV1
+
+
 class ProcessPhaseV1(_Strict):
     role: Literal["setup", "agent", "verifier"]
     argv: tuple[str, ...] = Field(min_length=1, max_length=128)

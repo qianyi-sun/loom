@@ -31,6 +31,7 @@ from loom.execution_runtime_contract import (
     RuntimeOutputDeclarationV1,
     RuntimeTaskInputV1,
     SidecarContainerV1,
+    TaskExecutionResourceRequestsV1,
 )
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
@@ -104,11 +105,6 @@ class ControllerComputeResourcesV1(_Strict):
 
     cpu_millis: int = Field(gt=0, le=128_000)
     memory_mib: int = Field(gt=0, le=1_048_576)
-
-
-class TaskExecutionResourceRequestsV1(_Strict):
-    task_revision_sha256: str = Field(pattern=_SHA256.pattern)
-    requests: ExecutionResourceRequestsV1
 
 
 class ServiceExecutionRuntimeProfileV1(_Strict):
