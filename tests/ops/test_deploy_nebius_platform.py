@@ -80,6 +80,10 @@ config, release, profile = json.loads(inputs.read_text())
 files = build_platform(config, release, profile, {}, repo_root=root)
 write_platform(files, config, release, output)
 identity, observed, loaded = load_render(output)
+default_requests = observed.pop("default_task_resource_requests")
+assert sum(role["cpu_millis"] for role in default_requests.values()) == 1000
+assert sum(role["memory_mib"] for role in default_requests.values()) == 2048
+assert sum(role["ephemeral_storage_mib"] for role in default_requests.values()) == 2048
 assert observed == config
 assert loaded == files
 assert identity["candidate_sha"] == release["candidate_sha"]

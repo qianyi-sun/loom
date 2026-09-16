@@ -64,7 +64,7 @@ returns `items: []` plus aggregate `telemetry_status: unavailable`.
 ## Capacity calibration
 
 A bounded, explicit per-Batch request comparison may use a sampled cohort via
-[the native Terminus request override](nebius-terminus2.md#compare-measured-scheduling-requests).
+[the native Terminus request override](nebius-terminus2.md#per-task-measured-overrides).
 Keep hard limits and fleet defaults unchanged and report incomplete telemetry.
 This comparison does not establish generally calibrated slot limits.
 
