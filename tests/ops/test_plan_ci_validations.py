@@ -233,10 +233,10 @@ def test_ci_internal_pr_labels_disable_docs_only_fast_path() -> None:
 
         assert plan.docs_only is False
         assert plan.integration is True
-        assert plan.coverage_summary is True
+        assert plan.coverage_summary is (label == "ci:coverage-summary")
 
 
-def test_integration_label_selects_coverage_but_inferred_integration_does_not() -> None:
+def test_integration_selection_does_not_enable_optional_coverage() -> None:
     labeled_plan = plan_validations(
         changed_paths=["docs/user-guide.md"],
         labels={"ci:integration"},
@@ -249,7 +249,7 @@ def test_integration_label_selects_coverage_but_inferred_integration_does_not() 
     )
 
     assert labeled_plan.integration is True
-    assert labeled_plan.coverage_summary is True
+    assert labeled_plan.coverage_summary is False
     assert inferred_plan.integration is True
     assert inferred_plan.coverage_summary is False
 
@@ -711,3 +711,38 @@ def test_unowned_merge_group_runtime_path_remains_fail_closed() -> None:
     assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
     expected_reason = f"unowned-runtime-path:{path}"
     assert all(expected_reason in plan.reasons[check] for check in HEAVY_CHECKS)
+
+
+@pytest.mark.parametrize(("path", "checks"), [
+    ("scripts/ops/deploy_nebius_platform.py", {"integration", "cluster_smoke"}),
+    ("scripts/ops/render_nebius_platform.py", {"integration", "cluster_smoke"}),
+    ("scripts/ops/verify_nebius_restore.py", {"integration"}),
+    ("deploy/nebius/integration.platform.json.example", {"integration", "cluster_smoke"}),
+    ("src/loom/nebius_platform_render.py", {"integration", "images", "cluster_smoke"}),
+    ("tests/unit/test_nebius_platform_render.py", {"cluster_smoke"}),
+])
+def test_nebius_operator_paths_select_their_consumers(path, checks):
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+    assert not plan.docs_only
+    assert not plan.unowned_runtime
+    assert plan.selected_heavy_checks() == checks
+
+
+@pytest.mark.parametrize("path", [
+    ".github/workflows/nebius-candidate.yml",
+    "scripts/ops/nebius_candidate.py",
+    "scripts/ops/nebius_registry_auth.py",
+    "scripts/validate_trivy_release_report.py",
+    "scripts/ops/new_nebius_operator.py",
+])
+def test_nebius_publication_authority_and_unknown_paths_keep_full_validation(path):
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+    assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
+
+
+def test_nebius_scoped_routing_cannot_remove_mixed_path_or_label_requirements():
+    plan = plan_validations(
+        changed_paths=["scripts/ops/verify_nebius_restore.py", "migrations/new_revision.py"],
+        labels={"cluster-smoke"}, event_name="pull_request",
+    )
+    assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)

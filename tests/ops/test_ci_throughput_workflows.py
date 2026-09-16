@@ -2377,3 +2377,77 @@ def test_lint_and_static_does_not_restore_opaque_analysis_state() -> None:
     steps = workflow["jobs"]["lint-and-static"]["steps"]
     assert all(not str(step.get("uses", "")).startswith("actions/cache@") for step in steps)
     assert "Cache mypy" not in {step.get("name") for step in steps}
+
+
+@pytest.mark.parametrize("lane", ["tests-root", "tests-packages", "integration"])
+@pytest.mark.parametrize("coverage_enabled", ["false", "true"])
+@pytest.mark.parametrize("test_exit", [0, 7])
+def test_pytest_workflow_preserves_tests_and_failures_with_optional_integration_coverage(
+    tmp_path: Path, lane: str, coverage_enabled: str, test_exit: int,
+) -> None:
+    job = _workflow(".github/workflows/ci.yml")["jobs"][lane]
+    step = next(step for step in job["steps"] if step.get("name", "").startswith("Pytest"))
+    uv = tmp_path / "uv"
+    uv.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "if 'test-paths' in sys.argv:\n"
+        "    print('tests/selected_first.py\\ntests/selected_second.py')\n"
+        "elif 'pytest' in sys.argv:\n"
+        "    Path(os.environ['ARGV_FILE']).write_text(json.dumps(sys.argv[1:]))\n"
+        "    sys.exit(int(os.environ['TEST_EXIT']))\n"
+        "else:\n"
+        "    sys.exit(99)\n",
+    )
+    uv.chmod(0o755)
+    argv_file = tmp_path / "argv.json"
+    result = subprocess.run(
+        ["bash", "-c", step["run"]], cwd=REPO_ROOT, capture_output=True, text=True,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}",
+             "RUNNER_TEMP": str(tmp_path), "SHARD_INDEX": "0", "SHARD_COUNT": "2",
+             "COVERAGE_ENABLED": coverage_enabled, "ARGV_FILE": str(argv_file),
+             "TEST_EXIT": str(test_exit)},
+    )
+    assert result.returncode == test_exit, result.stderr
+    args = json.loads(argv_file.read_text())
+    assert [arg for arg in args if arg.startswith("tests/")] == [
+        "tests/selected_first.py", "tests/selected_second.py",
+    ]
+    instrumented = lane != "integration" or coverage_enabled == "true"
+    assert ("--cov=src" in args) is instrumented
+    assert ("--cov=packages" in args) is instrumented
+    assert ("--cov-report=" in args) is instrumented
+    assert "--cov-report=term" not in args and "--cov-report=xml" not in args
+    if not instrumented:
+        assert args[args.index("-p") + 1] == "no:cov"
+    if lane == "integration":
+        assert args[args.index("-m") + 1] == "not docker"
+        assert job["env"]["COVERAGE_ENABLED"] == "${{ needs.workflow-plan.outputs.coverage_summary }}"
+        upload = next(s for s in job["steps"] if s.get("name") == "Upload integration coverage data")
+        assert "env.COVERAGE_ENABLED == 'true'" in upload["if"]
+
+
+def test_manual_coverage_request_selects_integration_through_workflow_planner(tmp_path: Path) -> None:
+    workflow = _workflow(".github/workflows/ci.yml")
+    assert _workflow_on(workflow)["workflow_dispatch"]["inputs"]["coverage_summary"]["default"] is False
+    step = next(s for s in workflow["jobs"]["workflow-plan"]["steps"] if s.get("id") == "plan")
+    assert step["env"]["DISPATCH_COVERAGE_SUMMARY"] == "${{ inputs.coverage_summary }}"
+    git = tmp_path / "git"
+    git.write_text("#!/bin/sh\nprintf '%s\\n' docs/user-guide.md\n")
+    git.chmod(0o755)
+    output = tmp_path / "output"
+    script = step["run"].replace("/tmp/loom-changed-files.txt", str(tmp_path / "changes"))
+    result = subprocess.run(
+        ["bash", "-c", script], cwd=REPO_ROOT, capture_output=True, text=True,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}",
+             "EVENT_NAME": "workflow_dispatch", "HEAD_SHA": "a" * 40,
+             "PR_LABELS_JSON": "[]", "PR_ACTION": "", "PR_ACTION_LABEL": "",
+             "PR_DRAFT": "false", "PR_BASE_CHANGED": "false",
+             "DISPATCH_INTEGRATION": "false", "DISPATCH_INTEGRATION_DOCKER": "false",
+             "DISPATCH_COVERAGE_SUMMARY": "true", "GITHUB_OUTPUT": str(output)},
+    )
+    assert result.returncode == 0, result.stderr
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert values["coverage_summary"] == values["integration"] == "true"
+    assert values["docs_only"] == "false"

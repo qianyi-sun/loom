@@ -815,9 +815,11 @@ def test_cgroup_population_proof_rejects_missing_duplicate_or_malformed_evidence
         broker._cgroup_is_empty(cgroup)
 
 
+@pytest.mark.parametrize("observation_delay", [0.0, 1.1])
 def test_containment_grace_expiry_force_kills_every_cgroup_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    observation_delay: float,
 ) -> None:
     process, child_pid = _contained_process_tree(tmp_path, ignore_term=True)
     cgroup = tmp_path / "system.slice" / _TEST_UNIT_NAME
@@ -827,8 +829,14 @@ def test_containment_grace_expiry_force_kills_every_cgroup_process(
     events = cgroup / "cgroup.events"
     events.write_text("populated 1\n", encoding="ascii")
     commands: list[tuple[str, ...]] = []
+    observed_exit_after = 0.0
+
+    def process_is_live(pid: int) -> bool:
+        # Exercise exit visibility after the fixture's former one-second wait.
+        return time.monotonic() < observed_exit_after or _pid_is_live(pid)
 
     def systemctl(*arguments: str, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal observed_exit_after
         commands.append(arguments)
         requested_signal = next(
             (item.removeprefix("--signal=") for item in arguments if item.startswith("--signal=")),
@@ -843,24 +851,29 @@ def test_containment_grace_expiry_force_kills_every_cgroup_process(
                     os.kill(pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-            deadline = time.monotonic() + 1.0
-            while any(_pid_is_live(pid) for pid in (process.pid, child_pid)):
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(0.001)
-            if not any(_pid_is_live(pid) for pid in (process.pid, child_pid)):
-                procs.write_text("", encoding="ascii")
-                events.write_text("populated 0\n", encoding="ascii")
+            observed_exit_after = time.monotonic() + observation_delay
         return subprocess.CompletedProcess(arguments, 0, "", "")
 
+    read_empty = broker._cgroup_is_empty
+
+    def cgroup_is_empty(path: Path) -> bool:
+        assert path == cgroup
+        # Model kernel-updated population on every observation. A one-time
+        # snapshot after SIGKILL can stay populated after both processes exit.
+        live = [pid for pid in (process.pid, child_pid) if process_is_live(pid)]
+        procs.write_text("".join(f"{pid}\n" for pid in live), encoding="ascii")
+        events.write_text(f"populated {int(bool(live))}\n", encoding="ascii")
+        return read_empty(path)
+
     monkeypatch.setattr(broker, "_systemctl", systemctl)
+    monkeypatch.setattr(broker, "_cgroup_is_empty", cgroup_is_empty)
     try:
         broker._terminate_and_verify_containment(
             unit_name=_TEST_UNIT_NAME,
             cgroup_path=cgroup,
             job_state_path=tmp_path / "missing.job.json",
             graceful_timeout=0.05,
-            forced_timeout=1.0,
+            # Use the production forced-exit budget for actual OS scheduling.
         )
         process.wait(timeout=2)
         assert not _pid_is_live(child_pid)

@@ -6,8 +6,9 @@ from collections.abc import Collection, Sequence
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-if __package__:
+if TYPE_CHECKING or __package__:
     from scripts.component_ownership import Manifest, load_manifest
 else:
     from component_ownership import Manifest, load_manifest
@@ -73,6 +74,15 @@ NEBIUS_IAC_EXACT = {
 }
 
 NEBIUS_IAC_PREFIXES = ("deploy/terraform/nebius/",)
+
+# Operator tools have root and database tests; rendered manifests also need the
+# disposable Kubernetes contract. Publication authority remains on full CI.
+NEBIUS_PLATFORM_EXACT = {
+    "scripts/ops/deploy_nebius_platform.py",
+    "scripts/ops/render_nebius_platform.py",
+    "scripts/ops/verify_nebius_restore.py",
+}
+NEBIUS_PLATFORM_PREFIXES = ("deploy/nebius/",)
 
 PROTECTED_STAGING_ROLLOUT_EXACT = {
     ".github/workflows/deploy-environment.yml",
@@ -288,8 +298,6 @@ def plan_validations(
     for label in sorted(labels):
         if check := LABEL_TO_CHECK.get(label):
             select(check, f"label:{label}")
-        if event_name == "pull_request" and label == "ci:integration":
-            select("coverage_summary", f"label:{label}")
 
     if any(path in PLANNER_PATHS for path in paths):
         for name in HEAVY_CHECKS:
@@ -367,6 +375,10 @@ def plan_validations(
     )
     cluster_exact = {
         ".github/workflows/cluster-smoke.yml",
+        "src/loom/nebius_platform_render.py",
+        "scripts/ops/render_nebius_platform.py",
+        "scripts/ops/deploy_nebius_platform.py",
+        "tests/unit/test_nebius_platform_render.py",
         ".github/workflows/release-promotion-gate.yml",
         "scripts/ops/deploy_staging_k3s.sh",
         "src/loom_cli/cluster_cmd.py",
@@ -376,6 +388,7 @@ def plan_validations(
         "config/loom-schema.toml",
     }
     cluster_prefixes = (
+        "deploy/nebius/",
         "src/loom_cli/templates/k8s/",
         "deploy/k8s/",
         "deploy/environments/",
@@ -438,6 +451,7 @@ def plan_validations(
             path in PLANNER_PATHS
             or path in OWNERSHIP_AUTHORITY_PATHS
             or _matches(path, exact=NEBIUS_IAC_EXACT, prefixes=NEBIUS_IAC_PREFIXES)
+            or _matches(path, exact=NEBIUS_PLATFORM_EXACT, prefixes=NEBIUS_PLATFORM_PREFIXES)
             or _is_protected_staging_rollout_path(path)
             or _is_protected_native_authority_path(path)
             or bool(test_owner_lanes)
