@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -61,7 +61,14 @@ def _render(plan, task):
     ))["spec"]["template"]["spec"]
 
 
-def test_scoped_requests_render_and_price_same_pod_without_changing_task_limits():
+@pytest.mark.parametrize("acquired_at, expected_daily_costs, expected_total", [
+    (datetime(2026, 9, 16, 12, tzinfo=UTC), ((date(2026, 9, 16), 3088),), 3088),
+    (datetime(2026, 9, 16, 23, 35, tzinfo=UTC),
+     ((date(2026, 9, 16), 1287), (date(2026, 9, 17), 1802)), 3089),
+], ids=["same-day", "cross-midnight"])
+def test_scoped_requests_render_and_price_same_pod_without_changing_task_limits(
+    acquired_at, expected_daily_costs, expected_total,
+):
     task, trial, profile = _inputs()
     before = task.model_dump(mode="json")
     baseline = _compile(task, trial, profile)
@@ -93,14 +100,17 @@ def test_scoped_requests_render_and_price_same_pod_without_changing_task_limits(
     assert totals.model_dump() == {
         "cpu_millis": 400, "memory_mib": 896, "ephemeral_storage_mib": 1792,
     }
-    now = datetime.now(UTC)
+    # Each UTC day's reservation rounds up independently. Keep the resource
+    # pricing assertion deterministic and exercise both sides of midnight.
     cost = estimate_execution_cost(plan, ExecutionPriceSnapshot(
         base_microusd_per_hour=0, vcpu_microusd_per_hour=1000,
         memory_gib_microusd_per_hour=1024, ephemeral_storage_gib_microusd_per_hour=1024,
-    ), acquired_at=now, deadline_at=now + timedelta(hours=1))
+    ), acquired_at=acquired_at, deadline_at=acquired_at + timedelta(hours=1))
     assert (cost.requested_cpu_millis, cost.requested_memory_mib,
             cost.requested_ephemeral_storage_mib) == (400, 896, 1792)
-    assert cost.estimated_cost_microusd == 3088
+    assert cost.duration_seconds == 3600
+    assert cost.daily_costs == expected_daily_costs
+    assert cost.estimated_cost_microusd == expected_total
 
 
 def test_one_role_override_defaults_other_roles_to_limits():
