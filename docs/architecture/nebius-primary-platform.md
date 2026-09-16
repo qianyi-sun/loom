@@ -40,7 +40,7 @@ The branches independently used revisions `0133`–`0135` for different changes.
 zero-quota observation and native-build observation migrations are appended as
 `0144`, `0145` and `0146`. Fresh databases and existing `dev` databases upgrade
 through that single chain. Nebius subsequently added native resource usage at `0136`;
-`dev` preserves its worker-claim migration at `0147` and appends native usage as `0148`.
+`dev` preserves its published migrations through `0149` and appends native usage as `0150`.
 The deployed Nebius series through `d07718e2` is retained by the conversion candidate.
 
 An existing isolated-branch Nebius database at `0133`, `0134`, `0135` or `0136` is **not**

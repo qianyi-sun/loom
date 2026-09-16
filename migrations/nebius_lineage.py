@@ -22,7 +22,7 @@ from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.exc import SQLAlchemyError
 
 SOURCE_REVISIONS = ("0133", "0134", "0135", "0136")
-TARGET_REVISION = "0148"
+TARGET_REVISION = "0150"
 _DEV_TABLES = (
     "gateway_dispatch_receipts",
     "task_image_publication_keys",
@@ -220,7 +220,7 @@ def convert_lineage(
     )
     inspect_lineage(connection, expected_revision)
     with Operations.context(MigrationContext.configure(connection)):
-        for number in range(133, 149):
+        for number in range(133, 151):
             revision = f"{number:04}"
             script = scripts.get_revision(revision)
             if script is None or script.down_revision != f"{number - 1:04}":
@@ -229,7 +229,7 @@ def convert_lineage(
             # native-build from Nebius 0135, and native usage from Nebius 0136.
             if revision == "0146" and expected_revision in {"0135", "0136"}:
                 continue
-            if revision == "0148" and expected_revision == "0136":
+            if revision == "0150" and expected_revision == "0136":
                 continue
             script.module.upgrade()
     result = connection.execute(

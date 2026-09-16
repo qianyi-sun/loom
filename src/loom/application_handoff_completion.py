@@ -103,7 +103,7 @@ def complete_application_handoff_database(
     role_bindings: Mapping[str, str],
     password: str,
     schema_acl_profile: ApplicationSchemaAclProfile,
-    schema_revision: ApplicationSchemaRevision = "0149/guard_0035",
+    schema_revision: ApplicationSchemaRevision = "0150/guard_0035",
 ) -> ApplicationHandoffDatabaseOutcome:
     """Finish or reconcile transfer/reopen/login without creating another guard.
 

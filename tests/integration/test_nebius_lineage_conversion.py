@@ -36,7 +36,7 @@ def _historical(url: str, revision: str) -> None:
             # 7912ec076babc2fe51768fd2596b70c7de9e3d31. Shared history ends at 0132.
             # The later native-usage 0136 is included in deployed d07718e2.
             with Operations.context(MigrationContext.configure(connection)):
-                for number in (144, 145, 146, 148)[: int(revision) - 132]:
+                for number in (144, 145, 146, 150)[: int(revision) - 132]:
                     script = _scripts().get_revision(f"{number:04}")
                     assert script is not None
                     script.module.upgrade()
@@ -212,7 +212,7 @@ def test_conversion_preserves_history_and_reaches_dev(
             assert after == before
             assert (
                 connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-                == "0148"
+                == "0150"
             )
             assert connection.exec_driver_sql(
                 "SELECT to_regclass('gateway_dispatch_receipts')"
@@ -326,7 +326,7 @@ def test_job_command_inspects_applies_and_sanitizes_rejection(
         with engine.connect() as connection:
             assert (
                 connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-                == "0148"
+                == "0150"
             )
         result = subprocess.run(
             [*argv, "--apply"], env=environment, capture_output=True, text=True, timeout=60
