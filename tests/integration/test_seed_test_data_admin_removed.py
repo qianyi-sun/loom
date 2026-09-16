@@ -137,5 +137,5 @@ def test_seed_test_data_system_output_includes_least_privilege_builder_token(
             ).where(TaskImageMaterialization.task_id == "hello-world")
         ).all()
     assert builder_row == ("worker", ["task-image:build"])
-    assert set(materializations) == {("x86_64", "queued"), ("arm64", "queued")}
+    assert set(materializations) == {("x86_64", "queued")}
     engine.dispose()

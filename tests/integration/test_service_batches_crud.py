@@ -1794,7 +1794,7 @@ async def test_admin_on_behalf_rejects_k8s_worker_pool_when_disabled(
     detail = r.json()["detail"]
     assert "k8s-worker" in detail
     assert "k8s_worker.enabled=false" in detail
-    assert "oldlab" in detail
+    assert "available x86_64 execution pool" in detail
 
 
 async def test_admin_on_behalf_without_k8s_worker_pool_still_works_when_disabled(

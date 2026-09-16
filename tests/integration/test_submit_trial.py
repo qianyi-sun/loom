@@ -316,7 +316,7 @@ def test_submit_ordinary_task_into_nebius_batch_uses_automatic_pool_binding(
                         TrialTaskImageMaterialization.trial_id == trial.id,
                     )
                 ).all()
-                assert {row.cpu_arch for row in prerequisites} == {"x86_64", "arm64"}
+                assert {row.cpu_arch for row in prerequisites} == {"x86_64"}
                 assert all(row.state == "queued" for row in prerequisites)
     finally:
         with sessions() as session:
@@ -360,7 +360,7 @@ def test_submit_enqueues_and_links_each_required_task_image(
                 .where(TrialTaskImageMaterialization.trial_id == trial_id)
                 .order_by(TaskImageMaterialization.cpu_arch.desc())
             ).all()
-        assert [row.cpu_arch for row in materializations] == ["x86_64", "arm64"]
+        assert [row.cpu_arch for row in materializations] == ["x86_64"]
         assert all(row.state == "queued" for row in materializations)
         assert all(row.task_checksum == "2" * 64 for row in materializations)
     finally:
@@ -422,7 +422,7 @@ def test_idempotent_resubmission_repairs_missing_task_image_links(
                 .where(TrialTaskImageMaterialization.trial_id == trial_id)
                 .order_by(TaskImageMaterialization.cpu_arch)
             ).all()
-        assert repaired_architectures == ["arm64", "x86_64"]
+        assert repaired_architectures == ["x86_64"]
     finally:
         engine.dispose()
 
@@ -940,7 +940,7 @@ def test_idempotent_resubmission_preserves_original_task_image_revision(
                         TrialTaskImageMaterialization.trial_id == trial_id,
                     )
                 ))
-                assert len(original_ids) == 2
+                assert len(original_ids) == 1
                 session.execute(update(Task).where(Task.id == "dockerfile-any").values(
                     checksum="3" * 64, source="s3://loom-tasks/rebuilt-dockerfile-any",
                 ))
@@ -959,6 +959,6 @@ def test_idempotent_resubmission_preserves_original_task_image_revision(
             assert {row.task_source for row in rows} == {"s3://loom-tasks/dockerfile-any"}
             assert session.scalar(select(func.count()).select_from(TaskImageMaterialization).where(
                 TaskImageMaterialization.task_id == "dockerfile-any",
-            )) == 2
+            )) == 1
     finally:
         engine.dispose()
