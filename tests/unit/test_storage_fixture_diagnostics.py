@@ -94,3 +94,67 @@ async def test_successful_fixture_command_returns_exact_production_result(monkey
     monkeypatch.setattr(fixture, "AsyncCommandRunner", Runner)
     assert await fixture._ContainerKubectl("a" * 64).run(["kubectl", "get", "namespace"]) is expected
     assert len(calls) == 1
+
+
+def _retirement_reader_test(monkeypatch, values):
+    from types import SimpleNamespace
+    from tests.integration import test_legacy_writer_retirement_fence as retirement
+
+    clock = [0.0]
+    calls = []
+    monkeypatch.setattr(retirement.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(retirement.time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+
+    class Reader:
+        def list_namespaced_pod(self, namespace, **kwargs):
+            calls.append((namespace, kwargs))
+            value = values.pop(0) if len(values) > 1 else values[0]
+            if isinstance(value, Exception):
+                raise value
+            return SimpleNamespace(items=value)
+
+    return retirement, Reader(), calls
+
+
+def _tls_eof():
+    import ssl
+    from urllib3.exceptions import MaxRetryError, SSLError
+
+    return MaxRetryError(None, "/pods", SSLError(ssl.SSLEOFError(8, "unexpected EOF")))
+
+
+def test_retirement_startup_read_waits_for_pods_after_transient_tls_eof(monkeypatch):
+    from types import SimpleNamespace
+
+    running = [SimpleNamespace(status=SimpleNamespace(phase="Running")) for _ in range(7)]
+    retirement, reader, calls = _retirement_reader_test(monkeypatch, [_tls_eof(), [], running])
+    assert retirement._wait_for_old_writer_pods(reader) is running
+    assert len(calls) == 3
+    assert all(namespace == "loom-staging" and 0 < kwargs["_request_timeout"] <= 5
+               for namespace, kwargs in calls)
+
+
+def test_retirement_startup_tls_eof_cannot_extend_deadline(monkeypatch):
+    retirement, reader, calls = _retirement_reader_test(monkeypatch, [_tls_eof()])
+    with pytest.raises(AssertionError, match="old writers did not start"):
+        retirement._wait_for_old_writer_pods(reader, timeout_seconds=1)
+    assert 1 < len(calls) <= 6
+
+
+@pytest.mark.parametrize("kind", ["certificate", "authorization", "other-ssl", "other-transport"])
+def test_retirement_startup_does_not_retry_other_failures(monkeypatch, kind):
+    import ssl
+    from kubernetes.client.exceptions import ApiException
+    from urllib3.exceptions import MaxRetryError, SSLError
+
+    error = {
+        "certificate": MaxRetryError(None, "/pods", SSLError(ssl.SSLCertVerificationError("bad certificate"))),
+        "authorization": ApiException(status=403),
+        "other-ssl": MaxRetryError(None, "/pods", SSLError("other TLS error")),
+        "other-transport": MaxRetryError(None, "/pods", RuntimeError("other transport error")),
+    }[kind]
+    retirement, reader, calls = _retirement_reader_test(monkeypatch, [error])
+    with pytest.raises(type(error)) as raised:
+        retirement._wait_for_old_writer_pods(reader)
+    assert raised.value is error
+    assert len(calls) == 1
