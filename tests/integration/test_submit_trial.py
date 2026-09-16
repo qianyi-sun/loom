@@ -962,3 +962,63 @@ def test_idempotent_resubmission_preserves_original_task_image_revision(
             )) == 1
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize("task_id", ["hello", "dockerfile-any"])
+def test_arm_submission_returns_400_without_creating_work(
+    app, seed_team, postgres_url: str, task_id: str,
+):  # type: ignore[no-untyped-def]
+    team_id, raw = seed_team
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            task = session.get(Task, task_id)
+            config = dict(task.config)
+            config["environment"] = {**config["environment"], "cpu_arch": "arm64"}
+            task.config = config
+            session.commit()
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/trials", headers={"Authorization": f"Bearer {raw}"},
+                json={"task_id": task_id, "config": {"agent_name": "oracle", "agent_model": None}},
+            )
+        assert response.status_code == 400, response.text
+        assert "x86_64 only" in response.json()["detail"]
+        with sessionmaker(engine)() as session:
+            assert session.scalar(select(func.count()).select_from(Trial)) == 0
+            assert session.scalar(select(func.count()).select_from(TaskImageMaterialization)) == 0
+            assert session.get(TeamQuota, team_id).in_flight_count == 0
+    finally:
+        engine.dispose()
+
+
+def test_historical_arm_idempotent_submission_remains_readable(
+    app, seed_team, postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    team_id, raw = seed_team
+    trial_id = uuid4()
+    key = f"historical-arm-{trial_id}"
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            task = session.get(Task, "hello")
+            config = dict(task.config)
+            config["environment"] = {**config["environment"], "cpu_arch": "arm64"}
+            task.config = config
+            session.add(Trial(id=trial_id, team_id=team_id, task_id=task.id,
+                              idempotency_key=key, state="succeeded", config={}, result={"status": "succeeded"},
+                              requires_caps={"cpu_arch": "arm64"}))
+            session.commit()
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/trials", headers={"Authorization": f"Bearer {raw}"},
+                json={"task_id": "hello", "idempotency_key": key},
+            )
+        assert response.status_code == 201, response.text
+        assert response.json()["trial_id"] == str(trial_id)
+        assert response.json()["state"] == "succeeded"
+        with sessionmaker(engine)() as session:
+            assert session.scalar(select(func.count()).select_from(Trial)) == 1
+            assert session.scalar(select(func.count()).select_from(TaskImageMaterialization)) == 0
+    finally:
+        engine.dispose()
