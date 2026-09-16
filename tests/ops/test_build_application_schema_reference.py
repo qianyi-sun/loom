@@ -76,12 +76,12 @@ async def test_builder_emits_all_fixed_major_profile_pairs(monkeypatch) -> None:
     monkeypatch.setattr(builder, "build_application_schema_reference", build)
     result = await builder._build_profiles()
     assert set(result) == {"16", "17"}
-    assert build.await_count == 88
+    assert build.await_count == 102
     for major in (16, 17):
         profiles = {"legacy-owner", "sealed-owner", "staging-readonly-legacy-owner", "staging-readonly-sealed-owner", "cnpg-staging-legacy-owner", "cnpg-staging-sealed-owner"}
-        assert set(result[str(major)]) == {"0148/guard_0036", "0149/guard_0035", "0148/guard_0035", "0147/guard_0036", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"}
-        for revision in ("0148/guard_0036", "0149/guard_0035", "0148/guard_0035", "0147/guard_0036", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"):
-            assert set(result[str(major)][revision]) == (profiles | {"cnpg-staging-executor-admission"} if revision in {"0148/guard_0036", "0147/guard_0036"} else profiles)
+        assert set(result[str(major)]) == {"0149/guard_0036", "0148/guard_0036", "0149/guard_0035", "0148/guard_0035", "0147/guard_0036", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"}
+        for revision in ("0149/guard_0036", "0148/guard_0036", "0149/guard_0035", "0148/guard_0035", "0147/guard_0036", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"):
+            assert set(result[str(major)][revision]) == (profiles | {"cnpg-staging-executor-admission"} if revision in {"0149/guard_0036", "0148/guard_0036", "0147/guard_0036"} else profiles)
             for profile in profiles:
                 build.assert_any_await(postgres_major=major, profile=profile, revision=revision)
                 assert result[str(major)][revision][profile]["postgres_major"] == major
