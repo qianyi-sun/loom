@@ -737,7 +737,7 @@ description = "Immutable digest-qualified trusted fleet image used for the candi
 [service_config.personal_dev_capacity_pool_capabilities_json]
 used_by     = ["loom-service"]
 python_type = "str"
-default     = '[{"capability_id":"oldlab-x86-none","pool_id":"oldlab","operating_system":"linux","cpu_architecture":"x86_64","gpu_vendor":"none","network_policies":["public"]},{"capability_id":"gb10-arm-none","pool_id":"gb10","operating_system":"linux","cpu_architecture":"arm64","gpu_vendor":"none","network_policies":["public"]}]'
+default     = '[{"capability_id":"oldlab-x86-none","pool_id":"oldlab","operating_system":"linux","cpu_architecture":"x86_64","gpu_vendor":"none","network_policies":["public"]}]'
 description = "Operator-owned physical pool capability offers for arch-specific and arch-neutral task matching. This contract contains no pool weights."
 
 [service_config.personal_dev_capacity_agent_poll_interval_sec]

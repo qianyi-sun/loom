@@ -20,6 +20,7 @@ from loom.db.schema import (
     Trial,
     TrialTaskImageMaterialization,
 )
+from loom.execution_architecture import execution_cpu_arch
 from loom.models.task import TaskConfig
 from loom.task_image_materialization import (
     required_task_image_components,
@@ -296,10 +297,9 @@ async def claim_task_image_materialization(
     nebius_pool_id: str | None = None,
 ) -> TaskImageMaterialization | None:
     """Claim queued work or an expired lease, optionally for native demand only."""
+    cpu_arch = execution_cpu_arch(cpu_arch)
     scope: tuple[ColumnElement[bool], ...] = ()
     if nebius_pool_id is not None:
-        if cpu_arch != "x86_64":
-            raise ValueError("Nebius task image preparation requires x86_64")
         if not nebius_pool_id.strip():
             raise ValueError("nebius_pool_id must not be empty")
         scope = (_nebius_demand_exists(TaskImageMaterialization, pool_id=nebius_pool_id),)

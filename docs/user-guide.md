@@ -10,6 +10,14 @@ Loom's product boundary and architecture are in the
 [repo README](../README.md). Provider setup for hosted APIs and self-hosted
 GPU-cluster vLLM lives in [`provider-onboarding.md`](integrations/provider-onboarding.md).
 
+Loom executes new workloads on **x86_64 (Docker platform `linux/amd64`) only**.
+Architecture-independent tasks (`cpu_arch = "any"`) run and build on x86_64.
+ARM task bundles and worker registration are rejected with an explicit error;
+existing ARM run records remain available for inspection. Using the browser or
+CLI on an Apple Silicon Mac is supported: the client host does not determine
+the remote task architecture. These are the current supported-workload bounds
+for #1548/#1538; older dual-architecture acceptance records are historical.
+
 ## Install
 
 ```bash
