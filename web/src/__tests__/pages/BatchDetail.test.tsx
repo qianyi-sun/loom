@@ -1,5 +1,5 @@
 import { QueryClient } from "@tanstack/react-query";
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -297,6 +297,37 @@ describe("BatchDetail run plan", () => {
     expect(screen.getByText("Defaults only")).toBeInTheDocument();
     expect(screen.queryByText("task_filter")).not.toBeInTheDocument();
     expect(screen.queryByText("trial_config")).not.toBeInTheDocument();
+  });
+
+  it("shows frozen aggregate requests without presenting partial role overrides as totals", async () => {
+    mockBatch({
+      ...BATCH_BODY,
+      backend: "nebius",
+      task_resource_requests: {
+        "task-a": {
+          task_revision_sha256: "sha256:" + "a".repeat(64),
+          requests: {
+            controller: { cpu_millis: 200, memory_mib: 512, ephemeral_storage_mib: 100 },
+            task_sandbox: { cpu_millis: 600, memory_mib: 1024, ephemeral_storage_mib: 300 },
+            verifier_sandbox: { cpu_millis: 200, memory_mib: 512, ephemeral_storage_mib: 100 },
+          },
+        },
+        "task-b": {
+          task_revision_sha256: "sha256:" + "b".repeat(64),
+          requests: {
+            controller: { cpu_millis: 100, memory_mib: 256, ephemeral_storage_mib: 64 },
+          },
+        },
+      },
+    });
+    renderBatchDetail();
+    await userEvent.click(await screen.findByText("Resolved scheduling requests for 2 tasks"));
+    const row = screen.getByText("task-a").closest("tr")!;
+    expect(within(row).getByText("1")).toBeInTheDocument();
+    expect(within(row).getByText("2048")).toBeInTheDocument();
+    expect(within(row).getByText("500")).toBeInTheDocument();
+    expect(screen.getByText("0.1 + role defaults")).toBeInTheDocument();
+    expect(screen.getByText(/not measured usage or task limits/)).toBeInTheDocument();
   });
 
   it("shows durable Nebius lifecycle and canonical readiness counts", async () => {

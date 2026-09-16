@@ -47,6 +47,12 @@ def test_native_build_render_preflight_does_not_import_service_dependencies(
         "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
         **({"cache_bucket": config["buckets"]["artifacts"]} if cache_enabled else {}),
     }
+    config["task_resource_requests"] = {"local/measured-task": {
+        "task_revision_sha256": "sha256:" + "d" * 64,
+        "requests": {"controller": {
+            "cpu_millis": 200, "memory_mib": 512, "ephemeral_storage_mib": 100,
+        }},
+    }}
     inputs = tmp_path / "inputs.json"
     inputs.write_text(json.dumps([config, release, profile]))
     # A fresh process prevents imports already loaded by pytest from masking

@@ -786,6 +786,8 @@ export interface components {
             provider_used_vcpu_millis: number;
             provider_quota_vcpu_millis_headroom: number;
             active_nodes: number;
+            occupied_nodes?: number | null;
+            draining_nodes?: number | null;
             node_states: {
               desired: number;
               creating: number;
@@ -1374,7 +1376,16 @@ export interface components {
       not_rerunnable: components["schemas"]["RerunTarget"][];
       final_trial_selection: components["schemas"]["FinalTrialSelection"][];
     };
+    TaskResourceRequests: {
+      task_revision_sha256: string;
+      requests: Partial<Record<"controller" | "task_sandbox" | "verifier_sandbox", {
+        cpu_millis: number;
+        memory_mib: number;
+        ephemeral_storage_mib: number;
+      }>>;
+    };
     BatchDetail: components["schemas"]["Batch"] & {
+      task_resource_requests?: Record<string, components["schemas"]["TaskResourceRequests"]>;
       trial_summary: Record<string, number>;
       service_execution_summary?: {
         lease_count: number;

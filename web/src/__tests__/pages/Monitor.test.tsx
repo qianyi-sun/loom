@@ -131,7 +131,11 @@ const monitorSummaryPayload = {
         policy: { max_nodes: 8 },
         observation: {
           is_fresh: true,
-          active_nodes: 2,
+          active_nodes: 9,
+          occupied_nodes: 1,
+          draining_nodes: 2,
+          observed_at: "2026-09-16T17:53:11Z",
+          fresh_until: "2026-09-16T17:55:11Z",
           node_states: {
             desired: 3,
             creating: 1,
@@ -577,7 +581,11 @@ describe("Monitor human-readable labels", () => {
     expect(screen.getByText("12 slots")).toBeInTheDocument();
     expect(screen.getByText("42 slots")).toBeInTheDocument();
     expect(screen.getByText(/128 \/ 200 vCPU/)).toBeInTheDocument();
-    expect(screen.getByText(/Nodes: desired 3 · creating 1 · ready 2/)).toBeInTheDocument();
+    expect(screen.getByText(/Nodes: desired 3 · provisioning \(estimated\) 1 · ready 2 · occupied 1 · draining 2/)).toBeInTheDocument();
+    expect(screen.getByText(/Configured node maximum: 8/)).toBeInTheDocument();
+    expect(screen.getByText(/it is not occupied nodes or quota/)).toBeInTheDocument();
+    expect(screen.queryByText("9 / 8")).not.toBeInTheDocument();
+    expect(screen.getByText(/fresh until:/)).toBeInTheDocument();
     expect(screen.getByText("120s")).toBeInTheDocument();
     expect(screen.getByText("Lifecycle: succeeded 54 · materializing 1 · output_unavailable 1")).toBeInTheDocument();
     expect(screen.getByText("Provider execution: finalized 56")).toBeInTheDocument();
@@ -682,6 +690,22 @@ describe("Monitor human-readable labels", () => {
     renderWithProviders(<Monitor />, { route: "/monitor?view=trials" });
 
     expect(await screen.findByText("3 queued")).toBeInTheDocument();
+  });
+
+  it("does not display legacy missing occupancy or draining observations as zero", async () => {
+    const target = monitorSummaryPayload.service_execution.targets[0];
+    mockMonitorEndpoints({
+      ...monitorSummaryPayload,
+      service_execution: {
+        ...monitorSummaryPayload.service_execution,
+        targets: [{
+          ...target,
+          observation: { ...target.observation, occupied_nodes: null, draining_nodes: null },
+        }],
+      },
+    });
+    renderWithProviders(<Monitor />, { route: "/monitor?view=batches" });
+    expect(await screen.findByText(/occupied unknown · draining unknown/)).toBeInTheDocument();
   });
 
   it("shows stale Nebius capacity, blockers, and empty lifecycle evidence explicitly", async () => {
