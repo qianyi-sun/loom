@@ -23,7 +23,7 @@ import httpx
 
 from loom.attempt_deadline import AttemptDeadline
 from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
-from loom.errors import AgentError, DriverError
+from loom.errors import AgentError, DriverError, exception_info
 from loom.models.capabilities import Capabilities
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
@@ -154,6 +154,9 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
             if deadline is None or not deadline.reached or not agent_entered:
                 raise
             timed_out = True
+        except Exception as exc:
+            _write_json_atomic(output / "exception.json", exception_info(exc).model_dump(mode="json"))
+            raise
         finally:
             finalizing = True
             # This budget permits only local accounting, quiescence and a
@@ -278,7 +281,18 @@ def main() -> None:
         task = normalize_steps(TaskConfig.model_validate(tomllib.load(stream)))
     trial = TrialConfig.model_validate_json(os.environ["LOOM_TASK_TRIAL_JSON"])
     phase = run_agent if args.phase == "terminus-2" else run_verifier
-    asyncio.run(phase(workspace, task, trial))
+    try:
+        asyncio.run(phase(workspace, task, trial))
+    except AgentTimeoutFinalizedError:
+        raise
+    except Exception as exc:
+        directory = "agent" if args.phase == "terminus-2" else "verifier"
+        path = workspace / ".loom" / directory / "exception.json"
+        # An agent failure is captured before cleanup, which can also fail.
+        # Keep that original identity instead of replacing it during unwinding.
+        if not path.exists():
+            _write_json_atomic(path, exception_info(exc).model_dump(mode="json"))
+        raise
 
 
 if __name__ == "__main__":

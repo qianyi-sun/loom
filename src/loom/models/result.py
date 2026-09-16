@@ -7,11 +7,12 @@ from enum import StrEnum
 from typing import Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
 from loom.models.verifier import VerifierResult
+from loom.security.redaction import redact_text
 
 
 class TrialState(StrEnum):
@@ -57,11 +58,26 @@ class AgentInfo(BaseModel):
     model: ModelSpec | None = None
 
 
+class ExceptionInfo(BaseModel):
+    """Sanitized exception identity, independent of Loom's retry taxonomy."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    exception_type: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z_][A-Za-z0-9_.]*$")
+    exception_message: str = Field(max_length=2000)
+    occurred_at: datetime
+
+    @field_validator("exception_message")
+    @classmethod
+    def redact_message(cls, value: str) -> str:
+        return redact_text(value, limit=2000)
+
+
 class StepError(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     phase: Literal["prepare", "agent", "artifacts", "verifier"]
     reason: Literal["timeout", "exception", "missing_artifacts", "cancelled"]
     message: str
+    exception_type: str | None = None
     traceback: str | None = None
     occurred_at: datetime
 
