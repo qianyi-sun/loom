@@ -140,12 +140,14 @@ def test_protected_writer_grants_have_distinct_reference_and_explicit_history(ma
 
 @pytest.mark.parametrize("major", [16, 17])
 @pytest.mark.parametrize("profile", ["legacy-owner", "sealed-owner", "staging-readonly-legacy-owner", "staging-readonly-sealed-owner", "cnpg-staging-legacy-owner", "cnpg-staging-sealed-owner", "cnpg-staging-executor-admission"])
-def test_execution_journal_head_preserves_prior_reference(major, profile):
+@pytest.mark.parametrize("prior_head", ["0147", "0148"])
+def test_capacity_wait_head_preserves_prior_reference(major, profile, prior_head):
     from loom.application_schema_reference import application_schema_revision
     current = application_schema_reference(profile=profile, postgres_major=major)
-    historical = application_schema_reference(profile=profile, postgres_major=major, revision="0147/guard_0036")
+    historical = application_schema_reference(profile=profile, postgres_major=major, revision=f"{prior_head}/guard_0036")
     assert current.application_head == "0149"
-    assert historical.application_head == "0147"
+    assert historical.application_head == prior_head
     assert current.inventory_sha256 != historical.inventory_sha256
     assert current.object_count > historical.object_count
-    assert application_schema_revision(public_revision="0148", guard_revision="guard_0036") == "0148/guard_0036"
+    assert application_schema_revision(public_revision=prior_head, guard_revision="guard_0036") == f"{prior_head}/guard_0036"
+    assert application_schema_revision(public_revision="0149", guard_revision="guard_0036") == "0149/guard_0036"

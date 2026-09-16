@@ -399,6 +399,23 @@ def test_committed_staging_manifest_carries_partition_authority_into_release_gat
     assert check.outcome == "pass"
     assert check.evidence["authority_verified"] is True
 
+    assert manifest["external_workers"]["external_slurm_runner_prerequisites"][
+        "retained_inactive_supervisor_pools"
+    ] == ["gb10", "oldlab"]
+    assert check.evidence["policy_enabled"] is False
+    supervisors = [
+        row for row in manifest["external_workers"]["external_slurm_autoscaler_supervisors"]
+        if row["pool_name"] in {"gb10", "oldlab"}
+    ]
+    assert len(supervisors) == 2
+    assert all(row["enabled"] is False and row["active"] is False for row in supervisors)
+    supervisors[0]["active"] = True
+    changed = _external_slurm_acceptance_check(
+        manifest, authority_artifact=_valid_gb10_authority(manifest),
+    )
+    assert changed is not None and changed.outcome == "fail"
+    assert "external_slurm_retained_inactive_supervisors_invalid" in changed.evidence["blockers"]
+
 
 def test_release_gate_rejects_malformed_partition_node_inventory() -> None:
     manifest = _manifest(external_workers=_external_gb10_workers(enabled=True))

@@ -63,7 +63,7 @@ def transfer_application_ownership(
     admission_target: ApplicationDatabaseAdmissionTarget | None = None,
     coordination_guard: ApplicationDatabaseCoordinationGuard | None = None,
     schema_acl_profile: ApplicationSchemaAclProfile = "application-only",
-    schema_revision: ApplicationSchemaRevision = "0148/guard_0036",
+    schema_revision: ApplicationSchemaRevision = "0149/guard_0036",
 ) -> None:
     """Transfer an admitted legacy database, or validate an exact sealed replay.
 

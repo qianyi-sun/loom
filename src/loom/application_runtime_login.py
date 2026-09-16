@@ -55,7 +55,7 @@ def observe_application_runtime_login(
     password: str,
     target: ApplicationDatabaseAdmissionTarget,
     schema_acl_profile: ApplicationSchemaAclProfile = "application-only",
-    schema_revision: ApplicationSchemaRevision = "0148/guard_0036",
+    schema_revision: ApplicationSchemaRevision = "0149/guard_0036",
     coordination_guard: ApplicationDatabaseCoordinationGuard | None = None,
 ) -> ApplicationRuntimeLoginState:
     """Classify a saved restoration without changing login, password or grants.
@@ -80,7 +80,7 @@ def restore_application_runtime_login(
     password: str,
     target: ApplicationDatabaseAdmissionTarget,
     schema_acl_profile: ApplicationSchemaAclProfile = "application-only",
-    schema_revision: ApplicationSchemaRevision = "0148/guard_0036",
+    schema_revision: ApplicationSchemaRevision = "0149/guard_0036",
     coordination_guard: ApplicationDatabaseCoordinationGuard | None = None,
 ) -> None:
     """Commit login for the former owner only after exact sealed-profile admission.
@@ -110,7 +110,7 @@ def seal_application_runtime_for_cutover(
     target: ApplicationDatabaseAdmissionTarget,
     coordination_guard: ApplicationDatabaseCoordinationGuard,
     schema_acl_profile: ApplicationSchemaAclProfile = "application-only",
-    schema_revision: ApplicationSchemaRevision = "0148/guard_0036",
+    schema_revision: ApplicationSchemaRevision = "0149/guard_0036",
 ) -> None:
     """Commit NOLOGIN for the exact separated runtime, preserving its verifier.
 

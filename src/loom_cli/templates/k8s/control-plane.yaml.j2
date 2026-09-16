@@ -73,9 +73,9 @@ spec:
 {% endif %}
             - name: LOOM_CP_ADMIN_SECRET_FILE
               value: "/var/run/loom/secrets/admin/secrets.toml"
-{% if runtime_environment == "staging" %}
             - name: LOOM_CP_PROTECTED_TRIAL_CUTOVER_ENABLED
-              value: "true"
+              value: "{{ 'true' if runtime_environment == 'staging' else 'false' }}"
+{% if runtime_environment == "staging" %}
             - name: LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE
               value: "/run/loom/protected-worker-runtime/files/database-url"
 {% endif %}

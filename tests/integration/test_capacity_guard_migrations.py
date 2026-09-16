@@ -40,6 +40,7 @@ EXPECTED_GUARD_TABLES = {
     "atomic_trial_submissions",
     "trial_requirements",
     "trial_attempts",
+    "trial_adoptions",
     "trial_writer_fence",
     "trial_writer_mutations",
     "trial_mutation_permits",

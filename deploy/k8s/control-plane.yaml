@@ -191,6 +191,8 @@ spec:
           value: '30'
         - name: LOOM_CP_ADMIN_SECRET_FILE
           value: /var/run/loom/secrets/admin/secrets.toml
+        - name: LOOM_CP_PROTECTED_TRIAL_CUTOVER_ENABLED
+          value: 'false'
         - name: LOOM_ENV
           value: production
         - name: LOOM_NAMESPACE

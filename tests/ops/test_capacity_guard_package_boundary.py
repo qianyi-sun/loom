@@ -149,6 +149,12 @@ def test_capacity_agent_has_no_pool_mutation_or_candidate_runtime_wiring() -> No
         Path("src/loom_cli/rollout/operator/installed_execution_authority.py"): {
             "loom_capacity_agent.legacy_fence",
         },
+        Path("src/loom_cli/rollout/operator/protected_trial_writer_control.py"): {
+            "loom_capacity_agent.contracts",
+        },
+        # The module name occurs only inside a CEL policy expression; no import
+        # or standalone module string may acquire runtime wiring here.
+        Path("src/loom_cli/rollout/operator/protected_legacy_writer_fence.py"): set(),
         Path("src/loom_cli/rollout/operator/legacy_writer_freeze_ceremony.py"): {
             "loom_capacity_agent.contracts",
             "loom_capacity_agent.legacy_fence",

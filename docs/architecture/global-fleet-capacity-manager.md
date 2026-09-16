@@ -513,13 +513,15 @@ These observations are not trusted reference artifacts or ownership-transfer
 receipts. The runtime package now bundles separate PostgreSQL-major-bound
 legacy-owner and sealed-owner references for the reviewed pairs
 `0134` / `guard_0030`, `0142` / `guard_0035`, `0147` / `guard_0035` and
-`0147` / `guard_0036`, `0148` / `guard_0035`, and current `0148` / `guard_0036`.
+`0147` / `guard_0036`, `0148` / `guard_0035`, `0148` / `guard_0036`,
+`0149` / `guard_0035`, and current `0149` / `guard_0036`.
 The 0142 pair includes the publication/keyset, task-source, personal
 membership, incarnation-storage and build-platform objects introduced by
 application migrations `0135`–`0142`. The 0147 pair additionally includes
 the reviewed build-grant constraint, reward backfill, zero-quota constraint and
-native build observation and refundable legacy-claim identity changes. The current 0148 pair additionally covers the signed task-image execution revision
-and one-use start journals. Its six public profiles and executor-admission
+native build observation and refundable legacy-claim identity changes. The 0148 pairs additionally cover the signed task-image execution revision
+and one-use start journals. The current 0149 pair also includes task-image capacity
+wait state. Its six public profiles and executor-admission
 profile are independently provisioned twice on each PostgreSQL major. Older
 reference pins remain available for their explicit historical revisions. The trial-writer migration follows the
 native-reader fence (`guard_0031`), typed-terminal importer (`guard_0032`) and

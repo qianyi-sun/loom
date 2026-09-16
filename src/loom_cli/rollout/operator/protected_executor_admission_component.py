@@ -221,4 +221,4 @@ def require_executor_schema(connection: ApplicationDatabaseConnection, *, issued
             "loom": "application-runtime", APPLICATION_OWNER_ROLE: "application-owner", "postgres": "provisioner",
             **{f"loom_cap_staging_{role}": f"guard-{role}" for role in ("owner", "migrator", "agent", "executor", "observer", "runtime")},
         })
-        require_application_schema_reference(observed, profile=profile, revision="0148/guard_0036")
+        require_application_schema_reference(observed, profile=profile, revision="0149/guard_0036")

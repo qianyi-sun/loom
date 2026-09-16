@@ -39,7 +39,7 @@ def _operation(tmp_path, postgres, guard, arguments):
         plan_digest="a" * 64, credential_binding_sha256="b" * 64,
         target=arguments["target"], coordination_guard=arguments["coordination_guard"],
         role_bindings=arguments["role_bindings"], password=arguments["password"],
-        schema_acl_profile="staging-readonly", schema_revision="0148/guard_0036",
+        schema_acl_profile="staging-readonly", schema_revision="0149/guard_0036",
         runner=Runner(), authority_check=check,
     )
 

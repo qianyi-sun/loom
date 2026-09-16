@@ -82,7 +82,13 @@ def test_schema_label_rollback_retains_reader_fence_and_reupgrade_is_exact(
     engine = create_engine(capacity_guard_database["admin_url"])
     try:
         with engine.connect() as connection:
+            current = _installed(connection)
+        command.downgrade(config, "guard_0031")
+        with engine.connect() as connection:
             before = _installed(connection)
+            assert before["definition"].count(
+                "materialization.ready_publication_operation_id IS NULL"
+            ) == 2
         command.downgrade(config, "guard_0030")
         with engine.connect() as connection:
             assert _installed(connection) == before
@@ -97,6 +103,9 @@ def test_schema_label_rollback_retains_reader_fence_and_reupgrade_is_exact(
         command.upgrade(config, "guard_0031")
         with engine.connect() as connection:
             assert _installed(connection) == before
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            assert _installed(connection) == current
     finally:
         engine.dispose()
 

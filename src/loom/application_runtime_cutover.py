@@ -46,7 +46,7 @@ def close_application_runtime_for_cutover(
     role_bindings: Mapping[str, str],
     password: str,
     schema_acl_profile: ApplicationSchemaAclProfile,
-    schema_revision: ApplicationSchemaRevision = "0148/guard_0036",
+    schema_revision: ApplicationSchemaRevision = "0149/guard_0036",
 ) -> ApplicationRuntimeCutoverOutcome:
     """Seal, close and retire only the runtime, then refuse other client work.
 
