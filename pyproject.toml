@@ -295,18 +295,14 @@ module = [
 ignore_missing_imports = true
 
 [tool.coverage.paths]
-# Coverage shards can run on GitHub-hosted or oldlab ephemeral runners while
-# the aggregation jobs intentionally remain GitHub-hosted. Normalize both
-# checkout roots before combining their binary coverage data.
+# Normalize local and GitHub-hosted checkout roots for coverage aggregation.
 source = [
   "src",
   "/home/runner/work/*/*/src",
-  "/opt/actions-runner/_work/*/*/src",
 ]
 packages = [
   "packages",
   "/home/runner/work/*/*/packages",
-  "/opt/actions-runner/_work/*/*/packages",
 ]
 
 [tool.pytest.ini_options]

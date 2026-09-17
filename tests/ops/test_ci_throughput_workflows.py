@@ -224,7 +224,11 @@ def test_go_checks_executes_required_python_go_v2_handoff() -> None:
     )
 
 
-def test_coverage_artifacts_map_hosted_and_oldlab_checkout_roots() -> None:
+
+
+
+
+def test_coverage_artifacts_map_hosted_checkout_roots() -> None:
     config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     paths = config["tool"]["coverage"]["paths"]
 
@@ -232,7 +236,6 @@ def test_coverage_artifacts_map_hosted_and_oldlab_checkout_roots() -> None:
         assert paths[path_group] == [
             source_root,
             f"/home/runner/work/*/*/{source_root}",
-            f"/opt/actions-runner/_work/*/*/{source_root}",
         ]
 
 
