@@ -31,7 +31,11 @@ from loom.execution_architecture import execution_cpu_arch
 from loom.llm_call_ledger import serialize_llm_call
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
-from loom.service_execution_backend import NEBIUS_BACKEND, NEBIUS_LOGICAL_POOL_ID
+from loom.service_execution_backend import (
+    NEBIUS_BACKEND,
+    NEBIUS_LOGICAL_POOL_ID,
+    local_execution_enabled,
+)
 from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
     automatic_service_execution_rejections,
@@ -74,6 +78,8 @@ def _resolve_required_worker_pool_for_backend(
     """Map an explicit user backend to exactly one execution mechanism."""
 
     if batch_backend != NEBIUS_BACKEND:
+        if not local_execution_enabled():
+            raise HTTPException(status_code=400, detail="Hosted execution supports Nebius only")
         if requested_pool == NEBIUS_LOGICAL_POOL_ID:
             raise HTTPException(
                 status_code=400,
@@ -208,7 +214,7 @@ async def submit_trial(
     # tenant from the parent batch row.
     batch_id = payload.get("batch_id")
     batch_team_id: UUID | None = None
-    batch_backend = "docker"
+    batch_backend = "docker" if local_execution_enabled() else NEBIUS_BACKEND
     batch_submitter_user_id: UUID | None = None
     batch_usage_user_id: UUID | None = None
     batch_usage_actor: str | None = None

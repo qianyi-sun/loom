@@ -980,15 +980,15 @@ export default function NewBatch(): JSX.Element {
     );
   }, [batchPurpose]);
 
-  // Default-pick the backend once the catalog loads: docker if
+  // Default-pick the backend once the catalog loads: Nebius if
   // advertised, else the first `available` backend, else the first
   // entry. Skips when the user has already picked one.
   useEffect(() => {
     if (backend || !backends.data) return;
     const items = backends.data.items;
-    const docker = items.find((b) => b.name === "docker");
+    const nebius = items.find((b) => b.name === "nebius");
     const firstLive = items.find((b) => b.available);
-    const pick = docker ?? firstLive ?? items[0];
+    const pick = nebius ?? firstLive ?? items[0];
     if (pick) setBackend(pick.name);
   }, [backend, backends.data]);
 
@@ -1711,8 +1711,9 @@ export default function NewBatch(): JSX.Element {
                   </Help>
                 ) : (
                   <Help>
-                    Execution sandbox for each trial. Loom does not fall back
-                    across backends.
+                    Hosted trials run on Nebius Kubernetes. Local development
+                    can use explicitly configured local workers. Unsupported
+                    workloads must be converted before hosted submission.
                   </Help>
                 )}
               </label>

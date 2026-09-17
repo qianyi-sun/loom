@@ -43,10 +43,10 @@ and artifact storage and calls configured inference providers directly.
 The Driver protocol remains useful for local Docker and disposable test drivers;
 it is not a catalog of supported hosted backends.
 
-The disposable Compose stack explicitly sets `LOOM_ENV=local`. Only that explicit
-environment permits worker backends in the service catalog and admission path.
-Missing configuration and the development, staging and production environments
-all use the Nebius-only hosted boundary. See [CLI mode](cli-mode.md).
+The disposable Compose stack explicitly sets `LOOM_LOCAL_EXECUTION=1` with
+`LOOM_ENV=development`. This opt-in permits worker backends in its service
+catalog and admission path. The default is hosted Nebius execution; staging
+and production cannot enable local worker admission. See [CLI mode](cli-mode.md).
 
 ## Workload and data boundaries
 

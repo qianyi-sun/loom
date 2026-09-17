@@ -54,7 +54,11 @@ from loom.pipeline.keys import canonical_digest
 from loom.request_params import sanitize_request_extras
 from loom.resource_usage_store import resource_usage_response
 from loom.security.redaction import redact_mapping, redact_text
-from loom.service_execution_backend import NEBIUS_BACKEND, NEBIUS_LOGICAL_POOL_ID
+from loom.service_execution_backend import (
+    NEBIUS_BACKEND,
+    NEBIUS_LOGICAL_POOL_ID,
+    local_execution_enabled,
+)
 from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
     TaskExecutionResourceRequestsV1,
@@ -143,9 +147,7 @@ from loom_service.usage_accounting import (
     cost_meta_filter as _cost_meta_filter,
 )
 from loom_service.worker_backends import (
-    compatible_cold_start_pool_names,
     get_active_backends,
-    get_cold_start_pools,
     get_service_execution_backend_pools,
     runtime_environment,
 )
@@ -237,10 +239,8 @@ class _CreateBatch(BaseModel):
     # when `combinations` is non-empty (each Combination carries
     # its own n_per_task).
     n_per_task: int = Field(default=1, ge=1, le=100)
-    # Plan 28 PR-3: backend selection at the batch level. Optional;
-    # defaults to "docker" so single-backend deployments don't have
-    # to send it.
-    backend: str = "docker"
+    # Hosted submissions default to Nebius. Disposable local stacks use Docker.
+    backend: str = Field(default_factory=lambda: "docker" if local_execution_enabled() else NEBIUS_BACKEND)
     # Plan 28 PR-3: multi-(agent, model) combinations. Empty list
     # ⇒ single-combination behavior (agent + model come from
     # trial_config).
@@ -505,12 +505,13 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
     resolve_versions: bool = True,
     automatic_only: bool = False,
 ) -> ServiceExecutionRuntimeProfileV1 | None:
-    """Require fresh execution capacity or a compatible cold-start policy.
-
-    A healthy autoscaler policy only authorizes persisting queued demand.  It
-    remains distinct from a fresh worker and therefore never changes the
-    backend catalog's ``available`` truth value.
-    """
+    """Require a native target, or a worker in explicit local development."""
+    if backend != NEBIUS_BACKEND and not local_execution_enabled():
+        _reject_submission(
+            reason="unsupported_hosted_backend", status_code=400,
+            detail={"reason": "unsupported_hosted_backend", "backend": backend,
+                    "message": "Hosted execution supports Nebius only."},
+        )
     selection_configs = [
         combo.model_dump(mode="json") if isinstance(combo, Combination) else combo
         for combo in combinations
@@ -530,9 +531,6 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
         str(task_id): (TaskConfig.model_validate(config), dict(source_provenance or {}))
         for task_id, config, source_provenance in task_rows
     }
-    task_configs = tuple(
-        configs_by_id[task_id][0] for task_id in task_ids if task_id in configs_by_id
-    )
     if backend == NEBIUS_BACKEND:
         parsed_trials: tuple[TrialConfig, ...] | None = None
         parsed_trial_error = False
@@ -649,28 +647,11 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
     active_backends = await get_active_backends(session)
     if backend in active_backends:
         return None
-    cold_start_pools = await get_cold_start_pools(session)
-    compatible_pools = compatible_cold_start_pool_names(
-        cold_start_pools,
-        backend=backend,
-        task_configs=task_configs,
-    )
-    if len(task_configs) == len(task_ids) and compatible_pools:
-        return None
-
-    available_str = (
-        ", ".join(sorted(active_backends)) if active_backends else "(none — no active workers)"
-    )
-    environment = runtime_environment()
+    available_str = ", ".join(sorted(active_backends)) or "(none — no active workers)"
     _reject_submission(
-        reason="no_workers",
-        status_code=400,
-        detail=(
-            f"no active worker advertises backend {backend!r}. "
-            f"Currently available: {available_str}; no healthy autoscaled "
-            f"pool in environment {environment!r} can cold-start all selected "
-            "tasks for that backend. See `GET /api/v1/backends`."
-        ),
+        reason="no_workers", status_code=400,
+        detail=(f"no active worker advertises backend {backend!r}. "
+                f"Currently available: {available_str}. Start a local worker."),
     )
 
 
