@@ -21,54 +21,18 @@ port-forward (``kubectl port-forward deploy/loom-control-plane 8080:8080``).
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import httpx
 
 from loom.security.redaction import RedactedEnvironmentEntry, redact_environment_mapping
-from loom_cli.cluster_backup_guard import is_protected_environment
-from loom_cli.gb10_release_gate import gb10_release_target_mismatches
-from loom_cli.rollout_lock import (
-    DEFAULT_ROLLOUT_LOCK_TTL_SECONDS,
-    RolloutAttribution,
-    RolloutLease,
-    RolloutLeaseError,
-    RolloutLeaseManager,
-    default_rollout_lock_dir,
-    rollout_owner_id,
-)
-from loom_cli.rollout_lock_cli import (
-    BROKER_LOCK_OPTIONS as _BROKER_LOCK_OPTIONS,
-)
-from loom_cli.rollout_lock_cli import (
-    EXPLICIT_ROLLOUT_LOCK_OPTIONS_ATTR as _EXPLICIT_ROLLOUT_LOCK_OPTIONS_ATTR,
-)
-from loom_cli.rollout_lock_cli import (
-    add_rollout_lock_args as _add_rollout_lock_args,
-)
-from loom_cli.rollout_lock_cli import (
-    fixed_rollout_lock_evidence_path as _fixed_rollout_lock_evidence_path,
-)
-from loom_cli.rollout_lock_cli import (
-    load_broker_rollout_envelope as _load_broker_rollout_envelope,
-)
-from loom_cli.rollout_lock_cli import (
-    require_real_directory as _require_real_directory,
-)
-from loom_cli.rollout_lock_cli import (
-    require_real_file as _require_real_file,
-)
 from loom_cli.secret_source import (
     SecretSourceError,
-    resolve_secret_source,
-    secret_source_argparse_type,
 )
 from loom_cli.server_client import (
     HttpStatusError,
@@ -77,9 +41,6 @@ from loom_cli.server_client import (
     authed_client,
     require_logged_in,
 )
-
-if TYPE_CHECKING:
-    from loom_cli.environment_state import EnvironmentStateProfile
 
 # Same constraint as the CP route: prefix must be hex, 4-64 chars.
 # Catching this client-side avoids a round-trip just to hit the 400.
@@ -91,12 +52,6 @@ _DEFAULT_ADMIN_TOKEN_SOURCE = "env:LOOM_ADMIN_TOKEN"
 _DEFAULT_ENV_DIAGNOSTIC_PREFIX = "LOOM_"
 
 
-@dataclass(frozen=True, slots=True)
-class _EnvironmentStateBrokerBinding:
-    config: Any
-    envelope: Any
-    evidence_path: Path
-    attribution: RolloutAttribution
 
 
 def _env_diagnostic_value(entry: RedactedEnvironmentEntry) -> str:
@@ -134,234 +89,20 @@ def _env_diagnostics(args: argparse.Namespace) -> int:
     return 0
 
 
-def _expected_broker_environment_profile(config: Any, envelope: Any) -> Path:
-    from loom_cli.cluster_config import load_cluster_config
-
-    rollout_dir = Path(config.rollout_root) / "rollouts" / str(envelope.rollout_id)
-    candidate_root = rollout_dir / "01-worktree" / "src"
-    _require_real_directory(candidate_root, label="broker candidate worktree")
-    try:
-        relative_config = Path(config.cluster_config_path).relative_to(config.runner_repo)
-    except ValueError as exc:
-        raise ValueError("configured staging cluster profile is outside the runner repo") from exc
-    candidate_config = candidate_root / relative_config
-    _require_real_file(candidate_config, label="broker candidate cluster config")
-    cluster_config = load_cluster_config(candidate_config)
-    profile_value = str(cluster_config.env_state_profile or "").strip()
-    if not profile_value:
-        raise ValueError("broker candidate cluster config has no environment-state profile")
-    profile = Path(profile_value)
-    if profile.is_absolute():
-        expected = profile
-    else:
-        expected = Path(os.path.normpath(candidate_config.parent / profile))
-    try:
-        expected.relative_to(candidate_root)
-    except ValueError as exc:
-        raise ValueError("broker environment-state profile escapes candidate worktree") from exc
-    _require_real_file(expected, label="broker environment-state profile")
-    return expected
 
 
-def _validate_broker_environment_state_inputs(
-    args: argparse.Namespace,
-    config: Any,
-    envelope: Any,
-    *,
-    operation: str,
-) -> Path:
-    if envelope.environment != "staging" or args.environment != envelope.environment:
-        raise ValueError("environment-state target does not match broker envelope")
-    if args.cp_url != envelope.cp_url:
-        raise ValueError("environment-state CP URL does not match broker envelope")
-    if args.admin_token != envelope.admin_token_source:
-        raise ValueError("environment-state admin token source does not match broker envelope")
-    if args.expect_admin_token_fingerprint != envelope.expect_admin_token_fingerprint:
-        raise ValueError("environment-state token fingerprint does not match broker envelope")
-    if operation == "check" and args.worker_token != envelope.worker_token_source:
-        raise ValueError("environment-state worker token source does not match broker envelope")
-    expected_profile = _expected_broker_environment_profile(config, envelope)
-    if Path(args.file) != expected_profile:
-        raise ValueError("environment-state profile path does not match broker rollout")
-    if list(args.var) != [
-        f"IMAGE_TAG={envelope.image_tag}",
-        f"ENV_CONFIG_VERSION={envelope.image_tag}",
-        f"GIT_SHA={envelope.resolved_sha}",
-    ]:
-        raise ValueError("environment-state release variables do not match broker envelope")
-    expected_format = "json" if operation == "check" else "text"
-    if args.format != expected_format:
-        raise ValueError("environment-state output format does not match broker rollout")
-    return _fixed_rollout_lock_evidence_path(
-        config,
-        envelope,
-        step_directory="11-env-state",
-    )
 
 
-def _validate_broker_environment_state_profile(
-    profile: EnvironmentStateProfile,
-    envelope: Any,
-) -> None:
-    if (
-        profile.environment != envelope.environment
-        or profile.control_plane_environment != envelope.environment
-    ):
-        raise ValueError("environment-state profile targets do not match broker envelope")
 
 
-def _reject_broker_lock_overrides_before_profile(args: argparse.Namespace) -> None:
-    if getattr(args, "rollout_request_envelope", None) is None:
-        return
-    explicit = set(getattr(args, _EXPLICIT_ROLLOUT_LOCK_OPTIONS_ATTR, ()))
-    if explicit & _BROKER_LOCK_OPTIONS:
-        raise ValueError("manual rollout lock overrides are forbidden in broker mode")
 
 
-def _prepare_environment_state_broker_binding(
-    args: argparse.Namespace,
-    *,
-    operation: str,
-) -> _EnvironmentStateBrokerBinding | None:
-    envelope_path = getattr(args, "rollout_request_envelope", None)
-    if envelope_path is None:
-        if args.environment == "staging" and is_protected_environment(
-            environment=args.environment,
-            namespace=args.environment,
-        ):
-            raise ValueError(
-                "broker-created request envelope is required for staging environment-state"
-            )
-        return None
-    _reject_broker_lock_overrides_before_profile(args)
-    config, envelope = _load_broker_rollout_envelope(Path(envelope_path))
-    evidence_path = _validate_broker_environment_state_inputs(
-        args,
-        config,
-        envelope,
-        operation=operation,
-    )
-    return _EnvironmentStateBrokerBinding(
-        config=config,
-        envelope=envelope,
-        evidence_path=evidence_path,
-        attribution=RolloutAttribution(
-            request_id=envelope.request_id,
-            initiating_operator=envelope.initiating_operator,
-            initiating_uid=envelope.initiating_uid,
-            attempt_number=envelope.attempt_number,
-            attempt_operator=envelope.attempt_operator,
-            attempt_uid=envelope.attempt_uid,
-        ),
-    )
 
 
-def _protected_environment_state_target(
-    args: argparse.Namespace,
-    profile: EnvironmentStateProfile,
-) -> str | None:
-    protected_targets: list[str] = []
-    for target in dict.fromkeys(
-        (
-            str(args.environment),
-            profile.environment,
-            profile.control_plane_environment,
-        )
-    ):
-        if is_protected_environment(environment=target, namespace=target):
-            protected_targets.append(target)
-    if "staging" in protected_targets:
-        return "staging"
-    if "production" in protected_targets:
-        return "production"
-    return None
 
 
-def _acquire_environment_state_rollout_lock(
-    args: argparse.Namespace,
-    *,
-    operation: str,
-    profile: EnvironmentStateProfile,
-    broker_binding: _EnvironmentStateBrokerBinding | None,
-) -> RolloutLease | None:
-    environment = _protected_environment_state_target(args, profile)
-    if environment is None:
-        return None
-    if environment == "staging":
-        if broker_binding is None:
-            raise ValueError(
-                "broker-created request envelope is required for staging environment-state"
-            )
-        _validate_broker_environment_state_profile(
-            profile,
-            broker_binding.envelope,
-        )
-    manager = RolloutLeaseManager(
-        Path(broker_binding.config.runtime_root) / "mutation-locks"
-        if broker_binding is not None
-        else args.rollout_lock_dir or default_rollout_lock_dir()
-    )
-    try:
-        lease = manager.acquire(
-            environment=environment,
-            owner_id=(
-                broker_binding.envelope.rollout_id
-                if broker_binding is not None
-                else rollout_owner_id(environment, args.rollout_id)
-            ),
-            ttl_seconds=(
-                DEFAULT_ROLLOUT_LOCK_TTL_SECONDS
-                if broker_binding is not None
-                else args.rollout_lock_ttl_seconds
-            ),
-            command=[
-                "loom",
-                "admin",
-                "environment-state",
-                operation,
-                "--environment",
-                args.environment,
-                "--file",
-                str(args.file),
-            ],
-            evidence_path=(
-                broker_binding.evidence_path
-                if broker_binding is not None
-                else args.rollout_lock_evidence
-            ),
-            force=False if broker_binding is not None else args.force_rollout_lock,
-            attribution=(broker_binding.attribution if broker_binding is not None else None),
-        )
-    except (RolloutLeaseError, ValueError) as exc:
-        sys.stderr.write(f"error: {exc}\n")
-        diagnostic = getattr(exc, "diagnostic", None)
-        if isinstance(diagnostic, dict):
-            sys.stderr.write(
-                "rollout lock diagnostic: " + json.dumps(diagnostic, sort_keys=True) + "\n",
-            )
-        raise
-    sys.stderr.write(
-        f"Acquired rollout mutation lease for {environment}: {lease.owner_id}\n",
-    )
-    return lease
 
 
-def _print_gb10_release_target_mismatches(
-    mismatches: list[str],
-    *,
-    release_image_tag: str | None,
-    release_env_config_version: str | None,
-) -> None:
-    if not mismatches:
-        return
-    sys.stderr.write(
-        "GB10 rollout target mismatch: "
-        f"{len(mismatches)} active desired/node state(s) do not match "
-        f"release target image={release_image_tag or '-'} "
-        f"env={release_env_config_version or '-'}\n",
-    )
-    for item in mismatches:
-        sys.stderr.write(f"  {item}\n")
 
 
 def _resolve_admin_token(source: str) -> str:
@@ -398,28 +139,8 @@ def _resolve_admin_token(source: str) -> str:
     )
 
 
-def _secret_fingerprint(value: str) -> str:
-    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
-    return f"sha256:{digest} len={len(value)}"
 
 
-def _validate_expected_admin_token_fingerprint(
-    args: argparse.Namespace,
-    admin_token: str,
-) -> bool:
-    expected = getattr(args, "expect_admin_token_fingerprint", None)
-    if expected is None:
-        return True
-    live = _secret_fingerprint(admin_token)
-    if live == expected:
-        return True
-    sys.stderr.write(
-        "admin_token_fingerprint drift: "
-        f"desired={expected!r} live={live!r}. "
-        "Resolve the protected-environment admin token source before "
-        "running environment-state apply/check.\n",
-    )
-    return False
 
 
 def _mint_worker_token(args: argparse.Namespace) -> int:
@@ -627,7 +348,7 @@ def _ensure_smoke_user(args: argparse.Namespace) -> int:
 
     Idempotently ensures a dedicated non-human ``loom-smoke`` User + Team
     and mints a fresh user-owned ``submit`` token so the release-gate /
-    operator trajectory smoke can submit ``oracle × gb10-smoke`` without a
+    operator trajectory smoke can submit ``oracle × a smoke task`` without a
     human login (see loom_cli.smoke_credential). Writes directly to the
     target service DB — run it after migrations during a deploy, then pipe
     the token straight into the secret store.
@@ -802,241 +523,10 @@ def _ensure_dev_worker_token(args: argparse.Namespace) -> int:
     return 0
 
 
-def _slurm_workers_status(args: argparse.Namespace) -> int:
-    try:
-        admin_token = _resolve_admin_token(args.admin_token)
-    except ValueError as e:
-        sys.stderr.write(f"error: {e}\n")
-        return 2
-
-    url = f"{args.cp_url.rstrip('/')}/admin/slurm-worker-jobs/status"
-    try:
-        resp = httpx.get(
-            url,
-            headers={"Authorization": f"Bearer {admin_token}"},
-            timeout=10.0,
-        )
-    except httpx.RequestError as e:
-        sys.stderr.write(f"error: could not reach CP at {url}: {e}\n")
-        return 2
-
-    if resp.status_code != 200:
-        sys.stderr.write(
-            f"error: CP returned {resp.status_code}: {resp.text}\n",
-        )
-        return 1
-
-    data = resp.json()
-    if args.format == "json":
-        json.dump(data, sys.stdout, indent=2)
-        sys.stdout.write("\n")
-        return 0
-
-    summary = data.get("summary", [])
-    jobs = data.get("jobs", [])
-    sys.stdout.write("Slurm worker capacity:\n")
-    if not summary:
-        sys.stdout.write("  no Slurm worker jobs recorded\n")
-    for row in summary:
-        sys.stdout.write(
-            f"  {row['environment']}/{row['pool_name']} "
-            f"desired={row['desired_slots']} "
-            f"active={row['active_slots']} "
-            f"pending={row['pending_slots']} "
-            f"stale={row.get('stale_slots', 0)} "
-            f"jobs running={row['running_jobs']} "
-            f"pending={row['pending_jobs']} "
-            f"stale_jobs={row.get('stale_jobs', 0)} "
-            f"failed_submissions={row['failed_submissions']} "
-            f"cancelled_pending={row['cancelled_pending_jobs']} "
-            f"idle_exits={row['idle_exits']}\n",
-        )
-    if jobs:
-        sys.stdout.write("\nJobs:\n")
-    for job in jobs:
-        env_items = " ".join(
-            f"{key}={value}" for key, value in sorted(job.get("redacted_env", {}).items())
-        )
-        sys.stdout.write(
-            f"  {job.get('job_id') or '-'} "
-            f"{job['environment']}/{job['pool_name']} "
-            f"{job['state']} nodelist={job['nodelist']} "
-            f"concurrency={job['requested_concurrency']}",
-        )
-        if env_items:
-            sys.stdout.write(f" env={env_items}")
-        pending_reason = job.get("pending_reason")
-        if pending_reason:
-            sys.stdout.write(f" reason={pending_reason}")
-        sys.stdout.write("\n")
-    return 0
 
 
-def _gb10_workers_status(args: argparse.Namespace) -> int:
-    try:
-        admin_token = _resolve_admin_token(args.admin_token)
-    except ValueError as e:
-        sys.stderr.write(f"error: {e}\n")
-        return 2
-    if not _validate_expected_admin_token_fingerprint(args, admin_token):
-        return 1
-
-    url = f"{args.cp_url.rstrip('/')}/admin/gb10-worker-pools/status"
-    params: dict[str, str] = {}
-    if args.environment:
-        params["environment"] = args.environment
-    if args.pool_name:
-        params["pool_name"] = args.pool_name
-    try:
-        if params:
-            resp = httpx.get(
-                url,
-                headers={"Authorization": f"Bearer {admin_token}"},
-                params=params,
-                timeout=10.0,
-            )
-        else:
-            resp = httpx.get(
-                url,
-                headers={"Authorization": f"Bearer {admin_token}"},
-                timeout=10.0,
-            )
-    except httpx.RequestError as e:
-        sys.stderr.write(f"error: could not reach CP at {url}: {e}\n")
-        return 2
-
-    if resp.status_code != 200:
-        sys.stderr.write(
-            f"error: CP returned {resp.status_code}: {resp.text}\n",
-        )
-        return 1
-
-    data = resp.json()
-    mismatches = gb10_release_target_mismatches(
-        data,
-        release_image_tag=args.release_image_tag,
-        release_env_config_version=args.release_env_config_version,
-    )
-    if args.format == "json":
-        json.dump(data, sys.stdout, indent=2)
-        sys.stdout.write("\n")
-        _print_gb10_release_target_mismatches(
-            mismatches,
-            release_image_tag=args.release_image_tag,
-            release_env_config_version=args.release_env_config_version,
-        )
-        return 1 if mismatches else 0
-
-    desired_states = data.get("desired_states", [])
-    nodes = data.get("nodes", [])
-    sys.stdout.write("GB10 worker lifecycle:\n")
-    sys.stdout.write("Desired states:\n")
-    if not desired_states:
-        sys.stdout.write("  no desired states recorded\n")
-    for row in desired_states:
-        previous = row.get("previous_image_tag") or "-"
-        sys.stdout.write(
-            f"  {row['environment']}/{row['pool_name']} "
-            f"image={row['image_tag']} "
-            f"max={row['max_concurrent']} "
-            f"env={row['env_config_version']} "
-            f"previous={previous}\n",
-        )
-    sys.stdout.write("Nodes:\n")
-    if not nodes:
-        sys.stdout.write("  no node reports recorded\n")
-    for node in nodes:
-        result = node.get("last_apply_result") or "-"
-        error = node.get("error_message") or "-"
-        source = node.get("source_git_commit")
-        source_short = source[:12] if isinstance(source, str) else "-"
-        source_dirty = node.get("source_git_dirty")
-        sys.stdout.write(
-            f"  {node['hostname']} {node['environment']}/{node['pool_name']} "
-            f"{node['apply_state']} "
-            f"image={node.get('current_image_tag') or '-'}/"
-            f"{node.get('desired_image_tag') or '-'} "
-            f"max={node.get('current_max_concurrent') or '-'}/"
-            f"{node.get('desired_max_concurrent') or '-'} "
-            f"env={node.get('current_env_config_version') or '-'}/"
-            f"{node.get('desired_env_config_version') or '-'} "
-            f"source={source_short} "
-            f"dirty={source_dirty if source_dirty is not None else '-'} "
-            f"dir={node.get('compose_project_dir') or '-'} "
-            f"result={result} error={error}\n",
-        )
-    _print_gb10_release_target_mismatches(
-        mismatches,
-        release_image_tag=args.release_image_tag,
-        release_env_config_version=args.release_env_config_version,
-    )
-    return 1 if mismatches else 0
 
 
-def _worker_pool_autoscaler_status(args: argparse.Namespace) -> int:
-    try:
-        admin_token = _resolve_admin_token(args.admin_token)
-    except ValueError as e:
-        sys.stderr.write(f"error: {e}\n")
-        return 2
-
-    url = f"{args.cp_url.rstrip('/')}/admin/worker-pool-autoscalers/status"
-    try:
-        resp = httpx.get(
-            url,
-            headers={"Authorization": f"Bearer {admin_token}"},
-            timeout=10.0,
-        )
-    except httpx.RequestError as e:
-        sys.stderr.write(f"error: could not reach CP at {url}: {e}\n")
-        return 2
-
-    if resp.status_code != 200:
-        sys.stderr.write(
-            f"error: CP returned {resp.status_code}: {resp.text}\n",
-        )
-        return 1
-
-    data = resp.json()
-    if args.format == "json":
-        json.dump(data, sys.stdout, indent=2)
-        sys.stdout.write("\n")
-        return 0
-
-    policies = data.get("policies", [])
-    sys.stdout.write("Worker-pool autoscalers:\n")
-    if not policies:
-        sys.stdout.write("  no autoscaler policies recorded\n")
-        return 0
-    for row in policies:
-        error = row.get("last_error") or "-"
-        blocked = row.get("last_blocked_reason") or "-"
-        routing_capacity = row.get("routing_capacity")
-        capacity = routing_capacity if isinstance(routing_capacity, dict) else {}
-        details = _format_autoscaler_blocked_details(
-            row.get("last_blocked_details"),
-        )
-        details_text = f" details={details}" if details else ""
-        sys.stdout.write(
-            f"  {row['environment']}/{row['pool_name']} "
-            f"{row['actuator']} "
-            f"enabled={row['enabled']} "
-            f"min={row['min_slots']} max={row['max_slots']} "
-            f"desired={row.get('last_desired_slots') or 0} "
-            f"actual={row.get('last_actual_slots') or 0} "
-            f"pending={row.get('last_pending_slots') or 0} "
-            f"draining={row.get('last_draining_slots') or 0} "
-            f"occupied={row.get('last_occupied_slots') or 0} "
-            f"queued={row.get('last_queued_slots') or 0} "
-            f"executable_free={capacity.get('executable_free_slots', 0)} "
-            f"scale_headroom={capacity.get('configured_scale_headroom_slots', 0)} "
-            f"capacity={capacity.get('capacity_evidence_kind', 'unavailable')} "
-            f"fresh={capacity.get('capacity_is_fresh', False)} "
-            f"decision={row.get('last_decision') or '-'} "
-            f"reason={row.get('last_decision_reason') or '-'} "
-            f"blocked={blocked}{details_text} error={error}\n",
-        )
-    return 0
 
 
 def _execution_admission_status(args: argparse.Namespace) -> int:
@@ -1326,396 +816,24 @@ def _execution_resource_profile_bind(args: argparse.Namespace) -> int:
     return 0
 
 
-def _format_autoscaler_blocked_details(value: Any) -> str:
-    if not isinstance(value, dict):
-        return ""
-    node_exclusions = value.get("node_exclusions")
-    if isinstance(node_exclusions, list):
-        parts: list[str] = []
-        for item in node_exclusions:
-            if not isinstance(item, dict):
-                continue
-            hostname = str(item.get("hostname") or "").strip()
-            reason = str(item.get("reason") or "").strip()
-            if hostname and reason:
-                parts.append(f"{hostname}:{reason}")
-        if parts:
-            return ",".join(parts)
-    reason = str(value.get("reason") or "").strip()
-    return reason
 
 
-def _parse_environment_state_vars(values: list[str]) -> dict[str, str]:
-    variables: dict[str, str] = {}
-    for item in values:
-        if "=" not in item:
-            raise ValueError(f"--var must be KEY=VALUE, got {item!r}")
-        key, value = item.split("=", 1)
-        key = key.strip()
-        if not key:
-            raise ValueError(f"--var key cannot be empty in {item!r}")
-        variables[key] = value
-    return variables
 
 
-def _load_environment_state_profile_from_args(
-    args: argparse.Namespace,
-) -> EnvironmentStateProfile | None:
-    from loom_cli.environment_state import (
-        EnvironmentStateProfileError,
-        load_environment_state_profile,
-    )
-
-    try:
-        variables = _parse_environment_state_vars(args.var)
-        return load_environment_state_profile(
-            args.file,
-            variables=variables,
-            expected_environment=args.environment,
-        )
-    except (EnvironmentStateProfileError, ValueError) as e:
-        sys.stderr.write(f"error: {e}\n")
-        return None
 
 
-def _format_environment_state_value(value: Any) -> str:
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, sort_keys=True, separators=(",", ":"))
-    return repr(value)
 
 
-def _environment_state_label(profile: EnvironmentStateProfile) -> str:
-    if profile.control_plane_environment == profile.environment:
-        return profile.environment
-    return f"{profile.environment} (CP environment {profile.control_plane_environment})"
 
 
-def _fetch_environment_state(
-    *,
-    cp_url: str,
-    admin_token: str,
-) -> tuple[int, dict[str, Any] | None]:
-    headers = {"Authorization": f"Bearer {admin_token}"}
-    base = cp_url.rstrip("/")
-    try:
-        autoscaler_resp = httpx.get(
-            f"{base}/admin/worker-pool-autoscalers/status",
-            headers=headers,
-            timeout=10.0,
-        )
-        gb10_resp = httpx.get(
-            f"{base}/admin/gb10-worker-pools/status",
-            headers=headers,
-            timeout=10.0,
-        )
-        slurm_resp = httpx.get(
-            f"{base}/admin/slurm-worker-jobs/status",
-            headers=headers,
-            timeout=10.0,
-        )
-    except httpx.RequestError as e:
-        sys.stderr.write(f"error: could not reach CP at {base}: {e}\n")
-        return 2, None
-
-    for name, resp in (
-        ("worker-pool autoscaler status", autoscaler_resp),
-        ("GB10 desired state status", gb10_resp),
-        ("Slurm worker job status", slurm_resp),
-    ):
-        if resp.status_code != 200:
-            sys.stderr.write(
-                f"error: CP returned {resp.status_code} for {name}: {resp.text}\n",
-            )
-            return 1, None
-    return 0, {
-        "autoscaler_status": autoscaler_resp.json(),
-        "gb10_status": gb10_resp.json(),
-        "slurm_status": slurm_resp.json(),
-    }
 
 
-def _environment_state_apply(args: argparse.Namespace) -> int:
-    try:
-        broker_binding = _prepare_environment_state_broker_binding(
-            args,
-            operation="apply",
-        )
-    except ValueError as exc:
-        sys.stderr.write(f"error: {exc}\n")
-        return 1
-    profile = _load_environment_state_profile_from_args(args)
-    if profile is None:
-        return 2
-    try:
-        lease = _acquire_environment_state_rollout_lock(
-            args,
-            operation="apply",
-            profile=profile,
-            broker_binding=broker_binding,
-        )
-    except RolloutLeaseError:
-        return 1
-    except ValueError as exc:
-        sys.stderr.write(f"error: {exc}\n")
-        return 1
-    rc = 1
-    try:
-        rc = _environment_state_apply_impl(args, profile)
-        return rc
-    finally:
-        if lease is not None:
-            lease.release(status="released" if rc == 0 else "failed")
 
 
-def _environment_state_apply_impl(
-    args: argparse.Namespace,
-    profile: EnvironmentStateProfile,
-) -> int:
-    from loom_cli.environment_state import (
-        apply_external_slurm_autoscaler_supervisors,
-        autoscaler_policy_payload,
-        gb10_desired_state_payload,
-    )
-
-    try:
-        admin_token = _resolve_admin_token(args.admin_token)
-    except ValueError as e:
-        sys.stderr.write(f"error: {e}\n")
-        return 2
-    if not _validate_expected_admin_token_fingerprint(args, admin_token):
-        return 1
-
-    headers = {"Authorization": f"Bearer {admin_token}"}
-    base = args.cp_url.rstrip("/")
-    applied: list[dict[str, str]] = []
-    try:
-        for policy in profile.autoscaler_policies:
-            url = (
-                f"{base}/admin/worker-pool-autoscaler-policies/"
-                f"{policy['environment']}/{policy['pool_name']}"
-            )
-            resp = httpx.put(
-                url,
-                json=autoscaler_policy_payload(policy),
-                headers=headers,
-                timeout=10.0,
-            )
-            if resp.status_code != 200:
-                sys.stderr.write(
-                    f"error: CP returned {resp.status_code} for {url}: {resp.text}\n",
-                )
-                return 1
-            applied.append({"kind": "worker_pool_autoscaler_policy", "url": url})
-
-        for state in profile.gb10_desired_states:
-            url = (
-                f"{base}/admin/gb10-worker-pools/"
-                f"{state['environment']}/{state['pool_name']}/desired-state"
-            )
-            resp = httpx.put(
-                url,
-                json=gb10_desired_state_payload(state),
-                headers=headers,
-                timeout=10.0,
-            )
-            if resp.status_code != 200:
-                sys.stderr.write(
-                    f"error: CP returned {resp.status_code} for {url}: {resp.text}\n",
-                )
-                return 1
-            applied.append({"kind": "gb10_worker_pool_desired_state", "url": url})
-    except httpx.RequestError as e:
-        sys.stderr.write(f"error: could not reach CP at {base}: {e}\n")
-        return 2
-
-    try:
-        applied.extend(apply_external_slurm_autoscaler_supervisors(profile))
-    except ValueError as e:
-        sys.stderr.write(f"error: {e}\n")
-        return 2
-
-    if args.format == "json":
-        json.dump(
-            {
-                "environment": profile.environment,
-                "control_plane_environment": profile.control_plane_environment,
-                "profile": str(args.file),
-                "applied": applied,
-                "catalog_provisioning": profile.catalog_provisioning,
-            },
-            sys.stdout,
-            indent=2,
-        )
-        sys.stdout.write("\n")
-        return 0
-
-    sys.stdout.write(
-        f"Applied environment state {_environment_state_label(profile)}: "
-        f"{len(profile.autoscaler_policies)} autoscaler polic"
-        f"{'y' if len(profile.autoscaler_policies) == 1 else 'ies'}, "
-        f"{len(profile.gb10_desired_states)} GB10 desired state"
-        f"{'' if len(profile.gb10_desired_states) == 1 else 's'}, "
-        f"{len(profile.external_slurm_autoscaler_supervisors)} external autoscaler "
-        "supervisor"
-        f"{'' if len(profile.external_slurm_autoscaler_supervisors) == 1 else 's'}.\n",
-    )
-    if profile.catalog_provisioning.get("required"):
-        command = profile.catalog_provisioning.get("command")
-        if command:
-            sys.stdout.write(f"Catalog provisioning gate: {command}\n")
-    return 0
 
 
-def _environment_state_check(args: argparse.Namespace) -> int:
-    try:
-        broker_binding = _prepare_environment_state_broker_binding(
-            args,
-            operation="check",
-        )
-    except ValueError as exc:
-        sys.stderr.write(f"error: {exc}\n")
-        return 1
-    profile = _load_environment_state_profile_from_args(args)
-    if profile is None:
-        return 2
-    try:
-        lease = _acquire_environment_state_rollout_lock(
-            args,
-            operation="check",
-            profile=profile,
-            broker_binding=broker_binding,
-        )
-    except RolloutLeaseError:
-        return 1
-    except ValueError as exc:
-        sys.stderr.write(f"error: {exc}\n")
-        return 1
-    rc = 1
-    try:
-        rc = _environment_state_check_impl(args, profile)
-        return rc
-    finally:
-        if lease is not None:
-            lease.release(status="released" if rc == 0 else "failed")
 
 
-def _environment_state_check_impl(
-    args: argparse.Namespace,
-    profile: EnvironmentStateProfile,
-) -> int:
-    from loom_cli.environment_state import (
-        autoscaler_blockers,
-        diff_environment_state,
-        diff_external_slurm_autoscaler_supervisors,
-        diff_external_slurm_runner_prerequisites,
-    )
-
-    try:
-        admin_token = _resolve_admin_token(args.admin_token)
-    except ValueError as e:
-        sys.stderr.write(f"error: {e}\n")
-        return 2
-    if not _validate_expected_admin_token_fingerprint(args, admin_token):
-        return 1
-
-    rc, live = _fetch_environment_state(
-        cp_url=args.cp_url,
-        admin_token=admin_token,
-    )
-    if rc != 0 or live is None:
-        return rc
-
-    expected_worker_token: str | None = None
-    if getattr(args, "worker_token", None):
-        try:
-            expected_worker_token = resolve_secret_source(
-                args.worker_token,
-                flag_name="--worker-token",
-            )
-        except SecretSourceError as e:
-            sys.stderr.write(f"error: {e}\n")
-            return 2
-
-    drift = diff_environment_state(
-        profile,
-        live,
-        expected_worker_token=expected_worker_token,
-    )
-    drift.extend(
-        diff_external_slurm_runner_prerequisites(
-            profile,
-            expected_worker_token=expected_worker_token,
-        )
-    )
-    drift.extend(diff_external_slurm_autoscaler_supervisors(profile))
-    blockers = autoscaler_blockers(profile, live)
-    if args.format == "json":
-        json.dump(
-            {
-                "environment": profile.environment,
-                "control_plane_environment": profile.control_plane_environment,
-                "profile": str(args.file),
-                "ok": not drift and not blockers,
-                "drift": [
-                    {
-                        "path": item.path,
-                        "desired": item.desired,
-                        "live": item.live,
-                    }
-                    for item in drift
-                ],
-                "autoscaler_blockers": blockers,
-                "catalog_provisioning": profile.catalog_provisioning,
-            },
-            sys.stdout,
-            indent=2,
-        )
-        sys.stdout.write("\n")
-        return 1 if drift or blockers else 0
-
-    if drift:
-        sys.stderr.write(
-            f"Environment state drift for {_environment_state_label(profile)}: "
-            f"{len(drift)} difference(s)\n",
-        )
-        for item in drift:
-            sys.stderr.write(
-                f"  {item.path}: desired={_format_environment_state_value(item.desired)} "
-                f"live={_format_environment_state_value(item.live)}\n",
-            )
-        sys.stderr.write(
-            "Apply the versioned desired state with "
-            "`loom admin environment-state apply --file ...` after confirming "
-            "the profile matches this rollout.\n",
-        )
-        return 1
-
-    if blockers:
-        sys.stderr.write(
-            f"Environment state autoscaler blockers for {_environment_state_label(profile)}: "
-            f"{len(blockers)} blocker(s)\n",
-        )
-        for blocker in blockers:
-            sys.stderr.write(
-                "  "
-                f"{blocker.get('environment')}/{blocker.get('pool_name')}: "
-                f"blocked={blocker.get('last_blocked_reason')} "
-                f"decision={blocker.get('last_decision') or '-'} "
-                f"reason={blocker.get('last_decision_reason') or '-'}\n",
-            )
-        sys.stderr.write(
-            "Resolve the autoscaler blocker before accepting this environment as release-ready.\n",
-        )
-        return 1
-
-    sys.stdout.write(
-        f"Environment state {_environment_state_label(profile)} matches desired profile.\n",
-    )
-    if profile.catalog_provisioning.get("required"):
-        command = profile.catalog_provisioning.get("command")
-        if command:
-            sys.stdout.write(f"Catalog provisioning gate: {command}\n")
-    return 0
 
 
 _KNOWN_TEAM_SCOPES = (
@@ -2292,14 +1410,8 @@ def dispatch(argv: list[str]) -> int:
     )
     sub = parser.add_subparsers(dest="admin_cmd", required=True)
 
-    from loom_cli.capacity_control_plane_cmd import add_capacity_control_plane_subparser
-    from loom_cli.personal_dev_control_plane_cmd import (
-        add_personal_dev_control_plane_subparser,
-    )
     from loom_cli.pipeline_admin_cmd import add_pipeline_admin_subparser
 
-    add_capacity_control_plane_subparser(sub)
-    add_personal_dev_control_plane_subparser(sub)
     add_pipeline_admin_subparser(sub)
 
     p_agents = sub.add_parser("agent-runtime", help="Register a trusted published native runtime.")
@@ -2552,102 +1664,12 @@ def dispatch(argv: list[str]) -> int:
     )
     p_rotate.set_defaults(handler=_rotate_worker_token)
 
-    p_slurm = sub.add_parser(
-        "slurm-workers",
-        help="Inspect elastic Slurm worker capacity recorded by the CP.",
-    )
-    slurm_sub = p_slurm.add_subparsers(dest="slurm_op", required=True)
-    p_slurm_status = slurm_sub.add_parser(
-        "status",
-        help="Show recorded Slurm worker jobs and per-pool capacity.",
-    )
-    _add_common_args(p_slurm_status)
-    p_slurm_status.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="Output format.",
-    )
-    p_slurm_status.set_defaults(handler=_slurm_workers_status)
-
-    p_gb10 = sub.add_parser(
-        "gb10-workers",
-        help="Inspect GB10 Docker Compose worker lifecycle status.",
-    )
-    gb10_sub = p_gb10.add_subparsers(dest="gb10_op", required=True)
-    p_gb10_status = gb10_sub.add_parser(
-        "status",
-        help="Show GB10 desired state and per-host rollout status.",
-    )
-    _add_common_args(p_gb10_status)
-    p_gb10_status.add_argument("--environment", default=None)
-    p_gb10_status.add_argument("--pool-name", default=None)
-    p_gb10_status.add_argument(
-        "--release-image-tag",
-        default=None,
-        help=(
-            "Fail if active GB10 nodes or desired state have not converged "
-            "to this release image tag."
-        ),
-    )
-    p_gb10_status.add_argument(
-        "--release-env-config-version",
-        default=None,
-        help=(
-            "Fail if active GB10 nodes or desired state have not converged "
-            "to this env config version."
-        ),
-    )
-    p_gb10_status.add_argument(
-        "--expect-admin-token-fingerprint",
-        default=None,
-        help=(
-            "Redacted fingerprint expected for --admin-token, formatted "
-            "as 'sha256:<12-hex> len=<N>'. When set, GB10 status collection "
-            "fails before contacting CP if the resolved admin token source "
-            "drifts from the protected-environment source."
-        ),
-    )
-    p_gb10_status.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="Output format.",
-    )
-    p_gb10_status.set_defaults(handler=_gb10_workers_status)
-
-    p_worker_pools = sub.add_parser(
-        "worker-pools",
-        help="Inspect worker-pool autoscaler policy and decision state.",
-    )
-    worker_pools_sub = p_worker_pools.add_subparsers(
-        dest="worker_pools_op",
-        required=True,
-    )
-    p_autoscaler = worker_pools_sub.add_parser(
-        "autoscaler",
-        help="Worker-pool autoscaler operations.",
-    )
-    autoscaler_sub = p_autoscaler.add_subparsers(
-        dest="autoscaler_op",
-        required=True,
-    )
-    p_autoscaler_status = autoscaler_sub.add_parser(
-        "status",
-        help="Show worker-pool autoscaler desired/actual/drain state.",
-    )
-    _add_common_args(p_autoscaler_status)
-    p_autoscaler_status.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="Output format.",
-    )
-    p_autoscaler_status.set_defaults(handler=_worker_pool_autoscaler_status)
+    p_worker_pools = sub.add_parser("worker-pools", help="Inspect native execution admission, capacity, and resources.")
+    worker_pools_sub = p_worker_pools.add_subparsers(dest="worker_pools_op", required=True)
 
     p_admission_status = worker_pools_sub.add_parser(
         "admission-status",
-        help="Show persisted hybrid execution admission ceilings and active reservations.",
+        help="Show native execution admission ceilings and active reservations.",
     )
     _add_common_args(p_admission_status)
     p_admission_status.add_argument(
@@ -2742,89 +1764,6 @@ def dispatch(argv: list[str]) -> int:
     p_resource_profile_bind.add_argument("--reason", default=None)
     p_resource_profile_bind.add_argument("--format", choices=["text", "json"], default="text")
     p_resource_profile_bind.set_defaults(handler=_execution_resource_profile_bind)
-
-    p_env_state = sub.add_parser(
-        "environment-state",
-        help=(
-            "Apply or check versioned environment desired state that lives "
-            "outside Kubernetes manifests."
-        ),
-    )
-    env_state_sub = p_env_state.add_subparsers(
-        dest="environment_state_op",
-        required=True,
-    )
-
-    def _add_environment_state_args(p: argparse.ArgumentParser) -> None:
-        _add_common_args(p)
-        p.add_argument(
-            "--file",
-            type=Path,
-            required=True,
-            help=("TOML desired-state profile, for example deploy/environment-state/staging.toml."),
-        )
-        p.add_argument(
-            "--environment",
-            required=True,
-            help="Expected profile environment; rejects accidental cross-env apply.",
-        )
-        p.add_argument(
-            "--var",
-            action="append",
-            default=[],
-            metavar="KEY=VALUE",
-            help=(
-                "Template variable for ${KEY} placeholders in the profile. "
-                "Repeat for rollout-specific values such as IMAGE_TAG."
-            ),
-        )
-        p.add_argument(
-            "--format",
-            choices=["text", "json"],
-            default="text",
-            help="Output format.",
-        )
-        p.add_argument(
-            "--expect-admin-token-fingerprint",
-            default=None,
-            help=(
-                "Redacted fingerprint expected for --admin-token, formatted "
-                "as 'sha256:<12-hex> len=<N>'. When set, environment-state "
-                "apply/check fail before contacting CP if the resolved admin "
-                "token source drifts from the protected-environment source."
-            ),
-        )
-        p.add_argument(
-            "--rollout-request-envelope",
-            type=Path,
-            default=None,
-            help=argparse.SUPPRESS,
-        )
-        _add_rollout_lock_args(p)
-
-    p_env_state_apply = env_state_sub.add_parser(
-        "apply",
-        help="Idempotently apply worker-pool and GB10 desired state through CP admin APIs.",
-    )
-    _add_environment_state_args(p_env_state_apply)
-    p_env_state_apply.set_defaults(handler=_environment_state_apply)
-
-    p_env_state_check = env_state_sub.add_parser(
-        "check",
-        help="Fail if live CP-backed environment state drifts from a desired profile.",
-    )
-    _add_environment_state_args(p_env_state_check)
-    p_env_state_check.add_argument(
-        "--worker-token",
-        type=secret_source_argparse_type("--worker-token"),
-        default=None,
-        help=(
-            "Current environment worker token source for remote-worker parity "
-            "checks. Must be env:VAR, file:PATH, or -; only redacted "
-            "fingerprints are emitted."
-        ),
-    )
-    p_env_state_check.set_defaults(handler=_environment_state_check)
 
     p_team = tok_sub.add_parser(
         "team",

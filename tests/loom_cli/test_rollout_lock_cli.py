@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from loom_cli import admin_cmd, cluster_cmd
+from loom_cli import cluster_cmd
 from loom_cli.__main__ import main
 from loom_cli.cluster_cmd import ApplyResult, ClusterStatus, ComponentStatus
 from loom_cli.cluster_config import ClusterConfig, cluster_config_from_mapping
@@ -31,13 +31,6 @@ _ATTRIBUTION = {
 }
 
 
-def test_cluster_and_admin_share_rollout_lock_cli_contracts() -> None:
-    assert admin_cmd._add_rollout_lock_args is cluster_cmd._add_rollout_lock_args
-    assert admin_cmd._load_broker_rollout_envelope is cluster_cmd._load_broker_rollout_envelope
-    assert admin_cmd._require_real_file is cluster_cmd._require_real_file
-    assert (
-        admin_cmd._fixed_rollout_lock_evidence_path is cluster_cmd._fixed_rollout_lock_evidence_path
-    )
 
 
 @dataclass(frozen=True)
@@ -51,166 +44,8 @@ class _BrokerAttemptFixture:
     backup_manifest: Path
 
 
-def _broker_attempt_fixture(tmp_path: Path) -> _BrokerAttemptFixture:
-    rollout_root = tmp_path / "data" / "loom-staging"
-    rollout_dir = rollout_root / "rollouts" / _ROLLOUT_ID
-    (rollout_dir / "07-render").mkdir(parents=True)
-    (rollout_dir / "10-cluster-up").mkdir(parents=True)
-    (rollout_dir / "11-env-state").mkdir()
-
-    runner_repo = tmp_path / "runner"
-    cluster_relative = Path("deploy/environments/staging.cluster.toml")
-    cluster_config = runner_repo / cluster_relative
-    cluster_config.parent.mkdir(parents=True)
-    cluster_config.write_text(
-        'namespace = "loom-staging"\n'
-        'runtime_environment = "staging"\n'
-        'env_state_profile = "../environment-state/staging.toml"\n'
-        'container_registry = "192.168.50.13:5000"\n'
-        'container_registry_push = "localhost:5000"\n'
-        'persistent_storage_backend = "dynamic"\n'
-        f'persistent_storage_host_path_root = "{rollout_root}"\n'
-        '[topology]\n'
-        'multi_node = true\n'
-        'storage_backend = "longhorn"\n'
-        'postgres_replicas = 3\n'
-        'minio_replicas = 4\n'
-        'anti_affinity = "required"\n'
-        'min_available = 3\n',
-        encoding="utf-8",
-    )
-
-    candidate_root = rollout_dir / "01-worktree" / "src"
-    candidate_config = candidate_root / cluster_relative
-    candidate_config.parent.mkdir(parents=True)
-    candidate_config.write_text(cluster_config.read_text(encoding="utf-8"), encoding="utf-8")
-    environment_profile = candidate_root / "deploy/environment-state/staging.toml"
-    environment_profile.parent.mkdir(parents=True)
-    environment_profile.write_text('environment = "staging"\n', encoding="utf-8")
-
-    rollout_config = rollout_dir / "rollout-cluster-config.toml"
-    rollout_config.write_text(
-        f'image_tag = "staging-{_SHA[:7]}"\n'
-        'namespace = "loom-staging"\n'
-        'runtime_environment = "staging"\n'
-        'container_registry = "192.168.50.13:5000"\n'
-        'container_registry_push = "localhost:5000"\n'
-        'persistent_storage_backend = "dynamic"\n'
-        f'persistent_storage_host_path_root = "{rollout_root}"\n'
-        "[workload_contract]\n"
-        'workload_trust_mode = "internal_trusted"\n'
-        "taskset_transforms_enabled = false\n"
-        "taskset_transform_network_isolated = false\n"
-        "untrusted_workload_isolation = false\n"
-        "[k8s_worker]\n"
-        "enabled = false\n"
-        "[topology]\n"
-        "multi_node = true\n"
-        'storage_backend = "longhorn"\n'
-        "postgres_replicas = 3\n"
-        "minio_replicas = 4\n"
-        'anti_affinity = "required"\n'
-        "min_available = 3\n",
-        encoding="utf-8",
-    )
-    (rollout_dir / "07-render" / "rendered.yaml").write_text(
-        "apiVersion: v1\nkind: List\nitems: []\n",
-        encoding="utf-8",
-    )
-
-    backup_manifest = tmp_path / "backups" / "backup-manifest.json"
-    backup_manifest.parent.mkdir()
-    backup_manifest.write_text("{}\n", encoding="utf-8")
-    secret_root = tmp_path / "secrets"
-    secret_root.mkdir()
-    for name in ("admin", "worker", "service"):
-        (secret_root / name).write_text(f"{name}-secret\n", encoding="utf-8")
-    kubeconfig_path = tmp_path / "private" / "kubeconfig"
-    kubeconfig_path.parent.mkdir()
-    kubeconfig_path.write_text("apiVersion: v1\n", encoding="utf-8")
-
-    config = SimpleNamespace(
-        runtime_root=tmp_path / "run" / "loom-staging-rollout",
-        rollout_root=rollout_root,
-        runner_repo=runner_repo,
-        kubeconfig_path=kubeconfig_path,
-        cluster_config_path=cluster_config,
-        environment="staging",
-        namespace="loom-staging",
-        cluster_name="loom-staging",
-        cp_url="http://127.0.0.1:18081",
-        admin_token_source=f"file:{secret_root / 'admin'}",
-        worker_token_source=f"file:{secret_root / 'worker'}",
-        service_token_source=f"file:{secret_root / 'service'}",
-        backup_max_objects=1_000_000,
-        backup_max_entries=16_000_000,
-        expect_admin_token_fingerprint=(
-            "sha256:" + hashlib.sha256(b"admin-secret").hexdigest()[:12] + " len=12"
-        ),
-    )
-    envelope = DriverEnvelope(
-        schema_version=1,
-        request_id=_REQUEST_ID,
-        rollout_id=_ROLLOUT_ID,
-        initiating_operator="hongjian",
-        initiating_uid=2011,
-        attempt_number=2,
-        attempt_operator="devansh",
-        attempt_uid=2501,
-        remote_url="https://github.com/qianyi-sun/loom.git",
-        target_ref="origin/dev",
-        resolved_sha=_SHA,
-        image_tag=f"staging-{_SHA[:7]}",
-        fetched_at="2026-07-13T15:00:00+00:00",
-        backup_manifest_path=str(backup_manifest),
-        backup_manifest_sha256="2" * 64,
-        runner_config_sha256="1" * 64,
-        preflight_attestation_sha256="3" * 64,
-        preflight_registry_sha256="4" * 64,
-        preflight_coverage_sha256="5" * 64,
-        cluster_name="loom-staging",
-        namespace="loom-staging",
-        environment="staging",
-        cp_url=config.cp_url,
-        cluster_config_path=str(cluster_config),
-        rollout_root=str(rollout_root),
-        admin_token_source=config.admin_token_source,
-        worker_token_source=config.worker_token_source,
-        service_token_source=config.service_token_source,
-        expect_admin_token_fingerprint=config.expect_admin_token_fingerprint,
-        smoke_on_behalf_username="devansh",
-        smoke_on_behalf_team_id="team-agentic-rl",
-        scope="current-gb10",
-        gb10_prep_concurrency=5,
-        resume=True,
-    )
-    envelope_path = tmp_path / "private" / "envelope.json"
-    return _BrokerAttemptFixture(
-        config=config,
-        envelope=envelope,
-        envelope_path=envelope_path,
-        rollout_dir=rollout_dir,
-        rollout_config=rollout_config,
-        environment_profile=environment_profile,
-        backup_manifest=backup_manifest,
-    )
 
 
-def _patch_broker_attempt(
-    monkeypatch: pytest.MonkeyPatch,
-    fixture: _BrokerAttemptFixture,
-) -> None:
-    monkeypatch.setenv("KUBECONFIG", str(fixture.config.kubeconfig_path))
-    monkeypatch.setattr(
-        "loom_cli.cluster_cmd._load_broker_rollout_envelope",
-        lambda _path: (fixture.config, fixture.envelope),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        "loom_cli.admin_cmd._load_broker_rollout_envelope",
-        lambda _path: (fixture.config, fixture.envelope),
-        raising=False,
-    )
 
 
 def _cluster_broker_argv(fixture: _BrokerAttemptFixture) -> list[str]:
@@ -244,43 +79,6 @@ def _cluster_broker_argv(fixture: _BrokerAttemptFixture) -> list[str]:
     ]
 
 
-def _admin_broker_argv(
-    fixture: _BrokerAttemptFixture,
-    operation: str,
-) -> list[str]:
-    argv = [
-        "admin",
-        "environment-state",
-        operation,
-        "--cp-url",
-        fixture.envelope.cp_url,
-        "--admin-token",
-        fixture.envelope.admin_token_source,
-        "--expect-admin-token-fingerprint",
-        fixture.envelope.expect_admin_token_fingerprint,
-        "--file",
-        str(fixture.environment_profile),
-        "--environment",
-        "staging",
-        "--var",
-        f"IMAGE_TAG={fixture.envelope.image_tag}",
-        "--var",
-        f"ENV_CONFIG_VERSION={fixture.envelope.image_tag}",
-        "--var",
-        f"GIT_SHA={fixture.envelope.resolved_sha}",
-        "--rollout-request-envelope",
-        str(fixture.envelope_path),
-    ]
-    if operation == "check":
-        argv.extend(
-            [
-                "--worker-token",
-                fixture.envelope.worker_token_source,
-                "--format",
-                "json",
-            ]
-        )
-    return argv
 
 
 def _main_without_parser_exit(argv: list[str]) -> int:
@@ -469,99 +267,8 @@ def test_cluster_up_protected_records_lock_evidence(
     assert evidence["events"][0]["owner_id"] == "production-d46a16c"
 
 
-def test_environment_state_apply_protected_conflict_reports_owner(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    RolloutLeaseManager(tmp_path).acquire(
-        environment="production",
-        owner_id="cluster-owner",
-        ttl_seconds=3600,
-        command=["loom", "cluster", "up"],
-    )
-    monkeypatch.setattr(
-        "loom_cli.admin_cmd._load_environment_state_profile_from_args",
-        lambda _args: _empty_environment_profile(
-            environment="production",
-            control_plane_environment="production",
-        ),
-    )
-    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
-
-    rc = main(
-        [
-            "admin",
-            "environment-state",
-            "apply",
-            "--file",
-            "deploy/environment-state/staging.toml",
-            "--environment",
-            "production",
-            "--rollout-lock-dir",
-            str(tmp_path),
-        ]
-    )
-
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "cluster-owner" in err
-    assert "active rollout mutation lease" in err
 
 
-def test_environment_state_check_records_lock_evidence(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    evidence_path = tmp_path / "env-state-lock.json"
-    monkeypatch.setattr(
-        "loom_cli.admin_cmd._load_environment_state_profile_from_args",
-        lambda _args: _empty_environment_profile(
-            environment="production",
-            control_plane_environment="production",
-        ),
-    )
-    monkeypatch.setattr(
-        "loom_cli.admin_cmd._fetch_environment_state",
-        lambda **_kwargs: (
-            0,
-            {
-                "autoscaler_status": {"policies": []},
-                "gb10_status": {"desired_states": []},
-                "slurm_status": {"jobs": []},
-            },
-        ),
-    )
-    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
-
-    rc = main(
-        [
-            "admin",
-            "environment-state",
-            "check",
-            "--file",
-            "deploy/environment-state/staging.toml",
-            "--environment",
-            "production",
-            "--rollout-id",
-            "env-state-check-production-d46a16c",
-            "--rollout-lock-dir",
-            str(tmp_path),
-            "--rollout-lock-evidence",
-            str(evidence_path),
-            "--format",
-            "json",
-        ]
-    )
-
-    assert rc == 0
-    output = json.loads(capsys.readouterr().out)
-    assert output["ok"] is True
-    events = json.loads(evidence_path.read_text(encoding="utf-8"))["events"]
-    assert events[0]["event"] == "acquired"
-    assert events[0]["owner_id"] == "env-state-check-production-d46a16c"
-    assert events[1]["event"] == "released"
 
 
 def test_manual_staging_cluster_up_requires_envelope_before_config_lock_or_network(
@@ -766,7 +473,6 @@ def test_cluster_up_uses_one_config_snapshot_when_file_changes_before_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from loom_cli import cluster_cmd
     from loom_cli.cluster_config import (
         cluster_config_from_mapping as real_cluster_config_from_mapping,
     )
@@ -1002,146 +708,8 @@ def test_cluster_up_preserves_relative_host_root_render_diagnostic(
     assert "broker-created request envelope" not in err
 
 
-@pytest.mark.parametrize("operation", ["apply", "check"])
-def test_manual_staging_environment_state_requires_envelope_before_profile_or_io(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    operation: str,
-) -> None:
-    calls = {"profile": 0, "token": 0, "network": 0, "lock": 0}
-
-    def _load_profile(_args: Any) -> EnvironmentStateProfile:
-        calls["profile"] += 1
-        return _empty_environment_profile()
-
-    def _track_token(_source: str) -> str:
-        calls["token"] += 1
-        return "admin-secret"
-
-    def _track_network(*_args: Any, **_kwargs: Any) -> Any:
-        calls["network"] += 1
-        return SimpleNamespace(status_code=200, text="", json=lambda: {})
-
-    def _track_lock(*_args: Any, **_kwargs: Any) -> Any:
-        calls["lock"] += 1
-        return SimpleNamespace(
-            owner_id="unexpected-lock",
-            release=lambda **_release_kwargs: None,
-        )
-
-    monkeypatch.setattr(
-        "loom_cli.admin_cmd._load_environment_state_profile_from_args",
-        _load_profile,
-    )
-    monkeypatch.setattr("loom_cli.admin_cmd._resolve_admin_token", _track_token)
-    monkeypatch.setattr("loom_cli.admin_cmd.httpx.put", _track_network)
-    monkeypatch.setattr("loom_cli.admin_cmd._fetch_environment_state", _track_network)
-    monkeypatch.setattr(RolloutLeaseManager, "acquire", _track_lock)
-
-    rc = main(
-        [
-            "admin",
-            "environment-state",
-            operation,
-            "--file",
-            str(tmp_path / "must-not-be-read.toml"),
-            "--environment",
-            "staging",
-            "--rollout-lock-dir",
-            str(tmp_path / "locks"),
-        ]
-    )
-
-    assert rc == 1
-    assert "broker-created request envelope is required" in capsys.readouterr().err
-    assert calls == {"profile": 0, "token": 0, "network": 0, "lock": 0}
-    assert not (tmp_path / "locks").exists()
 
 
-@pytest.mark.parametrize("operation", ["apply", "check"])
-def test_environment_state_cannot_hide_staging_control_plane_behind_development_profile(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    operation: str,
-) -> None:
-    from loom_cli import admin_cmd
-
-    profile_path = tmp_path / "disguised-staging.toml"
-    profile_path.write_text(
-        'environment = "development"\n'
-        'control_plane_environment = "staging"\n'
-        "[[worker_pool_autoscaler_policies]]\n"
-        'pool_name = "gb10"\n'
-        'actuator = "slurm"\n'
-        "max_slots = 1\n",
-        encoding="utf-8",
-    )
-    calls = {"profile": 0, "token": 0, "network": 0, "lock": 0}
-    load_profile = admin_cmd._load_environment_state_profile_from_args
-
-    def _load_profile_once(args: Any) -> EnvironmentStateProfile | None:
-        calls["profile"] += 1
-        return load_profile(args)
-
-    def _resolve_token(_source: str) -> str:
-        calls["token"] += 1
-        return "admin-secret"
-
-    def _fake_put(*_args: Any, **_kwargs: Any) -> Any:
-        calls["network"] += 1
-        return SimpleNamespace(status_code=200, text="", json=lambda: {})
-
-    def _fake_fetch(**_kwargs: Any) -> tuple[int, dict[str, Any]]:
-        calls["network"] += 1
-        return (
-            0,
-            {
-                "autoscaler_status": {"policies": []},
-                "gb10_status": {"desired_states": []},
-                "slurm_status": {"jobs": []},
-            },
-        )
-
-    def _track_acquire(*_args: Any, **_kwargs: Any) -> Any:
-        calls["lock"] += 1
-        return SimpleNamespace(
-            owner_id="unexpected-lock",
-            release=lambda **_release_kwargs: None,
-        )
-
-    monkeypatch.setattr(
-        "loom_cli.admin_cmd._load_environment_state_profile_from_args",
-        _load_profile_once,
-    )
-    monkeypatch.setattr("loom_cli.admin_cmd._resolve_admin_token", _resolve_token)
-    monkeypatch.setattr("loom_cli.admin_cmd.httpx.put", _fake_put)
-    monkeypatch.setattr("loom_cli.admin_cmd._fetch_environment_state", _fake_fetch)
-    monkeypatch.setattr(RolloutLeaseManager, "acquire", _track_acquire)
-
-    rc = main(
-        [
-            "admin",
-            "environment-state",
-            operation,
-            "--cp-url",
-            "http://cp:8080",
-            "--admin-token",
-            "env:LOOM_ADMIN_TOKEN",
-            "--file",
-            str(profile_path),
-            "--environment",
-            "development",
-            "--rollout-lock-dir",
-            str(tmp_path / "locks"),
-        ]
-    )
-
-    assert rc == 1
-    assert "broker-created request envelope is required" in capsys.readouterr().err
-    assert calls == {"profile": 1, "token": 0, "network": 0, "lock": 0}
-    assert not (tmp_path / "locks").exists()
 
 
 def test_broker_cluster_up_records_exact_attribution_and_fixed_lock_paths(
@@ -1314,97 +882,8 @@ def test_broker_cluster_up_rejects_non_exact_protected_config_before_lock_or_net
     assert not (fixture.config.runtime_root / "mutation-locks").exists()
 
 
-def test_broker_environment_state_records_exact_attribution_and_fixed_lock_paths(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    fixture = _broker_attempt_fixture(tmp_path)
-    _patch_broker_attempt(monkeypatch, fixture)
-    monkeypatch.setattr(
-        "loom_cli.admin_cmd._load_environment_state_profile_from_args",
-        lambda _args: _empty_environment_profile(),
-    )
-    monkeypatch.setattr(
-        "loom_cli.admin_cmd._fetch_environment_state",
-        lambda **_kwargs: (
-            0,
-            {
-                "autoscaler_status": {"policies": []},
-                "gb10_status": {"desired_states": []},
-                "slurm_status": {"jobs": []},
-            },
-        ),
-    )
-
-    rc = _main_without_parser_exit(_admin_broker_argv(fixture, "check"))
-
-    assert rc == 0
-    assert json.loads(capsys.readouterr().out)["ok"] is True
-    lock_path = fixture.config.runtime_root / "mutation-locks" / "staging.lock"
-    active = json.loads(lock_path.read_text(encoding="utf-8"))
-    assert active["owner_id"] == fixture.envelope.rollout_id
-    assert {field: active[field] for field in _ATTRIBUTION} == _ATTRIBUTION
-    evidence_path = fixture.rollout_dir / "11-env-state" / "rollout-lock.json"
-    events = json.loads(evidence_path.read_text(encoding="utf-8"))["events"]
-    assert all({field: event[field] for field in _ATTRIBUTION} == _ATTRIBUTION for event in events)
 
 
-@pytest.mark.parametrize("operation", ["apply", "check"])
-def test_broker_environment_state_rejects_cross_environment_control_plane_before_io(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    operation: str,
-) -> None:
-    fixture = _broker_attempt_fixture(tmp_path)
-    _patch_broker_attempt(monkeypatch, fixture)
-    calls = {"token": 0, "network": 0, "lock": 0}
-    monkeypatch.setattr(
-        "loom_cli.admin_cmd._load_environment_state_profile_from_args",
-        lambda _args: _empty_environment_profile(
-            environment="staging",
-            control_plane_environment="production",
-        ),
-    )
-
-    def _resolve_token(_source: str) -> str:
-        calls["token"] += 1
-        return "admin-secret"
-
-    def _fake_put(*_args: Any, **_kwargs: Any) -> Any:
-        calls["network"] += 1
-        return SimpleNamespace(status_code=200, text="", json=lambda: {})
-
-    def _fake_fetch(**_kwargs: Any) -> tuple[int, dict[str, Any]]:
-        calls["network"] += 1
-        return (
-            0,
-            {
-                "autoscaler_status": {"policies": []},
-                "gb10_status": {"desired_states": []},
-                "slurm_status": {"jobs": []},
-            },
-        )
-
-    def _track_acquire(*_args: Any, **_kwargs: Any) -> Any:
-        calls["lock"] += 1
-        return SimpleNamespace(
-            owner_id="unexpected-lock",
-            release=lambda **_release_kwargs: None,
-        )
-
-    monkeypatch.setattr("loom_cli.admin_cmd._resolve_admin_token", _resolve_token)
-    monkeypatch.setattr("loom_cli.admin_cmd.httpx.put", _fake_put)
-    monkeypatch.setattr("loom_cli.admin_cmd._fetch_environment_state", _fake_fetch)
-    monkeypatch.setattr(RolloutLeaseManager, "acquire", _track_acquire)
-
-    rc = _main_without_parser_exit(_admin_broker_argv(fixture, operation))
-
-    assert rc == 1
-    assert "profile targets do not match broker envelope" in capsys.readouterr().err
-    assert calls == {"token": 0, "network": 0, "lock": 0}
-    assert not (fixture.config.runtime_root / "mutation-locks").exists()
 
 
 @pytest.mark.parametrize(
@@ -1434,55 +913,6 @@ def test_broker_cluster_up_rejects_explicit_lock_override_even_when_value_matche
     assert not (fixture.config.runtime_root / "mutation-locks").exists()
 
 
-@pytest.mark.parametrize("operation", ["apply", "check"])
-@pytest.mark.parametrize(
-    "override",
-    [
-        ["--rollout-id", _ROLLOUT_ID],
-        ["--rollout-lock-dir", "/tmp/ignored-rollout-locks"],
-        ["--rollout-lock-ttl-seconds", "14400"],
-        ["--rollout-lock-evidence", "/tmp/ignored/../escape.json"],
-        ["--force-rollout-lock"],
-    ],
-)
-def test_broker_environment_state_rejects_every_manual_lock_override_before_io(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    operation: str,
-    override: list[str],
-) -> None:
-    fixture = _broker_attempt_fixture(tmp_path)
-    _patch_broker_attempt(monkeypatch, fixture)
-    monkeypatch.setattr(
-        "loom_cli.admin_cmd._load_environment_state_profile_from_args",
-        lambda _args: (_ for _ in ()).throw(
-            AssertionError("profile must not load before override rejection")
-        ),
-    )
-    monkeypatch.setattr(
-        "loom_cli.admin_cmd._resolve_admin_token",
-        lambda _source: (_ for _ in ()).throw(
-            AssertionError("token must not resolve before override rejection")
-        ),
-    )
-    monkeypatch.setattr(
-        "loom_cli.admin_cmd._fetch_environment_state",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("network must not run before override rejection")
-        ),
-    )
-
-    rc = _main_without_parser_exit(
-        [
-            *_admin_broker_argv(fixture, operation),
-            *override,
-        ]
-    )
-
-    assert rc == 1
-    assert "manual rollout lock overrides are forbidden" in capsys.readouterr().err
-    assert not (fixture.config.runtime_root / "mutation-locks").exists()
 
 
 def test_broker_cluster_up_rejects_symlinked_evidence_parent_before_lock_or_network(
@@ -1551,116 +981,10 @@ def test_broker_cluster_up_rejects_non_service_owned_rollout_evidence_directory(
     assert not (fixture.config.runtime_root / "mutation-locks").exists()
 
 
-def test_broker_environment_state_rejects_envelope_before_token_or_lock(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    fixture = _broker_attempt_fixture(tmp_path)
-    profile_loads = 0
-
-    def reject(_path: Path) -> tuple[Any, DriverEnvelope]:
-        raise ValueError("invalid private envelope")
-
-    def _load_profile(_args: Any) -> EnvironmentStateProfile:
-        nonlocal profile_loads
-        profile_loads += 1
-        return _empty_environment_profile()
-
-    monkeypatch.setattr(
-        "loom_cli.admin_cmd._load_broker_rollout_envelope",
-        reject,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        "loom_cli.admin_cmd._load_environment_state_profile_from_args",
-        _load_profile,
-    )
-
-    rc = _main_without_parser_exit(_admin_broker_argv(fixture, "apply"))
-
-    assert rc == 1
-    assert "invalid private envelope" in capsys.readouterr().err
-    assert profile_loads == 0
-    assert not (fixture.config.runtime_root / "mutation-locks").exists()
 
 
-def test_broker_environment_state_rejects_wrong_profile_path_before_reading_it(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    fixture = _broker_attempt_fixture(tmp_path)
-    _patch_broker_attempt(monkeypatch, fixture)
-    profile_loads = 0
-
-    def _load_profile(_args: Any) -> EnvironmentStateProfile:
-        nonlocal profile_loads
-        profile_loads += 1
-        return _empty_environment_profile()
-
-    monkeypatch.setattr(
-        "loom_cli.admin_cmd._load_environment_state_profile_from_args",
-        _load_profile,
-    )
-    argv = _admin_broker_argv(fixture, "apply")
-    argv[argv.index("--file") + 1] = str(tmp_path / "attacker-controlled.toml")
-
-    rc = _main_without_parser_exit(argv)
-
-    assert rc == 1
-    assert "profile path does not match broker rollout" in capsys.readouterr().err
-    assert profile_loads == 0
-    assert not (fixture.config.runtime_root / "mutation-locks").exists()
 
 
-@pytest.mark.parametrize("operation", ["apply", "check"])
-def test_environment_state_hidden_production_target_keeps_production_lock_diagnostic(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    operation: str,
-) -> None:
-    profile_path = tmp_path / "production-control-plane.toml"
-    profile_path.write_text(
-        'environment = "development"\ncontrol_plane_environment = "production"\n',
-        encoding="utf-8",
-    )
-    RolloutLeaseManager(tmp_path / "locks").acquire(
-        environment="production",
-        owner_id="production-owner",
-        ttl_seconds=3600,
-        command=["loom", "cluster", "up"],
-    )
-
-    def _unexpected_token(_source: str) -> str:
-        raise AssertionError("token must not resolve while the production lock is held")
-
-    def _unexpected_network(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("network must not run while the production lock is held")
-
-    monkeypatch.setattr("loom_cli.admin_cmd._resolve_admin_token", _unexpected_token)
-    monkeypatch.setattr("loom_cli.admin_cmd.httpx.put", _unexpected_network)
-    monkeypatch.setattr("loom_cli.admin_cmd._fetch_environment_state", _unexpected_network)
-
-    rc = main(
-        [
-            "admin",
-            "environment-state",
-            operation,
-            "--file",
-            str(profile_path),
-            "--environment",
-            "development",
-            "--rollout-lock-dir",
-            str(tmp_path / "locks"),
-        ]
-    )
-
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "active rollout mutation lease" in err
-    assert "production-owner" in err
 
 
 def test_development_cluster_up_does_not_create_rollout_lock(
@@ -1684,3 +1008,161 @@ def test_development_cluster_up_does_not_create_rollout_lock(
 
     assert rc == 0
     assert not list(tmp_path.glob("*.lock"))
+
+
+def _broker_attempt_fixture(tmp_path: Path) -> _BrokerAttemptFixture:
+    rollout_root = tmp_path / "data" / "loom-staging"
+    rollout_dir = rollout_root / "rollouts" / _ROLLOUT_ID
+    (rollout_dir / "07-render").mkdir(parents=True)
+    (rollout_dir / "10-cluster-up").mkdir(parents=True)
+    (rollout_dir / "11-env-state").mkdir()
+
+    runner_repo = tmp_path / "runner"
+    cluster_relative = Path("deploy/environments/staging.cluster.toml")
+    cluster_config = runner_repo / cluster_relative
+    cluster_config.parent.mkdir(parents=True)
+    cluster_config.write_text(
+        'namespace = "loom-staging"\n'
+        'runtime_environment = "staging"\n'
+        'env_state_profile = "../environment-state/staging.toml"\n'
+        'container_registry = "192.168.50.13:5000"\n'
+        'container_registry_push = "localhost:5000"\n'
+        'persistent_storage_backend = "dynamic"\n'
+        f'persistent_storage_host_path_root = "{rollout_root}"\n'
+        '[topology]\n'
+        'multi_node = true\n'
+        'storage_backend = "longhorn"\n'
+        'postgres_replicas = 3\n'
+        'minio_replicas = 4\n'
+        'anti_affinity = "required"\n'
+        'min_available = 3\n',
+        encoding="utf-8",
+    )
+
+    candidate_root = rollout_dir / "01-worktree" / "src"
+    candidate_config = candidate_root / cluster_relative
+    candidate_config.parent.mkdir(parents=True)
+    candidate_config.write_text(cluster_config.read_text(encoding="utf-8"), encoding="utf-8")
+    environment_profile = candidate_root / "deploy/environment-state/staging.toml"
+    environment_profile.parent.mkdir(parents=True)
+    environment_profile.write_text('environment = "staging"\n', encoding="utf-8")
+
+    rollout_config = rollout_dir / "rollout-cluster-config.toml"
+    rollout_config.write_text(
+        f'image_tag = "staging-{_SHA[:7]}"\n'
+        'namespace = "loom-staging"\n'
+        'runtime_environment = "staging"\n'
+        'container_registry = "192.168.50.13:5000"\n'
+        'container_registry_push = "localhost:5000"\n'
+        'persistent_storage_backend = "dynamic"\n'
+        f'persistent_storage_host_path_root = "{rollout_root}"\n'
+        "[workload_contract]\n"
+        'workload_trust_mode = "internal_trusted"\n'
+        "taskset_transforms_enabled = false\n"
+        "taskset_transform_network_isolated = false\n"
+        "untrusted_workload_isolation = false\n"
+        "[k8s_worker]\n"
+        "enabled = false\n"
+        "[topology]\n"
+        "multi_node = true\n"
+        'storage_backend = "longhorn"\n'
+        "postgres_replicas = 3\n"
+        "minio_replicas = 4\n"
+        'anti_affinity = "required"\n'
+        "min_available = 3\n",
+        encoding="utf-8",
+    )
+    (rollout_dir / "07-render" / "rendered.yaml").write_text(
+        "apiVersion: v1\nkind: List\nitems: []\n",
+        encoding="utf-8",
+    )
+
+    backup_manifest = tmp_path / "backups" / "backup-manifest.json"
+    backup_manifest.parent.mkdir()
+    backup_manifest.write_text("{}\n", encoding="utf-8")
+    secret_root = tmp_path / "secrets"
+    secret_root.mkdir()
+    for name in ("admin", "worker", "service"):
+        (secret_root / name).write_text(f"{name}-secret\n", encoding="utf-8")
+    kubeconfig_path = tmp_path / "private" / "kubeconfig"
+    kubeconfig_path.parent.mkdir()
+    kubeconfig_path.write_text("apiVersion: v1\n", encoding="utf-8")
+
+    config = SimpleNamespace(
+        runtime_root=tmp_path / "run" / "loom-staging-rollout",
+        rollout_root=rollout_root,
+        runner_repo=runner_repo,
+        kubeconfig_path=kubeconfig_path,
+        cluster_config_path=cluster_config,
+        environment="staging",
+        namespace="loom-staging",
+        cluster_name="loom-staging",
+        cp_url="http://127.0.0.1:18081",
+        admin_token_source=f"file:{secret_root / 'admin'}",
+        worker_token_source=f"file:{secret_root / 'worker'}",
+        service_token_source=f"file:{secret_root / 'service'}",
+        backup_max_objects=1_000_000,
+        backup_max_entries=16_000_000,
+        expect_admin_token_fingerprint=(
+            "sha256:" + hashlib.sha256(b"admin-secret").hexdigest()[:12] + " len=12"
+        ),
+    )
+    envelope = DriverEnvelope(
+        schema_version=1,
+        request_id=_REQUEST_ID,
+        rollout_id=_ROLLOUT_ID,
+        initiating_operator="hongjian",
+        initiating_uid=2011,
+        attempt_number=2,
+        attempt_operator="devansh",
+        attempt_uid=2501,
+        remote_url="https://github.com/qianyi-sun/loom.git",
+        target_ref="origin/dev",
+        resolved_sha=_SHA,
+        image_tag=f"staging-{_SHA[:7]}",
+        fetched_at="2026-07-13T15:00:00+00:00",
+        backup_manifest_path=str(backup_manifest),
+        backup_manifest_sha256="2" * 64,
+        runner_config_sha256="1" * 64,
+        preflight_attestation_sha256="3" * 64,
+        preflight_registry_sha256="4" * 64,
+        preflight_coverage_sha256="5" * 64,
+        cluster_name="loom-staging",
+        namespace="loom-staging",
+        environment="staging",
+        cp_url=config.cp_url,
+        cluster_config_path=str(cluster_config),
+        rollout_root=str(rollout_root),
+        admin_token_source=config.admin_token_source,
+        worker_token_source=config.worker_token_source,
+        service_token_source=config.service_token_source,
+        expect_admin_token_fingerprint=config.expect_admin_token_fingerprint,
+        smoke_on_behalf_username="devansh",
+        smoke_on_behalf_team_id="team-agentic-rl",
+        scope="current-gb10",
+        gb10_prep_concurrency=5,
+        resume=True,
+    )
+    envelope_path = tmp_path / "private" / "envelope.json"
+    return _BrokerAttemptFixture(
+        config=config,
+        envelope=envelope,
+        envelope_path=envelope_path,
+        rollout_dir=rollout_dir,
+        rollout_config=rollout_config,
+        environment_profile=environment_profile,
+        backup_manifest=backup_manifest,
+    )
+
+
+def _patch_broker_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+    fixture: _BrokerAttemptFixture,
+) -> None:
+    monkeypatch.setenv("KUBECONFIG", str(fixture.config.kubeconfig_path))
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._load_broker_rollout_envelope",
+        lambda _path: (fixture.config, fixture.envelope),
+        raising=False,
+    )
+
