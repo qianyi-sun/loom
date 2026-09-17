@@ -98,6 +98,34 @@ def _profile() -> ServiceExecutionRuntimeProfileV1:
     )
 
 
+@pytest.mark.parametrize("architecture", ["x86_64", "arm64", "any"])
+async def test_x86_policy_is_scoped_to_nebius(architecture: str) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from loom.task_image_materialization import required_task_image_architectures
+    from loom_service.task_config_validation import split_valid_task_configs
+
+    raw = _task().model_dump(mode="json")
+    raw["environment"].update(cpu_arch=architecture, docker_image=None, dockerfile="Dockerfile")
+    task = TaskConfig.model_validate(raw)
+    result = MagicMock()
+    result.all.return_value = [(task.task.id, task.model_dump(mode="json"))]
+    session = AsyncMock()
+    session.execute.return_value = result
+
+    # Shared batch validation and image planning still admit ARM outside Nebius.
+    valid, invalid = await split_valid_task_configs(session, [task.task.id])
+    assert valid == [task.task.id]
+    assert invalid == []
+    assert set(required_task_image_architectures(task)) == (
+        {"x86_64", "arm64"} if architecture == "any" else {architecture}
+    )
+    reasons = automatic_service_execution_rejections(
+        task, _trial(), source_provenance=_provenance(), allow_task_image_preparation=True,
+    )
+    assert ("linux_x86_64_required" in reasons) == (architecture == "arm64")
+
+
 def test_input_manifest_is_canonical_and_preserves_executable_mode(tmp_path: Path) -> None:
     (tmp_path / "instruction.md").write_text("hello\n", encoding="utf-8")
     script = tmp_path / "verifier" / "check.sh"

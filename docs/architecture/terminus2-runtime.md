@@ -646,3 +646,16 @@ Related: `src/loom_control_plane/terminus_recovery.py`,
 | `packages/loom-launcher/loom_launcher/terminus_2_runner.py` | Import-stability stub; exits with current runtime guidance |
 | `tests/conformance/terminus2/README.md` | Local conformance notes |
 | `tests/unit/test_multi_model_switch.py` | Role router + config unit tests |
+
+## Execution architecture across platforms
+
+Nebius native execution requires Linux x86_64. ARM clients may submit work to
+Nebius remotely. This restriction belongs to Nebius admission and image-builder
+claims; shared task validation, catalog publication and worker registration
+continue to support ARM execution on other platforms. Tasks declaring `any`
+retain both AMD64 and ARM64 image prerequisites outside Nebius, including the
+Terminus runtime fallback builds. GB10 retains its ARM capability.
+
+The [Harbor90 migration runbook](../runbooks/nebius-harbor90-migration.md)
+prepares an x86 revision of that specific Nebius catalog. It does not retire ARM
+execution globally or authorize publication or live maintenance by itself.
