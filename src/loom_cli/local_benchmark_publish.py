@@ -27,6 +27,14 @@ from loom.driver.task_image import (
     dockerfile_uses_runtime_arm64_fallback_base,
 )
 from loom.models.task_checksum import task_checksum
+from loom.nebius_terminus_ingest import (
+    NEBIUS_TERMINUS_PROFILE,
+    NebiusTerminusProfileStats,
+    adapt_bundle_for_nebius_terminus,
+    merge_profile_stats,
+    preflight_nebius_terminus_admission,
+    resolve_execution_profile,
+)
 from loom.service_execution_materialization import (
     prepare_service_execution_input_manifest,
 )
@@ -62,6 +70,8 @@ class LocalBenchmarkPublishStats:
     compat_flattened_files: int
     bucket: str
     source_prefix: str
+    execution_profile: str | None = None
+    profile_stats: NebiusTerminusProfileStats | None = None
 
 
 async def publish_local_benchmark(
@@ -79,11 +89,17 @@ async def publish_local_benchmark(
     compat_flatten_environment: bool = False,
     source_registration_mode: str = "legacy",
     create_bucket: bool = False,
+    execution_profile: str | None = None,
 ) -> LocalBenchmarkPublishStats:
     """Publish to an existing bucket; bucket creation is an explicit bootstrap option."""
 
     if source_registration_mode not in {"legacy", "versioned-v1"}:
         raise ValueError("unsupported task source registration mode")
+    try:
+        profile = resolve_execution_profile(execution_profile)
+    except ValueError as exc:
+        raise LocalBenchmarkValidationError(str(exc), exit_code=2) from exc
+
     result = validate_local_benchmark(
         root,
         benchmark_id=benchmark_id,
@@ -111,6 +127,7 @@ async def publish_local_benchmark(
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     inserted = updated = unchanged = uploaded_objects = 0
     compat_flattened_files = 0
+    profile_stats = NebiusTerminusProfileStats()
     source_prefix = f"s3://{bucket}/{entry.id}/"
     try:
         async with session_factory() as session:
@@ -161,6 +178,16 @@ async def publish_local_benchmark(
                     # the Loom-schema form so the worker validates.
                     raw_cfg = normalize_terminal_bench_task_toml(raw_cfg)
                     _promote_cpu_arch_if_runtime_fallback(raw_cfg, staged)
+                    if profile == NEBIUS_TERMINUS_PROFILE:
+                        # #1996: adapt staged verifier + Loom config after
+                        # normalize so TB absolute verifier paths are corrected
+                        # before checksum / SEI / admission preflight.
+                        raw_cfg, adapt_stats = adapt_bundle_for_nebius_terminus(
+                            staged,
+                            raw_cfg,
+                        )
+                    else:
+                        adapt_stats = None
                     checksum = task_checksum(staged)
                     metadata_digest = bundle_file_metadata_sha256(staged).removeprefix(
                         "sha256:",
@@ -199,6 +226,21 @@ async def publish_local_benchmark(
                         "bundle_file_metadata_sha256": f"sha256:{metadata_digest}",
                         **sei_provenance,
                     }
+                    if adapt_stats is not None:
+                        reasons = preflight_nebius_terminus_admission(
+                            raw_cfg,
+                            source_provenance,
+                        )
+                        if reasons:
+                            raise LocalBenchmarkValidationError(
+                                "nebius-terminus admission preflight failed for "
+                                f"{task_id}: {', '.join(reasons)}",
+                            )
+                        profile_stats = merge_profile_stats(
+                            profile_stats,
+                            adapt_stats,
+                            preflight_ok=True,
+                        )
                 existing = await _get_task(session, task_id)
                 if existing is None:
                     inserted += 1
@@ -256,6 +298,8 @@ async def publish_local_benchmark(
         compat_flattened_files=compat_flattened_files,
         bucket=bucket,
         source_prefix=source_prefix,
+        execution_profile=profile,
+        profile_stats=profile_stats if profile is not None else None,
     )
 
 

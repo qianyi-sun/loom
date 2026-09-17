@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +19,17 @@ from loom.config.benchmarks import (
     normalize_source_subdir,
 )
 from loom.models.task import TaskConfig
+from loom.nebius_terminus_ingest import (
+    NEBIUS_TERMINUS_PROFILE,
+    NebiusTerminusProfileStats,
+    adapt_bundle_for_nebius_terminus,
+    merge_profile_stats,
+    preflight_nebius_terminus_admission,
+    resolve_execution_profile,
+)
+from loom.service_execution_materialization import (
+    prepare_service_execution_input_manifest,
+)
 from loom.terminal_bench_normalize import (
     normalize_terminal_bench_task_toml,
 )
@@ -61,6 +74,8 @@ class LocalBenchmarkValidationResult:
     task_root: Path
     entry: LocalBenchmarkEntry
     task_tomls: tuple[Path, ...]
+    execution_profile: str | None = None
+    profile_stats: NebiusTerminusProfileStats | None = None
 
     @property
     def task_count(self) -> int:
@@ -75,12 +90,18 @@ def validate_local_benchmark(
     series: str | None = None,
     license_spdx: str | None = None,
     source_subdir: str | None = None,
+    execution_profile: str | None = None,
 ) -> LocalBenchmarkValidationResult:
     root = root.resolve()
     if not root.is_dir():
         raise LocalBenchmarkValidationError(
             f"benchmark folder not found: {root}", exit_code=2,
         )
+
+    try:
+        profile = resolve_execution_profile(execution_profile)
+    except ValueError as exc:
+        raise LocalBenchmarkValidationError(str(exc), exit_code=2) from exc
 
     metadata_path = root / "benchmark.toml"
     if metadata_path.exists():
@@ -127,11 +148,17 @@ def validate_local_benchmark(
     for task_toml in task_tomls:
         _validate_task_toml(task_toml)
 
+    profile_stats: NebiusTerminusProfileStats | None = None
+    if profile == NEBIUS_TERMINUS_PROFILE:
+        profile_stats = _validate_nebius_terminus_profile(entry.id, task_root, task_tomls)
+
     return LocalBenchmarkValidationResult(
         root=root,
         task_root=task_root,
         entry=entry,
         task_tomls=task_tomls,
+        execution_profile=profile,
+        profile_stats=profile_stats,
     )
 
 
@@ -144,21 +171,29 @@ def render_config_snippet(entry: LocalBenchmarkEntry) -> str:
 
 
 def render_validation_json(result: LocalBenchmarkValidationResult) -> str:
-    return json.dumps(
-        {
-            "benchmark_id": result.entry.id,
-            "display_name": result.entry.display_name,
-            "series": result.entry.series,
-            "license_spdx": result.entry.license_spdx,
-            "source_subdir": result.entry.source_subdir,
-            "task_count": result.task_count,
-            "root": str(result.root),
-            "task_root": str(result.task_root),
-            "config_snippet": render_config_snippet(result.entry),
-        },
-        indent=2,
-        sort_keys=True,
-    )
+    payload: dict[str, object] = {
+        "benchmark_id": result.entry.id,
+        "display_name": result.entry.display_name,
+        "series": result.entry.series,
+        "license_spdx": result.entry.license_spdx,
+        "source_subdir": result.entry.source_subdir,
+        "task_count": result.task_count,
+        "root": str(result.root),
+        "task_root": str(result.task_root),
+        "config_snippet": render_config_snippet(result.entry),
+    }
+    if result.execution_profile is not None:
+        payload["execution_profile"] = result.execution_profile
+    if result.profile_stats is not None:
+        payload["profile_stats"] = {
+            "adapted_tasks": result.profile_stats.adapted_tasks,
+            "verifier_wrappers_installed": (
+                result.profile_stats.verifier_wrappers_installed
+            ),
+            "resources_filled_tasks": result.profile_stats.resources_filled_tasks,
+            "preflight_passed": result.profile_stats.preflight_passed,
+        }
+    return json.dumps(payload, indent=2, sort_keys=True)
 
 
 def _load_benchmark_toml(path: Path) -> BenchmarkToml:
@@ -185,3 +220,41 @@ def _validate_task_toml(path: Path) -> None:
         raise LocalBenchmarkValidationError(
             f"invalid task.toml at {path}: {exc}", exit_code=1,
         ) from exc
+
+
+def _validate_nebius_terminus_profile(
+    benchmark_id: str,
+    task_root: Path,
+    task_tomls: tuple[Path, ...],
+) -> NebiusTerminusProfileStats:
+    """Dry-run adapt + SEI + admission preflight without uploading."""
+
+    from loom.models.task_checksum import task_checksum
+
+    stats = NebiusTerminusProfileStats()
+    for task_toml in task_tomls:
+        bundle_dir = task_toml.parent
+        rel = bundle_dir.relative_to(task_root)
+        task_id = benchmark_id if rel == Path(".") else f"{benchmark_id}/{rel.as_posix()}"
+        with tempfile.TemporaryDirectory(prefix="loom-validate-nebius-") as stage_root:
+            staged = Path(stage_root) / "bundle"
+            shutil.copytree(bundle_dir, staged, symlinks=False)
+            with (staged / task_toml.name).open("rb") as f:
+                raw_cfg = tomllib.load(f)
+            raw_cfg = normalize_terminal_bench_task_toml(raw_cfg)
+            raw_cfg, adapt_stats = adapt_bundle_for_nebius_terminus(staged, raw_cfg)
+            checksum = task_checksum(staged)
+            _, sei_provenance = prepare_service_execution_input_manifest(
+                staged,
+                task_checksum=checksum,
+                bucket="validate-local",
+                manifest_key=f"{task_id}/service-execution-input.json",
+            )
+            reasons = preflight_nebius_terminus_admission(raw_cfg, sei_provenance)
+            if reasons:
+                raise LocalBenchmarkValidationError(
+                    "nebius-terminus admission preflight failed for "
+                    f"{task_id}: {', '.join(reasons)}",
+                )
+            stats = merge_profile_stats(stats, adapt_stats, preflight_ok=True)
+    return stats

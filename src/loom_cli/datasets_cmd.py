@@ -454,6 +454,17 @@ def _add_validate_local_args(p: argparse.ArgumentParser) -> None:
         default=None,
         help="Optional relative task-bundle subdir for direct-layout PATHs.",
     )
+    p.add_argument(
+        "--execution-profile",
+        default=None,
+        choices=["nebius-terminus"],
+        help=(
+            "Optional ingest profile. nebius-terminus adapts Harbor/TB packs "
+            "for Nebius Terminus admission (gateway-only, resources, "
+            "verifier/run.sh, x86_64) and dry-runs admission preflight "
+            "(#1996)."
+        ),
+    )
     p.add_argument("--json", dest="as_json", action="store_true")
 
 
@@ -545,6 +556,16 @@ def _add_publish_local_args(p: argparse.ArgumentParser) -> None:
             "Use only with retained evidence for Source Useful-style bundles "
             "that keep runtime files under environment/; the default is "
             "diagnostic fail-fast."
+        ),
+    )
+    p.add_argument(
+        "--execution-profile",
+        default=None,
+        choices=["nebius-terminus"],
+        help=(
+            "Optional ingest profile. nebius-terminus adapts Harbor/TB packs "
+            "for Nebius Terminus admission before SEI publish and fails if "
+            "admission reasons remain (#1996)."
         ),
     )
 
@@ -1520,6 +1541,7 @@ def _cmd_validate_local(args: argparse.Namespace) -> int:
             series=args.series,
             license_spdx=args.license_spdx,
             source_subdir=args.source_subdir,
+            execution_profile=args.execution_profile,
         )
     except LocalBenchmarkValidationError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1537,6 +1559,16 @@ def _cmd_validate_local(args: argparse.Namespace) -> int:
     if result.entry.source_subdir:
         print(f"source_subdir: {result.entry.source_subdir}")
     print(f"tasks:        {result.task_count} valid")
+    if result.execution_profile is not None and result.profile_stats is not None:
+        ps = result.profile_stats
+        print(f"execution_profile: {result.execution_profile}")
+        print(
+            "profile: "
+            f"adapted_tasks={ps.adapted_tasks} "
+            f"verifier_wrappers_installed={ps.verifier_wrappers_installed} "
+            f"resources_filled_tasks={ps.resources_filled_tasks} "
+            f"preflight_passed={ps.preflight_passed}"
+        )
     print("config snippet:")
     print(render_config_snippet(result.entry))
     return 0
@@ -1628,13 +1660,14 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
                 imported_by=args.imported_by,
                 compat_flatten_environment=args.compat_flatten_environment,
                 create_bucket=args.create_bucket,
+                execution_profile=args.execution_profile,
             )
         )
     except LocalBenchmarkValidationError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return exc.exit_code
 
-    print(
+    summary = (
         f"publish-local {stats.benchmark_id}: "
         f"tasks={stats.task_count} "
         f"inserted={stats.inserted} "
@@ -1642,8 +1675,18 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
         f"unchanged={stats.unchanged} "
         f"uploaded_objects={stats.uploaded_objects} "
         f"compat_flattened_files={stats.compat_flattened_files} "
-        f"source={stats.source_prefix}",
+        f"source={stats.source_prefix}"
     )
+    if stats.execution_profile is not None and stats.profile_stats is not None:
+        ps = stats.profile_stats
+        summary += (
+            f" execution_profile={stats.execution_profile}"
+            f" adapted_tasks={ps.adapted_tasks}"
+            f" verifier_wrappers_installed={ps.verifier_wrappers_installed}"
+            f" resources_filled_tasks={ps.resources_filled_tasks}"
+            f" preflight_passed={ps.preflight_passed}"
+        )
+    print(summary)
     return 0
 
 

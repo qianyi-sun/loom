@@ -245,9 +245,42 @@ their original inputs; submit a new Trial after republishing. Verify the current
 catalog source with `loom datasets audit <benchmark-id> --verify-bundles` using
 the target database and object-store configuration.
 
-`publish-local` validates the general bundle schema and normalizes Harbor TOML;
-it does not silently rewrite a task's architecture, network access, verifier or
-resource contract for Nebius. Review these fields **before** publishing:
+`publish-local` validates the general bundle schema and normalizes Harbor TOML.
+By default it does **not** rewrite a task's architecture, network access,
+verifier or resource contract for Nebius. Unadapted Harbor rows still fail
+admission (`nebius_task_incompatible` / the specific contract reasons in
+[#1996](https://github.com/qianyi-sun/loom/issues/1996)). Service-execution
+input (#1978) is necessary but not sufficient.
+
+For Harbor/TB packs that should become Nebius Terminus-admissible, pass the
+opt-in ingest profile (keeps admission contracts; adapts the staged publish
+tree + DB config only):
+
+```sh
+loom datasets validate-local /path/to/benchmark \
+  --execution-profile nebius-terminus
+loom datasets publish-local /path/to/benchmark \
+  --execution-profile nebius-terminus \
+  --minio-region eu-north1
+```
+
+That profile forces `cpu_arch=x86_64`, `gateway-only` networking, fills missing
+`cpus`/`memory_mb`/`storage_mb` (defaults 1 / 2048 / 4096), sets
+`user=agent` + compatible `/app` workdir, strips custom verifier identity,
+points the verifier at relative `verifier/run.sh`, drops Harbor TB2.1
+artifact globs that admission rejects, installs the offline Nebius wrapper
+when missing or Harbor-online, then dry-runs
+`automatic_service_execution_rejections` before upsert. Bucket creation stays
+opt-in via `--create-bucket` ([#1993](https://github.com/qianyi-sun/loom/issues/1993) /
+[#1994](https://github.com/qianyi-sun/loom/pull/1994)); prefer an infra-managed
+bucket and pass `--minio-region` for signing.
+
+This is distinct from `scripts/ops/prepare_nebius_terminal_bench.py`, which
+builds a one-task TaskSet upload. Use the TaskSet helper for a single adapted
+upload; use `--execution-profile nebius-terminus` when republishing a catalog
+benchmark folder through `publish-local`.
+
+Review these fields when publishing without the profile:
 
 | Contract | Nebius Terminus requirement |
 | --- | --- |
