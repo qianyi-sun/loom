@@ -12,6 +12,49 @@ class _FakeEngine:
         pass
 
 
+def test_startup_runs_native_execution_without_retired_autoscalers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_control_plane import app as control_plane_app
+    from loom_control_plane.config import ControlPlaneSettings
+
+    started: set[str] = set()
+
+    async def schema_ready(_engine: object) -> int:
+        return 0
+
+    async def background(**_kwargs: object) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        started.add(task.get_name())
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(control_plane_app, "_assert_schema_startup", schema_ready)
+    monkeypatch.setattr(control_plane_app, "create_async_engine", lambda *_a, **_kw: _FakeEngine())
+    monkeypatch.setattr(control_plane_app, "build_s3_client", lambda **_: object())
+    for name in (
+        "run_crash_detector_loop", "run_metrics_refresher_loop",
+        "run_retry_exhausted_sweeper_loop", "run_live_preview_reconciler_loop",
+        "run_service_execution_scheduler_loop", "run_service_execution_materializer_loop",
+        "run_worker_pool_autoscaler_loop", "run_elastic_slurm_worker_controller_loop",
+    ):
+        monkeypatch.setattr(control_plane_app, name, background, raising=False)
+    settings = ControlPlaneSettings(
+        _env_file=None,
+        db_url="postgresql+psycopg://loom:loom@example/loom",
+        minio_endpoint="http://minio.example",
+        minio_access_key="minio-access",
+        minio_secret_key="minio-secret",
+        step_jwt_signing_key="test-step-jwt-signing-key",
+        service_execution_scheduler_enabled=True,
+    )
+    with TestClient(control_plane_app.create_app(settings)) as client:
+        assert client.get("/healthz").status_code == 200
+    assert "loom-cp-service-execution-scheduler" in started
+    assert "loom-cp-worker-pool-autoscaler" not in started
+    assert "loom-cp-elastic-slurm-worker-controller" not in started
+
+
 @pytest.mark.asyncio
 async def test_background_task_drain_follow_up_cancels_all_pending_tasks_together() -> None:
     from loom_control_plane import app as control_plane_app
