@@ -1,0 +1,769 @@
+{
+  "task_image_build_containment_attestations": [
+    {
+      "id": "44444444-4444-4444-4444-444444444444",
+      "grant_id": "11111111-1111-1111-1111-111111111111",
+      "generation": 1,
+      "attestation_json": {
+        "grant_id": "11111111-1111-1111-1111-111111111111",
+        "issued_at": "2026-09-02T14:00:05Z",
+        "node_name": "trt-gb10-1",
+        "attachment": {
+          "map_ids": [
+            301,
+            302
+          ],
+          "link_ids": [
+            101,
+            102,
+            103
+          ],
+          "program_ids": [
+            201,
+            202,
+            203
+          ],
+          "cgroup_inode": 987654,
+          "probe_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+          "schema_version": 1,
+          "containment_root": "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_12345/step_batch/loom-builder",
+          "bpf_program_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+          "build_egress_cgroup": "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_12345/step_batch/loom-builder/build-egress",
+          "bpf_map_schema_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+          "resource_limits_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "trusted_service_cgroup": "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_12345/step_batch/loom-builder/trusted-service",
+          "containment_policy_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+        },
+        "expires_at": "2026-09-02T14:00:40Z",
+        "generation": 1,
+        "cgroup_path": "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_12345/step_batch",
+        "cgroup_inode": 987654,
+        "node_boot_id": "77777777-7777-7777-7777-777777777777",
+        "slurm_job_id": "12345",
+        "attestation_id": "44444444-4444-4444-4444-444444444444",
+        "schema_version": 1,
+        "slurm_cluster_id": "gb10"
+      },
+      "attestation_sha256": "dd56328111f7b01facc8f2581ded8faa415c97040f8a4e0639c9059361d1e0eb",
+      "issued_at": "2026-09-02T14:00:05+00:00",
+      "expires_at": "2026-09-02T14:00:40+00:00",
+      "recorded_at": "2026-09-02T14:00:06+00:00"
+    }
+  ],
+  "task_image_build_grants": [
+    {
+      "id": "11111111-1111-1111-1111-111111111111",
+      "environment": "staging",
+      "provider": "slurm-rootless-v1",
+      "slurm_cluster_id": "gb10",
+      "cpu_arch": "arm64",
+      "state": "released",
+      "submitting_identity": "loom-builder",
+      "slurm_account": "loom-task-builder",
+      "slurm_partition": "loom-task-builder",
+      "slurm_qos": "loom-task-image-builder-rootless-gb10",
+      "request_spec": {
+        "qos": "loom-task-image-builder-rootless-gb10",
+        "account": "loom-task-builder",
+        "cpu_arch": "arm64",
+        "partition": "loom-task-builder",
+        "resources": {
+          "cpus": 8,
+          "pids": 4096,
+          "wall_time": "02:00:00",
+          "memory_mib": 32768,
+          "swap_bytes": 0,
+          "scratch_bytes": 107374182400,
+          "scratch_inodes": 1000000
+        },
+        "supervisor_path": "/usr/local/libexec/loom-task-builder-supervisor",
+        "slurm_cluster_id": "gb10",
+        "feature_constraint": "loom_rootless_buildkit",
+        "submitting_identity": "loom-builder"
+      },
+      "request_sha256": "b31748648e7873b0e5f34e75fdb2b4cc5d4d1e0ea7518f1f17ae919872780654",
+      "slurm_comment": "loom-task-builder-v1:grant=11111111-1111-1111-1111-111111111111",
+      "ambiguity_settle_seconds": 30,
+      "ambiguity_settle_until": "2026-09-02T14:00:30+00:00",
+      "invocation_started_at": "2026-09-02T14:00:00+00:00",
+      "slurm_job_id": "12345",
+      "revoke_reason": null,
+      "journal_sequence": 4,
+      "created_at": "2026-09-02T14:00:00+00:00",
+      "updated_at": "2026-09-02T14:00:02+00:00",
+      "bound_at": "2026-09-02T14:00:01+00:00",
+      "released_at": "2026-09-02T14:00:02+00:00",
+      "revoked_at": null,
+      "authority_spec": {
+        "pool_id": "staging-gb10-task-image",
+        "purpose": "production",
+        "cpu_arch": "arm64",
+        "issued_at": "2026-09-02T13:59:00Z",
+        "expires_at": "2026-09-02T16:00:00Z",
+        "environment": "staging",
+        "schema_version": 2,
+        "slurm_cluster_id": "gb10",
+        "shadow_campaign_id": null,
+        "build_policy_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "slurm_request_sha256": "b31748648e7873b0e5f34e75fdb2b4cc5d4d1e0ea7518f1f17ae919872780654",
+        "builder_release_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "resource_profile_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "containment_policy_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "supervisor_executable_sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+      },
+      "authority_sha256": "f9f3592f853b6b8afea9c8cc662a8f9b37679700d703856e6f277b9adfde9ddb",
+      "grant_expires_at": "2026-09-02T16:00:00+00:00"
+    }
+  ],
+  "task_image_build_projections": [
+    {
+      "id": "6fdcae3d-7b46-401f-bbe9-6de99aeeead1",
+      "grant_id": "11111111-1111-1111-1111-111111111111",
+      "state": "exchanged",
+      "principal_id": "gb10-trt-gb10-1",
+      "principal_sha256": "7b5e20cd945a2d2408cac1361b69343754e2aa1306a8c659d4d8f35a6dca71c2",
+      "request_id": "22222222-2222-2222-2222-222222222222",
+      "request_json": {
+        "cpu_arch": "arm64",
+        "grant_id": "11111111-1111-1111-1111-111111111111",
+        "node_name": "trt-gb10-1",
+        "slurm_qos": "loom-task-image-builder-rootless-gb10",
+        "request_id": "22222222-2222-2222-2222-222222222222",
+        "cgroup_path": "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_12345/step_batch",
+        "observed_at": "2026-09-02T14:00:03Z",
+        "cgroup_inode": 987654,
+        "node_boot_id": "77777777-7777-7777-7777-777777777777",
+        "slurm_job_id": "12345",
+        "slurm_account": "loom-task-builder",
+        "schema_version": 1,
+        "supervisor_gid": 980,
+        "supervisor_pid": 42100,
+        "supervisor_uid": 993,
+        "slurm_partition": "loom-task-builder",
+        "slurm_cluster_id": "gb10",
+        "submitting_identity": "loom-builder",
+        "slurm_request_sha256": "b31748648e7873b0e5f34e75fdb2b4cc5d4d1e0ea7518f1f17ae919872780654",
+        "supervisor_executable_sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+      },
+      "request_sha256": "9d5775b6ba0adee83f9c4d4b70efb413572acdaf26cecf8ccce4d9cd87258255",
+      "node_name": "trt-gb10-1",
+      "node_boot_id": "77777777-7777-7777-7777-777777777777",
+      "slurm_cluster_id": "gb10",
+      "slurm_job_id": "12345",
+      "supervisor_pid": 42100,
+      "supervisor_uid": 993,
+      "supervisor_gid": 980,
+      "supervisor_executable_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "cgroup_path": "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_12345/step_batch",
+      "cgroup_inode": 987654,
+      "challenge_nonce": "33333333-3333-3333-3333-333333333333",
+      "challenge_json": {
+        "grant_id": "11111111-1111-1111-1111-111111111111",
+        "issued_at": "2026-09-02T14:00:04Z",
+        "expires_at": "2026-09-02T14:01:04Z",
+        "request_id": "22222222-2222-2222-2222-222222222222",
+        "request_sha256": "9d5775b6ba0adee83f9c4d4b70efb413572acdaf26cecf8ccce4d9cd87258255",
+        "schema_version": 1,
+        "challenge_nonce": "33333333-3333-3333-3333-333333333333",
+        "resource_profile_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "containment_policy_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      "challenge_sha256": "1c2f405d49d8f5bbce14a80ee91c445f5f7c9f63a7201bb205c5a635442721cb",
+      "challenge_issued_at": "2026-09-02T14:00:04+00:00",
+      "challenge_expires_at": "2026-09-02T14:01:04+00:00",
+      "proof_id": "44444444-4444-4444-4444-444444444444",
+      "proof_json": {
+        "grant_id": "11111111-1111-1111-1111-111111111111",
+        "proof_id": "44444444-4444-4444-4444-444444444444",
+        "node_name": "trt-gb10-1",
+        "attachment": {
+          "map_ids": [
+            301,
+            302
+          ],
+          "link_ids": [
+            101,
+            102,
+            103
+          ],
+          "program_ids": [
+            201,
+            202,
+            203
+          ],
+          "cgroup_inode": 987654,
+          "probe_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+          "schema_version": 1,
+          "containment_root": "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_12345/step_batch/loom-builder",
+          "bpf_program_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+          "build_egress_cgroup": "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_12345/step_batch/loom-builder/build-egress",
+          "bpf_map_schema_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+          "resource_limits_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "trusted_service_cgroup": "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_12345/step_batch/loom-builder/trusted-service",
+          "containment_policy_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+        },
+        "request_id": "22222222-2222-2222-2222-222222222222",
+        "cgroup_path": "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_12345/step_batch",
+        "observed_at": "2026-09-02T14:00:05Z",
+        "cgroup_inode": 987654,
+        "node_boot_id": "77777777-7777-7777-7777-777777777777",
+        "slurm_job_id": "12345",
+        "request_sha256": "9d5775b6ba0adee83f9c4d4b70efb413572acdaf26cecf8ccce4d9cd87258255",
+        "schema_version": 1,
+        "challenge_nonce": "33333333-3333-3333-3333-333333333333",
+        "slurm_cluster_id": "gb10",
+        "attestation_expires_at": "2026-09-02T14:00:40Z",
+        "attestation_generation": 1
+      },
+      "proof_sha256": "94651e964361b3faced9c949b36b2067e103e59c5ec52d00f2594d67a5c0205d",
+      "bootstrap_token_hash": "\\x9918a1a2a77c68fe34e2afce37daec3e017cc7de769386527c2a775c95a9d7c6",
+      "bootstrap_secret_ref": "loom://task-image-bootstrap/0e35180e-6309-4852-9a31-f5318ee83ba2",
+      "bootstrap_issued_at": "2026-09-02T14:00:06+00:00",
+      "bootstrap_expires_at": "2026-09-02T14:00:40+00:00",
+      "exchange_id": "55555555-5555-5555-5555-555555555555",
+      "exchange_json": {
+        "grant_id": "11111111-1111-1111-1111-111111111111",
+        "exchange_id": "55555555-5555-5555-5555-555555555555",
+        "observed_at": "2026-09-02T14:00:07Z",
+        "proof_sha256": "94651e964361b3faced9c949b36b2067e103e59c5ec52d00f2594d67a5c0205d",
+        "schema_version": 1,
+        "bootstrap_token_sha256": "9918a1a2a77c68fe34e2afce37daec3e017cc7de769386527c2a775c95a9d7c6"
+      },
+      "exchange_sha256": "63d2ea0eb13c4da2497067a77e72cbb0ac33bb4788b13b5a2e6ad1b0b853ebcd",
+      "session_id": "f227ff1c-b4c4-4abe-a9a9-ac058f66398d",
+      "session_token_hash": "\\xe59ee1d0e7eb5fb8d28441f2af763cade212be2adad6a07c0809f002c73c0f60",
+      "session_secret_ref": "loom://task-image-session/03bb3479-a8cd-44c8-b2b7-ff9ac0d17199",
+      "session_json": {
+        "pool_id": "staging-gb10-task-image",
+        "purpose": "production",
+        "cpu_arch": "arm64",
+        "grant_id": "11111111-1111-1111-1111-111111111111",
+        "issued_at": "2026-09-02T14:00:08Z",
+        "expires_at": "2026-09-02T14:00:40Z",
+        "generation": 1,
+        "session_id": "f227ff1c-b4c4-4abe-a9a9-ac058f66398d",
+        "schema_version": 2,
+        "attestation_sha256": "dd56328111f7b01facc8f2581ded8faa415c97040f8a4e0639c9059361d1e0eb",
+        "shadow_campaign_id": null,
+        "session_token_sha256": "e59ee1d0e7eb5fb8d28441f2af763cade212be2adad6a07c0809f002c73c0f60",
+        "attestation_generation": 1
+      },
+      "session_sha256": "b948b34224c72fceb2870f1ce2b55eab716f6acf63ac829874b514423c2ab538",
+      "session_issued_at": "2026-09-02T14:00:08+00:00",
+      "session_expires_at": "2026-09-02T14:00:40+00:00",
+      "attestation_generation": 1,
+      "attestation_sha256": "dd56328111f7b01facc8f2581ded8faa415c97040f8a4e0639c9059361d1e0eb",
+      "attestation_expires_at": "2026-09-02T14:00:40+00:00",
+      "event_sequence": 3,
+      "created_at": "2026-09-02T14:00:04+00:00",
+      "updated_at": "2026-09-02T14:00:08+00:00",
+      "revoked_at": null,
+      "revoke_reason": null,
+      "expired_at": null,
+      "session_generation": 1
+    }
+  ],
+  "task_image_build_session_generations": [
+    {
+      "id": "278dea92-dfdd-4b4d-a246-5ba5c84c0ba2",
+      "grant_id": "11111111-1111-1111-1111-111111111111",
+      "generation": 1,
+      "session_id": "f227ff1c-b4c4-4abe-a9a9-ac058f66398d",
+      "session_token_hash": "\\xe59ee1d0e7eb5fb8d28441f2af763cade212be2adad6a07c0809f002c73c0f60",
+      "session_secret_ref": "loom://task-image-session/03bb3479-a8cd-44c8-b2b7-ff9ac0d17199",
+      "session_json": {
+        "pool_id": "staging-gb10-task-image",
+        "purpose": "production",
+        "cpu_arch": "arm64",
+        "grant_id": "11111111-1111-1111-1111-111111111111",
+        "issued_at": "2026-09-02T14:00:08Z",
+        "expires_at": "2026-09-02T14:00:40Z",
+        "generation": 1,
+        "session_id": "f227ff1c-b4c4-4abe-a9a9-ac058f66398d",
+        "schema_version": 2,
+        "attestation_sha256": "dd56328111f7b01facc8f2581ded8faa415c97040f8a4e0639c9059361d1e0eb",
+        "shadow_campaign_id": null,
+        "session_token_sha256": "e59ee1d0e7eb5fb8d28441f2af763cade212be2adad6a07c0809f002c73c0f60",
+        "attestation_generation": 1
+      },
+      "session_sha256": "b948b34224c72fceb2870f1ce2b55eab716f6acf63ac829874b514423c2ab538",
+      "attestation_generation": 1,
+      "attestation_sha256": "dd56328111f7b01facc8f2581ded8faa415c97040f8a4e0639c9059361d1e0eb",
+      "renewal_id": null,
+      "renewal_sha256": null,
+      "predecessor_session_id": null,
+      "issued_at": "2026-09-02T14:00:08+00:00",
+      "expires_at": "2026-09-02T14:00:40+00:00",
+      "recorded_at": "2026-09-02T14:00:08+00:00"
+    }
+  ],
+  "task_image_materializations": [
+    {
+      "id": "f2ac8286-1b19-4885-b96f-de5ec69969bc",
+      "materialization_key": "36cd4d8b37b4b999c79e55e6f38257b80ae96210b92ac9c6628ee4fc3c3c91f2",
+      "task_id": "phase2c/session-bound",
+      "task_checksum": "4444444444444444444444444444444444444444444444444444444444444444",
+      "cpu_arch": "arm64",
+      "task_config": {
+        "task": {
+          "id": "phase2c/session-bound",
+          "name": "session-bound"
+        },
+        "agent": {
+          "name": "oracle"
+        },
+        "verifier": {
+          "name": "pytest"
+        },
+        "environment": {
+          "os": "linux",
+          "cpu_arch": "arm64",
+          "sidecars": [],
+          "dockerfile": "environment/Dockerfile",
+          "build_timeout_sec": 600.0
+        },
+        "schema_version": "1"
+      },
+      "task_source": "s3://loom-bundles/phase2c/session-bound/",
+      "task_source_provenance": {
+        "bundle_file_metadata_sha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+      },
+      "state": "ready",
+      "attempt_count": 0,
+      "max_attempts": 3,
+      "next_attempt_at": null,
+      "claimed_by": null,
+      "lease_epoch": 1,
+      "lease_expires_at": null,
+      "registry_images": {
+        "task": "registry.example:5443/loom-task-image-attempts/arm64/16d58f24-ad0a-4a1f-a289-5a8a91ecec2f/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "registry_image_history": [],
+      "failure_reason": null,
+      "failure_message": null,
+      "created_at": "2026-09-17T19:39:31.166895+00:00",
+      "updated_at": "2026-09-02T14:00:14.999999+00:00",
+      "claimed_at": "2026-09-02T14:00:10+00:00",
+      "started_at": null,
+      "ready_at": "2026-09-02T14:00:14.999999+00:00",
+      "finished_at": "2026-09-02T14:00:14.999999+00:00",
+      "last_referenced_at": "2026-09-17T19:39:31.166895+00:00",
+      "unreferenced_at": null,
+      "ready_publication_operation_id": "f575844e-dc5a-40b7-b86d-5b93b23c3516",
+      "bundle_content_manifest_sha256": ""
+    }
+  ],
+  "task_image_publication_keys": [
+    {
+      "key_id": "publication-1",
+      "public_key": "\\x3746ab19597cc3bd0cdb0f64f75b713c19a1c9cb7d3de5d28a0605eb2d184aa8",
+      "activated_at": "2026-09-02T14:00:00+00:00",
+      "status": "active",
+      "retired_at": null,
+      "revoked_at": null
+    }
+  ],
+  "task_image_publication_state": [
+    {
+      "singleton_id": 1,
+      "revocation_epoch": 0,
+      "keyset_version": 1
+    }
+  ],
+  "teams": [
+    {
+      "id": "7245d290-7b17-4f75-a6b2-a1cb17d91d47",
+      "name": "admin",
+      "created_at": "2026-09-17T19:39:21.54481+00:00",
+      "disabled_at": null,
+      "disabled_reason": null,
+      "submissions_paused_at": null,
+      "submissions_paused_reason": null,
+      "public_registration_enabled": false
+    },
+    {
+      "id": "2c9506e1-7d5e-4b49-b532-4b8f0a3f5ea9",
+      "name": "loom-system-taskset-fence-canary",
+      "created_at": "2026-09-17T19:39:21.54481+00:00",
+      "disabled_at": null,
+      "disabled_reason": null,
+      "submissions_paused_at": null,
+      "submissions_paused_reason": null,
+      "public_registration_enabled": false
+    }
+  ],
+  "users": [
+    {
+      "id": "75cb11e3-4313-45d1-9261-592af2278e5f",
+      "email": null,
+      "display_name": "Qianyi",
+      "is_platform_admin": true,
+      "created_at": "2026-09-17T19:39:21.54481+00:00",
+      "last_login_at": null,
+      "username": "Qianyi",
+      "username_normalized": "qianyi",
+      "password_hash": null,
+      "password_set_at": null,
+      "status": "pending_setup",
+      "disabled_at": null
+    },
+    {
+      "id": "c2326529-cfbc-4130-bfea-25daae56161b",
+      "email": null,
+      "display_name": "Hongjian",
+      "is_platform_admin": true,
+      "created_at": "2026-09-17T19:39:21.54481+00:00",
+      "last_login_at": null,
+      "username": "Hongjian",
+      "username_normalized": "hongjian",
+      "password_hash": null,
+      "password_set_at": null,
+      "status": "pending_setup",
+      "disabled_at": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000001216",
+      "email": null,
+      "display_name": "Loom Pipeline acceptance controller",
+      "is_platform_admin": false,
+      "created_at": "2026-09-17T19:39:21.54481+00:00",
+      "last_login_at": null,
+      "username": "loom-pipeline-acceptance-controller",
+      "username_normalized": "loom-pipeline-acceptance-controller",
+      "password_hash": null,
+      "password_set_at": null,
+      "status": "active",
+      "disabled_at": null
+    }
+  ],
+  "task_image_build_grant_events": [
+    {
+      "id": "012639ad-7374-4a3a-8820-1b9ba9af8e32",
+      "grant_id": "11111111-1111-1111-1111-111111111111",
+      "sequence": 1,
+      "event_type": "issued",
+      "payload": {},
+      "created_at": "2026-09-02T14:00:00+00:00"
+    },
+    {
+      "id": "c334447a-be5f-48e5-9102-d1f5cb57c033",
+      "grant_id": "11111111-1111-1111-1111-111111111111",
+      "sequence": 2,
+      "event_type": "submission_started",
+      "payload": {},
+      "created_at": "2026-09-02T14:00:00+00:00"
+    },
+    {
+      "id": "1d3a0d1c-f837-49f4-9958-96737a96cba4",
+      "grant_id": "11111111-1111-1111-1111-111111111111",
+      "sequence": 3,
+      "event_type": "bound",
+      "payload": {
+        "job_id": "12345"
+      },
+      "created_at": "2026-09-02T14:00:01+00:00"
+    },
+    {
+      "id": "7d3ac907-a2f1-440e-a521-38b6b6de9cbc",
+      "grant_id": "11111111-1111-1111-1111-111111111111",
+      "sequence": 4,
+      "event_type": "released",
+      "payload": {
+        "job_id": "12345"
+      },
+      "created_at": "2026-09-02T14:00:02+00:00"
+    }
+  ],
+  "task_image_build_projection_events": [
+    {
+      "id": "6987bdad-ffef-474a-90af-c093807fab80",
+      "grant_id": "11111111-1111-1111-1111-111111111111",
+      "event_sequence": 1,
+      "event_type": "challenged",
+      "event_key": "challenge",
+      "payload_json": {
+        "request_sha256": "9d5775b6ba0adee83f9c4d4b70efb413572acdaf26cecf8ccce4d9cd87258255"
+      },
+      "created_at": "2026-09-02T14:00:04+00:00"
+    },
+    {
+      "id": "02be2e5e-b5f6-48b5-b36c-65a71d094e39",
+      "grant_id": "11111111-1111-1111-1111-111111111111",
+      "event_sequence": 2,
+      "event_type": "projected",
+      "event_key": "projection",
+      "payload_json": {
+        "proof_sha256": "94651e964361b3faced9c949b36b2067e103e59c5ec52d00f2594d67a5c0205d",
+        "attestation_sha256": "dd56328111f7b01facc8f2581ded8faa415c97040f8a4e0639c9059361d1e0eb"
+      },
+      "created_at": "2026-09-02T14:00:06+00:00"
+    },
+    {
+      "id": "2e76779e-564f-417b-a14c-71b15f205b48",
+      "grant_id": "11111111-1111-1111-1111-111111111111",
+      "event_sequence": 3,
+      "event_type": "exchanged",
+      "event_key": "exchange",
+      "payload_json": {
+        "session_id": "f227ff1c-b4c4-4abe-a9a9-ac058f66398d",
+        "exchange_sha256": "63d2ea0eb13c4da2497067a77e72cbb0ac33bb4788b13b5a2e6ad1b0b853ebcd"
+      },
+      "created_at": "2026-09-02T14:00:08+00:00"
+    }
+  ],
+  "task_image_materialization_attempts": [
+    {
+      "id": "16d58f24-ad0a-4a1f-a289-5a8a91ecec2f",
+      "materialization_id": "f2ac8286-1b19-4885-b96f-de5ec69969bc",
+      "attempt_number": 1,
+      "lease_epoch": 1,
+      "builder_id": "rootless:f227ff1cb4c44abea9a9ac058f66398d",
+      "claimed_at": "2026-09-02T14:00:10+00:00",
+      "created_at": "2026-09-17T19:39:31.166895+00:00",
+      "grant_id": "11111111-1111-1111-1111-111111111111",
+      "session_id": "f227ff1c-b4c4-4abe-a9a9-ac058f66398d",
+      "session_generation": 1,
+      "claim_id": "3ad54224-40c6-421e-8583-dbee79b40dc9",
+      "claim_deterministic_failure_count": 0,
+      "claim_lease_expires_at": "2026-09-02T14:05:10+00:00",
+      "claim_plan_json": {
+        "task_id": "phase2c/session-bound",
+        "cpu_arch": "arm64",
+        "grant_id": "11111111-1111-1111-1111-111111111111",
+        "platform": "linux/arm64",
+        "builder_id": "rootless:f227ff1cb4c44abea9a9ac058f66398d",
+        "components": [
+          {
+            "name": "task",
+            "context_path": ".",
+            "dockerfile_path": "environment/Dockerfile",
+            "oci_output_path": "oci/0000.tar"
+          }
+        ],
+        "session_id": "f227ff1c-b4c4-4abe-a9a9-ac058f66398d",
+        "bundle_bucket": "loom-bundles",
+        "bundle_prefix": "phase2c/session-bound/",
+        "task_checksum": "4444444444444444444444444444444444444444444444444444444444444444",
+        "schema_version": "loom.task-image-build-plan.v1",
+        "bundle_byte_limit": 536870912,
+        "bundle_file_limit": 2000,
+        "materialization_id": "f2ac8286-1b19-4885-b96f-de5ec69969bc",
+        "session_generation": 1,
+        "build_timeout_seconds": 600.0,
+        "authorization_expires_at": "2026-09-02T14:00:40Z",
+        "bundle_file_metadata_sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+      },
+      "claim_plan_sha256": "438092680173237a39fcbde36f077876af37870fa0c85e30a2c3ec42b3da2983",
+      "native_build": null
+    }
+  ],
+  "team_memberships": [
+    {
+      "team_id": "7245d290-7b17-4f75-a6b2-a1cb17d91d47",
+      "user_id": "75cb11e3-4313-45d1-9261-592af2278e5f",
+      "role": "owner",
+      "created_at": "2026-09-17T19:39:21.54481+00:00"
+    },
+    {
+      "team_id": "7245d290-7b17-4f75-a6b2-a1cb17d91d47",
+      "user_id": "c2326529-cfbc-4130-bfea-25daae56161b",
+      "role": "owner",
+      "created_at": "2026-09-17T19:39:21.54481+00:00"
+    }
+  ],
+  "team_quotas": [
+    {
+      "team_id": "7245d290-7b17-4f75-a6b2-a1cb17d91d47",
+      "fair_share_weight": 1,
+      "max_attempts_ceiling": 3,
+      "in_flight_count": 0,
+      "license_allowlist": [
+        "MIT",
+        "Apache-2.0",
+        "BSD-3-Clause",
+        "CC-BY-4.0"
+      ],
+      "allow_private_endpoints": false,
+      "taskset_max_count": null,
+      "taskset_max_storage_bytes": null
+    },
+    {
+      "team_id": "2c9506e1-7d5e-4b49-b532-4b8f0a3f5ea9",
+      "fair_share_weight": 1,
+      "max_attempts_ceiling": 3,
+      "in_flight_count": 0,
+      "license_allowlist": [
+        "MIT",
+        "Apache-2.0",
+        "BSD-3-Clause",
+        "CC-BY-4.0"
+      ],
+      "allow_private_endpoints": false,
+      "taskset_max_count": null,
+      "taskset_max_storage_bytes": null
+    }
+  ],
+  "task_image_publication_jobs": [
+    {
+      "operation_id": "f575844e-dc5a-40b7-b86d-5b93b23c3516",
+      "materialization_attempt_id": "16d58f24-ad0a-4a1f-a289-5a8a91ecec2f",
+      "materialization_id": "f2ac8286-1b19-4885-b96f-de5ec69969bc",
+      "attempt_number": 1,
+      "lease_epoch": 1,
+      "builder_id": "rootless:f227ff1cb4c44abea9a9ac058f66398d",
+      "grant_id": "11111111-1111-1111-1111-111111111111",
+      "canonical_snapshot": "\\x7b22617474656d70745f6964223a2231366435386632342d616430612d346131662d613238392d356138613931656365633266222c22617474656d70745f6e756d626572223a312c226275696c645f706f6c6963795f736861323536223a2233333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333222c226275696c6465725f6964223a22726f6f746c6573733a6632323766663163623463343461626561396139616330353866363633393864222c226275696c6465725f72656c656173655f736861323536223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c22636f6d706f6e656e7473223a5b7b2263616e646964617465223a7b22617474656d70745f6964223a2231366435386632342d616430612d346131662d613238392d356138613931656365633266222c22617474656d70745f6e756d626572223a312c22626173655f7265736f6c7574696f6e223a7b226f627365727665645f626173655f64696765737473223a5b5d2c226f75747075745f646967657374223a227368613235363a61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c22706c6174666f726d223a226c696e75782f61726d3634222c22736368656d61223a226c6f6f6d2e7461736b2d696d6167652d626173652d7265736f6c7574696f6e2f7631222c22736f6c76655f726566223a22736f6c76652d31227d2c226275696c6465725f6964223a22726f6f746c6573733a6632323766663163623463343461626561396139616330353866363633393864222c2263616e6469646174655f6964223a2238353764626235332d323362372d343631352d383437382d383938346665643633656562222c22636f6d706f6e656e74223a227461736b222c2263726564656e7469616c5f67656e65726174696f6e223a312c2263726564656e7469616c5f6964223a2236653334333939612d393963362d343237312d383266342d343963333835666439656234222c226772616e745f6964223a2231313131313131312d313131312d313131312d313131312d313131313131313131313131222c226c656173655f65706f6368223a312c226d616e69666573745f646967657374223a227368613235363a61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c226d616e69666573745f73697a65223a3531322c226d6174657269616c697a6174696f6e5f6964223a2266326163383238362d316231392d343838352d623936662d646535656336393936396263222c226f63695f66696c655f736861323536223a2262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262222c226f63695f66696c655f73697a65223a343039362c226f7065726174696f6e5f6964223a2233346139333965312d643039302d343839392d616539652d643366656530666363646464222c22706c6174666f726d223a226c696e75782f61726d3634222c227265636f726465645f6174223a22323032362d30392d30325431343a30303a31325a222c227265706f7369746f7279223a226c6f6f6d2d7461736b2d696d6167652d617474656d7074732f61726d36342f31366435386632342d616430612d346131662d613238392d3561386139316563656332662f7461736b222c22736368656d615f76657273696f6e223a226c6f6f6d2e7461736b2d696d6167652d7075626c69636174696f6e2d63616e6469646174652e7632222c2273657373696f6e5f67656e65726174696f6e223a312c2273657373696f6e5f6964223a2266323237666631632d623463342d346162652d613961392d616330353866363633393864227d2c2263616e6469646174655f736861323536223a2262326635343637326366613763316532333365373133373364633530303435633734393865356338376562646638613638376430653439623230643134376164227d5d2c22636f6e7461696e6d656e745f6174746573746174696f6e5f736861323536223a2264643536333238313131663762303166616363386632353831646564386661613431356339373034306638613465303633396339303539333631643165306562222c22656e7669726f6e6d656e74223a2273746167696e67222c2266726f7a656e5f706c616e5f736861323536223a2234333830393236383031373332333761333966636264653336663037373837366166333738373066613063383565333061326333656334326233646132393833222c226772616e745f6964223a2231313131313131312d313131312d313131312d313131312d313131313131313131313131222c226c656173655f65706f6368223a312c226d6174657269616c697a6174696f6e5f6964223a2266326163383238362d316231392d343838352d623936662d646535656336393936396263222c226d6174657269616c697a6174696f6e5f6b6579223a2233366364346438623337623462393939633739653535653666333832353762383061653936323130623932616339633636323865653466633363336339316632222c226f726967696e616c5f636c61696d5f73657373696f6e5f67656e65726174696f6e223a312c226f726967696e616c5f636c61696d5f73657373696f6e5f6964223a2266323237666631632d623463342d346162652d613961392d616330353866363633393864222c22706c6174666f726d223a226c696e75782f61726d3634222c22706f6f6c5f6964223a2273746167696e672d676231302d7461736b2d696d616765222c22707572706f7365223a2270726f64756374696f6e222c2272656769737472795f6f726967696e223a2268747470733a2f2f72656769737472792e6578616d706c653a35343433222c22736368656d61223a226c6f6f6d2e7461736b2d696d6167652d7075626c69636174696f6e2d6a6f622d696e7075742f7631222c22736c75726d5f636c75737465725f6964223a2267623130222c22736c75726d5f6a6f625f6964223a223132333435222c2273757065727669736f725f65786563757461626c655f736861323536223a2236363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636222c227461736b5f636865636b73756d223a2234343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434222c227461736b5f6964223a22706861736532632f73657373696f6e2d626f756e64227d",
+      "snapshot_sha256": "1fa55e8945c33ecbc5dd806564b8710ac09911b6137cb42aa35ca0fcf7a3f996",
+      "created_at": "2026-09-02T14:00:14+00:00",
+      "deadline": "2026-09-02T14:30:14+00:00",
+      "available_at": "2026-09-02T14:00:14+00:00",
+      "state": "completed",
+      "worker_id": null,
+      "worker_generation": 1,
+      "worker_expires_at": null,
+      "failure_code": null,
+      "completed_at": "2026-09-02T14:00:14.999999+00:00",
+      "canonical_receipt": "\\x7b22617474656d70745f6964223a2231366435386632342d616430612d346131662d613238392d356138613931656365633266222c2263616e6469646174655f7365745f736861323536223a2234613364313734316264646661343365653533643561306662316130316462666631376631326132363638636334623037373464353632643830363565316435222c22636f6d706c657465645f6174223a22323032362d30392d30325431343a30303a31345a222c22636f6d706f6e656e745f636f756e74223a312c226c656173655f65706f6368223a312c226d6174657269616c697a6174696f6e5f6964223a2266326163383238362d316231392d343838352d623936662d646535656336393936396263222c226f7065726174696f6e5f6964223a2266353735383434652d646335612d343062372d623836642d356239336232336333353136222c227075626c69636174696f6e5f7365745f736861323536223a2234313034633463323861383632323662323134623539316662383836303636393739636533373438383464626363323933646637303037633262313130623834222c22736368656d61223a226c6f6f6d2e7461736b2d696d6167652d7075626c69636174696f6e2d726563656970742f7631222c22736e617073686f745f736861323536223a2231666135356538393435633333656362633564643830363536346238373130616330393931316236313337636234326161333563613066636637613366393936222c22776f726b65725f67656e65726174696f6e223a317d",
+      "receipt_sha256": "9a44b3cbf7505bd3a485eecf5f713da44f22ce0c1de8f520ef13097011481bee"
+    }
+  ],
+  "task_image_registry_credentials": [
+    {
+      "credential_id": "6e34399a-99c6-4271-82f4-49c385fd9eb4",
+      "request_id": "a325e1cb-eb58-41af-8e4e-181e066d365c",
+      "materialization_attempt_id": "16d58f24-ad0a-4a1f-a289-5a8a91ecec2f",
+      "materialization_id": "f2ac8286-1b19-4885-b96f-de5ec69969bc",
+      "attempt_number": 1,
+      "lease_epoch": 1,
+      "builder_id": "rootless:f227ff1cb4c44abea9a9ac058f66398d",
+      "grant_id": "11111111-1111-1111-1111-111111111111",
+      "session_id": "f227ff1c-b4c4-4abe-a9a9-ac058f66398d",
+      "session_generation": 1,
+      "attestation_generation": 1,
+      "attestation_sha256": "dd56328111f7b01facc8f2581ded8faa415c97040f8a4e0639c9059361d1e0eb",
+      "component": "task",
+      "generation": 1,
+      "predecessor_credential_id": null,
+      "lease_heartbeat_operation_id": null,
+      "repository": "loom-task-image-attempts/arm64/16d58f24-ad0a-4a1f-a289-5a8a91ecec2f/task",
+      "registry_origin": "https://registry.example:5443",
+      "registry_service": "registry.example",
+      "registry_issuer": "loom-task-image-authority",
+      "registry_key_id": "LfTG0Rwvwk5mxH4q0zYbM1ZwVnA5tx7Q63kN3HemMxo",
+      "request_sha256": "b1f24b072b29bde01f81b2e5d72ab929342f761b9e3d2466c188ec45f370006d",
+      "response_public_json": {
+        "actions": [
+          "pull",
+          "push"
+        ],
+        "purpose": "production",
+        "cpu_arch": "arm64",
+        "grant_id": "11111111-1111-1111-1111-111111111111",
+        "platform": "linux/arm64",
+        "component": "task",
+        "issued_at": "2026-09-02T14:00:11Z",
+        "attempt_id": "16d58f24-ad0a-4a1f-a289-5a8a91ecec2f",
+        "builder_id": "rootless:f227ff1cb4c44abea9a9ac058f66398d",
+        "expires_at": "2026-09-02T14:00:40Z",
+        "generation": 1,
+        "repository": "loom-task-image-attempts/arm64/16d58f24-ad0a-4a1f-a289-5a8a91ecec2f/task",
+        "request_id": "a325e1cb-eb58-41af-8e4e-181e066d365c",
+        "session_id": "f227ff1c-b4c4-4abe-a9a9-ac058f66398d",
+        "lease_epoch": 1,
+        "credential_id": "6e34399a-99c6-4271-82f4-49c385fd9eb4",
+        "attempt_number": 1,
+        "schema_version": 1,
+        "registry_issuer": "loom-task-image-authority",
+        "registry_key_id": "LfTG0Rwvwk5mxH4q0zYbM1ZwVnA5tx7Q63kN3HemMxo",
+        "registry_origin": "https://registry.example:5443",
+        "registry_service": "registry.example",
+        "attestation_sha256": "dd56328111f7b01facc8f2581ded8faa415c97040f8a4e0639c9059361d1e0eb",
+        "materialization_id": "f2ac8286-1b19-4885-b96f-de5ec69969bc",
+        "session_generation": 1,
+        "shadow_campaign_id": null,
+        "bearer_token_sha256": "bec64d1aaead94a5a38db602c11a70087135b148666a1bba6a3fb9e338c5333e",
+        "attestation_generation": 1,
+        "predecessor_generation": null,
+        "predecessor_credential_id": null,
+        "lease_heartbeat_operation_id": null
+      },
+      "response_sha256": "b073a945ce516b9ab6a78ab8c48a6e58e63e28506153d021903fbcfe1b81dd36",
+      "token_hash": "\\xbec64d1aaead94a5a38db602c11a70087135b148666a1bba6a3fb9e338c5333e",
+      "secret_response_ref": "loom://task-image-registry-credential/31c0620b-48dc-4716-aff8-2a2b17dab4b6",
+      "issued_at": "2026-09-02T14:00:11+00:00",
+      "expires_at": "2026-09-02T14:00:40+00:00",
+      "recorded_at": "2026-09-02T14:00:11+00:00"
+    }
+  ],
+  "task_image_publication_candidates": [
+    {
+      "candidate_id": "857dbb53-23b7-4615-8478-8984fed63eeb",
+      "operation_id": "34a939e1-d090-4899-ae9e-d3fee0fccddd",
+      "credential_id": "6e34399a-99c6-4271-82f4-49c385fd9eb4",
+      "materialization_attempt_id": "16d58f24-ad0a-4a1f-a289-5a8a91ecec2f",
+      "materialization_id": "f2ac8286-1b19-4885-b96f-de5ec69969bc",
+      "attempt_number": 1,
+      "lease_epoch": 1,
+      "builder_id": "rootless:f227ff1cb4c44abea9a9ac058f66398d",
+      "grant_id": "11111111-1111-1111-1111-111111111111",
+      "session_id": "f227ff1c-b4c4-4abe-a9a9-ac058f66398d",
+      "session_generation": 1,
+      "component": "task",
+      "repository": "loom-task-image-attempts/arm64/16d58f24-ad0a-4a1f-a289-5a8a91ecec2f/task",
+      "manifest_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "manifest_size": 512,
+      "oci_file_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "oci_file_size": 4096,
+      "platform": "linux/arm64",
+      "response_json": {
+        "grant_id": "11111111-1111-1111-1111-111111111111",
+        "platform": "linux/arm64",
+        "component": "task",
+        "attempt_id": "16d58f24-ad0a-4a1f-a289-5a8a91ecec2f",
+        "builder_id": "rootless:f227ff1cb4c44abea9a9ac058f66398d",
+        "repository": "loom-task-image-attempts/arm64/16d58f24-ad0a-4a1f-a289-5a8a91ecec2f/task",
+        "session_id": "f227ff1c-b4c4-4abe-a9a9-ac058f66398d",
+        "lease_epoch": 1,
+        "recorded_at": "2026-09-02T14:00:12Z",
+        "candidate_id": "857dbb53-23b7-4615-8478-8984fed63eeb",
+        "operation_id": "34a939e1-d090-4899-ae9e-d3fee0fccddd",
+        "credential_id": "6e34399a-99c6-4271-82f4-49c385fd9eb4",
+        "manifest_size": 512,
+        "oci_file_size": 4096,
+        "attempt_number": 1,
+        "schema_version": "loom.task-image-publication-candidate.v2",
+        "base_resolution": {
+          "schema": "loom.task-image-base-resolution/v1",
+          "platform": "linux/arm64",
+          "solve_ref": "solve-1",
+          "output_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "observed_base_digests": []
+        },
+        "manifest_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "oci_file_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "materialization_id": "f2ac8286-1b19-4885-b96f-de5ec69969bc",
+        "session_generation": 1,
+        "credential_generation": 1
+      },
+      "response_sha256": "b2f54672cfa7c1e233e71373dc50045c7498e5c87ebdf8a687d0e49b20d147ad",
+      "recorded_at": "2026-09-02T14:00:12+00:00"
+    }
+  ],
+  "task_image_publication_envelopes": [
+    {
+      "envelope_id": "9dc4ed68-0795-4402-8f13-91ba714bce20",
+      "candidate_id": "857dbb53-23b7-4615-8478-8984fed63eeb",
+      "materialization_attempt_id": "16d58f24-ad0a-4a1f-a289-5a8a91ecec2f",
+      "component": "task",
+      "key_id": "publication-1",
+      "canonical_statement": "\\x7b22617474656d70745f6964223a2231366435386632342d616430612d346131662d613238392d356138613931656365633266222c22617474656d70745f6e756d626572223a312c226275696c645f706f6c6963795f736861323536223a2233333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333222c226275696c6465725f72656c656173655f736861323536223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c22636f6d706f6e656e74223a227461736b222c22636f6e666967223a7b22646967657374223a227368613235363a39393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939222c226d656469615f74797065223a226170706c69636174696f6e2f766e642e6f63692e696d6167652e636f6e6669672e76312b6a736f6e222c2273697a65223a3132387d2c22636f6e7461696e6d656e745f6174746573746174696f6e5f736861323536223a2264643536333238313131663762303166616363386632353831646564386661613431356339373034306638613465303633396339303539333631643165306562222c2264697374726962757465645f6b65797365745f76657273696f6e223a312c22656e7669726f6e6d656e74223a2273746167696e67222c2266726f7a656e5f706c616e5f736861323536223a2234333830393236383031373332333761333966636264653336663037373837366166333738373066613063383565333061326333656334326233646132393833222c226772616e745f6964223a2231313131313131312d313131312d313131312d313131312d313131313131313131313131222c226973737565645f6174223a22323032362d30392d30325431343a30303a31345a222c226c6179657273223a5b5d2c226c656173655f65706f6368223a312c226d616e6966657374223a7b22646967657374223a227368613235363a61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c226d656469615f74797065223a226170706c69636174696f6e2f766e642e6f63692e696d6167652e6d616e69666573742e76312b6a736f6e222c2273697a65223a3531327d2c226d6174657269616c697a6174696f6e5f6964223a2266326163383238362d316231392d343838352d623936662d646535656336393936396263222c226d6174657269616c697a6174696f6e5f6b6579223a2233366364346438623337623462393939633739653535653666333832353762383061653936323130623932616339633636323865653466633363336339316632222c226f627365727665645f626173655f64696765737473223a5b5d2c226f726967696e616c5f636c61696d5f73657373696f6e5f67656e65726174696f6e223a312c226f726967696e616c5f636c61696d5f73657373696f6e5f6964223a2266323237666631632d623463342d346162652d613961392d616330353866363633393864222c22706c6174666f726d223a226c696e75782f61726d3634222c22706f6f6c5f6964223a2273746167696e672d676231302d7461736b2d696d616765222c22707572706f7365223a2270726f64756374696f6e222c2272656769737472795f6f726967696e223a2268747470733a2f2f72656769737472792e6578616d706c653a35343433222c227265706f7369746f7279223a226c6f6f6d2d7461736b2d696d6167652d617474656d7074732f61726d36342f31366435386632342d616430612d346131662d613238392d3561386139316563656332662f7461736b222c227265766f636174696f6e5f65706f6368223a302c22726f6f74223a7b22646967657374223a227368613235363a61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c226d656469615f74797065223a226170706c69636174696f6e2f766e642e6f63692e696d6167652e6d616e69666573742e76312b6a736f6e222c2273697a65223a3531327d2c22736368656d61223a226c6f6f6d2e7461736b2d696d6167652d7075626c69636174696f6e2f7631222c227369676e696e675f6b65795f6964223a227075626c69636174696f6e2d31222c22736c75726d5f636c75737465725f6964223a2267623130222c22736c75726d5f6a6f625f6964223a223132333435222c2273757065727669736f725f65786563757461626c655f736861323536223a2236363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636222c227461736b5f636865636b73756d223a2234343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434222c227461736b5f6964223a22706861736532632f73657373696f6e2d626f756e64227d",
+      "statement_sha256": "8b9747b237c680defed45a2132d9404fcbd19df9330d5bc00bbd6ec81ee4b624",
+      "algorithm": "Ed25519",
+      "signature": "RFIlYZxesGqMLQQzqT5Bh_1DAH3Cfn7T7SQiOCfGt-buFRtcWJBc-HpBSrU4JumYrkI5F7icsxKCL4LHWrLoAA",
+      "issued_at": "2026-09-02T14:00:14+00:00",
+      "recorded_at": "2026-09-02T14:00:14.999999+00:00",
+      "distributed_keyset_version": 1,
+      "revocation_epoch": 0
+    }
+  ]
+}

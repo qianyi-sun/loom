@@ -33,18 +33,14 @@ def test_frontend_changes_do_not_select_unrelated_python_integration(path: str) 
 
 
 @pytest.mark.parametrize("path", [
-    "src/loom_task_image_builder_guard/service.py",
     "src/loom_task_image_authority/api.py",
-    "cmd/loom-task-image-builder-supervisor/orchestrator.go",
-    "src/loom_control_plane/task_image_build_environment.py",
     "src/loom/task_image_materialization.py",
     "src/loom/db/schema.py",
     "src/loom/security/secret_store.py",
     "migrations/versions/new_task_image_schema.py",
-    "tests/support/guard_fixture.py",
     "tests/support/minio_images.py",
 ])
-def test_docker_guard_flow_and_fixture_dependencies_keep_heavy_coverage(path):
+def test_image_materialization_and_fixture_dependencies_keep_heavy_coverage(path):
     plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
     assert plan.integration_docker is True
 

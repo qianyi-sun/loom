@@ -1,7 +1,8 @@
 # Full Nebius platform integration
 
-Status: owner-approved target; development integration requested 2026-09-14. Implementation
-and live acceptance remain open under #1536 and #1538.
+Status: Nebius-only hosted architecture following the 2026-09-17 repository
+retirement decision. Workload qualification and live acceptance remain separate
+from source cleanup under #1536 and #1538.
 
 ## Branch and delivery contract
 
@@ -21,17 +22,17 @@ The four strict, app-bound current-head checks remain merge authority:
 `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
 `staging-smoke-gate`. Use native squash auto-merge, with no protection bypass.
 The isolated branch's single aggregate and legacy-test exclusions do not apply
-to `dev`. Existing capacity, signed task-image, rollout, dual-architecture and
-release controls remain covered alongside Nebius tests. Credential-free
+to `dev`. Native capacity, signed image admission, dual-architecture builds, retained-data
+compatibility and release controls remain covered. Credential-free
 Kubernetes checks include the disposable native execution/platform tests.
 Nebius candidate publication remains GitHub-hosted and protected by the
 `nebius-integration` Environment. See [publication](../ops/nebius-candidate.md).
 
 This integration is source delivery, not a deployment or a claim that all
 workload, recovery, cost or retirement acceptance has passed. Open acceptance
-remains owned by #1536 and its component issues. No legacy infrastructure is
-retired by this merge. The target runtime architecture is Nebius; existing
-platform code remains available during the separately qualified migration.
+remains owned by #1536 and its component issues. The [repository retirement](../historical/shared-cluster-retirement-2026-09.md)
+removes shared-cluster execution support. It does not authorize or certify
+live infrastructure shutdown. Unsupported hosted workloads have no legacy fallback.
 
 ## Database lineage when moving from the isolated branch
 

@@ -24,14 +24,7 @@ from tests.integration.test_task_bundle_source_journal import (
     _spec,
     _upload,
 )
-from tests.integration.test_task_image_registry_credentials import (
-    registry_issuer as registry_issuer,
-)
-from tests.integration.test_task_image_retired_credential_ingress import (
-    _insert,
-    _prepared_insert,
-    _retire,
-)
+from tests.support.historical_task_images import _insert, _prepared_insert, _retire
 
 pytestmark = pytest.mark.parametrize("transfer_postgres", [16, 17], indirect=True)
 
@@ -87,7 +80,7 @@ async def test_source_journal_publication_and_immutability_survive_handoff(
 
 
 async def test_credential_retirement_guard_survives_sealed_owner_handoff(
-    transfer_database, registry_issuer,  # noqa: F811
+    transfer_database,  # noqa: F811
 ):
     admin, url, owner, runtime, bindings, target = await _prepare(transfer_database)
     password = uuid4().hex
@@ -109,9 +102,15 @@ async def test_credential_retirement_guard_survives_sealed_owner_handoff(
         engine = create_async_engine(client_url)
         try:
             factory = async_sessionmaker(engine, expire_on_commit=False)
-            # Actual issuer-produced values and production retirement path, all
-            # through the restored non-owner LOGIN, not an administrator session.
-            attempt_id, values = await _prepared_insert(factory, registry_issuer)
+            # Restore historical rows as backup setup, then exercise all guards
+            # through the restored non-owner LOGIN.
+            fixture_engine = create_async_engine(make_url(url).set(drivername="postgresql+psycopg"))
+            try:
+                attempt_id, values = await _prepared_insert(
+                    async_sessionmaker(fixture_engine, expire_on_commit=False)
+                )
+            finally:
+                await fixture_engine.dispose()
             async with factory() as session:
                 await _insert(session, values)
                 assert await session.scalar(

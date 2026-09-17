@@ -26,17 +26,17 @@ def _tracked() -> tuple[str, ...]:
     [
         (
             "tests-root",
-            "tests/loom_cli/rollout/operator/test_broker.py",
+            "tests/loom_cli/test_end_to_end_fake_backend.py",
             "tests/unit/test_explicit_nebius_backend.py",
         ),
         (
             "tests-root",
-            "tests/unit/test_slurm_worker_jobs.py",
+            "tests/unit/test_control_plane_app.py",
             "tests/unit/test_worker_claim_loop.py",
         ),
         (
             "integration",
-            "tests/integration/test_executable_global_capacity_bridge.py",
+            "tests/integration/test_nebius_platform_bootstrap.py",
             "tests/integration/test_control_plane_client.py",
         ),
         (
@@ -46,7 +46,7 @@ def _tracked() -> tuple[str, ...]:
         ),
         (
             "go-checks",
-            "cmd/loom-task-image-builder-supervisor/main_test.go",
+            "cmd/loom-execution-runtime/input_test.go",
             "cmd/loom-execution-runtime/broker_test.go",
         ),
     ],
@@ -71,10 +71,7 @@ def test_dev_image_fallback_preserves_existing_images(force_all: bool) -> None:
     )
     identities = {row["image"] for row in images}
     assert {"service", "control-plane", "execution-actuator", "execution-runtime"} <= identities
-    assert identities.intersection(
-        {"capacity-manager", "capacity-executor", "rehearsal-postgres", "staging-admin-browser-smoke"}
-    )
-    assert any(identity.startswith("personal-dev-") for identity in identities)
+
 
 
 def test_runtime_payload_plan_preserves_existing_catalog() -> None:
@@ -82,7 +79,6 @@ def test_runtime_payload_plan_preserves_existing_catalog() -> None:
     plan = lane_execution_plan(manifest, tracked_paths=_tracked(), lane="runtime-payload")
     paths = [case["path"] for group in plan for case in group["cases"]]
     assert paths
-    assert any("gb10" in path for path in paths)
     assert any("tb2-task-hello-world" in path for path in paths)
 
 
@@ -95,7 +91,5 @@ def test_python_lint_cli_preserves_combined_platform_scope() -> None:
     assert "src/loom_execution_actuator/renderer.py" in paths
     assert "tests/unit/test_worker_claim_loop.py" in paths
     assert "tests/ops/test_nebius_ci_scope.py" in paths
-    assert any(path.startswith("src/loom_cli/rollout/") for path in paths)
-    assert any(path.startswith("src/loom_capacity_") for path in paths)
     # Historical migrations still form the shared application schema chain.
     assert "migrations/versions/0043_gb10_worker_lifecycle.py" in paths

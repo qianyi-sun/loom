@@ -174,54 +174,8 @@ def test_native_image_publish_jobs_stay_on_architecture_matched_github_hosts() -
     assert jobs["publish-manifest"]["runs-on"] == "ubuntu-24.04"
 
 
-def test_ci_checks_nebius_go_packages_and_keeps_manual_supervisor() -> None:
-    steps = {
-        step.get("name"): str(step.get("run", ""))
-        for step in _workflow(".github/workflows/ci.yml")["jobs"]["go-checks"]["steps"]
-    }
-
-    assert "gofmt -l ./cmd/" in steps["gofmt"]
-    assert 'go vet "${packages[@]}"' in steps["go vet"]
-    assert 'go test -race "${packages[@]}"' in steps["go test"]
-    assert not any(name.endswith(" supervisor") for name in steps if name)
 
 
-def test_go_checks_executes_required_python_go_v2_handoff() -> None:
-    steps = _workflow(".github/workflows/ci.yml")["jobs"]["go-checks"]["steps"]
-    step_by_name = {step.get("name"): step for step in steps}
-
-    setup_uv = step_by_name["Install uv"]
-    assert setup_uv["uses"] == ("astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39")
-    assert setup_uv["with"] == {
-        "version": "0.11.26",
-        "checksum": "6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0",
-        "enable-cache": True,
-        "save-cache": (
-            "${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}"
-        ),
-        "cache-dependency-glob": "uv.lock",
-    }
-    assert step_by_name["Set up Python 3.11"]["run"] == "uv python install 3.11"
-    assert step_by_name["Sync locked workspace"]["run"] == (
-        "uv sync --locked --all-packages --extra dev --python 3.11"
-    )
-    assert step_by_name["Build Go V2 handoff test binary"]["run"] == (
-        'go test -race -c -o "${RUNNER_TEMP}/loom-task-image-builder-supervisor.test" '
-        "./cmd/loom-task-image-builder-supervisor"
-    )
-    for name in ("Install uv", "Set up Python 3.11", "Sync locked workspace",
-                 "Build Go V2 handoff test binary", "Python-Go V2 handoff"):
-        assert step_by_name[name]["if"] == "env.CI_TEST_SCOPE == 'all'"
-    handoff = step_by_name["Python-Go V2 handoff"]
-    assert handoff["env"] == {
-        "LOOM_GO_V2_TEST_BINARY": ("${{ runner.temp }}/loom-task-image-builder-supervisor.test"),
-        "LOOM_GO_V2_TEST_REQUIRED": "1",
-    }
-    assert handoff["run"] == (
-        'uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" '
-        "tests/integration/test_task_image_builder_guard_local_flow.py "
-        "tests/integration/test_task_image_publication_full_flow.py"
-    )
 
 
 
