@@ -20,18 +20,16 @@ def test_compatibility_report_is_complete_and_has_named_owners() -> None:
     report = json.loads(REPORT.read_text(encoding="utf-8"))
     rows = report["workloads"]
     assert report["schema_version"] == "loom.service-workload-compatibility-report.v2"
-    assert report["accepted_pool_ids"] == ["gb10", "nebius-cpu", "oldlab"]
+    assert report["accepted_pool_ids"] == ["nebius-cpu"]
     assert report["workload_policy_pool_id"] == "nebius-cpu"
     assert report["summary"]["total_workloads"] == len(rows) == 69
     assert report["summary"]["pools"]["nebius-cpu"]["supported"] == 0
     assert report["summary"]["pools"]["nebius-cpu"]["conversion_required"] == 66
     assert report["summary"]["pools"]["nebius-cpu"]["unsupported"] == 3
-    for pool_id in ("oldlab", "gb10"):
-        assert report["summary"]["pools"][pool_id]["runtime_admission_required"] == 69
     assert len({row["workload_id"] for row in rows}) == len(rows)
     assert all(
         {decision["logical_pool_id"] for decision in row["pool_dispositions"]}
-        == {"nebius-cpu", "oldlab", "gb10"}
+        == {"nebius-cpu"}
         for row in rows
     )
     assert all(
