@@ -30,6 +30,38 @@ def _is_disposable_read_refusal(stderr):
             and lowered.rstrip().endswith(" was refused - did you specify the right host or port?"))
 
 
+def _server_failure_categories(logs):
+    lowered = logs.lower()
+    categories = {label for label, fragments in (
+        ("api-server-exit", ("kube-apiserver exited",)),
+        ("controller-manager-exit", ("kube-controller-manager exited",)),
+        ("scheduler-exit", ("kube-scheduler exited",)),
+        ("containerd-exit", ("containerd exited",)),
+        ("leader-election-lost", ("leaderelection lost", "leader election lost")),
+        ("disk-full", ("no space left on device",)),
+        ("file-descriptor-limit", ("too many open files",)),
+        ("memory-exhausted", ("out of memory", "cannot allocate memory")),
+        ("permission-denied", ("permission denied",)),
+        ("address-in-use", ("address already in use",)),
+        ("fatal", ("level=fatal", '"level":"fatal"')),
+        ("panic", ("panic:",)),
+        ("termination-signal", ("received signal", "received sigterm", "received sigint")),
+        ("context-cancelled", ("context canceled",)),
+    ) if any(fragment in lowered for fragment in fragments)}
+    return ",".join(sorted(categories)) or "unclassified"
+
+
+def _container_lifecycle_categories(events):
+    categories = set()
+    for line in events.splitlines():
+        fields = line.split()
+        if fields and fields[0] in {"oom", "die", "stop", "destroy"}:
+            categories.add(fields[0])
+        elif len(fields) == 2 and fields[0] == "kill" and fields[1] in {str(value) for value in range(1, 65)}:
+            categories.add("kill-" + fields[1])
+    return ",".join(sorted(categories)) or "none-observed"
+
+
 def _failure_category(stderr):
     # Finite labels only: kubectl can quote Secret input, names or server URLs.
     lowered = stderr.lower()
@@ -158,9 +190,32 @@ class _ContainerKubectl:
                     and type(value["Running"]) is bool and type(value["OOMKilled"]) is bool
                     and type(value["ExitCode"]) is int):
                     note("disposable container state: " + json.dumps(value, sort_keys=True))
+                    if not value["Running"]:
+                        await self._stopped_diagnostics(note)
             except (DevInstanceRuntimeError, ValueError):
                 note("disposable container state unavailable")
             raise
+
+    async def _stopped_diagnostics(self, note):
+        # docker exec cannot recover stderr once PID 1 exits. Inspect only this
+        # disposable container; retain finite labels, never raw server output.
+        try:
+            captured = await AsyncCommandRunner().run([
+                "sh", "-c", 'docker logs --tail 100 "$1" 2>&1 | head -c 32769',
+                "loom-k3s-diagnostics", self.container_id,
+            ], timeout_seconds=5)
+            note("disposable k3s log categories: " + _server_failure_categories(captured.stdout[:32768]))
+        except DevInstanceRuntimeError:
+            note("disposable k3s log categories unavailable")
+        try:
+            captured = await AsyncCommandRunner().run([
+                "docker", "events", "--filter", "container=" + self.container_id,
+                "--since", "10m", "--until", str(int(time.time()) + 1),
+                "--format", '{{.Action}} {{index .Actor.Attributes "signal"}}',
+            ], timeout_seconds=5)
+            note("disposable container lifecycle: " + _container_lifecycle_categories(captured.stdout[:8192]))
+        except DevInstanceRuntimeError:
+            note("disposable container lifecycle unavailable")
 
 
 @pytest.fixture
@@ -238,3 +293,14 @@ async def test_bootstrap_rejects_unbound_namespace_owned_by_same_field_manager(d
         await KubectlCandidateGenerationProvisioner(kubectl).bootstrap(binding.identity, config)
     namespace = await kubectl.read_namespace_optional(binding.identity.namespace)
     assert "loom.dev/storage-binding" not in namespace["metadata"].get("annotations", {})
+
+
+async def test_stopped_disposable_server_retains_actual_shutdown_events(disposable_storage_kubectl):
+    runner = disposable_storage_kubectl.runner
+    await AsyncCommandRunner().run(["docker", "stop", "--time", "1", runner.container_id])
+    with pytest.raises(DevInstanceRuntimeError) as raised:
+        await runner.run(["kubectl", "get", "namespace", "default"])
+    notes = raised.value.__notes__
+    assert any(note.startswith("disposable k3s log categories: ") for note in notes)
+    lifecycle = next(note for note in notes if note.startswith("disposable container lifecycle: "))
+    assert "kill-15" in lifecycle and "stop" in lifecycle and "die" in lifecycle
