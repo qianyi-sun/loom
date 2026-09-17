@@ -581,7 +581,7 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
     assert body["archive_filename"].endswith(".tar.gz")
     assert body["manifest"]["schema_version"] == "1"
     assert body["manifest"]["selection_rule"] == (
-        "highest_priority_succeeded_by_task_sample_combination"
+        "highest_priority_deliverable_by_task_sample_combination"
     )
     assert body["manifest"]["batch_family"] == {
         "main_batch_id": str(main_batch_id),
@@ -1442,6 +1442,249 @@ async def test_delivery_export_rejects_unresolved_platform_failures(
     body = response.json()
     assert body["detail"]["code"] == "delivery_export_unresolved_trials"
     assert body["detail"]["unresolved_trials"][0]["task_id"].startswith("source-useful-5003/")
+
+
+def _seed_scored_timeout(
+    delivery_setup: dict[str, object],
+    postgres_url: str,
+    *,
+    defect: str | None = None,
+) -> tuple[UUID, dict[str, object]]:
+    """Persist the native timeout-to-verifier outcome without changing its failure."""
+    task_id = delivery_setup["task_ids"][2]  # type: ignore[index]
+    trial_id = delivery_setup["selected_trials"][task_id]  # type: ignore[index]
+    settings: LoomServiceSettings = delivery_setup["settings"]  # type: ignore[assignment]
+    fake_s3: _FakeS3Client = delivery_setup["fake_s3"]  # type: ignore[assignment]
+    prefix = f"{delivery_setup['team_id']}/{trial_id}"
+    reward = {"passed": 0.0}
+    output = b'{"rewards":{"passed":0.0}}'
+    digest = "sha256:" + hashlib.sha256(output).hexdigest()
+    phases = [
+        {"role": "agent", "exit_code": 124, "timed_out": True},
+        {"role": "verifier", "exit_code": 0, "timed_out": False},
+    ]
+    outputs = [
+        {
+            "source_path": ".loom/verifier/output.json",
+            "relative_path": "verifier/output.json",
+            "kind": "verifier",
+            "required": True,
+            "state": "captured",
+            "size_bytes": len(output),
+            "sha256": digest,
+        }
+    ]
+    if defect == "missing_verifier":
+        phases.pop()
+    elif defect == "failed_verifier":
+        phases[-1]["exit_code"] = 1
+    elif defect == "missing_output":
+        outputs[0].update(state="missing", size_bytes=None, sha256=None)
+    result: dict[str, object] = {
+        # Native finalization persists state/reason on Trial, not this projection
+        # (service_execution.finalize_committed_service_execution).
+        "schema_version": "loom.service-execution-trial-result.v1",
+        "aggregate_reward": 0.0,
+        "reward": reward,
+        "runtime_result": {
+            "schema_version": "loom.execution-runtime-result.v1",
+            "execution_role": "attempt",
+            "status": "timed_out",
+            "failure_reason": None,
+            "phases": phases,
+            "outputs": outputs,
+            "verifier_rewards": reward,
+            "partial_evidence": True,
+        },
+    }
+    terminal = {
+        "kind": "trial_end",
+        "seq": 1,
+        "emitted_at": datetime.now(UTC).isoformat(),
+        "trial_id": str(trial_id),
+        "step_id": "__trial__",
+        "final_state": "failed",
+        "reward": reward,
+        "failure_reason": "timed_out",
+    }
+    metadata = {
+        "final_state": "failed",
+        "reward": reward,
+        "error": {"failure_reason": "timed_out"},
+    }
+    if defect == "typed_wrong_reason":
+        terminal["failure_reason"] = "verifier_error"
+    elif defect == "atif_wrong_reason":
+        metadata["error"] = {"failure_reason": "verifier_error"}
+    fake_s3.objects[(settings.trajectories_bucket, f"{prefix}/events.jsonl")] = (
+        json.dumps(terminal) + "\n"
+    ).encode()
+    fake_s3.objects[(settings.trajectories_bucket, f"{prefix}/atif.json")] = json.dumps(
+        {"version": "1.7", "trial_id": str(trial_id), "metadata": metadata}
+    ).encode()
+    artifact_id = uuid4()
+    key = f"trials/{trial_id}/bundles/{artifact_id}/files/verifier/output.json"
+    fake_s3.objects[(settings.artifacts_bucket, key)] = output
+    manifest_key = f"trials/{trial_id}/bundles/{artifact_id}/source/_manifest.json"
+    manifest = b'{"schema_version":"loom.artifact-commit.v1"}'
+    fake_s3.objects[(settings.artifacts_bucket, manifest_key)] = manifest
+    sync_engine = create_engine(postgres_url)
+    try:
+        with sync_engine.begin() as conn:
+            conn.execute(
+                update(Trial)
+                .where(Trial.id == trial_id)
+                .values(
+                    state="failed",
+                    failure_reason="timed_out",
+                    failure_message="service execution runtime reported timed_out",
+                    result=result,
+                )
+            )
+            if defect != "missing_bundle":
+                conn.execute(
+                    insert(Artifact).values(
+                        id=artifact_id,
+                        artifact_type="loom.trial-artifact-bundle.v1",
+                        name="trial_bundle",
+                        team_id=delivery_setup["team_id"],
+                        trial_id=trial_id,
+                        control_producer_kind="service_execution",
+                        control_producer_id=uuid4(),
+                        content_hash="sha256:" + "1" * 64,
+                        storage={
+                            "schema_version": "loom.canonical-trial-bundle-storage.v1",
+                            "attempt": 0,
+                            "files": [
+                                {
+                                    "relative_path": "verifier/output.json",
+                                    "size_bytes": len(output),
+                                    "sha256": digest,
+                                    "media_type": "application/json",
+                                    "bucket": settings.artifacts_bucket,
+                                    "key": key,
+                                }
+                            ],
+                            "source_evidence": [
+                                {
+                                    "relative_path": "source/_manifest.json",
+                                    "size_bytes": len(manifest),
+                                    "sha256": "sha256:" + hashlib.sha256(manifest).hexdigest(),
+                                    "media_type": "application/json",
+                                    "bucket": settings.artifacts_bucket,
+                                    "key": manifest_key,
+                                }
+                            ],
+                        },
+                        artifact_metadata={"materialization_state": "committed"},
+                        visibility="team",
+                        share_status="shared",
+                        safety_state="verified_internal",
+                        access_class="team_runtime",
+                    )
+                )
+    finally:
+        sync_engine.dispose()
+    return trial_id, result
+
+
+async def _export_complete_test_family(delivery_setup: dict[str, object]) -> httpx.Response:
+    transport = httpx.ASGITransport(app=delivery_setup["app"])  # type: ignore[arg-type]
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as client:
+        return await client.post(
+            f"/api/v1/batches/{delivery_setup['main_batch_id']}/delivery-export",
+            headers={"Authorization": f"Bearer {delivery_setup['raw']}"},
+            json={
+                "supplemental_batch_ids": [
+                    str(delivery_setup["supplemental_batch_id"]),
+                    str(delivery_setup["targeted_batch_id"]),
+                ]
+            },
+        )
+
+
+async def test_delivery_export_includes_scored_timeout_without_rewriting_failure(
+    delivery_setup: dict[str, object],
+    postgres_url: str,
+) -> None:
+    trial_id, original_result = _seed_scored_timeout(delivery_setup, postgres_url)
+    response = await _export_complete_test_family(delivery_setup)
+    assert response.status_code == 201, response.text
+    body = response.json()
+    fake_s3: _FakeS3Client = delivery_setup["fake_s3"]  # type: ignore[assignment]
+    archive = fake_s3.objects[(body["storage"]["bucket"], body["storage"]["key"])]
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        _assert_complete_payload_checksums(tar)
+        rows = [
+            json.loads(line)
+            for line in tar.extractfile("ledger/trials.jsonl").read().splitlines()  # type: ignore[union-attr]
+        ]
+        assert len(rows) == 4
+        row = next(item for item in rows if item["selected_trial_id"] == str(trial_id))
+        assert row["state"] == "failed"
+        assert row["failure_reason"] == "timed_out"
+        assert row["reward"] == 0.0
+        assert sum(item["state"] == "succeeded" for item in rows) == 3
+        csv_rows = list(
+            csv.DictReader(
+                io.StringIO(tar.extractfile("ledger/trials.csv").read().decode())  # type: ignore[union-attr]
+            )
+        )
+        csv_row = next(item for item in csv_rows if item["selected_trial_id"] == str(trial_id))
+        assert csv_row["state"] == "failed"
+        assert csv_row["failure_reason"] == "timed_out"
+        assert float(csv_row["reward"]) == 0.0
+        terminal = json.loads(tar.extractfile(row["trajectory_file"]).read())  # type: ignore[union-attr]
+        assert terminal["final_state"] == "failed"
+        assert terminal["failure_reason"] == "timed_out"
+        assert terminal["reward"] == {"passed": 0.0}
+        atif = json.load(tar.extractfile(row["atif_file"]))  # type: ignore[arg-type]
+        assert atif["metadata"]["final_state"] == "failed"
+        assert atif["metadata"]["error"]["failure_reason"] == "timed_out"
+        assert atif["metadata"]["reward"] == {"passed": 0.0}
+        verifier_paths = [name for name in tar.getnames() if name.endswith("/verifier/output.json")]
+        assert len(verifier_paths) == 1
+        assert json.load(tar.extractfile(verifier_paths[0])) == {"rewards": {"passed": 0.0}}  # type: ignore[arg-type]
+    sync_engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(sync_engine)() as session:
+            trial = session.get(Trial, trial_id)
+            assert trial is not None
+            assert trial.state == "failed"
+            assert trial.failure_reason == "timed_out"
+            assert trial.result == original_result
+    finally:
+        sync_engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "defect", ["missing_verifier", "failed_verifier", "missing_output", "missing_bundle"]
+)
+async def test_delivery_export_rejects_incomplete_scored_timeout(
+    delivery_setup: dict[str, object],
+    postgres_url: str,
+    defect: str,
+) -> None:
+    _seed_scored_timeout(delivery_setup, postgres_url, defect=defect)
+    response = await _export_complete_test_family(delivery_setup)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == (
+        "delivery_export_objects_missing"
+        if defect == "missing_bundle"
+        else "delivery_export_unresolved_trials"
+    )
+
+
+@pytest.mark.parametrize("defect", ["typed_wrong_reason", "atif_wrong_reason"])
+async def test_delivery_export_rejects_timeout_terminal_evidence_disagreement(
+    delivery_setup: dict[str, object],
+    postgres_url: str,
+    defect: str,
+) -> None:
+    _seed_scored_timeout(delivery_setup, postgres_url, defect=defect)
+    response = await _export_complete_test_family(delivery_setup)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "delivery_export_terminal_state_mismatch"
 
 
 def _tb2_v2_events_jsonl(

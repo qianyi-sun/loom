@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import re
@@ -26,7 +25,9 @@ from loom.models.taskset import (
     bundle_object_key,
     validate_bundle_relative_path,
 )
-from loom.service_execution_materialization import build_service_execution_input_manifest
+from loom.service_execution_materialization import (
+    prepare_service_execution_input_manifest,
+)
 from loom.task_bundle_compat import (
     CompatibilitySeverity,
     TaskBundleCompatibilityIssue,
@@ -232,11 +233,12 @@ def _publish_service_execution_input_manifest(
     bundle_dir: Path,
     task_checksum_value: str,
 ) -> tuple[dict[str, Any], int]:
-    manifest = build_service_execution_input_manifest(
+    body, provenance = prepare_service_execution_input_manifest(
         bundle_dir,
         task_checksum=task_checksum_value,
+        bucket=bucket,
+        manifest_key=manifest_key,
     )
-    body = manifest.canonical_bytes()
     _put_object(
         client,
         bucket=bucket,
@@ -244,18 +246,7 @@ def _publish_service_execution_input_manifest(
         body=body,
         content_type="application/json",
     )
-    return (
-        {
-            "service_execution_input": {
-                "schema_version": "loom.service-execution-input.v1",
-                "manifest_uri": f"s3://{bucket}/{manifest_key}",
-                "manifest_sha256": "sha256:" + hashlib.sha256(body).hexdigest(),
-                "file_count": len(manifest.files),
-                "total_bytes": sum(item.size_bytes for item in manifest.files),
-            },
-        },
-        len(body),
-    )
+    return provenance, len(body)
 
 
 def _assert_safe_tar_member(member: tarfile.TarInfo) -> PurePosixPath:

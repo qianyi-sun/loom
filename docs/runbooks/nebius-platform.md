@@ -117,6 +117,9 @@ the execution taint. The distinct node-role keeps integration nodes outside the 
 `node-role=execution` inventory. A dedicated execution group avoids competing autoscalers
 and duplicate quota accounting against the older development pool.
 
+For repeated expansion during node initialization, use the
+[read-only cold-start capture and bounded packing procedure](nebius-cold-start.md).
+
 Terraform owns the execution group's static autoscaling limit: the default is
 [the native API ceiling of 100 nodes](https://github.com/nebius/api/blob/main/nebius/mk8s/v1/node_group.proto),
 with explicit lower `integration_platform.execution_max_nodes` values preserved.
@@ -227,6 +230,34 @@ result committed within that window keeps its normal finalization path. After
 the window, absent output is explicitly unavailable, the current Trial fails,
 and the existing UID-scoped cleanup releases its reservations. This path never
 fabricates a runtime result, verifier reward or successful artifact bundle.
+
+Native task/verifier sidecar restarts invalidate the attempt even while the Pod
+still reports Running. The actuator records current and previous termination
+reason, exit code, signal, timestamps and restart count in the existing
+UID-bound Kubernetes observation before cleanup. Pod resource versions retain
+distinct sidecar updates under an unchanged Job. Arbitrary termination messages
+are excluded; exit code 137 alone is not evidence of OOM. Normal sidecar shutdown
+after the execution container exits is not classified as sandbox loss. Sandbox
+loss uses the same bounded output window so controller partial evidence can
+still commit before resources are removed.
+
+The execution controller pins each private sandbox's `/health` process identity
+and stops the attempt and its model requests when that process is lost or
+replaced. An isolated slow response does not prove death: ambiguous health
+failures require three consecutive observations and a healthy response resets
+the count. Confirmed socket loss or a changed process identity ends the attempt
+without reconnecting it to a fresh filesystem. Partial output and the model
+ledger remain available during finalization.
+
+Process cleanup owns the sandbox runtime's task descendants, not every process
+visible in its PID namespace. OCI exec probes briefly appear with UID 0 and
+`PPid: 0` because their parent is outside the namespace. Cleanup leaves those
+external processes alone; task descendants, including orphans adopted by PID 1,
+must still match the runtime UID. Ownership failures retain bounded numeric
+PID/parent/UID and state diagnostics. Verifier reports are captured before
+cleanup and remain partial evidence if cleanup fails; neither an available
+reward nor a second cleanup error may turn that failure into success or hide
+its original cause.
 
 When the same identified Pod reports `DisruptionTarget=True` with
 `DeletionByTaintManager`, preserve the specific eviction observation through

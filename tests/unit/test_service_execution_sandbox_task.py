@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
@@ -10,6 +12,111 @@ from loom.driver.fake import FakeDriver
 from loom.models.exec import ExecResult
 from loom.service_execution_sandbox_task import run_agent, run_verifier
 from tests.unit.test_service_execution_terminus_plan import _inputs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("snapshot_fails", [False, True])
+async def test_deadline_timeout_handoff_requires_completed_snapshot(
+    tmp_path, monkeypatch, snapshot_fails,
+):
+    from loom import service_execution_sandbox_task as module
+
+    task, trial, _ = _inputs()
+    (tmp_path / "instruction.md").write_text("work")
+    driver = Sandbox()
+    monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
+    monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
+    epoch = time.time() + 0.05
+    monkeypatch.setenv("LOOM_EXECUTION_PHASE_DEADLINE", str(epoch))
+    monkeypatch.setenv("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "1")
+    monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
+
+    async def identity(_):
+        return uuid4(), uuid4()
+
+    async def terminus(**kwargs):
+        assert kwargs["deadline"].wall_deadline_epoch_sec == epoch
+        (kwargs["workspace"] / "trajectory.jsonl").write_bytes(b"")
+        driver.filesystem[PurePosixPath("/app/answer.txt")] = b"partial answer"
+        await asyncio.sleep(10)
+
+    async def failed_snapshot(*args):
+        raise RuntimeError("snapshot failed")
+
+    monkeypatch.setattr(module, "_execution_identity", identity)
+    monkeypatch.setattr(module, "run_terminus2", terminus)
+    if snapshot_fails:
+        monkeypatch.setattr(module, "_export_workspace_archive", failed_snapshot)
+    expected = RuntimeError if snapshot_fails else module.AgentTimeoutFinalizedError
+    with pytest.raises(expected):
+        await module.run_agent(tmp_path, task, trial)
+    assert driver.quiesced and driver.state == "stopped"
+    assert (tmp_path / ".loom/agent/usage.json").is_file()
+    assert (tmp_path / ".loom/workspace.tar").is_file() is not snapshot_fails
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["deadline_signal", "early_cancel", "second_signal", "stuck_snapshot", "late_unwind"])
+async def test_signal_and_finalization_budget_do_not_grant_unsafe_handoff(
+    tmp_path, monkeypatch, mode,
+):
+    from loom import service_execution_sandbox_task as module
+
+    task, trial, _ = _inputs()
+    (tmp_path / "instruction.md").write_text("work")
+    monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
+    monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
+    monkeypatch.setenv("LOOM_EXECUTION_PHASE_DEADLINE", str(time.time() + 0.05))
+    monkeypatch.setenv("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "0.1")
+    callbacks = []
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "add_signal_handler", lambda _, callback: callbacks.append(callback))
+    monkeypatch.setattr(loop, "remove_signal_handler", lambda _: True)
+
+    class SignalSandbox(Sandbox):
+        async def export_workspace_archive(self, src, dst):
+            if mode in {"deadline_signal", "second_signal"}:
+                callbacks[0]()  # Same deadline signal must not interrupt cleanup.
+            if mode == "second_signal":
+                callbacks[0]()  # A second stop cancels; never authorize verifier.
+                await asyncio.sleep(0)
+            if mode == "stuck_snapshot":
+                await asyncio.sleep(10)
+            if mode == "late_unwind":
+                await asyncio.sleep(0.01)
+            await super().export_workspace_archive(src, dst)
+
+    driver = SignalSandbox()
+    monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
+
+    async def identity(_):
+        return uuid4(), uuid4()
+
+    async def terminus(**kwargs):
+        (kwargs["workspace"] / "trajectory.jsonl").write_bytes(b"")
+        if mode == "early_cancel":
+            callbacks[0]()
+        try:
+            await asyncio.sleep(10)
+        finally:
+            if mode == "late_unwind":
+                # Slow unwinding cannot restart the grace period.
+                time.sleep(0.2)
+
+    monkeypatch.setattr(module, "_execution_identity", identity)
+    monkeypatch.setattr(module, "run_terminus2", terminus)
+    expected = {
+        "deadline_signal": module.AgentTimeoutFinalizedError,
+        "early_cancel": asyncio.CancelledError,
+        "second_signal": asyncio.CancelledError,
+        "stuck_snapshot": TimeoutError,
+        "late_unwind": TimeoutError,
+    }[mode]
+    with pytest.raises(expected) as caught:
+        await module.run_agent(tmp_path, task, trial)
+    if mode != "deadline_signal":
+        assert not isinstance(caught.value, module.AgentTimeoutFinalizedError)
+    assert driver.quiesced and driver.state == "stopped"
 
 
 class Sandbox(FakeDriver):
@@ -64,6 +171,9 @@ async def test_phase_handoff_keeps_tests_private_and_quiesces_before_snapshot(
             await run_agent(tmp_path, task, trial)
         assert agent.quiesced and agent.state == "stopped"
         assert (tmp_path / ".loom/workspace.tar").exists()
+        info = json.loads((tmp_path / ".loom/agent/exception.json").read_text())
+        assert info["exception_type"] == "RuntimeError"
+        assert info["exception_message"] == "agent stopped"
         return
     await run_agent(tmp_path, task, trial)
     assert (tmp_path / ".loom/collected/answer.txt").read_bytes() == b"42"
@@ -82,3 +192,180 @@ async def test_phase_handoff_keeps_tests_private_and_quiesces_before_snapshot(
     await run_verifier(tmp_path, task, trial)
     assert verifier.quiesced and verifier.state == "stopped"
     assert json.loads((tmp_path / ".loom/verifier/output.json").read_bytes())["rewards"] == {"passed": 0}
+
+
+@pytest.mark.parametrize("phase", ["terminus-2", "verify-sandbox"])
+def test_phase_entrypoint_retains_sanitized_typed_failure(tmp_path, monkeypatch, phase):
+    import tomli_w
+
+    from loom import service_execution_sandbox_task as module
+    from loom.errors import AgentError
+
+    class ContextLengthExceededError(Exception):
+        pass
+
+    task, trial, _ = _inputs()
+    (tmp_path / "task.toml").write_text(tomli_w.dumps(task.model_dump(mode="json", exclude_none=True)))
+    monkeypatch.setenv("LOOM_TASK_TRIAL_JSON", trial.model_dump_json())
+    monkeypatch.setattr("sys.argv", ["sandbox-task", phase, "--workspace", str(tmp_path)])
+
+    async def fail(*args):
+        try:
+            raise ContextLengthExceededError("Bearer private-step-token")
+        except ContextLengthExceededError as exc:
+            raise AgentError("") from exc
+
+    monkeypatch.setattr(module, "run_agent" if phase == "terminus-2" else "run_verifier", fail)
+    with pytest.raises(AgentError):
+        module.main()
+    directory = "agent" if phase == "terminus-2" else "verifier"
+    body = (tmp_path / ".loom" / directory / "exception.json").read_text()
+    assert "private-step-token" not in body
+    assert json.loads(body)["exception_type"] == "ContextLengthExceededError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("signal_during_snapshot", [False, True])
+async def test_successful_agent_snapshot_crossing_deadline_still_hands_off(
+    tmp_path, monkeypatch, signal_during_snapshot,
+):
+    from loom import service_execution_sandbox_task as module
+
+    task, trial, _ = _inputs()
+    (tmp_path / "instruction.md").write_text("work")
+    monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
+    monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
+    monkeypatch.setenv("LOOM_EXECUTION_PHASE_DEADLINE", str(time.time() + 0.05))
+    monkeypatch.setenv("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "1")
+    callbacks = []
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "add_signal_handler", lambda _, callback: callbacks.append(callback))
+    monkeypatch.setattr(loop, "remove_signal_handler", lambda _: True)
+
+    class SlowSnapshotSandbox(Sandbox):
+        async def export_workspace_archive(self, src, dst):
+            await asyncio.sleep(0.08)
+            if signal_during_snapshot:
+                callbacks[0]()
+            await super().export_workspace_archive(src, dst)
+
+    driver = SlowSnapshotSandbox()
+    monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
+
+    async def identity(_):
+        return uuid4(), uuid4()
+
+    async def terminus(**kwargs):
+        assert not kwargs["deadline"].reached
+        (kwargs["workspace"] / "trajectory.jsonl").write_bytes(b"")
+        # Agent finishes before its cutoff; only the snapshot crosses it.
+
+    monkeypatch.setattr(module, "_execution_identity", identity)
+    monkeypatch.setattr(module, "run_terminus2", terminus)
+    with pytest.raises(module.AgentTimeoutFinalizedError):
+        await module.run_agent(tmp_path, task, trial)
+    assert driver.quiesced and driver.state == "stopped"
+    assert (tmp_path / ".loom/workspace.tar").is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("report", [b'{"rewards":{"passed":0}}', b'{"rewards":'])
+async def test_verifier_cleanup_failure_retains_reports_without_success(
+    tmp_path, monkeypatch, capsys, report,
+):
+    from pydantic import ValidationError
+
+    from loom import service_execution_sandbox_task as module
+    from loom.errors import DriverError
+
+    task, trial, _ = _inputs()
+    cleanup_error = DriverError("cleanup-secret-must-not-be-printed")
+
+    class FailingCleanup(Sandbox):
+        stops = 0
+
+        async def stop_processes(self):
+            self.stops += 1
+            raise cleanup_error
+
+    driver = FailingCleanup()
+    monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
+
+    async def noop(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(module, "materialize_workspace", noop)
+    monkeypatch.setattr(module, "_import_workspace_archive", noop)
+
+    def verify(cmd, user, cwd, env):
+        driver.filesystem[PurePosixPath(env["LOOM_VERIFIER_OUTPUT"])] = report
+        driver.filesystem[PurePosixPath("/logs/verifier/ctrf.json")] = b'{"results":{}}'
+        return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0)
+
+    driver.exec_handler = verify
+    valid = report.endswith(b"}}")
+    with pytest.raises(DriverError if valid else ValidationError) as caught:
+        await run_verifier(tmp_path, task, trial)
+    if valid:
+        assert caught.value is cleanup_error
+    assert (tmp_path / ".loom/verifier/output.json").read_bytes() == report
+    assert (tmp_path / ".loom/verifier/ctrf.json").read_bytes() == b'{"results":{}}'
+    assert driver.stops == 1 and driver.state == "stopped"
+    stderr = capsys.readouterr().err
+    assert "cleanup-secret" not in stderr
+    if not valid:
+        assert "secondary verifier stop_processes failure (DriverError)" in stderr
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exec_raises", [False, True])
+async def test_verifier_primary_failure_survives_cleanup_and_driver_stop_failure(
+    tmp_path, monkeypatch, capsys, exec_raises,
+):
+    from loom import service_execution_sandbox_task as module
+    from loom.errors import DriverError
+
+    task, trial, _ = _inputs()
+    exec_error = DriverError("private-command-in-error")
+
+    class FailedDriver(Sandbox):
+        stops = 0
+        closed = False
+
+        async def stop_processes(self):
+            self.stops += 1
+            raise DriverError("private-cleanup-detail")
+
+        async def stop(self, **kwargs):
+            self.closed = True
+            raise DriverError("private-close-detail")
+
+    driver = FailedDriver()
+    monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
+
+    async def noop(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(module, "materialize_workspace", noop)
+    monkeypatch.setattr(module, "_import_workspace_archive", noop)
+
+    def verify(cmd, user, cwd, env):
+        if exec_raises:
+            raise exec_error
+        driver.filesystem[PurePosixPath(env["LOOM_VERIFIER_OUTPUT"])] = b'{"rewards":{"passed":0}}'
+        return ExecResult(return_code=1, stdout=b"", stderr=b"", duration_sec=0)
+
+    driver.exec_handler = verify
+    expected = DriverError if exec_raises else module.ServiceExecutionTaskError
+    with pytest.raises(expected) as caught:
+        await run_verifier(tmp_path, task, trial)
+    if exec_raises:
+        assert caught.value is exec_error
+    else:
+        assert str(caught.value) == "isolated verifier process failed"
+        assert json.loads((tmp_path / ".loom/verifier/output.json").read_bytes())["rewards"] == {"passed": 0}
+    assert driver.stops == 1 and driver.closed
+    stderr = capsys.readouterr().err
+    assert "private-" not in stderr
+    assert "secondary verifier stop_processes failure (DriverError)" in stderr
+    assert "secondary verifier stop failure (DriverError)" in stderr

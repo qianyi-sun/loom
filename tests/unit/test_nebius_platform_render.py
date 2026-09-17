@@ -11,6 +11,76 @@ from loom.nebius_platform_render import NebiusPlatformError, build_platform, wri
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize("configured_default", [None, {
+    "controller": {"cpu_millis": 100, "memory_mib": 256, "ephemeral_storage_mib": 256},
+    "task_sandbox": {"cpu_millis": 400, "memory_mib": 512, "ephemeral_storage_mib": 512},
+    "verifier_sandbox": {"cpu_millis": 100, "memory_mib": 256, "ephemeral_storage_mib": 256},
+}])
+def test_environment_resource_policy_survives_new_published_candidate(
+    platform_inputs: tuple, configured_default: dict | None,
+) -> None:
+    config, candidate, profile = platform_inputs
+    requests = {"local/measured-task": {
+        "task_revision_sha256": "sha256:" + "d" * 64,
+        "requests": {"controller": {
+            "cpu_millis": 250, "memory_mib": 512, "ephemeral_storage_mib": 100,
+        }},
+    }}
+    config["task_resource_requests"] = requests
+    expected_default = configured_default or {
+        "controller": {"cpu_millis": 200, "memory_mib": 512, "ephemeral_storage_mib": 512},
+        "task_sandbox": {"cpu_millis": 600, "memory_mib": 1024, "ephemeral_storage_mib": 1024},
+        "verifier_sandbox": {"cpu_millis": 200, "memory_mib": 512, "ephemeral_storage_mib": 512},
+    }
+    if configured_default is not None:
+        config["default_task_resource_requests"] = configured_default
+    original_config = json.dumps(config, sort_keys=True)
+    original_profile = json.dumps(profile, sort_keys=True)
+    for commit in ("c" * 40, "e" * 40):
+        files = build_platform(config, {**candidate, "candidate_sha": commit},
+                               {**profile, "candidate_sha": commit,
+                                "default_task_resource_requests": {"controller": {
+                                    "cpu_millis": 1000, "memory_mib": 4096,
+                                    "ephemeral_storage_mib": 10240,
+                                }}}, {}, repo_root=ROOT)
+        cm = next(doc for doc in files["10-config-network.yaml"]
+                  if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == "loom-platform-config")
+        rendered_profile = json.loads(cm["data"]["profile.json"])
+        assert rendered_profile["task_resource_requests"] == requests
+        assert rendered_profile["default_task_resource_requests"] == expected_default
+        assert json.loads(cm["data"]["environment.json"])["default_task_resource_requests"] == expected_default
+        service = next(doc for doc in files["40-services.yaml"]
+                       if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "loom-service")
+        env = {item["name"]: item.get("value")
+               for item in service["spec"]["template"]["spec"]["containers"][0]["env"]}
+        service_profile = json.loads(env["LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON"])
+        assert service_profile["task_resource_requests"] == requests
+        assert service_profile["default_task_resource_requests"] == expected_default
+    assert json.dumps(config, sort_keys=True) == original_config
+    assert json.dumps(profile, sort_keys=True) == original_profile
+
+
+@pytest.mark.parametrize("requests", [None, {}, [], {"unknown": {}}, {
+    "controller": {"cpu_millis": True, "memory_mib": 512, "ephemeral_storage_mib": 512},
+}, {"controller": {"cpu_millis": 0, "memory_mib": 512, "ephemeral_storage_mib": 512}}])
+def test_environment_rejects_invalid_default_resource_template(
+    platform_inputs: tuple, requests: object,
+) -> None:
+    config, candidate, profile = platform_inputs
+    config["default_task_resource_requests"] = requests
+    with pytest.raises(ValueError):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
+@pytest.mark.parametrize("requests", [[], {"": {}}, {"local/task": {}},
+                                     {"local/task": {"task_revision_sha256": "unbound", "requests": {}}}])
+def test_environment_rejects_unbound_resource_policy(platform_inputs: tuple, requests: object) -> None:
+    config, candidate, profile = platform_inputs
+    config["task_resource_requests"] = requests
+    with pytest.raises(ValueError):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
 @pytest.mark.parametrize("maximum", [None, 14400])
 def test_scheduler_deadline_can_cover_long_task_phase_timeouts(
     platform_inputs: tuple, maximum: int | None,

@@ -21,7 +21,7 @@ from uuid import UUID
 
 from loom.attempt_deadline import AttemptDeadline, AttemptDeadlineExceededError
 from loom.driver.base import Driver, StartOptions
-from loom.errors import AgentError, classify_failure, classify_failure_message
+from loom.errors import AgentError, classify_failure, classify_failure_message, exception_info
 from loom.models.networking import NetworkPolicy
 from loom.models.result import ArtifactRef, FailureReason, StepError, StepResult
 from loom.models.task import StepConfig
@@ -818,6 +818,7 @@ async def _run_agent_with_retry(
                 occurred_at=datetime.now(UTC),
             )
         except AgentError as exc:
+            info = exception_info(exc)
             text_result = classify_failure_message(str(exc))
             if text_result is not None:
                 failure_reason, failure_message = text_result
@@ -837,13 +838,15 @@ async def _run_agent_with_retry(
                 return StepError(
                     phase="agent",
                     reason="exception",
-                    message=failure_message or str(exc),
+                    message=failure_message or info.exception_message,
+                    exception_type=info.exception_type,
                     occurred_at=datetime.now(UTC),
                 )
             return StepError(
                 phase="agent",
                 reason="exception",
-                message=str(exc),
+                message=info.exception_message,
+                exception_type=info.exception_type,
                 occurred_at=datetime.now(UTC),
             )
         except Exception as exc:

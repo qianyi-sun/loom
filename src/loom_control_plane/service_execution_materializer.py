@@ -41,6 +41,7 @@ from loom.db.schema import (
 )
 from loom.execution_runtime_contract import ExecutionRuntimeResultV1
 from loom.llm_call_ledger import read_service_execution_llm_calls
+from loom.models.result import ExceptionInfo
 from loom.models.task import TaskConfig
 from loom.models.trajectory import (
     LLMCallEvent,
@@ -102,6 +103,7 @@ _TRACE_PATH = "trajectory/events.jsonl"
 _USAGE_PATH = "accounting/usage.json"
 _VERIFIER_PATH = "verifier/output.json"
 _RESULT_PATH = "result.json"
+_EXCEPTION_PATHS = {"diagnostics/agent-exception.json", "diagnostics/verifier-exception.json"}
 _MAX_DERIVATION_BYTES = 256 * 1024 * 1024
 
 
@@ -149,6 +151,7 @@ class MaterializationResult:
     final_trial_state: str
     failure_reason: str | None
     accounting_call_count: int | None = None
+    exception_info: ExceptionInfo | None = None
 
 
 def _digest(body: bytes) -> str:
@@ -167,6 +170,21 @@ def _canonical_jsonl(events: Sequence[TrajectoryEvent]) -> bytes:
         ).encode("utf-8")
         for event in events
     )
+
+
+def read_exception_info(
+    runtime_result: ExecutionRuntimeResultV1, inputs: dict[str, bytes],
+) -> ExceptionInfo | None:
+    if runtime_result.status in {"succeeded", "cancelled"}:
+        return None
+    phase = "verifier" if runtime_result.status == "verifier_error" else "agent"
+    body = inputs.get(f"diagnostics/{phase}-exception.json")
+    if body is None:
+        return None
+    try:
+        return ExceptionInfo.model_validate_json(body)
+    except ValidationError as exc:
+        raise MaterializationIntegrityError("exception_info_invalid") from exc
 
 
 def _model_matches(source: str, trial_config: TrialConfig) -> bool:
@@ -271,6 +289,7 @@ def build_canonical_events(
     trace_body: bytes | None,
     verifier_body: bytes | None,
     gateway_calls: list[dict[str, Any]] | None = None,
+    exception_info: ExceptionInfo | None = None,
 ) -> tuple[TrajectoryEvent, ...]:
     """Validate the lossless source trace and project it to Loom event rows."""
 
@@ -419,8 +438,9 @@ def build_canonical_events(
                 trial_id=trial_id,
                 step_id="trial",
                 seq=len(events),
-                error_type=runtime_result.status,
-                message=f"service execution runtime reported {runtime_result.status}",
+                error_type=exception_info.exception_type if exception_info else runtime_result.status,
+                message=(exception_info.exception_message if exception_info else
+                         f"service execution runtime reported {runtime_result.status}"),
                 traceback="",
             )
         )
@@ -802,6 +822,7 @@ class ServiceExecutionMaterializer:
                 _TRACE_PATH,
                 _USAGE_PATH,
                 _VERIFIER_PATH,
+                *_EXCEPTION_PATHS,
             }:
                 derivation_inputs[file.relative_path] = await self._read_exact(
                     key=source_key, expected=file.sha256, size=file.size_bytes
@@ -842,6 +863,7 @@ class ServiceExecutionMaterializer:
         ):
             raise MaterializationIntegrityError("runtime_result_projection_drift")
         trace_body = derivation_inputs.get(_TRACE_PATH)
+        exception_info = read_exception_info(runtime_result, derivation_inputs)
         if runtime_result.status == "succeeded" and trace_body is None:
             raise MaterializationIntegrityError("trajectory_output_missing")
         if runtime_result.status == "succeeded":
@@ -859,6 +881,7 @@ class ServiceExecutionMaterializer:
             trace_body=trace_body,
             verifier_body=derivation_inputs.get(_VERIFIER_PATH),
             gateway_calls=gateway_calls,
+            exception_info=exception_info,
         )
         if gateway_calls is not None:
             # Preserve the immutable runtime projection as source evidence. The
@@ -938,6 +961,7 @@ class ServiceExecutionMaterializer:
                 None if runtime_result.status == "succeeded" else runtime_result.status
             ),
             accounting_call_count=len(gateway_calls) if gateway_calls is not None else None,
+            exception_info=exception_info,
         )
 
     async def _commit(self, claim: MaterializationClaim, result: MaterializationResult) -> bool:
@@ -1107,6 +1131,12 @@ class ServiceExecutionMaterializer:
                 trial.failure_message = None
             elif trial.state != result.final_trial_state:
                 raise MaterializationIntegrityError("terminal_trial_state_drift")
+            if result.exception_info is not None:
+                trial.result = {**(trial.result or {}),
+                                "exception_info": result.exception_info.model_dump(mode="json")}
+                trial.failure_message = (
+                    f"{result.exception_info.exception_type}: {result.exception_info.exception_message}"
+                )[:2000]
             lease.materialization_state = "committed"
             lease.materialization_claim_id = None
             lease.materialization_claim_expires_at = None

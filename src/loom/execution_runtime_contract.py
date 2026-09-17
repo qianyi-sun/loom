@@ -101,6 +101,13 @@ class ExecutionResourceRequestsV1(_Strict):
                 raise ValueError(f"{role} resource requests exceed hard limits")
 
 
+class TaskExecutionResourceRequestsV1(_Strict):
+    """Measured requests bound to a task revision; usable by offline renderers."""
+
+    task_revision_sha256: str = Field(pattern=_SHA256.pattern)
+    requests: ExecutionResourceRequestsV1
+
+
 class ProcessPhaseV1(_Strict):
     role: Literal["setup", "agent", "verifier"]
     argv: tuple[str, ...] = Field(min_length=1, max_length=128)
@@ -278,6 +285,7 @@ class ExecutionRuntimePlanV1(_Strict):
     main: ProcessPhaseV1
     verifier_execution: VerifierExecution
     verifier: ProcessPhaseV1 | None = None
+    verifier_after_agent_timeout: bool = False
     sidecars: tuple[SidecarContainerV1, ...] = Field(default=(), max_length=32)
     max_log_bytes_per_stream: int = Field(default=10 * 1024 * 1024, gt=0, le=100 * 1024 * 1024)
     max_artifact_bytes: int = Field(default=1024 * 1024 * 1024, gt=0, le=10 * 1024**3)
@@ -351,6 +359,15 @@ class ExecutionRuntimePlanV1(_Strict):
             if any(item not in known for item in sidecar.depends_on):
                 raise ValueError("sidecar dependencies must reference earlier sidecars")
             known.add(sidecar.role_name)
+        if self.verifier_after_agent_timeout and (
+            self.execution_role != "attempt"
+            or self.composition != RuntimeComposition.INIT_PAYLOAD
+            or self.agent_image_ref is None
+            or self.verifier_execution != "in_attempt"
+            or {sidecar.role_name for sidecar in self.sidecars if sidecar.private_sandbox}
+            != {"task-sandbox", "verifier-sandbox"}
+        ):
+            raise ValueError("timeout verification requires an isolated attempt controller and in-attempt verifier")
         if self.controller_resources is not None:
             sandboxes = [sidecar for sidecar in self.sidecars if sidecar.private_sandbox]
             if (
@@ -391,6 +408,8 @@ class ExecutionRuntimePlanV1(_Strict):
     def canonical_payload(self) -> dict[str, object]:
         payload = self.model_dump(mode="json")
         # Keep existing published plans byte-compatible when new fields are unused.
+        if not self.verifier_after_agent_timeout:
+            payload.pop("verifier_after_agent_timeout")
         if self.controller_resources is None:
             payload.pop("controller_resources")
         if self.resource_requests is None:
@@ -522,6 +541,7 @@ class ExecutionRuntimeResultV1(_Strict):
     phases: tuple[RuntimePhaseEvidenceV1, ...] = Field(max_length=64)
     outputs: tuple[RuntimeOutputEvidenceV1, ...] = Field(default=(), max_length=10_000)
     verifier_rewards: dict[str, float] | None = None
+    failure_reason: Literal["sandbox_lost"] | None = None
     partial_evidence: bool
 
     @field_validator("task_image_ref", "runtime_image_ref")
@@ -537,6 +557,8 @@ class ExecutionRuntimeResultV1(_Strict):
             raise ValueError("runtime result timestamps are reversed")
         if self.partial_evidence != (self.status != "succeeded"):
             raise ValueError("runtime partial-evidence flag does not match status")
+        if self.failure_reason is not None and self.status != "runtime_error":
+            raise ValueError("sandbox loss must remain a runtime failure")
         if [phase.ordinal for phase in self.phases] != list(range(1, len(self.phases) + 1)):
             raise ValueError("runtime phase ordinals are not contiguous")
         sources = [item.source_path for item in self.outputs]

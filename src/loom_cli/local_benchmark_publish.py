@@ -27,6 +27,9 @@ from loom.driver.task_image import (
     dockerfile_uses_runtime_arm64_fallback_base,
 )
 from loom.models.task_checksum import task_checksum
+from loom.service_execution_materialization import (
+    prepare_service_execution_input_manifest,
+)
 from loom.task_bundle_compat import (
     CompatibilitySeverity,
     collect_task_dir_compatibility_issues,
@@ -75,8 +78,9 @@ async def publish_local_benchmark(
     imported_by: str | None = None,
     compat_flatten_environment: bool = False,
     source_registration_mode: str = "legacy",
+    create_bucket: bool = False,
 ) -> LocalBenchmarkPublishStats:
-    """Validate, upload, and register a user-owned local benchmark folder."""
+    """Publish to an existing bucket; bucket creation is an explicit bootstrap option."""
 
     if source_registration_mode not in {"legacy", "versioned-v1"}:
         raise ValueError("unsupported task source registration mode")
@@ -100,7 +104,8 @@ async def publish_local_benchmark(
             compat_flatten_environment=compat_flatten_environment,
         )
     entry = result.entry
-    await object_store.ensure_bucket(bucket)
+    if create_bucket:
+        await object_store.ensure_bucket(bucket)
 
     engine = create_async_engine(normalize_db_url(db_url))
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -160,15 +165,13 @@ async def publish_local_benchmark(
                     metadata_digest = bundle_file_metadata_sha256(staged).removeprefix(
                         "sha256:",
                     )
-                    source_provenance = {
-                        "bundle_file_metadata_sha256": f"sha256:{metadata_digest}",
-                    }
-                    prefix = _task_revision_prefix(
+                    revision_prefix = _task_revision_prefix(
                         entry.id,
                         rel,
                         checksum,
                         metadata_digest,
                     )
+                    prefix = f"{revision_prefix}bundle/"
                     source = f"s3://{bucket}/{prefix}"
                     uploaded_objects += await upload_task_dir(
                         store=object_store,
@@ -176,6 +179,26 @@ async def publish_local_benchmark(
                         prefix=prefix,
                         task_dir=staged,
                     )
+                    # Publication metadata must stay outside the bundle prefix:
+                    # both ordinary materialization and the native builder require
+                    # its objects to match the task's original files exactly.
+                    manifest_key = f"{revision_prefix}service-execution-input.json"
+                    manifest_body, sei_provenance = prepare_service_execution_input_manifest(
+                        staged,
+                        task_checksum=checksum,
+                        bucket=bucket,
+                        manifest_key=manifest_key,
+                    )
+                    await object_store.put_object(
+                        bucket=bucket,
+                        key=manifest_key,
+                        body=manifest_body,
+                    )
+                    uploaded_objects += 1
+                    source_provenance = {
+                        "bundle_file_metadata_sha256": f"sha256:{metadata_digest}",
+                        **sei_provenance,
+                    }
                 existing = await _get_task(session, task_id)
                 if existing is None:
                     inserted += 1
@@ -273,7 +296,9 @@ def _task_revision_prefix(
     checksum: str,
     metadata_digest: str,
 ) -> str:
-    return f"{_task_prefix(benchmark_id, rel)}.loom-revisions/{checksum}/{metadata_digest}/"
+    # v1 mixed the input manifest with task files. A new namespace also repairs
+    # unchanged republishes without deleting or changing previously frozen inputs.
+    return f"{_task_prefix(benchmark_id, rel)}.loom-revisions-v2/{checksum}/{metadata_digest}/"
 
 
 async def _get_task(session, task_id: str):  # type: ignore[no-untyped-def]

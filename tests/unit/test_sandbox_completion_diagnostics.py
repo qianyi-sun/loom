@@ -72,3 +72,25 @@ async def test_rpc_diagnostic_never_includes_response_body_or_unknown_header(rea
         assert "private" not in str(caught.value)
     finally:
         await driver.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("diagnostic,retained", [
+    ("pid=31;ppid=1;state=S;uid=65533;expected_uid=65532", True),
+    ("pid=31;ppid=1;state=S;uid=65533;expected_uid=65532;command=private", False),
+    ("pid=31;ppid=1;state=S;uid=9999999999;expected_uid=65532", False),
+    ("pid=31;ppid=1;state=private;uid=0;expected_uid=65532", False),
+])
+async def test_rpc_retains_only_bounded_kernel_process_identity(diagnostic, retained):
+    from loom.driver.service_sandbox import SandboxRPCError
+
+    response = httpx.Response(409, headers={
+        "X-Loom-Sandbox-Error": "process_owner_mismatch",
+        "X-Loom-Sandbox-Process": diagnostic,
+    }, request=httpx.Request("POST", "http://private-endpoint/stop-processes"),
+        text="private response")
+    error = SandboxRPCError("/stop-processes", httpx.HTTPStatusError(
+        "private exception", request=response.request, response=response,
+    ))
+    assert (diagnostic in str(error)) is retained
+    assert "private" not in str(error)

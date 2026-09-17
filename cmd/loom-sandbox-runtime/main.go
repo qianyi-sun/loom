@@ -5,6 +5,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -31,6 +33,19 @@ var (
 	errCleanupProcRead     = errors.New("cannot inspect sandbox processes")
 )
 
+// Only bounded kernel identity fields may cross the cleanup error boundary.
+// Command lines, environment and paths must never be attached to this error.
+type processOwnerError struct {
+	PID         int
+	ParentPID   uint64
+	State       string
+	ExpectedUID int
+	ObservedUID uint64
+}
+
+func (e *processOwnerError) Error() string { return errCleanupProcessOwner.Error() }
+func (e *processOwnerError) Unwrap() error { return errCleanupProcessOwner }
+
 // These fixed codes carry no process, command, environment, or filesystem data.
 func cleanupErrorCode(err error) string {
 	switch {
@@ -51,6 +66,12 @@ func cleanupErrorCode(err error) string {
 
 func writeCleanupFailure(w http.ResponseWriter, err error) {
 	w.Header().Set("X-Loom-Sandbox-Error", cleanupErrorCode(err))
+	var owner *processOwnerError
+	if errors.As(err, &owner) && owner.PID > 1 && len(owner.State) == 1 && strings.Contains("RSDTtXZPIUW", owner.State) {
+		w.Header().Set("X-Loom-Sandbox-Process", fmt.Sprintf(
+			"pid=%d;ppid=%d;state=%s;uid=%d;expected_uid=%d",
+			owner.PID, owner.ParentPID, owner.State, owner.ObservedUID, owner.ExpectedUID))
+	}
 	http.Error(w, "sandbox process cleanup failed", http.StatusConflict)
 }
 
@@ -92,10 +113,17 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 }
 
 func (s runtimeServer) handler() http.Handler {
+	// Identify this server incarnation so the controller cannot reconnect to a
+	// restarted sandbox whose writable task state has been lost.
+	var identity [16]byte
+	if _, err := rand.Read(identity[:]); err != nil {
+		panic("cannot initialize sandbox identity")
+	}
+	instanceID := hex.EncodeToString(identity[:])
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"ready":true}`)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ready": true, "instance_id": instanceID})
 	})
 	mux.HandleFunc("POST /exec", s.execute)
 	mux.HandleFunc("PUT /file", s.upload)

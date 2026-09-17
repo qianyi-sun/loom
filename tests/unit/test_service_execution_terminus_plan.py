@@ -118,6 +118,13 @@ def test_typed_trace_keeps_native_events_and_real_call_accounting():
         "started_at": events[0].emitted_at, "finished_at": events[-1].emitted_at,
         "phases": [], "outputs": [], "verifier_rewards": {"passed": 0}, "partial_evidence": False,
     })
+    lost = {**result.model_dump(), "status": "runtime_error", "partial_evidence": True,
+            "failure_reason": "sandbox_lost"}
+    assert ExecutionRuntimeResultV1.model_validate(lost).failure_reason == "sandbox_lost"
+    with pytest.raises(ValueError, match="sandbox loss must remain a runtime failure"):
+        ExecutionRuntimeResultV1.model_validate({
+            **result.model_dump(), "failure_reason": "sandbox_lost",
+        })
     canonical = build_canonical_events(
         trial_id=identity, task_id="task-1", task_config=_inputs()[0], trial_config=trial,
         runtime_result=result, trace_body=body, verifier_body=b'{"rewards":{"passed":0}}',

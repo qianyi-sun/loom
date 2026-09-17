@@ -265,14 +265,28 @@ def test_publish_local_rejects_literal_secret_flags_before_upload(
     assert captured.out == ""
 
 
+@pytest.mark.parametrize(
+    ("region_env", "region_args", "expected_region", "create_bucket"),
+    [
+        ({}, [], "us-east-1", False),
+        ({"LOOM_SVC_MINIO_REGION": "eu-north1"}, [], "eu-north1", False),
+        ({"LOOM_MINIO_REGION": "eu-west1", "LOOM_SVC_MINIO_REGION": "eu-north1"}, [], "eu-west1", False),
+        ({"LOOM_MINIO_REGION": "eu-west1"}, ["--minio-region", "eu-north1"], "eu-north1", True),
+    ],
+)
 def test_publish_local_resolves_env_secret_references_without_logging_values(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
+    region_env: dict[str, str], region_args: list[str], expected_region: str, create_bucket: bool,
 ) -> None:
     root = tmp_path / "team-evals"
     root.mkdir()
     captured: dict[str, object] = {}
+    for key in ("LOOM_MINIO_REGION", "LOOM_SVC_MINIO_REGION"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in region_env.items():
+        monkeypatch.setenv(key, value)
 
     monkeypatch.setenv(
         "SAFE_PUBLISH_DB_URL",
@@ -297,6 +311,7 @@ def test_publish_local_resolves_env_secret_references_without_logging_values(
 
     async def fake_publish_local_benchmark(*args, **kwargs):  # type: ignore[no-untyped-def]
         captured["db_url"] = kwargs["db_url"]
+        assert kwargs["create_bucket"] is create_bucket
         return _Stats()
 
     monkeypatch.setattr("loom.trajectory.storage.MinioObjectStore", _Store)
@@ -317,6 +332,8 @@ def test_publish_local_resolves_env_secret_references_without_logging_values(
             "env:SAFE_PUBLISH_MINIO_ACCESS_KEY",
             "--minio-secret-key",
             "env:SAFE_PUBLISH_MINIO_SECRET_KEY",
+            *region_args,
+            *(["--create-bucket"] if create_bucket else []),
         ]
     )
 
@@ -326,6 +343,7 @@ def test_publish_local_resolves_env_secret_references_without_logging_values(
         "endpoint_url": "https://minio.example",
         "access_key": "resolved-access-secret",
         "secret_key": "resolved-minio-secret",
+        "region": expected_region,
     }
     output = capsys.readouterr()
     assert "resolved-db-secret" not in output.out

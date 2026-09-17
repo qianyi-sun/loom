@@ -8,6 +8,7 @@ import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { api, type DeliveryExport } from "../api/client";
+import type { components } from "../api/schema";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
@@ -84,6 +85,48 @@ function deliveryReady(
   delivery: DeliveryExport | undefined,
 ): delivery is ReadyDeliveryExport {
   return delivery?.status === "ready" && typeof delivery.download_url === "string";
+}
+
+function TaskResourceRequests({
+  requests,
+}: {
+  requests: Record<string, components["schemas"]["TaskResourceRequests"]> | undefined;
+}): JSX.Element | null {
+  const tasks = Object.entries(requests ?? {}).sort(([left], [right]) => left.localeCompare(right));
+  if (!tasks.length) return null;
+  return (
+    <details className="mt-4 rounded-md border border-slate-200 p-3">
+      <summary className="cursor-pointer text-sm font-semibold text-slate-900">
+        Resolved scheduling requests for {tasks.length} {tasks.length === 1 ? "task" : "tasks"}
+      </summary>
+      <p className="mt-2 text-xs text-slate-600">
+        Reservations per task execution, shared across its controller and sandboxes. These are scheduling requests, not measured usage or task limits. Repeated samples each reserve their own resources.
+      </p>
+      <div className="mt-2 overflow-x-auto">
+        <table className="w-full text-left text-xs">
+          <thead><tr>
+            <th className="p-2">Task</th><th className="p-2">CPU</th>
+            <th className="p-2">Memory (MiB)</th><th className="p-2">Temporary disk (MiB)</th>
+          </tr></thead>
+          <tbody>{tasks.map(([taskId, profile]) => {
+            const roles = Object.values(profile.requests);
+            const complete = ["controller", "task_sandbox", "verifier_sandbox"].every(
+              (role) => role in profile.requests,
+            );
+            const suffix = complete ? "" : " + role defaults";
+            return (
+              <tr key={taskId} className="border-t border-slate-100">
+                <td className="break-all p-2">{taskId}</td>
+                <td className="p-2">{roles.reduce((sum, role) => sum + role.cpu_millis, 0) / 1000}{suffix}</td>
+                <td className="p-2">{roles.reduce((sum, role) => sum + role.memory_mib, 0)}{suffix}</td>
+                <td className="p-2">{roles.reduce((sum, role) => sum + role.ephemeral_storage_mib, 0)}{suffix}</td>
+              </tr>
+            );
+          })}</tbody>
+        </table>
+      </div>
+    </details>
+  );
 }
 
 export default function BatchDetail(): JSX.Element {
@@ -847,6 +890,8 @@ export default function BatchDetail(): JSX.Element {
               </p>
             </div>
           </div>
+
+          <TaskResourceRequests requests={c.task_resource_requests} />
 
           {taskSummary.diagnostics.length > 0 ||
           trialConfigSummary.diagnostics.length > 0 ? (

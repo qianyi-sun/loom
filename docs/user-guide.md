@@ -436,10 +436,18 @@ supplemental rerun batches. Later linked reruns replace earlier failed attempts
 only at the same coordinate, so the manifest preserves the lineage from the
 selected trial back to its source batch. Before the archive is marked ready, the
 service verifies that every selected trajectory and ATIF object can be read
-through object storage. The command downloads the archive, verifies the exposed
+through object storage. Successful attempts remain eligible. A native agent
+attempt with state `failed` and failure reason `timed_out` is also eligible when
+its independent verifier finished successfully with a numeric reward (including
+zero) and all required evidence is complete. Other failures (including runtime
+and verifier failures), cancellation, and incomplete outputs remain excluded.
+Export preserves the selected attempt's
+original state and failure reason; a scored timeout is not rewritten as success.
+
+The command downloads the archive, verifies the exposed
 SHA-256, writes `<archive>.sha256`, and exits non-zero with the service's
 structured error if a referenced object is missing or a coordinate still has no
-successful final trial. The service builds archives through a bounded spool and
+eligible completed attempt. The service builds archives through a bounded spool and
 streams object-store bodies into the tar writer; the CLI streams downloads to
 disk while hashing chunks. Large raw exports should not require memory
 proportional to total archive size.
@@ -469,8 +477,8 @@ trials under `all_failed` or `partial_failed`, including cancellations. The batc
 display and debug evidence distinguish cancelled children from failed children
 using the trial summary, including batches where every child was cancelled.
 
-Delivery export is stricter: selection requires a **succeeded** trial per main
-coordinate. Cancelling a hang does not make that coordinate exportable. After
+Delivery export requires an eligible completed attempt per main coordinate,
+as described above. Cancelling a hang does not make that coordinate exportable. After
 the batch finishes, use `loom eval batch rerun-plan <batch-id>`, submit a
 targeted/supplemental rerun that succeeds, then create the delivery bundle.
 
@@ -1102,11 +1110,30 @@ switching between batch and trial views. Failed trial lists include a Failure
 diagnostics summary grouped by platform `failure_reason`, with representative
 messages and links to the first affected trial so provider, sandbox, verifier,
 and artifact failures can be triaged before opening individual logs.
+For Nebius, Monitor separates the configured node maximum from capacity-accounted
+nodes (the largest of Kubernetes inventory, provider actual nodes and provider
+target). This is pool-level accounting, not the nodes occupied by a batch or
+provider quota. Desired, estimated provisioning, ready, occupied and observed
+draining counts describe different, sometimes overlapping states. Occupied
+counts nodes with nonterminal execution or build Pods for the target; draining
+requires an observed deletion or native autoscaler deletion taint. Missing older
+observations show unknown rather than zero. Observation time and expiry identify
+stale counts. Cancelling tasks can finish before native node reclamation does;
+estimated removal or stalled/not-ready counts alone do not prove a node leak or
+hardware failure.
+
 User-facing web timestamps render in the viewer's local timezone with a short
 timezone label, and CLI text summaries use the executing shell's local
 timezone. API and `--format json` responses keep canonical timezone-aware ISO
 timestamps. Token usage labels use `Input` and `Output` instead of abbreviated
 `P`/`C` wording.
+
+Batch detail's **Resolved scheduling requests** section shows the frozen request
+allocation for each configured task revision. Complete role overrides are summed
+across the controller, task and verifier sandboxes; partial overrides explicitly
+show that other role defaults still apply. Each repeated Trial uses its own
+allocation. These requests do not change the task's hard limits or represent
+measured usage.
 
 New Batch includes a Release review card before submit. Check that it shows the
 intended task scope, planned trial count, selected backend worker availability,
@@ -1395,6 +1422,16 @@ loom datasets publish-local ./team-evals --bucket loom-benchmarks
 
 loom datasets audit team-evals
 ```
+
+`publish-local` publishes into an **existing bucket** by default and needs object
+write access, not bucket-management permissions. It does not call `HeadBucket`
+or create a bucket. For a local bootstrap with a bucket-capable identity, opt in
+with `--create-bucket`. Missing buckets and denied object writes remain errors;
+failed publication does not commit catalog rows.
+
+For `publish-local` and `audit`, set `--minio-region` to the storage region or
+export `LOOM_MINIO_REGION` (fallback: `LOOM_SVC_MINIO_REGION`). The default is
+`us-east-1`; native Nebius storage must use its configured region.
 
 `publish-local` uploads each task bundle under the immutable revision prefix
 `s3://loom-benchmarks/team-evals/<task-id>/.loom-revisions/<task-checksum>/<mode-manifest-sha256>/`

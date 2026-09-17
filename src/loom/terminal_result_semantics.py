@@ -54,6 +54,60 @@ def result_has_numeric_reward(result: Mapping[str, Any]) -> bool:
     )
 
 
+def is_scored_agent_timeout(*, state: str, result: Any, failure_reason: Any) -> bool:
+    """A task deadline can still produce a complete, independently scored attempt.
+
+    Use the persisted runtime evidence, already validated by its owner, rather
+    than treating any failed row with a cached score as deliverable. Storage and
+    trajectory completeness remain the export boundary's responsibility.
+    """
+    if state != "failed" or failure_reason != "timed_out" or not isinstance(result, Mapping):
+        return False
+    runtime = result.get("runtime_result")
+    if (
+        # Native finalization stores state on the Trial row; an embedded state
+        # is optional, but must agree when supplied by another result producer.
+        result.get("state") not in (None, "failed")
+        or result.get("failure_reason") not in (None, "timed_out")
+        or not isinstance(runtime, Mapping)
+        or runtime.get("schema_version") != "loom.execution-runtime-result.v1"
+        or runtime.get("execution_role") != "attempt"
+        or runtime.get("status") != "timed_out"
+        or runtime.get("failure_reason") is not None
+        or not has_numeric_reward(runtime.get("verifier_rewards"))
+        or not has_numeric_reward(result.get("reward"))
+        or result["reward"] != runtime["verifier_rewards"]
+    ):
+        return False
+    phases = runtime.get("phases")
+    if not isinstance(phases, list) or not all(isinstance(item, Mapping) for item in phases):
+        return False
+    roles = [item.get("role") for item in phases]
+    if roles not in (["agent", "verifier"], ["setup", "agent", "verifier"]):
+        return False
+    agent, verifier = phases[-2:]
+    if (
+        agent.get("exit_code") != 124
+        or agent.get("timed_out") is not True
+        or any(
+            item.get("exit_code") != 0
+            or item.get("timed_out") is not False
+            or item.get("signal") is not None
+            for item in [*phases[:-2], verifier]
+        )
+    ):
+        return False
+    outputs = runtime.get("outputs")
+    return (
+        isinstance(outputs, list)
+        and all(isinstance(item, Mapping) for item in outputs)
+        and all(not item.get("required") or item.get("state") == "captured" for item in outputs)
+        and any(
+            item.get("kind") == "verifier" and item.get("state") == "captured" for item in outputs
+        )
+    )
+
+
 def projected_result_conflicts(result: Any) -> list[TerminalResultConflict]:
     """Return contradictions contained within a projected terminal result.
 

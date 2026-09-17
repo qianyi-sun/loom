@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
+from botocore.exceptions import ClientError
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -16,6 +18,7 @@ from loom.trajectory.storage import (
     FakeObjectStore,
     bundle_file_metadata_sha256,
 )
+from loom_cli.benchmark_readiness import run_bundle_presence_audit
 from loom_cli.local_benchmark_publish import (
     PUBLISH_IMPORTED_BY,
     S3_FOLDER_KIND,
@@ -96,35 +99,57 @@ def _write_environment_path_mismatch_layout(root: Path) -> None:
     )
 
 
+class ObjectOnlyStore(FakeObjectStore):
+    async def ensure_bucket(self, bucket: str) -> None:
+        raise ClientError({"Error": {"Code": "403"}}, "HeadBucket")
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("create_bucket", [False, True], ids=["object-only", "bootstrap"])
 async def test_publish_local_benchmark_uploads_and_registers(
     postgres_url: str,
     tmp_path: Path,
+    create_bucket: bool,
 ) -> None:
     root = tmp_path / "team-evals"
     _write_layout(root)
-    store = FakeObjectStore()
+    store = FakeObjectStore() if create_bucket else ObjectOnlyStore()
     task_dir = root / "tasks" / "alpha"
     expected_checksum = task_checksum(task_dir)
     metadata_digest = bundle_file_metadata_sha256(task_dir).removeprefix("sha256:")
-    revision_prefix = f"team-evals/alpha/.loom-revisions/{expected_checksum}/{metadata_digest}/"
+    revision_prefix = (
+        f"team-evals/alpha/.loom-revisions-v2/{expected_checksum}/{metadata_digest}/bundle/"
+    )
 
     stats = await publish_local_benchmark(
         root,
         db_url=postgres_url,
         object_store=store,
         bucket="loom-benchmarks",
+        **({"create_bucket": True} if create_bucket else {}),
     )
 
+    assert ("loom-benchmarks" in store.buckets) is create_bucket
     assert stats.benchmark_id == "team-evals"
     assert stats.task_count == 1
     assert stats.inserted == 1
     assert stats.updated == 0
     assert stats.unchanged == 0
-    assert stats.uploaded_objects == 2
+    assert stats.uploaded_objects == 3
     assert stats.source_prefix == "s3://loom-benchmarks/team-evals/"
     assert ("loom-benchmarks", f"{revision_prefix}task.toml") in store.objects
     assert ("loom-benchmarks", f"{revision_prefix}instruction.md") in store.objects
+    manifest_key = f"{revision_prefix.removesuffix('bundle/')}service-execution-input.json"
+    assert ("loom-benchmarks", manifest_key) in store.objects
+    manifest_body = store.objects[("loom-benchmarks", manifest_key)]
+    expected_sei = {
+        "schema_version": "loom.service-execution-input.v1",
+        "manifest_uri": f"s3://loom-benchmarks/{manifest_key}",
+        "manifest_sha256": "sha256:" + hashlib.sha256(manifest_body).hexdigest(),
+        "file_count": 2,
+        "total_bytes": len((task_dir / "task.toml").read_bytes())
+        + len((task_dir / "instruction.md").read_bytes()),
+    }
 
     engine = create_async_engine(postgres_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -154,7 +179,21 @@ async def test_publish_local_benchmark_uploads_and_registers(
             assert task.checksum == expected_checksum
             assert task.source_provenance == {
                 "bundle_file_metadata_sha256": f"sha256:{metadata_digest}",
+                "service_execution_input": expected_sei,
             }
+            # Audit/worker materialization must see exactly the published task
+            # files, not publication metadata added after the bundle upload.
+            downloaded = tmp_path / "downloaded"
+            await store.download_prefix(
+                bucket="loom-benchmarks",
+                prefix=task.source.removeprefix("s3://loom-benchmarks/"),
+                out_dir=downloaded,
+            )
+            assert task_checksum(downloaded) == task.checksum
+            audit = await run_bundle_presence_audit(
+                db_url=postgres_url, object_store=store, benchmark="team-evals",
+            )
+            assert audit.verified == 1 and audit.failed == 0
     finally:
         async with factory() as session:
             await session.execute(
@@ -231,8 +270,8 @@ async def test_failed_database_commit_does_not_overwrite_live_task_bundle(
 
         assert store.objects[("loom-benchmarks", before_key)] == b"do alpha\n"
         revised_key = (
-            "team-evals/alpha/.loom-revisions/"
-            f"{revised_checksum}/{revised_metadata_digest}/instruction.md"
+            "team-evals/alpha/.loom-revisions-v2/"
+            f"{revised_checksum}/{revised_metadata_digest}/bundle/instruction.md"
         )
         assert store.objects[("loom-benchmarks", revised_key)] == b"do revised alpha\n"
     finally:
@@ -312,8 +351,8 @@ async def test_mode_only_revision_does_not_overwrite_live_transport_metadata(
 
         assert store.objects[("loom-benchmarks", before_metadata_key)] == before_metadata
         revised_metadata_key = (
-            "team-evals/alpha/.loom-revisions/"
-            f"{before_checksum}/{revised_metadata_digest}/"
+            "team-evals/alpha/.loom-revisions-v2/"
+            f"{before_checksum}/{revised_metadata_digest}/bundle/"
             f"{BUNDLE_FILE_METADATA_NAME}"
         )
         assert store.objects[("loom-benchmarks", revised_metadata_key)] != before_metadata
@@ -410,11 +449,11 @@ async def test_publish_local_explicit_flatten_override_records_evidence(
             ).scalar_one()
             source_prefix = task.source.removeprefix("s3://loom-benchmarks/")
             revision_prefix = (
-                f"source-useful-compat/app-path-missing/.loom-revisions/{task.checksum}/"
+                f"source-useful-compat/app-path-missing/.loom-revisions-v2/{task.checksum}/"
             )
             assert source_prefix.startswith(revision_prefix)
             metadata_digest = source_prefix.removeprefix(revision_prefix).removesuffix(
-                "/",
+                "/bundle/",
             )
             assert len(metadata_digest) == 64
             assert set(metadata_digest) <= set("0123456789abcdef")
@@ -444,4 +483,39 @@ async def test_publish_local_explicit_flatten_override_records_evidence(
                 delete(Benchmark).where(Benchmark.id == "source-useful-compat"),
             )
             await session.commit()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_code", ["AccessDenied", "NoSuchBucket"])
+async def test_publish_object_failure_propagates_without_database_commit(
+    postgres_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_code: str,
+) -> None:
+    root = tmp_path / "team-evals"
+    _write_layout(root)
+    store = ObjectOnlyStore()
+    original_put = store.put_object
+    put_count = 0
+
+    async def reject_second_put(*, bucket: str, key: str, body: bytes) -> None:
+        nonlocal put_count
+        put_count += 1
+        if put_count == 2:
+            raise ClientError({"Error": {"Code": error_code}}, "PutObject")
+        await original_put(bucket=bucket, key=key, body=body)
+
+    monkeypatch.setattr(store, "put_object", reject_second_put)
+    engine = create_async_engine(postgres_url)
+    try:
+        with pytest.raises(ClientError) as error:
+            await publish_local_benchmark(
+                root, db_url=postgres_url, object_store=store, bucket="loom-benchmarks",
+            )
+        assert error.value.operation_name == "PutObject"
+        assert error.value.response["Error"]["Code"] == error_code
+        assert put_count == 2
+        async with async_sessionmaker(engine)() as session:
+            assert await session.get(Benchmark, "team-evals") is None
+            assert await session.get(TaskRow, "team-evals/alpha") is None
+    finally:
         await engine.dispose()

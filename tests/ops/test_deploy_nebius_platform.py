@@ -47,6 +47,12 @@ def test_native_build_render_preflight_does_not_import_service_dependencies(
         "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
         **({"cache_bucket": config["buckets"]["artifacts"]} if cache_enabled else {}),
     }
+    config["task_resource_requests"] = {"local/measured-task": {
+        "task_revision_sha256": "sha256:" + "d" * 64,
+        "requests": {"controller": {
+            "cpu_millis": 200, "memory_mib": 512, "ephemeral_storage_mib": 100,
+        }},
+    }}
     inputs = tmp_path / "inputs.json"
     inputs.write_text(json.dumps([config, release, profile]))
     # A fresh process prevents imports already loaded by pytest from masking
@@ -74,6 +80,10 @@ config, release, profile = json.loads(inputs.read_text())
 files = build_platform(config, release, profile, {}, repo_root=root)
 write_platform(files, config, release, output)
 identity, observed, loaded = load_render(output)
+default_requests = observed.pop("default_task_resource_requests")
+assert sum(role["cpu_millis"] for role in default_requests.values()) == 1000
+assert sum(role["memory_mib"] for role in default_requests.values()) == 2048
+assert sum(role["ephemeral_storage_mib"] for role in default_requests.values()) == 2048
 assert observed == config
 assert loaded == files
 assert identity["candidate_sha"] == release["candidate_sha"]

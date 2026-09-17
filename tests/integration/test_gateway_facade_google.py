@@ -17,7 +17,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from sqlalchemy import create_engine, delete, insert, text
+from sqlalchemy import create_engine, delete, event, insert, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -32,6 +32,7 @@ from loom.db.schema import (
     Token,
 )
 from loom.security.secret_store import LocalEncryptedSecretStore
+from loom_llm_gateway import dispatch_audit
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.egress_client_pool import EgressClientPool
@@ -56,6 +57,10 @@ async def facade_setup(
     Seeds a google-typed connection with operator-supplied pricing
     ($0.075/1M in, $0.30/1M out — Gemini Flash actuals).
     """
+    # Exercise pricing/authentication against a real DB without making this
+    # functional suite a one-second hosted-runner latency test. Deadline and
+    # fail-closed admission policy remain covered by test_gateway_dispatch_audit.
+    monkeypatch.setattr(dispatch_audit, "_AUDIT_TIMEOUT_SECONDS", 10.0)
     for k, v in {
         "LOOM_GW_DB_URL": postgres_url,
         "LOOM_SECRET_STORE_MASTER_KEY": _TEST_MASTER_KEY,
@@ -229,11 +234,23 @@ async def _post(
 # ──────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("preexisting_audit", [False, True])
 async def test_facade_forwards_with_query_string_key_and_records_llm_call(
     facade_setup,
     postgres_url: str,
+    preexisting_audit: bool,
 ) -> None:
     app, jwt, team_id, trial_id, conn_id, captures = facade_setup
+    if preexisting_audit:
+        # Historical audit rows can outlive their trials in the shared DB.
+        engine = create_engine(postgres_url)
+        with engine.begin() as conn:
+            conn.execute(insert(LlmCall).values(
+                team_id=uuid4(), trial_id=uuid4(), step_id="unrelated",
+                dialect="anthropic", model="unrelated", input_tokens=1,
+                output_tokens=1, cost_usd=0, rate_card_hash="fixture",
+            ))
+        engine.dispose()
     r = await _post(
         app,
         jwt,
@@ -260,7 +277,10 @@ async def test_facade_forwards_with_query_string_key_and_records_llm_call(
 
     sync_engine = create_engine(postgres_url)
     with sync_engine.connect() as conn:
-        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+        rows = list(conn.execute(
+            text("SELECT * FROM llm_calls WHERE trial_id = :trial_id"),
+            {"trial_id": facade_setup[3]},
+        ))
     sync_engine.dispose()
     assert len(rows) == 1
     row = dict(rows[0]._mapping)
@@ -278,6 +298,37 @@ async def test_facade_forwards_with_query_string_key_and_records_llm_call(
     #                       = 0.000015 + 0.000024 = 0.000039
     assert float(row["cost_usd"]) == pytest.approx(0.000039, abs=1e-8)
     assert "operator-supplied" in row["rate_card_hash"]
+
+
+async def test_facade_pricing_retains_durable_audit_on_slow_database(
+    facade_setup,
+    postgres_url: str,
+) -> None:
+    app, jwt, _team_id, trial_id, conn_id, _captures = facade_setup
+    engine = app.state.session_factory.kw["bind"].sync_engine
+
+    def slow_receipt_insert(conn, cursor, statement, parameters, context, executemany):
+        if statement.lower().startswith("insert into gateway_dispatch_receipts"):
+            cursor.execute("SELECT pg_sleep(1.2)")
+
+    # Simulate the hosted database stall seen in CI while retaining real audit
+    # writes. This pricing suite is not the dispatch-deadline policy suite.
+    event.listen(engine, "before_cursor_execute", slow_receipt_insert)
+    try:
+        response = await _post(app, jwt, **{"x-loom-provider-connection-id": str(conn_id)})
+    finally:
+        event.remove(engine, "before_cursor_execute", slow_receipt_insert)
+    assert response.status_code == 200, response.text
+    sync_engine = create_engine(postgres_url)
+    try:
+        with sync_engine.connect() as conn:
+            receipt = conn.execute(text(
+                "SELECT provider_outcome, gateway_outcome FROM gateway_dispatch_receipts "
+                "WHERE trial_id = :trial_id"
+            ), {"trial_id": trial_id}).one()
+        assert tuple(receipt) == ("response_received", "completed")
+    finally:
+        sync_engine.dispose()
 
 
 async def test_facade_rate_card_pricing_uses_google_provider(
@@ -324,7 +375,10 @@ async def test_facade_rate_card_pricing_uses_google_provider(
 
     sync_engine = create_engine(postgres_url)
     with sync_engine.connect() as conn:
-        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+        rows = list(conn.execute(
+            text("SELECT * FROM llm_calls WHERE trial_id = :trial_id"),
+            {"trial_id": facade_setup[3]},
+        ))
     sync_engine.dispose()
     assert len(rows) == 1
     row = dict(rows[0]._mapping)
@@ -377,7 +431,10 @@ async def test_facade_rate_card_missing_entry_records_missing_marker(
 
     sync_engine = create_engine(postgres_url)
     with sync_engine.connect() as conn:
-        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+        rows = list(conn.execute(
+            text("SELECT * FROM llm_calls WHERE trial_id = :trial_id"),
+            {"trial_id": facade_setup[3]},
+        ))
     sync_engine.dispose()
     assert len(rows) == 1
     row = dict(rows[0]._mapping)
@@ -410,7 +467,10 @@ async def test_facade_count_tokens_action_returns_body_without_audit(
 
     sync_engine = create_engine(postgres_url)
     with sync_engine.connect() as conn:
-        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+        rows = list(conn.execute(
+            text("SELECT * FROM llm_calls WHERE trial_id = :trial_id"),
+            {"trial_id": facade_setup[3]},
+        ))
     sync_engine.dispose()
     assert rows == []
 
@@ -583,7 +643,10 @@ async def test_facade_surfaces_upstream_403_records_failed_audit_row(
     assert "API key invalid" in r.json()["detail"]
     sync_engine = create_engine(postgres_url)
     with sync_engine.connect() as conn:
-        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+        rows = list(conn.execute(
+            text("SELECT * FROM llm_calls WHERE trial_id = :trial_id"),
+            {"trial_id": facade_setup[3]},
+        ))
     sync_engine.dispose()
     assert len(rows) == 1
     row = dict(rows[0]._mapping)
@@ -656,7 +719,10 @@ async def test_facade_returns_502_on_missing_usage_metadata(
 
     sync_engine = create_engine(postgres_url)
     with sync_engine.connect() as conn:
-        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+        rows = list(conn.execute(
+            text("SELECT * FROM llm_calls WHERE trial_id = :trial_id"),
+            {"trial_id": facade_setup[3]},
+        ))
     sync_engine.dispose()
     assert rows == []
 

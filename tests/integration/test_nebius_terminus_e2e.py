@@ -16,16 +16,18 @@ import subprocess
 import sys
 import sysconfig
 import threading
+import time
 import tomllib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from uuid import uuid4
 
 
-def test_native_harbor_manifest_and_isolated_verifier(tmp_path: Path, missing_tool: bool) -> None:
+def test_native_harbor_manifest_and_isolated_verifier(tmp_path: Path, scenario: str) -> None:
     import pytest
     import tomli_w
 
+    missing_tool = scenario == "missing-tool"
     repository = Path(__file__).resolve().parents[2]
     task_image = os.environ["LOOM_TERMINUS_SMOKE_IMAGE"]
     controller_image = os.environ["LOOM_TERMINUS_CONTROLLER_IMAGE"]
@@ -86,6 +88,7 @@ def test_native_harbor_manifest_and_isolated_verifier(tmp_path: Path, missing_to
             "-v", volumes[0] + ":/loom/sandboxes/task-sandbox",
             "-v", volumes[1] + ":/loom/sandboxes/verifier-sandbox",
             "-e", f"LOOM_SMOKE_MISSING_TOOL={int(missing_tool)}",
+            "-e", f"LOOM_SMOKE_TIMEOUT={int(scenario == 'timeout')}",
             "-e", "HOME=/tmp/loom-home", "--workdir", "/app", "--entrypoint", "python",
             controller_image, "-I", "-B", "/fixture/test.py", "--inside",
         )
@@ -97,8 +100,14 @@ def test_native_harbor_manifest_and_isolated_verifier(tmp_path: Path, missing_to
             assert report["gateway_calls"] == 0
         else:
             assert report["reward"] == 1
-            assert report["native_turns"] >= 2
+            assert report["native_turns"] >= (1 if scenario == "timeout" else 2)
             assert report["private_inputs_hidden"] is True
+            if scenario == "timeout":
+                assert report["agent_exit_code"] == 124
+                assert report["blocked_model_calls"] == 1
+                assert report["workspace_snapshot_retained"] is True
+                assert report["usage_call_count"] == report["typed_calls"] == 1
+                assert report["agent_elapsed_seconds"] < 50
         assert report["gateway_calls"] == report["typed_calls"]
         assert report["external_model_calls"] == 0
         assert report["untrusted_imports_blocked"] is True
@@ -178,6 +187,9 @@ async def _inside() -> None:
                         override_agent_timeout_sec=90, request_params={"temperature": 0.2})
     trial_id, team_id = uuid4(), uuid4()
     ledger: list[dict[str, object]] = []
+    timeout_case = os.environ.get("LOOM_SMOKE_TIMEOUT") == "1"
+    release_blocked = threading.Event()
+    blocked_calls: list[int] = []
     solution = base64.b64encode((source / "original/solution/solve.sh").read_bytes()).decode()
     command = (
         "test ! -e /app/tests/test_outputs.py && test ! -e /app/verifier/run.sh "
@@ -204,6 +216,13 @@ async def _inside() -> None:
             assert request["temperature"] == 0.2
             index = len(ledger)
             assert index < 5, "unexpected additional model retry"
+            if timeout_case and index > 0:
+                # The first response solves the task. Leave the second call
+                # outstanding until the real Python phase deadline expires.
+                # No successful/paid response is fabricated in the stub ledger.
+                blocked_calls.append(index)
+                release_blocked.wait(timeout=90)
+                return
             ledger.append({
                 "id": str(uuid4()), "trial_id": str(trial_id), "step_id": "agent",
                 "model": "glm-5.2", "dialect": "openai_facade", "input_tokens": 10 + index,
@@ -229,23 +248,38 @@ async def _inside() -> None:
     os.environ["LOOM_TASK_ARTIFACTS_JSON"] = '["archive_manifest.json","build_manifest.py","private-inputs-hidden"]'
     try:
         missing_tool = os.environ.get("LOOM_SMOKE_MISSING_TOOL") == "1"
+        agent_exit_code = None
+        agent_elapsed = 0.0
         for phase in (("terminus-2",) if missing_tool else ("terminus-2", "verify-sandbox")):
+            phase_env = {**os.environ, "LOOM_TASK_TRIAL_JSON": trial.model_dump_json()}
+            if timeout_case and phase == "terminus-2":
+                phase_env.update(LOOM_EXECUTION_PHASE_DEADLINE=str(time.time() + 20),
+                                 LOOM_EXECUTION_TERMINATION_GRACE_SECONDS="30")
+            started = time.monotonic()
             completed = subprocess.run(
                 [sys.executable, "-I", "-B", "-m", "loom.service_execution_sandbox_task",
                  phase, "--workspace", str(workspace)],
-                cwd="/app", env={**os.environ, "LOOM_TASK_TRIAL_JSON": trial.model_dump_json()},
+                cwd="/app", env=phase_env,
                 capture_output=True, text=True, timeout=120,
             )
             sys.stdout.write(completed.stdout)
             sys.stderr.write(completed.stderr)
+            if phase == "terminus-2":
+                agent_exit_code = completed.returncode
+                agent_elapsed = time.monotonic() - started
             if missing_tool:
                 assert completed.returncode != 0
                 assert "task image must preinstall bash, tmux and asciinema" in completed.stderr
                 assert not ledger
+            elif timeout_case and phase == "terminus-2":
+                assert completed.returncode == 124, completed.stderr
+                assert "verified workspace handoff retained" in completed.stderr
+                assert (workspace / ".loom/workspace.tar").is_file()
             else:
                 completed.check_returncode()
         assert not Path("/evidence/shadow-import-executed").exists()
     finally:
+        release_blocked.set()
         server.shutdown()
         server.server_close()
         thread.join()
@@ -261,9 +295,13 @@ async def _inside() -> None:
     native = json.loads((workspace / ".loom/agent/harbor/trajectory.json").read_text())
     events = [json.loads(line) for line in (workspace / ".loom/agent/trajectory.jsonl").read_text().splitlines()]
     verifier = json.loads((workspace / ".loom/verifier/output.json").read_text())
+    usage = json.loads((workspace / ".loom/agent/usage.json").read_text())
     report = {"reward": verifier["rewards"]["resolved"],
               "native_turns": sum(step["source"] == "agent" for step in native["steps"]),
               "gateway_calls": len(ledger), "typed_calls": sum(event["kind"] == "llm_call" for event in events),
+              "usage_call_count": usage["call_count"], "agent_exit_code": agent_exit_code,
+              "agent_elapsed_seconds": agent_elapsed, "blocked_model_calls": len(blocked_calls),
+              "workspace_snapshot_retained": (workspace / ".loom/workspace.tar").is_file(),
               "private_inputs_hidden": (workspace / ".loom/collected/private-inputs-hidden").exists(),
               "external_model_calls": 0, "untrusted_imports_blocked": True}
     Path("/evidence/report.json").write_text(json.dumps(report, indent=2))
@@ -276,7 +314,7 @@ else:
     import pytest
 
     test_native_harbor_manifest_and_isolated_verifier = pytest.mark.parametrize(
-        "missing_tool", [False, True], ids=["manifest", "missing-tool"]
+        "scenario", ["manifest", "missing-tool", "timeout"]
     )(test_native_harbor_manifest_and_isolated_verifier)
     test_native_harbor_manifest_and_isolated_verifier = pytest.mark.skipif(
         not os.environ.get("LOOM_TERMINUS_SMOKE_IMAGE"),

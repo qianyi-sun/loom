@@ -19,6 +19,17 @@ from urllib.parse import urlsplit
 import yaml  # type: ignore[import-untyped]
 
 from loom.execution_contract import NEBIUS_CPU_EXECUTION_CLASS_V1
+from loom.execution_runtime_contract import (
+    ExecutionResourceRequestsV1,
+    TaskExecutionResourceRequestsV1,
+)
+
+# Scheduling baseline for future automatic Nebius Terminus tasks, not task limits.
+DEFAULT_TASK_RESOURCE_REQUESTS = {
+    "controller": {"cpu_millis": 200, "memory_mib": 512, "ephemeral_storage_mib": 512},
+    "task_sandbox": {"cpu_millis": 600, "memory_mib": 1024, "ephemeral_storage_mib": 1024},
+    "verifier_sandbox": {"cpu_millis": 200, "memory_mib": 512, "ephemeral_storage_mib": 512},
+}
 
 
 class NebiusPlatformError(ValueError):
@@ -81,12 +92,24 @@ def validate_environment(config: dict[str, Any]) -> None:
             "public_gateway_ipv4",
             "task_image_builder",
             "service_execution_scheduler_max_deadline_sec",
+            "task_resource_requests",
+            "default_task_resource_requests",
         }
         != expected
     ):
         raise NebiusPlatformError("platform configuration has missing or unknown fields")
     if type(config.get("public_tls_bootstrap", False)) is not bool:
         raise NebiusPlatformError("public_tls_bootstrap must be a boolean")
+    ExecutionResourceRequestsV1.model_validate(
+        config.get("default_task_resource_requests", DEFAULT_TASK_RESOURCE_REQUESTS)
+    )
+    requests = config.get("task_resource_requests", {})
+    if not isinstance(requests, dict):
+        raise NebiusPlatformError("task_resource_requests must be a task-ID keyed object")
+    for task_id, entry in requests.items():
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise NebiusPlatformError("task_resource_requests requires nonempty task IDs")
+        TaskExecutionResourceRequestsV1.model_validate(entry)
     for key in (
         "namespace",
         "execution_namespace",
@@ -1243,6 +1266,16 @@ def build_platform(
 ) -> dict[str, list[dict[str, Any]]]:
     """Build Kubernetes resources from published image refs and environment settings."""
     validate_environment(config)
+    # Resolve the environment-owned baseline once and persist it with the
+    # environment and each release profile. Task limits remain source-owned.
+    default_requests = ExecutionResourceRequestsV1.model_validate(
+        config.get("default_task_resource_requests", DEFAULT_TASK_RESOURCE_REQUESTS)
+    ).model_dump(mode="json")
+    config = {**config, "default_task_resource_requests": default_requests}
+    profile = {**profile, "default_task_resource_requests": default_requests}
+    # Exact task/revision entries remain higher-priority overrides.
+    if "task_resource_requests" in config:
+        profile = {**profile, "task_resource_requests": config["task_resource_requests"]}
     if (
         candidate.get("source_ref") not in {"refs/heads/dev", "refs/heads/codex/nebius-main"}
         or candidate.get("repository") != "qianyi-sun/loom"

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -29,7 +29,7 @@ from loom.agent.terminus2.model_switch import (
 from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA, LOOM_BRIDGE_REVISION
 from loom.attempt_deadline import AttemptDeadline, AttemptDeadlineExceededError
 from loom.driver.base import Driver
-from loom.errors import AgentError
+from loom.errors import AgentError, exception_info
 from loom.models.mcp import MCPConnection
 from loom.models.trajectory import (
     Terminus2EpisodeCheckpointEvent,
@@ -212,7 +212,7 @@ def _install_tmux_session_alive_guard(agent: Any) -> None:
             raise AgentError(_TMUX_SESSION_LOST_MID_DISPATCH) from cause
         try:
             cwd = await _recreate_harbor_tmux_session(session)
-        except AgentError:
+        except (AgentError, AttemptDeadlineExceededError):
             raise
         except Exception as exc:
             raise AgentError(_TMUX_SESSION_LOST_MID_DISPATCH) from exc
@@ -460,6 +460,7 @@ class LoomTerminus2Runtime:
     max_turns: int = 50
     workdir: PurePosixPath = field(default_factory=lambda: PurePosixPath("/workspace"))
     step_token_ttl_sec: int = 1800
+    local_artifact_sink: Callable[[Path], None] | None = field(default=None, repr=False)
     _attempt_deadline: AttemptDeadline | None = field(
         default=None,
         init=False,
@@ -543,8 +544,17 @@ class LoomTerminus2Runtime:
                 agent_context_cls=agent_context_cls,
             )
         finally:
-            logs_ctx.cleanup()
-            self._active_env = None
+            try:
+                # Only the native service adapter supplies this trusted local
+                # sink. It retains partial files without reopening checkpoint,
+                # trajectory, sandbox-upload or CP mutation fences at timeout.
+                if self.local_artifact_sink is not None and self._attempt_deadline is not None:
+                    if self._attempt_deadline.reached:
+                        _assert_harbor_artifacts_have_no_step_secrets(logs_root)
+                        self.local_artifact_sink(logs_root)
+            finally:
+                logs_ctx.cleanup()
+                self._active_env = None
 
     async def _run_harbor(
         self,
@@ -872,12 +882,13 @@ class LoomTerminus2Runtime:
             ):
                 pass
             raise
-        except AgentError:
+        except (AgentError, AttemptDeadlineExceededError):
             raise
         except Exception as exc:
             # Harbor tmux/session failures are bare RuntimeError; wrap so
             # step_runner keeps an actionable message (#1068).
-            raise AgentError(str(exc)) from exc
+            info = exception_info(exc)
+            raise AgentError(f"{info.exception_type}: {info.exception_message}") from exc
         finally:
             poll_stop.set()
             await poll_task

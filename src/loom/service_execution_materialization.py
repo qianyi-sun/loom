@@ -31,6 +31,7 @@ from loom.execution_runtime_contract import (
     RuntimeOutputDeclarationV1,
     RuntimeTaskInputV1,
     SidecarContainerV1,
+    TaskExecutionResourceRequestsV1,
 )
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
@@ -106,11 +107,6 @@ class ControllerComputeResourcesV1(_Strict):
     memory_mib: int = Field(gt=0, le=1_048_576)
 
 
-class TaskExecutionResourceRequestsV1(_Strict):
-    task_revision_sha256: str = Field(pattern=_SHA256.pattern)
-    requests: ExecutionResourceRequestsV1
-
-
 class ServiceExecutionRuntimeProfileV1(_Strict):
     """Deployment-owned immutable inputs for automatic plan compilation."""
 
@@ -124,6 +120,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     agent_image_ref: str | None = None
     agent_runtime_bindings: tuple[AgentRuntimeBindingV1, ...] = ()
     controller_resources: ControllerComputeResourcesV1 | None = None
+    default_task_resource_requests: ExecutionResourceRequestsV1 | None = None
     task_resource_requests: dict[str, TaskExecutionResourceRequestsV1] = Field(default_factory=dict)
     runtime_image_ref: str
     runtime_binary_sha256: str = Field(pattern=_SHA256.pattern)
@@ -141,6 +138,8 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
         payload: dict[str, Any] = handler(self)
         if not self.task_resource_requests:
             payload.pop("task_resource_requests", None)
+        if self.default_task_resource_requests is None:
+            payload.pop("default_task_resource_requests", None)
         return payload
 
     @model_validator(mode="after")
@@ -197,6 +196,39 @@ def build_service_execution_input_manifest(
         task_revision_sha256="sha256:" + task_checksum.removeprefix("sha256:"),
         files=tuple(files),
     )
+
+
+def prepare_service_execution_input_manifest(
+    bundle_dir: Path,
+    *,
+    task_checksum: str,
+    bucket: str,
+    manifest_key: str,
+) -> tuple[bytes, dict[str, Any]]:
+    """Build canonical manifest bytes and the ``source_provenance`` binding.
+
+    Shared by TaskSet materialization and benchmark ``publish-local`` so both
+    catalog parents attach the same ``service_execution_input`` shape (#1978).
+    Does not upload; callers put ``body`` at ``manifest_key``.
+    """
+
+    if not manifest_key or manifest_key.endswith("/"):
+        raise ValueError("manifest_key must be a non-empty object key")
+    manifest = build_service_execution_input_manifest(
+        bundle_dir,
+        task_checksum=task_checksum,
+    )
+    body = manifest.canonical_bytes()
+    provenance = {
+        "service_execution_input": {
+            "schema_version": "loom.service-execution-input.v1",
+            "manifest_uri": f"s3://{bucket}/{manifest_key}",
+            "manifest_sha256": "sha256:" + hashlib.sha256(body).hexdigest(),
+            "file_count": len(manifest.files),
+            "total_bytes": sum(item.size_bytes for item in manifest.files),
+        },
+    }
+    return body, provenance
 
 
 def service_execution_input_binding(
@@ -635,6 +667,8 @@ def _compile_terminus_plan(
     for source, target, kind, required in (
         ("agent/trajectory.jsonl", "trajectory/events.jsonl", "trajectory", True),
         ("agent/usage.json", "accounting/usage.json", "usage", True),
+        ("agent/exception.json", "diagnostics/agent-exception.json", "agent_native", False),
+        ("verifier/exception.json", "diagnostics/verifier-exception.json", "verifier", False),
         ("agent/harbor/trajectory.json", "artifacts/harbor/trajectory.json", "agent_native", True),
         ("agent/harbor/recording.cast", "artifacts/harbor/recording.cast", "agent_native", False),
         ("workspace.tar", "artifacts/workspace.tar", "task_artifact", True),
@@ -672,6 +706,7 @@ def _compile_terminus_plan(
         ), output_declarations=tuple(outputs), sidecars=tuple(sidecars),
         main=phase("agent", "terminus-2", agent_timeout),
         verifier_execution="in_attempt",
+        verifier_after_agent_timeout=True,
         verifier=phase("verifier", "verify-sandbox", verifier_timeout),
         max_log_bytes_per_stream=profile.max_log_bytes_per_stream,
         max_artifact_bytes=profile.max_artifact_bytes,
@@ -693,6 +728,7 @@ __all__ = [
     "build_service_execution_input_manifest",
     "compile_service_execution_plan",
     "load_service_execution_runtime_profile",
+    "prepare_service_execution_input_manifest",
     "service_execution_input_binding",
     "validate_task_resource_requests",
 ]

@@ -3349,6 +3349,7 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
     source_task_id: str | None,
     rewards: dict[str, float],
     aggregate_reward: float,
+    runtime_status: str = "succeeded",
 ) -> None:
     class FailOnceSourceStore(FakeObjectStore):
         fail_next_delete: bool = True
@@ -3502,6 +3503,12 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             "verifier/output.json": canonical_document({"rewards": rewards}),
         }
         result_document = _runtime_result_payload(lease, started_at=now)
+        result_document["status"] = runtime_status
+        result_document["partial_evidence"] = runtime_status != "succeeded"
+        if runtime_status == "timed_out":
+            phases = result_document["phases"]
+            assert isinstance(phases, list)
+            phases[0].update(exit_code=124, timed_out=True)
         result_document.update(
             outputs=[
                 {
@@ -3601,7 +3608,7 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             current = await session.get(ServiceExecutionLease, lease.id, with_for_update=True)
             trial = await session.get(Trial, trial_id)
             assert current is not None and trial is not None
-            assert trial.state == "materializing"
+            assert trial.state == ("materializing" if runtime_status == "succeeded" else "failed")
             assert trial.result is not None
             assert trial.result["aggregate_reward"] == aggregate_reward
             assert trial.result["reward"] == rewards
@@ -3635,7 +3642,7 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             assert current is not None and trial is not None
             assert current.materialization_state == "pending"
             assert current.materialization_error_code == "transient_materialization_error"
-            assert trial.state == "materializing"
+            assert trial.state == ("materializing" if runtime_status == "succeeded" else "failed")
             current.materialization_next_attempt_at = now
             await session.commit()
         materializer = ServiceExecutionMaterializer(
@@ -3696,7 +3703,8 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             assert current.canonical_trajectory_sha256 is not None
             assert current.source_cleanup_state == "complete"
             assert current.source_cleanup_attempts == 2
-            assert trial.state == "succeeded"
+            assert trial.state == ("succeeded" if runtime_status == "succeeded" else "failed")
+            assert trial.failure_reason == (None if runtime_status == "succeeded" else "timed_out")
             assert trial.result == projected_result
             from loom_service.routes.batches import _rollup_from_trials
 
@@ -3717,8 +3725,14 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
                 "step_end",
                 "verifier_start",
                 "verifier_end",
+                *([] if runtime_status == "succeeded" else ["trial_error"]),
                 "trial_end",
             ]
+            assert events[-1].payload["reward"] == rewards
+            assert events[-1].payload["final_state"] == trial.state
+            assert next(event for event in events if event.kind == "verifier_end").payload[
+                "result"
+            ]["rewards"] == rewards
             storage_files = artifact.storage["files"]
             source_evidence = artifact.storage["source_evidence"]
             assert [item["relative_path"] for item in source_evidence] == [
@@ -3785,8 +3799,21 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
         assert response.status_code == 200, response.text
         item = next(item for item in response.json()["items"] if item["id"] == str(trial_id))
         assert item["aggregate_reward"] == aggregate_reward
+        assert item["state"] == ("succeeded" if runtime_status == "succeeded" else "failed")
     finally:
         await engine.dispose()
+
+
+async def test_timeout_preserves_zero_verifier_reward_through_canonical_cleanup(
+    postgres_url: str,
+) -> None:
+    await test_materializer_commits_complete_bundle_after_execution_cleanup(
+        postgres_url=postgres_url,
+        source_task_id=None,
+        rewards={"passed": 0.0},
+        aggregate_reward=0.0,
+        runtime_status="timed_out",
+    )
 
 
 async def test_service_execution_input_is_resolved_from_persisted_task_binding(

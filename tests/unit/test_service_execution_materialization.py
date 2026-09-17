@@ -18,6 +18,8 @@ from loom.service_execution_materialization import (
     automatic_service_execution_rejections,
     build_service_execution_input_manifest,
     compile_service_execution_plan,
+    prepare_service_execution_input_manifest,
+    service_execution_input_binding,
 )
 from loom.trajectory.storage import FakeObjectStore
 from loom_control_plane.service_execution_materializer import (
@@ -96,6 +98,34 @@ def _profile() -> ServiceExecutionRuntimeProfileV1:
     )
 
 
+@pytest.mark.parametrize("architecture", ["x86_64", "arm64", "any"])
+async def test_x86_policy_is_scoped_to_nebius(architecture: str) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from loom.task_image_materialization import required_task_image_architectures
+    from loom_service.task_config_validation import split_valid_task_configs
+
+    raw = _task().model_dump(mode="json")
+    raw["environment"].update(cpu_arch=architecture, docker_image=None, dockerfile="Dockerfile")
+    task = TaskConfig.model_validate(raw)
+    result = MagicMock()
+    result.all.return_value = [(task.task.id, task.model_dump(mode="json"))]
+    session = AsyncMock()
+    session.execute.return_value = result
+
+    # Shared batch validation and image planning still admit ARM outside Nebius.
+    valid, invalid = await split_valid_task_configs(session, [task.task.id])
+    assert valid == [task.task.id]
+    assert invalid == []
+    assert set(required_task_image_architectures(task)) == (
+        {"x86_64", "arm64"} if architecture == "any" else {architecture}
+    )
+    reasons = automatic_service_execution_rejections(
+        task, _trial(), source_provenance=_provenance(), allow_task_image_preparation=True,
+    )
+    assert ("linux_x86_64_required" in reasons) == (architecture == "arm64")
+
+
 def test_input_manifest_is_canonical_and_preserves_executable_mode(tmp_path: Path) -> None:
     (tmp_path / "instruction.md").write_text("hello\n", encoding="utf-8")
     script = tmp_path / "verifier" / "check.sh"
@@ -114,6 +144,32 @@ def test_input_manifest_is_canonical_and_preserves_executable_mode(tmp_path: Pat
     ]
     assert [item.mode for item in manifest.files] == ["0644", "0755"]
     assert json.loads(manifest.canonical_bytes()) == manifest.model_dump(mode="json")
+
+
+def test_prepare_service_execution_input_manifest_binding_matches_body(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "instruction.md").write_text("hello\n", encoding="utf-8")
+    body, provenance = prepare_service_execution_input_manifest(
+        tmp_path,
+        task_checksum=_REVISION,
+        bucket="artifacts",
+        manifest_key="bench/task/service-execution-input.json",
+    )
+    binding = service_execution_input_binding(provenance)
+    assert binding is not None
+    assert binding.manifest_uri == (
+        "s3://artifacts/bench/task/service-execution-input.json"
+    )
+    assert binding.manifest_sha256 == "sha256:" + hashlib.sha256(body).hexdigest()
+    assert binding.file_count == 1
+    assert binding.total_bytes == len(b"hello\n")
+    assert "immutable_task_input_unavailable" not in automatic_service_execution_rejections(
+        _task(),
+        _trial(),
+        source_provenance=provenance,
+        allow_task_image_preparation=True,
+    )
 
 
 def test_ordinary_task_compiles_to_profile_owned_nebius_plan() -> None:
@@ -748,3 +804,44 @@ async def test_accounting_refresh_defers_bad_archive_and_preserves_cancellation(
     with pytest.raises(asyncio.CancelledError):
         await materializer.reconcile_accounting_once(now=now + timedelta(seconds=61))
     assert materializer._accounting_retry_after == {}
+
+
+@pytest.mark.parametrize("agent", ["direct-completion", "terminus-2"])
+def test_compiler_opts_only_isolated_terminus_into_timeout_verification(agent: str) -> None:
+    task = _task(
+        agent={"name": agent, "timeout_sec": 900},
+        verifier={
+            "name": "script",
+            "args": {"script_path": "verifier/check.sh"},
+            "timeout_sec": 1200,
+        },
+    )
+    controller = "registry.example/controller@sha256:" + "9" * 64
+    profile = _profile().model_copy(
+        update={
+            "agent_image_ref": controller,
+            "image_admission": signed_image_admission_bundle(
+                (_TASK_IMAGE, _RUNTIME_IMAGE, controller)
+            ),
+        }
+    )
+    trial = _trial().model_copy(update={"agent_name": agent})
+    plan = compile_service_execution_plan(
+        task=task,
+        trial=trial,
+        profile=profile,
+        source_provenance=_provenance(),
+        task_revision_sha256=_REVISION,
+    )
+    assert plan.main.timeout_seconds == 900
+    assert plan.verifier is not None and plan.verifier.timeout_seconds == 1200
+    if agent == "terminus-2":
+        assert plan.canonical_payload()["verifier_after_agent_timeout"] is True
+        assert plan.agent_image_ref == controller
+        assert {sidecar.role_name for sidecar in plan.sidecars if sidecar.private_sandbox} == {
+            "task-sandbox",
+            "verifier-sandbox",
+        }
+    else:
+        assert not plan.verifier_after_agent_timeout
+        assert "verifier_after_agent_timeout" not in plan.canonical_payload()

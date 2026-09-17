@@ -1144,8 +1144,12 @@ def _print_trial_cancel_next_steps(batch_id: str | None) -> None:
         "(cancelled counts toward batch completion).",
     )
     print(
-        "  - Delivery export still needs a succeeded attempt for this "
+        "  - Delivery export needs an eligible completed attempt for this "
         "coordinate; cancelled does not select for export.",
+    )
+    print(
+        "  - Native agent timeouts with completed verifier scores and complete "
+        "evidence can also export, preserving their failed/timed_out metadata.",
     )
     if batch_id:
         print(

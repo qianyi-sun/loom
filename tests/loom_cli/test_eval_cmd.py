@@ -2283,6 +2283,10 @@ def test_trial_cancel_running(
     assert f"Cancelled trial {_TRIAL_ID}" in out
     assert "running → cancelled" in out
     assert "Sibling trials" in out
+    assert "eligible completed attempt" in out
+    assert "cancelled does not select for export" in out
+    assert "Native agent timeouts with completed verifier scores and complete evidence" in out
+    assert "preserving their failed/timed_out metadata" in out
     assert f"loom eval batch rerun-plan {_BATCH_ID}" in out
     methods = [req.method for req in mock_server.requests]
     assert methods == ["GET", "POST"]
