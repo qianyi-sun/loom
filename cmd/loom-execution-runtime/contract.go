@@ -103,37 +103,45 @@ type executionImageAdmission struct {
 	Admissions    []signedImageAdmission `json:"admissions"`
 }
 
+type executionResourceRequests struct {
+	Controller      *resources `json:"controller,omitempty"`
+	TaskSandbox     *resources `json:"task_sandbox,omitempty"`
+	VerifierSandbox *resources `json:"verifier_sandbox,omitempty"`
+}
+
 type plan struct {
-	SchemaVersion              string                  `json:"schema_version"`
-	CandidateSHA               string                  `json:"candidate_sha"`
-	TaskRevisionSHA256         string                  `json:"task_revision_sha256"`
-	CommandIdentitySHA256      string                  `json:"command_identity_sha256"`
-	ExecutionRole              string                  `json:"execution_role"`
-	ExecutionClassID           string                  `json:"execution_class_id"`
-	Composition                string                  `json:"composition"`
-	TaskImageRef               string                  `json:"task_image_ref"`
-	TaskImageMaterializationID *string                 `json:"task_image_materialization_id,omitempty"`
-	AgentImageRef              *string                 `json:"agent_image_ref,omitempty"`
-	RuntimeImageRef            string                  `json:"runtime_image_ref"`
-	RuntimeBinarySHA256        string                  `json:"runtime_binary_sha256"`
-	ImageAdmission             executionImageAdmission `json:"image_admission"`
-	RunAsUser                  int64                   `json:"run_as_user"`
-	RunAsGroup                 int64                   `json:"run_as_group"`
-	FSGroup                    int64                   `json:"fs_group"`
-	TaskResources              resources               `json:"task_resources"`
-	WorkspaceMiB               int64                   `json:"workspace_mib"`
-	RuntimeVolumeMiB           int64                   `json:"runtime_volume_mib"`
-	TerminationGraceSec        int64                   `json:"termination_grace_seconds"`
-	Setup                      []phase                 `json:"setup"`
-	Main                       phase                   `json:"main"`
-	VerifierExecution          string                  `json:"verifier_execution"`
-	Verifier                   *phase                  `json:"verifier"`
-	Sidecars                   []sidecar               `json:"sidecars"`
-	MaxLogBytesPerStream       int64                   `json:"max_log_bytes_per_stream"`
-	MaxArtifactBytes           int64                   `json:"max_artifact_bytes"`
-	TaskInput                  *taskInput              `json:"task_input"`
-	OutputDeclarations         []outputDeclaration     `json:"output_declarations"`
-	RuntimeContractSHA256      string                  `json:"-"`
+	SchemaVersion              string                     `json:"schema_version"`
+	CandidateSHA               string                     `json:"candidate_sha"`
+	TaskRevisionSHA256         string                     `json:"task_revision_sha256"`
+	CommandIdentitySHA256      string                     `json:"command_identity_sha256"`
+	ExecutionRole              string                     `json:"execution_role"`
+	ExecutionClassID           string                     `json:"execution_class_id"`
+	Composition                string                     `json:"composition"`
+	TaskImageRef               string                     `json:"task_image_ref"`
+	TaskImageMaterializationID *string                    `json:"task_image_materialization_id,omitempty"`
+	AgentImageRef              *string                    `json:"agent_image_ref,omitempty"`
+	RuntimeImageRef            string                     `json:"runtime_image_ref"`
+	RuntimeBinarySHA256        string                     `json:"runtime_binary_sha256"`
+	ImageAdmission             executionImageAdmission    `json:"image_admission"`
+	RunAsUser                  int64                      `json:"run_as_user"`
+	RunAsGroup                 int64                      `json:"run_as_group"`
+	FSGroup                    int64                      `json:"fs_group"`
+	TaskResources              resources                  `json:"task_resources"`
+	ControllerResources        *resources                 `json:"controller_resources,omitempty"`
+	ResourceRequests           *executionResourceRequests `json:"resource_requests,omitempty"`
+	WorkspaceMiB               int64                      `json:"workspace_mib"`
+	RuntimeVolumeMiB           int64                      `json:"runtime_volume_mib"`
+	TerminationGraceSec        int64                      `json:"termination_grace_seconds"`
+	Setup                      []phase                    `json:"setup"`
+	Main                       phase                      `json:"main"`
+	VerifierExecution          string                     `json:"verifier_execution"`
+	Verifier                   *phase                     `json:"verifier"`
+	Sidecars                   []sidecar                  `json:"sidecars"`
+	MaxLogBytesPerStream       int64                      `json:"max_log_bytes_per_stream"`
+	MaxArtifactBytes           int64                      `json:"max_artifact_bytes"`
+	TaskInput                  *taskInput                 `json:"task_input"`
+	OutputDeclarations         []outputDeclaration        `json:"output_declarations"`
+	RuntimeContractSHA256      string                     `json:"-"`
 }
 
 func loadPlan(path string) (plan, error) {
@@ -272,6 +280,60 @@ func (p plan) validate() error {
 			return err
 		}
 		known[item.RoleName] = true
+	}
+	if p.ControllerResources != nil || p.ResourceRequests != nil {
+		if p.ControllerResources != nil {
+			if err := p.ControllerResources.validate(); err != nil {
+				return fmt.Errorf("invalid controller resources: %w", err)
+			}
+		}
+		if p.AgentImageRef == nil || p.ExecutionRole != "attempt" || p.Composition != "init_payload" {
+			return fmt.Errorf("controller resources require an isolated attempt controller")
+		}
+		sandboxes := map[string]bool{}
+		for _, item := range p.Sidecars {
+			if item.PrivateSandbox {
+				sandboxes[item.RoleName] = true
+				if item.Resources != p.TaskResources {
+					return fmt.Errorf("controller sizing must preserve task and verifier resources")
+				}
+			}
+		}
+		if !sandboxes["task-sandbox"] || !sandboxes["verifier-sandbox"] {
+			return fmt.Errorf("controller resources require an isolated attempt controller")
+		}
+		if p.ControllerResources != nil && p.ControllerResources.EphemeralStorageMiB != p.TaskResources.EphemeralStorageMiB {
+			return fmt.Errorf("controller sizing must preserve task-derived storage")
+		}
+		if p.ResourceRequests != nil {
+			limits := p.TaskResources
+			if p.ControllerResources != nil {
+				limits = *p.ControllerResources
+			}
+			configured := false
+			for _, pair := range []struct {
+				request *resources
+				limit   resources
+			}{
+				{p.ResourceRequests.Controller, limits},
+				{p.ResourceRequests.TaskSandbox, p.TaskResources},
+				{p.ResourceRequests.VerifierSandbox, p.TaskResources},
+			} {
+				if pair.request == nil {
+					continue
+				}
+				configured = true
+				if err := pair.request.validate(); err != nil {
+					return fmt.Errorf("invalid resource requests: %w", err)
+				}
+				if pair.request.CPUMillis > pair.limit.CPUMillis || pair.request.MemoryMiB > pair.limit.MemoryMiB || pair.request.EphemeralStorageMiB > pair.limit.EphemeralStorageMiB {
+					return fmt.Errorf("resource requests exceed hard limits")
+				}
+			}
+			if !configured {
+				return fmt.Errorf("resource requests must configure at least one container")
+			}
+		}
 	}
 	// The authenticated lease carries the Control Plane's task-image authorization.
 	// Only that prepared task image and matching private sandboxes are exempt from

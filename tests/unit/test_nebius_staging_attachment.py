@@ -153,7 +153,25 @@ def test_staging_attachment_separates_spool_without_second_control_plane(tmp_pat
         == "https://cp.example:8443"
     )
     roles = [row for row in docs if row["kind"] in {"ClusterRole", "ClusterRoleBinding"}]
-    assert all(row["metadata"]["name"].endswith("-staging") for row in roles)
+    assert {row["metadata"]["name"] for row in roles} == {
+        "loom-execution-capacity-collector-staging",
+        "loom-nebius-staging-actuator-usage",
+    }
+    usage_role = next(
+        row
+        for row in roles
+        if row["kind"] == "ClusterRole"
+        and row["metadata"]["name"] == "loom-nebius-staging-actuator-usage"
+    )
+    assert usage_role["rules"] == [
+        {"apiGroups": [""], "resources": ["nodes/proxy"], "verbs": ["get"]}
+    ]
+    for role_binding in (row for row in roles if row["kind"] == "ClusterRoleBinding"):
+        assert role_binding["roleRef"]["name"] == role_binding["metadata"]["name"]
+        assert all(
+            subject["namespace"] == "loom-nebius-staging"
+            for subject in role_binding["subjects"]
+        )
 
 
 @pytest.mark.parametrize("database", ["loom", "loom_staging"])

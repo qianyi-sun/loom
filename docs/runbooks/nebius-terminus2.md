@@ -57,12 +57,89 @@ separate verifier and transform fields empty. Select `terminus-2` + `glm-5.2` wh
 model/provider configuration and credentials stay in the Gateway. Catalog/model
 availability must be verified on the target environment. The task configuration
 starts with 2 vCPU, 4 GiB memory and 8 GiB storage for the task container. The
-controller and verifier each request another 2 vCPU and 4 GiB: the complete Trial
-therefore requests 6 vCPU and 12 GiB, with about 33 GiB conservatively accounted
-storage including workspaces and runtime volumes. The current 16-vCPU/64-GiB
-node template can fit this Trial. This is an initial allocation, not a promise
-for all 90 tasks; placement must account for all containers and live regional
-quota. Agent and verifier each retain the original 900-second timeout.
+verifier requests the same task resources. Newly published Nebius profiles set
+`controller_resources: {"cpu_millis": 1000, "memory_mib": 2048}` for the trusted
+Harbor controller, independently of the task's compute. This example therefore
+requests 5 vCPU and 10 GiB across the complete Pod. Controller storage remains
+task-derived (8 GiB here), as do the task/verifier allocations, workspace and
+output bounds. The Pod requests 24 GiB of temporary storage. The workspace,
+runtime and output emptyDir limits bound usage within that Pod budget; admission
+and cost reservation use the same request as native scheduling and observation,
+without adding those limits again. Existing reservations and historical cost
+records are not rewritten. The current
+16-vCPU/64-GiB node template can fit this Trial. CPU/RAM savings alone do not
+establish better packing when storage is the limiting resource. This is an
+initial allocation, not a promise for all 90 tasks; placement accounts for all
+containers and live regional quota. Agent and verifier each retain the original
+900-second timeout.
+
+The deployment runtime profile's optional `controller_resources` contains only
+CPU and memory. Automatic native Terminus plans freeze it with task-derived
+storage. An absent setting preserves legacy task-sized controller behavior;
+existing frozen plans retain their original allocation and remain readable.
+Direct-completion plans do not use this setting. Explicit published harness
+versions retain their selected controller image. The runtime image supplies the
+Go plan reader; the selected Harbor image receives unchanged task/trial inputs
+and phase arguments, not the execution plan or deployment profile.
+The Python compiler, actuator,
+capacity admission and Go execution runtime must be deployed together before
+publishing plans with the new field. The 1-vCPU/2-GiB controller baseline retains
+the allocation exercised by the ordinary-task acceptance; it is not derived
+from a low point-in-time usage sample. Further reductions require evidence from
+startup, Harbor processing, workspace handoff and output publication, including
+memory peaks and CPU throttling. By default, resource requests and limits use the
+configured values. The scoped override below changes only scheduling requests.
+
+## Compare measured scheduling requests
+
+After collecting a representative baseline, a native Terminus Batch can opt into
+per-task requests without editing task inputs, rebuilding task images or lowering
+hard limits. This supports a bounded same-cohort comparison; it does not establish
+a fleet-wide calibrated default. Keep task/model parameters, limits and retries
+fixed, compare packing and node-hours, and retain resource completeness, OOM,
+eviction and latency evidence. Sampled storage excludes read-only image layers;
+include node filesystem/image-cache headroom when selecting requests.
+
+Pass `--task-resource-requests @requests.json` to `loom eval batch create`, or the
+same `task_resource_requests` object to `POST /api/v1/batches`. The JSON is keyed
+by selected task ID. For example (illustrative values, not a sizing recommendation):
+
+```json
+{
+  "local/example-task": {
+    "task_revision_sha256": "sha256:<existing task checksum>",
+    "requests": {
+      "controller": {
+        "cpu_millis": 1000,
+        "memory_mib": 2048,
+        "ephemeral_storage_mib": 2048
+      }
+    }
+  }
+}
+```
+
+Each configured role (`controller`, `task_sandbox`, `verifier_sandbox`) requires
+positive integer CPU millicores, memory MiB and ephemeral-storage MiB, each no
+higher than its existing hard limit. Unlisted roles and tasks keep their default
+requests. The task checksum identifies which measured revision the values apply
+to; a mismatch is rejected. Overrides require automatic native `terminus-2`
+execution. They are rejected for unselected tasks, other backends/agents and
+explicit precompiled task bindings.
+
+Requests are frozen on the Batch and exposed by its ordinary detail API. They do
+not change deployment defaults, task revisions, container limits, workspace or
+output bounds. Kubernetes placement, admission reservations and request-based cost
+allocation all use the same effective Pod requests. Cost allocation is not the
+provider's settled bill. Rerunning failed cases preserves requests for the selected
+subset, including with `--use-current-runtime`, and validates them against the
+selected runtime's limits. To remove an override, create a new Batch without it.
+
+Deploy the matching Python services, actuator and Go runtime before submitting an
+override; older runtime binaries reject the new plan field. Existing default plans
+omit it and retain their previous behavior. Compare results before adopting these
+values for other workloads; broader calibration remains in the
+[resource-accounting runbook](trial-resource-accounting.md#capacity-calibration).
 
 ## Dockerfile task prerequisites
 

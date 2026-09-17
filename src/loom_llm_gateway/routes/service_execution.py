@@ -176,6 +176,7 @@ async def issue_service_execution_token(
                 session,
                 lease=lease,
                 ttl_seconds=payload.ttl_seconds,
+                attempt_deadline_wall_clock=payload.attempt_deadline_wall_clock,
                 signing_key=request.app.state.settings.step_jwt_signing_key.get_secret_value(),
             )
             await session.commit()

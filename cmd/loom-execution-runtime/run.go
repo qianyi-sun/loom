@@ -130,6 +130,7 @@ func runPlan(
 	p plan,
 	workspace, outputRoot string,
 	trustedEnvironment map[string]string,
+	phaseBoundary ...func(time.Time),
 ) (resultManifest, error) {
 	started := time.Now().UTC()
 	result := resultManifest{
@@ -168,7 +169,7 @@ func runPlan(
 		evidence, err := runPhase(
 			ctx, item, ordinal+1, workspace, outputRoot,
 			p.MaxLogBytesPerStream, time.Duration(p.TerminationGraceSec)*time.Second,
-			trustedEnvironment,
+			trustedEnvironment, phaseBoundary...,
 		)
 		result.Phases = append(result.Phases, evidence)
 		if err != nil {
@@ -191,9 +192,15 @@ func runPhase(
 	limit int64,
 	terminationGrace time.Duration,
 	trustedEnvironment map[string]string,
+	phaseBoundary ...func(time.Time),
 ) (phaseEvidence, error) {
 	phaseCtx, cancel := context.WithTimeout(parent, time.Duration(item.TimeoutSeconds)*time.Second)
 	defer cancel()
+	deadline, _ := phaseCtx.Deadline()
+	for _, boundary := range phaseBoundary {
+		boundary(deadline)
+		defer boundary(time.Time{})
+	}
 	directory := filepath.Clean(item.WorkingDirectory)
 	// /app is the fixed trusted controller directory. Do not normalize task
 	// paths into that exception or allow arbitrary sibling application paths.

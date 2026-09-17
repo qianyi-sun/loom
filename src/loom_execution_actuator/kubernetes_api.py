@@ -104,14 +104,28 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
         started_at = getattr(
             getattr(execution_state, "running", None), "started_at", None
         ) or getattr(execution_terminated, "started_at", None)
-        if pod.metadata.deletion_timestamp is not None:
-            state = NormalizedJobState.TERMINATING
         pod_reason = getattr(pod.status, "reason", None)
+        disruption = _condition(getattr(pod.status, "conditions", None), "DisruptionTarget")
         pod_message = getattr(pod.status, "message", None)
         if pod_reason == "Evicted":
             state, reason, message = NormalizedJobState.EVICTED, pod_reason, pod_message
+        elif (
+            pod_uid is not None
+            and getattr(disruption, "status", None) == "True"
+            and getattr(disruption, "reason", None) == "DeletionByTaintManager"
+        ):
+            # This condition belongs to the UID-bound Pod observation. Keep
+            # its eviction cause while deletion and generic Job backoff status
+            # arrive; do not infer it from unbound Events or other disruptions.
+            state, reason, message = (
+                NormalizedJobState.EVICTED,
+                "DeletionByTaintManager",
+                getattr(disruption, "message", None),
+            )
         elif pod_reason in {"NodeLost", "Shutdown"}:
             state, reason, message = NormalizedJobState.NODE_LOST, pod_reason, pod_message
+        elif pod.metadata.deletion_timestamp is not None or metadata.deletion_timestamp is not None:
+            state = NormalizedJobState.TERMINATING
         else:
             terminated = [
                 status.state.terminated
@@ -263,6 +277,34 @@ class InClusterKubernetesJobApi:
             self._client = client
             self._batch = client.BatchV1Api()
             self._core = client.CoreV1Api()
+
+    async def resource_summary(self, *, node_name: str) -> dict[str, Any]:
+        """Read kubelet summaries via the API server; never expose raw node data."""
+
+        def read() -> dict[str, Any]:
+            import json
+
+            try:
+                # This generated connect API declares response_type='str'. Its
+                # deserializer converts JSON objects into Python repr strings,
+                # so decode the raw JSON before that lossy coercion.
+                response = self._core.connect_get_node_proxy_with_path(
+                    name=node_name,
+                    path="stats/summary",
+                    _request_timeout=10,
+                    _preload_content=False,
+                )
+                try:
+                    result = json.loads(response.data)
+                    if not isinstance(result, dict):
+                        raise ValueError("kubelet summary is not a JSON object")
+                    return result
+                finally:
+                    response.release_conn()
+            except Exception as exc:
+                raise self._translate(exc, "resource_summary") from exc
+
+        return await asyncio.to_thread(read)
 
     async def close(self) -> None:
         try:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Any
@@ -20,6 +21,7 @@ from loom_control_plane.service_execution import (
     claim_execution_commands,
     defer_execution_command,
     finalize_committed_service_execution,
+    finalize_failed_service_execution,
     mark_execution_output_unavailable,
     record_kubernetes_observation,
     refresh_execution_target_health,
@@ -40,8 +42,12 @@ from loom_execution_actuator.metrics import (
     KUBERNETES_PENDING_TOTAL,
     KUBERNETES_RECONCILE_CONVERGED,
     KUBERNETES_WATCH_RESTARTS_TOTAL,
+    RESOURCE_USAGE_ERRORS_TOTAL,
 )
 from loom_execution_actuator.renderer import ExecutionTargetRuntime, render_execution_job
+from loom_execution_actuator.resource_usage import ResourceSample, persist_native_usage, pod_samples
+
+_LOG = logging.getLogger(__name__)
 
 _MANAGED_SELECTOR = "app.kubernetes.io/managed-by=loom-execution-actuator"
 _FAILURE_REASONS = frozenset(
@@ -95,6 +101,7 @@ class ExecutionActuator:
         self._command_lease_seconds = command_lease_seconds
         self._delete_grace_seconds = delete_grace_seconds
         self._watch_resource_version: str | None = None
+        self._usage_cache: dict[str, tuple[datetime, dict[str, Any] | None]] = {}
 
     async def run_commands_once(self, *, now: datetime | None = None) -> int:
         current_time = now or datetime.now(UTC)
@@ -151,6 +158,73 @@ class ExecutionActuator:
                     "Kubernetes termination output does not match durable commit"
                 )
 
+    async def _usage_samples(
+        self, observation: KubernetesJobObservation, *, now: datetime
+    ) -> tuple[dict[str, ResourceSample], str | None]:
+        reader = getattr(self._kubernetes, "resource_summary", None)
+        node = observation.node_name
+        if reader is None or node is None or observation.pod_uid is None:
+            return {}, "kubelet_sample_unavailable"
+        cached = self._usage_cache.get(node)
+        if cached is None or (now - cached[0]).total_seconds() >= 15:
+            try:
+                summary = await reader(node_name=node)
+            except Exception:
+                RESOURCE_USAGE_ERRORS_TOTAL.labels(operation="collect").inc()
+                _LOG.warning(
+                    "Native resource sample unavailable for lease %s", observation.lease_id
+                )
+                summary = None
+            # Bound retention to active nodes; no durable raw node or foreign Pod data.
+            self._usage_cache = {
+                key: item
+                for key, item in self._usage_cache.items()
+                if (now - item[0]).total_seconds() < 60
+            }
+            self._usage_cache[node] = (now, summary)
+        else:
+            summary = cached[1]
+        if summary is None:
+            return {}, "kubelet_sample_unavailable"
+        try:
+            samples = pod_samples(
+                summary, namespace=observation.namespace, pod_uid=observation.pod_uid
+            )
+        except (ValueError, TypeError, KeyError, AttributeError):
+            RESOURCE_USAGE_ERRORS_TOTAL.labels(operation="parse").inc()
+            _LOG.warning("Malformed native resource sample for lease %s", observation.lease_id)
+            return {}, "kubelet_sample_malformed"
+        return samples, None if samples else "pod_stats_unavailable"
+
+    async def _persist_usage(
+        self,
+        session: AsyncSession,
+        *,
+        lease: ServiceExecutionLease,
+        observation: KubernetesJobObservation,
+        samples: dict[str, ResourceSample],
+        now: datetime,
+        terminal: bool,
+        diagnostic: str | None,
+    ) -> None:
+        # Only telemetry is isolated. Primary observation and delete ownership
+        # checks run outside this savepoint and must still fail closed.
+        try:
+            async with session.begin_nested():
+                await persist_native_usage(
+                    session,
+                    lease=lease,
+                    observation=observation,
+                    samples=samples,
+                    now=now,
+                    terminal=terminal,
+                    diagnostic=diagnostic,
+                )
+                await session.flush()
+        except Exception:
+            RESOURCE_USAGE_ERRORS_TOTAL.labels(operation="persist").inc()
+            _LOG.warning("Native resource persistence failed for lease %s", lease.id)
+
     async def _persist_observation(
         self,
         lease: ServiceExecutionLease,
@@ -170,6 +244,7 @@ class ExecutionActuator:
             )
         if observation.normalized_state in _FAILURE_REASONS:
             KUBERNETES_PENDING_TOTAL.labels(reason=observation.normalized_state.value).inc()
+        samples, diagnostic = await self._usage_samples(observation, now=now)
         async with self._sessions() as session:
             await record_kubernetes_observation(
                 session,
@@ -178,16 +253,33 @@ class ExecutionActuator:
                 payload=observation.event_payload(),
                 observed_at=now,
             )
+            await self._persist_usage(
+                session,
+                lease=lease,
+                observation=observation,
+                samples=samples,
+                now=now,
+                terminal=observation.normalized_state in _COMMITTED_RESULT_TERMINAL_STATES
+                or observation.normalized_state == NormalizedJobState.DELETED,
+                diagnostic=diagnostic,
+            )
             if observation.normalized_state == NormalizedJobState.UNSCHEDULABLE:
                 await retry_unscheduled_execution_after_deadline(
                     session, lease_id=lease.id, generation=lease.generation, observed_at=now
                 )
             if observation.normalized_state in _COMMITTED_RESULT_TERMINAL_STATES:
-                await finalize_committed_service_execution(
+                committed = await finalize_committed_service_execution(
                     session,
                     lease_id=lease.id,
                     observed_at=now,
                 )
+                if not committed:
+                    await finalize_failed_service_execution(
+                        session,
+                        lease_id=lease.id,
+                        generation=lease.generation,
+                        observed_at=now,
+                    )
             await session.commit()
 
     async def _close_output_before_delete(
@@ -268,6 +360,18 @@ class ExecutionActuator:
             now=now,
             cancel_immediately=cancel_immediately,
         )
+        samples, diagnostic = await self._usage_samples(observation, now=now)
+        async with self._sessions() as session:
+            await self._persist_usage(
+                session,
+                lease=lease,
+                observation=observation,
+                samples=samples,
+                now=now,
+                terminal=True,
+                diagnostic=diagnostic,
+            )
+            await session.commit()
         with KUBERNETES_API_SECONDS.labels(operation="delete").time():
             await self._kubernetes.delete_job(
                 namespace=self._target.namespace,

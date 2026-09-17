@@ -11,12 +11,20 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from loom.agent_runtime import AgentRuntimeBindingV1, AgentRuntimeReleaseV1
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
 from loom.execution_runtime_contract import (
     ContainerResourcesV1,
+    ExecutionResourceRequestsV1,
     ExecutionRuntimePlanV1,
     ProbeV1,
     ProcessPhaseV1,
@@ -91,6 +99,18 @@ class ServiceExecutionInputBindingV1(_Strict):
     total_bytes: int = Field(ge=0, le=MAX_INPUT_BYTES)
 
 
+class ControllerComputeResourcesV1(_Strict):
+    """Trusted harness compute, independent of the task sandbox allocation."""
+
+    cpu_millis: int = Field(gt=0, le=128_000)
+    memory_mib: int = Field(gt=0, le=1_048_576)
+
+
+class TaskExecutionResourceRequestsV1(_Strict):
+    task_revision_sha256: str = Field(pattern=_SHA256.pattern)
+    requests: ExecutionResourceRequestsV1
+
+
 class ServiceExecutionRuntimeProfileV1(_Strict):
     """Deployment-owned immutable inputs for automatic plan compilation."""
 
@@ -103,6 +123,8 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     task_image_ref: str
     agent_image_ref: str | None = None
     agent_runtime_bindings: tuple[AgentRuntimeBindingV1, ...] = ()
+    controller_resources: ControllerComputeResourcesV1 | None = None
+    task_resource_requests: dict[str, TaskExecutionResourceRequestsV1] = Field(default_factory=dict)
     runtime_image_ref: str
     runtime_binary_sha256: str = Field(pattern=_SHA256.pattern)
     image_admission: ExecutionImageAdmissionBundleV1
@@ -113,6 +135,13 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     termination_grace_seconds: int = Field(default=30, ge=1, le=300)
     max_log_bytes_per_stream: int = Field(default=10 * 1024 * 1024, gt=0)
     max_artifact_bytes: int = Field(default=1024 * 1024 * 1024, gt=0)
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_requests(self, handler: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = handler(self)
+        if not self.task_resource_requests:
+            payload.pop("task_resource_requests", None)
+        return payload
 
     @model_validator(mode="after")
     def unique_agent_versions(self) -> ServiceExecutionRuntimeProfileV1:
@@ -294,7 +323,17 @@ def compile_service_execution_plan(
     source_provenance: dict[str, Any],
     profile: ServiceExecutionRuntimeProfileV1,
     task_image_grant: TaskImageExecutionGrantV1 | None = None,
+    task_id: str | None = None,
 ) -> ExecutionRuntimePlanV1:
+    if profile.task_resource_requests and task_id is None:
+        raise ValueError("task resource requests require the selected task identity")
+    override = profile.task_resource_requests.get(task_id) if task_id is not None else None
+    resource_requests = (
+        validate_task_resource_requests(
+            task=task, trial=trial, profile=profile,
+            task_revision_sha256=task_revision_sha256, override=override,
+        ) if override is not None else None
+    )
     if task_image_grant is not None:
         if (trial.agent_name != "terminus-2"
             or task.environment.dockerfile is None
@@ -381,6 +420,7 @@ def compile_service_execution_plan(
             task=task, trial=trial, task_revision_sha256=task_revision_sha256,
             profile=profile, binding=binding, command_identity=command_identity,
             output_paths=output_paths,
+            resource_requests=resource_requests,
             task_image_materialization_id=(
                 task_image_grant.materialization_id if task_image_grant else None
             ),
@@ -469,6 +509,34 @@ def controller_image_for_trial(
     return None
 
 
+def validate_task_resource_requests(
+    task: TaskConfig, trial: TrialConfig, profile: ServiceExecutionRuntimeProfileV1,
+    task_revision_sha256: str, override: TaskExecutionResourceRequestsV1,
+) -> ExecutionResourceRequestsV1:
+    """Validate a batch-scoped request against the unchanged source task limits."""
+    if override.task_revision_sha256 != task_revision_sha256:
+        raise ValueError("task resource requests source revision does not match")
+    if (trial.agent_name != "terminus-2" or task.service_execution is not None
+            or controller_image_for_trial(profile, trial) is None):
+        raise ValueError("task resource requests require automatic native terminus-2 execution")
+    env = task.environment
+    if env.cpus is None or env.memory_mb is None or env.storage_mb is None:
+        raise ValueError("task resource requests require explicit task limits")
+    task_limits = ContainerResourcesV1(
+        cpu_millis=round(env.cpus * 1000), memory_mib=env.memory_mb,
+        ephemeral_storage_mib=env.storage_mb,
+    )
+    controller_limits = (
+        ContainerResourcesV1(
+            cpu_millis=profile.controller_resources.cpu_millis,
+            memory_mib=profile.controller_resources.memory_mib,
+            ephemeral_storage_mib=env.storage_mb,
+        ) if profile.controller_resources is not None else task_limits
+    )
+    override.requests.validate_limits(controller=controller_limits, task=task_limits)
+    return override.requests
+
+
 def freeze_agent_runtime_releases(
     profile: ServiceExecutionRuntimeProfileV1,
     releases: tuple[AgentRuntimeReleaseV1, ...],
@@ -522,6 +590,7 @@ def _compile_terminus_plan(
     profile: ServiceExecutionRuntimeProfileV1, binding: ServiceExecutionInputBindingV1,
     command_identity: str, output_paths: list[str],
     task_image_materialization_id: UUID | None = None,
+    resource_requests: ExecutionResourceRequestsV1 | None = None,
 ) -> ExecutionRuntimePlanV1:
     """Reuse Harbor in a trusted controller with private native task/verifier sandboxes."""
     env = task.environment
@@ -587,7 +656,14 @@ def _compile_terminus_plan(
         runtime_binary_sha256=profile.runtime_binary_sha256,
         image_admission=_plan_admissions(profile, published_refs),
         run_as_user=profile.run_as_user, run_as_group=profile.run_as_group, fs_group=profile.fs_group,
-        task_resources=resources, workspace_mib=env.storage_mb,
+        task_resources=resources,
+        resource_requests=resource_requests,
+        controller_resources=(ContainerResourcesV1(
+            cpu_millis=profile.controller_resources.cpu_millis,
+            memory_mib=profile.controller_resources.memory_mib,
+            ephemeral_storage_mib=env.storage_mb,
+        ) if profile.controller_resources is not None else None),
+        workspace_mib=env.storage_mb,
         runtime_volume_mib=profile.runtime_volume_mib,
         termination_grace_seconds=profile.termination_grace_seconds,
         task_input=RuntimeTaskInputV1(
@@ -606,14 +682,17 @@ __all__ = [
     "MAX_INPUT_BYTES",
     "MAX_INPUT_FILES",
     "MAX_INPUT_MANIFEST_BYTES",
+    "ControllerComputeResourcesV1",
     "RuntimeTaskInputV1",
     "ServiceExecutionInputBindingV1",
     "ServiceExecutionInputFileV1",
     "ServiceExecutionInputManifestV1",
     "ServiceExecutionRuntimeProfileV1",
+    "TaskExecutionResourceRequestsV1",
     "automatic_service_execution_rejections",
     "build_service_execution_input_manifest",
     "compile_service_execution_plan",
     "load_service_execution_runtime_profile",
     "service_execution_input_binding",
+    "validate_task_resource_requests",
 ]

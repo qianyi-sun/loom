@@ -61,6 +61,7 @@ func main() {
 			os.Exit(2)
 		}
 	}
+	broker.setPhaseDeadline(time.Time{})
 	proxyURL, stopProxy, err := broker.startProxy(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "start workload proxy:", err)
@@ -73,6 +74,7 @@ func main() {
 		filepath.Clean(*workspace),
 		cleanOutput,
 		trustedGatewayEnvironment(proxyURL),
+		broker.setPhaseDeadline,
 	)
 	captureErr := captureDeclaredOutputs(p, filepath.Clean(*workspace), cleanOutput, &result)
 	if captureErr != nil {

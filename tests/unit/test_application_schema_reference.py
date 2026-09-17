@@ -15,7 +15,7 @@ from loom.application_schema_reference import (
 
 def test_bundled_reference_is_immutable_and_has_no_caller_digest() -> None:
     reference = application_schema_reference()
-    assert (reference.application_head, reference.guard_head) == ("0149", "guard_0035")
+    assert (reference.application_head, reference.guard_head) == ("0150", "guard_0035")
     # A caller-created alternate value cannot change the module's pinned value.
     alternate = replace(reference, inventory_sha256="e" * 64)
     assert application_schema_reference() == reference
@@ -104,7 +104,7 @@ def test_unreviewed_revision_pair_is_not_reference_authority(revision):
         application_schema_reference(revision=revision)
 
 
-@pytest.mark.parametrize("revision", ["0149/guard_0035", "0148/guard_0035", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"])
+@pytest.mark.parametrize("revision", ["0150/guard_0035", "0149/guard_0035", "0148/guard_0035", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"])
 @pytest.mark.parametrize("major", [16, 17])
 @pytest.mark.parametrize("ownership", ["legacy-owner", "sealed-owner"])
 def test_cnpg_locale_is_distinct_from_personal_development(revision, major, ownership):

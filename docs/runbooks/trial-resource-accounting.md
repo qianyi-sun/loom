@@ -27,6 +27,13 @@ stable CPU/RSS/PID/I/O contract. Adding provider telemetry requires a new typed
 adapter implementation and contract tests; it must not map billing duration to
 resource use.
 
+Native Kubernetes executions use the actuator's
+[kubelet sampling adapter](nebius-platform.md#native-trial-resource-observations).
+Their sampled maxima are not kernel peaks, and finalized rows remain `partial`
+when the backend cannot supply the full counter contract. Native sampling writes
+directly to the durable ledger; the worker outbox described below applies to
+worker-backed executions.
+
 ## Durability and recovery
 
 Each active execution checkpoints its latest report under the worker's private
@@ -56,7 +63,12 @@ returns `items: []` plus aggregate `telemetry_status: unavailable`.
 
 ## Capacity calibration
 
-Do not change slot limits from a small smoke. Collect at least 1,000
+A bounded, explicit per-Batch request comparison may use a sampled cohort via
+[the native Terminus request override](nebius-terminus2.md#compare-measured-scheduling-requests).
+Keep hard limits and fleet defaults unchanged and report incomplete telemetry.
+This comparison does not establish generally calibrated slot limits.
+
+For fleet-wide defaults, do not change slot limits from a small smoke. Collect at least 1,000
 representative trials over at least two weeks and include one 100-200 concurrent
 batch. Exclude or separately report trials whose telemetry is not complete.
 Group by workload class, architecture, backend, image/candidate and resource

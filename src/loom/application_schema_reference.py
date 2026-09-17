@@ -37,7 +37,7 @@ ApplicationSchemaProfile = Literal[
     "cnpg-staging-legacy-owner",
     "cnpg-staging-sealed-owner",
 ]
-ApplicationSchemaRevision = Literal["0149/guard_0035", "0148/guard_0035", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"]
+ApplicationSchemaRevision = Literal["0150/guard_0035", "0149/guard_0035", "0148/guard_0035", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"]
 
 ApplicationSchemaAclProfile = Literal["application-only", "staging-readonly", "cnpg-staging"]
 
@@ -83,7 +83,7 @@ def application_reference_postgres_image(*, postgres_major: int = 16) -> str:
 
 def application_schema_reference(
     *, profile: ApplicationSchemaProfile = "legacy-owner", postgres_major: int = 16,
-    revision: ApplicationSchemaRevision = "0149/guard_0035",
+    revision: ApplicationSchemaRevision = "0150/guard_0035",
 ) -> ApplicationSchemaReference:
     """Select one bundled profile, never a caller-selected digest."""
     profiles: tuple[ApplicationSchemaProfile, ...] = (
@@ -116,6 +116,25 @@ def application_schema_reference(
             "a4457cf147a7d554b8f81aae84f29d167d8ba95c8387154ac3af4e7f8b2f6958",
         ),
     }
+    if revision == "0150/guard_0035":
+        digests = {
+            16: (
+                "bb5119cb802665e7de1410d8b16535d4b8caa062fc612cb253b4ee309d8da817",
+                "7ec1a1f98241a6be531ae13a115ecaf30f576338d51bcc3a2abe05eab463eb55",
+                "fb3a79059cb7f35a9fb74927694a73423e87a393fc89e8705bc2db798f581e9c",
+                "fb5945359741d7ee1679abc1289df8c574a70106855a4e3ec135ed81aa550e0e",
+                "857b56293d7f514f2e2ade73cf3a42ce49f6aecd860d95d2c58e5b596dc290b3",
+                "9b56a906e8d2753f61927ae315d184b5145748497cdf44c91050ec0e51ccb08c",
+            ),
+            17: (
+                "8cbc2182d7f29cb917720baae2c5a6f53b27bce6ef155f4343174409b4ba0f05",
+                "3b81b3e7886d94d6c893e249680b76a868c888bd7f36ee4a18a7413bbefbaf71",
+                "67a9590f4e9be0f04d782783c075afaf6c4781e0fea4dbfcd35593e67f08c90f",
+                "8299e127ad3398fd5591af316d0248db52d7304f858b4d590d95f0d9f6e93aef",
+                "ce2dccf6a142b5cbdf03e02e23aca0bd72c2067f8e23e62884d8360c38b39535",
+                "7dd403490fe2f45a035bb8798b687b06823666eec177a7ae1776c0cf79eb0fc0",
+            ),
+        }
     if revision == "0149/guard_0035":
         digests = {
             16: (
@@ -199,7 +218,7 @@ def application_schema_reference(
         guard_head=guard_head,
         postgres_image=image,
         postgres_major=postgres_major,
-        object_count={"0149/guard_0035": 7353, "0148/guard_0035": 7319, "0147/guard_0035": 7232, "0142/guard_0035": 7227, "0134/guard_0030": 6736}[revision]
+        object_count={"0150/guard_0035": 7374, "0149/guard_0035": 7353, "0148/guard_0035": 7319, "0147/guard_0035": 7232, "0142/guard_0035": 7227, "0134/guard_0030": 6736}[revision]
         + (0 if profile in {"legacy-owner", "staging-readonly-legacy-owner", "cnpg-staging-legacy-owner"} else 2),
         inventory_sha256=digests[postgres_major][profiles.index(profile)],
     )
@@ -207,7 +226,7 @@ def application_schema_reference(
 
 def require_application_schema_reference(
     observed: ApplicationSchemaInventory, *, profile: ApplicationSchemaProfile = "legacy-owner",
-    revision: ApplicationSchemaRevision = "0149/guard_0035",
+    revision: ApplicationSchemaRevision = "0150/guard_0035",
 ) -> None:
     """Compare only; caller still owns trusted role binding, quiescence and locks."""
     if type(observed.postgres_major) is not int or observed.postgres_major not in {16, 17}:
@@ -223,6 +242,8 @@ def require_application_schema_reference(
 
 def application_schema_revisions(revision: ApplicationSchemaRevision) -> tuple[str, str]:
     """Only reviewed migration pairs can select a reference recipe."""
+    if revision == "0150/guard_0035":
+        return "0150", "guard_0035"
     if revision == "0149/guard_0035":
         return "0149", "guard_0035"
     if revision == "0148/guard_0035":
@@ -240,6 +261,8 @@ def application_schema_revision(
     *, public_revision: str | None, guard_revision: str | None,
 ) -> ApplicationSchemaRevision:
     """Select using a protected original checkpoint, never a new live observation."""
+    if (public_revision, guard_revision) == ("0150", "guard_0035"):
+        return "0150/guard_0035"
     if (public_revision, guard_revision) == ("0149", "guard_0035"):
         return "0149/guard_0035"
     if (public_revision, guard_revision) == ("0148", "guard_0035"):

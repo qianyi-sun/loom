@@ -277,7 +277,7 @@ def test_observation_upgrade_and_rollback_preserve_refundable_claim_authority(
             else:
                 command.upgrade(config, target)
             with engine.connect() as connection:
-                assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0149"
+                assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0150"
                 assert connection.scalar(text(
                     "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                 )) == target

@@ -355,7 +355,10 @@ def test_job_renderer_maps_ordered_native_sidecar_and_bounded_volumes(audience: 
     assert {item["name"] for item in pod["volumes"]} == expected_volumes
 
 
-def test_private_sandboxes_have_disjoint_filesystems_and_full_resource_request() -> None:
+@pytest.mark.parametrize("independent_controller", [False, True])
+def test_private_sandboxes_have_disjoint_filesystems_and_full_resource_request(
+    independent_controller: bool,
+) -> None:
     from loom.execution_runtime_contract import runtime_pod_resources
 
     lease = _lease()
@@ -396,6 +399,13 @@ def test_private_sandboxes_have_disjoint_filesystems_and_full_resource_request()
             ),
         }
     )
+    if independent_controller:
+        plan = ExecutionRuntimePlanV1.model_validate({
+            **plan.canonical_payload(),
+            "controller_resources": plan.task_resources.model_copy(
+                update={"cpu_millis": 500, "memory_mib": 512}
+            ),
+        })
     lease.runtime_contract_json = plan.canonical_payload()
     lease.runtime_contract_sha256 = canonical_digest(lease.runtime_contract_json)
     assert lease.workload_requirements_json["sidecar_count"] == 0
@@ -430,8 +440,12 @@ def test_private_sandboxes_have_disjoint_filesystems_and_full_resource_request()
             == 1
         )
     resources = runtime_pod_resources(plan)
-    assert resources.cpu_millis == 3 * plan.task_resources.cpu_millis
-    assert resources.memory_mib == 3 * plan.task_resources.memory_mib
+    assert resources.cpu_millis == (
+        plan.execution_resources.cpu_millis + 2 * plan.task_resources.cpu_millis
+    )
+    assert resources.memory_mib == (
+        plan.execution_resources.memory_mib + 2 * plan.task_resources.memory_mib
+    )
     assert (
         sum(
             int(c["resources"]["requests"]["cpu"][:-1])

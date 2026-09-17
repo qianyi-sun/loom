@@ -63,7 +63,7 @@ async def test_retained_claim_prevents_lossy_downgrade(
         with pytest.raises(DBAPIError, match="retained legacy claim identities"):
             await asyncio.to_thread(command.downgrade, config, "0146")
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0149"
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0150"
             assert await connection.scalar(text(
                 "SELECT legacy_claim_id FROM trials WHERE id=:id"
             ), {"id": trial_id}) == identity
@@ -102,7 +102,7 @@ async def test_refund_history_without_claim_identity_prevents_lossy_downgrade(
         with pytest.raises(DBAPIError, match="retained legacy claim identities"):
             await asyncio.to_thread(command.downgrade, config, "0146")
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0149"
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0150"
             assert (await connection.execute(history, {"id": trial_id})).one() == before
     finally:
         await engine.dispose()

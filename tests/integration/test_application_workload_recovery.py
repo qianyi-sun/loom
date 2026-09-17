@@ -29,11 +29,26 @@ from tests.integration.test_application_ownership_transfer import (
     transfer_postgres_url,  # noqa: F401
 )
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.integration.test_personal_dev_storage_namespace import _failure_category
 from tests.loom_cli.rollout.operator.test_application_admission_recovery import _component
 from tests.loom_cli.rollout.operator.test_application_guard_retention import _guard, _setup
 
 _IMAGE = "docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616"
 _NAMESPACE = "loom-staging"
+
+
+def _run_disposable_kubectl(run, argv, **kwargs):
+    reply = run(argv, **kwargs)
+    if reply.returncode:
+        # The production runner deliberately hides subprocess output. Keep the
+        # disposable fixture diagnostic finite, without echoing objects or
+        # retrying a write whose acknowledgement may have been lost.
+        category = _failure_category(reply.stderr[:8192].decode(errors="replace"))
+        raise RuntimeError(
+            f"disposable workload kubectl failed: category={category}; "
+            f"exit={reply.returncode}; stderr-bytes={len(reply.stderr)}"
+        )
+    return reply
 
 
 def _wait(predicate, diagnostic):
@@ -139,7 +154,7 @@ async def test_real_workload_pause_and_sql_recovery_survive_lost_patch_ack(
                 assert argv[0] == "kubectl" and kwargs["env"] == runner.environment
                 assert "get" in argv or "patch" in argv
                 kwargs["env"] = {**kwargs["env"], "KUBECONFIG": str(config_path)}
-                reply = subprocess_run((kubectl, *argv[1:]), **kwargs)
+                reply = _run_disposable_kubectl(subprocess_run, (kubectl, *argv[1:]), **kwargs)
                 if "patch" in argv and reply.returncode == 0:
                     patched.append(argv[argv.index("patch") + 2])
                     if lost_ack[0]:

@@ -259,6 +259,14 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
             connection.rollback()
             for table in ("task_image_materializations", "trial_task_image_materializations"):
                 connection.execute("SELECT 1 FROM " + table + " LIMIT 0")
+            if role == "actuator":
+                for privilege in ("SELECT", "INSERT", "UPDATE"):
+                    assert connection.execute(
+                        "SELECT has_table_privilege(current_user, 'trial_resource_usage', %s)", (privilege,),
+                    ).fetchone() == (True,)
+            assert connection.execute(
+                "SELECT has_table_privilege(current_user, 'trial_resource_usage', 'DELETE')",
+            ).fetchone() == (False,)
             if role == "gateway":
                 for table in ("batches", "task_image_materialization_attempts", "task_image_publication_evidence"):
                     with pytest.raises(psycopg.errors.InsufficientPrivilege):
