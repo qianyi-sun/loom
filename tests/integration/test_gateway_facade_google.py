@@ -229,11 +229,23 @@ async def _post(
 # ──────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("preexisting_audit", [False, True])
 async def test_facade_forwards_with_query_string_key_and_records_llm_call(
     facade_setup,
     postgres_url: str,
+    preexisting_audit: bool,
 ) -> None:
     app, jwt, team_id, trial_id, conn_id, captures = facade_setup
+    if preexisting_audit:
+        # Historical audit rows can outlive their trials in the shared DB.
+        engine = create_engine(postgres_url)
+        with engine.begin() as conn:
+            conn.execute(insert(LlmCall).values(
+                team_id=uuid4(), trial_id=uuid4(), step_id="unrelated",
+                dialect="anthropic", model="unrelated", input_tokens=1,
+                output_tokens=1, cost_usd=0, rate_card_hash="fixture",
+            ))
+        engine.dispose()
     r = await _post(
         app,
         jwt,
@@ -260,7 +272,10 @@ async def test_facade_forwards_with_query_string_key_and_records_llm_call(
 
     sync_engine = create_engine(postgres_url)
     with sync_engine.connect() as conn:
-        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+        rows = list(conn.execute(
+            text("SELECT * FROM llm_calls WHERE trial_id = :trial_id"),
+            {"trial_id": facade_setup[3]},
+        ))
     sync_engine.dispose()
     assert len(rows) == 1
     row = dict(rows[0]._mapping)
@@ -324,7 +339,10 @@ async def test_facade_rate_card_pricing_uses_google_provider(
 
     sync_engine = create_engine(postgres_url)
     with sync_engine.connect() as conn:
-        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+        rows = list(conn.execute(
+            text("SELECT * FROM llm_calls WHERE trial_id = :trial_id"),
+            {"trial_id": facade_setup[3]},
+        ))
     sync_engine.dispose()
     assert len(rows) == 1
     row = dict(rows[0]._mapping)
@@ -377,7 +395,10 @@ async def test_facade_rate_card_missing_entry_records_missing_marker(
 
     sync_engine = create_engine(postgres_url)
     with sync_engine.connect() as conn:
-        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+        rows = list(conn.execute(
+            text("SELECT * FROM llm_calls WHERE trial_id = :trial_id"),
+            {"trial_id": facade_setup[3]},
+        ))
     sync_engine.dispose()
     assert len(rows) == 1
     row = dict(rows[0]._mapping)
@@ -410,7 +431,10 @@ async def test_facade_count_tokens_action_returns_body_without_audit(
 
     sync_engine = create_engine(postgres_url)
     with sync_engine.connect() as conn:
-        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+        rows = list(conn.execute(
+            text("SELECT * FROM llm_calls WHERE trial_id = :trial_id"),
+            {"trial_id": facade_setup[3]},
+        ))
     sync_engine.dispose()
     assert rows == []
 
@@ -583,7 +607,10 @@ async def test_facade_surfaces_upstream_403_records_failed_audit_row(
     assert "API key invalid" in r.json()["detail"]
     sync_engine = create_engine(postgres_url)
     with sync_engine.connect() as conn:
-        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+        rows = list(conn.execute(
+            text("SELECT * FROM llm_calls WHERE trial_id = :trial_id"),
+            {"trial_id": facade_setup[3]},
+        ))
     sync_engine.dispose()
     assert len(rows) == 1
     row = dict(rows[0]._mapping)
@@ -656,7 +683,10 @@ async def test_facade_returns_502_on_missing_usage_metadata(
 
     sync_engine = create_engine(postgres_url)
     with sync_engine.connect() as conn:
-        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+        rows = list(conn.execute(
+            text("SELECT * FROM llm_calls WHERE trial_id = :trial_id"),
+            {"trial_id": facade_setup[3]},
+        ))
     sync_engine.dispose()
     assert rows == []
 
