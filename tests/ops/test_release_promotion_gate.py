@@ -765,7 +765,7 @@ def test_release_gate_requires_immutable_semver_prod_tag(
     assert "prod_tag must be an immutable SemVer tag like v1.0.0" in result.stderr
 
 
-def test_release_gate_requires_execution_records_when_enabled(
+def test_release_gate_requires_native_execution_records(
     tmp_path: Path,
 ) -> None:
     manifest = _passing_evidence()
@@ -803,6 +803,41 @@ def test_release_gate_rejects_incomplete_native_execution_record(
 
     assert result.returncode == 1
     assert "execution_records[0].job_uid" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("provider", "other", "provider must be 'nebius'"),
+        ("execution_records", [], "must contain native execution evidence"),
+        ("failures", 1, "failures must be zero"),
+        ("failures", False, "failures must be zero"),
+        ("runtime_seconds", float("nan"), "finite non-negative number"),
+    ],
+)
+def test_release_capacity_evidence_rejects_invalid_observations(
+    tmp_path: Path, field: str, value: object, message: str,
+) -> None:
+    manifest = _passing_evidence()
+    manifest["checks"]["execution_capacity_smoke"][field] = value
+    result = _run_release_gate(
+        tmp_path, manifest, "validate", "--candidate-sha", _candidate_sha(),
+        "--image-tag", "release-0123456789ab",
+    )
+    assert result.returncode == 1
+    assert message in result.stderr
+
+
+def test_release_capacity_evidence_rejects_duplicate_attempts(tmp_path: Path) -> None:
+    manifest = _passing_evidence()
+    records = manifest["checks"]["execution_capacity_smoke"]["execution_records"]
+    records.append(dict(records[0]))
+    result = _run_release_gate(
+        tmp_path, manifest, "validate", "--candidate-sha", _candidate_sha(),
+        "--image-tag", "release-0123456789ab",
+    )
+    assert result.returncode == 1
+    assert "repeats an execution attempt" in result.stderr
 
 
 def test_release_gate_verify_production_rejects_candidate_or_image_mismatch(

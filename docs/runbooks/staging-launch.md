@@ -153,7 +153,7 @@ The manifest currently requires these checks:
   `provider_smoke`;
 - `benchmark_reward_gate`, `score_positive_canary`,
   `benchmark_score_alignment`, and `hf_mirror_token_boundary`;
-- `worker_capacity_smoke`, `prod_staging_isolation`, and
+- `execution_capacity_smoke`, `prod_staging_isolation`, and
   `raw_delivery_export_status`;
 - `rollback_plan` and `release_owner_approval`.
 
