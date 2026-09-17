@@ -97,8 +97,12 @@ def resolve_execution_profile(value: str | None) -> str | None:
 def offline_verifier_run_sh_bytes() -> bytes:
     """Return the Nebius offline ``verifier/run.sh`` template bytes."""
 
+    try:
+        repo_root = Path(__file__).resolve().parents[2]
+    except IndexError:
+        return _OFFLINE_VERIFIER_RUN_SH
     catalog = (
-        Path(__file__).resolve().parents[2]
+        repo_root
         / "deploy"
         / "catalog"
         / "nebius-terminal-bench"
