@@ -214,35 +214,23 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
             "direct_hf_egress_required": False,
             "secret_safe": True,
         },
-        "worker_capacity_smoke": {
+        "execution_capacity_smoke": {
             "status": "pass",
             "url": "https://github.com/qianyi-sun/loom/actions/runs/1009",
-            "batch_id": "batch-worker-capacity",
-            "k8s_workers": 3,
-            "oldlab_workers": 3,
+            "batch_id": "batch-native-capacity",
+            "provider": "nebius",
             "runtime_seconds": 120,
             "failures": 0,
-            "oldlab_worker_records": [
+            "execution_records": [
                 {
-                    "node_name": "TRT-EAI-OLDLAB-1",
-                    "slurm_job_id": "13441",
-                    "worker_id": "worker-oldlab-1",
-                    "concurrency": 6,
-                    "trials_claimed": 4,
-                },
-                {
-                    "node_name": "trt-EAI-OLDLAB-2",
-                    "slurm_job_id": "13442",
-                    "worker_id": "worker-oldlab-2",
-                    "concurrency": 6,
-                    "trials_claimed": 4,
-                },
-                {
-                    "node_name": "trt-eai-oldlab-3",
-                    "slurm_job_id": "13443",
-                    "worker_id": "worker-oldlab-3",
-                    "concurrency": 6,
-                    "trials_claimed": 4,
+                    "trial_id": "trial-native-1",
+                    "attempt_id": "attempt-native-1",
+                    "target_id": "staging-primary",
+                    "project_id": "project-fixture",
+                    "cluster_id": "cluster-fixture",
+                    "namespace": "loom-staging",
+                    "job_uid": "job-native-1",
+                    "node_name": "execution-node-1",
                 },
             ],
         },
@@ -374,7 +362,7 @@ def test_release_gate_accepts_complete_manifest_and_writes_artifacts(tmp_path: P
     assert "score_positive_canary" in markdown
     assert "benchmark_score_alignment" in markdown
     assert "hf_mirror_token_boundary" in markdown
-    assert "worker_capacity_smoke" in markdown
+    assert "execution_capacity_smoke" in markdown
     assert "frontend_route_evidence" in markdown
     assert "prod_staging_isolation" in markdown
     assert "raw_delivery_export_status" in markdown
@@ -777,11 +765,11 @@ def test_release_gate_requires_immutable_semver_prod_tag(
     assert "prod_tag must be an immutable SemVer tag like v1.0.0" in result.stderr
 
 
-def test_release_gate_requires_oldlab_worker_records_when_enabled(
+def test_release_gate_requires_execution_records_when_enabled(
     tmp_path: Path,
 ) -> None:
     manifest = _passing_evidence()
-    manifest["checks"]["worker_capacity_smoke"].pop("oldlab_worker_records")
+    manifest["checks"]["execution_capacity_smoke"].pop("execution_records")
 
     result = _run_release_gate(
         tmp_path,
@@ -794,22 +782,14 @@ def test_release_gate_requires_oldlab_worker_records_when_enabled(
     )
 
     assert result.returncode == 1
-    assert "worker_capacity_smoke.oldlab_worker_records" in result.stderr
+    assert "execution_capacity_smoke.execution_records" in result.stderr
 
 
-def test_release_gate_rejects_incomplete_oldlab_worker_record(
+def test_release_gate_rejects_incomplete_native_execution_record(
     tmp_path: Path,
 ) -> None:
     manifest = _passing_evidence()
-    manifest["checks"]["worker_capacity_smoke"]["oldlab_workers"] = 1
-    manifest["checks"]["worker_capacity_smoke"]["oldlab_worker_records"] = [
-        {
-            "node_name": "trt-eai-oldlab-4",
-            "slurm_job_id": "14004",
-            "concurrency": 6,
-            "trials_claimed": 2,
-        },
-    ]
+    manifest["checks"]["execution_capacity_smoke"]["execution_records"][0].pop("job_uid")
 
     result = _run_release_gate(
         tmp_path,
@@ -822,7 +802,7 @@ def test_release_gate_rejects_incomplete_oldlab_worker_record(
     )
 
     assert result.returncode == 1
-    assert "oldlab_worker_records[0].worker_id" in result.stderr
+    assert "execution_records[0].job_uid" in result.stderr
 
 
 def test_release_gate_verify_production_rejects_candidate_or_image_mismatch(
