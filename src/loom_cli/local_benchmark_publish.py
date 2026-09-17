@@ -78,8 +78,9 @@ async def publish_local_benchmark(
     imported_by: str | None = None,
     compat_flatten_environment: bool = False,
     source_registration_mode: str = "legacy",
+    create_bucket: bool = False,
 ) -> LocalBenchmarkPublishStats:
-    """Validate, upload, and register a user-owned local benchmark folder."""
+    """Publish to an existing bucket; bucket creation is an explicit bootstrap option."""
 
     if source_registration_mode not in {"legacy", "versioned-v1"}:
         raise ValueError("unsupported task source registration mode")
@@ -103,7 +104,8 @@ async def publish_local_benchmark(
             compat_flatten_environment=compat_flatten_environment,
         )
     entry = result.entry
-    await object_store.ensure_bucket(bucket)
+    if create_bucket:
+        await object_store.ensure_bucket(bucket)
 
     engine = create_async_engine(normalize_db_url(db_url))
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
