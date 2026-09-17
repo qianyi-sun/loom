@@ -14,14 +14,19 @@ from testcontainers.postgres import PostgresContainer
 
 from loom.application_ownership_transfer import transfer_application_ownership
 from loom.application_schema_inventory import read_application_schema_inventory
+from loom.application_schema_provisioning import (
+    PsycopgSharedFixtureSqlExecutor,
+    ReferenceDatabase,
+    _new_credentials,
+    derive_identity,
+    instance_database_url,
+    render_create_database_sql,
+    render_role_convergence_sql,
+)
 from loom.application_schema_reference import (
     application_schema_reference,
     require_application_schema_reference,
 )
-from loom.dev_instance import derive_identity
-from loom.dev_instance_provision import render_create_database_sql, render_role_convergence_sql
-from loom.dev_instance_runtime import PsycopgSharedFixtureSqlExecutor, instance_database_url
-from loom.personal_dev_capacity_runtime import PsycopgPersonalDevCapacityDatabase, _new_credentials
 
 pytestmark = pytest.mark.parametrize("transfer_postgres", [16, 17], indirect=True)
 
@@ -57,7 +62,7 @@ async def transfer_database(
         password = "ab" * 16
     baseline = getattr(request, "param", None) == "baseline"
     from scripts.application_schema_baseline import BaselineReferenceDatabase
-    provisioner = (BaselineReferenceDatabase if baseline else PsycopgPersonalDevCapacityDatabase)(transfer_postgres_url)
+    provisioner = (BaselineReferenceDatabase if baseline else ReferenceDatabase)(transfer_postgres_url)
     await PsycopgSharedFixtureSqlExecutor(transfer_postgres_url).apply_role_and_database(
         identity,
         role_sql=render_role_convergence_sql(identity, password),

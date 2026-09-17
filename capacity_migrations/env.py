@@ -8,15 +8,16 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from loom_capacity_manager.models import Base
-from loom_capacity_manager.postgres_timeouts import capacity_migration_connect_args
+from loom.db.capacity_migration_timeouts import capacity_migration_connect_args
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 db_url = os.environ.get("LOOM_CAPACITY_DB_URL")
-target_metadata = Base.metadata
+# This retired runtime has no current ORM/autogeneration target. Published
+# revision files remain the authority for upgrade and restore.
+target_metadata = None
 
 
 def _required_database_url() -> str:

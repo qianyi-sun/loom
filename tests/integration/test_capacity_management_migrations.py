@@ -2995,10 +2995,6 @@ def test_capacity_migration_downgrades_and_reupgrades(
         engine.dispose()
 
 
-def test_capacity_models_match_migration_head(capacity_postgres_url: str) -> None:
-    command.check(_capacity_config(capacity_postgres_url))
-
-
 def test_capacity_alembic_environment_has_no_environment_db_fallback() -> None:
     source = Path("capacity_migrations/env.py").read_text(encoding="utf-8")
     assert "LOOM_CAPACITY_DB_URL" in source

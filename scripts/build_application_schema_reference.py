@@ -26,24 +26,27 @@ from loom.application_schema_inventory import (
     ApplicationSchemaInventory,
     read_application_schema_inventory,
 )
+from loom.application_schema_provisioning import (
+    ApplicationOwnerBinding,
+    PsycopgSharedFixtureSqlExecutor,
+    ReferenceDatabase,
+    ReferenceIdentity,
+    _new_credentials,
+    derive_identity,
+    instance_database_url,
+    render_create_database_sql,
+    render_role_convergence_sql,
+)
+from loom.application_schema_readonly import (
+    ReadonlyDatabaseCredential,
+    render_readonly_role_sql,
+)
 from loom.application_schema_reference import (
     ApplicationSchemaProfile,
     ApplicationSchemaReference,
     ApplicationSchemaRevision,
     application_reference_postgres_image,
     application_schema_revisions,
-)
-from loom.dev_instance import DevInstanceIdentity, derive_identity
-from loom.dev_instance_provision import render_create_database_sql, render_role_convergence_sql
-from loom.dev_instance_runtime import PsycopgSharedFixtureSqlExecutor, instance_database_url
-from loom.personal_dev_capacity_runtime import (
-    ApplicationOwnerBinding,
-    PsycopgPersonalDevCapacityDatabase,
-    _new_credentials,
-)
-from loom_cli.rollout.readonly_database_bootstrap import (
-    ReadonlyDatabaseCredential,
-    render_readonly_role_sql,
 )
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -60,7 +63,7 @@ def _head(directory: str) -> str:
 
 async def _observe_fresh_database(
     admin_url: str,
-    identity: DevInstanceIdentity,
+    identity: ReferenceIdentity,
     *,
     profile: ApplicationSchemaProfile = "legacy-owner",
     revision: ApplicationSchemaRevision = "0151/guard_0035",
@@ -69,7 +72,7 @@ async def _observe_fresh_database(
     from scripts.application_schema_baseline import BaselineReferenceDatabase
 
     application_head, guard_head = application_schema_revisions(revision)
-    factory = BaselineReferenceDatabase if revision == "0134/guard_0030" else PsycopgPersonalDevCapacityDatabase
+    factory = BaselineReferenceDatabase if revision == "0134/guard_0030" else ReferenceDatabase
     sealed = profile in {"sealed-owner", "staging-readonly-sealed-owner", "cnpg-staging-sealed-owner"}
     staging_readonly = profile in {"staging-readonly-legacy-owner", "staging-readonly-sealed-owner", "cnpg-staging-legacy-owner", "cnpg-staging-sealed-owner"}
     password = uuid4().hex
@@ -233,7 +236,7 @@ async def _migrate_reference_guard(
 
 
 async def _prepare_sealed_owner(
-    admin_url: str, identity: DevInstanceIdentity
+    admin_url: str, identity: ReferenceIdentity
 ) -> tuple[str, str, str]:
     """Establish ownership in an EMPTY reference DB, before creating any app objects."""
     owner = f"reference_owner_{uuid4().hex}"
