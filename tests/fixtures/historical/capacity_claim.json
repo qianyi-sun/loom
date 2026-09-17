@@ -1,0 +1,1995 @@
+{
+  "agent_incarnation": "07f0fe44-0fa9-49c6-b076-fd7ff901a8cc",
+  "first_attempt": {
+    "execution_generation": 7,
+    "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+    "requirements_digest": "715d016aa6ffb05e650e2a0c54254fa882e02f73ae106b6f684ec62f15bdbeb0"
+  },
+  "payload": {
+    "binding": {
+      "account_id": "owner-alice",
+      "candidate": {
+        "algorithm": "git-sha1",
+        "identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "publication_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "schema_version": 2
+      },
+      "candidate_generation": 7,
+      "concurrency_slots": 1,
+      "deployment_generation": 7,
+      "execution": {
+        "allocation_epoch": 11,
+        "authority_incarnation": "00000000-0000-0000-0000-000000000065",
+        "configuration_epoch": 5,
+        "executable": true,
+        "executable_new_capacity_ceiling": 1,
+        "executable_new_capacity_rate_per_minute": 1,
+        "execution_epoch": 7,
+        "execution_manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "execution_state": "active",
+        "schema_version": 2,
+        "trusted_fleet_release_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "writer_epoch": 3
+      },
+      "executor_id": "oldlab-executor",
+      "executor_incarnation": "00000000-0000-0000-0000-000000000068",
+      "intent_id": "00000000-0000-0000-0000-000000000067",
+      "node_ids": [
+        "trt-eai-oldlab-3"
+      ],
+      "old_shape_backing_id": null,
+      "pool_generation": 13,
+      "pool_id": "oldlab",
+      "profile_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+      "profile_generation": 17,
+      "profile_id": "oldlab-default",
+      "resources": {
+        "cpu_millicores": 1000,
+        "generic": {},
+        "gpu_count": 0,
+        "memory_bytes": 1024,
+        "schema_version": 1,
+        "slots": 1
+      },
+      "rollout_surge_slots": 0,
+      "schema_version": 2,
+      "shape_id": "staging-oldlab-cpu",
+      "shape_instance_id": "staging-oldlab-node-3",
+      "subject_id": "00000000-0000-0000-0000-00000000012d",
+      "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+      "tier_id": "staging",
+      "tranche_id": "00000000-0000-0000-0000-000000000066"
+    },
+    "executable": true,
+    "inventory_digest": "9999999999999999999999999999999999999999999999999999999999999999",
+    "inventory_execution": {
+      "authority_incarnation": "00000000-0000-0000-0000-000000000065",
+      "configuration_epoch": 5,
+      "executable_new_capacity_ceiling": 1,
+      "executable_new_capacity_rate_per_minute": 1,
+      "execution_epoch": 7,
+      "execution_manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "execution_state": "active",
+      "schema_version": 2,
+      "trusted_fleet_release_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "writer_epoch": 3
+    },
+    "inventory_sequence": 4,
+    "journal_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "journal_sequence": 5,
+    "observed_at": "2026-09-05T12:01:00Z",
+    "record": {
+      "authority_scope": "dedicated-loom-association",
+      "controller_evidence_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "node_ids": [
+        "trt-eai-oldlab-3"
+      ],
+      "ownership_proof": {
+        "metadata": {
+          "association": "loom",
+          "binding": {
+            "account_id": "owner-alice",
+            "candidate": {
+              "algorithm": "git-sha1",
+              "identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "publication_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "schema_version": 2
+            },
+            "candidate_generation": 7,
+            "concurrency_slots": 1,
+            "deployment_generation": 7,
+            "execution": {
+              "allocation_epoch": 11,
+              "authority_incarnation": "00000000-0000-0000-0000-000000000065",
+              "configuration_epoch": 5,
+              "executable": true,
+              "executable_new_capacity_ceiling": 1,
+              "executable_new_capacity_rate_per_minute": 1,
+              "execution_epoch": 7,
+              "execution_manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+              "execution_state": "active",
+              "schema_version": 2,
+              "trusted_fleet_release_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+              "writer_epoch": 3
+            },
+            "executor_id": "oldlab-executor",
+            "executor_incarnation": "00000000-0000-0000-0000-000000000068",
+            "intent_id": "00000000-0000-0000-0000-000000000067",
+            "node_ids": [
+              "trt-eai-oldlab-3"
+            ],
+            "old_shape_backing_id": null,
+            "pool_generation": 13,
+            "pool_id": "oldlab",
+            "profile_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+            "profile_generation": 17,
+            "profile_id": "oldlab-default",
+            "resources": {
+              "cpu_millicores": 1000,
+              "generic": {},
+              "gpu_count": 0,
+              "memory_bytes": 1024,
+              "schema_version": 1,
+              "slots": 1
+            },
+            "rollout_surge_slots": 0,
+            "schema_version": 2,
+            "shape_id": "staging-oldlab-cpu",
+            "shape_instance_id": "staging-oldlab-node-3",
+            "subject_id": "00000000-0000-0000-0000-00000000012d",
+            "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+            "tier_id": "staging",
+            "tranche_id": "00000000-0000-0000-0000-000000000066"
+          },
+          "controller_authority_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+          "launch_profile_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "schema_version": 3,
+          "slurm_cluster": "oldlab-controller",
+          "subject_authority": {
+            "acknowledgement_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "configuration": {
+              "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "generation": 1,
+              "schema_version": 1,
+              "scope": "subject",
+              "subject_id": "00000000-0000-0000-0000-00000000012d",
+              "subject_incarnation": "00000000-0000-0000-0000-00000000012e"
+            },
+            "membership": null,
+            "purpose": "application-worker",
+            "schema_version": 3,
+            "source": "immutable-base"
+          },
+          "submitted_at": "2026-09-05T12:00:00Z",
+          "submitter_identity": "loom",
+          "trusted_launcher_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "schema_version": 3,
+        "signature_base64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+        "signing_key_id": "oldlab-key"
+      },
+      "physical_identity": "12345",
+      "physical_kind": "slurm-job",
+      "resources": {
+        "cpu_millicores": 1000,
+        "generic": {},
+        "gpu_count": 0,
+        "memory_bytes": 1024,
+        "schema_version": 1,
+        "slots": 1
+      },
+      "schema_version": 3,
+      "state": "terminal",
+      "terminal_evidence_sha256": "8888888888888888888888888888888888888888888888888888888888888888"
+    },
+    "schema_version": 3
+  },
+  "role_names": {
+    "agent_role": "loom_guard_agent_test_329384_914f0f4b",
+    "executor_role": "loom_guard_executor_test_329384_914f0f4b",
+    "migrator_role": "loom_guard_migrator_test_329384_914f0f4b",
+    "observer_role": "loom_guard_observer_test_329384_914f0f4b",
+    "owner_role": "loom_guard_owner_test_329384_914f0f4b",
+    "runtime_role": "loom_guard_runtime_test_329384_914f0f4b"
+  },
+  "rows": {
+    "loom_capacity_guard.agent_registrations": [
+      {
+        "agent_incarnation": "07f0fe44-0fa9-49c6-b076-fd7ff901a8cc",
+        "allocation_epoch": 0,
+        "authority_incarnation": "00000000-0000-0000-0000-0000000002bd",
+        "authority_mode": "disabled",
+        "candidate_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "candidate_identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "candidate_identity_algorithm": "git-sha1",
+        "candidate_publication_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "configuration_generation": 1,
+        "created_at": "2026-09-17T20:17:12.03664+00:00",
+        "deployment_generation": 7,
+        "environment_id": "staging",
+        "registration_state": "registered",
+        "reporter_incarnation": "00000000-0000-0000-0000-00000000012f",
+        "schema_version": 1,
+        "singleton_id": 1,
+        "subject_id": "00000000-0000-0000-0000-00000000012d",
+        "subject_incarnation": "00000000-0000-0000-0000-00000000012e"
+      }
+    ],
+    "loom_capacity_guard.agent_reporter_state": [
+      {
+        "agent_incarnation": "07f0fe44-0fa9-49c6-b076-fd7ff901a8cc",
+        "created_at": "2026-09-17T20:17:12.03664+00:00",
+        "high_water": 0
+      }
+    ],
+    "loom_capacity_guard.atomic_trial_submissions": [
+      {
+        "canonical_payload": "\\x7b22636f6e666967223a207b227265747279223a207b226261636b6f6666223a207b226a6974746572223a20302e322c20226d61785f736563223a203630302e302c2022626173655f736563223a2033302e302c20226d756c7469706c696572223a20322e307d2c202272657472795f6f6e223a205b22676174657761795f6572726f72222c202270726f76696465725f7472616e73706f72745f646973636f6e6e656374222c20226e6f64655f73657475705f6865616c7468225d2c20226d61785f617474656d707473223a20337d2c20226167656e745f6e616d65223a20226f7261636c65222c202264656c6574655f656e76223a20747275652c202266616d696c795f72756e223a206e756c6c2c20226167656e745f6d6f64656c223a206e756c6c2c2022666f7263655f6275696c64223a2066616c73652c20226d756c74695f6d6f64656c223a206e756c6c2c202265787472615f736b696c6c73223a205b5d2c20226167656e745f76657273696f6e223a206e756c6c2c2022736b69705f7665726966696572223a2066616c73652c2022726571756573745f706172616d73223a207b7d2c2022736368656d615f76657273696f6e223a202231222c20227375626d69745f7072696f72697479223a203130302c202265787472615f6d63705f73657276657273223a205b5d2c202276657269666965725f656e765f6d6f6465223a206e756c6c2c20226d6f64656c5f7377697463685f706c616e5f6d6f6465223a206e756c6c2c20226167656e745f74696d656f75745f6d756c7469706c696572223a20312e302c20226f766572726964655f6167656e745f74696d656f75745f736563223a206e756c6c2c202276657269666965725f74696d656f75745f6d756c7469706c696572223a20312e302c2022656e765f6275696c645f74696d656f75745f6d756c7469706c696572223a20312e302c20226f766572726964655f76657269666965725f74696d656f75745f736563223a206e756c6c2c2022776f726b73706163655f73746167696e675f706f6c6963795f6e616d65223a206e756c6c2c20226f766572726964655f656e765f6275696c645f74696d656f75745f736563223a206e756c6c2c2022626173656c696e655f6e6574776f726b5f706f6c6963795f6f76657272696465223a206e756c6c7d2c20227461736b5f6964223a202270726f7465637465642d72657472792d6261633439646462306362323462363661336138643965313636623238643463222c20227465616d5f6964223a202230633961363238612d363331312d343261302d626231332d343834336362303631373936222c202262617463685f6964223a206e756c6c2c2022747269616c5f6964223a202264623033666238332d373833632d343366392d613665652d643232386564666264383433222c202265786563757461626c65223a2066616c73652c202266616d696c795f6b6579223a206e756c6c2c202273616d706c655f696478223a20302c20227375626a6563745f6964223a202230303030303030302d303030302d303030302d303030302d303030303030303030313264222c2022726571756972656d656e7473223a207b226f73223a20226c696e7578222c20226370755f61726368223a20227838365f3634222c20226770755f76656e646f72223a20226e6f6e65222c202272657175697265645f706f6f6c223a20226f6c646c6162222c2022736368656d615f76657273696f6e223a20312c20226e6574776f726b5f706f6c6963696573223a205b227075626c6963225d7d2c2022617574686f726974795f6d6f6465223a202264697361626c6564222c2022656e7669726f6e6d656e745f6964223a202273746167696e67222c2022736368656d615f76657273696f6e223a20312c2022636f6d62696e6174696f6e5f696478223a20302c20226964656d706f74656e63795f6b6579223a206e756c6c2c20227375626d69745f7072696f72697479223a203130302c2022616c6c6f636174696f6e5f65706f6368223a20302c2022617474656d70745f73657175656e6365223a20302c202263616e6469646174655f646967657374223a202262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262222c20226167656e745f696e6361726e6174696f6e223a202230376630666534342d306661392d343963362d623037362d666437666639303161386363222c202270726f76696465725f6d6f64656c5f6964223a206e756c6c2c202263616e6469646174655f6964656e74697479223a202261616161616161616161616161616161616161616161616161616161616161616161616161616161222c20227265706f727465725f686967685f7761746572223a20302c2022726571756972656d656e74735f646967657374223a202237313564303136616136666662303565363530653261306335343235346661383832653032663733616531303662366636383465633632663135626462656230222c20227375626a6563745f696e6361726e6174696f6e223a202230303030303030302d303030302d303030302d303030302d303030303030303030313265222c2022657865637574696f6e5f67656e65726174696f6e223a20372c202270726f7465637465645f617474656d70745f6964223a202263613733343661662d383230632d346331632d616437312d653734343230353236666365222c20227265706f727465725f696e6361726e6174696f6e223a202230303030303030302d303030302d303030302d303030302d303030303030303030313266222c20227375626d69747465645f62795f757365725f6964223a202235396132666538662d616532642d343334382d626561342d393033326133643136666134222c2022617574686f726974795f696e6361726e6174696f6e223a202230303030303030302d303030302d303030302d303030302d303030303030303030326264222c20226465706c6f796d656e745f67656e65726174696f6e223a20372c202270726f76696465725f636f6e6e656374696f6e5f6964223a206e756c6c2c202275736167655f617474726962757465645f6163746f72223a2022757365723a35396132666538662d616532642d343334382d626561342d393033326133643136666134222c2022636f6e66696775726174696f6e5f67656e65726174696f6e223a20312c202275736167655f617474726962757465645f757365725f6964223a202235396132666538662d616532642d343334382d626561342d393033326133643136666134222c202263616e6469646174655f6964656e746974795f616c676f726974686d223a20226769742d73686131222c202263616e6469646174655f7075626c69636174696f6e5f736861323536223a202262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262227d",
+        "idempotency_key": null,
+        "lifecycle_authority_id": "6cc79931-687e-4ec0-a775-6f19e1c422b6",
+        "lifecycle_environment": "staging",
+        "lifecycle_namespace": "loom-staging",
+        "payload": {
+          "agent_incarnation": "07f0fe44-0fa9-49c6-b076-fd7ff901a8cc",
+          "allocation_epoch": 0,
+          "attempt_sequence": 0,
+          "authority_incarnation": "00000000-0000-0000-0000-0000000002bd",
+          "authority_mode": "disabled",
+          "batch_id": null,
+          "candidate_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "candidate_identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "candidate_identity_algorithm": "git-sha1",
+          "candidate_publication_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "combination_idx": 0,
+          "config": {
+            "agent_model": null,
+            "agent_name": "oracle",
+            "agent_timeout_multiplier": 1.0,
+            "agent_version": null,
+            "baseline_network_policy_override": null,
+            "delete_env": true,
+            "env_build_timeout_multiplier": 1.0,
+            "extra_mcp_servers": [],
+            "extra_skills": [],
+            "family_run": null,
+            "force_build": false,
+            "model_switch_plan_mode": null,
+            "multi_model": null,
+            "override_agent_timeout_sec": null,
+            "override_env_build_timeout_sec": null,
+            "override_verifier_timeout_sec": null,
+            "request_params": {},
+            "retry": {
+              "backoff": {
+                "base_sec": 30.0,
+                "jitter": 0.2,
+                "max_sec": 600.0,
+                "multiplier": 2.0
+              },
+              "max_attempts": 3,
+              "retry_on": [
+                "gateway_error",
+                "provider_transport_disconnect",
+                "node_setup_health"
+              ]
+            },
+            "schema_version": "1",
+            "skip_verifier": false,
+            "submit_priority": 100,
+            "verifier_env_mode": null,
+            "verifier_timeout_multiplier": 1.0,
+            "workspace_staging_policy_name": null
+          },
+          "configuration_generation": 1,
+          "deployment_generation": 7,
+          "environment_id": "staging",
+          "executable": false,
+          "execution_generation": 7,
+          "family_key": null,
+          "idempotency_key": null,
+          "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+          "provider_connection_id": null,
+          "provider_model_id": null,
+          "reporter_high_water": 0,
+          "reporter_incarnation": "00000000-0000-0000-0000-00000000012f",
+          "requirements": {
+            "cpu_arch": "x86_64",
+            "gpu_vendor": "none",
+            "network_policies": [
+              "public"
+            ],
+            "os": "linux",
+            "required_pool": "oldlab",
+            "schema_version": 1
+          },
+          "requirements_digest": "715d016aa6ffb05e650e2a0c54254fa882e02f73ae106b6f684ec62f15bdbeb0",
+          "sample_idx": 0,
+          "schema_version": 1,
+          "subject_id": "00000000-0000-0000-0000-00000000012d",
+          "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+          "submit_priority": 100,
+          "submitted_by_user_id": "59a2fe8f-ae2d-4348-bea4-9032a3d16fa4",
+          "task_id": "protected-retry-bac49ddb0cb24b66a3a8d9e166b28d4c",
+          "team_id": "0c9a628a-6311-42a0-bb13-4843cb061796",
+          "trial_id": "db03fb83-783c-43f9-a6ee-d228edfbd843",
+          "usage_attributed_actor": "user:59a2fe8f-ae2d-4348-bea4-9032a3d16fa4",
+          "usage_attributed_user_id": "59a2fe8f-ae2d-4348-bea4-9032a3d16fa4"
+        },
+        "payload_digest": "e69c1ec7f62c8f27dc233d2cc6e09d17da69a6e597efdd0d20757a7eef4d5884",
+        "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+        "protected_canonical_payload": "\\x7b226167656e745f696e6361726e6174696f6e223a2230376630666534342d306661392d343963362d623037362d666437666639303161386363222c22616c6c6f636174696f6e5f65706f6368223a302c22617474656d70745f73657175656e6365223a302c22617574686f726974795f696e6361726e6174696f6e223a2230303030303030302d303030302d303030302d303030302d303030303030303030326264222c22617574686f726974795f6d6f6465223a2264697361626c6564222c2263616e6469646174655f646967657374223a2262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262222c2263616e6469646174655f6964656e74697479223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161222c2263616e6469646174655f6964656e746974795f616c676f726974686d223a226769742d73686131222c2263616e6469646174655f7075626c69636174696f6e5f736861323536223a2262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262222c22636f6e66696775726174696f6e5f67656e65726174696f6e223a312c226465706c6f796d656e745f67656e65726174696f6e223a372c22656e7669726f6e6d656e745f6964223a2273746167696e67222c2265786563757461626c65223a66616c73652c22657865637574696f6e5f67656e65726174696f6e223a372c2270726f7465637465645f617474656d70745f6964223a2263613733343661662d383230632d346331632d616437312d653734343230353236666365222c227265706f727465725f686967685f7761746572223a302c227265706f727465725f696e6361726e6174696f6e223a2230303030303030302d303030302d303030302d303030302d303030303030303030313266222c22726571756972656d656e7473223a7b226370755f61726368223a227838365f3634222c226770755f76656e646f72223a226e6f6e65222c226e6574776f726b5f706f6c6963696573223a5b227075626c6963225d2c226f73223a226c696e7578222c2272657175697265645f706f6f6c223a226f6c646c6162222c22736368656d615f76657273696f6e223a317d2c22726571756972656d656e74735f646967657374223a2237313564303136616136666662303565363530653261306335343235346661383832653032663733616531303662366636383465633632663135626462656230222c22736368656d615f76657273696f6e223a312c227375626a6563745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030313264222c227375626a6563745f696e6361726e6174696f6e223a2230303030303030302d303030302d303030302d303030302d303030303030303030313265222c22747269616c5f6964223a2264623033666238332d373833632d343366392d613665652d643232386564666264383433227d",
+        "protected_payload": {
+          "agent_incarnation": "07f0fe44-0fa9-49c6-b076-fd7ff901a8cc",
+          "allocation_epoch": 0,
+          "attempt_sequence": 0,
+          "authority_incarnation": "00000000-0000-0000-0000-0000000002bd",
+          "authority_mode": "disabled",
+          "candidate_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "candidate_identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "candidate_identity_algorithm": "git-sha1",
+          "candidate_publication_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "configuration_generation": 1,
+          "deployment_generation": 7,
+          "environment_id": "staging",
+          "executable": false,
+          "execution_generation": 7,
+          "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+          "reporter_high_water": 0,
+          "reporter_incarnation": "00000000-0000-0000-0000-00000000012f",
+          "requirements": {
+            "cpu_arch": "x86_64",
+            "gpu_vendor": "none",
+            "network_policies": [
+              "public"
+            ],
+            "os": "linux",
+            "required_pool": "oldlab",
+            "schema_version": 1
+          },
+          "requirements_digest": "715d016aa6ffb05e650e2a0c54254fa882e02f73ae106b6f684ec62f15bdbeb0",
+          "schema_version": 1,
+          "subject_id": "00000000-0000-0000-0000-00000000012d",
+          "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+          "trial_id": "db03fb83-783c-43f9-a6ee-d228edfbd843"
+        },
+        "protected_payload_digest": "5a3a6f8f6fb2cd4d57c629d57c1b32a642b2a442c85343faee027e503507cf80",
+        "requirements_digest": "715d016aa6ffb05e650e2a0c54254fa882e02f73ae106b6f684ec62f15bdbeb0",
+        "submitted_at": "2026-09-17T20:17:12.451392+00:00",
+        "trial_id": "db03fb83-783c-43f9-a6ee-d228edfbd843"
+      }
+    ],
+    "loom_capacity_guard.attempt_lifecycle_events": [
+      {
+        "admission_incarnation": null,
+        "allowance_id": null,
+        "created_at": "2026-09-17T20:17:12.451392+00:00",
+        "executable": false,
+        "execution_generation": 7,
+        "lifecycle_state": "pending-unassigned",
+        "manager_allocation_epoch": null,
+        "operation": "initialize",
+        "payload": {
+          "executable": false,
+          "execution_generation": 7,
+          "lifecycle_state": "pending-unassigned",
+          "operation": "initialize",
+          "previous_state": null,
+          "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+          "requirements_digest": "715d016aa6ffb05e650e2a0c54254fa882e02f73ae106b6f684ec62f15bdbeb0",
+          "schema_version": 1,
+          "transition_id": "dd089fa3-4b5e-4454-9e9a-9a84acbac5d1",
+          "transition_sequence": 0
+        },
+        "payload_digest": "e56066db5f5ca2dba45377e10ad1101a8bf0ca94ee68982736d5f93290f8f0c7",
+        "plan_id": null,
+        "pool_id": null,
+        "previous_state": null,
+        "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+        "requirements_digest": "715d016aa6ffb05e650e2a0c54254fa882e02f73ae106b6f684ec62f15bdbeb0",
+        "shape_instance_id": null,
+        "submission_intent_id": null,
+        "transition_id": "dd089fa3-4b5e-4454-9e9a-9a84acbac5d1",
+        "transition_sequence": 0
+      },
+      {
+        "admission_incarnation": "39e4ecd1-b114-4721-8646-9f979dd556d4",
+        "allowance_id": "3d6300ed-5e9f-4b5e-9426-dbf11535db5a",
+        "created_at": "2026-09-17T20:17:12.497302+00:00",
+        "executable": false,
+        "execution_generation": 7,
+        "lifecycle_state": "assigned",
+        "manager_allocation_epoch": 11,
+        "operation": "assign",
+        "payload": {
+          "admission_incarnation": "39e4ecd1-b114-4721-8646-9f979dd556d4",
+          "agent_incarnation": "07f0fe44-0fa9-49c6-b076-fd7ff901a8cc",
+          "allocation_epoch": 0,
+          "allowance_id": "3d6300ed-5e9f-4b5e-9426-dbf11535db5a",
+          "authority_incarnation": "00000000-0000-0000-0000-0000000002bd",
+          "authority_mode": "disabled",
+          "candidate_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "candidate_identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "candidate_identity_algorithm": "git-sha1",
+          "candidate_publication_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "configuration_generation": 1,
+          "deployment_generation": 7,
+          "environment_id": "staging",
+          "executable": false,
+          "execution_generation": 7,
+          "expected_state": "pending-unassigned",
+          "expected_transition_sequence": 0,
+          "manager_allocation_epoch": 11,
+          "operation": "assign",
+          "plan_id": "efb155e4-2312-4300-9bc6-b59623eed9b8",
+          "pool_id": "oldlab",
+          "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+          "reporter_high_water": 0,
+          "reporter_incarnation": "00000000-0000-0000-0000-00000000012f",
+          "requirements_digest": "715d016aa6ffb05e650e2a0c54254fa882e02f73ae106b6f684ec62f15bdbeb0",
+          "schema_version": 1,
+          "shape_instance_id": "staging-oldlab-node-3",
+          "subject_id": "00000000-0000-0000-0000-00000000012d",
+          "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+          "submission_intent_id": "00000000-0000-0000-0000-000000000067",
+          "target_state": "assigned",
+          "transition_id": "9837856f-57d8-4b46-ba4c-917f0703bac1",
+          "transition_reason": "manager-placement"
+        },
+        "payload_digest": "c68757c70fb0cede05d5fd9929160e843a0a4515bdd23317e986cbfdc146cf7d",
+        "plan_id": "efb155e4-2312-4300-9bc6-b59623eed9b8",
+        "pool_id": "oldlab",
+        "previous_state": "pending-unassigned",
+        "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+        "requirements_digest": "715d016aa6ffb05e650e2a0c54254fa882e02f73ae106b6f684ec62f15bdbeb0",
+        "shape_instance_id": "staging-oldlab-node-3",
+        "submission_intent_id": "00000000-0000-0000-0000-000000000067",
+        "transition_id": "9837856f-57d8-4b46-ba4c-917f0703bac1",
+        "transition_sequence": 1
+      }
+    ],
+    "loom_capacity_guard.attempt_lifecycle_heads": [
+      {
+        "created_at": "2026-09-17T20:17:12.451392+00:00",
+        "executable": false,
+        "lifecycle_state": "assigned",
+        "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+        "transition_id": "9837856f-57d8-4b46-ba4c-917f0703bac1",
+        "transition_sequence": 1,
+        "updated_at": "2026-09-17T20:17:12.497302+00:00"
+      }
+    ],
+    "loom_capacity_guard.audit_events": [
+      {
+        "created_at": "2026-09-17T20:17:12.03664+00:00",
+        "event_id": 1,
+        "event_type": "authority_initialized.v1",
+        "payload": {
+          "allocation_epoch": 0,
+          "authority_incarnation": "00000000-0000-0000-0000-0000000002bd",
+          "authority_mode": "disabled",
+          "candidate_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "configuration_generation": 1,
+          "deployment_generation": 7,
+          "environment_id": "staging",
+          "reporter_high_water": 0,
+          "reporter_incarnation": "00000000-0000-0000-0000-00000000012f",
+          "schema_version": 1,
+          "subject_id": "00000000-0000-0000-0000-00000000012d",
+          "subject_incarnation": "00000000-0000-0000-0000-00000000012e"
+        },
+        "payload_digest": "f9aef5bf2a65c7c0ea82d2fa95b438d536fbc9bdcae0140752f24b2025588082",
+        "protected_attempt_id": null,
+        "trial_id": null
+      },
+      {
+        "created_at": "2026-09-17T20:17:12.03664+00:00",
+        "event_id": 2,
+        "event_type": "agent_registered.v1",
+        "payload": {
+          "agent_incarnation": "07f0fe44-0fa9-49c6-b076-fd7ff901a8cc",
+          "allocation_epoch": 0,
+          "authority_incarnation": "00000000-0000-0000-0000-0000000002bd",
+          "authority_mode": "disabled",
+          "candidate_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "candidate_identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "candidate_identity_algorithm": "git-sha1",
+          "candidate_publication_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "configuration_generation": 1,
+          "deployment_generation": 7,
+          "environment_id": "staging",
+          "reporter_high_water": 0,
+          "reporter_incarnation": "00000000-0000-0000-0000-00000000012f",
+          "schema_version": 1,
+          "subject_id": "00000000-0000-0000-0000-00000000012d",
+          "subject_incarnation": "00000000-0000-0000-0000-00000000012e"
+        },
+        "payload_digest": "30e72a7e470b734451a77a389cf9abbd40c0bf3de74e06997821c95e367ac07b",
+        "protected_attempt_id": null,
+        "trial_id": null
+      },
+      {
+        "created_at": "2026-09-17T20:17:12.451392+00:00",
+        "event_id": 3,
+        "event_type": "trial_submission_registered.v1",
+        "payload": {
+          "attempt_sequence": 0,
+          "executable": false,
+          "execution_generation": 7,
+          "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+          "requirements_digest": "715d016aa6ffb05e650e2a0c54254fa882e02f73ae106b6f684ec62f15bdbeb0",
+          "schema_version": 1,
+          "trial_id": "db03fb83-783c-43f9-a6ee-d228edfbd843"
+        },
+        "payload_digest": "5a3a6f8f6fb2cd4d57c629d57c1b32a642b2a442c85343faee027e503507cf80",
+        "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+        "trial_id": "db03fb83-783c-43f9-a6ee-d228edfbd843"
+      },
+      {
+        "created_at": "2026-09-17T20:17:12.497302+00:00",
+        "event_id": 4,
+        "event_type": "admission_plan_prepared.v1",
+        "payload": {
+          "admission_incarnation": "39e4ecd1-b114-4721-8646-9f979dd556d4",
+          "allowance_count": 1,
+          "executable": false,
+          "manager_allocation_epoch": 11,
+          "plan_id": "efb155e4-2312-4300-9bc6-b59623eed9b8",
+          "pool_id": "oldlab",
+          "schema_version": 1,
+          "worker_shape_count": 1
+        },
+        "payload_digest": "bcedb9e10614825d60b963f57b1049c6b4b44173998e01fc0ad532204577c21b",
+        "protected_attempt_id": null,
+        "trial_id": null
+      }
+    ],
+    "loom_capacity_guard.authority_state": [
+      {
+        "allocation_epoch": 0,
+        "authority_incarnation": "00000000-0000-0000-0000-0000000002bd",
+        "authority_mode": "disabled",
+        "candidate_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "configuration_generation": 1,
+        "deployment_generation": 7,
+        "environment_id": "staging",
+        "lifecycle_environment": "staging",
+        "lifecycle_namespace": "loom-staging",
+        "reporter_high_water": 0,
+        "reporter_incarnation": "00000000-0000-0000-0000-00000000012f",
+        "schema_version": 1,
+        "singleton_id": 1,
+        "subject_id": "00000000-0000-0000-0000-00000000012d",
+        "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+        "updated_at": "2026-09-17T20:17:12.03664+00:00"
+      }
+    ],
+    "loom_capacity_guard.executable_admission_events": [
+      {
+        "agent_incarnation": "07f0fe44-0fa9-49c6-b076-fd7ff901a8cc",
+        "binding": {
+          "account_id": "owner-alice",
+          "candidate": {
+            "algorithm": "git-sha1",
+            "identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "publication_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "schema_version": 2
+          },
+          "candidate_generation": 7,
+          "concurrency_slots": 1,
+          "deployment_generation": 7,
+          "execution": {
+            "allocation_epoch": 11,
+            "authority_incarnation": "00000000-0000-0000-0000-000000000065",
+            "configuration_epoch": 5,
+            "executable": true,
+            "executable_new_capacity_ceiling": 1,
+            "executable_new_capacity_rate_per_minute": 1,
+            "execution_epoch": 7,
+            "execution_manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            "execution_state": "active",
+            "schema_version": 2,
+            "trusted_fleet_release_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+            "writer_epoch": 3
+          },
+          "executor_id": "oldlab-executor",
+          "executor_incarnation": "00000000-0000-0000-0000-000000000068",
+          "intent_id": "00000000-0000-0000-0000-000000000067",
+          "node_ids": [
+            "trt-eai-oldlab-3"
+          ],
+          "old_shape_backing_id": null,
+          "pool_generation": 13,
+          "pool_id": "oldlab",
+          "profile_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+          "profile_generation": 17,
+          "profile_id": "oldlab-default",
+          "resources": {
+            "cpu_millicores": 1000,
+            "generic": {},
+            "gpu_count": 0,
+            "memory_bytes": 1024,
+            "schema_version": 1,
+            "slots": 1
+          },
+          "rollout_surge_slots": 0,
+          "schema_version": 2,
+          "shape_id": "staging-oldlab-cpu",
+          "shape_instance_id": "staging-oldlab-node-3",
+          "subject_id": "00000000-0000-0000-0000-00000000012d",
+          "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+          "tier_id": "staging",
+          "tranche_id": "00000000-0000-0000-0000-000000000066"
+        },
+        "bootstrap_registration_epoch": 1,
+        "bootstrap_revoked": null,
+        "bootstrap_sha256": "6554e3b0a7e79074b612621a08191c29217a79572376b205c8cdf4364883e833",
+        "claim_high_water": null,
+        "created_at": "2026-09-17T20:17:12.074153+00:00",
+        "drain_epoch": null,
+        "event_id": 1,
+        "event_kind": "prepared",
+        "intent_id": "00000000-0000-0000-0000-000000000067",
+        "operation_id": "00000000-0000-0000-0000-000000000067",
+        "ownership_evidence_sha256": null,
+        "physical_job_id": null,
+        "predecessor_credential_revoked": null,
+        "predecessor_worker_incarnation": null,
+        "protected_registration_epoch": null,
+        "receipt": {
+          "admission_digest": "01a527639a4a88bf221855d879a585f25fc967a31baef40c5277af689f8b7014",
+          "admission_state": "prepared",
+          "bootstrap_registration_epoch": 1,
+          "bootstrap_sha256": "6554e3b0a7e79074b612621a08191c29217a79572376b205c8cdf4364883e833",
+          "executable": true,
+          "intent_id": "00000000-0000-0000-0000-000000000067",
+          "protected_high_water": 1,
+          "request_digest": "01a527639a4a88bf221855d879a585f25fc967a31baef40c5277af689f8b7014",
+          "schema_version": 2,
+          "subject_id": "00000000-0000-0000-0000-00000000012d",
+          "subject_incarnation": "00000000-0000-0000-0000-00000000012e"
+        },
+        "release_epoch": null,
+        "request_digest": "01a527639a4a88bf221855d879a585f25fc967a31baef40c5277af689f8b7014",
+        "request_payload": {
+          "binding": {
+            "account_id": "owner-alice",
+            "candidate": {
+              "algorithm": "git-sha1",
+              "identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "publication_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "schema_version": 2
+            },
+            "candidate_generation": 7,
+            "concurrency_slots": 1,
+            "deployment_generation": 7,
+            "execution": {
+              "allocation_epoch": 11,
+              "authority_incarnation": "00000000-0000-0000-0000-000000000065",
+              "configuration_epoch": 5,
+              "executable": true,
+              "executable_new_capacity_ceiling": 1,
+              "executable_new_capacity_rate_per_minute": 1,
+              "execution_epoch": 7,
+              "execution_manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+              "execution_state": "active",
+              "schema_version": 2,
+              "trusted_fleet_release_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+              "writer_epoch": 3
+            },
+            "executor_id": "oldlab-executor",
+            "executor_incarnation": "00000000-0000-0000-0000-000000000068",
+            "intent_id": "00000000-0000-0000-0000-000000000067",
+            "node_ids": [
+              "trt-eai-oldlab-3"
+            ],
+            "old_shape_backing_id": null,
+            "pool_generation": 13,
+            "pool_id": "oldlab",
+            "profile_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+            "profile_generation": 17,
+            "profile_id": "oldlab-default",
+            "resources": {
+              "cpu_millicores": 1000,
+              "generic": {},
+              "gpu_count": 0,
+              "memory_bytes": 1024,
+              "schema_version": 1,
+              "slots": 1
+            },
+            "rollout_surge_slots": 0,
+            "schema_version": 2,
+            "shape_id": "staging-oldlab-cpu",
+            "shape_instance_id": "staging-oldlab-node-3",
+            "subject_id": "00000000-0000-0000-0000-00000000012d",
+            "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+            "tier_id": "staging",
+            "tranche_id": "00000000-0000-0000-0000-000000000066"
+          },
+          "bootstrap_evidence_sha256": "bd3893f78c5d440d9a22e61d79e33ebc2d1f3de15a4236b49359be77e207811e",
+          "bootstrap_registration_epoch": 1,
+          "command_sequence": 1,
+          "executable": true,
+          "schema_version": 2
+        },
+        "subject_id": "00000000-0000-0000-0000-00000000012d",
+        "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+        "worker_credential_revoked": null,
+        "worker_credential_sha256": null,
+        "worker_id": null,
+        "worker_incarnation": null
+      },
+      {
+        "agent_incarnation": "07f0fe44-0fa9-49c6-b076-fd7ff901a8cc",
+        "binding": {
+          "account_id": "owner-alice",
+          "candidate": {
+            "algorithm": "git-sha1",
+            "identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "publication_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "schema_version": 2
+          },
+          "candidate_generation": 7,
+          "concurrency_slots": 1,
+          "deployment_generation": 7,
+          "execution": {
+            "allocation_epoch": 11,
+            "authority_incarnation": "00000000-0000-0000-0000-000000000065",
+            "configuration_epoch": 5,
+            "executable": true,
+            "executable_new_capacity_ceiling": 1,
+            "executable_new_capacity_rate_per_minute": 1,
+            "execution_epoch": 7,
+            "execution_manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            "execution_state": "active",
+            "schema_version": 2,
+            "trusted_fleet_release_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+            "writer_epoch": 3
+          },
+          "executor_id": "oldlab-executor",
+          "executor_incarnation": "00000000-0000-0000-0000-000000000068",
+          "intent_id": "00000000-0000-0000-0000-000000000067",
+          "node_ids": [
+            "trt-eai-oldlab-3"
+          ],
+          "old_shape_backing_id": null,
+          "pool_generation": 13,
+          "pool_id": "oldlab",
+          "profile_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+          "profile_generation": 17,
+          "profile_id": "oldlab-default",
+          "resources": {
+            "cpu_millicores": 1000,
+            "generic": {},
+            "gpu_count": 0,
+            "memory_bytes": 1024,
+            "schema_version": 1,
+            "slots": 1
+          },
+          "rollout_surge_slots": 0,
+          "schema_version": 2,
+          "shape_id": "staging-oldlab-cpu",
+          "shape_instance_id": "staging-oldlab-node-3",
+          "subject_id": "00000000-0000-0000-0000-00000000012d",
+          "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+          "tier_id": "staging",
+          "tranche_id": "00000000-0000-0000-0000-000000000066"
+        },
+        "bootstrap_registration_epoch": 1,
+        "bootstrap_revoked": null,
+        "bootstrap_sha256": null,
+        "claim_high_water": null,
+        "created_at": "2026-09-17T20:17:12.074153+00:00",
+        "drain_epoch": null,
+        "event_id": 2,
+        "event_kind": "physical-bound",
+        "intent_id": "00000000-0000-0000-0000-000000000067",
+        "operation_id": "00000000-0000-0000-0000-000000000130",
+        "ownership_evidence_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "physical_job_id": "12345",
+        "predecessor_credential_revoked": null,
+        "predecessor_worker_incarnation": null,
+        "protected_registration_epoch": null,
+        "receipt": {
+          "binding_digest": "9da19f21bf9712e19baf3251298e58ec120e7dd8fafc2dbb096a5344313bda9d",
+          "binding_state": "bound",
+          "bootstrap_registration_epoch": 1,
+          "executable": true,
+          "intent_id": "00000000-0000-0000-0000-000000000067",
+          "ownership_evidence_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "protected_high_water": 2,
+          "request_digest": "9da19f21bf9712e19baf3251298e58ec120e7dd8fafc2dbb096a5344313bda9d",
+          "schema_version": 2,
+          "slurm_job_id": "12345",
+          "subject_id": "00000000-0000-0000-0000-00000000012d",
+          "subject_incarnation": "00000000-0000-0000-0000-00000000012e"
+        },
+        "release_epoch": null,
+        "request_digest": "9da19f21bf9712e19baf3251298e58ec120e7dd8fafc2dbb096a5344313bda9d",
+        "request_payload": {
+          "binding": {
+            "account_id": "owner-alice",
+            "candidate": {
+              "algorithm": "git-sha1",
+              "identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "publication_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "schema_version": 2
+            },
+            "candidate_generation": 7,
+            "concurrency_slots": 1,
+            "deployment_generation": 7,
+            "execution": {
+              "allocation_epoch": 11,
+              "authority_incarnation": "00000000-0000-0000-0000-000000000065",
+              "configuration_epoch": 5,
+              "executable": true,
+              "executable_new_capacity_ceiling": 1,
+              "executable_new_capacity_rate_per_minute": 1,
+              "execution_epoch": 7,
+              "execution_manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+              "execution_state": "active",
+              "schema_version": 2,
+              "trusted_fleet_release_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+              "writer_epoch": 3
+            },
+            "executor_id": "oldlab-executor",
+            "executor_incarnation": "00000000-0000-0000-0000-000000000068",
+            "intent_id": "00000000-0000-0000-0000-000000000067",
+            "node_ids": [
+              "trt-eai-oldlab-3"
+            ],
+            "old_shape_backing_id": null,
+            "pool_generation": 13,
+            "pool_id": "oldlab",
+            "profile_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+            "profile_generation": 17,
+            "profile_id": "oldlab-default",
+            "resources": {
+              "cpu_millicores": 1000,
+              "generic": {},
+              "gpu_count": 0,
+              "memory_bytes": 1024,
+              "schema_version": 1,
+              "slots": 1
+            },
+            "rollout_surge_slots": 0,
+            "schema_version": 2,
+            "shape_id": "staging-oldlab-cpu",
+            "shape_instance_id": "staging-oldlab-node-3",
+            "subject_id": "00000000-0000-0000-0000-00000000012d",
+            "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+            "tier_id": "staging",
+            "tranche_id": "00000000-0000-0000-0000-000000000066"
+          },
+          "bootstrap_registration_epoch": 1,
+          "executable": true,
+          "operation_id": "00000000-0000-0000-0000-000000000130",
+          "ownership_evidence_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "schema_version": 2,
+          "slurm_job_id": "12345"
+        },
+        "subject_id": "00000000-0000-0000-0000-00000000012d",
+        "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+        "worker_credential_revoked": null,
+        "worker_credential_sha256": null,
+        "worker_id": null,
+        "worker_incarnation": null
+      },
+      {
+        "agent_incarnation": "07f0fe44-0fa9-49c6-b076-fd7ff901a8cc",
+        "binding": {
+          "account_id": "owner-alice",
+          "candidate": {
+            "algorithm": "git-sha1",
+            "identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "publication_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "schema_version": 2
+          },
+          "candidate_generation": 7,
+          "concurrency_slots": 1,
+          "deployment_generation": 7,
+          "execution": {
+            "allocation_epoch": 11,
+            "authority_incarnation": "00000000-0000-0000-0000-000000000065",
+            "configuration_epoch": 5,
+            "executable": true,
+            "executable_new_capacity_ceiling": 1,
+            "executable_new_capacity_rate_per_minute": 1,
+            "execution_epoch": 7,
+            "execution_manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            "execution_state": "active",
+            "schema_version": 2,
+            "trusted_fleet_release_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+            "writer_epoch": 3
+          },
+          "executor_id": "oldlab-executor",
+          "executor_incarnation": "00000000-0000-0000-0000-000000000068",
+          "intent_id": "00000000-0000-0000-0000-000000000067",
+          "node_ids": [
+            "trt-eai-oldlab-3"
+          ],
+          "old_shape_backing_id": null,
+          "pool_generation": 13,
+          "pool_id": "oldlab",
+          "profile_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+          "profile_generation": 17,
+          "profile_id": "oldlab-default",
+          "resources": {
+            "cpu_millicores": 1000,
+            "generic": {},
+            "gpu_count": 0,
+            "memory_bytes": 1024,
+            "schema_version": 1,
+            "slots": 1
+          },
+          "rollout_surge_slots": 0,
+          "schema_version": 2,
+          "shape_id": "staging-oldlab-cpu",
+          "shape_instance_id": "staging-oldlab-node-3",
+          "subject_id": "00000000-0000-0000-0000-00000000012d",
+          "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+          "tier_id": "staging",
+          "tranche_id": "00000000-0000-0000-0000-000000000066"
+        },
+        "bootstrap_registration_epoch": 1,
+        "bootstrap_revoked": true,
+        "bootstrap_sha256": null,
+        "claim_high_water": null,
+        "created_at": "2026-09-17T20:17:12.074153+00:00",
+        "drain_epoch": null,
+        "event_id": 3,
+        "event_kind": "worker-registered",
+        "intent_id": "00000000-0000-0000-0000-000000000067",
+        "operation_id": "00000000-0000-0000-0000-000000000131",
+        "ownership_evidence_sha256": null,
+        "physical_job_id": "12345",
+        "predecessor_credential_revoked": false,
+        "predecessor_worker_incarnation": null,
+        "protected_registration_epoch": 2,
+        "receipt": {
+          "executable": true,
+          "intent_id": "00000000-0000-0000-0000-000000000067",
+          "predecessor_worker_incarnation": null,
+          "protected_high_water": 3,
+          "protected_registration_epoch": 2,
+          "registration_digest": "9ab61a2c7bb7814e00f378c307df79c7a1c8462d8aa138c90693a7d0c4c544f0",
+          "registration_state": "registered",
+          "request_digest": "9ab61a2c7bb7814e00f378c307df79c7a1c8462d8aa138c90693a7d0c4c544f0",
+          "schema_version": 2,
+          "subject_id": "00000000-0000-0000-0000-00000000012d",
+          "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+          "worker_id": "00000000-0000-4000-8000-000000000301",
+          "worker_incarnation": "00000000-0000-4000-8000-000000000302"
+        },
+        "release_epoch": null,
+        "request_digest": "9ab61a2c7bb7814e00f378c307df79c7a1c8462d8aa138c90693a7d0c4c544f0",
+        "request_payload": {
+          "binding": {
+            "account_id": "owner-alice",
+            "candidate": {
+              "algorithm": "git-sha1",
+              "identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "publication_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "schema_version": 2
+            },
+            "candidate_generation": 7,
+            "concurrency_slots": 1,
+            "deployment_generation": 7,
+            "execution": {
+              "allocation_epoch": 11,
+              "authority_incarnation": "00000000-0000-0000-0000-000000000065",
+              "configuration_epoch": 5,
+              "executable": true,
+              "executable_new_capacity_ceiling": 1,
+              "executable_new_capacity_rate_per_minute": 1,
+              "execution_epoch": 7,
+              "execution_manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+              "execution_state": "active",
+              "schema_version": 2,
+              "trusted_fleet_release_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+              "writer_epoch": 3
+            },
+            "executor_id": "oldlab-executor",
+            "executor_incarnation": "00000000-0000-0000-0000-000000000068",
+            "intent_id": "00000000-0000-0000-0000-000000000067",
+            "node_ids": [
+              "trt-eai-oldlab-3"
+            ],
+            "old_shape_backing_id": null,
+            "pool_generation": 13,
+            "pool_id": "oldlab",
+            "profile_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+            "profile_generation": 17,
+            "profile_id": "oldlab-default",
+            "resources": {
+              "cpu_millicores": 1000,
+              "generic": {},
+              "gpu_count": 0,
+              "memory_bytes": 1024,
+              "schema_version": 1,
+              "slots": 1
+            },
+            "rollout_surge_slots": 0,
+            "schema_version": 2,
+            "shape_id": "staging-oldlab-cpu",
+            "shape_instance_id": "staging-oldlab-node-3",
+            "subject_id": "00000000-0000-0000-0000-00000000012d",
+            "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+            "tier_id": "staging",
+            "tranche_id": "00000000-0000-0000-0000-000000000066"
+          },
+          "bootstrap_registration_epoch": 1,
+          "executable": true,
+          "operation_id": "00000000-0000-0000-0000-000000000131",
+          "predecessor_worker_incarnation": null,
+          "protected_registration_epoch": 2,
+          "schema_version": 2,
+          "slurm_job_id": "12345",
+          "worker_credential_sha256": "371ffeee0b28ccdcc9e75af327c8309e97f0d8451cd676bb05962ba6f54e2c75",
+          "worker_id": "00000000-0000-4000-8000-000000000301",
+          "worker_incarnation": "00000000-0000-4000-8000-000000000302"
+        },
+        "subject_id": "00000000-0000-0000-0000-00000000012d",
+        "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+        "worker_credential_revoked": false,
+        "worker_credential_sha256": "371ffeee0b28ccdcc9e75af327c8309e97f0d8451cd676bb05962ba6f54e2c75",
+        "worker_id": "00000000-0000-4000-8000-000000000301",
+        "worker_incarnation": "00000000-0000-4000-8000-000000000302"
+      }
+    ],
+    "loom_capacity_guard.executable_claim_leases": [
+      {
+        "claim_high_water": 1,
+        "created_at": "2026-09-17T20:17:12.589876+00:00",
+        "executable": true,
+        "execution_generation": 7,
+        "intent_id": "00000000-0000-0000-0000-000000000067",
+        "lease_state": "live",
+        "operation_id": "8cff9ffa-d490-4cb0-b9c1-cf30dd20a179",
+        "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+        "receipt": {
+          "admitted": true,
+          "claim_high_water": 1,
+          "executable": true,
+          "execution_generation": 7,
+          "intent_id": "00000000-0000-0000-0000-000000000067",
+          "lease_state": "live",
+          "operation_id": "8cff9ffa-d490-4cb0-b9c1-cf30dd20a179",
+          "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+          "request_digest": "c688e5ac1abf879bf8955c309d3db4ef5ffd11032afac5ca555ac66dad2fa9cc",
+          "requirements_digest": "715d016aa6ffb05e650e2a0c54254fa882e02f73ae106b6f684ec62f15bdbeb0",
+          "schema_version": 2,
+          "subject_id": "00000000-0000-0000-0000-00000000012d",
+          "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+          "worker_id": "00000000-0000-4000-8000-000000000301",
+          "worker_incarnation": "00000000-0000-4000-8000-000000000302"
+        },
+        "request_digest": "c688e5ac1abf879bf8955c309d3db4ef5ffd11032afac5ca555ac66dad2fa9cc",
+        "request_payload": {
+          "executable": true,
+          "execution_generation": 7,
+          "expected_claim_high_water": 0,
+          "operation_id": "8cff9ffa-d490-4cb0-b9c1-cf30dd20a179",
+          "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+          "requirements_digest": "715d016aa6ffb05e650e2a0c54254fa882e02f73ae106b6f684ec62f15bdbeb0",
+          "schema_version": 2,
+          "worker_id": "00000000-0000-4000-8000-000000000301",
+          "worker_incarnation": "00000000-0000-4000-8000-000000000302"
+        },
+        "requirements_digest": "715d016aa6ffb05e650e2a0c54254fa882e02f73ae106b6f684ec62f15bdbeb0",
+        "subject_id": "00000000-0000-0000-0000-00000000012d",
+        "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+        "worker_id": "00000000-0000-4000-8000-000000000301",
+        "worker_incarnation": "00000000-0000-4000-8000-000000000302"
+      }
+    ],
+    "loom_capacity_guard.executable_claim_state": [
+      {
+        "binding": {
+          "account_id": "owner-alice",
+          "candidate": {
+            "algorithm": "git-sha1",
+            "identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "publication_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "schema_version": 2
+          },
+          "candidate_generation": 7,
+          "concurrency_slots": 1,
+          "deployment_generation": 7,
+          "execution": {
+            "allocation_epoch": 11,
+            "authority_incarnation": "00000000-0000-0000-0000-000000000065",
+            "configuration_epoch": 5,
+            "executable": true,
+            "executable_new_capacity_ceiling": 1,
+            "executable_new_capacity_rate_per_minute": 1,
+            "execution_epoch": 7,
+            "execution_manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            "execution_state": "active",
+            "schema_version": 2,
+            "trusted_fleet_release_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+            "writer_epoch": 3
+          },
+          "executor_id": "oldlab-executor",
+          "executor_incarnation": "00000000-0000-0000-0000-000000000068",
+          "intent_id": "00000000-0000-0000-0000-000000000067",
+          "node_ids": [
+            "trt-eai-oldlab-3"
+          ],
+          "old_shape_backing_id": null,
+          "pool_generation": 13,
+          "pool_id": "oldlab",
+          "profile_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+          "profile_generation": 17,
+          "profile_id": "oldlab-default",
+          "resources": {
+            "cpu_millicores": 1000,
+            "generic": {},
+            "gpu_count": 0,
+            "memory_bytes": 1024,
+            "schema_version": 1,
+            "slots": 1
+          },
+          "rollout_surge_slots": 0,
+          "schema_version": 2,
+          "shape_id": "staging-oldlab-cpu",
+          "shape_instance_id": "staging-oldlab-node-3",
+          "subject_id": "00000000-0000-0000-0000-00000000012d",
+          "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+          "tier_id": "staging",
+          "tranche_id": "00000000-0000-0000-0000-000000000066"
+        },
+        "claim_high_water": 1,
+        "draining": false,
+        "intent_id": "00000000-0000-0000-0000-000000000067",
+        "subject_id": "00000000-0000-0000-0000-00000000012d",
+        "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+        "terminal_high_water": 0
+      }
+    ],
+    "loom_capacity_guard.prepared_admission_plans": [
+      {
+        "admission_incarnation": "39e4ecd1-b114-4721-8646-9f979dd556d4",
+        "agent_incarnation": "07f0fe44-0fa9-49c6-b076-fd7ff901a8cc",
+        "created_at": "2026-09-17T20:17:12.497302+00:00",
+        "executable": false,
+        "lease_not_after": "2026-09-17T21:17:12.490507+00:00",
+        "manager_allocation_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+        "manager_allocation_epoch": 11,
+        "manager_authority_incarnation": "00000000-0000-0000-0000-000000000065",
+        "manager_input_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+        "manager_writer_epoch": 3,
+        "payload": {
+          "admission_incarnation": "39e4ecd1-b114-4721-8646-9f979dd556d4",
+          "agent_incarnation": "07f0fe44-0fa9-49c6-b076-fd7ff901a8cc",
+          "allocation_epoch": 0,
+          "authority_incarnation": "00000000-0000-0000-0000-0000000002bd",
+          "authority_mode": "disabled",
+          "candidate_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "candidate_identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "candidate_identity_algorithm": "git-sha1",
+          "candidate_publication_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "configuration_generation": 1,
+          "deployment_generation": 7,
+          "environment_id": "staging",
+          "executable": false,
+          "lease_not_after": "2026-09-17T21:17:12.490507Z",
+          "manager_allocation_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+          "manager_allocation_epoch": 11,
+          "manager_authority_incarnation": "00000000-0000-0000-0000-000000000065",
+          "manager_input_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+          "manager_writer_epoch": 3,
+          "placement_allowances": [
+            {
+              "allowance_id": "3d6300ed-5e9f-4b5e-9426-dbf11535db5a",
+              "allowance_state": "prepared",
+              "executable": false,
+              "execution_generation": 7,
+              "pool_id": "oldlab",
+              "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+              "requirements_digest": "715d016aa6ffb05e650e2a0c54254fa882e02f73ae106b6f684ec62f15bdbeb0",
+              "schema_version": 1,
+              "shape_instance_id": "staging-oldlab-node-3",
+              "shape_slot_index": 0,
+              "submission_intent_id": "00000000-0000-0000-0000-000000000067"
+            }
+          ],
+          "plan_id": "efb155e4-2312-4300-9bc6-b59623eed9b8",
+          "plan_state": "prepared",
+          "pool_generation": 13,
+          "pool_id": "oldlab",
+          "profile_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+          "profile_generation": 17,
+          "profile_id": "oldlab-default",
+          "protocol_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+          "protocol_generation": 1,
+          "reporter_high_water": 0,
+          "reporter_incarnation": "00000000-0000-0000-0000-00000000012f",
+          "schema_version": 1,
+          "subject_id": "00000000-0000-0000-0000-00000000012d",
+          "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+          "worker_shapes": [
+            {
+              "bootstrap_registration_epoch": 1,
+              "executable": false,
+              "pool_generation": 13,
+              "pool_id": "oldlab",
+              "profile_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+              "profile_generation": 17,
+              "profile_id": "oldlab-default",
+              "protocol_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+              "protocol_generation": 1,
+              "schema_version": 1,
+              "shape_instance_id": "staging-oldlab-node-3",
+              "shape_state": "prepared",
+              "submission_intent_id": "00000000-0000-0000-0000-000000000067",
+              "worker_shape": {
+                "capabilities": [
+                  "cpu_arch.x86_64",
+                  "gpu_vendor.none",
+                  "network.public",
+                  "os.linux"
+                ],
+                "compatible_domain_ids": [
+                  "oldlab"
+                ],
+                "concurrency_slots": 1,
+                "node_resources": [
+                  {
+                    "cpu_millicores": 1000,
+                    "generic": {},
+                    "gpu_count": 0,
+                    "memory_bytes": 1024,
+                    "schema_version": 1,
+                    "slots": 1
+                  }
+                ],
+                "placement_constraints": {},
+                "schema_version": 1,
+                "shape_id": "staging-oldlab-cpu",
+                "total_resources": {
+                  "cpu_millicores": 1000,
+                  "generic": {},
+                  "gpu_count": 0,
+                  "memory_bytes": 1024,
+                  "schema_version": 1,
+                  "slots": 1
+                },
+                "warm_approved": false
+              },
+              "worker_shape_digest": "920246225ca70cef0cc87f64b05a2a7eb08e94742cf493edbaafac31ca171031"
+            }
+          ]
+        },
+        "payload_digest": "bcedb9e10614825d60b963f57b1049c6b4b44173998e01fc0ad532204577c21b",
+        "plan_id": "efb155e4-2312-4300-9bc6-b59623eed9b8",
+        "plan_state": "prepared",
+        "pool_generation": 13,
+        "pool_id": "oldlab",
+        "profile_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+        "profile_generation": 17,
+        "profile_id": "oldlab-default",
+        "protocol_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+        "protocol_generation": 1
+      }
+    ],
+    "loom_capacity_guard.prepared_placement_allowances": [
+      {
+        "allowance_id": "3d6300ed-5e9f-4b5e-9426-dbf11535db5a",
+        "allowance_state": "prepared",
+        "created_at": "2026-09-17T20:17:12.497302+00:00",
+        "executable": false,
+        "execution_generation": 7,
+        "payload": {
+          "allowance_id": "3d6300ed-5e9f-4b5e-9426-dbf11535db5a",
+          "allowance_state": "prepared",
+          "executable": false,
+          "execution_generation": 7,
+          "pool_id": "oldlab",
+          "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+          "requirements_digest": "715d016aa6ffb05e650e2a0c54254fa882e02f73ae106b6f684ec62f15bdbeb0",
+          "schema_version": 1,
+          "shape_instance_id": "staging-oldlab-node-3",
+          "shape_slot_index": 0,
+          "submission_intent_id": "00000000-0000-0000-0000-000000000067"
+        },
+        "plan_id": "efb155e4-2312-4300-9bc6-b59623eed9b8",
+        "pool_id": "oldlab",
+        "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+        "requirements_digest": "715d016aa6ffb05e650e2a0c54254fa882e02f73ae106b6f684ec62f15bdbeb0",
+        "shape_instance_id": "staging-oldlab-node-3",
+        "shape_slot_index": 0,
+        "submission_intent_id": "00000000-0000-0000-0000-000000000067"
+      }
+    ],
+    "loom_capacity_guard.prepared_worker_shapes": [
+      {
+        "bootstrap_registration_epoch": 1,
+        "concurrency_slots": 1,
+        "created_at": "2026-09-17T20:17:12.497302+00:00",
+        "executable": false,
+        "payload": {
+          "bootstrap_registration_epoch": 1,
+          "executable": false,
+          "pool_generation": 13,
+          "pool_id": "oldlab",
+          "profile_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+          "profile_generation": 17,
+          "profile_id": "oldlab-default",
+          "protocol_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+          "protocol_generation": 1,
+          "schema_version": 1,
+          "shape_instance_id": "staging-oldlab-node-3",
+          "shape_state": "prepared",
+          "submission_intent_id": "00000000-0000-0000-0000-000000000067",
+          "worker_shape": {
+            "capabilities": [
+              "cpu_arch.x86_64",
+              "gpu_vendor.none",
+              "network.public",
+              "os.linux"
+            ],
+            "compatible_domain_ids": [
+              "oldlab"
+            ],
+            "concurrency_slots": 1,
+            "node_resources": [
+              {
+                "cpu_millicores": 1000,
+                "generic": {},
+                "gpu_count": 0,
+                "memory_bytes": 1024,
+                "schema_version": 1,
+                "slots": 1
+              }
+            ],
+            "placement_constraints": {},
+            "schema_version": 1,
+            "shape_id": "staging-oldlab-cpu",
+            "total_resources": {
+              "cpu_millicores": 1000,
+              "generic": {},
+              "gpu_count": 0,
+              "memory_bytes": 1024,
+              "schema_version": 1,
+              "slots": 1
+            },
+            "warm_approved": false
+          },
+          "worker_shape_digest": "920246225ca70cef0cc87f64b05a2a7eb08e94742cf493edbaafac31ca171031"
+        },
+        "plan_id": "efb155e4-2312-4300-9bc6-b59623eed9b8",
+        "pool_id": "oldlab",
+        "shape_instance_id": "staging-oldlab-node-3",
+        "shape_state": "prepared",
+        "submission_intent_id": "00000000-0000-0000-0000-000000000067",
+        "worker_shape_digest": "920246225ca70cef0cc87f64b05a2a7eb08e94742cf493edbaafac31ca171031"
+      }
+    ],
+    "loom_capacity_guard.protected_executable_bootstrap_registrations": [
+      {
+        "agent_incarnation": "07f0fe44-0fa9-49c6-b076-fd7ff901a8cc",
+        "binding": {
+          "account_id": "owner-alice",
+          "candidate": {
+            "algorithm": "git-sha1",
+            "identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "publication_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "schema_version": 2
+          },
+          "candidate_generation": 7,
+          "concurrency_slots": 1,
+          "deployment_generation": 7,
+          "execution": {
+            "allocation_epoch": 11,
+            "authority_incarnation": "00000000-0000-0000-0000-000000000065",
+            "configuration_epoch": 5,
+            "executable": true,
+            "executable_new_capacity_ceiling": 1,
+            "executable_new_capacity_rate_per_minute": 1,
+            "execution_epoch": 7,
+            "execution_manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            "execution_state": "active",
+            "schema_version": 2,
+            "trusted_fleet_release_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+            "writer_epoch": 3
+          },
+          "executor_id": "oldlab-executor",
+          "executor_incarnation": "00000000-0000-0000-0000-000000000068",
+          "intent_id": "00000000-0000-0000-0000-000000000067",
+          "node_ids": [
+            "trt-eai-oldlab-3"
+          ],
+          "old_shape_backing_id": null,
+          "pool_generation": 13,
+          "pool_id": "oldlab",
+          "profile_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+          "profile_generation": 17,
+          "profile_id": "oldlab-default",
+          "resources": {
+            "cpu_millicores": 1000,
+            "generic": {},
+            "gpu_count": 0,
+            "memory_bytes": 1024,
+            "schema_version": 1,
+            "slots": 1
+          },
+          "rollout_surge_slots": 0,
+          "schema_version": 2,
+          "shape_id": "staging-oldlab-cpu",
+          "shape_instance_id": "staging-oldlab-node-3",
+          "subject_id": "00000000-0000-0000-0000-00000000012d",
+          "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+          "tier_id": "staging",
+          "tranche_id": "00000000-0000-0000-0000-000000000066"
+        },
+        "bootstrap_registration_epoch": 1,
+        "bootstrap_sha256": "6554e3b0a7e79074b612621a08191c29217a79572376b205c8cdf4364883e833",
+        "created_at": "2026-09-17T20:17:12.062698+00:00",
+        "intent_id": "00000000-0000-0000-0000-000000000067",
+        "proposal_digest": "45fcaabba1bbcb27486df95a0b9e380411be46b42c6d7c6da2b3eee031f16809",
+        "proposal_epoch": 1,
+        "proposal_payload": {
+          "binding": {
+            "account_id": "owner-alice",
+            "candidate": {
+              "algorithm": "git-sha1",
+              "identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "publication_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "schema_version": 2
+            },
+            "candidate_generation": 7,
+            "concurrency_slots": 1,
+            "deployment_generation": 7,
+            "execution": {
+              "allocation_epoch": 11,
+              "authority_incarnation": "00000000-0000-0000-0000-000000000065",
+              "configuration_epoch": 5,
+              "executable": true,
+              "executable_new_capacity_ceiling": 1,
+              "executable_new_capacity_rate_per_minute": 1,
+              "execution_epoch": 7,
+              "execution_manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+              "execution_state": "active",
+              "schema_version": 2,
+              "trusted_fleet_release_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+              "writer_epoch": 3
+            },
+            "executor_id": "oldlab-executor",
+            "executor_incarnation": "00000000-0000-0000-0000-000000000068",
+            "intent_id": "00000000-0000-0000-0000-000000000067",
+            "node_ids": [
+              "trt-eai-oldlab-3"
+            ],
+            "old_shape_backing_id": null,
+            "pool_generation": 13,
+            "pool_id": "oldlab",
+            "profile_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+            "profile_generation": 17,
+            "profile_id": "oldlab-default",
+            "resources": {
+              "cpu_millicores": 1000,
+              "generic": {},
+              "gpu_count": 0,
+              "memory_bytes": 1024,
+              "schema_version": 1,
+              "slots": 1
+            },
+            "rollout_surge_slots": 0,
+            "schema_version": 2,
+            "shape_id": "staging-oldlab-cpu",
+            "shape_instance_id": "staging-oldlab-node-3",
+            "subject_id": "00000000-0000-0000-0000-00000000012d",
+            "subject_incarnation": "00000000-0000-0000-0000-00000000012e",
+            "tier_id": "staging",
+            "tranche_id": "00000000-0000-0000-0000-000000000066"
+          },
+          "bootstrap_sha256": "6554e3b0a7e79074b612621a08191c29217a79572376b205c8cdf4364883e833",
+          "command_sequence": 1,
+          "executable": true,
+          "expires_at": "2026-09-17T20:22:12.053132Z",
+          "proposal_epoch": 1,
+          "schema_version": 2
+        },
+        "protected_admission_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "receipt": {
+          "bootstrap_registration_epoch": 1,
+          "bootstrap_sha256": "6554e3b0a7e79074b612621a08191c29217a79572376b205c8cdf4364883e833",
+          "executable": false,
+          "intent_id": "00000000-0000-0000-0000-000000000067",
+          "proposal_digest": "45fcaabba1bbcb27486df95a0b9e380411be46b42c6d7c6da2b3eee031f16809",
+          "proposal_epoch": 1,
+          "protected_admission_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "protected_high_water": 1,
+          "registration_state": "registered",
+          "schema_version": 2,
+          "subject_id": "00000000-0000-0000-0000-00000000012d",
+          "subject_incarnation": "00000000-0000-0000-0000-00000000012e"
+        },
+        "registration_id": 1,
+        "subject_id": "00000000-0000-0000-0000-00000000012d",
+        "subject_incarnation": "00000000-0000-0000-0000-00000000012e"
+      }
+    ],
+    "loom_capacity_guard.protected_runtime_trial_readiness": [
+      {
+        "model_switch_prerequisite_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+        "public_requires_caps_digest": "6f8534af22c0b412005be4502ee1e742c5c4ab57120ea0ccfcf42365a6ac1e0e",
+        "ready_at": "2026-09-17T20:17:12.480837+00:00",
+        "task_image_prerequisites_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "trial_id": "db03fb83-783c-43f9-a6ee-d228edfbd843"
+      }
+    ],
+    "loom_capacity_guard.protected_runtime_trial_submissions": [
+      {
+        "attempt_sequence": 0,
+        "created_at": "2026-09-17T20:17:12.451881+00:00",
+        "not_before": null,
+        "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+        "public_attempt_count": 0,
+        "public_requires_caps": {
+          "backend": "docker",
+          "cpu_arch": "x86_64",
+          "gpu_vendor": "none",
+          "network_policies": [
+            "public"
+          ],
+          "os": "linux",
+          "terminus2_model_switch": false,
+          "worker_pool": "oldlab"
+        },
+        "public_requires_caps_canonical": "\\x7b226f73223a20226c696e7578222c20226261636b656e64223a2022646f636b6572222c20226370755f61726368223a20227838365f3634222c20226770755f76656e646f72223a20226e6f6e65222c2022776f726b65725f706f6f6c223a20226f6c646c6162222c20226e6574776f726b5f706f6c6963696573223a205b227075626c6963225d2c20227465726d696e7573325f6d6f64656c5f737769746368223a2066616c73657d",
+        "public_requires_caps_digest": "6f8534af22c0b412005be4502ee1e742c5c4ab57120ea0ccfcf42365a6ac1e0e",
+        "trial_id": "db03fb83-783c-43f9-a6ee-d228edfbd843"
+      }
+    ],
+    "loom_capacity_guard.trial_attempts": [
+      {
+        "assigned_pool": null,
+        "assignment_epoch": null,
+        "attempt_sequence": 0,
+        "claim_epoch": null,
+        "claim_state": "queued",
+        "created_at": "2026-09-17T20:17:12.451392+00:00",
+        "execution_generation": 7,
+        "protected_attempt_id": "ca7346af-820c-4c1c-ad71-e74420526fce",
+        "requirements_digest": "715d016aa6ffb05e650e2a0c54254fa882e02f73ae106b6f684ec62f15bdbeb0",
+        "trial_id": "db03fb83-783c-43f9-a6ee-d228edfbd843",
+        "worker_id": null
+      }
+    ],
+    "loom_capacity_guard.trial_requirements": [
+      {
+        "created_at": "2026-09-17T20:17:12.451392+00:00",
+        "requirements": {
+          "cpu_arch": "x86_64",
+          "gpu_vendor": "none",
+          "network_policies": [
+            "public"
+          ],
+          "os": "linux",
+          "required_pool": "oldlab",
+          "schema_version": 1
+        },
+        "requirements_digest": "715d016aa6ffb05e650e2a0c54254fa882e02f73ae106b6f684ec62f15bdbeb0",
+        "schema_version": 1,
+        "trial_id": "db03fb83-783c-43f9-a6ee-d228edfbd843"
+      }
+    ],
+    "public.data_lifecycle_authorities": [
+      {
+        "created_at": "2026-09-17T20:17:12.451392+00:00",
+        "data_class": "trial",
+        "deletion_token": null,
+        "environment": "staging",
+        "expires_at": "2026-09-24T20:17:12.451392+00:00",
+        "id": "6cc79931-687e-4ec0-a775-6f19e1c422b6",
+        "metadata": {},
+        "namespace": "loom-staging",
+        "owner_id": "db03fb83-783c-43f9-a6ee-d228edfbd843",
+        "owner_kind": "trial",
+        "pinned": false,
+        "state": "active",
+        "team_id": "0c9a628a-6311-42a0-bb13-4843cb061796"
+      }
+    ],
+    "public.execution_admission_reservations": [
+      {
+        "acquired_at": "2026-09-17T20:17:12.590238+00:00",
+        "attempt": 1,
+        "batch_id": null,
+        "environment": "staging",
+        "execution_class_id": null,
+        "execution_role": "attempt",
+        "id": "01d4f332-50a8-4f81-86c3-803d1bab25f9",
+        "owner_id": "00000000-0000-4000-8000-000000000301",
+        "owner_kind": "protected_worker_claim",
+        "pool_id": "oldlab",
+        "region": null,
+        "release_reason": null,
+        "released_at": null,
+        "state": "active",
+        "team_id": "0c9a628a-6311-42a0-bb13-4843cb061796",
+        "trial_id": "db03fb83-783c-43f9-a6ee-d228edfbd843"
+      }
+    ],
+    "public.slurm_worker_jobs": [
+      {
+        "candidate_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "compose_project": "loom-staging-protected-12345",
+        "created_at": "2026-09-17T20:17:12.096076+00:00",
+        "environment": "staging",
+        "finished_at": null,
+        "id": "00000000-0000-0000-0000-000000000067",
+        "job_id": "12345",
+        "last_reconciled_at": "2026-09-17T20:17:12.096259+00:00",
+        "nodelist": "trt-eai-oldlab-3",
+        "pending_reason": null,
+        "pool_name": "oldlab",
+        "redacted_env": {},
+        "requested_concurrency": 1,
+        "requested_cpus": 1,
+        "requested_gpu_tres": null,
+        "requested_gpus": 0,
+        "requested_memory_mib": null,
+        "requested_pids": null,
+        "sandbox_identity": "staging",
+        "slurm_cluster_id": "oldlab",
+        "slurm_state": "RUNNING",
+        "stale_at": null,
+        "started_at": "2026-09-17T20:17:12.096259+00:00",
+        "state": "running",
+        "submission_error": null,
+        "submitted_at": "2026-09-17T20:17:12.096259+00:00",
+        "updated_at": "2026-09-17T20:17:12.096076+00:00",
+        "worker_id": "00000000-0000-4000-8000-000000000301"
+      }
+    ],
+    "public.tasks": [
+      {
+        "benchmark_id": null,
+        "checksum": "9999999999999999999999999999999999999999999999999999999999999999",
+        "config": {
+          "agent": {
+            "name": "oracle"
+          },
+          "environment": {
+            "docker_image": "alpine",
+            "os": "linux"
+          },
+          "schema_version": "1",
+          "steps": [
+            {
+              "name": "main"
+            }
+          ],
+          "task": {
+            "id": "protected-retry-bac49ddb0cb24b66a3a8d9e166b28d4c",
+            "name": "protected-retry-bac49ddb0cb24b66a3a8d9e166b28d4c"
+          },
+          "verifier": {
+            "name": "pytest"
+          }
+        },
+        "id": "protected-retry-bac49ddb0cb24b66a3a8d9e166b28d4c",
+        "license": null,
+        "registered_at": "2026-09-17T20:17:12.123725+00:00",
+        "source": null,
+        "source_provenance": {},
+        "tags": {},
+        "task_set_id": null
+      }
+    ],
+    "public.team_quotas": [
+      {
+        "allow_private_endpoints": false,
+        "fair_share_weight": 1,
+        "in_flight_count": 0,
+        "license_allowlist": [
+          "MIT",
+          "Apache-2.0",
+          "BSD-3-Clause",
+          "CC-BY-4.0"
+        ],
+        "max_attempts_ceiling": 3,
+        "taskset_max_count": null,
+        "taskset_max_storage_bytes": null,
+        "team_id": "4b3eba8e-0086-49c1-916d-dce4e56e5a6b"
+      },
+      {
+        "allow_private_endpoints": false,
+        "fair_share_weight": 1,
+        "in_flight_count": 0,
+        "license_allowlist": [
+          "MIT",
+          "Apache-2.0",
+          "BSD-3-Clause",
+          "CC-BY-4.0"
+        ],
+        "max_attempts_ceiling": 3,
+        "taskset_max_count": null,
+        "taskset_max_storage_bytes": null,
+        "team_id": "2c9506e1-7d5e-4b49-b532-4b8f0a3f5ea9"
+      },
+      {
+        "allow_private_endpoints": false,
+        "fair_share_weight": 1,
+        "in_flight_count": 1,
+        "license_allowlist": [
+          "MIT",
+          "Apache-2.0",
+          "BSD-3-Clause",
+          "CC-BY-4.0"
+        ],
+        "max_attempts_ceiling": 3,
+        "taskset_max_count": null,
+        "taskset_max_storage_bytes": null,
+        "team_id": "0c9a628a-6311-42a0-bb13-4843cb061796"
+      }
+    ],
+    "public.teams": [
+      {
+        "created_at": "2026-09-17T20:17:05.140984+00:00",
+        "disabled_at": null,
+        "disabled_reason": null,
+        "id": "4b3eba8e-0086-49c1-916d-dce4e56e5a6b",
+        "name": "admin",
+        "public_registration_enabled": false,
+        "submissions_paused_at": null,
+        "submissions_paused_reason": null
+      },
+      {
+        "created_at": "2026-09-17T20:17:05.140984+00:00",
+        "disabled_at": null,
+        "disabled_reason": null,
+        "id": "2c9506e1-7d5e-4b49-b532-4b8f0a3f5ea9",
+        "name": "loom-system-taskset-fence-canary",
+        "public_registration_enabled": false,
+        "submissions_paused_at": null,
+        "submissions_paused_reason": null
+      },
+      {
+        "created_at": "2026-09-17T20:17:12.123725+00:00",
+        "disabled_at": null,
+        "disabled_reason": null,
+        "id": "0c9a628a-6311-42a0-bb13-4843cb061796",
+        "name": "protected-retry-0c9a628a-6311-42a0-bb13-4843cb061796",
+        "public_registration_enabled": false,
+        "submissions_paused_at": null,
+        "submissions_paused_reason": null
+      }
+    ],
+    "public.tokens": [
+      {
+        "created_by_actor": null,
+        "created_by_user_id": "59a2fe8f-ae2d-4348-bea4-9032a3d16fa4",
+        "expires_at": null,
+        "issued_at": "2026-09-17T20:17:12.125391+00:00",
+        "last_seen_at": "2026-09-17T20:17:12.412135+00:00",
+        "last_used_at": "2026-09-17T20:17:12.412135+00:00",
+        "name": null,
+        "revoked_at": null,
+        "scopes": [
+          "submit"
+        ],
+        "team_id": "0c9a628a-6311-42a0-bb13-4843cb061796",
+        "token_hash": "\\x6c684df7d7cf5b2068ef06ce594bb7dd907a031c90474d4ca49d5b1dd30b71cc",
+        "type": "team"
+      },
+      {
+        "created_by_actor": null,
+        "created_by_user_id": null,
+        "expires_at": null,
+        "issued_at": "2026-09-17T20:17:12.112697+00:00",
+        "last_seen_at": "2026-09-17T20:17:12.585306+00:00",
+        "last_used_at": "2026-09-17T20:17:12.585306+00:00",
+        "name": null,
+        "revoked_at": null,
+        "scopes": [
+          "worker:report",
+          "worker:claim"
+        ],
+        "team_id": null,
+        "token_hash": "\\x5d3b2884e67bb1a2d4e5fee399039cfbb29366dd24c55b2ddf6ede5ad6835aab",
+        "type": "worker"
+      }
+    ],
+    "public.trials": [
+      {
+        "attempt_count": 1,
+        "autoscaler_pool_assigned_at": null,
+        "autoscaler_pool_name": null,
+        "batch_id": null,
+        "cancellation_observed_at": null,
+        "cancellation_requested_at": null,
+        "claimed_at": "2026-09-17T20:17:12.590238+00:00",
+        "combination_idx": 0,
+        "config": {
+          "agent_model": null,
+          "agent_name": "oracle",
+          "agent_timeout_multiplier": 1.0,
+          "agent_version": null,
+          "baseline_network_policy_override": null,
+          "delete_env": true,
+          "env_build_timeout_multiplier": 1.0,
+          "extra_mcp_servers": [],
+          "extra_skills": [],
+          "family_run": null,
+          "force_build": false,
+          "model_switch_plan_mode": null,
+          "multi_model": null,
+          "override_agent_timeout_sec": null,
+          "override_env_build_timeout_sec": null,
+          "override_verifier_timeout_sec": null,
+          "request_params": {},
+          "retry": {
+            "backoff": {
+              "base_sec": 30.0,
+              "jitter": 0.2,
+              "max_sec": 600.0,
+              "multiplier": 2.0
+            },
+            "max_attempts": 3,
+            "retry_on": [
+              "gateway_error",
+              "provider_transport_disconnect",
+              "node_setup_health"
+            ]
+          },
+          "schema_version": "1",
+          "skip_verifier": false,
+          "submit_priority": 100,
+          "verifier_env_mode": null,
+          "verifier_timeout_multiplier": 1.0,
+          "workspace_staging_policy_name": null
+        },
+        "execution_route_generation": 0,
+        "execution_route_json": null,
+        "execution_route_pool_name": null,
+        "execution_route_sha256": null,
+        "failure_message": null,
+        "failure_reason": null,
+        "family_key": null,
+        "finished_at": null,
+        "id": "db03fb83-783c-43f9-a6ee-d228edfbd843",
+        "idempotency_key": null,
+        "legacy_claim_id": null,
+        "lifecycle_authority_id": "6cc79931-687e-4ec0-a775-6f19e1c422b6",
+        "next_attempt_at": null,
+        "pre_start_heartbeat_at": null,
+        "provider_connection_id": null,
+        "provider_model_id": null,
+        "requires_caps": {
+          "backend": "docker",
+          "cpu_arch": "x86_64",
+          "gpu_vendor": "none",
+          "network_policies": [
+            "public"
+          ],
+          "os": "linux",
+          "terminus2_model_switch": false,
+          "worker_pool": "oldlab"
+        },
+        "result": null,
+        "sample_idx": 0,
+        "share_status": "shared",
+        "source_provenance": [],
+        "started_at": null,
+        "state": "claimed",
+        "submit_priority": 100,
+        "submitted_at": "2026-09-17T20:17:12.451392+00:00",
+        "submitted_by_user_id": "59a2fe8f-ae2d-4348-bea4-9032a3d16fa4",
+        "task_id": "protected-retry-bac49ddb0cb24b66a3a8d9e166b28d4c",
+        "team_id": "0c9a628a-6311-42a0-bb13-4843cb061796",
+        "trajectory_index": null,
+        "usage_attributed_actor": "user:59a2fe8f-ae2d-4348-bea4-9032a3d16fa4",
+        "usage_attributed_user_id": "59a2fe8f-ae2d-4348-bea4-9032a3d16fa4",
+        "visibility": "org",
+        "worker_id": "00000000-0000-4000-8000-000000000301"
+      }
+    ],
+    "public.users": [
+      {
+        "created_at": "2026-09-17T20:17:05.140984+00:00",
+        "disabled_at": null,
+        "display_name": "Qianyi",
+        "email": null,
+        "id": "f5b93eb2-22b9-4d3c-ba95-ac6c62b8f6c1",
+        "is_platform_admin": true,
+        "last_login_at": null,
+        "password_hash": null,
+        "password_set_at": null,
+        "status": "pending_setup",
+        "username": "Qianyi",
+        "username_normalized": "qianyi"
+      },
+      {
+        "created_at": "2026-09-17T20:17:05.140984+00:00",
+        "disabled_at": null,
+        "display_name": "Hongjian",
+        "email": null,
+        "id": "dac6a052-a16a-478d-968c-84445ca59d58",
+        "is_platform_admin": true,
+        "last_login_at": null,
+        "password_hash": null,
+        "password_set_at": null,
+        "status": "pending_setup",
+        "username": "Hongjian",
+        "username_normalized": "hongjian"
+      },
+      {
+        "created_at": "2026-09-17T20:17:05.140984+00:00",
+        "disabled_at": null,
+        "display_name": "Loom Pipeline acceptance controller",
+        "email": null,
+        "id": "00000000-0000-4000-8000-000000001216",
+        "is_platform_admin": false,
+        "last_login_at": null,
+        "password_hash": null,
+        "password_set_at": null,
+        "status": "active",
+        "username": "loom-pipeline-acceptance-controller",
+        "username_normalized": "loom-pipeline-acceptance-controller"
+      },
+      {
+        "created_at": "2026-09-17T20:17:12.123725+00:00",
+        "disabled_at": null,
+        "display_name": null,
+        "email": null,
+        "id": "59a2fe8f-ae2d-4348-bea4-9032a3d16fa4",
+        "is_platform_admin": false,
+        "last_login_at": null,
+        "password_hash": null,
+        "password_set_at": null,
+        "status": "active",
+        "username": "protected-retry-59a2fe8f",
+        "username_normalized": "protected-retry-59a2fe8f"
+      }
+    ],
+    "public.workers": [
+      {
+        "auth_token_hash": "\\x371ffeee0b28ccdcc9e75af327c8309e97f0d8451cd676bb05962ba6f54e2c75",
+        "capabilities": [
+          {
+            "dynamic_network_policy": false,
+            "gpu_vendor": "none",
+            "mounted_fs": false,
+            "network_policies": [
+              "public"
+            ],
+            "os": "linux",
+            "resource_modes": [
+              "auto"
+            ]
+          }
+        ],
+        "capability_snapshot_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "capability_snapshot_json": null,
+        "drain_owner": null,
+        "drain_reason": null,
+        "drain_requested_at": null,
+        "drain_state": "active",
+        "hostname": "trt-eai-oldlab-3",
+        "id": "00000000-0000-4000-8000-000000000301",
+        "input_cache_capacity_bytes": 0,
+        "input_cache_ready_bytes": 0,
+        "input_cache_reserved_bytes": 0,
+        "last_seen_at": "2026-09-17T20:17:12.096259+00:00",
+        "lease_epoch": 1,
+        "max_concurrent": 1,
+        "pool_name": "oldlab",
+        "registered_at": "2026-09-17T20:17:12.096259+00:00",
+        "slurm_gpu_allocation_evidence_digest": null,
+        "slurm_gpu_allocation_evidence_json": null,
+        "status": "active",
+        "supported_work_kinds": [
+          "trial",
+          "execution_attempt"
+        ],
+        "version": "0.0.1"
+      }
+    ]
+  },
+  "trial_id": "db03fb83-783c-43f9-a6ee-d228edfbd843",
+  "worker_id": "00000000-0000-4000-8000-000000000301"
+}

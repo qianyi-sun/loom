@@ -2585,7 +2585,6 @@ async def test_reservation_cannot_reopen_cancelled_trial(
             cached = await reserve_session.get(Trial, trial_id) if cached_trial else None
             cancelled = await cancel_trial_under_authority(
                 session_factory=sessions,
-                protected_store=None,
                 trial_id=trial_id,
                 team_id=None,
             )
@@ -2653,7 +2652,6 @@ async def test_retry_cannot_reopen_cancelled_trial_after_timeout_reclaim(
                 await session.commit()
             cancelled = await cancel_trial_under_authority(
                 session_factory=sessions,
-                protected_store=None,
                 trial_id=trial_id,
                 team_id=None,
             )
@@ -3005,7 +3003,6 @@ async def test_service_step_token_freezes_identity_and_persists_audit(
                 ttl_sec=600,
             ),
             principal=auth,
-            protected_worker_session=None,
             execution_lease_id=lease.id,
             execution_generation=lease.generation,
         )

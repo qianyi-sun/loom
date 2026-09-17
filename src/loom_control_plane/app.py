@@ -15,6 +15,7 @@ from loom.admin_secret import AdminSecretVerifier, load_optional_admin_secret_ve
 from loom.db.schema_startup import assert_schema_at_head
 from loom.execution_image_admission import ImageAdmissionKeyring
 from loom.pipeline.artifact_commit import ArtifactCommitService
+from loom.service_execution_backend import local_execution_enabled
 from loom.storage_credentials import build_s3_client
 from loom.trajectory.source_spool import ServiceExecutionSourceConfig
 from loom.trajectory.storage import MinioObjectStore
@@ -32,10 +33,6 @@ from loom_control_plane.input_materialization_evidence import (
 )
 from loom_control_plane.live_preview import run_live_preview_reconciler_loop
 from loom_control_plane.metrics_refresher import run_metrics_refresher_loop
-from loom_control_plane.protected_worker_session import (
-    ProtectedWorkerSessionStore,
-    load_protected_worker_runtime_db_url,
-)
 from loom_control_plane.retry_exhausted_sweeper import (
     run_retry_exhausted_sweeper_loop,
 )
@@ -93,8 +90,6 @@ def create_app(
     task_image_execution_factory: Callable[[AsyncEngine], TaskImageExecutionService] | None = None,
 ) -> FastAPI:
     execution_config_file = settings.task_image_execution_config_file
-    if (task_image_execution_factory is not None or execution_config_file is not None) and settings.protected_worker_runtime_db_url_file is not None:
-        raise ValueError("signed legacy execution cannot replace protected worker authority")
     if task_image_execution_factory is not None and execution_config_file is not None:
         raise ValueError("execution configuration conflicts with injected factory")
     execution_config = load_execution_admission_settings(execution_config_file) if execution_config_file is not None else None
@@ -115,25 +110,6 @@ def create_app(
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         admin_secret_verifier = _load_admin_secret_verifier(settings)
 
-        protected_worker_runtime_engine: AsyncEngine | None = None
-        protected_worker_session_store: ProtectedWorkerSessionStore | None = None
-        if settings.protected_worker_runtime_db_url_file is not None:
-            protected_worker_runtime_engine = create_async_engine(
-                load_protected_worker_runtime_db_url(settings.protected_worker_runtime_db_url_file),
-                isolation_level="SERIALIZABLE",
-                pool_pre_ping=True,
-                pool_size=5,
-                max_overflow=5,
-                pool_timeout=settings.db_pool_timeout_sec,
-            )
-            protected_worker_session_store = ProtectedWorkerSessionStore(
-                async_sessionmaker(
-                    protected_worker_runtime_engine,
-                    expire_on_commit=False,
-                )
-            )
-            resources.push_async_callback(protected_worker_runtime_engine.dispose)
-            await protected_worker_session_store.assert_ready()
 
         minio_client = build_s3_client(
             endpoint_url=settings.minio_endpoint,
@@ -152,7 +128,6 @@ def create_app(
             app.state.task_image_execution = await resources.enter_async_context(configured_execution_service(engine, execution_config))
         app.state.admin_secret_verifier = admin_secret_verifier
         app.state.minio_client = minio_client
-        app.state.protected_worker_session_store = protected_worker_session_store
 
         artifact_store = MinioObjectStore(
             endpoint_url=settings.minio_endpoint,
@@ -314,7 +289,8 @@ def create_app(
     app.include_router(trials.router)
     app.include_router(resource_usage.router)
     app.include_router(service_executions.router)
-    app.include_router(workers.router)
+    if local_execution_enabled():
+        app.include_router(workers.router)
     app.include_router(state.router)
     app.include_router(trajectory.router)
     app.include_router(artifacts.router)

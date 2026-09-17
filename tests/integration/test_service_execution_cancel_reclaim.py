@@ -52,7 +52,6 @@ async def test_stale_claim_reclaim_preserves_service_execution_owner(
             assert (
                 await cancel_trial_under_authority(
                     session_factory=sessions,
-                    protected_store=None,
                     trial_id=trial_id,
                     team_id=None,
                 )
@@ -106,7 +105,6 @@ async def test_normal_cancel_replay_repairs_queued_cancel_with_deleted_lease(
         assert (
             await cancel_trial_under_authority(
                 session_factory=sessions,
-                protected_store=None,
                 trial_id=trial_id,
                 team_id=None,
             )

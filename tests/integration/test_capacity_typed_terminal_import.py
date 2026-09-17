@@ -15,85 +15,17 @@ from sqlalchemy.exc import DBAPIError
 from loom_capacity_manager.executable_contracts import canonical_executable_digest
 from loom_capacity_manager.typed_inventory_contracts import parse_terminal_inventory_evidence
 from tests.integration.test_capacity_guard_migrations import _guard_config
-from tests.integration.test_capacity_protected_worker_session import (
+from tests.support.historical_capacity import (
     _import_terminal_inventory_payload,
     _seed_claimed_protected_trial,
-    _terminal_inventory_evidence,
     _value,
+    restore_claim,
+    typed_payload,
 )
 
 
-def typed_payload(seeded, *, owner=None):
-    value = _terminal_inventory_evidence(seeded).model_dump(mode="json")
-    record = value["record"]
-    proof = record["ownership_proof"]
-    metadata = proof["metadata"]
-    for node in (value, record, proof, metadata):
-        node["schema_version"] = 3
-    binding = value["binding"]
-    metadata["launch_profile_sha256"] = "a" * 64
-    metadata["subject_authority"] = dict(
-        schema_version=3,
-        source="immutable-base",
-        purpose="application-worker",
-        configuration=dict(
-            schema_version=1,
-            scope="subject",
-            subject_id=binding["subject_id"],
-            subject_incarnation=binding["subject_incarnation"],
-            generation=1,
-            digest="b" * 64,
-        ),
-        acknowledgement_sha256="c" * 64,
-        membership=None,
-    )
-    if owner is not None:
-        metadata["subject_authority"].update(
-            source="personal-membership",
-            membership=dict(
-                schema_version=3,
-                namespace_id=str(UUID(int=990012)),
-                owner_id=str(owner),
-                revision=1,
-                head_sha256="d" * 64,
-                execution_manifest_sha256=binding["execution"]["execution_manifest_sha256"],
-            ),
-        )
-    return parse_terminal_inventory_evidence(json.dumps(value)).model_dump(mode="json")
-
-
 def seed_delegated_claim(database, monkeypatch, tmp_path, *, owner):
-    from tests.integration import test_capacity_protected_worker_session as worker_module
-
-    # Change fixture inputs before its real protected registration/claim writes;
-    # never mutate a live claim or manufacture an admitted database row.
-    original_bootstrap = worker_module._bootstrap
-    original_seed = worker_module._seed_protected_worker
-    original_projection = worker_module._public_registration_payload
-
-    def bootstrap(*args):
-        value = original_bootstrap(*args)
-        return value.model_copy(
-            update={
-                "binding": value.binding.model_copy(
-                    update={
-                        "account_id": f"dev-owner-{owner.hex}",
-                    }
-                )
-            }
-        )
-
-    async def seed(database):
-        return await original_seed(database, environment_id="dev-alice", tier_id="development")
-
-    monkeypatch.setattr(worker_module, "_bootstrap", bootstrap)
-    monkeypatch.setattr(worker_module, "_seed_protected_worker", seed)
-    monkeypatch.setattr(
-        worker_module,
-        "_public_registration_payload",
-        lambda: original_projection(sandbox_identity="loom-dev-alice"),
-    )
-    return _seed_claimed_protected_trial(database, monkeypatch, tmp_path)
+    return restore_claim(database, delegated=True)
 
 
 @pytest.mark.parametrize("delegated", (False, True))

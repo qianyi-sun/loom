@@ -18,7 +18,7 @@ from loom_cli.rollout.operator.protected_staging_capacity_database_component imp
 )
 from tests.integration.test_capacity_agent_migrations import _guard_config, _value
 from tests.integration.test_capacity_agent_store import _initialize_and_register, _seed_trial
-from tests.integration.test_capacity_protected_worker_session import _seed_claimed_protected_trial
+from tests.support.historical_capacity import _seed_claimed_protected_trial
 
 _BRIDGES = (
     (

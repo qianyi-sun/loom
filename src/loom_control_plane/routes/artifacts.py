@@ -9,10 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select
 
 from loom.db.schema import Trial as TrialRow
-from loom_control_plane.protected_worker_session import (
-    ProtectedPrincipalBodyTrialSession,
-    ProtectedWorkerPrincipal,
-)
+from loom_control_plane.request_auth import RequestPrincipal
 from loom_control_plane.routes.execution_fence import (
     OptionalExecutionGenerationHeader,
     OptionalExecutionLeaseIdHeader,
@@ -51,8 +48,7 @@ def _validate_key(key: str) -> None:
 async def mint_artifact_upload_url(
     request: Request,
     payload: dict[str, Any],
-    principal: ProtectedWorkerPrincipal,
-    protected_worker_session: ProtectedPrincipalBodyTrialSession,
+    principal: RequestPrincipal,
     execution_lease_id: OptionalExecutionLeaseIdHeader = None,
     execution_generation: OptionalExecutionGenerationHeader = None,
 ) -> dict[str, Any]:
