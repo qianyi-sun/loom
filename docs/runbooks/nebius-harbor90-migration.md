@@ -81,8 +81,21 @@ loom datasets publish-local /protected/harbor90-x86 \
   --minio-access-key env:LOOM_MINIO_ACCESS_KEY \
   --minio-secret-key env:LOOM_MINIO_SECRET_KEY \
   --bucket "$LOOM_CATALOG_BUCKET" \
+  --minio-region "$LOOM_MINIO_REGION" \
   --imported-by nebius-harbor90-x86-migration
 ```
+
+Use the existing catalog bucket. Publication defaults to object operations only,
+so a Nebius `storage.object-editor` identity does not need `HeadBucket` or bucket
+creation permissions. Do not use `--create-bucket` for this migration; that flag
+is only for explicit bootstrap with a bucket-capable identity. Actual object
+write failures still abort the database transaction.
+
+Both `publish-local` and `audit --verify-bundles` take `--minio-region`, defaulting
+to `LOOM_MINIO_REGION`, then `LOOM_SVC_MINIO_REGION`, then `us-east-1`. Set the
+actual Nebius region. When invoking the CLI in the control-plane container,
+map `LOOM_CP_MINIO_REGION` along with endpoint/access/secret environment values
+to the corresponding `LOOM_MINIO_*` names without printing their values.
 
 Use the established protected operator identity and its object-store endpoint;
 credentials must not appear as literal arguments. This is a catalog/database and

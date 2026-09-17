@@ -99,6 +99,9 @@ instruction_file = "instruction.md"
         return result
 
     try:
+        # Infrastructure owns bucket creation; ordinary publication uses the
+        # existing bucket, just as it does in the Nebius environment.
+        await store.ensure_bucket(bucket)
         await publish()
         async with sessions() as session:
             task = await session.get(TaskRow, "native-benchmark/alpha")
