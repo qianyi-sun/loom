@@ -273,8 +273,6 @@ jobs:
           # The broker allocates the whole request in order and freezes it.
           # Reserve scarce normal slots for the critical test paths before
           # short checks consume the five-slot pool (#1793).
-          if gate == "full" and os.environ["INTEGRATION"] == "true":
-              keys.extend(f"integration-{index}-of-4" for index in range(1, 5))
           if gate == "full" and os.environ["DOCS_ONLY"] != "true":
               keys.extend([
                   "tests-root-1-of-2",
@@ -1014,9 +1012,10 @@ jobs:
   # integration shards need bounded headroom for tests, coverage and cleanup.
   integration:
     name: integration (${{ matrix.shard }})
-    runs-on: >-
-      ${{ fromJSON(needs.ci-route.outputs.routes)[format('integration-{0}', matrix.shard)] }}
-    needs: [workflow-plan, ci-route]
+    # The pinned trusted routing action knows only the former two-shard keys.
+    # Keep new shards hosted until its normal protected contract promotion.
+    runs-on: ubuntu-latest
+    needs: [workflow-plan]
     timeout-minutes: 75
     if: >-
       needs.workflow-plan.outputs.gate_mode == 'full' &&

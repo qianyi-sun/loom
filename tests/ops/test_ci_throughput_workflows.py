@@ -1838,7 +1838,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     assert "gate_mode == 'full'" in jobs["fast-checks"]["if"]
     assert "docs_only != 'true'" in jobs["fast-checks"]["if"]
     assert "gate_mode == 'preflight'" not in jobs["fast-checks"]["if"]
-    assert set(jobs["integration"]["needs"]) == {"workflow-plan", "ci-route"}
+    assert set(jobs["integration"]["needs"]) == {"workflow-plan"}
     assert set(jobs["integration-docker"]["needs"]) == {"workflow-plan", "ci-route"}
     assert "docs_only != 'true'" in jobs["go-checks"]["if"]
     assert "gate_mode == 'full'" in jobs["integration"]["if"]

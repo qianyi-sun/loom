@@ -14,10 +14,6 @@ from loom_control_plane import ci_runner_lease_broker as leases
 ROOT = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 9, 4, tzinfo=UTC)
 CRITICAL_JOBS = (
-    "integration-1-of-4",
-    "integration-2-of-4",
-    "integration-3-of-4",
-    "integration-4-of-4",
     "tests-root-1-of-2",
     "tests-root-2-of-2",
 )
@@ -124,16 +120,13 @@ def test_priority_preserves_selected_job_set(
         "go-checks",
         "runtime-payload",
     }
-    if integration == "true":
-        expected.update(CRITICAL_JOBS[:4])
     if web == "true":
         expected.add("web-checks")
     if docker == "true":
         expected.add("integration-docker")
     assert set(keys) == expected
     assert len(keys) == len(expected)
-    if integration == "false":
-        assert keys[:2] == CRITICAL_JOBS[4:]
+    assert keys[:2] == CRITICAL_JOBS
 
 
 @pytest.mark.parametrize("web", ["true", "false"])

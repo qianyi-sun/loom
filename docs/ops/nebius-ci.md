@@ -73,7 +73,8 @@ The successful PR #1973 head `69359261` ran its two integration shards in
 new tests. This is a planning estimate, not a measured speedup. The 75-minute
 job budget retains room for optional coverage and runner variation.
 
-Runner routing recognizes both the old two-shard keys and the new four-shard
-keys so in-flight runs remain interpretable. The trusted runner controller must
-adopt this contract through its normal release process; until then the existing
-bounded fallback selects GitHub-hosted runners without changing admission rules.
+The four integration shards use GitHub-hosted runners directly. The pinned
+trusted routing action recognizes only the former two-shard keys; promoting a
+new routing contract requires its normal protected release. Other eligible jobs
+retain OLDLAB routing, with root tests first in the available slot order. This
+change neither promotes unmerged routing code nor requires a controller rollout.
