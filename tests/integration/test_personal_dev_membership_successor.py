@@ -418,7 +418,7 @@ async def test_successor_migration_preserves_history_and_rejects_lossy_downgrade
             await asyncio.to_thread(command.upgrade, cfg, "head")
         assert await snapshot() == before
         async with sessions() as session:
-            assert (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0148"
+            assert (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0151"
             # Existing historical outcomes never gain invented successor authority.
             parent = await SqlAlchemyPersonalDevEnvironmentAuthority(session).get_operation(claim.operation.id)
             assert (parent.membership_successor_operation_id is not None) is with_successor

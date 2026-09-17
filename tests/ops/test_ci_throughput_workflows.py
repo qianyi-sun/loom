@@ -1838,7 +1838,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     assert "gate_mode == 'full'" in jobs["fast-checks"]["if"]
     assert "docs_only != 'true'" in jobs["fast-checks"]["if"]
     assert "gate_mode == 'preflight'" not in jobs["fast-checks"]["if"]
-    assert set(jobs["integration"]["needs"]) == {"workflow-plan", "ci-route"}
+    assert set(jobs["integration"]["needs"]) == {"workflow-plan"}
     assert set(jobs["integration-docker"]["needs"]) == {"workflow-plan", "ci-route"}
     assert "docs_only != 'true'" in jobs["go-checks"]["if"]
     assert "gate_mode == 'full'" in jobs["integration"]["if"]
@@ -1982,8 +1982,8 @@ def test_python_test_shards_are_complete_and_non_overlapping() -> None:
 
     integration_matrix = jobs["integration"]["strategy"]["matrix"]["include"]
     assert integration_matrix == [
-        {"shard": "1-of-2", "shard_index": 0},
-        {"shard": "2-of-2", "shard_index": 1},
+        {"shard": f"{index + 1}-of-4", "shard_index": index}
+        for index in range(4)
     ]
     integration_paths = component_ownership.test_paths_for_lane(
         manifest,
@@ -2003,18 +2003,10 @@ def test_python_test_shards_are_complete_and_non_overlapping() -> None:
         )
         for shard in integration_matrix
     ]
-    assert set(integration_shards[0]).isdisjoint(integration_shards[1])
+    for index, shard in enumerate(integration_shards):
+        assert shard
+        assert all(set(shard).isdisjoint(other) for other in integration_shards[index + 1:])
     assert set().union(*map(set, integration_shards)) == set(integration_paths)
-    assert {
-        "tests/integration/test_cp_step_tokens.py",
-        "tests/integration/test_executable_global_capacity_bridge.py",
-        "tests/integration/test_capacity_manager_migrate.py",
-        "tests/integration/test_migration_task_set_materialization_jobs.py",
-        "tests/integration/test_personal_dev_build_guard_http.py",
-        "tests/integration/test_capacity_manager_execution_store.py",
-        "tests/integration/test_capacity_final_release_witness.py",
-        "tests/integration/test_capacity_typed_terminal_sql.py",
-    } <= set(integration_shards[1])
     auth_path = "tests/integration/test_username_password_auth.py"
     schema_path = "tests/integration/test_username_password_schema.py"
     assert any(auth_path in shard and schema_path in shard for shard in integration_shards)
@@ -2053,10 +2045,9 @@ def test_root_test_shard_timeout_has_bounded_growth_headroom() -> None:
 def test_integration_shard_timeout_has_bounded_growth_headroom() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
 
-    # Run34616503769 shard1 was cancelled at99% by its40-minute job limit,
-    # while still making normal test progress. Preserve room for completion,
-    # coverage upload and cleanup without reducing the selected test set.
-    assert 50 <= workflow["jobs"]["integration"]["timeout-minutes"] <= 60
+    # Four measured shards project ~39 minutes each; retain room for optional
+    # coverage instrumentation and hosted-runner variance without a two-hour job.
+    assert 60 <= workflow["jobs"]["integration"]["timeout-minutes"] <= 75
 
 
 def test_ci_supports_merge_queue_merge_group_event() -> None:
@@ -2371,3 +2362,77 @@ def test_lint_and_static_does_not_restore_opaque_analysis_state() -> None:
     steps = workflow["jobs"]["lint-and-static"]["steps"]
     assert all(not str(step.get("uses", "")).startswith("actions/cache@") for step in steps)
     assert "Cache mypy" not in {step.get("name") for step in steps}
+
+
+@pytest.mark.parametrize("lane", ["tests-root", "tests-packages", "integration"])
+@pytest.mark.parametrize("coverage_enabled", ["false", "true"])
+@pytest.mark.parametrize("test_exit", [0, 7])
+def test_pytest_workflow_preserves_tests_and_failures_with_optional_integration_coverage(
+    tmp_path: Path, lane: str, coverage_enabled: str, test_exit: int,
+) -> None:
+    job = _workflow(".github/workflows/ci.yml")["jobs"][lane]
+    step = next(step for step in job["steps"] if step.get("name", "").startswith("Pytest"))
+    uv = tmp_path / "uv"
+    uv.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "if 'test-paths' in sys.argv:\n"
+        "    print('tests/selected_first.py\\ntests/selected_second.py')\n"
+        "elif 'pytest' in sys.argv:\n"
+        "    Path(os.environ['ARGV_FILE']).write_text(json.dumps(sys.argv[1:]))\n"
+        "    sys.exit(int(os.environ['TEST_EXIT']))\n"
+        "else:\n"
+        "    sys.exit(99)\n",
+    )
+    uv.chmod(0o755)
+    argv_file = tmp_path / "argv.json"
+    result = subprocess.run(
+        ["bash", "-c", step["run"]], cwd=REPO_ROOT, capture_output=True, text=True,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}",
+             "RUNNER_TEMP": str(tmp_path), "SHARD_INDEX": "0", "SHARD_COUNT": "2",
+             "COVERAGE_ENABLED": coverage_enabled, "ARGV_FILE": str(argv_file),
+             "TEST_EXIT": str(test_exit)},
+    )
+    assert result.returncode == test_exit, result.stderr
+    args = json.loads(argv_file.read_text())
+    assert [arg for arg in args if arg.startswith("tests/")] == [
+        "tests/selected_first.py", "tests/selected_second.py",
+    ]
+    instrumented = lane != "integration" or coverage_enabled == "true"
+    assert ("--cov=src" in args) is instrumented
+    assert ("--cov=packages" in args) is instrumented
+    assert ("--cov-report=" in args) is instrumented
+    assert "--cov-report=term" not in args and "--cov-report=xml" not in args
+    if not instrumented:
+        assert args[args.index("-p") + 1] == "no:cov"
+    if lane == "integration":
+        assert args[args.index("-m") + 1] == "not docker"
+        assert job["env"]["COVERAGE_ENABLED"] == "${{ needs.workflow-plan.outputs.coverage_summary }}"
+        upload = next(s for s in job["steps"] if s.get("name") == "Upload integration coverage data")
+        assert "env.COVERAGE_ENABLED == 'true'" in upload["if"]
+
+
+def test_manual_coverage_request_selects_integration_through_workflow_planner(tmp_path: Path) -> None:
+    workflow = _workflow(".github/workflows/ci.yml")
+    assert _workflow_on(workflow)["workflow_dispatch"]["inputs"]["coverage_summary"]["default"] is False
+    step = next(s for s in workflow["jobs"]["workflow-plan"]["steps"] if s.get("id") == "plan")
+    assert step["env"]["DISPATCH_COVERAGE_SUMMARY"] == "${{ inputs.coverage_summary }}"
+    git = tmp_path / "git"
+    git.write_text("#!/bin/sh\nprintf '%s\\n' docs/user-guide.md\n")
+    git.chmod(0o755)
+    output = tmp_path / "output"
+    script = step["run"].replace("/tmp/loom-changed-files.txt", str(tmp_path / "changes"))
+    result = subprocess.run(
+        ["bash", "-c", script], cwd=REPO_ROOT, capture_output=True, text=True,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}",
+             "EVENT_NAME": "workflow_dispatch", "HEAD_SHA": "a" * 40,
+             "PR_LABELS_JSON": "[]", "PR_ACTION": "", "PR_ACTION_LABEL": "",
+             "PR_DRAFT": "false", "PR_BASE_CHANGED": "false",
+             "DISPATCH_INTEGRATION": "false", "DISPATCH_INTEGRATION_DOCKER": "false",
+             "DISPATCH_COVERAGE_SUMMARY": "true", "GITHUB_OUTPUT": str(output)},
+    )
+    assert result.returncode == 0, result.stderr
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert values["coverage_summary"] == values["integration"] == "true"
+    assert values["docs_only"] == "false"

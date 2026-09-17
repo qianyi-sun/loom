@@ -40,6 +40,7 @@ from .config import OperatorConfig, candidate_sha_from_runner_repo
 from .envelope import fixed_operator_config_path
 from .model import validate_safe_identifier
 from .policy import sanitized_child_environment
+from .protected_application_guard_retention import application_guard_is_retained
 from .readonly_database_client import (
     READONLY_DATABASE_STATEMENT_TIMEOUT_SECONDS,
     READONLY_DATABASE_TUNNEL_TEARDOWN_BOUND_SECONDS,
@@ -111,6 +112,10 @@ _HEALTH_SQL = (
 
 class MutationGuardError(RuntimeError):
     """Raised when request-bound mutation coordination cannot be proven safe."""
+
+
+class MutationGuardRetainedError(MutationGuardError):
+    """Release refused by pending handoff; never evidence that recovery completed."""
 
 
 class CommandResult(Protocol):
@@ -1008,7 +1013,9 @@ class MutationGuardManager:
                 ) from validation_error
             raise
 
-    def assert_ready(self, request_id: str) -> MutationGuardEvidence:
+    def assert_ready(
+        self, request_id: str, *, candidate_config: OperatorConfig | None = None,
+    ) -> MutationGuardEvidence:
         status = self.systemd.show_mutation_guard(request_id)
         if status is None or not status.is_running or status.main_pid < 1:
             raise MutationGuardError("mutation guard unit is not ready")
@@ -1018,7 +1025,22 @@ class MutationGuardManager:
         )
         if evidence.guard_pid != status.main_pid:
             raise MutationGuardError("mutation guard process identity drifted")
-        return self._validate(evidence, request_id=request_id, state="ready")
+        candidate_sha, candidate_tree = self.resolve_candidate(
+            self.config if candidate_config is None else candidate_config,
+        )
+        return self._validate(evidence, request_id=request_id, state="ready",
+                              candidate_sha=candidate_sha, candidate_tree=candidate_tree)
+
+    def observe_retained_epoch(
+        self, guard: MutationGuardEvidence, *, candidate_config: OperatorConfig | None = None,
+    ) -> int:
+        """Read live epoch without a new connection while admission is closed."""
+        from .protected_application_guard_probe import probe_retained_epoch
+
+        return probe_retained_epoch(
+            self.config, guard=guard, service_uid=self.service_uid,
+            assert_ready=lambda: self.assert_ready(guard.request_id, candidate_config=candidate_config),
+        )
 
     def release(
         self,
@@ -1027,6 +1049,10 @@ class MutationGuardManager:
         candidate_config: OperatorConfig | None = None,
     ) -> MutationGuardEvidence:
         selected_config = self.config if candidate_config is None else candidate_config
+        if application_guard_is_retained(
+            self.config.state_root, request_id=request_id, service_uid=self.service_uid,
+        ):
+            raise MutationGuardRetainedError("application handoff still retains the original mutation guard")
         candidate_sha, candidate_tree = self.resolve_candidate(selected_config)
         evidence = self.systemd.stop_mutation_guard(
             request_id,
@@ -1217,6 +1243,11 @@ def reconcile_orphaned_guard(
         raise MutationGuardError("orphaned mutation guard released evidence contradicts suspension")
     if final_evidence != initial_evidence:
         raise MutationGuardError("orphaned mutation guard evidence changed during recovery")
+    if application_guard_is_retained(
+        config.state_root, request_id=request_id, service_uid=service_uid,
+        guard=final_evidence,
+    ):
+        raise MutationGuardError("application handoff retains the orphaned mutation guard freeze")
     _restore_cronjob(
         config,
         run,
@@ -1296,6 +1327,7 @@ def hold_request_guard(
     acquired = False
     unsafe_loss = False
     ready_published = False
+    application_retention_seen: set[str] = set()
     ready: MutationGuardEvidence | None = None
     try:
         _require_before_readiness_deadline(
@@ -1449,6 +1481,26 @@ def hold_request_guard(
                         if not math.isfinite(now):
                             unsafe_loss = True
                             raise MutationGuardError("mutation guard clock authority was lost")
+                        if application_guard_is_retained(
+                            config.state_root, request_id=request_id, service_uid=service_uid,
+                            guard=ready, acknowledge=True,
+                            observed_components=application_retention_seen,
+                        ):
+                            if now >= deadline_monotonic:
+                                unsafe_loss = True
+                                raise MutationGuardError(
+                                    "mutation guard deadline expired during retained application handoff"
+                                )
+                            from .protected_application_guard_probe import (
+                                answer_retained_epoch_probe,
+                            )
+
+                            answer_retained_epoch_probe(
+                                config, guard=ready, service_uid=service_uid, query=query,
+                                assert_healthy=lambda: _require_lock_health(query, backend_pid=backend_pid),
+                            )
+                            sleep(1.0)
+                            continue
                         if stop_requested():
                             break
                         if now >= deadline_monotonic:
@@ -1700,6 +1752,7 @@ __all__ = [
     "MutationGuardError",
     "MutationGuardEvidence",
     "MutationGuardManager",
+    "MutationGuardRetainedError",
     "guard_evidence_path",
     "hold_request_guard",
     "main",

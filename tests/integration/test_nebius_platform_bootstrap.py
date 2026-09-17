@@ -36,6 +36,7 @@ async def _exercise_native_builder_role(database: str) -> None:
 
     from loom.db.schema import (
         Batch,
+        TaskImageCapacityWait,
         TaskImageMaterialization,
         TaskImageMaterializationAttempt,
         TaskImagePublicationEvidence,
@@ -43,6 +44,7 @@ async def _exercise_native_builder_role(database: str) -> None:
         TrialTaskImageMaterialization,
     )
     from loom_control_plane.task_image_capacity import reserve_native_task_image_capacity
+    from loom_control_plane.task_image_capacity_wait import remember_capacity_wait
     from loom_control_plane.task_image_materializations import (
         claim_task_image_materialization,
         complete_task_image_materialization,
@@ -51,6 +53,7 @@ async def _exercise_native_builder_role(database: str) -> None:
         heartbeat_task_image_materialization,
         start_task_image_materialization,
     )
+    from loom_execution_capacity_collector.contracts import ResourceTotals
     from tests.integration.test_service_execution_leases import _seed_ready_trial
 
     owner_engine = create_async_engine(make_url(database).set(drivername="postgresql+psycopg"))
@@ -87,6 +90,16 @@ async def _exercise_native_builder_role(database: str) -> None:
                 session.add(TrialTaskImageMaterialization(trial_id=trial_id, materialization_id=image.id))
                 image_id = image.id
             async with actuators() as session, session.begin():
+                for _ in range(2):
+                    await remember_capacity_wait(
+                        session, target_id=target.target_id, materialization_id=image_id,
+                        lease_epoch=0, pool_id=target.logical_pool_id,
+                        resources=ResourceTotals(cpu_millis=1000, memory_mib=1024, storage_mib=2048),
+                        now=datetime.now(UTC),
+                    )
+                wait = await session.get(TaskImageCapacityWait, target.target_id)
+                assert wait is not None and wait.materialization_id == image_id
+            async with actuators() as session, session.begin():
                 row = await claim_task_image_materialization(
                     session, builder_id="native-role", cpu_arch="x86_64", nebius_pool_id=target.logical_pool_id,
                 )
@@ -104,6 +117,9 @@ async def _exercise_native_builder_role(database: str) -> None:
                 await session.flush()
                 reserved = await reserve_native_task_image_capacity(session, attempt_id=attempt.id)
                 assert reserved["capacity_reserved_at"]
+                wait = await session.get(TaskImageCapacityWait, target.target_id)
+                assert wait is not None
+                await session.delete(wait)
                 ownership = {"materialization_id": image_id, "builder_id": "native-role", "lease_epoch": row.lease_epoch}
                 await start_task_image_materialization(session, **ownership)
                 await heartbeat_task_image_materialization(session, **ownership)
@@ -243,6 +259,14 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
             connection.rollback()
             for table in ("task_image_materializations", "trial_task_image_materializations"):
                 connection.execute("SELECT 1 FROM " + table + " LIMIT 0")
+            if role == "actuator":
+                for privilege in ("SELECT", "INSERT", "UPDATE"):
+                    assert connection.execute(
+                        "SELECT has_table_privilege(current_user, 'trial_resource_usage', %s)", (privilege,),
+                    ).fetchone() == (True,)
+            assert connection.execute(
+                "SELECT has_table_privilege(current_user, 'trial_resource_usage', 'DELETE')",
+            ).fetchone() == (False,)
             if role == "gateway":
                 for table in ("batches", "task_image_materialization_attempts", "task_image_publication_evidence"):
                     with pytest.raises(psycopg.errors.InsufficientPrivilege):
@@ -466,6 +490,11 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
     # Replaying bootstrap must not rebind, broaden, extend or revive a token.
     asyncio.run(_exercise_native_builder_role(platform_database))
     with psycopg.connect(platform_database) as connection:
+        for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+            assert connection.execute(
+                "SELECT has_table_privilege('loom_gateway', 'task_image_capacity_waits', %s)",
+                (privilege,),
+            ).fetchone() == (False,)
         connection.execute(
             "INSERT INTO teams (id, name) VALUES ('11111111-1111-1111-1111-111111111111', 'other-authority')"
         )

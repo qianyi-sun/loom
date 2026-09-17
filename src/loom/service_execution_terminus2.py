@@ -80,6 +80,8 @@ class LeaseGatewayClient:
         self, *, team_id: UUID, trial_id: UUID, step_id: str, ttl_sec: int,
         attempt_deadline_wall_clock: datetime,
     ) -> _ProxyTokenGrant:
+        # The trusted Go phase supervisor supplies and signs the tighter native
+        # deadline through the broker; this loopback caller cannot extend it.
         del attempt_deadline_wall_clock
         await self.mint_step_token(
             team_id=team_id, trial_id=trial_id, step_id=step_id, ttl_sec=ttl_sec,
@@ -186,6 +188,7 @@ async def run_terminus2(
     sandbox_workdir: PurePosixPath | None = None,
     max_turns: int = 50,
     timeout_sec: float | None = None,
+    deadline: AttemptDeadline | None = None,
     max_trajectory_bytes: int = 64 * 1024 * 1024,
 ) -> None:
     """Execute one Terminus session; leave typed/native files in trusted workspace.
@@ -211,7 +214,7 @@ async def run_terminus2(
     timeout = timeout_sec if timeout_sec is not None else (
         trial_config.override_agent_timeout_sec or task_config.agent.timeout_sec
     ) * trial_config.agent_timeout_multiplier
-    deadline = AttemptDeadline.after(timeout)
+    deadline = deadline or AttemptDeadline.after(timeout)
     workspace.mkdir(parents=True, exist_ok=True)
     events_path = workspace / "trajectory.jsonl"
     # A repeated process must not append a second episode-1 to an old session.
@@ -220,6 +223,15 @@ async def run_terminus2(
     events_path.chmod(0o600)
     trajectory = _LocalTrajectory(events_path, deadline, max_trajectory_bytes)
     protected_driver = cast(Driver, _ArtifactDriver(driver, workspace, workdir))
+    def retain_native_artifacts(logs_root: Path) -> None:
+        for name in _NATIVE_ARTIFACTS:
+            source = logs_root / name
+            if source.is_file():
+                destination = workspace / "harbor" / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+                destination.chmod(0o600)
+
     runtime = LoomTerminus2Runtime(
         model=trial_config.agent_model,
         team_id=str(team_id),
@@ -229,6 +241,7 @@ async def run_terminus2(
         workdir=workdir,
         max_turns=max_turns,
         request_params=dict(trial_config.request_params),
+        local_artifact_sink=retain_native_artifacts,
     )
     runtime.begin_attempt(deadline)
     async with asyncio.timeout(deadline.require_remaining()):

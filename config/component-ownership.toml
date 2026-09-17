@@ -73,21 +73,16 @@ pins = [
 
 [[test_sharding]]
 lane = "integration"
-shard_count = 2
-strategy = "contiguous"
+shard_count = 4
+strategy = "stable-hash"
+# PR #1973 head 69359261: ~155 minutes across 518 timed modules.
+# This salt projects 39.0 / 38.2 / 38.8 / 39.1 minutes without splitting modules.
+# Stable hashing keeps existing assignments when new test files are added.
+salt = "integration-v3-4"
 pins = [
-  # Five post-change runs still showed a 337s median shard gap. Move the two
-  # measured shard-1 hotspots as whole files; see #1680 and PR #1742 telemetry.
-  { path = "tests/integration/test_cp_step_tokens.py", shard_index = 1 },
-  { path = "tests/integration/test_executable_global_capacity_bridge.py", shard_index = 1 },
-  { path = "tests/integration/test_capacity_manager_migrate.py", shard_index = 1 },
-  { path = "tests/integration/test_migration_task_set_materialization_jobs.py", shard_index = 1 },
-  # PR #1930 run 34621281870: 3548s / 2353s test time. These whole modules
-  # accounted for ~519s in shard 1; preserve coverage and the 60-minute budget.
-  { path = "tests/integration/test_personal_dev_build_guard_http.py", shard_index = 1 },
-  { path = "tests/integration/test_capacity_manager_execution_store.py", shard_index = 1 },
-  { path = "tests/integration/test_capacity_final_release_witness.py", shard_index = 1 },
-  { path = "tests/integration/test_capacity_typed_terminal_sql.py", shard_index = 1 },
+  # Preserve the existing auth-before-schema ordering within one process.
+  { path = "tests/integration/test_username_password_auth.py", shard_index = 3 },
+  { path = "tests/integration/test_username_password_schema.py", shard_index = 3 },
 ]
 
 [[execution_policies]]
@@ -955,9 +950,13 @@ exclude_paths = [
   "tests/integration/test_nebius_platform_k3s.py",
   "tests/integration/test_behavior_pipeline_inputs.py",
   "tests/integration/test_cnpg_observer_controller_permissions.py",
+  "tests/integration/test_application_generation_resources_k3s.py",
   "tests/integration/test_capacity_executor_image_runtime.py",
   "tests/integration/test_oldlab_controller_stdin.py",
   "tests/integration/test_task_image_builder_phase2c_flow.py",
+  "tests/integration/test_cnpg_input_fence.py",
+  "tests/integration/test_application_workload_recovery.py",
+  "tests/integration/test_cnpg_manager_retirement.py",
   "tests/integration/test_docker_driver_exec.py",
   "tests/integration/test_docker_driver_exec_streaming.py",
   "tests/integration/test_docker_driver_healthcheck.py",
@@ -1013,9 +1012,13 @@ language = "python"
 lane = "integration-docker"
 include_paths = [
   "tests/integration/test_cnpg_observer_controller_permissions.py",
+  "tests/integration/test_application_generation_resources_k3s.py",
   "tests/integration/test_capacity_executor_image_runtime.py",
   "tests/integration/test_oldlab_controller_stdin.py",
   "tests/integration/test_task_image_builder_phase2c_flow.py",
+  "tests/integration/test_cnpg_input_fence.py",
+  "tests/integration/test_application_workload_recovery.py",
+  "tests/integration/test_cnpg_manager_retirement.py",
   "tests/integration/test_docker_driver_exec.py",
   "tests/integration/test_docker_driver_exec_streaming.py",
   "tests/integration/test_docker_driver_healthcheck.py",

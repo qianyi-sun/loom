@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -29,18 +30,21 @@ type workloadIdentity struct {
 }
 
 type workloadBroker struct {
-	podTokenFile string
-	root         *url.URL
-	identity     workloadIdentity
-	client       *http.Client
-	mu           sync.Mutex
-	token        string
-	expires      time.Time
+	podTokenFile  string
+	root          *url.URL
+	identity      workloadIdentity
+	client        *http.Client
+	mu            sync.Mutex
+	token         string
+	expires       time.Time
+	phaseDeadline time.Time
+	phaseBound    bool
 }
 
 type tokenRequest struct {
 	workloadIdentity
-	TTLSeconds int `json:"ttl_seconds"`
+	TTLSeconds      int        `json:"ttl_seconds"`
+	AttemptDeadline *time.Time `json:"attempt_deadline_wall_clock,omitempty"`
 }
 
 type tokenResponse struct {
@@ -192,17 +196,39 @@ func (b *workloadBroker) doJSON(ctx context.Context, method, endpoint string, re
 	return nil
 }
 
+// Only the trusted runner supplies phase boundaries. Client headers cannot extend them.
+func (b *workloadBroker) setPhaseDeadline(deadline time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.phaseDeadline = deadline
+	b.phaseBound = true
+	b.token = ""
+	b.expires = time.Time{}
+}
+
 func (b *workloadBroker) currentToken(ctx context.Context) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.phaseBound && !b.phaseDeadline.After(time.Now()) {
+		return "", context.DeadlineExceeded
+	}
 	if b.token != "" && time.Until(b.expires) > 60*time.Second {
 		return b.token, nil
+	}
+	var deadline *time.Time
+	if !b.phaseDeadline.IsZero() {
+		if !b.phaseDeadline.After(time.Now()) {
+			return "", context.DeadlineExceeded
+		}
+		value := b.phaseDeadline
+		deadline = &value
 	}
 	var response tokenResponse
 	if err := retryOperation(ctx, func() error {
 		return b.doJSON(ctx, http.MethodPost, b.endpoint("/token"), tokenRequest{
 			workloadIdentity: b.identity,
 			TTLSeconds:       480,
+			AttemptDeadline:  deadline,
 		}, nil, &response)
 	}); err != nil {
 		return "", err
@@ -214,7 +240,11 @@ func (b *workloadBroker) currentToken(ctx context.Context) (string, error) {
 	return b.token, nil
 }
 
-func (b *workloadBroker) startProxy(ctx context.Context) (string, func() error, error) {
+func (b *workloadBroker) startProxy(ctx context.Context, modelLifetime ...context.Context) (string, func() error, error) {
+	modelContext := ctx
+	if len(modelLifetime) > 0 {
+		modelContext = modelLifetime[0]
+	}
 	// Model calls follow the caller's phase lifetime and the Gateway's deadline.
 	// Keep the transport's connect/TLS bounds and the finite broker-operation client.
 	gatewayClient := *b.client
@@ -234,13 +264,35 @@ func (b *workloadBroker) startProxy(ctx context.Context) (string, func() error, 
 				http.Error(writer, "gateway route unavailable", http.StatusForbidden)
 				return
 			}
-			token, tokenErr := b.currentToken(request.Context())
+			// Stop model work immediately when the execution loses a private
+			// sandbox. Keep the ledger route alive for partial finalization.
+			if modelContext.Err() != nil {
+				http.Error(writer, "execution is no longer running", http.StatusServiceUnavailable)
+				return
+			}
+			requestContext, cancelRequest := context.WithCancel(request.Context())
+			stopCancellation := context.AfterFunc(modelContext, cancelRequest)
+			defer stopCancellation()
+			defer cancelRequest()
+			b.mu.Lock()
+			phaseDeadline, phaseBound := b.phaseDeadline, b.phaseBound
+			b.mu.Unlock()
+			if phaseBound {
+				if !phaseDeadline.After(time.Now()) {
+					http.Error(writer, "execution phase deadline reached", http.StatusGatewayTimeout)
+					return
+				}
+				bounded, cancel := context.WithDeadline(requestContext, phaseDeadline)
+				defer cancel()
+				requestContext = bounded
+			}
+			token, tokenErr := b.currentToken(requestContext)
 			if tokenErr != nil {
 				http.Error(writer, "workload token unavailable", http.StatusServiceUnavailable)
 				return
 			}
 			upstream, requestErr := http.NewRequestWithContext(
-				request.Context(), request.Method,
+				requestContext, request.Method,
 				b.gatewayEndpoint(request.URL.Path, request.URL.RawQuery), request.Body,
 			)
 			if requestErr != nil {
@@ -252,6 +304,10 @@ func (b *workloadBroker) startProxy(ctx context.Context) (string, func() error, 
 			upstream.Header.Del("Connection")
 			response, requestErr := gatewayClient.Do(upstream)
 			if requestErr != nil {
+				if errors.Is(requestContext.Err(), context.DeadlineExceeded) {
+					http.Error(writer, "execution phase deadline reached", http.StatusGatewayTimeout)
+					return
+				}
 				http.Error(writer, "gateway unavailable", http.StatusBadGateway)
 				return
 			}

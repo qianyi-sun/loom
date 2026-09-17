@@ -274,3 +274,33 @@ async def test_workload_lost_reply_retries_same_uid_and_rejects_old_epoch(
     assert after["metadata"]["uid"] == before["metadata"]["uid"]
     with pytest.raises(DevInstanceRuntimeError, match=r"epoch|reservation attempt was superseded"):
         await write_storage_workload(kubectl, identity, document, operation_epoch=1)
+
+
+async def test_disposable_namespace_read_recovers_actual_connection_refusal(
+    disposable_storage_kubectl, monkeypatch,  # noqa: F811
+):
+    from loom.dev_instance_runtime import AsyncCommandRunner
+
+    kubectl = disposable_storage_kubectl
+    original = await kubectl.read_namespace_optional("default")
+    command_run = AsyncCommandRunner.run
+    reads = []
+
+    async def refuse_once(runner, argv, **kwargs):
+        if "loom-test-kubectl" in argv and "get" in argv:
+            reads.append(tuple(argv))
+            if len(reads) == 1:
+                # Connect to a closed loopback port inside this disposable
+                # container; exercise actual kubectl stderr and exit handling.
+                argv = list(argv)
+                argv.insert(argv.index("kubectl") + 1, "--server=https://127.0.0.1:1")
+        return await command_run(runner, argv, **kwargs)
+
+    monkeypatch.setattr(AsyncCommandRunner, "run", refuse_once)
+    # A raw read avoids separate discovery requests against the deliberately
+    # closed port and exercises the single refused GET observed in CI.
+    result = await kubectl.runner.run(["kubectl", "get", "--raw=/api/v1/namespaces/default"])
+    recovered = json.loads(result.stdout)
+    assert recovered["metadata"]["uid"] == original["metadata"]["uid"]
+    assert len(reads) == 2
+    assert kubectl.runner.last_failure_notes == []

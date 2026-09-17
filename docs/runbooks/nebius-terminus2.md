@@ -55,14 +55,125 @@ supports Terminus-2. In **Task Sets → Submit Task Set**, select `manifest.yaml
 and `bundle.tar.gz`; the archive already includes its verifier, so leave the
 separate verifier and transform fields empty. Select `terminus-2` + `glm-5.2` when submitting a Trial;
 model/provider configuration and credentials stay in the Gateway. Catalog/model
-availability must be verified on the target environment. The task configuration
-starts with 2 vCPU, 4 GiB memory and 8 GiB storage for the task container. The
-controller and verifier each request another 2 vCPU and 4 GiB: the complete Trial
-therefore requests 6 vCPU and 12 GiB, with about 33 GiB conservatively accounted
-storage including workspaces and runtime volumes. The current 16-vCPU/64-GiB
-node template can fit this Trial. This is an initial allocation, not a promise
-for all 90 tasks; placement must account for all containers and live regional
-quota. Agent and verifier each retain the original 900-second timeout.
+availability must be verified on the target environment. The example source task
+keeps its 2-vCPU/4-GiB/8-GiB task and verifier hard limits and original phase
+timeouts. Published Nebius profiles keep separate controller limits through
+`controller_resources` (CPU and memory; storage remains task-derived). These are
+execution limits, not the ordinary scheduling reservation described below.
+Workspace, runtime and output emptyDir bounds remain unchanged. Existing frozen
+Batches, reservations and historical cost records are not rewritten.
+
+The runtime image supplies the Go plan reader; the selected Harbor image receives
+task/trial inputs and phase arguments. Explicit harness versions retain their
+selected controller image. Deploy matching Python services, actuator and Go
+runtime before submitting plans with resource requests. Generic profiles without
+a request template and existing frozen plans retain their previous behavior.
+
+## Persistent Nebius scheduling baseline
+
+Ordinary automatic native Terminus-2 submissions use a persistent baseline of
+**1 CPU / 2 GiB RAM / 2 GiB ephemeral storage per complete execution Pod**. It
+applies to future task IDs and revisions, including frontend, CLI and API
+submissions. It is a scheduling policy, not a claim that all workloads use less
+than these amounts or that every task has been empirically calibrated.
+
+The deployment environment's optional `default_task_resource_requests` holds the
+role template. If omitted, the Nebius renderer resolves and persists this value
+in both the environment ConfigMap and each published runtime profile:
+
+```json
+{
+  "default_task_resource_requests": {
+    "controller": {
+      "cpu_millis": 200,
+      "memory_mib": 512,
+      "ephemeral_storage_mib": 512
+    },
+    "task_sandbox": {
+      "cpu_millis": 600,
+      "memory_mib": 1024,
+      "ephemeral_storage_mib": 1024
+    },
+    "verifier_sandbox": {
+      "cpu_millis": 200,
+      "memory_mib": 512,
+      "ephemeral_storage_mib": 512
+    }
+  }
+}
+```
+
+An explicit configured template survives subsequent candidate releases. Each
+configured role requires positive integer CPU millicores, memory MiB and storage
+MiB. This template does not alter source task/container limits, workspace/output
+bounds, build scratch space, node image-cache storage, or the native node ceiling.
+The default requires compatible role limits. Submission rejects requests above
+current hard limits; for a task with lower limits, provide a compatible explicit
+override rather than silently raising its limits.
+
+At submission the Batch resolver binds the template to each selected automatic
+Terminus task's current source checksum. The resulting per-task requests are
+frozen on the Batch. The precedence is:
+
+1. Explicit per-task submission override.
+2. Environment `task_resource_requests` entry for that exact task revision.
+3. Environment `default_task_resource_requests` template.
+
+A higher-priority per-task entry replaces that task's request object; unlisted
+roles keep the existing role defaults rather than merging individual fields from
+the lower-priority template. Exact revision overrides remain strict: stale
+checksums and requests over limits are rejected. The general template binds new
+revisions at submission, so operators do not need to copy a calibrated cohort for
+each new task. Non-Terminus and explicitly precompiled execution configurations
+are not silently overridden. Existing Batches keep their frozen maps; reruns
+retain the selected parent requests even when choosing the current runtime.
+
+### Per-task measured overrides
+
+After collecting representative usage, use an override to compare scheduling
+requests for selected tasks without rebuilding images or changing hard limits.
+Pass `--task-resource-requests @requests.json` to `loom eval batch create`, or the
+same `task_resource_requests` object to `POST /api/v1/batches`:
+
+```json
+{
+  "local/example-task": {
+    "task_revision_sha256": "sha256:<existing task checksum>",
+    "requests": {
+      "controller": {
+        "cpu_millis": 200,
+        "memory_mib": 512,
+        "ephemeral_storage_mib": 512
+      },
+      "task_sandbox": {
+        "cpu_millis": 600,
+        "memory_mib": 1024,
+        "ephemeral_storage_mib": 1024
+      },
+      "verifier_sandbox": {
+        "cpu_millis": 200,
+        "memory_mib": 512,
+        "ephemeral_storage_mib": 512
+      }
+    }
+  }
+}
+```
+
+To persist a deliberate task-specific override for ordinary users, place this map
+under `task_resource_requests` in the environment configuration. Remove obsolete
+cohort overrides when adopting the general baseline, or their higher precedence
+will intentionally preserve their previous requests. Overrides for unselected
+tasks, other backends/agents or explicit precompiled bindings are rejected.
+
+The Batch detail API exposes its resolved `task_resource_requests` map; the page
+shows per-task totals. Kubernetes placement, admission reservations and
+request-based cost allocation use the same effective Pod requests. Reservations
+are not maximum consumption, and request-based costs are not the provider bill.
+Compare packing and node-hours while retaining OOM, eviction, latency and
+resource-completeness evidence. Sampled task storage excludes read-only image
+layers; retain node filesystem/image-cache headroom. See the
+[resource-accounting runbook](trial-resource-accounting.md#capacity-calibration).
 
 ## Dockerfile task prerequisites
 
@@ -108,12 +219,49 @@ Preparing the same content again after cache retirement uses the current upload
 location; ready cache reuse preserves its existing frozen source.
 
 Native preparation reads ordinary TaskSet file modes from the frozen
-`service_execution_input` manifest already published by TaskSet materialization.
+`service_execution_input` manifest already published by TaskSet materialization
+(and, as of #1978, by benchmark `publish-local` using the same binding shape).
 It verifies that binding and the transferred bundle revision; ordinary uploads
-do not need the benchmark publisher's `.loom-bundle-files.v1.json` sidecar.
-Benchmark sources without an input-manifest binding retain the sidecar path.
+do not need the benchmark publisher's `.loom-bundle-files.v1.json` sidecar when
+`source_provenance.service_execution_input` is present. Benchmark sources
+without an input-manifest binding retain the sidecar path.
 A missing or corrupt bound manifest fails preparation; it does not fall back to
 unbound modes or a different source revision.
+
+Benchmark and TaskSet tasks use the same immutable input binding for Nebius
+Terminus admission. For a catalog suite, use `loom datasets publish-local` on
+the adapted benchmark folder; converting it into a TaskSet is unnecessary.
+Publication stores task files under
+`.loom-revisions-v2/<checksum>/<mode-digest>/bundle/` and the input manifest
+beside `bundle/`. The manifest is publication metadata, not another task file.
+This separation lets the ordinary bundle audit and native image builder consume
+the exact same revision.
+
+If a benchmark was published by the earlier implementation that stored
+`service-execution-input.json` inside the task prefix, republish the same local
+folder with the fixed CLI. It updates the catalog source and binding without
+changing task content or deleting old objects. Existing frozen Trials retain
+their original inputs; submit a new Trial after republishing. Verify the current
+catalog source with `loom datasets audit <benchmark-id> --verify-bundles` using
+the target database and object-store configuration.
+
+`publish-local` validates the general bundle schema and normalizes Harbor TOML;
+it does not silently rewrite a task's architecture, network access, verifier or
+resource contract for Nebius. Review these fields **before** publishing:
+
+| Contract | Nebius Terminus requirement |
+| --- | --- |
+| Architecture | Linux `x86_64` (or architecture-neutral `any`), no GPU; Dockerfile inputs must actually build for AMD64. |
+| Task environment | A supported Dockerfile when native preparation is enabled, or an admitted immutable image. |
+| Resource limits | Explicit `cpus`, `memory_mb`, and `storage_mb`; preserve requirements of the task. Scheduling requests are a separate policy. |
+| Network | `gateway-only` baseline policy; model access goes through the gateway. |
+| Workspace identity | `/app` or `/workspace`, default `agent` user, no custom agent/verifier user overrides. |
+| Verifier | Shared script verifier with an exact relative `verifier/...` path; no absolute path, glob or traversal. |
+| Execution shape | One step with an exact instruction path and supported environment features; private verifier isolation remains enabled. |
+
+Admission continues to reject incompatible fields with their specific reasons.
+Successful publication proves the catalog input is registered, not that every
+Harbor/GB10 task is Nebius-compatible or that its image has built successfully.
 
 Native Terminus execution keeps a declared dedicated Docker build-context
 directory and its Dockerfile in the controller's frozen inputs. They are used
@@ -138,6 +286,29 @@ diagnosis keeps that preparation failure and treats zero model calls as expected
 it does not recommend retrying the model to fix a Dockerfile. Cancellation before
 execution has the same expected zero-call treatment. A genuine agent failure
 without calls still retains the missing-usage diagnostic.
+
+Builder scratch and build output use separate volumes, each able to consume the
+existing total ephemeral-storage budget (16 GiB in the integration profile).
+They no longer divide that budget into fixed 7 GiB partitions. The aggregate Pod
+limit and reservation remain unchanged; volume maxima are not extra capacity.
+Private prepare/publish temporary storage stays separate. Before deleting a
+failed Job, the actuator retains bounded, sanitized Pod and Job diagnostics on
+the build attempt, distinguishing storage eviction, OOM, deadline and command
+failure. Exit 137 alone is not classified as OOM.
+
+The native Terminus controller shares the execution runtime's absolute agent
+deadline, including initialization. At expiry it stops agent work and uses only
+the existing termination grace for local usage/native artifacts, process
+quiescence and a validated workspace snapshot. If all handoff and cleanup steps
+finish, controller exit 124 permits the private verifier to evaluate the partial
+workspace with its own original deadline. Cancellation, forced kill, setup
+timeout or failed cleanup never permits this continuation. The Trial remains
+failed with `timed_out`, even when the verifier returns a numeric reward; that
+reward and available artifacts remain available for diagnosis.
+
+Harbor startup uses packaged LiteLLM metadata with build-time fallback, described
+in [the controller image guide](../../deploy/harbor-runtime.md). It does not
+download a price table during the agent's execution budget.
 
 ## What changes from old staging
 

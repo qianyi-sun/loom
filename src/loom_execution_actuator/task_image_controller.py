@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.schema import (
     ServiceExecutionTarget,
+    TaskImageCapacityWait,
     TaskImageMaterialization,
     TaskImageMaterializationAttempt,
 )
@@ -28,8 +29,10 @@ from loom.task_image_build_plan import derive_task_image_build_components
 from loom_control_plane.execution_capacity import (
     _CAPACITY_ADMISSION_LOCK,
     ExecutionProvisioningBlockedError,
+    native_build_resources,
 )
 from loom_control_plane.task_image_capacity import reserve_native_task_image_capacity
+from loom_control_plane.task_image_capacity_wait import remember_capacity_wait
 from loom_control_plane.task_image_materializations import (
     TaskImageCompletionError,
     claim_task_image_materialization,
@@ -227,7 +230,10 @@ class NativeBuildKubernetesApi:
 
 
 def _safe_log(value: str) -> str:
-    value = re.sub(r"(?i)((?:password|secret|access[_-]?key|token)\s*[=:]\s*)[^\s,;]+", r"\1[REDACTED]", value)
+    value = re.sub(
+        r'''(?i)((?:["']?(?:password|secret(?:[_-]?key)?|(?:api|access)[_-]?key|token)["']?)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)''',
+        r"\1[REDACTED]", value,
+    )
     return redact_text(value, limit=16384)
 
 
@@ -271,12 +277,18 @@ def _phase_error(observation: dict[str, Any], name: str) -> str:
 
 def build_observation(observation: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {"observed_at": datetime.now(UTC).isoformat()}
+    result["job_conditions"] = [
+        _status_diagnostic(condition)
+        for condition in observation.get("status", {}).get("conditions", [])[:10]
+        if isinstance(condition, dict)
+    ]
     pods = _owned_pods(observation, observation.get("metadata", {}).get("uid"))
     if len(pods) > 1:
         raise ValueError("native build unexpectedly has multiple owned Pods")
     if pods:
         pod = pods[0]
         result.update(pod_uid=pod["metadata"]["uid"], node_name=pod.get("spec", {}).get("nodeName"))
+        result["pod_status"] = _status_diagnostic(pod.get("status", {}))
         phases = []
         for row in (*pod.get("status", {}).get("initContainerStatuses", []), *pod.get("status", {}).get("containerStatuses", [])):
             if row.get("name") not in {"prepare", "build", "publish"}:
@@ -295,6 +307,33 @@ def build_observation(observation: dict[str, Any]) -> dict[str, Any]:
     if observation.get("builder_log"):
         result["builder_log"] = _safe_log(observation["builder_log"])
     return result
+
+
+def _status_diagnostic(status: dict[str, Any]) -> dict[str, str]:
+    """Keep bounded native diagnostics, never arbitrary status/receipt payloads."""
+    result = {}
+    for key in ("type", "status", "phase", "reason"):
+        value = status.get(key)
+        if isinstance(value, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,63}", value):
+            result[key] = value
+    if isinstance(status.get("message"), str):
+        result["message"] = _safe_log(status["message"])[:2000]
+    return result
+
+
+def _native_failure(native: dict[str, Any]) -> tuple[str, str, bool] | None:
+    pod = native.get("pod_status", {})
+    if pod.get("reason") == "Evicted":
+        message = pod.get("message", "")
+        storage = any(marker in message.lower() for marker in ("ephemeral-storage", "ephemeral storage", "emptydir"))
+        return ("build_storage_exceeded" if storage else "build_pod_evicted", "Pod Evicted: " + message, not storage)
+    for phase in native.get("phases", []):
+        if phase.get("state", {}).get("terminated", {}).get("reason") == "OOMKilled":
+            return "build_oom_killed", "Native build phase " + phase["name"] + " was OOMKilled", False
+    for condition in native.get("job_conditions", []):
+        if condition.get("status") == "True" and condition.get("reason") == "DeadlineExceeded":
+            return "build_deadline_exceeded", "Job DeadlineExceeded: " + condition.get("message", ""), True
+    return None
 
 
 class NativeTaskImageController:
@@ -341,46 +380,74 @@ class NativeTaskImageController:
     async def _claim(self) -> UUID | None:
         async with self.sessions() as session, session.begin():
             await session.execute(_CAPACITY_ADMISSION_LOCK)
-            target = await session.get(ServiceExecutionTarget, self.target.target_id)
-            if target is None or target.provider != "nebius" or target.desired_state != "active" or target.health_status != "healthy":
-                return None
-            if len(await self._outstanding(session)) >= self.settings.max_concurrent:
-                return None
-            row = await claim_task_image_materialization(session, builder_id=self.builder_id, cpu_arch="x86_64",
-                                                        nebius_pool_id=self.settings.pool_id)
-            if row is None:
-                return None
-            attempt = await session.scalar(select(TaskImageMaterializationAttempt).where(
-                TaskImageMaterializationAttempt.materialization_id == row.id,
-                TaskImageMaterializationAttempt.lease_epoch == row.lease_epoch,
-            ).with_for_update())
-            assert attempt is not None
+            waiting: tuple[UUID, int, dict[str, Any]] | None = None
             try:
-                claim = {**task_image_materialization_payload(row), **self.settings.runtime_configuration()}
-                components = derive_task_image_build_components(row.task_config)
-                cm, job = render_task_image_job(materialization_id=row.id, lease_epoch=row.lease_epoch,
-                                               claim=claim, components=components, target=self.target,
-                                               config=self.settings.job_config())
-            except (ValueError, TypeError, KeyError):
-                await self._fail(session, row, "build_input_unsupported", retryable=False,
-                                 message="Unsupported Dockerfile, context, architecture, or task build configuration")
+                # Keep the capacity lock outside the savepoint. Rejected work
+                # consumes no attempt, but a validated waiting head survives.
+                async with session.begin_nested():
+                    attempt = await self._prepare_claim(session)
+                    if attempt is None:
+                        return None
+                    assert attempt.native_build is not None
+                    waiting = (attempt.materialization_id, attempt.lease_epoch - 1,
+                               dict(attempt.native_build))
+                    attempt_id = attempt.id
+                    await reserve_native_task_image_capacity(session, attempt_id=attempt_id)
+                    wait = await session.get(TaskImageCapacityWait, self.target.target_id)
+                    if wait is not None and wait.materialization_id == attempt.materialization_id:
+                        await session.delete(wait)
+                    return attempt_id
+            except ExecutionProvisioningBlockedError:
+                if waiting is None:
+                    raise
+                materialization_id, lease_epoch, native = waiting
+                await remember_capacity_wait(
+                    session, target_id=self.target.target_id, materialization_id=materialization_id,
+                    lease_epoch=lease_epoch, pool_id=self.settings.pool_id,
+                    resources=native_build_resources(native), now=datetime.now(UTC),
+                )
                 return None
-            for metadata in (cm["metadata"], job["metadata"], job["spec"]["template"]["metadata"]):
-                metadata["labels"]["app.kubernetes.io/managed-by"] = _MANAGER
-                metadata.setdefault("annotations", {})["loom.openai.com/target-id"] = self.target.target_id
-            now = datetime.now(UTC)
-            attempt.native_build = {
-                "target_id": self.target.target_id, "namespace": self.settings.namespace,
-                "job_name": job["metadata"]["name"], "job_uid": None, "state": "reserved",
-                "resources": {"vcpu_millis": self.settings.cpu_millis, "memory_mib": self.settings.memory_mib,
-                              "storage_mib": self.settings.ephemeral_storage_mib},
-                "max_processes": self.settings.max_processes, "reserved_at": now.isoformat(),
-                "deadline_at": (now + timedelta(seconds=job["spec"]["activeDeadlineSeconds"])).isoformat(),
-                "configmap": cm, "job": job,
-            }
-            await session.flush()
-            await reserve_native_task_image_capacity(session, attempt_id=attempt.id)
-            return attempt.id
+
+    async def _prepare_claim(self, session: AsyncSession) -> TaskImageMaterializationAttempt | None:
+        target = await session.get(ServiceExecutionTarget, self.target.target_id)
+        if target is None or target.provider != "nebius" or target.desired_state != "active" or target.health_status != "healthy":
+            return None
+        if len(await self._outstanding(session)) >= self.settings.max_concurrent:
+            return None
+        row = await claim_task_image_materialization(session, builder_id=self.builder_id, cpu_arch="x86_64",
+                                                    nebius_pool_id=self.settings.pool_id)
+        if row is None:
+            return None
+        attempt = await session.scalar(select(TaskImageMaterializationAttempt).where(
+            TaskImageMaterializationAttempt.materialization_id == row.id,
+            TaskImageMaterializationAttempt.lease_epoch == row.lease_epoch,
+        ).with_for_update())
+        assert attempt is not None
+        try:
+            claim = {**task_image_materialization_payload(row), **self.settings.runtime_configuration()}
+            components = derive_task_image_build_components(row.task_config)
+            cm, job = render_task_image_job(materialization_id=row.id, lease_epoch=row.lease_epoch,
+                                           claim=claim, components=components, target=self.target,
+                                           config=self.settings.job_config())
+        except (ValueError, TypeError, KeyError):
+            await self._fail(session, row, "build_input_unsupported", retryable=False,
+                             message="Unsupported Dockerfile, context, architecture, or task build configuration")
+            return None
+        for metadata in (cm["metadata"], job["metadata"], job["spec"]["template"]["metadata"]):
+            metadata["labels"]["app.kubernetes.io/managed-by"] = _MANAGER
+            metadata.setdefault("annotations", {})["loom.openai.com/target-id"] = self.target.target_id
+        now = datetime.now(UTC)
+        attempt.native_build = {
+            "target_id": self.target.target_id, "namespace": self.settings.namespace,
+            "job_name": job["metadata"]["name"], "job_uid": None, "state": "reserved",
+            "resources": {"vcpu_millis": self.settings.cpu_millis, "memory_mib": self.settings.memory_mib,
+                          "storage_mib": self.settings.ephemeral_storage_mib},
+            "max_processes": self.settings.max_processes, "reserved_at": now.isoformat(),
+            "deadline_at": (now + timedelta(seconds=job["spec"]["activeDeadlineSeconds"])).isoformat(),
+            "configmap": cm, "job": job,
+        }
+        await session.flush()
+        return attempt
 
     def _owned(self, row: TaskImageMaterialization | None, attempt: TaskImageMaterializationAttempt) -> bool:
         return bool(row is not None and row.lease_epoch == attempt.lease_epoch and row.claimed_by == self.builder_id
@@ -388,10 +455,19 @@ class NativeTaskImageController:
 
     async def _fail(self, session: AsyncSession, row: TaskImageMaterialization, reason: str, *,
                     retryable: bool, images: dict[str, str] | None = None, message: str | None = None) -> None:
+        safe_message = _safe_log(message or reason.replace("_", " "))[-2000:]
         await fail_task_image_materialization(session, materialization_id=row.id, builder_id=self.builder_id,
                                              lease_epoch=row.lease_epoch, retryable=retryable,
-                                             failure_reason=reason, failure_message=_safe_log(message or reason.replace("_", " "))[-2000:],
+                                             failure_reason=reason, failure_message=safe_message,
                                              registry_images=images or {})
+        attempt = await session.scalar(select(TaskImageMaterializationAttempt).where(
+            TaskImageMaterializationAttempt.materialization_id == row.id,
+            TaskImageMaterializationAttempt.lease_epoch == row.lease_epoch,
+        ))
+        if attempt is not None and attempt.native_build:
+            # The shared materialization clears its failure on the next claim.
+            # Retain this attempt's own result through retries and cleanup.
+            attempt.native_build = {**attempt.native_build, "failure_reason": reason, "failure_message": safe_message}
 
     async def _reconcile(self, attempt_id: UUID) -> None:
         # Serialize one attempt across actuator replicas without holding the
@@ -419,6 +495,7 @@ class NativeTaskImageController:
             if owned and (not demand or expired):
                 assert row is not None
                 await self._fail(session, row, "build_deadline_exceeded" if expired else "build_cancelled", retryable=True)
+                native = dict(attempt.native_build)
                 owned = False
             if owned:
                 await heartbeat_task_image_materialization(session, materialization_id=attempt.materialization_id,
@@ -445,6 +522,20 @@ class NativeTaskImageController:
             native["job_uid"] = uid
             await self._save_native(attempt_id, native)
         if not owned:
+            if observed is not None:
+                # Expiry/cancellation also needs a final observation before the
+                # only native evidence disappears. Never inspect a foreign Pod.
+                try:
+                    summary = build_observation({**observed, "metadata": {**observed.get("metadata", {}), "uid": uid}})
+                    old_uid = native.get("pod_uid")
+                    if old_uid and summary.get("pod_uid") not in (None, old_uid):
+                        raise ValueError("build Pod identity changed during cleanup")
+                except ValueError:
+                    # Cleanup still validates Job ownership for every Pod. An
+                    # ambiguous observation must not strand those resources.
+                    summary = {"observation_error": "build_pod_identity_changed"}
+                native = {**native, **summary}
+                await self._save_native(attempt_id, native)
             await self._cleanup(attempt_id, native)
             return
         if observed is None or observed.get("job_missing"):
@@ -470,7 +561,9 @@ class NativeTaskImageController:
             await session.execute(_CAPACITY_ADMISSION_LOCK)
             attempt = await session.get(TaskImageMaterializationAttempt, attempt_id, with_for_update=True)
             assert attempt is not None
-            attempt.native_build = native
+            # A failure may have been recorded in a separate transaction since
+            # this lifecycle snapshot was read. Cleanup must retain that result.
+            attempt.native_build = {**(attempt.native_build or {}), **native}
 
     async def _finish_failure(self, attempt_id: UUID, reason: str, *, retryable: bool) -> None:
         async with self.sessions() as session, session.begin():
@@ -533,10 +626,15 @@ class NativeTaskImageController:
             else:
                 phase = next((phase["name"] for phase in native.get("phases", [])
                               if phase.get("state", {}).get("terminated", {}).get("exitCode", 0)), "job")
+                failure = _native_failure(native)
+                reason, message, retryable = failure or (
+                    "build_" + phase + "_failed",
+                    ("Native build phase " + phase + " failed. " + native.get("builder_log", ""))
+                    if phase == "build" else "Native build phase " + phase + " failed: " + _phase_error(observed, phase),
+                    phase != "build",
+                )
                 try:
-                    await self._fail(session, row, "build_" + phase + "_failed", retryable=phase != "build", images=images,
-                                     message=("Native build phase " + phase + " failed. " + native.get("builder_log", ""))
-                                     if phase == "build" else "Native build phase " + phase + " failed: " + _phase_error(observed, phase))
+                    await self._fail(session, row, reason, retryable=retryable, images=images, message=message)
                 except TaskImageCompletionError:
                     await self._fail(session, row, "build_publication_receipt_invalid", retryable=False,
                                  message="Publisher receipt is missing, malformed, or differs from the frozen build identity/components/repository")

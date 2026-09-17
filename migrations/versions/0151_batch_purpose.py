@@ -1,7 +1,7 @@
 """Add batches.purpose for evaluation vs trajectory_generation.
 
-Revision ID: 0148
-Revises: 0147
+Revision ID: 0151
+Revises: 0150
 
 Purpose distinguishes catalog intent at batch create time:
 evaluation = native benchmarks with verification required;
@@ -14,8 +14,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0148"
-down_revision = "0147"
+revision = "0151"
+down_revision = "0150"
 branch_labels = None
 depends_on = None
 

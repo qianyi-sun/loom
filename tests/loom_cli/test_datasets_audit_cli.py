@@ -98,8 +98,8 @@ def test_tb21_audit_json_writes_activation_evidence(
     from loom_benchmark_tool.audit_cmd import AuditResult
 
     class FakeObjectStore:
-        def __init__(self, **_kwargs: object) -> None:
-            pass
+        def __init__(self, **kwargs: object) -> None:
+            assert kwargs["region"] == "eu-north1"
 
     class FakeEngine:
         async def dispose(self) -> None:
@@ -141,6 +141,8 @@ def test_tb21_audit_json_writes_activation_evidence(
             str(evidence),
             "--db-url",
             "postgresql://x/y",
+            "--minio-region",
+            "eu-north1",
             "--minio-endpoint",
             "http://minio:9000",
             "--minio-access-key",
@@ -260,6 +262,8 @@ def test_audit_verify_bundles_prints_summary_and_fails_on_missing(
         BundleVerificationFailure,
     )
 
+    monkeypatch.delenv("LOOM_MINIO_REGION", raising=False)
+    monkeypatch.setenv("LOOM_SVC_MINIO_REGION", "eu-north1")
     stores: list[dict[str, object]] = []
 
     class FakeObjectStore:
@@ -311,6 +315,7 @@ def test_audit_verify_bundles_prints_summary_and_fails_on_missing(
             "endpoint_url": "http://target-minio:9000",
             "access_key": "target-access",
             "secret_key": "target-secret",
+            "region": "eu-north1",
         }
     ]
     out = capsys.readouterr().out

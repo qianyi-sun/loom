@@ -10,10 +10,17 @@ from uuid import uuid4
 import pytest
 
 from loom.db.schema import ServiceExecutionLease, Task, Trial
-from loom.models.trajectory import TrialStartEvent
+from loom.execution_runtime_contract import ExecutionRuntimeResultV1
+from loom.models.trajectory import LLMCallEvent, Terminus2UserPromptEvent, TrialStartEvent
+from loom.models.trial import TrialConfig
 from loom.trajectory.storage import FakeObjectStore
 from loom_control_plane import service_execution_accounting_repair as repair
 from tests.unit.test_service_execution_materialization import _task, _trial
+
+_REAL_BUILD_EVENTS = repair.build_canonical_events
+_REAL_BUILD_ATIF = repair.build_canonical_atif
+_REAL_USAGE = repair.terminus_usage
+_REAL_RUNTIME_VALIDATE = ExecutionRuntimeResultV1.model_validate_json
 
 
 @pytest.fixture
@@ -52,7 +59,7 @@ def case(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     event = TrialStartEvent(trial_id=trial_id, step_id="trial", seq=0, emitted_at=now,
                            task_id="task-1", agent_name="terminus-2", agent_mode="out-of-box")
     projector = AsyncMock()  # Projection itself has separate full ledger regression tests.
-    monkeypatch.setattr(repair.ExecutionRuntimeResultV1, "model_validate_json", lambda body: object())
+    monkeypatch.setattr(repair.ExecutionRuntimeResultV1, "model_validate_json", lambda body: SimpleNamespace(status="succeeded"))
     monkeypatch.setattr(repair, "build_canonical_events", lambda **kwargs: (event,))
     monkeypatch.setattr(repair, "build_canonical_atif", lambda *args, **kwargs: b'{"schema_version":"harbor-tb2-v2-projection"}')
     monkeypatch.setattr(repair, "terminus_usage", lambda *args: {"call_count": 6, "totals": {"input_tokens": 13493, "output_tokens": 11888}})
@@ -225,3 +232,191 @@ async def test_partial_object_write_failure_cleans_only_new_revision(case: Simpl
     with pytest.raises(RuntimeError, match="injected object outage"):
         await repair.repair_accounting(**case.kwargs, apply=True)
     assert case.commits == 0 and case.store.objects == original_objects
+
+
+async def test_accounting_marker_does_not_hide_late_calls(case, monkeypatch):
+    await repair.repair_accounting(**case.kwargs, apply=True)
+    case.enters = 0
+    monkeypatch.setattr(repair, "read_service_execution_llm_calls", AsyncMock(return_value=[
+        {"id": "length-call"}, {"id": "late-call"},
+    ]))
+    monkeypatch.setattr(repair, "terminus_usage", lambda *args: {"call_count": 7})
+    result = await repair.repair_accounting(**case.kwargs, apply=True)
+    assert result["status"] == "corrected"
+    assert result["gateway_call_count"] == 2
+    assert case.artifact.artifact_metadata["accounting_call_count"] == 2
+    assert len(case.artifact.storage["source_evidence"]) == 2
+
+
+async def test_failed_trial_without_verifier_can_reconcile(case, monkeypatch):
+    case.trial.state = "failed"
+    case.artifact.storage["files"] = [r for r in case.artifact.storage["files"]
+                                       if r["relative_path"] != "verifier/output.json"]
+    monkeypatch.setattr(repair.ExecutionRuntimeResultV1, "model_validate_json",
+                        lambda body: SimpleNamespace(status="timed_out"))
+    observed = []
+    projector = repair.build_canonical_events
+
+    def project(**kwargs):
+        observed.append(kwargs["verifier_body"])
+        return projector(**kwargs)
+
+    monkeypatch.setattr(repair, "build_canonical_events", project)
+    assert (await repair.repair_accounting(**case.kwargs, apply=True))["status"] == "corrected"
+    assert observed == [None]
+    assert case.trial.state == "failed"
+
+
+async def test_repeated_repair_projects_immutable_native_source(case, monkeypatch):
+    await repair.repair_accounting(**case.kwargs, apply=True)
+    case.enters = 0
+    observed = []
+    projector = repair.build_canonical_events
+
+    def project(**kwargs):
+        observed.append(kwargs["trace_body"])
+        return projector(**kwargs)
+
+    monkeypatch.setattr(repair, "build_canonical_events", project)
+    await repair.repair_accounting(**case.kwargs, apply=True)
+    assert observed == [case.store.objects[("artifacts", "original/trajectory/events.jsonl")]]
+
+
+async def test_timed_out_archive_converges_four_failed_calls_then_late_9191_tokens(case, monkeypatch):
+    from tests.unit.test_service_execution_materialization import (
+        _REVISION,
+        _RUNTIME_IMAGE,
+        _TASK_IMAGE,
+    )
+
+    monkeypatch.setattr(repair, "build_canonical_events", _REAL_BUILD_EVENTS)
+    monkeypatch.setattr(repair, "build_canonical_atif", _REAL_BUILD_ATIF)
+    monkeypatch.setattr(repair, "terminus_usage", _REAL_USAGE)
+    monkeypatch.setattr(repair.ExecutionRuntimeResultV1, "model_validate_json", _REAL_RUNTIME_VALIDATE)
+    case.trial.state = "failed"
+    case.trial.result = {"error_type": "timed_out"}
+    trial_config = TrialConfig(agent_name="terminus-2", agent_model={"provider": "openai", "name": "glm-5.2"})
+    case.trial.config = trial_config.model_dump(mode="json")
+    now = case.trial.finished_at
+    native = Terminus2UserPromptEvent(trial_id=case.trial.id, step_id="agent", seq=0,
+                                     emitted_at=now, prompt_id="p", harbor_step_id=1, message="Solve")
+    runtime = {
+        "schema_version": "loom.execution-runtime-result.v1",
+        "runtime_contract_sha256": "sha256:" + "1" * 64,
+        "candidate_sha": "1" * 40, "task_revision_sha256": _REVISION,
+        "command_identity_sha256": "sha256:" + "2" * 64,
+        "execution_role": "attempt", "container_roles": ["execution", "agent", "verifier"],
+        "task_image_ref": _TASK_IMAGE, "runtime_image_ref": _RUNTIME_IMAGE,
+        "runtime_binary_sha256": "sha256:" + "3" * 64,
+        "execution_class_id": "linux-amd64-cpu-pod-v1", "status": "timed_out",
+        "started_at": now.isoformat(), "finished_at": now.isoformat(),
+        "phases": [], "outputs": [], "verifier_rewards": None, "partial_evidence": True,
+    }
+    bodies = {"result.json": repair._body(runtime), "trajectory/events.jsonl": native.model_dump_json().encode() + b"\n",
+              "accounting/usage.json": repair._body({"call_count": 0})}
+    case.artifact.storage["files"] = []
+    for path, body in bodies.items():
+        key = "original/" + path
+        case.store.objects[("artifacts", key)] = body
+        case.artifact.storage["files"].append({"relative_path": path, "bucket": "artifacts", "key": key,
+            "size_bytes": len(body), "sha256": "sha256:" + repair._digest(body), "media_type": "application/json"})
+    rows = [{"id": str(uuid4()), "trial_id": str(case.trial.id), "step_id": "agent",
+             "dialect": "openai_facade", "model": "glm-5.2", "input_tokens": 0, "output_tokens": 0,
+             "cost_usd": 0, "rate_card_hash": "test",
+             "provider_extras": {"_loom_call_status": "failed", "_loom_usage_status": "missing",
+                                 "_loom_failure_category": "upstream_timeout"},
+             "call_status": "failed", "captured_at": now.isoformat(), "attempt": 1} for _ in range(4)]
+    monkeypatch.setattr(repair, "read_service_execution_llm_calls", AsyncMock(side_effect=lambda *a, **k: copy.deepcopy(rows)))
+    first = await repair.repair_accounting(**case.kwargs, apply=True)
+    assert first["usage"]["call_count"] == 4
+    assert first["usage"]["totals"]["input_tokens"] == 0
+    assert first["usage"]["missing_usage_call_count"] == first["usage"]["failed_call_count"] == 4
+    source_before = copy.deepcopy(case.artifact.storage["source_evidence"])
+    rows.append({**rows[0], "id": str(uuid4()), "input_tokens": 999, "output_tokens": 8192,
+                 "provider_extras": {}, "call_status": "completed", "finish_reason": "length"})
+    second = await repair.repair_accounting(**case.kwargs, apply=True)
+    assert second["status"] == "corrected" and second["gateway_call_count"] == 5
+    assert second["usage"]["call_count"] == 5
+    assert second["usage"]["missing_usage_call_count"] == 4
+    assert second["usage"]["failed_call_count"] == 4
+    assert second["usage"]["partial_usage_call_count"] == 0
+    assert second["usage"]["totals"]["input_tokens"] + second["usage"]["totals"]["output_tokens"] == 9191
+    assert case.artifact.storage["source_evidence"] == source_before
+    atif_bucket, atif_key = case.trial.trajectory_index["atif_uri"][5:].split("/", 1)
+    atif = json.loads(case.store.objects[(atif_bucket, atif_key)])
+    assert atif["accounting"] == second["usage"]
+    assert len(atif["steps"]) == 1  # Only the original prompt, no invented agent turn.
+    assert case.events[-1].payload["final_state"] == "failed"
+    calls = [event for event in case.events if event.kind == LLMCallEvent.model_fields["kind"].default]
+    assert len(calls) == 5
+    failed = [event.payload for event in calls if event.payload["call_status"] == "failed"]
+    assert len(failed) == 4
+    assert all(event["usage_status"] == "missing" and event["failure_category"] == "upstream_timeout"
+               for event in failed)
+    known = [event.payload for event in calls if event.payload["call_status"] == "completed"]
+    assert len(known) == 1 and known[0]["usage_status"] is None
+    ledger_record = next(item for item in case.artifact.storage["files"]
+                         if item["relative_path"] == "accounting/gateway-calls.json")
+    exported_calls = json.loads(case.store.objects[(ledger_record["bucket"], ledger_record["key"])])["calls"]
+    assert sum(call["provider_extras"].get("_loom_usage_status") == "missing" for call in exported_calls) == 4
+    assert sum(call["provider_extras"].get("_loom_failure_category") == "upstream_timeout" for call in exported_calls) == 4
+    original_count, commits = len(case.store.objects), case.commits
+    third = await repair.repair_accounting(**case.kwargs, apply=True)
+    assert third["status"] == "already_corrected"
+    assert len(case.store.objects) == original_count and case.commits == commits
+    assert case.trial.result == {"error_type": "timed_out"}
+
+
+@pytest.mark.parametrize("changed", ["ledger", "outcome", "generation"])
+async def test_repair_fences_changed_inputs_and_removes_unpublished_objects(case, monkeypatch, changed):
+    original_objects = copy.deepcopy(case.store.objects)
+    original_storage = copy.deepcopy(case.artifact.storage)
+
+    def race():
+        if changed == "ledger":
+            monkeypatch.setattr(repair, "read_service_execution_llm_calls", AsyncMock(return_value=[{"id": "new-call"}]))
+        elif changed == "outcome":
+            case.trial.result = {"reward": 0}
+        else:
+            case.lease.output_generation = 2
+
+    case.change_on_commit = race
+    with pytest.raises(ValueError, match="repair input changed"):
+        await repair.repair_accounting(**case.kwargs, apply=True)
+    assert case.store.objects == original_objects
+    assert case.artifact.storage == original_storage and case.commits == 0
+
+
+async def test_current_content_only_backfills_missing_count_without_new_objects(case):
+    await repair.repair_accounting(**case.kwargs, apply=True)
+    case.artifact.artifact_metadata.pop("accounting_call_count")
+    original_objects, original_storage = copy.deepcopy(case.store.objects), copy.deepcopy(case.artifact.storage)
+    assert (await repair.repair_accounting(**case.kwargs))["status"] == "already_corrected"
+    assert "accounting_call_count" not in case.artifact.artifact_metadata
+    result = await repair.repair_accounting(**case.kwargs, apply=True)
+    assert result["status"] == "already_corrected"
+    assert case.artifact.artifact_metadata["accounting_call_count"] == 1
+    assert case.store.objects == original_objects and case.artifact.storage == original_storage
+    assert case.commits == 2
+
+
+async def test_successful_trial_still_requires_verifier(case):
+    case.artifact.storage["files"] = [r for r in case.artifact.storage["files"]
+                                       if r["relative_path"] != "verifier/output.json"]
+    with pytest.raises(ValueError, match="requires verifier"):
+        await repair.repair_accounting(**case.kwargs, apply=True)
+    assert case.commits == 0
+
+
+async def test_matching_materializer_json_format_does_not_publish_redundant_revision(case):
+    await repair.repair_accounting(**case.kwargs, apply=True)
+    record = next(r for r in case.artifact.storage["files"] if r["relative_path"] == "trajectory/events.jsonl")
+    # The initial materializer uses sorted-key JSON; repair's historical
+    # serializer used model field order. Formatting is not a ledger change.
+    body = b"".join(json.dumps(row.payload, sort_keys=True).encode() + b"\n" for row in case.events)
+    case.store.objects[(record["bucket"], record["key"])] = body
+    record.update(size_bytes=len(body), sha256="sha256:" + repair._digest(body))
+    case.trial.trajectory_index["trajectory_sha256"] = repair._digest(body)
+    objects = copy.deepcopy(case.store.objects)
+    assert (await repair.repair_accounting(**case.kwargs, apply=True))["status"] == "already_corrected"
+    assert case.store.objects == objects and case.commits == 1

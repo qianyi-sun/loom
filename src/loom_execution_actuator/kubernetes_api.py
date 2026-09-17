@@ -11,6 +11,8 @@ from loom.nebius_kubernetes import (
     create_api_client,
 )
 from loom_execution_actuator.contracts import (
+    ContainerDiagnostic,
+    ContainerTerminationDiagnostic,
     ExecutionTerminationSummaryV1,
     KubernetesApiError,
     KubernetesJobInventory,
@@ -25,6 +27,80 @@ _EXECUTION_UNIT_ANNOTATION = "loom.openai.com/execution-unit-key"
 _RUNTIME_CONTRACT_ANNOTATION = "loom.openai.com/runtime-contract-sha256"
 _COMMAND_IDENTITY_ANNOTATION = "loom.openai.com/command-identity-sha256"
 _EXECUTION_ROLE_ANNOTATION = "loom.openai.com/execution-role"
+
+
+def _termination_diagnostic(value: Any) -> ContainerTerminationDiagnostic | None:
+    if value is None:
+        return None
+    reason = getattr(value, "reason", None)
+    # Reasons originate at the runtime boundary. Do not persist free-form
+    # termination messages, container IDs, image refs, or arbitrary reason text.
+    safe_reasons = {
+        "OOMKilled",
+        "Error",
+        "Completed",
+        "ContainerCannotRun",
+        "StartError",
+        "DeadlineExceeded",
+        "ContainerStatusUnknown",
+    }
+    return ContainerTerminationDiagnostic(
+        reason=reason if reason in safe_reasons else "Unknown",
+        exit_code=getattr(value, "exit_code", None),
+        signal=getattr(value, "signal", None),
+        started_at=getattr(value, "started_at", None),
+        finished_at=getattr(value, "finished_at", None),
+    )
+
+
+def _container_diagnostics(statuses: list[Any]) -> tuple[ContainerDiagnostic, ...]:
+    return tuple(
+        ContainerDiagnostic(
+            name=status.name,
+            restart_count=getattr(status, "restart_count", None) or 0,
+            current_termination=_termination_diagnostic(
+                getattr(getattr(status, "state", None), "terminated", None)
+            ),
+            previous_termination=_termination_diagnostic(
+                getattr(getattr(status, "last_state", None), "terminated", None)
+            ),
+        )
+        for status in statuses
+        if getattr(status, "name", None) in {"execution", "task-sandbox", "verifier-sandbox"}
+    )
+
+
+def _sandbox_lost(item: ContainerDiagnostic, execution_terminated: Any) -> bool:
+    if item.name == "execution":
+        return False
+    execution_finished = getattr(execution_terminated, "finished_at", None)
+    previous = item.previous_termination
+    if (
+        item.restart_count == 1
+        and previous is not None
+        and previous.finished_at is not None
+        and execution_finished is not None
+        and previous.finished_at > execution_finished
+    ):
+        # The only restart occurred after execution ended. Multiple restarts
+        # or missing timestamps cannot establish that earlier state was intact.
+        return False
+    current = item.current_termination
+    return (
+        item.restart_count > 0
+        or previous is not None
+        or (
+            current is not None
+            and (
+                execution_terminated is None
+                or (
+                    current.finished_at is not None
+                    and execution_finished is not None
+                    and current.finished_at < execution_finished
+                )
+            )
+        )
+    )
 
 
 def _condition(conditions: list[Any] | None, condition_type: str) -> Any | None:
@@ -70,6 +146,8 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
     node_name = None
     pod_uid = None
     pod_ip = None
+    pod_resource_version = None
+    diagnostics: tuple[ContainerDiagnostic, ...] = ()
 
     if metadata.deletion_timestamp is not None:
         state = NormalizedJobState.TERMINATING
@@ -86,12 +164,15 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
 
     if pod is not None:
         pod_uid = str(pod.metadata.uid) if pod.metadata.uid is not None else None
+        pod_resource_version = getattr(pod.metadata, "resource_version", None)
         pod_ip = getattr(pod.status, "pod_ip", None)
         node_name = getattr(pod.spec, "node_name", None)
         scheduled = _condition(getattr(pod.status, "conditions", None), "PodScheduled")
         if getattr(scheduled, "status", None) == "True":
             scheduled_at = getattr(scheduled, "last_transition_time", None)
         statuses = list(getattr(pod.status, "container_statuses", None) or [])
+        init_statuses = list(getattr(pod.status, "init_container_statuses", None) or [])
+        diagnostics = _container_diagnostics(statuses + init_statuses)
         execution_status = next(
             (status for status in statuses if getattr(status, "name", None) == "execution"),
             None,
@@ -104,14 +185,28 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
         started_at = getattr(
             getattr(execution_state, "running", None), "started_at", None
         ) or getattr(execution_terminated, "started_at", None)
-        if pod.metadata.deletion_timestamp is not None:
-            state = NormalizedJobState.TERMINATING
         pod_reason = getattr(pod.status, "reason", None)
+        disruption = _condition(getattr(pod.status, "conditions", None), "DisruptionTarget")
         pod_message = getattr(pod.status, "message", None)
         if pod_reason == "Evicted":
             state, reason, message = NormalizedJobState.EVICTED, pod_reason, pod_message
+        elif (
+            pod_uid is not None
+            and getattr(disruption, "status", None) == "True"
+            and getattr(disruption, "reason", None) == "DeletionByTaintManager"
+        ):
+            # This condition belongs to the UID-bound Pod observation. Keep
+            # its eviction cause while deletion and generic Job backoff status
+            # arrive; do not infer it from unbound Events or other disruptions.
+            state, reason, message = (
+                NormalizedJobState.EVICTED,
+                "DeletionByTaintManager",
+                getattr(disruption, "message", None),
+            )
         elif pod_reason in {"NodeLost", "Shutdown"}:
             state, reason, message = NormalizedJobState.NODE_LOST, pod_reason, pod_message
+        elif pod.metadata.deletion_timestamp is not None or metadata.deletion_timestamp is not None:
+            state = NormalizedJobState.TERMINATING
         else:
             terminated = [
                 status.state.terminated
@@ -120,7 +215,7 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
             ]
             waiting = [
                 status.state.waiting
-                for status in statuses
+                for status in statuses + init_statuses
                 if getattr(getattr(status, "state", None), "waiting", None) is not None
             ]
             raw_summary = getattr(execution_terminated, "message", None)
@@ -180,6 +275,27 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
                     pod_message,
                 )
 
+            # Kubernetes native sidecars restart independently of the Job.
+            # A fresh sandbox cannot continue the same attempt's process state.
+            # Normal sidecar teardown after execution exits is not a failure.
+            lost = next(
+                (item for item in diagnostics if _sandbox_lost(item, execution_terminated)),
+                None,
+            )
+            if lost is not None:
+                endings = (lost.previous_termination, lost.current_termination)
+                state = (
+                    NormalizedJobState.OOM_KILLED
+                    if any(item is not None and item.reason == "OOMKilled" for item in endings)
+                    else NormalizedJobState.FAILED
+                )
+                reason = (
+                    "SandboxRestarted"
+                    if lost.restart_count > 0 or lost.previous_termination
+                    else "SandboxTerminated"
+                )
+                message = f"{lost.name} lost its attempt process state (restart count {lost.restart_count})"
+
     if termination_summary is not None and (
         termination_summary.runtime_contract_sha256 != annotations.get(_RUNTIME_CONTRACT_ANNOTATION)
         or termination_summary.command_identity_sha256
@@ -216,6 +332,10 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
         resource_version=(
             str(metadata.resource_version) if metadata.resource_version is not None else None
         ),
+        pod_resource_version=str(pod_resource_version)
+        if pod_resource_version is not None
+        else None,
+        container_diagnostics=diagnostics,
         node_name=node_name,
         scheduled_at=scheduled_at,
         started_at=started_at,
@@ -263,6 +383,34 @@ class InClusterKubernetesJobApi:
             self._client = client
             self._batch = client.BatchV1Api()
             self._core = client.CoreV1Api()
+
+    async def resource_summary(self, *, node_name: str) -> dict[str, Any]:
+        """Read kubelet summaries via the API server; never expose raw node data."""
+
+        def read() -> dict[str, Any]:
+            import json
+
+            try:
+                # This generated connect API declares response_type='str'. Its
+                # deserializer converts JSON objects into Python repr strings,
+                # so decode the raw JSON before that lossy coercion.
+                response = self._core.connect_get_node_proxy_with_path(
+                    name=node_name,
+                    path="stats/summary",
+                    _request_timeout=10,
+                    _preload_content=False,
+                )
+                try:
+                    result = json.loads(response.data)
+                    if not isinstance(result, dict):
+                        raise ValueError("kubelet summary is not a JSON object")
+                    return result
+                finally:
+                    response.release_conn()
+            except Exception as exc:
+                raise self._translate(exc, "resource_summary") from exc
+
+        return await asyncio.to_thread(read)
 
     async def close(self) -> None:
         try:

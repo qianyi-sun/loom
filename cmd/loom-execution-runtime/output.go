@@ -48,17 +48,19 @@ func captureDeclaredOutputs(
 		}
 		result.Outputs = append(result.Outputs, evidence)
 	}
-	if firstError == nil {
-		rewards, err := verifierRewards(outputRoot, result.Outputs)
-		if err != nil {
+	// Evaluation is independent evidence, including for partial failed attempts.
+	// A missing trajectory must not discard an already captured numeric reward.
+	rewards, err := verifierRewards(outputRoot, result.Outputs)
+	if err != nil {
+		if firstError == nil {
 			firstError = err
-			if result.Status == "succeeded" {
-				result.Status = "verifier_error"
-				result.PartialEvidence = true
-			}
-		} else {
-			result.VerifierRewards = rewards
 		}
+		if result.Status == "succeeded" {
+			result.Status = "verifier_error"
+			result.PartialEvidence = true
+		}
+	} else {
+		result.VerifierRewards = rewards
 	}
 	return firstError
 }

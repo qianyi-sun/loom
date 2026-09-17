@@ -674,3 +674,21 @@ def test_publication_check_is_the_single_tier_one_publication_boundary(tmp_path:
         image_tag=image_tag,
         migration_target_revision="0066",
     )
+
+
+def test_store_preserves_explicit_separated_owner_migration_artifact(tmp_path: Path) -> None:
+    store = PreflightArtifactStore(tmp_path / "state")
+    image_tag, images, manifests = _loadable_artifacts()
+    migration = build_migration_manifest_artifact(lambda _: _Result(0, ""),
+        candidate_sha="a" * 40, candidate_tree="f" * 40, image_tag=image_tag,
+        image_id=images.image_digests["loom-control-plane"], namespace="loom-staging",
+        migration_plan_sha256="1" * 64, migration_target_revision="0142", application_owner_role="loom_app_staging_owner")
+    publication = store.publish(candidate_sha="a" * 40, candidate_tree="f" * 40, mutation_epoch=8,
+        images=images, manifests=manifests, migration=migration, production_defaults=_production_defaults(),
+        migration_plan_sha256="1" * 64, migration_target_revision="0142", browser_report_schema_sha256="2" * 64)
+    loaded = store.load(bundle_digest=publication.bundle_digest, candidate_sha="a" * 40, candidate_tree="f" * 40,
+        mutation_epoch=8, image_tag=image_tag, namespace="loom-staging", image_run=_docker)
+    assert loaded.migration == migration
+    record = json.loads(publication.descriptor_path.read_bytes())
+    assert record["schema_version"] == 7
+    assert record["migration_application_owner_role"] == "loom_app_staging_owner"

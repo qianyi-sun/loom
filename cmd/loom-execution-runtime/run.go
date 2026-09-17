@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -60,6 +61,7 @@ type resultManifest struct {
 	RuntimeBinarySHA256   string             `json:"runtime_binary_sha256"`
 	ExecutionClassID      string             `json:"execution_class_id"`
 	Status                string             `json:"status"`
+	FailureReason         string             `json:"failure_reason,omitempty"`
 	StartedAt             time.Time          `json:"started_at"`
 	FinishedAt            time.Time          `json:"finished_at"`
 	Phases                []phaseEvidence    `json:"phases"`
@@ -130,6 +132,7 @@ func runPlan(
 	p plan,
 	workspace, outputRoot string,
 	trustedEnvironment map[string]string,
+	phaseBoundary ...func(time.Time),
 ) (resultManifest, error) {
 	started := time.Now().UTC()
 	result := resultManifest{
@@ -139,6 +142,7 @@ func runPlan(
 		TaskRevisionSHA256: p.TaskRevisionSHA256, TaskImageRef: p.TaskImageRef,
 		RuntimeImageRef: p.RuntimeImageRef, RuntimeBinarySHA256: p.RuntimeBinarySHA256,
 		ExecutionClassID: p.ExecutionClassID, Status: "running", StartedAt: started,
+		Phases: []phaseEvidence{},
 	}
 	result.ContainerRoles = []string{"execution", p.Main.Role}
 	for _, item := range p.Sidecars {
@@ -164,19 +168,54 @@ func runPlan(
 	if p.Verifier != nil {
 		phases = append(phases, *p.Verifier)
 	}
+	var agentTimeout error
 	for ordinal, item := range phases {
+		if ctx.Err() != nil {
+			result.Status = classifyFailure(ctx, phaseEvidence{})
+			result.PartialEvidence = true
+			result.FinishedAt = time.Now().UTC()
+			if errors.Is(context.Cause(ctx), errSandboxLost) {
+				result.FailureReason = "sandbox_lost"
+			}
+			return result, context.Cause(ctx)
+		}
 		evidence, err := runPhase(
 			ctx, item, ordinal+1, workspace, outputRoot,
 			p.MaxLogBytesPerStream, time.Duration(p.TerminationGraceSec)*time.Second,
-			trustedEnvironment,
+			trustedEnvironment, phaseBoundary...,
 		)
 		result.Phases = append(result.Phases, evidence)
+		if errors.Is(context.Cause(ctx), errSandboxLost) {
+			err = context.Cause(ctx)
+		}
 		if err != nil {
+			// Exit 124 is the trusted controller's acknowledgement that an
+			// expired agent is quiescent and its workspace handoff is complete.
+			// A deadline alone (or a forced kill) is never a safe handoff.
+			if p.VerifierAfterAgentTimeout && item.Role == "agent" &&
+				evidence.TimedOut && evidence.ExitCode == 124 && ctx.Err() == nil {
+				agentTimeout = err
+				result.PartialEvidence = true
+				continue
+			}
 			result.Status = classifyFailure(ctx, evidence)
+			if errors.Is(context.Cause(ctx), errSandboxLost) {
+				result.FailureReason = "sandbox_lost"
+				err = context.Cause(ctx)
+			}
+			if agentTimeout != nil && ctx.Err() == nil {
+				result.Status = "timed_out"
+				err = errors.Join(agentTimeout, err)
+			}
 			result.PartialEvidence = true
 			result.FinishedAt = time.Now().UTC()
 			return result, err
 		}
+	}
+	if agentTimeout != nil {
+		result.Status = "timed_out"
+		result.FinishedAt = time.Now().UTC()
+		return result, agentTimeout
 	}
 	result.Status = "succeeded"
 	result.FinishedAt = time.Now().UTC()
@@ -191,9 +230,15 @@ func runPhase(
 	limit int64,
 	terminationGrace time.Duration,
 	trustedEnvironment map[string]string,
+	phaseBoundary ...func(time.Time),
 ) (phaseEvidence, error) {
 	phaseCtx, cancel := context.WithTimeout(parent, time.Duration(item.TimeoutSeconds)*time.Second)
 	defer cancel()
+	deadline, _ := phaseCtx.Deadline()
+	for _, boundary := range phaseBoundary {
+		boundary(deadline)
+		defer boundary(time.Time{})
+	}
 	directory := filepath.Clean(item.WorkingDirectory)
 	// /app is the fixed trusted controller directory. Do not normalize task
 	// paths into that exception or allow arbitrary sibling application paths.
@@ -235,6 +280,10 @@ func runPhase(
 	for name, value := range trustedEnvironment {
 		environment[name] = value
 	}
+	// The Python controller and Gateway use this same cutoff. Do not let
+	// process startup reset the agent's full task-owned allowance.
+	environment["LOOM_EXECUTION_PHASE_DEADLINE"] = strconv.FormatFloat(float64(deadline.UnixNano())/1e9, 'f', 9, 64)
+	environment["LOOM_EXECUTION_TERMINATION_GRACE_SECONDS"] = strconv.FormatFloat(terminationGrace.Seconds(), 'f', -1, 64)
 	names := make([]string, 0, len(environment))
 	for name := range environment {
 		names = append(names, name)
@@ -265,13 +314,13 @@ func runPhase(
 				_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 				<-waited
 			}
-			err = phaseCtx.Err()
+			err = context.Cause(phaseCtx)
 		}
 	}
 	finished := time.Now().UTC()
 	evidence := phaseEvidence{
 		Role: item.Role, Ordinal: ordinal, StartedAt: started, FinishedAt: finished,
-		ExitCode: 0, TimedOut: errors.Is(phaseCtx.Err(), context.DeadlineExceeded),
+		ExitCode: 0, TimedOut: errors.Is(phaseCtx.Err(), context.DeadlineExceeded) || !finished.Before(deadline),
 		Stdout: stdout.evidence(filepath.Base(stdoutPath)), Stderr: stderr.evidence(filepath.Base(stderrPath)),
 	}
 	if err != nil {
@@ -291,6 +340,9 @@ func runPhase(
 }
 
 func classifyFailure(ctx context.Context, evidence phaseEvidence) string {
+	if errors.Is(context.Cause(ctx), errSandboxLost) {
+		return "runtime_error"
+	}
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return "cancelled"
 	}

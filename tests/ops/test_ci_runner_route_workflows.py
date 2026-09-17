@@ -56,7 +56,6 @@ def test_every_normal_job_consumes_its_ci_route_dependency() -> None:
         "runtime-payload": "['runtime-payload']",
         "go-checks": "['go-checks']",
         "web-checks": "['web-checks']",
-        "integration": "format('integration-{0}', matrix.shard)",
         "integration-docker": "['integration-docker']",
     }
 
@@ -66,6 +65,16 @@ def test_every_normal_job_consumes_its_ci_route_dependency() -> None:
         assert "needs.ci-route.outputs.routes" in job["runs-on"]
         assert route_key in job["runs-on"]
         assert "LOOM_CI_" not in job["runs-on"]
+
+
+def test_four_integration_shards_use_hosted_capacity_until_route_promotion() -> None:
+    jobs = _workflow("ci")["jobs"]
+    integration = jobs["integration"]
+    assert integration["runs-on"] == "ubuntu-latest"
+    assert integration["needs"] == ["workflow-plan"]
+    keys = next(step["run"] for step in jobs["ci-route"]["steps"] if step.get("id") == "keys")
+    assert '"integration-1-of-2"' not in keys
+    assert "integration-{index}-of-4" not in keys
 
 
 def test_go_checks_workflow_pins_exact_supervisor_toolchain_patch() -> None:

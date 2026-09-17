@@ -882,6 +882,7 @@ async def test_get_trial_llm_calls_returns_items(  # type: ignore[no-untyped-def
 
     app, raw = cp_setup
     cp, http = await _client(app, raw)
+    call_id = uuid4()
     try:
         team_id = uuid4()
         trial_id = uuid4()
@@ -908,6 +909,7 @@ async def test_get_trial_llm_calls_returns_items(  # type: ignore[no-untyped-def
             )
             conn.execute(
                 insert(LlmCall).values(
+                    id=call_id,
                     team_id=team_id,
                     trial_id=trial_id,
                     step_id="main",
@@ -927,6 +929,11 @@ async def test_get_trial_llm_calls_returns_items(  # type: ignore[no-untyped-def
         assert items[0]["input_tokens"] == 100
         assert items[0]["dialect"] == "anthropic"
     finally:
+        # Audit rows intentionally survive Trial deletion; remove our own row.
+        engine = create_engine(postgres_url)
+        with engine.begin() as conn:
+            conn.execute(delete(LlmCall).where(LlmCall.id == call_id))
+        engine.dispose()
         await http.aclose()
 
 

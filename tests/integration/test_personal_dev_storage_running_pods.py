@@ -3,6 +3,7 @@
 import asyncio
 import json
 from copy import deepcopy
+from datetime import datetime
 from uuid import uuid4
 
 import pytest
@@ -50,6 +51,9 @@ async def _wait_ready_nodes(kubectl, *, timeout_seconds=120):
                 await asyncio.sleep(0.5)
     except TimeoutError as error:
         error.add_note("disposable k3s readiness: " + states)
+        if isinstance(kubectl.runner, _ContainerKubectl):
+            for note in kubectl.runner.last_failure_notes:
+                error.add_note(note)
         raise
 
 
@@ -72,6 +76,29 @@ async def _eventually(kubectl, identity, kind, name, predicate):
             if predicate(observed):
                 return observed
             await asyncio.sleep(0.5)
+
+
+async def _executed_failed_pod(kubectl, identity, job):
+    """Job Failed alone also admits eviction without ever starting a command."""
+    reply = await kubectl.runner.run(kubectl._argv(
+        "get", "pods", "-n", identity.namespace, "-l",
+        "batch.kubernetes.io/controller-uid=" + job["metadata"]["uid"], "-o", "json",
+    ))
+    pods = json.loads(reply.stdout)["items"]
+    assert len(pods) == 1
+    pod = pods[0]
+    assert any(owner.get("controller") is True and owner.get("kind") == "Job"
+               and owner.get("uid") == job["metadata"]["uid"]
+               for owner in pod["metadata"].get("ownerReferences", []))
+    assert pod["status"]["phase"] == "Failed"
+    assert pod["status"].get("reason") != "Evicted", pod["status"]
+    statuses = pod["status"].get("containerStatuses", [])
+    assert len(statuses) == 1 and statuses[0]["name"] == "probe", pod["status"]
+    terminated = statuses[0].get("state", {}).get("terminated", {})
+    assert terminated.get("reason") == "Error" and terminated.get("exitCode") == 1, terminated
+    assert terminated.get("containerID"), terminated
+    assert datetime.fromisoformat(terminated["finishedAt"]) >= datetime.fromisoformat(terminated["startedAt"])
+    return pod["metadata"]["uid"]
 
 
 @pytest.mark.docker
@@ -133,10 +160,13 @@ async def test_failed_job_new_attempt_actually_executes_again(running_storage_ku
     await _reconcile_workload(kubectl, identity, document, operation_epoch=1)
     failed = await _eventually(kubectl, identity, "job", document["metadata"]["name"], lambda value:
         any(item["type"] == "Failed" and item["status"] == "True" for item in value.get("status", {}).get("conditions", [])))
+    first_pod = await _executed_failed_pod(kubectl, identity, failed)
     document["metadata"]["labels"]["loom.dev/attempt"] = str(uuid4())
     document["metadata"]["labels"]["loom.dev/attempt-sequence"] = "1"
     await _reconcile_workload(kubectl, identity, document, operation_epoch=1)
     retried = await _eventually(kubectl, identity, "job", document["metadata"]["name"], lambda value:
         any(item["type"] == "Failed" and item["status"] == "True" for item in value.get("status", {}).get("conditions", [])))
+    second_pod = await _executed_failed_pod(kubectl, identity, retried)
+    assert first_pod != second_pod
     assert failed["metadata"]["uid"] != retried["metadata"]["uid"]
     assert failed["status"]["failed"] == retried["status"]["failed"] == 1

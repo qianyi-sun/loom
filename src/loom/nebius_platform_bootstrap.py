@@ -50,11 +50,13 @@ COMMON_EXECUTION_TABLES = (
 # Keep the Gateway's inventory independent: it may read task-image readiness,
 # but never acquires builder leases or writes publication evidence.
 ACTUATOR_TASK_IMAGE_WRITES = {
+    "task_image_capacity_waits": ("INSERT", "UPDATE", "DELETE"),
     "task_image_materializations": ("UPDATE",),
     "task_image_materialization_attempts": ("INSERT", "UPDATE"),
     "task_image_publication_evidence": ("INSERT",),
 }
 ACTUATOR_TABLES = (
+    "trial_resource_usage",
     *COMMON_EXECUTION_TABLES,
     "batches",
     "trial_task_image_materializations",
@@ -207,6 +209,7 @@ def bootstrap_database(config: dict[str, Any]) -> None:
                     tables = sql.SQL(", ").join(sql.Identifier(table) for table in inventory)
                     cursor.execute(sql.SQL("GRANT SELECT ON {} TO {}").format(tables, identifier))
                     read_only = {
+                        "trial_resource_usage",
                         "alembic_version",
                         "users",
                         "tokens",
@@ -214,6 +217,7 @@ def bootstrap_database(config: dict[str, Any]) -> None:
                         "tasks",
                         "batches",
                         "task_image_materializations",
+                        "task_image_capacity_waits",
                         "task_image_materialization_attempts",
                         "task_image_publication_evidence",
                         "trial_task_image_materializations",
@@ -245,6 +249,7 @@ def bootstrap_database(config: dict[str, Any]) -> None:
                             "GRANT UPDATE (last_used_at, last_seen_at) ON tokens TO loom_gateway"
                         )
                     if role == "loom_actuator":
+                        cursor.execute("GRANT INSERT, UPDATE ON trial_resource_usage TO loom_actuator")
                         for table, privileges in ACTUATOR_TASK_IMAGE_WRITES.items():
                             cursor.execute(
                                 sql.SQL("GRANT {} ON {} TO loom_actuator").format(

@@ -19,7 +19,8 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
-from sqlalchemy import func, or_, select
+from sqlalchemy import Text, func, or_, select
+from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.agent.terminus2.mapper import Terminus2TrajectoryMapper
@@ -32,12 +33,15 @@ from loom.db.schema import (
     Artifact,
     ArtifactUploadFile,
     ArtifactUploadSession,
+    DataLifecycleAuthority,
+    LlmCall,
     ServiceExecutionLease,
     Trial,
     TrialEvent,
 )
 from loom.execution_runtime_contract import ExecutionRuntimeResultV1
 from loom.llm_call_ledger import read_service_execution_llm_calls
+from loom.models.result import ExceptionInfo
 from loom.models.task import TaskConfig
 from loom.models.trajectory import (
     LLMCallEvent,
@@ -99,6 +103,7 @@ _TRACE_PATH = "trajectory/events.jsonl"
 _USAGE_PATH = "accounting/usage.json"
 _VERIFIER_PATH = "verifier/output.json"
 _RESULT_PATH = "result.json"
+_EXCEPTION_PATHS = {"diagnostics/agent-exception.json", "diagnostics/verifier-exception.json"}
 _MAX_DERIVATION_BYTES = 256 * 1024 * 1024
 
 
@@ -145,6 +150,8 @@ class MaterializationResult:
     atif_sha256: str
     final_trial_state: str
     failure_reason: str | None
+    accounting_call_count: int | None = None
+    exception_info: ExceptionInfo | None = None
 
 
 def _digest(body: bytes) -> str:
@@ -163,6 +170,21 @@ def _canonical_jsonl(events: Sequence[TrajectoryEvent]) -> bytes:
         ).encode("utf-8")
         for event in events
     )
+
+
+def read_exception_info(
+    runtime_result: ExecutionRuntimeResultV1, inputs: dict[str, bytes],
+) -> ExceptionInfo | None:
+    if runtime_result.status in {"succeeded", "cancelled"}:
+        return None
+    phase = "verifier" if runtime_result.status == "verifier_error" else "agent"
+    body = inputs.get(f"diagnostics/{phase}-exception.json")
+    if body is None:
+        return None
+    try:
+        return ExceptionInfo.model_validate_json(body)
+    except ValidationError as exc:
+        raise MaterializationIntegrityError("exception_info_invalid") from exc
 
 
 def _model_matches(source: str, trial_config: TrialConfig) -> bool:
@@ -267,6 +289,7 @@ def build_canonical_events(
     trace_body: bytes | None,
     verifier_body: bytes | None,
     gateway_calls: list[dict[str, Any]] | None = None,
+    exception_info: ExceptionInfo | None = None,
 ) -> tuple[TrajectoryEvent, ...]:
     """Validate the lossless source trace and project it to Loom event rows."""
 
@@ -415,8 +438,9 @@ def build_canonical_events(
                 trial_id=trial_id,
                 step_id="trial",
                 seq=len(events),
-                error_type=runtime_result.status,
-                message=f"service execution runtime reported {runtime_result.status}",
+                error_type=exception_info.exception_type if exception_info else runtime_result.status,
+                message=(exception_info.exception_message if exception_info else
+                         f"service execution runtime reported {runtime_result.status}"),
                 traceback="",
             )
         )
@@ -497,6 +521,7 @@ class ServiceExecutionMaterializer:
         self._retry_base = retry_base_seconds
         self._retry_max = retry_max_seconds
         self._source_retention = timedelta(seconds=max(0, source_retention_seconds))
+        self._accounting_retry_after: dict[UUID, datetime] = {}
 
     async def claim_one(self, *, now: datetime | None = None) -> MaterializationClaim | None:
         current = now or datetime.now(UTC)
@@ -797,6 +822,7 @@ class ServiceExecutionMaterializer:
                 _TRACE_PATH,
                 _USAGE_PATH,
                 _VERIFIER_PATH,
+                *_EXCEPTION_PATHS,
             }:
                 derivation_inputs[file.relative_path] = await self._read_exact(
                     key=source_key, expected=file.sha256, size=file.size_bytes
@@ -837,6 +863,7 @@ class ServiceExecutionMaterializer:
         ):
             raise MaterializationIntegrityError("runtime_result_projection_drift")
         trace_body = derivation_inputs.get(_TRACE_PATH)
+        exception_info = read_exception_info(runtime_result, derivation_inputs)
         if runtime_result.status == "succeeded" and trace_body is None:
             raise MaterializationIntegrityError("trajectory_output_missing")
         if runtime_result.status == "succeeded":
@@ -854,6 +881,7 @@ class ServiceExecutionMaterializer:
             trace_body=trace_body,
             verifier_body=derivation_inputs.get(_VERIFIER_PATH),
             gateway_calls=gateway_calls,
+            exception_info=exception_info,
         )
         if gateway_calls is not None:
             # Preserve the immutable runtime projection as source evidence. The
@@ -932,6 +960,8 @@ class ServiceExecutionMaterializer:
             failure_reason=(
                 None if runtime_result.status == "succeeded" else runtime_result.status
             ),
+            accounting_call_count=len(gateway_calls) if gateway_calls is not None else None,
+            exception_info=exception_info,
         )
 
     async def _commit(self, claim: MaterializationClaim, result: MaterializationResult) -> bool:
@@ -1020,6 +1050,8 @@ class ServiceExecutionMaterializer:
                 **({"accounting_source": "gateway_lease_ledger"} if any(
                     item.relative_path == "accounting/gateway-calls.json" for item in result.files
                 ) else {}),
+                **({"accounting_call_count": result.accounting_call_count}
+                   if result.accounting_call_count is not None else {}),
             }
             trial.trajectory_index = {
                 "schema_version": "1",
@@ -1099,6 +1131,12 @@ class ServiceExecutionMaterializer:
                 trial.failure_message = None
             elif trial.state != result.final_trial_state:
                 raise MaterializationIntegrityError("terminal_trial_state_drift")
+            if result.exception_info is not None:
+                trial.result = {**(trial.result or {}),
+                                "exception_info": result.exception_info.model_dump(mode="json")}
+                trial.failure_message = (
+                    f"{result.exception_info.exception_type}: {result.exception_info.exception_message}"
+                )[:2000]
             lease.materialization_state = "committed"
             lease.materialization_claim_id = None
             lease.materialization_claim_expires_at = None
@@ -1374,6 +1412,74 @@ class ServiceExecutionMaterializer:
             int(unavailable_row[1] or 0)
         )
 
+    async def reconcile_accounting_once(self, *, now: datetime | None = None) -> bool:
+        """Refresh one retained terminal archive after a newly committed Gateway row.
+
+        Calls are immutable inserts. Compare the number actually included in the
+        archive, not wall time: a request can begin before materialization and
+        commit after it. No new execution or change to the source ACK is needed.
+        """
+        from loom_control_plane.service_execution_accounting_repair import repair_accounting
+
+        current = now or datetime.now(UTC)
+        self._accounting_retry_after = {
+            key: until for key, until in self._accounting_retry_after.items() if until > current
+        }
+        binding = LlmCall.provider_extras["_loom_raw_provider_log"]["service_execution"]
+        call_count = (
+            select(func.count(LlmCall.id)).where(
+                LlmCall.team_id == ServiceExecutionLease.team_id,
+                LlmCall.trial_id == ServiceExecutionLease.trial_id,
+                LlmCall.step_id == "agent",
+                binding["lease_id"].astext == sql_cast(ServiceExecutionLease.id, Text),
+                binding["generation"].astext == sql_cast(ServiceExecutionLease.output_generation, Text),
+            ).correlate(ServiceExecutionLease).scalar_subquery()
+        )
+        async with self._session_factory() as session:
+            candidate = (await session.execute(
+                select(ServiceExecutionLease.id, ServiceExecutionLease.team_id)
+                .join(Trial, Trial.id == ServiceExecutionLease.trial_id)
+                .join(Artifact, (Artifact.control_producer_kind == "service_execution")
+                      & (Artifact.control_producer_id == ServiceExecutionLease.id)
+                      & (Artifact.team_id == ServiceExecutionLease.team_id)
+                      & (Artifact.trial_id == ServiceExecutionLease.trial_id))
+                .join(DataLifecycleAuthority, DataLifecycleAuthority.id == Artifact.lifecycle_authority_id)
+                .where(
+                    ServiceExecutionLease.output_commit_state == "committed",
+                    ServiceExecutionLease.materialization_state == "committed",
+                    ServiceExecutionLease.output_generation.is_not(None),
+                    Trial.team_id == ServiceExecutionLease.team_id,
+                    Trial.attempt_count == ServiceExecutionLease.attempt,
+                    Trial.state.in_(("succeeded", "failed", "cancelled")),
+                    Trial.config["agent_name"].astext == "terminus-2",
+                    DataLifecycleAuthority.state == "active",
+                    or_(DataLifecycleAuthority.pinned, DataLifecycleAuthority.expires_at > current),
+                    Artifact.artifact_metadata["accounting_call_count"].is_distinct_from(func.to_jsonb(call_count)),
+                    ServiceExecutionLease.id.not_in(tuple(self._accounting_retry_after)),
+                ).order_by(Artifact.created_at, ServiceExecutionLease.id).limit(1)
+            )).one_or_none()
+        if candidate is None:
+            return False
+        lease_id, team_id = candidate
+        try:
+            await repair_accounting(
+                session_factory=self._session_factory, store=self._canonical_store,
+                artifacts_bucket=self._artifacts_bucket, trajectories_bucket=self._trajectories_bucket,
+                lease_id=lease_id, team_id=team_id, apply=True,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _raise_if_cancellation_requested(exc)
+            # A broken old archive must not starve current materialization or
+            # other corrections. State remains in the existing ledger on restart.
+            if len(self._accounting_retry_after) >= 128:
+                self._accounting_retry_after.pop(next(iter(self._accounting_retry_after)))
+            self._accounting_retry_after[lease_id] = current + timedelta(seconds=self._retry_max)
+            logger.warning("native accounting refresh deferred for lease %s (%s)", lease_id, type(exc).__name__)
+            return False
+        return True
+
     async def run_once(self) -> bool:
         claim = await self.claim_one()
         if claim is None:
@@ -1418,6 +1524,7 @@ async def run_service_execution_materializer_loop(
                     return
                 if index == 0:
                     await materializer.refresh_metrics()
+                    processed = await materializer.reconcile_accounting_once() or processed
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

@@ -172,6 +172,133 @@ def test_kubernetes_status_normalization_is_exhaustive(
     assert observation.resource_version == "42"
 
 
+@pytest.mark.parametrize(
+    "reason,expected",
+    [("OOMKilled", NormalizedJobState.OOM_KILLED), ("Error", NormalizedJobState.FAILED)],
+)
+def test_restarted_native_sandbox_is_terminal_even_when_pod_is_running(reason, expected) -> None:
+    pod = _pod(phase="Running")
+    finished = datetime.now(UTC)
+    pod.metadata.resource_version = "44"
+    pod.status.init_container_statuses = [
+        _ns(
+            name="task-sandbox",
+            restart_count=1,
+            state=_ns(running=_ns(started_at=finished), terminated=None),
+            last_state=_ns(
+                terminated=_ns(
+                    reason=reason,
+                    exit_code=137,
+                    signal=9,
+                    started_at=finished - timedelta(seconds=20),
+                    finished_at=finished,
+                    message="secret=must-not-be-persisted",
+                )
+            ),
+        )
+    ]
+    observed = _normalize(_job(), [pod])
+    assert observed.normalized_state == expected
+    assert observed.reason == "SandboxRestarted"
+    assert observed.pod_resource_version == "44"
+    payload = observed.event_payload()
+    diagnostic = payload["container_diagnostics"][0]
+    assert diagnostic["name"] == "task-sandbox"
+    assert diagnostic["restart_count"] == 1
+    assert diagnostic["previous_termination"]["reason"] == reason
+    assert diagnostic["previous_termination"]["exit_code"] == 137
+    assert diagnostic["previous_termination"]["finished_at"] is not None
+    assert "must-not-be-persisted" not in json.dumps(payload)
+
+
+def test_normal_sidecar_shutdown_after_execution_is_not_sandbox_failure() -> None:
+    pod = _pod(phase="Succeeded")
+    pod.status.init_container_statuses = [
+        _ns(
+            name="task-sandbox",
+            restart_count=0,
+            state=_ns(terminated=_ns(reason="Error", exit_code=137, signal=9)),
+            last_state=_ns(terminated=None),
+        )
+    ]
+    assert _normalize(_job(), [pod]).normalized_state == NormalizedJobState.SUCCEEDED
+
+
+def test_sandbox_exit_before_execution_ended_retains_failure_cause() -> None:
+    pod = _pod(phase="Succeeded")
+    finished = datetime.now(UTC)
+    pod.status.container_statuses[0].state.terminated.finished_at = finished
+    pod.status.init_container_statuses = [
+        _ns(
+            name="task-sandbox",
+            restart_count=0,
+            state=_ns(
+                terminated=_ns(
+                    reason="OOMKilled", exit_code=137, finished_at=finished - timedelta(seconds=1)
+                )
+            ),
+            last_state=_ns(terminated=None),
+        )
+    ]
+    assert _normalize(_job(), [pod]).normalized_state == NormalizedJobState.OOM_KILLED
+    pod.status.init_container_statuses[0].state.terminated.finished_at = finished + timedelta(
+        seconds=1
+    )
+    assert _normalize(_job(), [pod]).normalized_state == NormalizedJobState.SUCCEEDED
+
+
+@pytest.mark.parametrize(
+    "restarts,known_after,expected",
+    [
+        (1, True, NormalizedJobState.SUCCEEDED),
+        (1, False, NormalizedJobState.FAILED),
+        (2, True, NormalizedJobState.FAILED),
+    ],
+)
+def test_only_proven_single_restart_after_execution_is_normal_teardown(
+    restarts, known_after, expected
+) -> None:
+    pod = _pod(phase="Succeeded")
+    finished = datetime.now(UTC)
+    pod.status.container_statuses[0].state.terminated.finished_at = finished
+    pod.status.init_container_statuses = [
+        _ns(
+            name="task-sandbox",
+            restart_count=restarts,
+            state=_ns(running=_ns(started_at=finished + timedelta(seconds=2))),
+            last_state=_ns(
+                terminated=_ns(
+                    reason="Error",
+                    exit_code=137,
+                    finished_at=finished + timedelta(seconds=1) if known_after else None,
+                )
+            ),
+        )
+    ]
+    observed = _normalize(_job(), [pod])
+    assert observed.normalized_state == expected
+    assert observed.container_diagnostics[1].restart_count == restarts
+
+
+def test_sandbox_death_before_execution_and_init_image_pull_are_observed() -> None:
+    pod = _pod()
+    pod.status.init_container_statuses = [
+        _ns(
+            name="task-sandbox",
+            restart_count=0,
+            state=_ns(terminated=_ns(reason="Error", exit_code=1)),
+            last_state=_ns(terminated=None),
+        )
+    ]
+    observed = _normalize(_job(), [pod])
+    assert observed.normalized_state == NormalizedJobState.FAILED
+    assert observed.reason == "SandboxTerminated"
+    pod.status.init_container_statuses[0].state = _ns(
+        waiting=_ns(reason="ErrImagePull", message="pull failed")
+    )
+    assert _normalize(_job(), [pod]).normalized_state == NormalizedJobState.IMAGE_PULL_BACKOFF
+
+
 def test_unschedulable_job_start_is_not_reported_as_pod_scheduled_or_started() -> None:
     job_started = datetime(2026, 9, 3, 5, 16, tzinfo=UTC)
     job = _job()
@@ -355,8 +482,11 @@ def test_actuator_manifest_is_namespace_scoped_and_active_for_development() -> N
         )
     )
     kinds = [document["kind"] for document in documents]
-    assert "ClusterRole" not in kinds
-    assert "ClusterRoleBinding" not in kinds
+    assert "ClusterRoleBinding" in kinds
+    usage_role = next(d for d in documents if d["kind"] == "ClusterRole")
+    assert usage_role["rules"] == [
+        {"apiGroups": [""], "resources": ["nodes/proxy"], "verbs": ["get"]}
+    ]
     quota = next(document for document in documents if document["kind"] == "ResourceQuota")
     assert quota["metadata"]["namespace"] == "loom-nebius-development"
     assert quota["spec"]["hard"] == {
@@ -612,3 +742,158 @@ def test_platform_network_policies_support_kube_dns_and_coredns_labels() -> None
                 },
             }
         ]
+
+
+def _native_disruption_objects(
+    *,
+    reason: str | None = "DeletionByTaintManager",
+    condition_status: str = "True",
+    deleting: bool = True,
+    pod_phase: str = "Pending",
+    pod_uid: str | None = "pod-uid",
+    job_failed: bool = False,
+) -> tuple[Any, Any]:
+    from kubernetes import client
+
+    job = client.V1Job(
+        metadata=client.V1ObjectMeta(**vars(_job().metadata)),
+        status=client.V1JobStatus(
+            conditions=[
+                client.V1JobCondition(
+                    type="Failed",
+                    status="True",
+                    reason="BackoffLimitExceeded",
+                    message="Job has reached the specified backoff limit",
+                )
+            ]
+            if job_failed
+            else []
+        ),
+    )
+    pod = client.V1Pod(
+        metadata=client.V1ObjectMeta(
+            uid=pod_uid,
+            creation_timestamp=datetime.now(UTC),
+            deletion_timestamp=datetime.now(UTC) if deleting else None,
+        ),
+        spec=client.V1PodSpec(containers=[], node_name="node-a"),
+        status=client.V1PodStatus(
+            phase=pod_phase,
+            conditions=[
+                client.V1PodCondition(
+                    type="DisruptionTarget",
+                    status=condition_status,
+                    reason=reason,
+                    message="Taint manager: deleting due to NoExecute taint",
+                )
+            ]
+            if reason is not None
+            else [],
+        ),
+    )
+    return job, pod
+
+
+@pytest.mark.parametrize("pod_phase", ["Pending", "Running", "Failed"])
+@pytest.mark.parametrize("job_failed", [False, True])
+def test_taint_eviction_condition_survives_deleting_pod_and_job_backoff(
+    pod_phase: str,
+    job_failed: bool,
+) -> None:
+    job, pod = _native_disruption_objects(pod_phase=pod_phase, job_failed=job_failed)
+    observation = _normalize(job, [pod])
+    assert observation.normalized_state is NormalizedJobState.EVICTED
+    assert observation.reason == "DeletionByTaintManager"
+    assert observation.pod_uid == pod.metadata.uid
+    assert observation.message == "Taint manager: deleting due to NoExecute taint"
+    assert observation.started_at is None
+
+
+@pytest.mark.parametrize(
+    "reason,status,uid",
+    [
+        (None, "True", "pod-uid"),
+        ("DeletionByTaintManager", "False", "pod-uid"),
+        ("DeletionByTaintManager", "Unknown", "pod-uid"),
+        ("DeletionByTaintManager", "True", None),
+        ("EvictionByEvictionAPI", "True", "pod-uid"),
+        ("PreemptionByScheduler", "True", "pod-uid"),
+    ],
+)
+def test_only_uid_bound_true_taint_disruption_is_eviction(
+    reason: str | None,
+    status: str,
+    uid: str | None,
+) -> None:
+    job, pod = _native_disruption_objects(
+        reason=reason,
+        condition_status=status,
+        pod_uid=uid,
+        pod_phase="Running",
+    )
+    observation = _normalize(job, [pod])
+    assert observation.normalized_state is NormalizedJobState.TERMINATING
+    assert observation.reason != "DeletionByTaintManager"
+
+
+def test_existing_evicted_status_keeps_specific_diagnosis_during_delete() -> None:
+    job, pod = _native_disruption_objects(reason=None, pod_phase="Failed")
+    pod.status.reason = "Evicted"
+    pod.status.message = "The node was low on resource: ephemeral-storage"
+    observation = _normalize(job, [pod])
+    assert observation.normalized_state is NormalizedJobState.EVICTED
+    assert observation.reason == "Evicted"
+    assert observation.message == pod.status.message
+
+
+@pytest.mark.parametrize("malformed", [False, True])
+async def test_resource_summary_reads_json_before_sdk_string_coercion(monkeypatch, malformed):
+    from kubernetes import client
+    from urllib3.response import HTTPResponse
+
+    api_client = client.ApiClient()
+    responses = []
+    released = []
+
+    def request(*args, **kwargs):
+        assert args[0] == "GET"
+        assert "/nodes/node-1/proxy/stats%2Fsummary" in args[1]
+        response = HTTPResponse(
+            body=b'{"pods":'
+            if malformed
+            else b'{"pods":[{"podRef":{"uid":"pod-1","namespace":"ns"}}]}',
+            status=200,
+            preload_content=False,
+        )
+        original_release = response.release_conn
+
+        def release():
+            released.append(response)
+            original_release()
+
+        monkeypatch.setattr(response, "release_conn", release)
+        responses.append(response)
+        return response
+
+    monkeypatch.setattr(api_client, "request", request)
+    api = InClusterKubernetesJobApi(
+        client_module=client,
+        batch_api=client.BatchV1Api(api_client),
+        core_api=client.CoreV1Api(api_client),
+    )
+    try:
+        # Exercise the real generated Core API and ApiClient deserializer. Its
+        # declared response_type='str' turns a parsed dict into Python repr.
+        if malformed:
+            from loom_execution_actuator.contracts import KubernetesApiError
+
+            with pytest.raises(KubernetesApiError) as error:
+                await api.resource_summary(node_name="node-1")
+            assert isinstance(error.value.__cause__, json.JSONDecodeError)
+        else:
+            result = await api.resource_summary(node_name="node-1")
+            assert result == {"pods": [{"podRef": {"uid": "pod-1", "namespace": "ns"}}]}
+        assert len(responses) == 1
+        assert released == responses
+    finally:
+        api_client.close()

@@ -45,6 +45,7 @@ from loom.db.schema import (
     TeamQuota,
     Trial,
     TrialEvent,
+    TrialResourceUsage,
 )
 from loom.execution_contract import (
     NEBIUS_CPU_EXECUTION_CLASS_V1,
@@ -130,7 +131,7 @@ from loom_execution_actuator.contracts import (
     NormalizedJobState,
 )
 from loom_execution_actuator.controller import ExecutionActuator
-from loom_execution_actuator.renderer import ExecutionTargetRuntime
+from loom_execution_actuator.renderer import ExecutionTargetRuntime, render_execution_job
 from loom_llm_gateway.execution_attempt_dispatch import authorize_trial_execution_dispatch
 from tests.execution_placement_fixtures import placement_fixture
 from tests.support.execution_image_admission import (
@@ -198,6 +199,7 @@ async def _cleanup_service_execution_test_rows(postgres_url: str):  # type: igno
                     ExecutionCostReservation.id.in_(owned_cost_reservations)
                 )
             )
+            await session.execute(delete(TrialResourceUsage).where(TrialResourceUsage.trial_id.in_(owned_trials)))
             await session.execute(
                 delete(ServiceExecutionLease).where(
                     ServiceExecutionLease.trial_id.in_(owned_trials)
@@ -825,7 +827,7 @@ async def test_reservation_persists_trial_lease_command_and_history_atomically(
             assert cost_reservation.estimated_cost_microusd == 3_600_000
             assert cost_reservation.requested_cpu_millis == 1_000
             assert cost_reservation.requested_memory_mib == 1_024
-            assert cost_reservation.requested_ephemeral_storage_mib == 4_148
+            assert cost_reservation.requested_ephemeral_storage_mib == 2_048
             assert history.snapshot_json["selected_pool_id"] == "nebius-cpu"
             projection = execution_lease_projection(persisted)
             assert projection["selected_pool_id"] == "nebius-cpu"
@@ -3347,6 +3349,7 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
     source_task_id: str | None,
     rewards: dict[str, float],
     aggregate_reward: float,
+    runtime_status: str = "succeeded",
 ) -> None:
     class FailOnceSourceStore(FakeObjectStore):
         fail_next_delete: bool = True
@@ -3500,6 +3503,12 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             "verifier/output.json": canonical_document({"rewards": rewards}),
         }
         result_document = _runtime_result_payload(lease, started_at=now)
+        result_document["status"] = runtime_status
+        result_document["partial_evidence"] = runtime_status != "succeeded"
+        if runtime_status == "timed_out":
+            phases = result_document["phases"]
+            assert isinstance(phases, list)
+            phases[0].update(exit_code=124, timed_out=True)
         result_document.update(
             outputs=[
                 {
@@ -3599,7 +3608,7 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             current = await session.get(ServiceExecutionLease, lease.id, with_for_update=True)
             trial = await session.get(Trial, trial_id)
             assert current is not None and trial is not None
-            assert trial.state == "materializing"
+            assert trial.state == ("materializing" if runtime_status == "succeeded" else "failed")
             assert trial.result is not None
             assert trial.result["aggregate_reward"] == aggregate_reward
             assert trial.result["reward"] == rewards
@@ -3633,7 +3642,7 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             assert current is not None and trial is not None
             assert current.materialization_state == "pending"
             assert current.materialization_error_code == "transient_materialization_error"
-            assert trial.state == "materializing"
+            assert trial.state == ("materializing" if runtime_status == "succeeded" else "failed")
             current.materialization_next_attempt_at = now
             await session.commit()
         materializer = ServiceExecutionMaterializer(
@@ -3694,7 +3703,8 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             assert current.canonical_trajectory_sha256 is not None
             assert current.source_cleanup_state == "complete"
             assert current.source_cleanup_attempts == 2
-            assert trial.state == "succeeded"
+            assert trial.state == ("succeeded" if runtime_status == "succeeded" else "failed")
+            assert trial.failure_reason == (None if runtime_status == "succeeded" else "timed_out")
             assert trial.result == projected_result
             from loom_service.routes.batches import _rollup_from_trials
 
@@ -3715,8 +3725,14 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
                 "step_end",
                 "verifier_start",
                 "verifier_end",
+                *([] if runtime_status == "succeeded" else ["trial_error"]),
                 "trial_end",
             ]
+            assert events[-1].payload["reward"] == rewards
+            assert events[-1].payload["final_state"] == trial.state
+            assert next(event for event in events if event.kind == "verifier_end").payload[
+                "result"
+            ]["rewards"] == rewards
             storage_files = artifact.storage["files"]
             source_evidence = artifact.storage["source_evidence"]
             assert [item["relative_path"] for item in source_evidence] == [
@@ -3783,8 +3799,21 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
         assert response.status_code == 200, response.text
         item = next(item for item in response.json()["items"] if item["id"] == str(trial_id))
         assert item["aggregate_reward"] == aggregate_reward
+        assert item["state"] == ("succeeded" if runtime_status == "succeeded" else "failed")
     finally:
         await engine.dispose()
+
+
+async def test_timeout_preserves_zero_verifier_reward_through_canonical_cleanup(
+    postgres_url: str,
+) -> None:
+    await test_materializer_commits_complete_bundle_after_execution_cleanup(
+        postgres_url=postgres_url,
+        source_task_id=None,
+        rewards={"passed": 0.0},
+        aggregate_reward=0.0,
+        runtime_status="timed_out",
+    )
 
 
 async def test_service_execution_input_is_resolved_from_persisted_task_binding(
@@ -4434,12 +4463,16 @@ async def test_actuator_records_unavailable_before_accepting_an_already_absent_j
         await engine.dispose()
 
 
-@pytest.mark.parametrize("class_cpu_limit", [None, 5_000])
+@pytest.mark.parametrize("class_cpu_limit", [None, 4_500])
+@pytest.mark.parametrize("independent_controller", [False, True])
+@pytest.mark.parametrize("request_overrides", [False, True])
 async def test_private_terminus_sandboxes_reserve_full_pod_resources(
     postgres_url: str,
     class_cpu_limit: int | None,
+    independent_controller: bool,
+    request_overrides: bool,
 ) -> None:
-    """Three 2 CPU / 4 GiB containers must reserve/admit 6 CPU / 12 GiB."""
+    """Admission and both reservations include the controller and private sandboxes."""
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)
@@ -4476,6 +4509,22 @@ async def test_private_terminus_sandboxes_reserve_full_pod_resources(
             ),
         }
     )
+    if independent_controller:
+        plan = ExecutionRuntimePlanV1.model_validate({
+            **plan.canonical_payload(),
+            "controller_resources": resources.model_copy(
+                update={"cpu_millis": 1_000, "memory_mib": 2_048}
+            ),
+        })
+    if request_overrides:
+        plan = ExecutionRuntimePlanV1.model_validate({
+            **plan.canonical_payload(),
+            "resource_requests": {
+                "controller": {"cpu_millis": 250, "memory_mib": 512, "ephemeral_storage_mib": 256},
+                "task_sandbox": {"cpu_millis": 500, "memory_mib": 1024, "ephemeral_storage_mib": 512},
+                "verifier_sandbox": {"cpu_millis": 250, "memory_mib": 512, "ephemeral_storage_mib": 256},
+            },
+        })
     requirements = _requirements().model_copy(update={"cpu_millis": 2_000, "memory_mib": 4_096})
     try:
         async with sessions() as session:
@@ -4498,9 +4547,9 @@ async def test_private_terminus_sandboxes_reserve_full_pod_resources(
             await session.commit()
 
         async with sessions() as session:
-            if class_cpu_limit is not None:
+            if class_cpu_limit is not None and not request_overrides:
                 # The task's own 2 CPU declaration fits this class; its complete
-                # 6 CPU Pod does not. No lease or reservation may survive.
+                # 5 or 6 CPU Pod does not. No lease or reservation may survive.
                 with pytest.raises(ServiceExecutionConflict, match="cpu_limit_exceeded"):
                     async with session.begin_nested():
                         await _reserve(
@@ -4562,11 +4611,38 @@ async def test_private_terminus_sandboxes_reserve_full_pod_resources(
                     )
                 )
             ).scalar_one()
+            admission = (
+                await session.execute(
+                    select(ExecutionAdmissionReservation).where(
+                        ExecutionAdmissionReservation.owner_id == lease_id,
+                        ExecutionAdmissionReservation.owner_kind == "service_execution_lease",
+                    )
+                )
+            ).scalar_one()
+            assert admission.state == "active"
+            expected_cpu = 1_000 if request_overrides else (5_000 if independent_controller else 6_000)
+            expected_memory = 2_048 if request_overrides else (10_240 if independent_controller else 12_288)
+            expected_storage = 1_024 if request_overrides else 6_144
             for reserved in (cost, capacity):
-                assert reserved.requested_cpu_millis == 6_000
-                assert reserved.requested_memory_mib == 12_288
-            assert cost.requested_ephemeral_storage_mib == 8_244
+                assert reserved.requested_cpu_millis == expected_cpu
+                assert reserved.requested_memory_mib == expected_memory
+            assert cost.requested_ephemeral_storage_mib == expected_storage
             assert capacity.requested_storage_mib == cost.requested_ephemeral_storage_mib
+            pod = render_execution_job(persisted, target=ExecutionTargetRuntime(
+                target_id=persisted.target_id, namespace=persisted.namespace_name,
+            ), now=now)["spec"]["template"]["spec"]
+            containers = [*pod["containers"], *pod["initContainers"][1:]]
+            for dimension, suffix, expected in (
+                ("cpu", "m", expected_cpu), ("memory", "Mi", expected_memory),
+                ("ephemeral-storage", "Mi", expected_storage),
+            ):
+                assert sum(int(item["resources"]["requests"][dimension].removesuffix(suffix))
+                           for item in containers) == expected
+            assert pod["containers"][0]["resources"]["limits"]["cpu"] == (
+                "1000m" if independent_controller else "2000m"
+            )
+            assert all(item["resources"]["limits"]["cpu"] == "2000m"
+                       for item in pod["initContainers"][1:])
             trial = await session.get(Trial, trial_id)
             assert trial is not None and (trial.state, trial.attempt_count) == ("claimed", 1)
     finally:

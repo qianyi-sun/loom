@@ -92,5 +92,141 @@ async def test_successful_fixture_command_returns_exact_production_result(monkey
             return expected
 
     monkeypatch.setattr(fixture, "AsyncCommandRunner", Runner)
-    assert await fixture._ContainerKubectl("a" * 64).run(["kubectl", "get", "namespace"]) is expected
+    runner = fixture._ContainerKubectl("a" * 64)
+    runner.last_failure_notes = ["obsolete failure"]
+    assert await runner.run(["kubectl", "get", "namespace"]) is expected
+    assert runner.last_failure_notes == []
     assert len(calls) == 1
+
+
+_CONNECTION_REFUSED = (
+    "The connection to the server 127.0.0.1:6443 was refused - "
+    "did you specify the right host or port?\n"
+)
+
+
+def _refusing_fixture_runner(monkeypatch, *, stderr=_CONNECTION_REFUSED, persistent=False):
+    calls = []
+    failures = []
+    expected = CommandResult("exact recovered read", "")
+
+    class Runner:
+        async def run(self, argv, **kwargs):
+            if "sh" in argv:
+                calls.append((argv, kwargs))
+                if persistent or len(calls) == 1:
+                    error = DevInstanceRuntimeError("original refusal")
+                    failures.append(error)
+                    raise error
+                return expected
+            if "head" in argv:
+                return CommandResult("1" if argv[-1].endswith(".status") else stderr, "")
+            if "inspect" in argv:
+                return CommandResult('{"Running":true,"OOMKilled":false,"ExitCode":0}', "")
+            raise AssertionError("unexpected fixture diagnostic")
+
+    monkeypatch.setattr(fixture, "AsyncCommandRunner", Runner)
+    return calls, failures, expected
+
+
+def test_fixture_classifies_kubectl_connection_refusal():
+    assert fixture._failure_category(_CONNECTION_REFUSED) == "connection-refused"
+
+
+@pytest.mark.parametrize("verb", ["get", "create", "replace", "patch", "delete"])
+async def test_fixture_retries_connection_refusal_only_for_reads(monkeypatch, verb):
+    calls, failures, expected = _refusing_fixture_runner(monkeypatch)
+    runner = fixture._ContainerKubectl("a" * 64)
+    if verb == "get":
+        assert await runner.run(["kubectl", verb, "namespace"]) is expected
+        assert len(calls) == 2
+        assert runner.last_failure_notes == []
+    else:
+        with pytest.raises(DevInstanceRuntimeError) as raised:
+            await runner.run(["kubectl", verb, "namespace"], stdin="private-write")
+        assert raised.value is failures[0]
+        assert len(calls) == 1
+
+
+@pytest.mark.parametrize("stderr", [
+    "forbidden", "x509: unknown authority", "unclassified-private",
+    "x509: certificate error; connection refused",
+    "forbidden: connection refused",
+    "warning: private\n" + _CONNECTION_REFUSED,
+])
+async def test_fixture_does_not_retry_other_read_failures(monkeypatch, stderr):
+    calls, failures, _ = _refusing_fixture_runner(monkeypatch, stderr=stderr)
+    with pytest.raises(DevInstanceRuntimeError) as raised:
+        await fixture._ContainerKubectl("a" * 64).run(["kubectl", "get", "namespace"])
+    assert raised.value is failures[0]
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("timeout", [0.25, 120])
+async def test_fixture_read_refusal_stops_within_original_and_retry_budgets(monkeypatch, timeout):
+    from types import SimpleNamespace
+
+    calls, failures, _ = _refusing_fixture_runner(monkeypatch, persistent=True)
+    elapsed = [0.0]
+
+    async def pause(seconds):
+        elapsed[0] += seconds
+
+    monkeypatch.setattr(fixture, "time", SimpleNamespace(monotonic=lambda: elapsed[0]), raising=False)
+    monkeypatch.setattr(fixture.asyncio, "sleep", pause)
+    with pytest.raises(DevInstanceRuntimeError) as raised:
+        await fixture._ContainerKubectl("a" * 64).run(
+            ["kubectl", "get", "namespace"], timeout_seconds=timeout,
+        )
+    assert raised.value is failures[-1]
+    assert elapsed[0] == pytest.approx(min(timeout, 5))
+    assert 1 < len(calls) <= 60
+    assert all(0 < options["timeout_seconds"] <= timeout for _, options in calls)
+
+
+async def test_stopped_fixture_retains_safe_server_and_lifecycle_diagnostics(monkeypatch):
+    error = DevInstanceRuntimeError("original failure")
+    commands = []
+
+    class Runner:
+        async def run(self, argv, **kwargs):
+            commands.append(argv)
+            if "loom-k3s-diagnostics" in argv:
+                return CommandResult('level=fatal msg="kube-apiserver exited: private-endpoint"\n'
+                                     'error: no space left on device /private-path\n', "")
+            if argv[:2] == ["docker", "events"]:
+                return CommandResult('kill 15\ndie \nexec_create: private-command secret\n', "")
+            if "inspect" in argv:
+                return CommandResult('{"Running":false,"OOMKilled":false,"ExitCode":0}', "")
+            raise error
+
+    monkeypatch.setattr(fixture, "AsyncCommandRunner", Runner)
+    runner = fixture._ContainerKubectl("a" * 64)
+    with pytest.raises(DevInstanceRuntimeError) as raised:
+        await runner.run(["kubectl", "get", "namespace"])
+    assert raised.value is error
+    notes = "\n".join(error.__notes__)
+    assert "disposable k3s log categories: api-server-exit,disk-full,fatal" in notes
+    assert "disposable container lifecycle: die,kill-15" in notes
+    assert all(value not in notes for value in ("private-endpoint", "private-path", "private-command", "secret"))
+    assert len([argv for argv in commands if "loom-test-kubectl" in argv]) == 1
+
+
+async def test_stopped_fixture_diagnostic_failure_preserves_original_error(monkeypatch):
+    original = DevInstanceRuntimeError("original failure")
+
+    class Runner:
+        async def run(self, argv, **kwargs):
+            if "inspect" in argv:
+                return CommandResult('{"Running":false,"OOMKilled":false,"ExitCode":1}', "")
+            if "loom-test-kubectl" in argv:
+                raise original
+            raise DevInstanceRuntimeError("private diagnostic failure")
+
+    monkeypatch.setattr(fixture, "AsyncCommandRunner", Runner)
+    with pytest.raises(DevInstanceRuntimeError) as raised:
+        await fixture._ContainerKubectl("a" * 64).run(["kubectl", "create", "-f", "-"], stdin="secret")
+    assert raised.value is original
+    assert "disposable k3s log categories unavailable" in original.__notes__
+    assert "disposable container lifecycle unavailable" in original.__notes__
+    assert "private" not in "\n".join(original.__notes__)

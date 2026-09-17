@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -49,6 +50,7 @@ from tests.loom_cli.rollout.operator.test_protected_migration_component import (
     _rebind_schema3_authority,
 )
 from tests.support.protected_application_deployments import application_manifest, ready_application
+from tests.unit.test_protected_peer_database_connection import _CHILD
 
 
 @pytest.fixture(autouse=True)
@@ -466,6 +468,7 @@ def _defaults_request(**kwargs):
 
 def test_executor_orders_epoch_before_nonlegacy_migration_and_recovers(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = tmp_path / "state"
     _attempt(state)
@@ -489,6 +492,23 @@ def test_executor_orders_epoch_before_nonlegacy_migration_and_recovers(
         production_defaults_request=_defaults_request,
     )
 
+    # Recovery and normal execution must construct one identical ordered chain,
+    # with the SAME journal instance available to its component closures.
+    from loom_cli.rollout.operator.protected_apply_journal import ProtectedApplyJournal
+    built = []
+    original_build = MigrationEpochProtectedApplyExecutor.build_components
+    original_execute = ProtectedApplyJournal.execute
+    def build(self, candidate, *, journal):
+        before = tuple(runner.calls)
+        components = original_build(self, candidate, journal=journal)
+        assert tuple(runner.calls) == before, 'building recovery chain executed a component'
+        built.append((journal, components))
+        return components
+    def execute(self, candidate, components):
+        assert built[-1][0] is self and built[-1][1] is components
+        return original_execute(self, candidate, components)
+    monkeypatch.setattr(MigrationEpochProtectedApplyExecutor, 'build_components', build)
+    monkeypatch.setattr(ProtectedApplyJournal, 'execute', execute)
     result = executor("final.protected-apply", CheckOperation.APPLY, plan)
 
     assert result.ready
@@ -755,6 +775,95 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
     assert "manifest-diff" in convergence_calls
     assert "defaults-read" not in convergence_calls
     assert all(not call.endswith("-apply") for call in convergence_calls)
+
+
+@pytest.mark.parametrize("installed_capacity", [False, True])
+def test_separated_owner_apply_and_convergence_share_original_component_order(tmp_path, monkeypatch, installed_capacity):
+    from loom_cli.rollout.operator.protected_apply_journal import ProtectedApplyJournal
+
+    state = tmp_path / "state"
+    _attempt(state)
+    plan = _plan(tmp_path)
+    runner = Runner(revision="0069", epoch=7)
+    runner.plan_digest = plan.plan_digest
+    applied = set()
+    bindings = []
+
+    class Factory:
+        def new_journal(self, candidate):
+            return ProtectedApplyJournal(state, request_id=candidate.request_id,
+                attempt_number=candidate.attempt_number, service_uid=os.geteuid())
+
+        def components(self, candidate, *, journal, ordinal):
+            assert candidate == plan and ordinal == 2
+            bindings.append((journal, ordinal))
+
+            def build(name):
+                def classify(_):
+                    runner.calls.append(name + "-owner-read")
+                    return ComponentObservation(ComponentState.EXACT if name in applied else ComponentState.READY,
+                        "e" * 64, plan.starting_mutation_epoch + 1)
+
+                def apply(_):
+                    if name == "database-migration":
+                        assert "application-ownership-handoff" in applied
+                        runner.revision = plan.migration_target_revision
+                    applied.add(name)
+                    runner.calls.append(name + "-owner-apply")
+
+                return ProtectedApplyComponent(name, "a" * 64, "b" * 64, classify, apply)
+
+            return tuple(build(name) for name in ("application-ownership-handoff", "database-migration"))
+
+    factory = Factory()
+    credentials = {"gx10-01c7": CredentialTransport("gx10-01c7")}
+    common = dict(service_uid=os.geteuid(), runner=runner, gb10_transport=GB10Fleet(),
+        environment_state_transport=EnvironmentState(), candidate_root=tmp_path / "candidate",
+        staging_capacity_runtime=StagingCapacityRuntime(runner.calls), external_supervisor_transport=ExternalSupervisors(),
+        external_supervisor_execution_host="gx10-01c7", external_supervisor_credential_transports=credentials,
+        external_supervisor_credential_identities=_credential_identities(credentials),
+        production_defaults_request=_defaults_request, application_factory=factory)
+    capacity_journals = []
+    if installed_capacity:
+        from dataclasses import replace
+
+        from tests.loom_cli.rollout.operator.test_protected_staging_capacity_runtime import _runtime
+        source = _runtime(tmp_path / "capacity")
+        fake = common["staging_capacity_runtime"]
+        def fake_component(candidate, name):
+            return next(c for c in fake.components(candidate, epoch_guard=lambda _: ComponentObservation(ComponentState.EXACT, "f" * 64, plan.starting_mutation_epoch + 1)) if c.component_id == name)
+        monkeypatch.setattr(type(source), "_classify", lambda self, name, candidate, epoch: fake_component(candidate, name).classify(candidate))
+        monkeypatch.setattr(type(source), "_apply", lambda self, name, candidate: fake_component(candidate, name).apply(candidate))
+        def database(candidate, active_journal):
+            capacity_journals.append(active_journal)
+            component = fake_component(candidate, "staging-capacity-database")
+            def apply(bound):
+                _, intent = active_journal._application_admission_context()
+                assert intent.component_id == "staging-capacity-database" and intent.ordinal == 5
+                assert {"application-ownership-handoff", "database-migration"} <= applied
+                component.apply(bound)
+            return replace(component, apply=apply, terminal_recovery_authority=None)
+        common["staging_capacity_runtime"] = replace(source, database_component_factory=database)
+    executor = MigrationEpochProtectedApplyExecutor(state_root=state, **common)
+    journal = factory.new_journal(plan)
+    components = executor.build_components(plan, journal=journal)
+    assert tuple(c.component_id for c in components)[1:4] == (
+        "mutation-epoch-claim", "application-ownership-handoff", "database-migration")
+    assert runner.calls == [] and bindings == [(journal, 2)]
+    if installed_capacity:
+        assert capacity_journals == [journal]
+    assert executor("final.protected-apply", CheckOperation.APPLY, plan).ready
+    assert runner.calls.index("epoch-apply") < runner.calls.index("application-ownership-handoff-owner-apply")
+    assert runner.calls.index("application-ownership-handoff-owner-apply") < runner.calls.index("database-migration-owner-apply")
+    before = list(runner.calls)
+    assert KubernetesProtectedConvergenceExecutor(**common)("final.convergence", CheckOperation.VERIFY, plan).ready
+    assert "application-ownership-handoff-owner-read" in runner.calls[len(before):]
+    assert "database-migration-owner-read" in runner.calls[len(before):]
+    assert "migration-read" not in runner.calls and "migration-apply" not in runner.calls
+    assert all(j.root == journal.root and ordinal == 2 for j, ordinal in bindings)
+    if installed_capacity:
+        assert capacity_journals == [j for j, _ in bindings]
+    assert all(not call.endswith("-apply") for call in runner.calls[len(before):])
 
 
 def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
@@ -1180,6 +1289,102 @@ def test_subprocess_runner_has_fixed_environment_and_redacted_failure(
             input_payload=b"manifest\n",
             timeout_seconds=5,
         )
+
+
+@pytest.mark.parametrize("database", ["loom", "postgres", "template1"])
+def test_subprocess_runner_opens_one_fixed_bounded_staging_peer_channel(
+    monkeypatch, database
+) -> None:
+    runner = SubprocessProtectedApplyCommandRunner()
+    popen = subprocess.Popen
+    calls = []
+    children = []
+    child_code = _CHILD.replace('456, "loom", "postgres"', f'456, "{database}", "postgres"')
+
+    def start(argv, **kwargs):
+        calls.append((tuple(argv), kwargs))
+        child = popen([sys.executable, "-u", "-c", child_code, "pg17-client-off"], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setenv("PGPASSWORD", "private-parent-password")
+    monkeypatch.setenv("KUBECONFIG", "/wrong-context")
+    monkeypatch.setattr(
+        "loom_cli.rollout.operator.protected_apply_executor.subprocess.Popen", start
+    )
+    open_peer = getattr(runner, {"loom": "open_staging_peer_database",
+                                "postgres": "open_staging_peer_maintenance_database",
+                                "template1": "open_staging_peer_template_database"}[database])
+    with open_peer() as connection:
+        with connection.transaction():
+            pass
+        assert connection.backend_identity.database == database
+        assert connection.backend_identity.session_user == "postgres"
+    assert len(calls) == 1
+    assert calls[0][0] == (
+        "kubectl",
+        "--namespace",
+        "loom-staging",
+        "exec",
+        "-i",
+        "service/loom-postgres-rw",
+        "--",
+        "sh",
+        "-ceu",
+        f"PGOPTIONS='-c event_triggers=off' exec psql -U postgres -d {database} -qAtX -v ON_ERROR_STOP=1",
+    )
+    assert calls[0][1] == {
+        "env": dict(runner.environment),
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "bufsize": 0,
+    }
+    assert children[0].poll() == 0
+    assert children[0].stdin.closed and children[0].stdout.closed and children[0].stderr.closed
+
+
+@pytest.mark.parametrize("wrong", ["database", "session-user", "server-version"])
+@pytest.mark.parametrize("database", ["loom", "postgres", "template1"])
+def test_subprocess_runner_refuses_wrong_peer_target_and_reaps(
+    monkeypatch, wrong, database
+) -> None:
+    runner = SubprocessProtectedApplyCommandRunner()
+    popen = subprocess.Popen
+    children = []
+    observed_database = "wrong" if wrong == "database" else database
+    observed_user = "wrong" if wrong == "session-user" else "postgres"
+    child_code = _CHILD.replace(
+        '456, "loom", "postgres"',
+        f'456, "{observed_database}", "{observed_user}"',
+    )
+
+    def start(argv, **kwargs):
+        mode = "normal" if wrong == "server-version" else "pg17-client-off"
+        child = popen([sys.executable, "-u", "-c", child_code, mode], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.operator.protected_apply_executor.subprocess.Popen", start
+    )
+    with pytest.raises(RuntimeError, match="peer identity"):
+        getattr(runner, {"loom": "open_staging_peer_database",
+                         "postgres": "open_staging_peer_maintenance_database",
+                         "template1": "open_staging_peer_template_database"}[database])()
+    assert len(children) == 1 and children[0].poll() is not None
+
+
+def test_subprocess_runner_peer_start_failure_is_redacted(monkeypatch) -> None:
+    def start(*args, **kwargs):
+        raise OSError("private-child-diagnostic")
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.operator.protected_apply_executor.subprocess.Popen", start
+    )
+    with pytest.raises(RuntimeError, match="peer process failed safely") as caught:
+        SubprocessProtectedApplyCommandRunner().open_staging_peer_database()
+    assert "private-child-diagnostic" not in str(caught.value)
 
 
 def test_subprocess_runner_accepts_multiline_argv_but_rejects_empty_and_nul(

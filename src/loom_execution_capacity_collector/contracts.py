@@ -49,6 +49,8 @@ class NodePlacement(BaseModel):
     ready: bool
     unschedulable: bool
     deleting: bool
+    # None means the observation predates explicit drain detection.
+    draining: bool | None = None
     allocatable: ResourceTotals
     requested: ResourceTotals
     pod_slots: int = Field(gt=0)

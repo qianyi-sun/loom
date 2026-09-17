@@ -1,6 +1,6 @@
-"""Bounded operator correction of committed Terminus accounting (#1921).
+"""Converge committed Terminus accounting on the bound Gateway ledger (#1962).
 
-Run in the Control Plane environment with one explicit lease UUID. No execution,
+Run in the Control Plane environment for one explicit lease UUID. No execution,
 source commit, outcome, or retention state changes; original objects remain.
 """
 from __future__ import annotations
@@ -29,6 +29,7 @@ from loom_control_plane.config import ControlPlaneSettings
 from loom_control_plane.service_execution_materializer import (
     build_canonical_atif,
     build_canonical_events,
+    read_exception_info,
 )
 from loom_control_plane.service_execution_task_snapshot import (
     resolve_service_execution_task_snapshot,
@@ -96,8 +97,6 @@ async def repair_accounting(
             raise ValueError("canonical trial identity missing")
         _guard(lease, trial, artifact, team_id)
         metadata = copy.deepcopy(artifact.artifact_metadata or {})
-        if metadata.get("accounting_source") == _SOURCE:
-            return {"status": "already_corrected", "trial_id": str(trial.id)}
         task = await resolve_service_execution_task_snapshot(session, lease=lease, trial=trial)
         trial_config = TrialConfig.model_validate(trial.config)
         if trial_config.agent_name != "terminus-2":
@@ -126,14 +125,35 @@ async def repair_accounting(
     if not isinstance(old_index, dict) or authority_id is None:
         raise ValueError("canonical trajectory index or lifecycle authority missing")
     records = {item["relative_path"]: item for item in storage["files"]}
-    inputs = {path: await _read_file(store, records[path], artifacts_bucket) for path in (
-        *_PATHS, "result.json", "verifier/output.json",
-    )}
+    sources = {item["relative_path"]: item for item in storage.get("source_evidence", [])}
+    if len(records) != len(storage["files"]) or len(sources) != len(storage.get("source_evidence", [])):
+        raise ValueError("duplicate canonical bundle paths")
+    inputs = {path: await _read_file(store, record, artifacts_bucket)
+              for path, record in records.items()
+              if path in {*_PATHS, "result.json", "verifier/output.json", "accounting/gateway-calls.json",
+                          "diagnostics/agent-exception.json", "diagnostics/verifier-exception.json"}}
+    runtime_result = ExecutionRuntimeResultV1.model_validate_json(inputs["result.json"])
+    if "verifier/output.json" not in inputs and (
+        outcome[0] == "succeeded" or runtime_result.status == "succeeded"
+    ):
+        raise ValueError("successful runtime requires verifier output")
+    # A canonical trace contains lifecycle/accounting events and is not a native
+    # Harbor input. Subsequent revisions always start from immutable evidence.
+    # Failed executions may have produced no native trace at all.
+    source_trace = sources.get("source/trajectory/events.jsonl")
+    trace_body = (
+        await _read_file(store, source_trace, artifacts_bucket) if source_trace is not None
+        else None if metadata.get("accounting_source") == _SOURCE
+        else inputs.get("trajectory/events.jsonl")
+    )
+    if runtime_result.status == "succeeded" and trace_body is None:
+        raise ValueError("successful runtime requires immutable native trace")
     events = build_canonical_events(
         trial_id=trial_id, task_id=task_id, task_config=task_config, trial_config=trial_config,
-        runtime_result=ExecutionRuntimeResultV1.model_validate_json(inputs["result.json"]),
-        trace_body=inputs["trajectory/events.jsonl"], verifier_body=inputs["verifier/output.json"],
+        runtime_result=runtime_result,
+        trace_body=trace_body, verifier_body=inputs.get("verifier/output.json"),
         gateway_calls=rows,
+        exception_info=read_exception_info(runtime_result, inputs),
     )
     events_body = b"".join(event.model_dump_json().encode() + b"\n" for event in events)
     usage = terminus_usage(list(events), trial_config)
@@ -141,8 +161,53 @@ async def repair_accounting(
         events, task_id=task_id, agent_name=trial_config.agent_name,
         agent_version=trial_config.agent_version or task_config.agent.version or "service-execution-v1",
     )
-    report = {"status": "prepared", "trial_id": str(trial_id), "lease_id": str(lease_id), "usage": usage}
+    ledger = {"schema_version": "loom.gateway-lease-ledger.v1", "calls": rows}
+    event_rows = [(event.seq, event.kind.value, event.model_dump(mode="json"),
+                   "service-execution-materializer", event_authority) for event in events]
+    matches = (
+        [json.loads(line) for line in inputs.get("trajectory/events.jsonl", b"").splitlines()]
+        == [event.model_dump(mode="json") for event in events]
+        and json.loads(inputs.get("accounting/usage.json", b"null")) == usage
+        and json.loads(inputs.get("accounting/gateway-calls.json", b"null")) == ledger
+        and old_events == event_rows
+        and old_index.get("trajectory_sha256")
+        == str(records.get("trajectory/events.jsonl", {}).get("sha256", "")).removeprefix("sha256:")
+        and old_index.get("atif_sha256") == _digest(atif_body)
+    )
+    report = {"status": "already_corrected" if matches else "prepared",
+              "trial_id": str(trial_id), "lease_id": str(lease_id), "usage": usage,
+              "gateway_call_count": len(rows)}
     if not apply:
+        return report
+
+    async def locked_inputs(session: AsyncSession) -> tuple[Trial, Artifact]:
+        current_lease = await session.get(ServiceExecutionLease, lease_id, with_for_update=True)
+        current_trial = await session.get(Trial, trial_id, with_for_update=True)
+        current_artifact = await session.get(Artifact, artifact_id, with_for_update=True)
+        if current_lease is None or current_trial is None or current_artifact is None:
+            raise ValueError("repair identity disappeared")
+        _guard(current_lease, current_trial, current_artifact, team_id)
+        current_events = list((await session.scalars(select(TrialEvent).where(
+            TrialEvent.trial_id == trial_id,
+        ).order_by(TrialEvent.seq).with_for_update())).all())
+        if (current_artifact.storage != storage or current_trial.trajectory_index != old_index
+                or (current_artifact.artifact_metadata or {}) != metadata
+                or [(row.seq, row.kind, row.payload, row.source, row.lifecycle_authority_id)
+                    for row in current_events] != old_events
+                or current_lease.output_generation != output_generation
+                or (current_trial.state, current_trial.finished_at,
+                    current_trial.result, current_trial.config) != outcome
+                or await read_service_execution_llm_calls(
+                    session, current_lease, generation=output_generation) != rows):
+            raise ValueError("repair input changed; canonical pointers were not updated")
+        return current_trial, current_artifact
+
+    if matches:
+        if metadata.get("accounting_call_count") != len(rows):
+            async with session_factory() as session:
+                _, current_artifact = await locked_inputs(session)
+                current_artifact.artifact_metadata = {**metadata, "accounting_call_count": len(rows)}
+                await session.commit()
         return report
 
     revision = str(uuid4())
@@ -168,13 +233,16 @@ async def repair_accounting(
         replacements = {}
         for path, body in (
             ("trajectory/events.jsonl", events_body), ("accounting/usage.json", _body(usage)),
-            ("accounting/gateway-calls.json", _body({"schema_version": "loom.gateway-lease-ledger.v1", "calls": rows})),
+            ("accounting/gateway-calls.json", _body(ledger)),
         ):
             replacements[path] = await write(path, body, artifacts_bucket, prefix + "files/" + path)
         new_storage["files"] = [replacements.pop(item["relative_path"], item) for item in storage["files"]]
         new_storage["files"].extend(replacements.values())
         for path in _PATHS:
-            new_storage["source_evidence"].append({**records[path], "relative_path": "source/" + path})
+            # Preserve only the original runtime evidence once, never a prior
+            # canonical revision. Missing source on failed runs remains missing.
+            if "source/" + path not in sources and path in records and metadata.get("accounting_source") != _SOURCE:
+                new_storage.setdefault("source_evidence", []).append({**records[path], "relative_path": "source/" + path})
         trajectory = await write("events.jsonl", events_body, trajectories_bucket, trajectory_prefix + "events.jsonl")
         atif = await write("atif.json", atif_body, trajectories_bucket, trajectory_prefix + "atif.json")
         new_index = copy.deepcopy(old_index)
@@ -186,22 +254,7 @@ async def repair_accounting(
         new_index["atif_schema_version"] = json.loads(atif_body)["schema_version"]
 
         async with session_factory() as session:
-            lease = await session.get(ServiceExecutionLease, lease_id, with_for_update=True)
-            trial = await session.get(Trial, trial_id, with_for_update=True)
-            artifact = await session.get(Artifact, artifact_id, with_for_update=True)
-            if lease is None or trial is None or artifact is None:
-                raise ValueError("repair identity disappeared")
-            _guard(lease, trial, artifact, team_id)
-            current_events = list((await session.scalars(select(TrialEvent).where(
-                TrialEvent.trial_id == trial.id,
-            ).order_by(TrialEvent.seq).with_for_update())).all())
-            if (artifact.storage != storage or trial.trajectory_index != old_index
-                    or (artifact.artifact_metadata or {}) != metadata
-                    or [(row.seq, row.kind, row.payload, row.source, row.lifecycle_authority_id) for row in current_events] != old_events
-                    or lease.output_generation != output_generation
-                    or (trial.state, trial.finished_at, trial.result, trial.config) != outcome
-                    or await read_service_execution_llm_calls(session, lease, generation=output_generation) != rows):
-                raise ValueError("repair input changed; canonical pointers were not updated")
+            trial, artifact = await locked_inputs(session)
             for record in objects:
                 await register_lifecycle_object(
                     session, authority_id=authority_id, bucket=record["bucket"], object_key=record["key"],
@@ -218,6 +271,7 @@ async def repair_accounting(
             artifact.storage = new_storage
             artifact.artifact_metadata = {**metadata, "accounting_source": _SOURCE,
                                           "accounting_repair_id": revision,
+                                          "accounting_call_count": len(rows),
                                           "accounting_previous_trajectory_index": old_index}
             trial.trajectory_index = new_index
             # The lease retains its immutable original materialization ACK.

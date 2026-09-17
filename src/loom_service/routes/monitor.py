@@ -81,6 +81,8 @@ _CAPACITY_OBSERVATION_FIELDS = (
     "provider_used_vcpu_millis",
     "provider_quota_vcpu_millis_headroom",
     "active_nodes",
+    "occupied_nodes",
+    "draining_nodes",
     "node_states",
     "policy_nodes_headroom",
     "provisioned_vcpu_millis",

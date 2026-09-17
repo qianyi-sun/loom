@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import ssl
 import subprocess
 import tempfile
 import time
@@ -12,6 +13,7 @@ from uuid import uuid4
 
 import pytest
 import yaml
+from urllib3.exceptions import MaxRetryError, SSLError
 
 from loom.db.schema import ServiceExecutionLease
 from loom.execution_contract import (
@@ -255,7 +257,7 @@ def _executable_lease(
     )
 
 
-def _start_k3s() -> object:
+def _start_k3s(*, node_name: str | None = None, ephemeral_storage_floor: str | None = None) -> object:
     from testcontainers.core.container import DockerContainer
 
     container = (
@@ -270,6 +272,11 @@ def _start_k3s() -> object:
                 "--disable=servicelb",
                 "--tls-san=127.0.0.1",
                 "--write-kubeconfig-mode=644",
+                *([] if node_name is None else [f"--node-name={node_name}"]),
+                *([] if ephemeral_storage_floor is None else [
+                    "--kubelet-arg=eviction-hard=memory.available<100Mi,nodefs.inodesFree<5%,imagefs.inodesFree<5%,"
+                    f"nodefs.available<{ephemeral_storage_floor},imagefs.available<{ephemeral_storage_floor}",
+                ]),
             ]
         )
         .with_kwargs(privileged=True)
@@ -365,6 +372,39 @@ def _import_image(container: object, *, tag: str, root: Path, ordinal: int) -> s
                 raise AssertionError(tagged.output.decode("utf-8", errors="replace"))
             return pinned
     raise AssertionError(f"imported image {tag} is absent from k3s inventory")
+
+
+async def _wait_for_dns_pods(core: object, *, timeout: float = 60) -> list[object]:
+    deadline = time.monotonic() + timeout
+    last_error: MaxRetryError | None = None
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            pods = (
+                await asyncio.to_thread(
+                    core.list_namespaced_pod,
+                    "kube-system",
+                    label_selector="k8s-app=kube-dns",
+                    _request_timeout=min(5, remaining),
+                )
+            ).items
+        except MaxRetryError as error:
+            # A newly started API server can close TLS after discovery succeeds.
+            # Only this read-only setup probe tolerates the observed EOF; all
+            # authority errors, writes and network-policy assertions fail normally.
+            reason = error.reason
+            if not (
+                isinstance(reason, SSLError)
+                and reason.args
+                and isinstance(reason.args[0], ssl.SSLEOFError)
+            ):
+                raise
+            last_error = error
+        else:
+            if pods:
+                return pods
+            last_error = None
+        await asyncio.sleep(min(0.25, max(0, deadline - time.monotonic())))
+    raise AssertionError("disposable k3s did not create a CoreDNS Pod") from last_error
 
 
 def _wait_for_pod(core: object, namespace: str, name: str) -> object:
@@ -534,21 +574,7 @@ async def test_attempt_network_policy_allows_only_dns_and_gateway() -> None:
             root = Path(temporary)
             container = await asyncio.to_thread(_start_k3s)
             _, core, _ = await asyncio.to_thread(_load_client, container)
-            dns_deadline = time.monotonic() + 60
-            dns_pods = []
-            while time.monotonic() < dns_deadline:
-                dns_pods = (
-                    await asyncio.to_thread(
-                        core.list_namespaced_pod,
-                        "kube-system",
-                        label_selector="k8s-app=kube-dns",
-                    )
-                ).items
-                if dns_pods:
-                    break
-                await asyncio.sleep(0.25)
-            if not dns_pods:
-                raise AssertionError("disposable k3s did not create a CoreDNS Pod")
+            dns_pods = await _wait_for_dns_pods(core)
             await asyncio.to_thread(
                 _wait_for_pod,
                 core,

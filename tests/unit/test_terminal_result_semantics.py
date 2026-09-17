@@ -1,10 +1,96 @@
+from copy import deepcopy
+
 import pytest
 
 from loom.terminal_result_semantics import (
     aggregate_reward_scalar,
+    is_scored_agent_timeout,
     projected_result_conflicts,
     terminal_result_conflicts,
 )
+
+
+def _scored_timeout_result() -> dict:
+    return {
+        "reward": {"passed": 0.0},
+        "runtime_result": {
+            "schema_version": "loom.execution-runtime-result.v1",
+            "execution_role": "attempt",
+            "status": "timed_out",
+            "failure_reason": None,
+            "verifier_rewards": {"passed": 0.0},
+            "partial_evidence": True,
+            "phases": [
+                {"role": "agent", "exit_code": 124, "timed_out": True},
+                {"role": "verifier", "exit_code": 0, "timed_out": False},
+            ],
+            "outputs": [{"kind": "verifier", "required": True, "state": "captured"}],
+        },
+    }
+
+
+@pytest.mark.parametrize("with_setup", [False, True])
+@pytest.mark.parametrize("embedded_state", [None, "failed"])
+def test_scored_deadline_keeps_truthful_failure_and_zero_reward(
+    with_setup: bool, embedded_state: str | None
+) -> None:
+    result = _scored_timeout_result()
+    if embedded_state is not None:
+        result["state"] = embedded_state
+    if with_setup:
+        result["runtime_result"]["phases"].insert(
+            0, {"role": "setup", "exit_code": 0, "timed_out": False}
+        )
+    original = deepcopy(result)
+    assert is_scored_agent_timeout(state="failed", result=result, failure_reason="timed_out")
+    assert result == original
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "legacy_score",
+        "verifier_timeout",
+        "verifier_signal",
+        "runtime_failure",
+        "reward_mismatch",
+        "nan_reward",
+        "bool_reward",
+        "required_output_missing",
+        "verifier_output_missing",
+        "agent_not_timed_out",
+        "cancelled",
+        "contradictory_state",
+    ],
+)
+def test_cached_score_does_not_hide_incomplete_or_failed_execution(defect: str) -> None:
+    result = _scored_timeout_result()
+    runtime = result["runtime_result"]
+    state, reason = "failed", "timed_out"
+    if defect == "legacy_score":
+        del result["runtime_result"]
+    elif defect == "verifier_timeout":
+        runtime["phases"][-1].update(exit_code=124, timed_out=True)
+    elif defect == "verifier_signal":
+        runtime["phases"][-1]["signal"] = 9
+    elif defect == "runtime_failure":
+        runtime["failure_reason"] = "verifier_error"
+    elif defect == "reward_mismatch":
+        result["reward"] = {"passed": 1.0}
+    elif defect in {"nan_reward", "bool_reward"}:
+        reward = {"passed": float("nan") if defect == "nan_reward" else False}
+        result["reward"] = runtime["verifier_rewards"] = reward
+    elif defect == "required_output_missing":
+        runtime["outputs"].append({"kind": "workspace", "required": True, "state": "missing"})
+    elif defect == "verifier_output_missing":
+        runtime["outputs"] = []
+    elif defect == "agent_not_timed_out":
+        runtime["phases"][0].update(exit_code=1, timed_out=False)
+    elif defect == "cancelled":
+        state, reason = "cancelled", "cancelled"
+    elif defect == "contradictory_state":
+        result["state"] = "succeeded"
+    assert not is_scored_agent_timeout(state=state, result=result, failure_reason=reason)
 
 
 @pytest.mark.parametrize(

@@ -1228,3 +1228,26 @@ def test_collector_remote_connection_is_explicit_and_complete(tmp_path: Path) ->
     remote = ExecutionCapacityCollectorSettings(**values)
     assert remote.kubernetes_connection.endpoint == "https://regional-api.example"
     assert remote.kubernetes_connection.credentials_file != remote.nebius_credentials_file
+
+
+@pytest.mark.asyncio
+async def test_kubernetes_drain_observation_does_not_infer_drain_from_cordon() -> None:
+    cordoned, draining, deleting = [_node(name) for name in ("cordoned", "draining", "deleting")]
+    cordoned.spec.unschedulable = True
+    draining.spec.taints = [SimpleNamespace(key="ToBeDeletedByClusterAutoscaler")]
+    deleting.metadata.deletion_timestamp = datetime(2026, 9, 16, tzinfo=UTC)
+    core = SimpleNamespace(
+        list_node=lambda **_: SimpleNamespace(
+            items=[cordoned, draining, deleting], metadata=SimpleNamespace(resource_version="nodes-9")
+        ),
+        list_pod_for_all_namespaces=lambda **_: SimpleNamespace(
+            items=[], metadata=SimpleNamespace(resource_version="pods-11")
+        ),
+    )
+    snapshot = await InClusterKubernetesCapacityReader(core_api=core, apps_api=_apps()).capture(
+        namespace="loom-nebius-staging",
+        target_id="nebius-eu-north1-staging",
+        node_label_selector="target=staging",
+    )
+    observed = {node.uid: node.draining for node in snapshot.nodes}
+    assert observed == {"cordoned-uid": False, "draining-uid": True, "deleting-uid": True}

@@ -47,6 +47,12 @@ def test_native_build_render_preflight_does_not_import_service_dependencies(
         "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
         **({"cache_bucket": config["buckets"]["artifacts"]} if cache_enabled else {}),
     }
+    config["task_resource_requests"] = {"local/measured-task": {
+        "task_revision_sha256": "sha256:" + "d" * 64,
+        "requests": {"controller": {
+            "cpu_millis": 200, "memory_mib": 512, "ephemeral_storage_mib": 100,
+        }},
+    }}
     inputs = tmp_path / "inputs.json"
     inputs.write_text(json.dumps([config, release, profile]))
     # A fresh process prevents imports already loaded by pytest from masking
@@ -74,6 +80,10 @@ config, release, profile = json.loads(inputs.read_text())
 files = build_platform(config, release, profile, {}, repo_root=root)
 write_platform(files, config, release, output)
 identity, observed, loaded = load_render(output)
+default_requests = observed.pop("default_task_resource_requests")
+assert sum(role["cpu_millis"] for role in default_requests.values()) == 1000
+assert sum(role["memory_mib"] for role in default_requests.values()) == 2048
+assert sum(role["ephemeral_storage_mib"] for role in default_requests.values()) == 2048
 assert observed == config
 assert loaded == files
 assert identity["candidate_sha"] == release["candidate_sha"]
@@ -169,6 +179,23 @@ def rendered(tmp_path: Path) -> tuple[argparse.Namespace, dict, dict, dict]:
         retry_failed_jobs=False,
     )
     return args, config, manifest, files
+
+
+@pytest.mark.parametrize("kind", ["ClusterRole", "ClusterRoleBinding"])
+def test_usage_cluster_resources_must_belong_to_target(rendered, kind):
+    args, config, _, files = rendered
+    resource = next(
+        row for row in files["60-execution.yaml"]
+        if row["kind"] == kind
+        and row["metadata"]["name"] == config["execution_namespace"] + "-actuator-usage"
+    )
+    deploy.load_render(args.render_dir)
+    resource["metadata"]["name"] = "different-environment-actuator-usage"
+    (args.render_dir / "60-execution.yaml").write_text(
+        yaml.safe_dump_all(files["60-execution.yaml"])
+    )
+    with pytest.raises(deploy.DeploymentError, match="does not belong"):
+        deploy.load_render(args.render_dir)
 
 
 class FakeKubectl(deploy.Kubectl):

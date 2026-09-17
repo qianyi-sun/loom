@@ -18,6 +18,8 @@ from loom.service_execution_materialization import (
     automatic_service_execution_rejections,
     build_service_execution_input_manifest,
     compile_service_execution_plan,
+    prepare_service_execution_input_manifest,
+    service_execution_input_binding,
 )
 from loom.trajectory.storage import FakeObjectStore
 from loom_control_plane.service_execution_materializer import (
@@ -96,6 +98,34 @@ def _profile() -> ServiceExecutionRuntimeProfileV1:
     )
 
 
+@pytest.mark.parametrize("architecture", ["x86_64", "arm64", "any"])
+async def test_x86_policy_is_scoped_to_nebius(architecture: str) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from loom.task_image_materialization import required_task_image_architectures
+    from loom_service.task_config_validation import split_valid_task_configs
+
+    raw = _task().model_dump(mode="json")
+    raw["environment"].update(cpu_arch=architecture, docker_image=None, dockerfile="Dockerfile")
+    task = TaskConfig.model_validate(raw)
+    result = MagicMock()
+    result.all.return_value = [(task.task.id, task.model_dump(mode="json"))]
+    session = AsyncMock()
+    session.execute.return_value = result
+
+    # Shared batch validation and image planning still admit ARM outside Nebius.
+    valid, invalid = await split_valid_task_configs(session, [task.task.id])
+    assert valid == [task.task.id]
+    assert invalid == []
+    assert set(required_task_image_architectures(task)) == (
+        {"x86_64", "arm64"} if architecture == "any" else {architecture}
+    )
+    reasons = automatic_service_execution_rejections(
+        task, _trial(), source_provenance=_provenance(), allow_task_image_preparation=True,
+    )
+    assert ("linux_x86_64_required" in reasons) == (architecture == "arm64")
+
+
 def test_input_manifest_is_canonical_and_preserves_executable_mode(tmp_path: Path) -> None:
     (tmp_path / "instruction.md").write_text("hello\n", encoding="utf-8")
     script = tmp_path / "verifier" / "check.sh"
@@ -114,6 +144,32 @@ def test_input_manifest_is_canonical_and_preserves_executable_mode(tmp_path: Pat
     ]
     assert [item.mode for item in manifest.files] == ["0644", "0755"]
     assert json.loads(manifest.canonical_bytes()) == manifest.model_dump(mode="json")
+
+
+def test_prepare_service_execution_input_manifest_binding_matches_body(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "instruction.md").write_text("hello\n", encoding="utf-8")
+    body, provenance = prepare_service_execution_input_manifest(
+        tmp_path,
+        task_checksum=_REVISION,
+        bucket="artifacts",
+        manifest_key="bench/task/service-execution-input.json",
+    )
+    binding = service_execution_input_binding(provenance)
+    assert binding is not None
+    assert binding.manifest_uri == (
+        "s3://artifacts/bench/task/service-execution-input.json"
+    )
+    assert binding.manifest_sha256 == "sha256:" + hashlib.sha256(body).hexdigest()
+    assert binding.file_count == 1
+    assert binding.total_bytes == len(b"hello\n")
+    assert "immutable_task_input_unavailable" not in automatic_service_execution_rejections(
+        _task(),
+        _trial(),
+        source_provenance=provenance,
+        allow_task_image_preparation=True,
+    )
 
 
 def test_ordinary_task_compiles_to_profile_owned_nebius_plan() -> None:
@@ -375,6 +431,9 @@ async def test_materializer_loop_recovers_after_control_database_outage() -> Non
             self.cleanup_calls += 1
             return False
 
+        async def reconcile_accounting_once(self) -> bool:
+            return False
+
         async def refresh_metrics(self) -> None:
             self.metric_calls += 1
             recovered.set()
@@ -412,6 +471,9 @@ async def test_materializer_loop_does_not_retry_an_error_after_shutdown() -> Non
 
         async def cleanup_source_once(self) -> bool:
             raise AssertionError("shutdown must stop before source cleanup")
+
+        async def reconcile_accounting_once(self) -> bool:
+            return False
 
         async def refresh_metrics(self) -> None:
             raise AssertionError("shutdown must stop before metrics refresh")
@@ -453,6 +515,9 @@ async def test_materializer_loop_preserves_translated_worker_cancellation() -> N
 
         async def cleanup_source_once(self) -> bool:
             raise AssertionError("cancelled worker must not start source cleanup")
+
+        async def reconcile_accounting_once(self) -> bool:
+            return False
 
         async def refresh_metrics(self) -> None:
             raise AssertionError("cancelled worker must not refresh metrics")
@@ -517,6 +582,9 @@ async def test_materializer_loop_does_not_finish_before_workers_are_drained() ->
         async def cleanup_source_once(self) -> bool:
             raise AssertionError("cancelled worker must not start source cleanup")
 
+        async def reconcile_accounting_once(self) -> bool:
+            return False
+
         async def refresh_metrics(self) -> None:
             raise AssertionError("cancelled worker must not refresh metrics")
 
@@ -558,6 +626,9 @@ async def test_materializer_loop_wakes_idle_workers_when_stopped() -> None:
         async def cleanup_source_once(self) -> bool:
             return False
 
+        async def reconcile_accounting_once(self) -> bool:
+            return False
+
         async def refresh_metrics(self) -> None:
             idle_cycle_finished.set()
 
@@ -574,6 +645,35 @@ async def test_materializer_loop_wakes_idle_workers_when_stopped() -> None:
 
     await asyncio.wait_for(loop_task, timeout=0.5)
     assert materializer.run_calls == 1
+
+
+async def test_busy_materializer_still_reconciles_late_accounting() -> None:
+    stop = asyncio.Event()
+    operations: list[str] = []
+
+    class BusyMaterializer:
+        async def run_once(self) -> bool:
+            operations.append("materialize")
+            return True
+
+        async def cleanup_source_once(self) -> bool:
+            operations.append("cleanup")
+            return False
+
+        async def refresh_metrics(self) -> None:
+            operations.append("metrics")
+
+        async def reconcile_accounting_once(self) -> bool:
+            operations.append("accounting")
+            stop.set()
+            return True
+
+    await asyncio.wait_for(run_service_execution_materializer_loop(
+        materializer=BusyMaterializer(),  # type: ignore[arg-type]
+        interval_seconds=60,
+        stop_event=stop,
+    ), timeout=0.5)
+    assert operations == ["materialize", "cleanup", "metrics", "accounting"]
 
 
 async def test_materializer_run_does_not_retry_a_translated_cancellation(
@@ -658,3 +758,90 @@ async def test_source_cleanup_does_not_retry_a_translated_cancellation(
     with pytest.raises(asyncio.CancelledError):
         await operation
     assert not retry_called
+
+
+async def test_accounting_refresh_defers_bad_archive_and_preserves_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_control_plane import service_execution_accounting_repair as repair
+
+    lease_id, team_id = uuid4(), uuid4()
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        async def execute(self, _statement):
+            return self
+
+        def one_or_none(self):
+            return lease_id, team_id
+
+    store = FakeObjectStore(objects={})
+    materializer = ServiceExecutionMaterializer(
+        session_factory=Session,  # type: ignore[arg-type]
+        source_store=store, source_bucket="source", canonical_store=store,
+        artifacts_bucket="canonical", trajectories_bucket="trajectories",
+        retry_max_seconds=60,
+    )
+    now = datetime.now(UTC)
+
+    async def unavailable(**_):
+        raise OSError("unavailable object store")
+
+    monkeypatch.setattr(repair, "repair_accounting", unavailable)
+    assert not await materializer.reconcile_accounting_once(now=now)
+    assert materializer._accounting_retry_after == {lease_id: now + timedelta(seconds=60)}
+    assert store.objects == {}
+
+    async def cancelled(**_):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(repair, "repair_accounting", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await materializer.reconcile_accounting_once(now=now + timedelta(seconds=61))
+    assert materializer._accounting_retry_after == {}
+
+
+@pytest.mark.parametrize("agent", ["direct-completion", "terminus-2"])
+def test_compiler_opts_only_isolated_terminus_into_timeout_verification(agent: str) -> None:
+    task = _task(
+        agent={"name": agent, "timeout_sec": 900},
+        verifier={
+            "name": "script",
+            "args": {"script_path": "verifier/check.sh"},
+            "timeout_sec": 1200,
+        },
+    )
+    controller = "registry.example/controller@sha256:" + "9" * 64
+    profile = _profile().model_copy(
+        update={
+            "agent_image_ref": controller,
+            "image_admission": signed_image_admission_bundle(
+                (_TASK_IMAGE, _RUNTIME_IMAGE, controller)
+            ),
+        }
+    )
+    trial = _trial().model_copy(update={"agent_name": agent})
+    plan = compile_service_execution_plan(
+        task=task,
+        trial=trial,
+        profile=profile,
+        source_provenance=_provenance(),
+        task_revision_sha256=_REVISION,
+    )
+    assert plan.main.timeout_seconds == 900
+    assert plan.verifier is not None and plan.verifier.timeout_seconds == 1200
+    if agent == "terminus-2":
+        assert plan.canonical_payload()["verifier_after_agent_timeout"] is True
+        assert plan.agent_image_ref == controller
+        assert {sidecar.role_name for sidecar in plan.sidecars if sidecar.private_sandbox} == {
+            "task-sandbox",
+            "verifier-sandbox",
+        }
+    else:
+        assert not plan.verifier_after_agent_timeout
+        assert "verifier_after_agent_timeout" not in plan.canonical_payload()

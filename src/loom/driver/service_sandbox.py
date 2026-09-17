@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import re
 import shlex
 import stat
 import tempfile
@@ -38,6 +39,10 @@ _CLEANUP_REASONS = frozenset({
     "pid_namespace_invalid", "process_owner_mismatch", "process_inspection_failed",
     "cleanup_timeout", "cleanup_cancelled", "cleanup_failed",
 })
+_PROCESS_DIAGNOSTIC = re.compile(
+    r"pid=([1-9][0-9]{0,9});ppid=([0-9]{1,10});state=([RSDTtXZPIUW]);"
+    r"uid=([0-9]{1,10});expected_uid=([0-9]{1,10})"
+)
 
 
 class SandboxRPCError(DriverError):
@@ -51,6 +56,14 @@ class SandboxRPCError(DriverError):
             if path != "/stop-processes" or reason not in _CLEANUP_REASONS:
                 reason = "http_error"
             detail = f"HTTP {status}; {reason}"
+            if reason == "process_owner_mismatch":
+                diagnostic = exc.response.headers.get("X-Loom-Sandbox-Process", "")
+                match = _PROCESS_DIAGNOSTIC.fullmatch(diagnostic)
+                if (
+                    match and max(int(match[1]), int(match[2])) < 2**31
+                    and max(int(match[4]), int(match[5])) < 2**32
+                ):
+                    detail += "; " + diagnostic
         else:
             detail = "transport_timeout" if isinstance(exc, httpx.TimeoutException) else "transport_error"
         super().__init__(f"sandbox {operation} failed ({detail})")
@@ -93,7 +106,8 @@ class ServiceSandboxDriver:
         try:
             response = await client.get("/health")
             response.raise_for_status()
-            if response.json() != {"ready": True}:
+            health = response.json()
+            if not isinstance(health, dict) or health.get("ready") is not True:
                 raise DriverError("sandbox readiness response invalid")
         except BaseException:
             await client.aclose()

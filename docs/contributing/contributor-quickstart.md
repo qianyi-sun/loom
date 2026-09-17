@@ -163,10 +163,12 @@ Each root shard has a bounded 40-minute whole-job budget, including environment
 setup, tests, wheel verification, coverage upload, and cleanup. This leaves
 headroom after the observed approximately 29-minute test phase; it does not
 relax per-test timeouts or remove any required checks.
-Each integration shard has a bounded 60-minute whole-job budget. The previous
-40-minute limit interrupted a normally progressing shard at 99%; this headroom
-includes coverage upload and cleanup without changing test selection, per-test
-timeouts, or the requirement for every selected shard to pass.
+Each integration shard has a bounded 120-minute whole-job budget. The expanded
+PostgreSQL handoff suite exhausted the previous 90-minute limit while still
+progressing; its remaining suffix took about nine minutes in an earlier run.
+This headroom includes setup, runner variation, coverage upload, and cleanup
+without changing test selection, per-test timeouts, or the requirement for every
+selected shard to pass.
 `repository-checks` enforces every selected result after the independent lanes
 finish. Docs-only PRs skip the no-input `fast-checks` job and let
 `repository-checks` validate that skipped result directly, avoiding a no-op
@@ -375,9 +377,11 @@ trusted post-merge/release workflow rather than the required PR context.
   non-document changes. `fast-checks` also writes the default fast-tier
   coverage summary to the GitHub Actions step summary; docs-only PRs skip it
   because they produce no coverage inputs.
-- **Combined fast + integration:** measured and posted to the GitHub Actions
-  step summary only on PRs labelled `ci:integration` or
-  `ci:coverage-summary`. It is reported but is not a required threshold.
+- **Combined fast + integration:** collected on request with the PR label
+  `ci:coverage-summary` or the CI dispatch input `coverage_summary=true`.
+  Either request selects integration tests and their coverage instrumentation.
+  `ci:integration` runs the functional tests without this diagnostic.
+  The combined report has no coverage threshold; the fast-tier 70% floor remains.
 - `coverage.xml` ships as a workflow artifact for external tools.
 
 To reproduce the protected fast coverage gate locally, run the equivalent

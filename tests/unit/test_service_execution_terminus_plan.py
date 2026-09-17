@@ -118,6 +118,13 @@ def test_typed_trace_keeps_native_events_and_real_call_accounting():
         "started_at": events[0].emitted_at, "finished_at": events[-1].emitted_at,
         "phases": [], "outputs": [], "verifier_rewards": {"passed": 0}, "partial_evidence": False,
     })
+    lost = {**result.model_dump(), "status": "runtime_error", "partial_evidence": True,
+            "failure_reason": "sandbox_lost"}
+    assert ExecutionRuntimeResultV1.model_validate(lost).failure_reason == "sandbox_lost"
+    with pytest.raises(ValueError, match="sandbox loss must remain a runtime failure"):
+        ExecutionRuntimeResultV1.model_validate({
+            **result.model_dump(), "failure_reason": "sandbox_lost",
+        })
     canonical = build_canonical_events(
         trial_id=identity, task_id="task-1", task_config=_inputs()[0], trial_config=trial,
         runtime_result=result, trace_body=body, verifier_body=b'{"rewards":{"passed":0}}',
@@ -133,3 +140,95 @@ def test_typed_trace_keeps_native_events_and_real_call_accounting():
                                   trial_config=trial)
     with pytest.raises(ValueError, match="another Trial"):
         parse_terminus_events(body, trial=trial, trial_id=uuid4())
+
+
+def test_controller_resources_are_frozen_independently_of_large_task():
+    from loom.execution_runtime_contract import ExecutionRuntimePlanV1, runtime_pod_resources
+    from loom.service_execution_materialization import (
+        ControllerComputeResourcesV1,
+        ServiceExecutionRuntimeProfileV1,
+    )
+
+    task, trial, profile = _inputs()
+    task = task.model_copy(update={"environment": task.environment.model_copy(update={
+        "cpus": 8, "memory_mb": 16_384, "storage_mb": 10_240,
+    })})
+    old_profile = profile.model_dump(mode="json")
+    old_profile.pop("controller_resources")
+    legacy = ServiceExecutionRuntimeProfileV1.model_validate(old_profile)
+    def compile(value):
+        return compile_service_execution_plan(
+            task=task, trial=trial, profile=value, source_provenance=_provenance(),
+            task_revision_sha256=_REVISION,
+        )
+    old_plan = compile(legacy)
+    assert "controller_resources" not in old_plan.canonical_payload()
+    assert ExecutionRuntimePlanV1.model_validate(old_plan.canonical_payload()).canonical_payload() == old_plan.canonical_payload()
+    assert runtime_pod_resources(old_plan).cpu_millis == 24_000
+    profile = profile.model_copy(update={
+        "controller_resources": ControllerComputeResourcesV1(cpu_millis=1000, memory_mib=2048),
+    })
+    # Submission persists the profile before the scheduler compiles the plan.
+    frozen_profile = ServiceExecutionRuntimeProfileV1.model_validate_json(profile.model_dump_json())
+    plan = compile(frozen_profile)
+    frozen = plan.canonical_payload()
+    assert plan.task_resources.cpu_millis == 8000
+    assert plan.controller_resources.cpu_millis == 1000
+    assert plan.controller_resources.memory_mib == 2048
+    assert plan.controller_resources.ephemeral_storage_mib == plan.workspace_mib == 10_240
+    assert all(s.resources == plan.task_resources for s in plan.sidecars)
+    assert runtime_pod_resources(plan).cpu_millis == 17_000
+    assert runtime_pod_resources(plan).memory_mib == 34_816
+    assert runtime_pod_resources(plan).ephemeral_storage_mib == 30_720
+    changed_profile = profile.model_copy(update={
+        "controller_resources": ControllerComputeResourcesV1(cpu_millis=2000, memory_mib=4096),
+    })
+    assert compile(changed_profile).controller_resources.cpu_millis == 2000
+    assert compile(frozen_profile).controller_resources.cpu_millis == 1000
+    assert ExecutionRuntimePlanV1.model_validate(frozen).controller_resources.cpu_millis == 1000
+
+
+@pytest.mark.parametrize("mutation,reason", [
+    ("missing_controller", "isolated attempt controller"),
+    ("missing_verifier", "isolated attempt controller"),
+    ("smaller_sandbox", "preserve task and verifier"),
+    ("smaller_storage", "preserve task-derived storage"),
+])
+def test_controller_sizing_cannot_weaken_task_contract(mutation, reason):
+    from loom.execution_runtime_contract import ExecutionRuntimePlanV1
+    from loom.service_execution_materialization import ControllerComputeResourcesV1
+
+    task, trial, profile = _inputs()
+    profile = profile.model_copy(update={
+        "controller_resources": ControllerComputeResourcesV1(cpu_millis=1000, memory_mib=2048),
+    })
+    payload = compile_service_execution_plan(
+        task=task, trial=trial, profile=profile, source_provenance=_provenance(),
+        task_revision_sha256=_REVISION,
+    ).canonical_payload()
+    if mutation == "missing_controller":
+        payload["agent_image_ref"] = None
+    elif mutation == "missing_verifier":
+        payload["sidecars"] = payload["sidecars"][:1]
+    elif mutation == "smaller_sandbox":
+        payload["sidecars"][0]["resources"]["cpu_millis"] = 1
+    else:
+        payload["controller_resources"]["ephemeral_storage_mib"] = 1
+    with pytest.raises(ValueError, match=reason if mutation != "missing_controller" else "agent image reference"):
+        ExecutionRuntimePlanV1.model_validate(payload)
+
+
+def test_direct_completion_keeps_task_resources_with_controller_profile():
+    from loom.service_execution_materialization import ControllerComputeResourcesV1
+
+    task, trial, profile = _task(), _trial(), _profile()
+    profile = profile.model_copy(update={
+        "controller_resources": ControllerComputeResourcesV1(cpu_millis=1000, memory_mib=2048),
+    })
+    plan = compile_service_execution_plan(
+        task=task, trial=trial, profile=profile, source_provenance=_provenance(),
+        task_revision_sha256=_REVISION,
+    )
+    assert plan.controller_resources is None
+    assert plan.execution_resources == plan.task_resources
+    assert "controller_resources" not in plan.canonical_payload()

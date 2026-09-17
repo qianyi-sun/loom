@@ -1481,21 +1481,17 @@ def test_manifest_root_shard_salt_is_bound_to_measured_collection_balance() -> N
     }
 
 
-def test_manifest_integration_shard_pins_are_exact_and_target_second_shard() -> None:
+def test_manifest_integration_shards_preserve_auth_schema_order() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
     policy = manifest.test_shard_policy("integration")
 
     assert policy is not None
-    assert policy.strategy == "contiguous"
+    assert policy.shard_count == 4
+    assert policy.strategy == "stable-hash"
+    assert policy.salt == "integration-v3-4"
     assert {(pin.path, pin.shard_index) for pin in policy.pins} == {
-        ("tests/integration/test_cp_step_tokens.py", 1),
-        ("tests/integration/test_executable_global_capacity_bridge.py", 1),
-        ("tests/integration/test_capacity_manager_migrate.py", 1),
-        ("tests/integration/test_migration_task_set_materialization_jobs.py", 1),
-        ("tests/integration/test_personal_dev_build_guard_http.py", 1),
-        ("tests/integration/test_capacity_manager_execution_store.py", 1),
-        ("tests/integration/test_capacity_final_release_witness.py", 1),
-        ("tests/integration/test_capacity_typed_terminal_sql.py", 1),
+        ("tests/integration/test_username_password_auth.py", 3),
+        ("tests/integration/test_username_password_schema.py", 3),
     }
 
 

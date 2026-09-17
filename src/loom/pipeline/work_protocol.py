@@ -85,13 +85,13 @@ class WorkClaimRequestV1(PipelineModel):
     worker_id: UUID
     capability_snapshot_digest: Digest
     free_slots: PositiveSafeInt
-    supported_work_kinds: Annotated[list[WorkKind], Field(min_length=2, max_length=2)]
+    supported_work_kinds: Annotated[list[WorkKind], Field(min_length=1, max_length=2)]
 
     @field_validator("supported_work_kinds")
     @classmethod
     def exact_work_kinds(cls, values: list[WorkKind]) -> list[WorkKind]:
-        if values != ["trial", "execution_attempt"]:
-            raise ValueError("new workers must request trial then execution_attempt")
+        if values not in (["trial"], ["trial", "execution_attempt"]):
+            raise ValueError("workers must request trial, optionally followed by execution_attempt")
         return values
 
 

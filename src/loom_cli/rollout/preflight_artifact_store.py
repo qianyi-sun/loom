@@ -18,6 +18,7 @@ from typing import TypedDict
 from uuid import uuid4
 
 from loom_cli.cluster_config import validate_container_registry_prefix
+from loom_cli.rollout.application_migration_contract import APPLICATION_OWNER_ROLE
 from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.image_readiness import (
     DockerRunner,
@@ -60,6 +61,7 @@ class _ParsedDescriptor(TypedDict):
     registry_digests: dict[str, str]
     manifest_artifact_sha256: str
     manifest_image_names: tuple[str, ...]
+    migration_application_owner_role: str
     migration_image_id: str
     migration_job_name: str
     migration_manifest_artifact_sha256: str
@@ -501,6 +503,7 @@ class PreflightArtifactStore:
             )
             migration = inspect_migration_manifest_artifact(
                 migration_read.payload.decode("utf-8"),
+                application_owner_role=descriptor["migration_application_owner_role"],
                 candidate_sha=candidate_sha,
                 candidate_tree=candidate_tree,
                 image_tag=image_tag,
@@ -684,7 +687,8 @@ def _descriptor(
         "production_defaults_sha256": production_defaults.artifact_digest,
         "rendered_manifest_sha256": manifests.rendered_sha256,
         "resource_set_digest": manifests.resource_set_digest,
-        "schema_version": 6,
+        "schema_version": 7 if migration.application_owner_role else 6,
+        **({"migration_application_owner_role": migration.application_owner_role} if migration.application_owner_role else {}),
     }
 
 
@@ -712,6 +716,7 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
     }
     current_expected = historical_expected | {"container_registry", "registry_digests"}
     schema_version = value.get("schema_version")
+    owner_role = value.get("migration_application_owner_role", "")
     image_digests = value.get("image_digests")
     registry_digests = value.get("registry_digests", {})
     container_registry = value.get("container_registry", "")
@@ -721,7 +726,9 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
         (
             (schema_version == 4 and set(value) != historical_expected)
             or (schema_version == 6 and set(value) != current_expected)
-            or schema_version not in {4, 6}
+            or (schema_version == 7 and set(value) != current_expected | {"migration_application_owner_role"})
+            or schema_version not in {4, 6, 7}
+            or (schema_version == 7 and owner_role != APPLICATION_OWNER_ROLE)
         )
         or value.get("bundle_digest") != bundle_digest
         or type(schema_version) is not int
@@ -779,6 +786,7 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
         registry_digests={str(key): str(item) for key, item in registry_digests.items()},
         manifest_artifact_sha256=str(value["manifest_artifact_sha256"]),
         manifest_image_names=tuple(str(name) for name in manifest_image_names),
+        migration_application_owner_role=str(owner_role),
         migration_image_id=str(value["migration_image_id"]),
         migration_job_name=str(value["migration_job_name"]),
         migration_manifest_artifact_sha256=str(value["migration_manifest_artifact_sha256"]),

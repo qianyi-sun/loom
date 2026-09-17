@@ -7,6 +7,7 @@ wiring. Only disposable testcontainers are stopped; no shared service is used.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import tarfile
 import threading
@@ -30,10 +31,12 @@ from loom.db.schema import (
     ServiceExecutionLease,
     Task,
     TaskImageMaterialization,
+    Team,
     Trial,
     TrialEvent,
     TrialTaskImageMaterialization,
 )
+from loom.execution_runtime_contract import RuntimeOutputDeclarationV1
 from loom.pipeline.artifact_commit import ArtifactCommitService, PartReceiptV1
 from loom.pipeline.keys import canonical_document, digest_bytes
 from loom.service_execution_terminus_trace import terminus_usage
@@ -44,7 +47,10 @@ from loom_control_plane.service_execution import (
     finalize_committed_service_execution,
     record_execution_event,
 )
-from loom_control_plane.service_execution_materializer import ServiceExecutionMaterializer
+from loom_control_plane.service_execution_materializer import (
+    ServiceExecutionMaterializer,
+    run_service_execution_materializer_loop,
+)
 from loom_control_plane.service_execution_output import (
     ServiceExecutionOutputFileV1,
     ServiceExecutionOutputPrepareV1,
@@ -124,13 +130,15 @@ async def _wait_for_minio_bucket(container: MinioContainer, bucket: str) -> None
 
 
 @pytest.mark.parametrize(
-    "terminus,legacy_repair,prepared_snapshot",
-    [(False, False, False), (True, False, False), (True, True, False), (True, True, True)],
+    "terminus,legacy_repair,prepared_snapshot,typed_failure",
+    [(False, False, False, False), (True, False, False, False), (True, True, False, False),
+     (True, True, True, False), (True, False, False, True)],
 )
 async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
     terminus: bool,
     legacy_repair: bool,
     prepared_snapshot: bool,
+    typed_failure: bool,
     monkeypatch: pytest.MonkeyPatch,
     isolated_migration_postgres_url: str,
     independent_minio_endpoints: tuple[MinioContainer, MinioContainer],
@@ -141,6 +149,12 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)
     plan = _complete_output_contract(now=now)
+    exception = {"exception_type": "ContextLengthExceededError",
+                 "exception_message": "ContextLengthExceededError", "occurred_at": now.isoformat().replace("+00:00", "Z")}
+    if typed_failure:
+        plan = plan.model_copy(update={"output_declarations": (*plan.output_declarations,
+            RuntimeOutputDeclarationV1(source_path=".loom/agent/exception.json",
+                relative_path="diagnostics/agent-exception.json", kind="agent_native", required=False))})
 
     def materializer() -> ServiceExecutionMaterializer:
         # Zero retention/claim TTL advances time locally without waiting a day.
@@ -333,6 +347,11 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             # authoritative Gateway rows for the later correction.
             monkeypatch.setattr(materializer_module, "read_service_execution_llm_calls", legacy_without_ledger)
         result = _runtime_result_payload(lease, started_at=now)
+        if typed_failure:
+            payloads["diagnostics/agent-exception.json"] = canonical_document(exception)
+            result["status"] = "task_error"
+            result["partial_evidence"] = True
+            result["phases"][0]["exit_code"] = 1
         result.update(
             outputs=[
                 {
@@ -458,7 +477,7 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 assert current.materialization_error_code == "transient_materialization_error"
                 assert current.cleanup_state == "complete"
                 assert current.deleted_at is not None
-                assert trial.state == "materializing"
+                assert trial.state == ("failed" if typed_failure else "materializing")
             for key, expected in source_snapshot.items():
                 assert await source_store.get_object(bucket="artifacts", key=key) == expected
         finally:
@@ -491,7 +510,11 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             assert current.materialization_state == "committed"
             assert current.materialization_attempts == 3
             assert current.source_cleanup_state == "retained"
-            assert trial.state == "succeeded"
+            assert trial.state == ("failed" if typed_failure else "succeeded")
+            if typed_failure:
+                assert trial.result["exception_info"] == exception
+                assert trial.failure_reason == "task_error"
+                assert "ContextLengthExceededError" in trial.failure_message
             artifact = (
                 await session.scalars(
                     select(Artifact).where(
@@ -513,7 +536,9 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                     )
                 )
             )
-            assert len(events) == (27 if legacy_repair else 28 if terminus else 7)
+            assert len(events) == (27 if legacy_repair else 28 if terminus else 7) + typed_failure
+            if typed_failure:
+                assert next(event.payload for event in events if event.kind == "trial_error")["error_type"] == "ContextLengthExceededError"
             assert len({event.seq for event in events}) == len(events)
 
         if legacy_repair:
@@ -618,6 +643,126 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
         async with sessions() as session:
             current = await session.get(ServiceExecutionLease, lease.id)
             assert current is not None and current.source_cleanup_state == "complete"
+
+        if terminus and not legacy_repair:
+            from loom_service.delivery_export import (
+                build_canonical_trial_bundle_archive,
+                canonical_bundle_from_artifact,
+            )
+
+            # Exercise the actual SQL selector and MinIO-backed repair after
+            # source GC. The request started before materialization but its
+            # immutable Gateway row commits later; timestamps cannot detect it.
+            preserved = (trial.state, trial.finished_at, copy.deepcopy(trial.result), trial.attempt_count,
+                         current.materialization_state, current.materialization_committed_at,
+                         current.source_retain_until, current.output_manifest_sha256,
+                         current.canonical_trajectory_sha256, current.canonical_atif_sha256,
+                         current.source_cleanup_state, current.desired_state, current.observed_state)
+            original_evidence = copy.deepcopy(evidence)
+            original_index = copy.deepcopy(trajectory_index)
+            old_objects = {
+                (item["bucket"], item["key"]): await canonical_store.get_object(bucket=item["bucket"], key=item["key"])
+                for item in [*files, *evidence]
+            }
+            assert not await restarted.reconcile_accounting_once()
+
+            def late_call(*, team_id=lease.team_id, generation=1, step_id="agent"):
+                return LlmCall(
+                    id=uuid4(), team_id=team_id, trial_id=trial_id, step_id=step_id,
+                    model=ledger[0]["model"], dialect=ledger[0]["dialect"],
+                    input_tokens=999, output_tokens=8192, cost_usd=0.01,
+                    rate_card_hash="test-rate", captured_at=now - timedelta(days=1), attempt=1,
+                    provider_extras={"_loom_raw_provider_log": {
+                        "service_execution": {"lease_id": str(lease.id), "generation": generation},
+                        "response": {"body": {"choices": [{"finish_reason": "length"}]}},
+                    }},
+                )
+
+            # Foreign team/generation/role rows must neither select the archive
+            # for correction nor contaminate its exported accounting.
+            foreign_team = uuid4()
+            async with sessions() as session:
+                session.add(Team(id=foreign_team, name="foreign-accounting-" + foreign_team.hex))
+                await session.flush()
+                excluded = [late_call(team_id=foreign_team), late_call(generation=2), late_call(step_id="verifier")]
+                session.add_all(excluded)
+                await session.commit()
+            assert not await restarted.reconcile_accounting_once()
+            included = late_call()
+            async with sessions() as session:
+                session.add(included)
+                await session.commit()
+            # The prior materialization is still committed, so its ordinary
+            # pending-materialization pass cannot discover the newly bound row.
+            assert not await restarted.run_once()
+            async with sessions() as session:
+                unchanged = await session.get(Artifact, artifact.id)
+                assert unchanged.artifact_metadata["accounting_call_count"] == 6
+            stop = asyncio.Event()
+            loop = asyncio.create_task(run_service_execution_materializer_loop(
+                materializer=restarted, interval_seconds=0.01, stop_event=stop,
+            ))
+            try:
+                async with asyncio.timeout(10):
+                    while True:
+                        async with sessions() as session:
+                            updated = await session.get(Artifact, artifact.id)
+                            if updated.artifact_metadata["accounting_call_count"] == 7:
+                                break
+                        await asyncio.sleep(0.01)
+            finally:
+                stop.set()
+                await asyncio.wait_for(loop, timeout=10)
+            assert not await restarted.reconcile_accounting_once()
+            async with sessions() as session:
+                trial = await session.get(Trial, trial_id)
+                current = await session.get(ServiceExecutionLease, lease.id)
+                artifact = await session.get(Artifact, artifact.id)
+                assert trial is not None and current is not None and artifact is not None
+                assert preserved == (trial.state, trial.finished_at, trial.result, trial.attempt_count,
+                                     current.materialization_state, current.materialization_committed_at,
+                                     current.source_retain_until, current.output_manifest_sha256,
+                                     current.canonical_trajectory_sha256, current.canonical_atif_sha256,
+                                     current.source_cleanup_state, current.desired_state, current.observed_state)
+                assert artifact.artifact_metadata["accounting_call_count"] == 7
+                assert artifact.storage["source_evidence"] == original_evidence
+                assert trial.trajectory_index != original_index
+                corrected_events = list((await session.scalars(select(TrialEvent).where(TrialEvent.trial_id == trial_id))).all())
+                assert len(corrected_events) == 29 + typed_failure
+                if typed_failure:
+                    assert next(event.payload for event in corrected_events if event.kind == "trial_error")["error_type"] == "ContextLengthExceededError"
+                assert sum(event.kind == "llm_call" for event in corrected_events) == 7
+                published_index = copy.deepcopy(trial.trajectory_index)
+                bundle = canonical_bundle_from_artifact(artifact, trial=trial)
+                assert bundle is not None
+            archive = build_canonical_trial_bundle_archive(client=canonical_store._client, bundle=bundle)
+            try:
+                with tarfile.open(fileobj=archive.body, mode="r:gz") as tar:
+                    archived_usage = json.load(tar.extractfile("files/accounting/usage.json"))
+                    assert archived_usage["call_count"] == 7
+                    assert sum(archived_usage["totals"][key] for key in ("input_tokens", "output_tokens")) == 34572
+                    calls = json.load(tar.extractfile("files/accounting/gateway-calls.json"))["calls"]
+                    assert {row["id"] for row in calls} == {row["id"] for row in ledger} | {str(included.id)}
+                    assert not any("_loom_raw_provider_log" in row["provider_extras"] for row in calls)
+                    assert json.load(tar.extractfile("source/accounting/usage.json"))["call_count"] == 5
+                    assert tar.extractfile("source/trajectory/events.jsonl").read() == payloads["trajectory/events.jsonl"]
+                    names = tar.getnames()
+                    assert len(names) == len(set(names))
+                    if typed_failure:
+                        assert json.load(tar.extractfile("files/diagnostics/agent-exception.json")) == exception
+            finally:
+                archive.body.close()
+            atif_key = published_index["atif_uri"].removeprefix("s3://trajectories/")
+            atif = json.loads(await canonical_store.get_object(bucket="trajectories", key=atif_key))
+            assert atif["accounting"] == archived_usage
+            assert len(atif["steps"]) == 6
+            for (bucket, key), body in old_objects.items():
+                assert await canonical_store.get_object(bucket=bucket, key=key) == body
+            # A fresh process uses durable published count, not in-memory state.
+            assert not await materializer().reconcile_accounting_once()
+            async with sessions() as session:
+                trial = await session.get(Trial, trial_id)
+                assert trial.trajectory_index == published_index
     finally:
         await engine.dispose()
 

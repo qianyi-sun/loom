@@ -55,7 +55,10 @@ async def running_signer(settings: SignerSettings) -> AsyncIterator[SignerServer
     try:
         # Do not load private signing handles or open a listener until the real
         # login has passed exact effective authority/schema validation.
-        await verify_signer_database_role(engine)
+        if any("execution" in operations for operations in settings.peer_operations.values()):
+            await verify_signer_database_role(engine, execution_enabled=True)
+        else:
+            await verify_signer_database_role(engine)
         publication = load_signing_key(settings.publication.seed_file, expected_public_key=settings.publication.public_bytes())
         execution = load_signing_key(settings.execution.seed_file, expected_public_key=settings.execution.public_bytes())
         # TLS private identity is also protected; SSL parses it without prompts.

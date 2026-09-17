@@ -1356,6 +1356,34 @@ def test_batch_create_task_filter_at_path(
     assert body["task_filter"] == {"task_ids": ["humaneval/HumanEval/0"]}
 
 
+def test_batch_create_resource_requests_at_path(mock_server: MockServer, tmp_path: Path) -> None:
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201, json={"batch_id": _BATCH_ID, "expected_trial_count": 1, "n_per_task": 1,
+                   "backend": "nebius", "state": "submitted", "combinations": [],
+                   "created_at": "2026-09-15T00:00:00Z"},
+    )
+    requests = {"local/task": {"task_revision_sha256": "sha256:" + "a" * 64,
+        "requests": {"controller": {"cpu_millis": 1000, "memory_mib": 2048,
+                                    "ephemeral_storage_mib": 1024}}}}
+    request_file = tmp_path / "requests.json"
+    request_file.write_text(json.dumps(requests))
+    rc = main(["eval", "batch", "create", "--provider", "openai-prod", "--model", "gpt-4o",
+               "--agent", "terminus-2", "--backend", "nebius", "--task-filter",
+               '{"task_ids":["local/task"]}', "--task-resource-requests", f"@{request_file}"])
+    assert rc == 0
+    body = json.loads(mock_server[1].content)
+    assert body["task_resource_requests"] == requests
+    assert "task_resource_requests" not in body["trial_config"]
+
+
+def test_batch_create_invalid_resource_requests_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["eval", "batch", "create", "--task-resource-requests", "[]"])
+    assert exc.value.code == 2
+    assert "--task-resource-requests" in capsys.readouterr().err
+
+
 def test_batch_create_benchmark_and_task_filter_mutually_exclusive(
     mock_server: MockServer,
     capsys: pytest.CaptureFixture[str],
@@ -2382,6 +2410,10 @@ def test_trial_cancel_running(
     assert f"Cancelled trial {_TRIAL_ID}" in out
     assert "running → cancelled" in out
     assert "Sibling trials" in out
+    assert "eligible completed attempt" in out
+    assert "cancelled does not select for export" in out
+    assert "Native agent timeouts with completed verifier scores and complete evidence" in out
+    assert "preserving their failed/timed_out metadata" in out
     assert f"loom eval batch rerun-plan {_BATCH_ID}" in out
     methods = [req.method for req in mock_server.requests]
     assert methods == ["GET", "POST"]

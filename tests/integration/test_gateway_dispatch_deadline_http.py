@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from fastapi import FastAPI, Request
-from sqlalchemy import create_engine, func, select, update
+from sqlalchemy import create_engine, select, update
 from starlette.responses import JSONResponse, StreamingResponse
 
 from loom.auth import mint_step_jwt
@@ -215,16 +215,22 @@ async def test_held_request_has_signed_dispatch_audit_without_billable_call(
                 assert str(agent_attempt_id) not in upstream and str(grant_id) not in upstream
                 engine = create_engine(postgres_url)
                 with engine.connect() as connection:
-                    assert (
-                        connection.scalar(
-                            select(func.count())
-                            .select_from(LlmCall)
-                            .where(
-                                LlmCall.trial_id == trial_id,
-                            )
-                        )
-                        == 0
-                    )
+                    calls = connection.execute(
+                        select(LlmCall.input_tokens, LlmCall.output_tokens,
+                               LlmCall.cost_usd, LlmCall.provider_extras)
+                        .where(LlmCall.trial_id == trial_id)
+                    ).mappings().all()
+                    # The native deadline repair retains an attempted OpenAI
+                    # facade call with missing usage. Dispatch remains audited
+                    # independently and no usage or charge is fabricated.
+                    assert len(calls) == int(path == "/openai/v1/chat/completions")
+                    if calls:
+                        assert calls[0]["input_tokens"] == calls[0]["output_tokens"] == 0
+                        assert calls[0]["cost_usd"] == 0
+                        extras = calls[0]["provider_extras"]
+                        assert extras["_loom_call_status"] == "failed"
+                        assert extras["_loom_usage_status"] == "missing"
+                        assert extras["_loom_failure_category"] == "attempt_deadline_reached"
                 engine.dispose()
         finally:
             _cleanup_gateway(

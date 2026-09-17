@@ -9,7 +9,7 @@ from pydantic import TypeAdapter
 
 from loom.models.trajectory import LLMCallEvent, TrajectoryEvent
 from loom.models.trial import TrialConfig
-from loom.trajectory.llm_call_events import llm_call_row_to_event
+from loom.trajectory.llm_call_events import llm_call_diagnostic_counts, llm_call_row_to_event
 
 _EVENT: TypeAdapter[TrajectoryEvent] = TypeAdapter(TrajectoryEvent)
 _COUNTERS = (
@@ -48,6 +48,7 @@ def terminus_usage(events: list[TrajectoryEvent], trial: TrialConfig) -> dict[st
         "schema_version": "loom.service-execution-terminus-usage.v1",
         "model": trial.agent_model.to_gateway_model_string() if trial.agent_model else None,
         "call_count": len(calls),
+        **llm_call_diagnostic_counts(calls),
         "gateway_request_ids": [call.gateway_request_id for call in calls],
         "totals": {
             **{name: sum(getattr(call, name) for call in calls) for name in _COUNTERS},

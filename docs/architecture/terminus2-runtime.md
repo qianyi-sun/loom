@@ -59,6 +59,31 @@ Harbor artifacts copied into the trial sandbox:
 Step runner always includes `.loom/agent/**` in artifact patterns for
 `terminus-2` trials.
 
+## Exception identity
+
+Loom embeds Harbor's agent rather than Harbor's Trial orchestrator. When the
+embedded agent raises, Loom preserves the original exception class even if its
+message is empty (for example, `ContextLengthExceededError`). Agent wrappers are
+unwrapped without replacing an SDK exception with its lower-level transport
+cause. Messages use the standard secret redactor; tracebacks and local variables
+are not added to the public failure record.
+
+The worker path retains `steps[].error.exception_type`, its sanitized `message`
+and timestamp in the Trial result. Native Nebius execution publishes optional
+`diagnostics/agent-exception.json` and `diagnostics/verifier-exception.json` files
+from the trusted controller workspace. Each contains `exception_type`,
+`exception_message` and `occurred_at`. Materialization projects the failing
+phase's identity into the canonical `trial_error` event and
+`trial.result.exception_info`; accounting reconciliation preserves it. Canonical
+bundle downloads retain the diagnostic files, and raw delivery
+`execution_result.json` retains the enriched Trial result.
+
+The existing `failure_reason`, terminal state and retry policy remain unchanged:
+exception identity supplies detail, not a second retry taxonomy or a claim that
+Harbor's verifier/orchestrator ran. Older results without these optional fields
+remain readable. Previously lost exception types cannot be reconstructed from
+an empty historical message.
+
 ## Attempt deadline and step-credential lifecycle (#1748)
 
 > **Evidence boundary:** this section defines the repository contract. It does
@@ -621,3 +646,16 @@ Related: `src/loom_control_plane/terminus_recovery.py`,
 | `packages/loom-launcher/loom_launcher/terminus_2_runner.py` | Import-stability stub; exits with current runtime guidance |
 | `tests/conformance/terminus2/README.md` | Local conformance notes |
 | `tests/unit/test_multi_model_switch.py` | Role router + config unit tests |
+
+## Execution architecture across platforms
+
+Nebius native execution requires Linux x86_64. ARM clients may submit work to
+Nebius remotely. This restriction belongs to Nebius admission and image-builder
+claims; shared task validation, catalog publication and worker registration
+continue to support ARM execution on other platforms. Tasks declaring `any`
+retain both AMD64 and ARM64 image prerequisites outside Nebius, including the
+Terminus runtime fallback builds. GB10 retains its ARM capability.
+
+The [Harbor90 migration runbook](../runbooks/nebius-harbor90-migration.md)
+prepares an x86 revision of that specific Nebius catalog. It does not retire ARM
+execution globally or authorize publication or live maintenance by itself.

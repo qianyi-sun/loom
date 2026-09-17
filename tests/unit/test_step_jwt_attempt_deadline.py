@@ -124,3 +124,30 @@ def test_verify_rejects_numeric_monotonic_deadline_claim() -> None:
 
     with pytest.raises(jwt.InvalidTokenError, match="invalid step JWT authority"):
         verify_step_jwt(token, signing_key=_SIGNING_KEY)
+
+
+def test_native_deadline_exception_requires_complete_short_lived_authority() -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    native = dict(
+        team_id=uuid4(), trial_id=uuid4(), step_id="agent", signing_key=_SIGNING_KEY,
+        issued_at=now, attempt_deadline_wall_clock=now + timedelta(seconds=900),
+        provider_connection_id_bound=True, step_jwt_id=uuid4(),
+        service_execution_lease_id=uuid4(), service_execution_generation=1,
+        service_execution_role="attempt", service_execution_runtime_contract_sha256="sha256:" + "a" * 64,
+        service_execution_candidate_sha="b" * 40,
+        service_execution_task_revision_sha256="sha256:" + "c" * 64,
+        service_execution_command_identity_sha256="sha256:" + "d" * 64,
+    )
+    token = mint_step_jwt(**native, ttl_sec=480)
+    assert verify_step_jwt(token, signing_key=_SIGNING_KEY).attempt_deadline_wall_clock == native["attempt_deadline_wall_clock"]
+    with pytest.raises(ValueError, match="600 seconds"):
+        mint_step_jwt(**native, ttl_sec=601)
+    claims = jwt.decode(token.removeprefix("loom_step_"), _SIGNING_KEY, algorithms=["HS256"])
+    for change in (
+        {"service_execution_lease_id": 123},
+        {"service_execution_candidate_sha": None},
+        {"exp": int(now.timestamp()) + 601},
+    ):
+        bad = "loom_step_" + jwt.encode({**claims, **change}, _SIGNING_KEY, algorithm="HS256")
+        with pytest.raises(jwt.InvalidTokenError):
+            verify_step_jwt(bad, signing_key=_SIGNING_KEY)

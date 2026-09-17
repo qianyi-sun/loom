@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from uuid import uuid4
 import httpx
 import pytest
 
+from loom.attempt_deadline import AttemptDeadline
 from loom.driver.fake import FakeDriver
 from loom.errors import AgentError
 from loom.models.exec import ExecResult
@@ -63,6 +65,41 @@ def _patch_harbor(monkeypatch: Any) -> None:
     monkeypatch.setattr("loom.agent.terminus2.runtime._import_terminus2", lambda: (Harbor, SimpleNamespace))
     monkeypatch.setattr("loom.agent.terminus2.runtime.make_trial_paths", lambda _: Paths())
     monkeypatch.setattr("loom.agent.terminus2.runtime.LoomHarborEnvironment.create", lambda **_: object())
+
+
+@pytest.mark.asyncio
+async def test_timeout_retains_native_files_without_post_deadline_ledger_or_upload(
+    tmp_path, monkeypatch,
+):
+    from loom.agent.terminus2 import runtime as module
+
+    _patch_harbor(monkeypatch)
+    harbor, context = module._import_terminus2()
+    deadline = AttemptDeadline.after(0.05)
+
+    class HangingHarbor(harbor):
+        async def run(self, *args):
+            await super().run(*args)
+            await asyncio.sleep(10)
+
+    async def sync(*args, **kwargs):
+        assert not deadline.reached, "deadline must still fence bridge/CP mutations"
+
+    monkeypatch.setattr(module, "_import_terminus2", lambda: (HangingHarbor, context))
+    monkeypatch.setattr(module.HarborCheckpointBridge, "sync_trajectory_file", sync)
+    task, trial = _config()
+    driver = FakeDriver()
+    await driver.start()
+    with pytest.raises(TimeoutError):
+        await run_terminus2(
+            driver=driver, workspace=tmp_path, task_config=task, trial_config=trial,
+            trial_id=uuid4(), team_id=uuid4(), gateway_url="http://127.0.0.1:9000",
+            instruction="Inspect /app and write the manifest.", deadline=deadline,
+        )
+    assert (tmp_path / "harbor/trajectory.json").is_file()
+    assert "api_key" not in (tmp_path / "harbor/trajectory.json").read_text()
+    assert (tmp_path / "harbor/recording.cast").is_file()
+    assert driver.filesystem == {}
 
 
 @pytest.mark.asyncio

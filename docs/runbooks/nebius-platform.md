@@ -117,6 +117,9 @@ the execution taint. The distinct node-role keeps integration nodes outside the 
 `node-role=execution` inventory. A dedicated execution group avoids competing autoscalers
 and duplicate quota accounting against the older development pool.
 
+For repeated expansion during node initialization, use the
+[read-only cold-start capture and bounded packing procedure](nebius-cold-start.md).
+
 Terraform owns the execution group's static autoscaling limit: the default is
 [the native API ceiling of 100 nodes](https://github.com/nebius/api/blob/main/nebius/mk8s/v1/node_group.proto),
 with explicit lower `integration_platform.execution_max_nodes` values preserved.
@@ -133,6 +136,14 @@ but short-task throughput still depends on this ramp rate; deliberately adjust
 the existing operator policy when planning a larger bounded acceptance run.
 
 The example `max_concurrent: null` creates no global or pool concurrency policy.
+The optional `service_execution_scheduler_max_deadline_sec` passes through the
+existing control-plane admission deadline setting (default `7200`). Set this
+environment bound high enough to cover the selected tasks' setup, agent and
+verifier timeouts, termination grace and the 600-second result-commit allowance.
+For example, `14400` admits a task with separate one-hour agent and verifier
+phases plus setup and finalization. It does not extend individual phase timeouts
+or change an existing Trial's runtime profile.
+
 Upgrade bootstrap disables only the exact old enabled four-task rows bearing
 `Nebius integration environment capacity`; other operator rows remain intact.
 A positive explicit value still installs global and pool admission limits. The
@@ -211,6 +222,50 @@ started workloads do not enter this recovery path. The Pod's native
 `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation protects active
 work from voluntary autoscaler eviction; terminal cleanup still removes the Pod.
 It does not prevent forced deletion or hardware failure.
+
+A native terminal failure before the runtime commits output must also converge.
+The actuator preserves the existing five-minute output window from the first
+durable terminal observation; repeated observations do not extend it. A real
+result committed within that window keeps its normal finalization path. After
+the window, absent output is explicitly unavailable, the current Trial fails,
+and the existing UID-scoped cleanup releases its reservations. This path never
+fabricates a runtime result, verifier reward or successful artifact bundle.
+
+Native task/verifier sidecar restarts invalidate the attempt even while the Pod
+still reports Running. The actuator records current and previous termination
+reason, exit code, signal, timestamps and restart count in the existing
+UID-bound Kubernetes observation before cleanup. Pod resource versions retain
+distinct sidecar updates under an unchanged Job. Arbitrary termination messages
+are excluded; exit code 137 alone is not evidence of OOM. Normal sidecar shutdown
+after the execution container exits is not classified as sandbox loss. Sandbox
+loss uses the same bounded output window so controller partial evidence can
+still commit before resources are removed.
+
+The execution controller pins each private sandbox's `/health` process identity
+and stops the attempt and its model requests when that process is lost or
+replaced. An isolated slow response does not prove death: ambiguous health
+failures require three consecutive observations and a healthy response resets
+the count. Confirmed socket loss or a changed process identity ends the attempt
+without reconnecting it to a fresh filesystem. Partial output and the model
+ledger remain available during finalization.
+
+Process cleanup owns the sandbox runtime's task descendants, not every process
+visible in its PID namespace. OCI exec probes briefly appear with UID 0 and
+`PPid: 0` because their parent is outside the namespace. Cleanup leaves those
+external processes alone; task descendants, including orphans adopted by PID 1,
+must still match the runtime UID. Ownership failures retain bounded numeric
+PID/parent/UID and state diagnostics. Verifier reports are captured before
+cleanup and remain partial evidence if cleanup fails; neither an available
+reward nor a second cleanup error may turn that failure into success or hide
+its original cause.
+
+When the same identified Pod reports `DisruptionTarget=True` with
+`DeletionByTaintManager`, preserve the specific eviction observation through
+termination and later generic Job backoff failure. A name-only Kubernetes Event
+can help diagnose a deleted Pod, but cannot authorize retries or reconstruct a
+missing historical Pod condition. Keep ordinary deletion distinct. Do not add
+broad startup-taint tolerations or infer that a higher node ceiling repairs an
+initialization-time eviction.
 
 This implementation is the single-region slice of #1884. Cross-region target
 selection, connectivity and provider-fault acceptance remain subsequent work.
@@ -759,6 +814,12 @@ Task Dockerfiles are product workloads: the existing execution actuator claims
 `task_image_materializations` and runs one native Kubernetes Job per fenced
 attempt. No additional queue, worker service or autoscaler is required.
 
+The actuator image must include the source-admission dependency closure used on
+the first claim, as well as the waiting-capacity module. Its build-time smoke
+imports both entrypoints and the lazily loaded source journal. The storage and
+Docker Python libraries are dependencies of those shared source helpers; this
+does not mount a host runtime socket or move Dockerfile execution into the actuator.
+
 Enable the primary-only loop by adding the following to the operator's platform
 configuration; omission leaves native building disabled:
 
@@ -777,6 +838,18 @@ configuration; omission leaves native building disabled:
 
 `cache_bucket` is optional. When absent, cache credentials and import/export are
 omitted. Source, backup and trajectory buckets cannot be used as build cache.
+`max_concurrent` bounds unfinished builds, including cleanup, and renders the
+matching build-namespace quota. For a batch of uncached task environments, start
+with two concurrent builds if the shared execution pool has room for their
+CPU, memory and temporary storage. Apply the operator configuration through the
+normal renderer/deployer; changing only the actuator environment or namespace
+quota leaves the two limits inconsistent. Builds still compete with executions
+through shared capacity admission. Image-unready Trials have no execution Pods,
+so increasing a node-group ceiling alone does not parallelize their preparation.
+Verify overlapping build attempts and resource release with disposable no-model
+fixtures before increasing concurrency further; retained image cache avoids
+repeating this cold-build cost.
+
 Before activation, provision these Secrets through the same protected operator
 path as the other platform credentials in `<execution_namespace>-build`:
 
@@ -818,11 +891,11 @@ addresses. Private registries, private package services, ARM/GPU and nested host
 container requirements need an explicit supported path; they must not fall back
 to a legacy host.
 
-The hard process limit is set **before** entering rootlesskit and inherited by
-Dockerfile processes. Linux counts the mapped processes against the parent UID;
-concurrent Pods sharing that host UID can have less available process capacity.
-Verify this startup contract on the actual native node before enabling untrusted
-builds. A successful local test alone is not native isolation acceptance.
+The shell sets `RLIMIT_NPROC` **before** entering RootlessKit. This per-UID limit
+is not evidence of a hard aggregate Pod/cgroup process bound; namespace mappings
+and concurrent Pods must be evaluated on the actual node. Phase 2 requires a
+verified cgroup process limit as well as hard scratch containment. A successful
+local test or an ephemeral-storage eviction limit does not establish either.
 
 Build CPU, RAM, ephemeral storage and pending/create slots use the same capacity
 admission lock and placement/quota observations as Trials. Reservations remain
@@ -830,6 +903,14 @@ until the matching Job and Pods have disappeared, including after failure,
 cancellation, lease expiry and actuator restart. Attempt metadata retains the
 Job/Pod identity, phase observations and bounded diagnostic output. No model
 request is needed to test preparation or a Dockerfile failure.
+
+If admission rejects a valid native build, the controller rolls back its claim
+but retains a 120-second renewable capacity waiting head. New trial admissions
+account for that head before consuming remaining capacity; unsupported,
+cancelled, expired or superseded work does not fence admission. Waiting does not
+increment build attempts or create/cost counters. Deploy the matching controller
+and all capacity writers before claiming live fairness. See the
+[native fairness contract](../architecture/nebius-primary-platform.md#native-task-image-capacity-fairness).
 
 Kubernetes may omit default-false host namespace and volume-mount flags and
 canonicalize volume sizes (for example, `7168Mi` to `7Gi`). The native controller
@@ -869,3 +950,48 @@ two new Dockerfiles, unchanged-input reuse, a relevant input change, useful fail
 without a model call, last-consumer cancellation, restart recovery and final
 Job/Pod/capacity cleanup. These preparation checks do not replace the separate
 minimal-harness and real trajectory acceptance in #1550/#1538/#1766.
+
+### Native Trial resource observations
+
+The execution actuator samples kubelet `/stats/summary` through the Kubernetes
+API server during ordinary reconciliation (normally 30 seconds; a 15-second
+per-node cache coalesces watch/reconcile reads). Only the lease's namespace and
+exact Pod UID are persisted. The actuator needs GET `nodes/proxy`; execution
+Pods retain no Kubernetes API privilege. This node-proxy permission belongs only
+to the trusted actuator, not a user task.
+
+The Kubernetes Python client's generated proxy method declares a string response
+even when kubelet returns JSON. Read the raw HTTP response and decode its JSON
+once; decoding the SDK's stringified Python dictionary fails despite a successful
+request. Regression coverage must exercise the real SDK response conversion,
+not only a stub that returns a JSON string.
+
+Trial/Batch `resource-usage` APIs and delivery exports retain the same durable
+ledger after native nodes are removed. Native rows carry execution lease,
+resource generation, target and Pod UID with a null worker ID. Legacy worker
+reporting cannot submit native identities. Controller (`execution`), task sandbox,
+verifier sandbox and materializer counters remain separate. The `pod` row alone
+holds kubelet's ephemeral-storage total, including shared volumes; container
+rootfs/log observations must not be added to that total again.
+
+`memory_sampled_max_bytes`, `cpu_sampled_max_nanocores` and filesystem/ephemeral
+sampled maxima are the largest observed samples, **not kernel high-water marks**.
+Short spikes between samples may be missed. CPU cumulative nanoseconds are
+converted to microseconds; kubelet container `startTime` separates observed
+incarnations so sidecar restarts do not overwrite previous CPU counters. Missing
+start times or counter resets leave partial evidence, never an exact whole-run
+total. Role image digests come from the frozen runtime plan. Unavailable throttling, true memory peaks and I/O
+counters remain null. Cumulative disk writes are not a storage-capacity estimate.
+Terminal/delete reconciliation finalizes captured rows before UID-scoped cleanup;
+missing kubelet data leaves `partial` or `unavailable` records and does not stall
+cleanup. A Pod that never acquired a UID has no invented container record.
+These observations are reference data, not an automatic sizing policy or an
+acceptance requirement for existing runs. Historical runs are not backfilled
+with guessed usage, and resource requests remain unchanged.
+
+Collection/parsing/persistence faults increment
+`loom_execution_actuator_resource_usage_errors_total` and emit a lease-scoped,
+secret-safe warning. Usage writes use a savepoint so telemetry failure cannot
+roll back primary lifecycle observations or prevent cleanup. A persistence
+failure can therefore leave missing/unfinalized usage; operators must not treat
+absence of usage as zero consumption or evidence sufficient to reduce requests.

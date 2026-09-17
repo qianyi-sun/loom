@@ -268,7 +268,7 @@ async def test_0142_rollback_refuses_any_retained_request(sessions, tmp_path, is
     with pytest.raises(DBAPIError, match="cannot downgrade 0142"):
         await asyncio.to_thread(command.downgrade, _config(isolated_migration_postgres_url), "0141")
     async with sessions() as session:
-        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0148"
+        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0151"
         assert await session.scalar(text("SELECT count(*) FROM personal_dev_build_platform_requests")) == 1
 
 

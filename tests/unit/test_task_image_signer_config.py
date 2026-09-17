@@ -46,6 +46,14 @@ def test_config_is_explicit_closed_and_preserves_fixed_separate_roots(tmp_path):
     assert parsed.peer_operations["a" * 64] == ("keyset",)
 
 
+def test_execution_operation_requires_an_explicit_peer_pin(tmp_path):
+    data = document(tmp_path)
+    data["peer_operations"]["c" * 64] = ["execution"]
+    parsed = module().decode_signer_settings(json.dumps(data).encode())
+    assert parsed.peer_operations["c" * 64] == ("execution",)
+    assert parsed.peer_operations["a" * 64] == ("keyset",)
+
+
 @pytest.mark.parametrize("change", ["unknown", "same-root", "same-id", "relative", "duplicate", "null", "empty-peers", "wrong-operation", "wrong-environment", "bad-root-time", "oversize"])
 def test_invalid_ambiguous_or_unscoped_service_config_refused(tmp_path, change):
     m = module()
