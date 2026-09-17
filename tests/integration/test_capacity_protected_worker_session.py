@@ -1130,7 +1130,6 @@ def _protected_cp_app(
         "run_metrics_refresher_loop",
         "run_retry_exhausted_sweeper_loop",
         "run_service_execution_materializer_loop",
-        "run_worker_pool_autoscaler_loop",
     ):
         monkeypatch.setattr(
             f"loom_control_plane.app.{name}",

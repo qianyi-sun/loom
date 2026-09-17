@@ -627,7 +627,6 @@ def dev_instance_manifest_documents(
         _literal_env("LOOM_CP_MINIO_REGION", config.minio_region),
         _literal_env("LOOM_CP_ARTIFACTS_BUCKET", identity.artifacts_bucket),
         _literal_env("LOOM_CP_TRAJECTORIES_BUCKET", identity.trajectories_bucket),
-        _literal_env("LOOM_CP_SLURM_WORKER_CONTROLLER_ENABLED", "false"),
         _literal_env("LOOM_CP_ADMIN_SECRET_FILE", "/var/run/loom/admin/secrets.toml"),
         *common,
     ]

@@ -323,7 +323,6 @@ class KubectlPersonalDevActivationExecutor:
 
         disabled_evidence: dict[str, str] = {}
         disabled_requirements = {
-            "control-plane": "LOOM_CP_SLURM_WORKER_CONTROLLER_ENABLED",
             "service": "LOOM_SVC_K8S_WORKER_ENABLED",
         }
         for component, variable in disabled_requirements.items():

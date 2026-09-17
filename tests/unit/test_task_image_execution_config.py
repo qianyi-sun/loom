@@ -169,10 +169,10 @@ def test_configured_control_plane_owns_signer_and_engine_on_all_exits(tmp_path, 
     monkeypatch.setattr(cp_app, "_assert_schema_startup", AsyncMock(side_effect=ValueError("fixture schema failure") if case == "schema-failure" else None))
     monkeypatch.setattr(cp_app, "build_s3_client", lambda **_: object())
     for name in ("run_crash_detector_loop", "run_metrics_refresher_loop", "run_retry_exhausted_sweeper_loop",
-                 "run_worker_pool_autoscaler_loop", "run_live_preview_reconciler_loop", "run_service_execution_materializer_loop"):
+                 "run_live_preview_reconciler_loop", "run_service_execution_materializer_loop"):
         monkeypatch.setattr(cp_app, name, idle)
     if case == "later-startup-failure":
-        monkeypatch.setattr(cp_app, "build_controller_config", Mock(side_effect=ValueError("fixture later failure")))
+        monkeypatch.setattr(cp_app, "SqlArtifactCommitRepository", Mock(side_effect=ValueError("fixture later failure")))
     elif case == "partial-background-failure":
         monkeypatch.setattr(cp_app, "ServiceExecutionMaterializer", Mock(side_effect=ValueError("fixture partial background failure")))
     app = cp_app.create_app(ControlPlaneSettings(_env_file=None, db_url="postgresql+psycopg://test:test@localhost/test",

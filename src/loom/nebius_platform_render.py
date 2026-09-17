@@ -1571,7 +1571,6 @@ def build_platform(
                     ),
                     "LOOM_CP_SERVICE_EXECUTION_MATERIALIZER_ENABLED": "true",
                     "LOOM_CP_SERVICE_EXECUTION_SOURCE_RETENTION_SEC": 86400,
-                    "LOOM_CP_SLURM_WORKER_CONTROLLER_ENABLED": "false",
                     "LOOM_CP_EXECUTION_IMAGE_ADMISSION_PUBLIC_KEYS_JSON": canonical(
                         keyring
                     ).decode(),

@@ -27,11 +27,6 @@ from loom_control_plane.artifact_commit_runtime import (
 )
 from loom_control_plane.artifact_read_service import ArtifactReadService
 from loom_control_plane.config import ControlPlaneSettings
-from loom_control_plane.elastic_slurm_worker_controller import (
-    SubprocessSlurmCommandRunner,
-    build_controller_config,
-    run_elastic_slurm_worker_controller_loop,
-)
 from loom_control_plane.input_materialization_evidence import (
     PipelineInputMaterializationEvidenceService,
 )
@@ -75,9 +70,6 @@ from loom_control_plane.task_image_execution import (
     configured_execution_service,
 )
 from loom_control_plane.task_lifecycle import cancel_and_drain_tasks as _cancel_and_drain_tasks
-from loom_control_plane.worker_pool_autoscaler import (
-    run_worker_pool_autoscaler_loop,
-)
 from loom_task_image_authority.execution_config import load_execution_admission_settings
 
 
@@ -204,29 +196,6 @@ def create_app(
             bucket=settings.artifacts_bucket,
         )
 
-        slurm_controller_config = build_controller_config(
-            enabled=settings.slurm_worker_controller_enabled,
-            environment=settings.slurm_worker_controller_environment,
-            pool_name=settings.slurm_worker_controller_pool_name,
-            allowed_nodes_csv=settings.slurm_worker_controller_allowed_nodes,
-            env_file=settings.slurm_worker_controller_env_file,
-            repo_dir=settings.slurm_worker_controller_repo_dir,
-            partition=settings.slurm_worker_controller_partition,
-            time_limit=settings.slurm_worker_controller_time_limit,
-            requested_cpus=settings.slurm_worker_controller_requested_cpus,
-            requested_memory_mib=settings.slurm_worker_controller_requested_memory_mib,
-            requested_concurrency=(settings.slurm_worker_controller_requested_concurrency),
-            max_jobs=settings.slurm_worker_controller_max_jobs,
-            pending_job_cap=settings.slurm_worker_controller_pending_job_cap,
-            min_queued_trials=settings.slurm_worker_controller_min_queued_trials,
-            stale_after_seconds=settings.slurm_worker_controller_stale_after_seconds,
-            sbatch_path=settings.slurm_worker_controller_sbatch_path,
-            squeue_path=settings.slurm_worker_controller_squeue_path,
-            sacct_path=settings.slurm_worker_controller_sacct_path,
-            scancel_path=settings.slurm_worker_controller_scancel_path,
-            command_timeout_seconds=(settings.slurm_worker_controller_command_timeout_seconds),
-        )
-
         background_tasks: list[asyncio.Task[None]] = []
         service_execution_materializer_stop_event: asyncio.Event | None = None
 
@@ -279,16 +248,6 @@ def create_app(
             name="loom-cp-retry-exhausted-sweeper",
         )
         background_tasks.append(retry_exhausted_task)
-        worker_pool_autoscaler_task = asyncio.create_task(
-            run_worker_pool_autoscaler_loop(
-                session_factory=session_factory,
-                environment=settings.slurm_worker_controller_environment,
-                interval_sec=settings.worker_reclaim_sweep_interval_sec,
-                freshness_sec=settings.worker_heartbeat_expiry_sec,
-            ),
-            name="loom-cp-worker-pool-autoscaler",
-        )
-        background_tasks.append(worker_pool_autoscaler_task)
         live_preview_reconciler_task = asyncio.create_task(
             run_live_preview_reconciler_loop(
                 session_factory=session_factory,
@@ -297,20 +256,6 @@ def create_app(
             name="loom-cp-live-preview-reconciler",
         )
         background_tasks.append(live_preview_reconciler_task)
-        slurm_controller_task: asyncio.Task[None] | None = None
-        if slurm_controller_config is not None:
-            slurm_controller_task = asyncio.create_task(
-                run_elastic_slurm_worker_controller_loop(
-                    session_factory=session_factory,
-                    config=slurm_controller_config,
-                    runner=SubprocessSlurmCommandRunner().bind_config(
-                        slurm_controller_config,
-                    ),
-                    interval_sec=settings.worker_reclaim_sweep_interval_sec,
-                ),
-                name="loom-cp-elastic-slurm-worker-controller",
-            )
-            background_tasks.append(slurm_controller_task)
         service_execution_scheduler_task: asyncio.Task[None] | None = None
         if settings.service_execution_scheduler_enabled:
             service_execution_scheduler_task = asyncio.create_task(

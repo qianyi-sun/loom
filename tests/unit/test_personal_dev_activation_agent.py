@@ -336,10 +336,6 @@ class _ActivationKubectlRunner:
         }
         for component in ("control-plane", "llm-gateway", "service", "web"):
             env = []
-            if component == "control-plane":
-                env.append(
-                    {"name": "LOOM_CP_SLURM_WORKER_CONTROLLER_ENABLED", "value": "false"},
-                )
             if component == "service":
                 env.append({"name": "LOOM_SVC_K8S_WORKER_ENABLED", "value": "false"})
             name = f"loom-{component}-g{intent.deployment_generation}"
