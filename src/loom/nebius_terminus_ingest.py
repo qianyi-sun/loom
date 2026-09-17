@@ -214,9 +214,8 @@ def adapt_bundle_for_nebius_terminus(
     if not workdir_ok:
         environment["workdir"] = "/app"
 
-    verifier_identity_stripped = "user" in verifier and verifier.get("user") is not None
-    if "user" in verifier:
-        del verifier["user"]
+    verifier_identity_stripped = verifier.get("user") is not None
+    verifier.pop("user", None)
     verifier["name"] = verifier.get("name") or "script"
     verifier["env_mode"] = "shared"
     verifier_path_forced = verifier_args.get("script_path") != VERIFIER_SCRIPT_PATH

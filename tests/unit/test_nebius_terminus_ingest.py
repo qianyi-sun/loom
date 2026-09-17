@@ -7,10 +7,10 @@ from pathlib import Path
 import pytest
 
 from loom.nebius_terminus_ingest import (
-    NEBIUS_TERMINUS_PROFILE,
     DEFAULT_CPUS,
     DEFAULT_MEMORY_MB,
     DEFAULT_STORAGE_MB,
+    NEBIUS_TERMINUS_PROFILE,
     VERIFIER_SCRIPT_PATH,
     adapt_bundle_for_nebius_terminus,
     offline_verifier_run_sh_bytes,
@@ -163,7 +163,7 @@ def test_adapt_after_normalize_fixes_absolute_verifier_path(tmp_path: Path) -> N
             "memory_mb": 2048,
             "storage_mb": 4096,
             "user": "root",
-            "architecture": "arm64",
+            "architecture": "any",
             "allow_internet": True,
         },
         "verifier": {"timeout_sec": 100.0, "user": "root"},
@@ -171,7 +171,7 @@ def test_adapt_after_normalize_fixes_absolute_verifier_path(tmp_path: Path) -> N
     }
     normalized = normalize_terminal_bench_task_toml(raw)
     assert normalized["verifier"]["args"]["script_path"] == DEFAULT_VERIFIER_SCRIPT_PATH
-    assert normalized["environment"]["cpu_arch"] == "arm64"
+    assert normalized["environment"]["cpu_arch"] == "any"
 
     adapted, stats = adapt_bundle_for_nebius_terminus(staged, normalized)
     assert adapted["verifier"]["args"]["script_path"] == VERIFIER_SCRIPT_PATH

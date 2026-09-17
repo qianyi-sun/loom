@@ -526,7 +526,7 @@ dockerfile = "environment/Dockerfile"
 docker_build_context = "environment"
 build_timeout_sec = 600.0
 user = "root"
-architecture = "arm64"
+architecture = "x86_64"
 allow_internet = true
 
 [agent]
@@ -659,6 +659,10 @@ async def test_publish_without_profile_keeps_harbor_root_verifier(
             assert task.config["verifier"]["args"]["script_path"] == (
                 "/app/verifier/run.sh"
             )
-            assert task.config["environment"].get("cpu_arch") == "arm64"
+            assert task.config["environment"].get("cpu_arch") == "x86_64"
+            assert task.config["environment"].get("network_policies_supported") != [
+                "gateway-only"
+            ]
+            assert task.config["environment"].get("user") == "root"
     finally:
         await engine.dispose()

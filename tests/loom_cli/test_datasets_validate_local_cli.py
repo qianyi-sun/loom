@@ -304,6 +304,9 @@ def test_publish_local_resolves_env_secret_references_without_logging_values(
         uploaded_objects = 4
         compat_flattened_files = 0
         source_prefix = "s3://loom-benchmarks/team-evals/"
+        execution_profile = None
+        profile_stats = None
+
 
     class _Store:
         def __init__(self, **kwargs):  # type: ignore[no-untyped-def]
@@ -369,6 +372,8 @@ def test_publish_local_explicit_flatten_override_is_visible_in_output(
         uploaded_objects = 4
         compat_flattened_files = 2
         source_prefix = "s3://loom-benchmarks/team-evals/"
+        execution_profile = None
+        profile_stats = None
 
     async def fake_publish_local_benchmark(*args, **kwargs):  # type: ignore[no-untyped-def]
         assert kwargs["compat_flatten_environment"] is True
