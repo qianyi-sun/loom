@@ -1982,8 +1982,8 @@ def test_python_test_shards_are_complete_and_non_overlapping() -> None:
 
     integration_matrix = jobs["integration"]["strategy"]["matrix"]["include"]
     assert integration_matrix == [
-        {"shard": "1-of-2", "shard_index": 0},
-        {"shard": "2-of-2", "shard_index": 1},
+        {"shard": f"{index + 1}-of-4", "shard_index": index}
+        for index in range(4)
     ]
     integration_paths = component_ownership.test_paths_for_lane(
         manifest,
@@ -2003,23 +2003,10 @@ def test_python_test_shards_are_complete_and_non_overlapping() -> None:
         )
         for shard in integration_matrix
     ]
-    assert set(integration_shards[0]).isdisjoint(integration_shards[1])
+    for index, shard in enumerate(integration_shards):
+        assert shard
+        assert all(set(shard).isdisjoint(other) for other in integration_shards[index + 1:])
     assert set().union(*map(set, integration_shards)) == set(integration_paths)
-    assert {
-        "tests/integration/test_cp_step_tokens.py",
-        "tests/integration/test_executable_global_capacity_bridge.py",
-        "tests/integration/test_capacity_manager_migrate.py",
-        "tests/integration/test_migration_task_set_materialization_jobs.py",
-        "tests/integration/test_personal_dev_build_guard_http.py",
-        "tests/integration/test_capacity_manager_execution_store.py",
-        "tests/integration/test_capacity_final_release_witness.py",
-        "tests/integration/test_capacity_typed_terminal_sql.py",
-        "tests/integration/test_application_handoff_completion.py",
-        "tests/integration/test_application_completed_authority.py",
-        "tests/integration/test_application_capacity_bootstrap_runtime.py",
-        "tests/integration/test_application_schema_reference.py",
-        "tests/integration/test_application_migrator_provision.py",
-    } <= set(integration_shards[1])
     auth_path = "tests/integration/test_username_password_auth.py"
     schema_path = "tests/integration/test_username_password_schema.py"
     assert any(auth_path in shard and schema_path in shard for shard in integration_shards)
@@ -2058,11 +2045,9 @@ def test_root_test_shard_timeout_has_bounded_growth_headroom() -> None:
 def test_integration_shard_timeout_has_bounded_growth_headroom() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
 
-    # Run35011189004 shard2 exhausted 90 minutes while still progressing at70%.
-    # The remaining suffix took nine minutes in run34925212036. Preserve every
-    # test and allow bounded headroom for growth, coverage and runner variation;
-    # per-test timeouts remain unchanged.
-    assert 110 <= workflow["jobs"]["integration"]["timeout-minutes"] <= 120
+    # Four measured shards project ~39 minutes each; retain room for optional
+    # coverage instrumentation and hosted-runner variance without a two-hour job.
+    assert 60 <= workflow["jobs"]["integration"]["timeout-minutes"] <= 75
 
 
 def test_ci_supports_merge_queue_merge_group_event() -> None:

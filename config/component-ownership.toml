@@ -73,29 +73,16 @@ pins = [
 
 [[test_sharding]]
 lane = "integration"
-shard_count = 2
-strategy = "contiguous"
+shard_count = 4
+strategy = "stable-hash"
+# PR #1973 head 69359261: ~155 minutes across 518 timed modules.
+# This salt projects 39.0 / 38.2 / 38.8 / 39.1 minutes without splitting modules.
+# Stable hashing keeps existing assignments when new test files are added.
+salt = "integration-v3-4"
 pins = [
-  # Five post-change runs still showed a 337s median shard gap. Move the two
-  # measured shard-1 hotspots as whole files; see #1680 and PR #1742 telemetry.
-  { path = "tests/integration/test_cp_step_tokens.py", shard_index = 1 },
-  { path = "tests/integration/test_executable_global_capacity_bridge.py", shard_index = 1 },
-  { path = "tests/integration/test_capacity_manager_migrate.py", shard_index = 1 },
-  { path = "tests/integration/test_migration_task_set_materialization_jobs.py", shard_index = 1 },
-  # PR #1930 run 34621281870: 3548s / 2353s test time. These whole modules
-  # accounted for ~519s in shard 1; preserve coverage and the 60-minute budget.
-  { path = "tests/integration/test_personal_dev_build_guard_http.py", shard_index = 1 },
-  { path = "tests/integration/test_capacity_manager_execution_store.py", shard_index = 1 },
-  { path = "tests/integration/test_capacity_final_release_witness.py", shard_index = 1 },
-  { path = "tests/integration/test_capacity_typed_terminal_sql.py", shard_index = 1 },
-  # PR #1960 run 34925212036: shard 1 progressed to 78% at 90 minutes,
-  # while shard 2 finished in 54 minutes. These five complete PostgreSQL
-  # modules account for approximately 1,545 seconds in the shard-1 log.
-  { path = "tests/integration/test_application_handoff_completion.py", shard_index = 1 },
-  { path = "tests/integration/test_application_completed_authority.py", shard_index = 1 },
-  { path = "tests/integration/test_application_capacity_bootstrap_runtime.py", shard_index = 1 },
-  { path = "tests/integration/test_application_schema_reference.py", shard_index = 1 },
-  { path = "tests/integration/test_application_migrator_provision.py", shard_index = 1 },
+  # Preserve the existing auth-before-schema ordering within one process.
+  { path = "tests/integration/test_username_password_auth.py", shard_index = 3 },
+  { path = "tests/integration/test_username_password_schema.py", shard_index = 3 },
 ]
 
 [[execution_policies]]

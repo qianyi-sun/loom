@@ -57,3 +57,23 @@ validation remains enforced by the repository gate.
 No wall-clock speedup is assumed: runner queueing and test runtimes vary. The
 removed work is integration coverage instrumentation/uploads on ordinary runs
 and redundant per-shard report generation. Functional test selection is unchanged.
+
+## Integration shard balance
+
+The fast integration lane uses four complete, non-overlapping file shards.
+`config/component-ownership.toml` owns the stable hash salt and the paired
+username/password fixture ordering. New files do not reshuffle existing files.
+Docker integration remains a separate lane, and every required gate still waits
+for all selected shards. Root coverage, ARM builds and platform tests are retained.
+
+The successful PR #1973 head `69359261` ran its two integration shards in
+66 and 90 minutes. Timestamped progress for 518 modules accounts for about
+155 minutes of test work. Repartitioning that same work projects approximately
+39.0, 38.2, 38.8 and 39.1 minutes across four runners, before setup, queueing and
+new tests. This is a planning estimate, not a measured speedup. The 75-minute
+job budget retains room for optional coverage and runner variation.
+
+Runner routing recognizes both the old two-shard keys and the new four-shard
+keys so in-flight runs remain interpretable. The trusted runner controller must
+adopt this contract through its normal release process; until then the existing
+bounded fallback selects GitHub-hosted runners without changing admission rules.
