@@ -182,3 +182,51 @@ async def test_fixture_read_refusal_stops_within_original_and_retry_budgets(monk
     assert elapsed[0] == pytest.approx(min(timeout, 5))
     assert 1 < len(calls) <= 60
     assert all(0 < options["timeout_seconds"] <= timeout for _, options in calls)
+
+
+async def test_stopped_fixture_retains_safe_server_and_lifecycle_diagnostics(monkeypatch):
+    error = DevInstanceRuntimeError("original failure")
+    commands = []
+
+    class Runner:
+        async def run(self, argv, **kwargs):
+            commands.append(argv)
+            if "loom-k3s-diagnostics" in argv:
+                return CommandResult('level=fatal msg="kube-apiserver exited: private-endpoint"\n'
+                                     'error: no space left on device /private-path\n', "")
+            if argv[:2] == ["docker", "events"]:
+                return CommandResult('kill 15\ndie \nexec_create: private-command secret\n', "")
+            if "inspect" in argv:
+                return CommandResult('{"Running":false,"OOMKilled":false,"ExitCode":0}', "")
+            raise error
+
+    monkeypatch.setattr(fixture, "AsyncCommandRunner", Runner)
+    runner = fixture._ContainerKubectl("a" * 64)
+    with pytest.raises(DevInstanceRuntimeError) as raised:
+        await runner.run(["kubectl", "get", "namespace"])
+    assert raised.value is error
+    notes = "\n".join(error.__notes__)
+    assert "disposable k3s log categories: api-server-exit,disk-full,fatal" in notes
+    assert "disposable container lifecycle: die,kill-15" in notes
+    assert all(value not in notes for value in ("private-endpoint", "private-path", "private-command", "secret"))
+    assert len([argv for argv in commands if "loom-test-kubectl" in argv]) == 1
+
+
+async def test_stopped_fixture_diagnostic_failure_preserves_original_error(monkeypatch):
+    original = DevInstanceRuntimeError("original failure")
+
+    class Runner:
+        async def run(self, argv, **kwargs):
+            if "inspect" in argv:
+                return CommandResult('{"Running":false,"OOMKilled":false,"ExitCode":1}', "")
+            if "loom-test-kubectl" in argv:
+                raise original
+            raise DevInstanceRuntimeError("private diagnostic failure")
+
+    monkeypatch.setattr(fixture, "AsyncCommandRunner", Runner)
+    with pytest.raises(DevInstanceRuntimeError) as raised:
+        await fixture._ContainerKubectl("a" * 64).run(["kubectl", "create", "-f", "-"], stdin="secret")
+    assert raised.value is original
+    assert "disposable k3s log categories unavailable" in original.__notes__
+    assert "disposable container lifecycle unavailable" in original.__notes__
+    assert "private" not in "\n".join(original.__notes__)
