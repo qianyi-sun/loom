@@ -439,3 +439,139 @@ def test_gb10_smoke_catalog_fixture_is_publish_local_ready(
         )
         == "hello"
     )
+
+
+def test_validate_local_forwards_nebius_terminus_execution_profile(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "harbor"
+    root.mkdir()
+    captured: dict[str, object] = {}
+
+    class _Stats:
+        adapted_tasks = 1
+        verifier_wrappers_installed = 1
+        resources_filled_tasks = 1
+        preflight_passed = 1
+
+    from loom.config.benchmarks import LocalBenchmarkEntry
+
+    entry = LocalBenchmarkEntry(
+        id="harbor",
+        display_name="Harbor",
+        series="tb",
+        license_spdx="MIT",
+        source_subdir="tasks",
+    )
+
+    class _Result:
+        def __init__(self) -> None:
+            self.entry = entry
+            self.task_count = 1
+            self.execution_profile = "nebius-terminus"
+            self.profile_stats = _Stats()
+
+    def fake_validate(path, **kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        return _Result()
+
+    monkeypatch.setattr(
+        "loom_cli.local_benchmark_validate.validate_local_benchmark",
+        fake_validate,
+    )
+
+    rc = datasets_cmd.dispatch(
+        [
+            "validate-local",
+            str(root),
+            "--execution-profile",
+            "nebius-terminus",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["execution_profile"] == "nebius-terminus"
+    out = capsys.readouterr().out
+    assert "execution_profile: nebius-terminus" in out
+    assert "verifier_wrappers_installed=1" in out
+
+
+def test_publish_local_forwards_nebius_terminus_execution_profile(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "harbor"
+    root.mkdir()
+    captured: dict[str, object] = {}
+
+    class _ProfileStats:
+        adapted_tasks = 2
+        verifier_wrappers_installed = 2
+        resources_filled_tasks = 1
+        preflight_passed = 2
+
+    class _Stats:
+        benchmark_id = "harbor"
+        task_count = 2
+        inserted = 2
+        updated = 0
+        unchanged = 0
+        uploaded_objects = 10
+        compat_flattened_files = 0
+        source_prefix = "s3://loom-benchmarks/harbor/"
+        execution_profile = "nebius-terminus"
+        profile_stats = _ProfileStats()
+
+    class _Store:
+        def __init__(self, **kwargs):  # type: ignore[no-untyped-def]
+            captured["store"] = kwargs
+
+    async def fake_publish(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captured["execution_profile"] = kwargs.get("execution_profile")
+        return _Stats()
+
+    monkeypatch.setattr("loom.trajectory.storage.MinioObjectStore", _Store)
+    monkeypatch.setattr(
+        "loom_cli.local_benchmark_publish.publish_local_benchmark",
+        fake_publish,
+    )
+    monkeypatch.setenv("LOOM_DB_URL", "postgresql://loom/loom")
+    monkeypatch.setenv("LOOM_MINIO_ENDPOINT", "http://minio:9000")
+    monkeypatch.setenv("LOOM_MINIO_ACCESS_KEY", "access")
+    monkeypatch.setenv("LOOM_MINIO_SECRET_KEY", "secret")
+
+    rc = datasets_cmd.dispatch(
+        [
+            "publish-local",
+            str(root),
+            "--execution-profile",
+            "nebius-terminus",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["execution_profile"] == "nebius-terminus"
+    out = capsys.readouterr().out
+    assert "execution_profile=nebius-terminus" in out
+    assert "adapted_tasks=2" in out
+
+
+def test_execution_profile_unknown_is_rejected_by_cli(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "harbor"
+    root.mkdir()
+    with pytest.raises(SystemExit) as error:
+        datasets_cmd.dispatch(
+            [
+                "validate-local",
+                str(root),
+                "--execution-profile",
+                "not-a-profile",
+            ]
+        )
+    assert error.value.code == 2
