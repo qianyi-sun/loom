@@ -301,6 +301,11 @@ def _add_audit_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     p.add_argument(
+        "--minio-region",
+        default=_target_minio_env("REGION") or "us-east-1",
+        help="S3 signing region (LOOM_MINIO_REGION, then LOOM_SVC_MINIO_REGION; default us-east-1).",
+    )
+    p.add_argument(
         "--minio-endpoint",
         default=_target_minio_env("ENDPOINT"),
     )
@@ -465,6 +470,11 @@ def _add_publish_local_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     p.add_argument(
+        "--minio-region",
+        default=_target_minio_env("REGION") or "us-east-1",
+        help="S3 signing region (LOOM_MINIO_REGION, then LOOM_SVC_MINIO_REGION; default us-east-1).",
+    )
+    p.add_argument(
         "--minio-endpoint",
         default=_target_minio_env("ENDPOINT"),
         help=(
@@ -494,6 +504,11 @@ def _add_publish_local_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     p.add_argument("--bucket", default="loom-benchmarks")
+    p.add_argument(
+        "--create-bucket",
+        action="store_true",
+        help="Create the bucket if missing; requires bucket-level permissions. Default: publish to an existing bucket.",
+    )
     p.add_argument("--imported-by", default=None)
     p.add_argument(
         "--id",
@@ -1204,6 +1219,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             endpoint_url=args.minio_endpoint,
             access_key=args.minio_access_key,
             secret_key=args.minio_secret_key,
+            region=args.minio_region,
         )
 
         async def _audit_tb21() -> AuditResult:
@@ -1264,6 +1280,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             endpoint_url=args.minio_endpoint,
             access_key=args.minio_access_key,
             secret_key=args.minio_secret_key,
+            region=args.minio_region,
         )
 
     items = asyncio.run(
@@ -1594,6 +1611,7 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
         endpoint_url=args.minio_endpoint,
         access_key=minio_access_key,
         secret_key=minio_secret_key,
+        region=args.minio_region,
     )
     try:
         stats = asyncio.run(
@@ -1609,6 +1627,7 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
                 source_subdir=args.source_subdir,
                 imported_by=args.imported_by,
                 compat_flatten_environment=args.compat_flatten_environment,
+                create_bucket=args.create_bucket,
             )
         )
     except LocalBenchmarkValidationError as exc:

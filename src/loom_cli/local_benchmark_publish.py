@@ -72,8 +72,9 @@ async def publish_local_benchmark(
     source_subdir: str | None = None,
     imported_by: str | None = None,
     compat_flatten_environment: bool = False,
+    create_bucket: bool = False,
 ) -> LocalBenchmarkPublishStats:
-    """Validate, upload, and register a user-owned local benchmark folder."""
+    """Publish to an existing bucket; bucket creation is an explicit bootstrap option."""
 
     result = validate_local_benchmark(
         root,
@@ -84,7 +85,8 @@ async def publish_local_benchmark(
         source_subdir=source_subdir,
     )
     entry = result.entry
-    await object_store.ensure_bucket(bucket)
+    if create_bucket:
+        await object_store.ensure_bucket(bucket)
 
     engine = create_async_engine(normalize_db_url(db_url))
     session_factory = async_sessionmaker(engine, expire_on_commit=False)

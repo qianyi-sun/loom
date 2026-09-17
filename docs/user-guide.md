@@ -1431,6 +1431,16 @@ loom datasets publish-local ./team-evals --bucket loom-benchmarks
 loom datasets audit team-evals
 ```
 
+`publish-local` publishes into an **existing bucket** by default and needs object
+write access, not bucket-management permissions. It does not call `HeadBucket`
+or create a bucket. For a local bootstrap with a bucket-capable identity, opt in
+with `--create-bucket`. Missing buckets and denied object writes remain errors;
+failed publication does not commit catalog rows.
+
+For `publish-local` and `audit`, set `--minio-region` to the storage region or
+export `LOOM_MINIO_REGION` (fallback: `LOOM_SVC_MINIO_REGION`). The default is
+`us-east-1`; native Nebius storage must use its configured region.
+
 `publish-local` uploads each task bundle under the immutable revision prefix
 `s3://loom-benchmarks/team-evals/<task-id>/.loom-revisions/<task-checksum>/<mode-manifest-sha256>/`
 and registers task rows with those sources. The two digests cover both file
