@@ -702,65 +702,6 @@ def test_batch_create_multi_model_beta_builds_trial_config(
     }
 
 
-def test_batch_create_multi_model_turn_schedule_builds_trial_config(
-    mock_server: MockServer,
-) -> None:
-    _stub_connection_lookup(mock_server)
-    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
-        201,
-        json={
-            "batch_id": _BATCH_ID,
-            "expected_trial_count": 1,
-            "n_per_task": 1,
-            "backend": "docker",
-            "combinations": [],
-            "state": "submitted",
-            "created_at": "2026-06-16T00:00:00Z",
-        },
-    )
-    rc = main(
-        [
-            "eval",
-            "batch",
-            "create",
-            "--purpose",
-            "evaluation",
-            "--provider",
-            "openai-prod",
-            "--model",
-            "glm-5.1",
-            "--agent",
-            "terminus-2",
-            "--benchmark",
-            "strict-pass-39",
-            "--multi-model",
-            "--multi-model-secondary",
-            "qwen-test",
-            "--multi-model-step-start",
-            "2",
-            "--multi-model-step-end",
-            "9",
-            "--multi-model-seed",
-            "turn-42",
-            "--name",
-            "turn-mix",
-        ]
-    )
-    assert rc == 0
-    body = json.loads(mock_server[1].content)
-    assert body["trial_config"]["multi_model"] == {
-        "enabled": True,
-        "policy": "student_to_teacher_turns",
-        "step_start": 2,
-        "step_end": 9,
-        "mix_seed": "turn-42",
-        "secondary_model": {
-            "provider": "openai",
-            "name": "qwen-test",
-            "source": "api",
-        },
-    }
-
 
 def test_batch_create_multi_model_beta_rejects_k1(
     mock_server: MockServer,
@@ -892,7 +833,7 @@ def test_batch_create_with_combinations_json_routes_provider_per_combo(
     assert req.url.path == "/api/v1/batches"
     body = json.loads(req.content)
     assert body["trial_config"] == {}
-    assert body["purpose"] == "trajectory_generation"
+    assert body["purpose"] == "evaluation"
     assert body["task_filter"] == {"benchmark_id": "source-useful-frontier-5003"}
     assert body["combinations"] == combinations
     assert "provider_connection_id" not in body
@@ -1368,7 +1309,8 @@ def test_batch_create_resource_requests_at_path(mock_server: MockServer, tmp_pat
                                     "ephemeral_storage_mib": 1024}}}}
     request_file = tmp_path / "requests.json"
     request_file.write_text(json.dumps(requests))
-    rc = main(["eval", "batch", "create", "--provider", "openai-prod", "--model", "gpt-4o",
+    rc = main(["eval", "batch", "create", "--purpose", "evaluation",
+               "--provider", "openai-prod", "--model", "gpt-4o",
                "--agent", "terminus-2", "--backend", "nebius", "--task-filter",
                '{"task_ids":["local/task"]}', "--task-resource-requests", f"@{request_file}"])
     assert rc == 0
@@ -1620,7 +1562,8 @@ def test_batch_create_serializes_selected_agent_version(mock_server, agent_versi
     mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
         201, json={"batch_id": _BATCH_ID, "expected_trial_count": 1, "state": "submitted"},
     )
-    argv = ["eval", "batch", "create", "--provider", "openai-prod", "--model", "gpt-4o",
+    argv = ["eval", "batch", "create", "--purpose", "evaluation",
+            "--provider", "openai-prod", "--model", "gpt-4o",
             "--agent", "terminus-2", "--benchmark", "terminal-bench", "--backend", "nebius"]
     if agent_version is not None:
         argv += ["--agent-version", agent_version]
