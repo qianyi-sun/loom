@@ -80,6 +80,7 @@ async def native_resource_batch(camp_setup, postgres_url: str) -> AsyncIterator[
         s.commit()
     payload = {
         "task_filter": {"task_ids": task_ids}, "backend": "nebius", "n_per_task": 1,
+        "purpose": "evaluation",
         "trial_config": {"agent_name": "terminus-2", "agent_model": {
             "provider": "openai", "name": "gpt-5", "source": "api",
         }, "retry": {"max_attempts": 1, "retry_on": []}},

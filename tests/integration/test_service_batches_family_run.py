@@ -88,6 +88,7 @@ async def _post_family_batch(
             headers={"Authorization": f"Bearer {raw_token}"},
             json={
                 "name": name,
+                "purpose": "evaluation",
                 "task_filter": {
                     "task_ids": [
                         "benchmarks/skillflow-iterative/family-a/task-1",
@@ -347,6 +348,7 @@ async def test_post_batch_with_family_run_seeds_state(
             json={
                 "name": "skillflow-iterative",
                 "description": "family-run seed integration test",
+                "purpose": "evaluation",
                 "task_filter": {
                     "task_ids": [
                         "benchmarks/skillflow-iterative/family-a/task-1",
@@ -427,6 +429,7 @@ async def test_post_batch_family_run_partial_spec_returns_400(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "partial-spec",
+                "purpose": "evaluation",
                 "task_filter": {
                     "task_ids": [
                         "benchmarks/skillflow-iterative/family-a/task-1",
@@ -461,6 +464,7 @@ async def test_post_batch_no_family_run_stays_classic(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "classic",
+                "purpose": "evaluation",
                 "task_filter": {
                     "task_ids": [
                         "benchmarks/skillflow-iterative/family-a/task-1",
