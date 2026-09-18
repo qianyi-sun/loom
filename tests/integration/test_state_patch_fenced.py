@@ -188,9 +188,9 @@ def test_family_skip_cancels_sibling_through_cancellation_authority(
             connection.execute(
                 text(
                     "INSERT INTO batches "
-                    "(id, team_id, name, task_filter, trial_config, state, "
+                    "(id, team_id, name, purpose, task_filter, trial_config, state, "
                     "created_by_token_prefix, family_run_spec) VALUES "
-                    "(:batch_id, :team_id, :name, '{}'::jsonb, '{}'::jsonb, "
+                    "(:batch_id, :team_id, :name, 'evaluation', '{}'::jsonb, '{}'::jsonb, "
                     "'running', 'family', CAST(:spec AS jsonb))"
                 ),
                 {
