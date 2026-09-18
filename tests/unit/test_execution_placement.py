@@ -144,15 +144,49 @@ def test_provider_charge_is_distinct_from_allocatable_and_domain_is_native():
     assert quota_identity(quota) != quota_identity(quota.model_copy(update={"region": "other"}))
 
 
-def test_daemonset_change_invalidates_historical_sample():
+def test_daemonset_generation_only_still_reuses_historical_sample():
     data = placement_fixture(target_id="a")
     data["daemonsets"] = [
         {"uid": "ds", "generation": 1, "requests": _resources(100).model_dump(), "scheduling": {}}
     ]
     old = CapacityPlacement.model_validate(data)
     changed = deepcopy(data)
+    changed["nodes"] = []
+    changed["node_group"]["node_count"] = 0
     changed["template_samples"] = []
     changed["daemonsets"][0]["generation"] = 2
+    sample = cold_sample(CapacityPlacement.model_validate(changed), [old])
+    assert sample is not None
+    assert (
+        plan_placement(
+            CapacityPlacement.model_validate(changed),
+            [("new:1", _resources())],
+            sample=sample,
+        ).additional_nodes
+        == 1
+    )
+
+
+@pytest.mark.parametrize("field", ["requests", "scheduling"])
+def test_daemonset_request_or_scheduling_change_invalidates_historical_sample(field):
+    data = placement_fixture(target_id="a")
+    data["daemonsets"] = [
+        {
+            "uid": "ds",
+            "generation": 1,
+            "requests": _resources(100).model_dump(),
+            "scheduling": {"node_selector": {"kubernetes.io/os": "linux"}},
+        }
+    ]
+    old = CapacityPlacement.model_validate(data)
+    changed = deepcopy(data)
+    changed["nodes"] = []
+    changed["node_group"]["node_count"] = 0
+    changed["template_samples"] = []
+    if field == "requests":
+        changed["daemonsets"][0]["requests"]["cpu_millis"] += 50
+    else:
+        changed["daemonsets"][0]["scheduling"] = {}
     assert cold_sample(CapacityPlacement.model_validate(changed), [old]) is None
 
 
@@ -265,4 +299,8 @@ def test_label_additions_preserve_group_resource_and_daemonset_boundaries(change
         data["daemonsets"][0]["requests"]["cpu_millis"] += 100
     else:
         data["daemonsets"][0]["scheduling"] = {}
-    assert cold_sample(CapacityPlacement.model_validate(data), [old]) is None
+    sample = cold_sample(CapacityPlacement.model_validate(data), [old])
+    if change == "daemon_generation":
+        assert sample is not None
+    else:
+        assert sample is None
