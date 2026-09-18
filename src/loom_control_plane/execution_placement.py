@@ -59,12 +59,29 @@ def _compatible_node_template(current: CapacityPlacement, old: CapacityPlacement
     return not any(_mentions_label(daemon.scheduling, added) for daemon in current.daemonsets)
 
 
+def _compatible_daemonsets(current: CapacityPlacement, old: CapacityPlacement) -> bool:
+    """Packing fingerprint: same DaemonSet set, requests, and scheduling.
+
+    Ignore ``generation``. Controller revision counters bump on any spec write
+    and must not invalidate measured cold-start samples when reserved resources
+    and placement rules are unchanged.
+    """
+    current_by_uid = {row.uid: row for row in current.daemonsets}
+    old_by_uid = {row.uid: row for row in old.daemonsets}
+    if current_by_uid.keys() != old_by_uid.keys():
+        return False
+    return all(
+        current_by_uid[uid].requests == old_by_uid[uid].requests
+        and current_by_uid[uid].scheduling == old_by_uid[uid].scheduling
+        for uid in current_by_uid
+    )
+
+
 def compatible_template(current: CapacityPlacement, old: CapacityPlacement) -> bool:
     return (
         current.node_group.id == old.node_group.id
         and current.node_group.raw_node == old.node_group.raw_node
-        and sorted(current.daemonsets, key=lambda row: row.uid)
-        == sorted(old.daemonsets, key=lambda row: row.uid)
+        and _compatible_daemonsets(current, old)
         and _compatible_node_template(current, old)
     )
 
