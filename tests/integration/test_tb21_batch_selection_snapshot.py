@@ -192,6 +192,7 @@ async def create_batch(client: httpx.AsyncClient) -> UUID:
         headers={"Authorization": f"Bearer {client.headers['x-test-token']}"},
         json={
             "name": "TB2 alias snapshot",
+            "purpose": "evaluation",
             "task_filter": {"benchmark_id": PUBLIC_ALIAS},
             "trial_config": {"agent": {"name": "oracle"}},
         },
@@ -264,6 +265,7 @@ async def test_http_submission_exposes_machine_readable_retired_code(
             headers={"Authorization": f"Bearer {raw_token}"},
             json={
                 "name": "Retired TB2 profile",
+                "purpose": "evaluation",
                 "task_filter": {"benchmark_id": HISTORICAL_PROFILE},
                 "trial_config": {"agent": {"name": "oracle"}},
             },

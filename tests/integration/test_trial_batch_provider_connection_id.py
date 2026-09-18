@@ -456,6 +456,7 @@ def test_batch_create_with_valid_provider_succeeds(app_setup) -> None:
         headers=_auth(tokens["a"]),
         json={
             "name": "batch-with-provider",
+            "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
             "trial_config": {"agent_name": "oracle", "agent_model": None},
             "provider_connection_id": str(ids["conn_a"]),
@@ -504,6 +505,7 @@ def test_batch_create_with_known_failed_preflight_model_returns_400(
         headers=_auth(tokens["a"]),
         json={
             "name": "known-failed-provider-model",
+            "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
             "trial_config": {"agent_name": "oracle", "agent_model": None},
             "provider_connection_id": str(ids["conn_a"]),
@@ -529,6 +531,7 @@ def test_batch_create_with_uncached_provider_model_returns_400(
         headers=_auth(tokens["a"]),
         json={
             "name": "uncached-provider-model",
+            "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
             "trial_config": {"agent_name": "oracle", "agent_model": None},
             "provider_connection_id": str(ids["conn_a"]),
@@ -560,6 +563,7 @@ def test_platform_admin_batch_create_with_explicit_team_uses_target_team_provide
         json={
             "team_id": str(ids["team_b"]),
             "name": "admin-on-behalf",
+            "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
             "trial_config": {"agent_name": "oracle", "agent_model": None},
             "provider_connection_id": str(ids["conn_b"]),
@@ -594,6 +598,7 @@ def test_platform_admin_api_token_batch_create_with_explicit_team(
         json={
             "team_id": str(ids["team_b"]),
             "name": "admin-api-token-on-behalf",
+            "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
             "trial_config": {"agent_name": "oracle", "agent_model": None},
             "provider_connection_id": str(ids["conn_b"]),
@@ -681,6 +686,7 @@ def test_shared_provider_can_be_used_by_target_team_for_batch_create(
         headers=_auth(tokens["b"]),
         json={
             "name": "batch-with-shared-provider",
+            "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
             "trial_config": {"agent_name": "oracle", "agent_model": None},
             "provider_connection_id": str(ids["conn_a"]),
@@ -725,6 +731,7 @@ def test_shared_provider_batch_create_with_uncached_model_returns_400(
         headers=_auth(tokens["b"]),
         json={
             "name": "shared-provider-uncached-model",
+            "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
             "trial_config": {"agent_name": "oracle", "agent_model": None},
             "provider_connection_id": str(ids["conn_a"]),
@@ -747,6 +754,7 @@ def test_batch_create_without_provider_succeeds(app_setup) -> None:
         headers=_auth(tokens["a"]),
         json={
             "name": "no-provider",
+            "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
             "trial_config": {"agent_name": "oracle", "agent_model": None},
         },
@@ -762,6 +770,7 @@ def test_batch_create_with_cross_team_provider_returns_404(app_setup) -> None:
         headers=_auth(tokens["a"]),
         json={
             "name": "cross-team",
+            "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
             "trial_config": {"agent_name": "oracle", "agent_model": None},
             "provider_connection_id": str(ids["conn_b"]),
@@ -779,6 +788,7 @@ def test_batch_create_with_nonexistent_provider_returns_400(app_setup) -> None:
         headers=_auth(tokens["a"]),
         json={
             "name": "nope",
+            "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
             "trial_config": {"agent_name": "oracle", "agent_model": None},
             "provider_connection_id": str(uuid4()),
@@ -796,6 +806,7 @@ def test_batch_create_with_deleted_provider_returns_400(app_setup) -> None:
         headers=_auth(tokens["a"]),
         json={
             "name": "deleted",
+            "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
             "trial_config": {"agent_name": "oracle", "agent_model": None},
             "provider_connection_id": str(ids["conn_a_deleted"]),

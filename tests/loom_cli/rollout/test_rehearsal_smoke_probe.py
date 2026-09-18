@@ -45,6 +45,7 @@ def test_probe_validates_admission_and_returns_only_hashed_evidence(
         "name": "rehearsal-abc123",
         "team_id": authority.team_id,
         "submitted_by_user": {"username": "Devansh", "team_id": authority.team_id},
+        "purpose": "evaluation",
         "task_filter": {"task_ids": [authority.task_id]},
         "required_worker_pools": ["gb10"],
         "state": "pending",
@@ -71,6 +72,7 @@ def test_probe_validates_admission_and_returns_only_hashed_evidence(
                 "name": "rehearsal-abc123",
                 "represented_username": "devansh",
                 "team_id": authority.team_id,
+                "purpose": "evaluation",
                 "task_filter": {"task_ids": [authority.task_id]},
                 "trial_config": {"agent_name": "oracle", "agent_model": None},
                 "n_per_task": 1,
@@ -210,6 +212,7 @@ def test_probe_rejects_persisted_authority_drift(
                             "username": "devansh",
                             "team_id": authority.team_id,
                         },
+                        "purpose": "evaluation",
                         "task_filter": {"task_ids": [authority.task_id]},
                     }
                 ]

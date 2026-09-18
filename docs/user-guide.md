@@ -10,14 +10,6 @@ Loom's product boundary and architecture are in the
 [repo README](../README.md). Provider setup for hosted APIs and self-hosted
 GPU-cluster vLLM lives in [`provider-onboarding.md`](integrations/provider-onboarding.md).
 
-Loom executes new workloads on **x86_64 (Docker platform `linux/amd64`) only**.
-Architecture-independent tasks (`cpu_arch = "any"`) run and build on x86_64.
-ARM task bundles and worker registration are rejected with an explicit error;
-existing ARM run records remain available for inspection. Using the browser or
-CLI on an Apple Silicon Mac is supported: the client host does not determine
-the remote task architecture. These are the current supported-workload bounds
-for #1548/#1538; older dual-architecture acceptance records are historical.
-
 ## Install
 
 ```bash
@@ -290,6 +282,7 @@ Submit, monitor, inspect usage, and download through public `/api/v1` routes:
 
 ```bash
 loom eval batch create \
+  --purpose evaluation \
   --name-suffix public-cli-smoke \
   --agent direct-completion \
   --provider smoke-openai \
@@ -301,6 +294,7 @@ loom eval batch create \
 # path-tracing) should select the TB21 private-path staging policy so the
 # agent cannot read the oracle:
 loom eval batch create \
+  --purpose trajectory_generation \
   --workspace-staging-policy tb21 \
   --agent terminus-2 \
   --provider smoke-openai \
@@ -1687,6 +1681,11 @@ loom run
   if `hash(seed:trial_id:episode) < beta`. Optional `--multi-model-seed`
   is stored on `model_switch_plans.seed` (not on `trial_config` as
   `seed`). This is who acts, not DAgger teacher labels.
+
+  Path C (`--multi-model-step-start` / `--multi-model-step-end`): each
+  chat-completion turn (`call_ordinal`) uses rising β between the window
+  edges, then forces teacher with one-way latch. Window is stored as plan
+  `k1`/`k2`. Optional `--multi-model-seed` applies here too.
 
   `raw-harbor-tb2-v2` packs applied cuts in
   `agent_runs/.../trajectory.json` → `model_switches`, and per-step

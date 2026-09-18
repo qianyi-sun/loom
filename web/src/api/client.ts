@@ -586,6 +586,8 @@ export interface CreateBatchBody {
   name?: string;
   name_suffix?: string;
   description?: string;
+  /** evaluation = native benchmarks + verification; trajectory_generation = TaskSets/benchmarks, verifier optional */
+  purpose: "evaluation" | "trajectory_generation";
   backend: string;
   task_filter: TaskFilter;
   trial_config: Record<string, unknown>;

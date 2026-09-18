@@ -507,6 +507,7 @@ def _seed_cursor_batches(
                 "team_id": team_id,
                 "name": f"cursor completeness {index:02d}",
                 "description": "issue 774 deterministic traversal fixture",
+                "purpose": "evaluation",
                 "task_filter": {
                     "subset_kind": "explicit",
                     "task_ids": [task_id],
@@ -591,6 +592,7 @@ def _seed_cursor_batches(
             "team_id": team_id,
             "name": "cursor completeness private",
             "description": "must remain outside cross-team traversal",
+            "purpose": "evaluation",
             "task_filter": {"subset_kind": "explicit", "task_ids": [task_id]},
             "trial_config": {},
             "state": "finished",
@@ -1160,6 +1162,7 @@ async def test_run_library_filters_by_structured_batch_fields(
                     "team_id": team_a,
                     "name": "skilllearnbench codex qwen generated",
                     "description": "structured library needle",
+                    "purpose": "evaluation",
                     "task_filter": {
                         "subset_kind": "random_n",
                         "benchmark_ids": ["skilllearnbench"],
@@ -1193,6 +1196,7 @@ async def test_run_library_filters_by_structured_batch_fields(
                     "team_id": team_a,
                     "name": "skilllearnbench codex claude generated",
                     "description": "structured library needle",
+                    "purpose": "evaluation",
                     "task_filter": {
                         "subset_kind": "random_n",
                         "benchmark_ids": ["skilllearnbench"],

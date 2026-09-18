@@ -182,10 +182,10 @@ def test_batch_insert_with_provider_succeeds(seeded, postgres_url) -> None:
     with engine.begin() as conn:
         conn.execute(text(
             "INSERT INTO batches "
-            "(id, team_id, name, task_filter, trial_config, "
+            "(id, team_id, name, purpose, task_filter, trial_config, "
             " created_by_token_prefix, "
             " provider_connection_id, provider_model_id) "
-            "VALUES (:id, :t, 'b', '{}'::jsonb, '{}'::jsonb, "
+            "VALUES (:id, :t, 'b', 'evaluation', '{}'::jsonb, '{}'::jsonb, "
             "        'admin:0', :pc, :pm)",
         ), {"id": batch_id, "t": team_id, "pc": conn_id, "pm": "gpt-4o"})
 

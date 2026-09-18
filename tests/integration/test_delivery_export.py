@@ -271,6 +271,7 @@ async def delivery_setup(
         common_batch = {
             "team_id": team_id,
             "description": None,
+            "purpose": "evaluation",
             "task_filter": {"subset_kind": "explicit", "task_ids": task_ids},
             "trial_config": {
                 "agent_name": "opencode",

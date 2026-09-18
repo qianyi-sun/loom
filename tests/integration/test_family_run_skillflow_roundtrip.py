@@ -173,11 +173,11 @@ async def _seed_batch(
         """), {"tid": task_id})
     await session.execute(text("""
         INSERT INTO batches (
-            id, team_id, name, task_filter, trial_config,
+            id, team_id, name, purpose, task_filter, trial_config,
             state, created_by_token_prefix, family_run_spec
         )
         VALUES (
-            :bid, :tid, 'rt-batch', '{}'::jsonb, '{}'::jsonb,
+            :bid, :tid, 'rt-batch', 'evaluation', '{}'::jsonb, '{}'::jsonb,
             'running', 'test', (:spec)::jsonb
         )
     """), {
