@@ -102,6 +102,27 @@ type RetryReason = (typeof RETRY_REASONS)[number]["value"];
 type SubsetKind = "all" | "first_n" | "last_n" | "random_n" | "explicit";
 type BatchPurpose = "evaluation" | "trajectory_generation";
 
+const PURPOSE_OPTIONS: Array<{
+  value: BatchPurpose;
+  title: string;
+  blurb: string;
+  /** Accessible name for tests + screen readers. */
+  radioName: string;
+}> = [
+  {
+    value: "evaluation",
+    title: "Evaluate",
+    blurb: "Official benchmarks with verification",
+    radioName: "Evaluation",
+  },
+  {
+    value: "trajectory_generation",
+    title: "Generate trajectories",
+    blurb: "TaskSets first; benchmarks optional",
+    radioName: "Trajectory generation",
+  },
+];
+
 function clampInt(raw: string, min: number, max: number): string {
   if (raw === "") return raw;
   const n = Number.parseInt(raw, 10);
@@ -163,9 +184,11 @@ interface AdvancedState {
   multiModelEnabled: boolean;
   teacherModelName: string;
   teacherEpisodes: string;
-  multiModelPolicy: "student_teacher_student" | "beta_mixture";
+  multiModelPolicy: "student_teacher_student" | "beta_mixture" | "student_to_teacher_turns";
   multiModelBeta: string;
   multiModelSeed: string;
+  multiModelStepStart: string;
+  multiModelStepEnd: string;
 }
 
 const INITIAL_ADVANCED: AdvancedState = {
@@ -192,6 +215,8 @@ const INITIAL_ADVANCED: AdvancedState = {
   multiModelPolicy: "student_teacher_student",
   multiModelBeta: "0.6",
   multiModelSeed: "",
+  multiModelStepStart: "2",
+  multiModelStepEnd: "9",
 };
 
 function buildAdvancedConfig(
@@ -304,6 +329,29 @@ function buildAdvancedConfig(
       if (mixSeed) {
         (out.multi_model as Record<string, unknown>).mix_seed = mixSeed;
       }
+    } else if (s.multiModelPolicy === "student_to_teacher_turns") {
+      const stepStart = numOrErr(s.multiModelStepStart, "Step start", { min: 2 });
+      if (typeof stepStart === "string") return { ok: false, error: stepStart };
+      const stepEnd = numOrErr(s.multiModelStepEnd, "Step end", { min: 3 });
+      if (typeof stepEnd === "string") return { ok: false, error: stepEnd };
+      if (stepEnd === undefined || stepStart === undefined || stepEnd <= stepStart) {
+        return { ok: false, error: "Step end must be greater than step start." };
+      }
+      out.multi_model = {
+        enabled: true,
+        policy: "student_to_teacher_turns",
+        step_start: stepStart,
+        step_end: stepEnd,
+        secondary_model: {
+          provider: "openai",
+          name: teacher,
+          source: "api",
+        },
+      };
+      const mixSeed = s.multiModelSeed.trim();
+      if (mixSeed) {
+        (out.multi_model as Record<string, unknown>).mix_seed = mixSeed;
+      }
     } else {
       const episodes = numOrErr(s.teacherEpisodes, "Teacher episodes", { min: 1, max: 1000 });
       if (typeof episodes === "string") return { ok: false, error: episodes };
@@ -341,11 +389,15 @@ function FieldLabel({
   hint?: React.ReactNode;
 }): JSX.Element {
   return (
-    <div className="mb-1 flex items-baseline justify-between gap-2">
-      <span className="text-xs font-medium uppercase tracking-wider text-slate-500">
+    <div className="mb-1 flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+      <span className="min-w-0 text-xs font-medium uppercase tracking-wider text-slate-500">
         {children}
       </span>
-      {hint ? <span className="text-xs text-slate-600">{hint}</span> : null}
+      {hint ? (
+        <span className="shrink-0 text-xs font-normal normal-case tracking-normal text-slate-500">
+          {hint}
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -398,11 +450,20 @@ function BenchmarkPicker({
   loading,
   selected,
   onChange,
+  loadingLabel = "Loading…",
+  emptyLabel = "No sources available.",
+  sourceKind = "benchmark",
+  flat = false,
 }: {
   items: BenchmarkItem[];
   loading: boolean;
   selected: Set<string>;
   onChange: (next: Set<string>) => void;
+  loadingLabel?: string;
+  emptyLabel?: string;
+  sourceKind?: "benchmark" | "TaskSet";
+  /** Skip series group headers (use for a single-kind TaskSet list). */
+  flat?: boolean;
 }): JSX.Element {
   const groups = useMemo(() => {
     const bySeries = new Map<string, BenchmarkItem[]>();
@@ -446,13 +507,14 @@ function BenchmarkPicker({
   };
 
   if (loading && items.length === 0) {
-    return (
-      <p className="mt-1 text-xs text-slate-500">Loading task sources…</p>
-    );
+    return <p className="mt-1 text-xs text-slate-500">{loadingLabel}</p>;
+  }
+  if (!loading && items.length === 0) {
+    return <p className="mt-1 text-xs text-slate-500">{emptyLabel}</p>;
   }
 
   return (
-    <div className="mt-1 max-h-72 overflow-y-auto rounded-lg border border-slate-200 bg-white">
+    <div className="mt-1 max-h-72 min-w-0 overflow-x-hidden overflow-y-auto rounded-lg border border-slate-200 bg-white">
       {groups.map(({ series, rows }) => {
         const seriesLabel = series === "" ? "Other" : series;
         const selectableRows = rows.filter(benchmarkSelectable);
@@ -462,66 +524,71 @@ function BenchmarkPicker({
         const someOn =
           !allOn && selectableRows.some((r) => selected.has(r.id));
         const populated = selectableRows.length;
+        const rowPad = flat
+          ? "flex min-w-0 items-center gap-2 px-3 py-1.5 text-sm"
+          : "flex min-w-0 items-center gap-2 pl-9 pr-3 py-1.5 text-sm";
         return (
-          <div key={seriesLabel} className="border-b border-slate-100 last:border-b-0">
-            <label
-              className={
-                populated > 0
-                  ? "flex items-center gap-2 bg-indigo-50/60 px-3 py-2 text-sm font-semibold text-indigo-900"
-                  : "flex items-center gap-2 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-600"
-              }
-            >
-              <input
-                type="checkbox"
-                checked={allOn}
-                ref={(el) => {
-                  if (el) el.indeterminate = someOn;
-                }}
-                onChange={() => toggleGroup(rows)}
-                disabled={populated === 0}
-                aria-label={`Select all in series ${seriesLabel}`}
-                title={
-                  populated > 0
-                    ? `Select or clear all ready sources in the ${seriesLabel} group.`
-                    : `The ${seriesLabel} group has no ready sources to select.`
-                }
-                className="h-4 w-4 border-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
-              />
-              <span
+          <div key={seriesLabel || "flat"} className="min-w-0 border-b border-slate-100 last:border-b-0">
+            {!flat ? (
+              <label
                 className={
                   populated > 0
-                    ? "inline-block h-2 w-2 rounded-full bg-indigo-400"
-                    : "inline-block h-2 w-2 rounded-full bg-slate-300"
-                }
-                aria-hidden="true"
-              />
-              <span className="uppercase tracking-wider text-xs">
-                {seriesLabel}
-              </span>
-              <span
-                className={
-                  populated > 0
-                    ? "ml-auto font-normal normal-case text-xs text-indigo-800"
-                    : "ml-auto font-normal normal-case text-xs text-slate-600"
+                    ? "flex min-w-0 items-center gap-2 bg-indigo-50/60 px-3 py-2 text-sm font-semibold text-indigo-900"
+                    : "flex min-w-0 items-center gap-2 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-600"
                 }
               >
-                {populated}/{rows.length} ready
-              </span>
-            </label>
+                <input
+                  type="checkbox"
+                  checked={allOn}
+                  ref={(el) => {
+                    if (el) el.indeterminate = someOn;
+                  }}
+                  onChange={() => toggleGroup(rows)}
+                  disabled={populated === 0}
+                  aria-label={`Select all in series ${seriesLabel}`}
+                  title={
+                    populated > 0
+                      ? `Select or clear all ready sources in the ${seriesLabel} group.`
+                      : `The ${seriesLabel} group has no ready sources to select.`
+                  }
+                  className="h-4 w-4 shrink-0 border-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
+                />
+                <span
+                  className={
+                    populated > 0
+                      ? "inline-block h-2 w-2 shrink-0 rounded-full bg-indigo-400"
+                      : "inline-block h-2 w-2 shrink-0 rounded-full bg-slate-300"
+                  }
+                  aria-hidden="true"
+                />
+                <span className="min-w-0 truncate uppercase tracking-wider text-xs">
+                  {seriesLabel}
+                </span>
+                <span
+                  className={
+                    populated > 0
+                      ? "ml-auto shrink-0 font-normal normal-case text-xs text-indigo-800"
+                      : "ml-auto shrink-0 font-normal normal-case text-xs text-slate-600"
+                  }
+                >
+                  {populated}/{rows.length} ready
+                </span>
+              </label>
+            ) : null}
             {rows.map((r) => {
               const label = r.display_name ?? r.id;
               const countText = benchmarkCountText(r);
               const selectable = benchmarkSelectable(r);
               const readinessLabel = benchmarkReadinessLabel(r);
               const readinessMessage = benchmarkReadinessMessage(r);
-              const sourceKind = isTaskSetId(r.id) ? "TaskSet" : "benchmark";
+              const rowKind = isTaskSetId(r.id) ? "TaskSet" : sourceKind;
               return (
                 <label
                   key={r.id}
                   className={
                     !selectable
-                      ? "flex items-center gap-2 pl-9 pr-3 py-1.5 text-sm text-slate-600 cursor-not-allowed"
-                      : "flex items-center gap-2 pl-9 pr-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+                      ? `${rowPad} cursor-not-allowed text-slate-600`
+                      : `${rowPad} text-slate-700 hover:bg-slate-50`
                   }
                   title={readinessMessage}
                 >
@@ -530,29 +597,24 @@ function BenchmarkPicker({
                     checked={selected.has(r.id)}
                     onChange={() => toggleOne(r.id)}
                     disabled={!selectable}
-                    aria-label={`Select ${sourceKind} ${r.id}`}
-                    className="h-4 w-4 border-slate-300 disabled:cursor-not-allowed"
+                    aria-label={`Select ${rowKind} ${r.id}`}
+                    className="h-4 w-4 shrink-0 border-slate-300 disabled:cursor-not-allowed"
                   />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate">{label}</span>
-                    {!selectable && readinessMessage ? (
-                      <span className="block truncate text-xs text-slate-500">
-                        {readinessMessage}
-                      </span>
-                    ) : null}
                   </span>
                   {countText ? (
                     <span
                       className={
                         !selectable
-                          ? "text-xs italic text-slate-600"
-                          : "text-xs text-slate-600"
+                          ? "shrink-0 text-xs italic text-slate-600"
+                          : "shrink-0 text-xs text-slate-600"
                       }
                     >
                       {countText}
                     </span>
                   ) : null}
-                  <span className={benchmarkReadinessBadgeClass(r)}>
+                  <span className={`shrink-0 ${benchmarkReadinessBadgeClass(r)}`}>
                     {readinessLabel}
                   </span>
                 </label>
@@ -1561,49 +1623,53 @@ export default function NewBatch(): JSX.Element {
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
         {/* LEFT column */}
-        <div className="space-y-6">
+        <div className="min-w-0 space-y-6">
           <Card>
             <Card.Header
               title="Task selection"
-              description="Choose purpose first. Evaluation uses official native benchmarks with verification. Trajectory generation can use TaskSets and, during transition, benchmarks too."
+              description="Pick a purpose, then choose sources for this batch."
             />
-            <Card.Body className="space-y-4">
-              <fieldset className="space-y-2">
-                <legend className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+            <Card.Body className="min-w-0 space-y-5">
+              <fieldset className="min-w-0">
+                <legend className="mb-2 block text-xs font-medium uppercase tracking-wider text-slate-500">
                   Purpose
                 </legend>
-                {(
-                  [
-                    [
-                      "evaluation",
-                      "Evaluation — native benchmarks, verification required",
-                    ],
-                    [
-                      "trajectory_generation",
-                      "Trajectory generation — TaskSets (benchmarks still allowed)",
-                    ],
-                  ] as Array<[BatchPurpose, string]>
-                ).map(([value, label]) => (
-                  <label
-                    key={value}
-                    className="flex items-center gap-2 text-sm text-slate-700"
-                  >
-                    <input
-                      type="radio"
-                      name="batch-purpose"
-                      value={value}
-                      checked={batchPurpose === value}
-                      onChange={() => setBatchPurpose(value)}
-                      className="h-4 w-4 border-slate-300"
-                    />
-                    {label}
-                  </label>
-                ))}
-                <Help>
-                  Same trial harness and trajectory export either way. Purpose
-                  only controls which catalogs you may select and whether
-                  grading can be skipped.
-                </Help>
+                <div
+                  className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2"
+                  role="presentation"
+                >
+                  {PURPOSE_OPTIONS.map((option) => {
+                    const selected = batchPurpose === option.value;
+                    return (
+                      <label
+                        key={option.value}
+                        className={
+                          selected
+                            ? "flex min-w-0 cursor-pointer flex-col gap-0.5 rounded-lg border border-slate-800 bg-slate-50 px-3 py-3 shadow-sm"
+                            : "flex min-w-0 cursor-pointer flex-col gap-0.5 rounded-lg border border-slate-200 bg-white px-3 py-3 hover:border-slate-300 hover:bg-slate-50/80"
+                        }
+                      >
+                        <span className="flex min-w-0 items-center gap-2">
+                          <input
+                            type="radio"
+                            name="batch-purpose"
+                            value={option.value}
+                            checked={selected}
+                            onChange={() => setBatchPurpose(option.value)}
+                            aria-label={option.radioName}
+                            className="h-4 w-4 shrink-0 border-slate-300"
+                          />
+                          <span className="min-w-0 truncate text-sm font-semibold text-slate-900">
+                            {option.title}
+                          </span>
+                        </span>
+                        <span className="pl-6 text-xs leading-snug text-slate-500">
+                          {option.blurb}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
               </fieldset>
               <label className="block max-w-sm">
                 <FieldLabel hint="required">Backend</FieldLabel>
@@ -1633,7 +1699,7 @@ export default function NewBatch(): JSX.Element {
                     selectedBackend.cold_start_available ? (
                       <span className="mt-0.5 block text-sky-700">
                         No live worker is required at submission. This backend
-                        has fresh scale-from-zero authority through {" "}
+                        has fresh scale-from-zero authority through{" "}
                         {selectedBackend.cold_start_pools.join(", ")}.
                       </span>
                     ) : selectedBackend?.available === false ? (
@@ -1645,61 +1711,83 @@ export default function NewBatch(): JSX.Element {
                   </Help>
                 ) : (
                   <Help>
-                    The sandbox provider that runs each trial. Loom ships
-                    explicit execution backends. Docker uses GB10/OLDLAB;
-                    Nebius uses the Nebius Kubernetes pool. Loom never falls
-                    back from one selected backend to another.
+                    Execution sandbox for each trial. Loom does not fall back
+                    across backends.
                   </Help>
                 )}
               </label>
               <fieldset
-                className="block"
+                className="block min-w-0 space-y-5"
                 disabled={subsetKind === "explicit"}
                 aria-label="Task sources"
               >
-                <FieldLabel hint={subsetKind === "explicit" ? "implied by ids" : "required"}>
-                  Task sources
-                </FieldLabel>
-                <BenchmarkPicker
-                  items={[
-                    ...((benchmarks.data?.items ?? []) as BenchmarkItem[]),
-                    ...(batchPurpose === "trajectory_generation"
-                      ? (evalTaskSets.data?.items ?? [])
-                          .filter(
-                            (ts) =>
-                              ts.status === "ready" || ts.status === "partial",
-                          )
-                          .map(
-                            (ts) =>
-                              ({
-                                id: ts.task_set_id,
-                                display_name: ts.display_name,
-                                task_count: ts.task_count,
-                                readiness_state: "ready",
-                                readiness_label: ts.status,
-                                selectable: true,
-                                series: "User Task Sets",
-                              }) satisfies BenchmarkItem,
-                          )
-                      : []),
-                  ]}
-                  loading={
-                    benchmarks.isPending ||
-                    (batchPurpose === "trajectory_generation" &&
-                      evalTaskSets.isPending)
-                  }
-                  selected={selectedBenchmarks}
-                  onChange={setSelectedBenchmarks}
-                />
-                {!benchmarks.isPending &&
-                (benchmarks.data?.items.length ?? 0) === 0 ? (
-                  <Help>
-                    No runnable benchmarks are provisioned in this
-                    environment yet. Ask an admin or operator to run the
-                    staging catalog provisioning step from the deployment
-                    runbook, then refresh this page.
-                  </Help>
+                {batchPurpose === "trajectory_generation" ? (
+                  <div className="min-w-0">
+                    <FieldLabel
+                      hint={
+                        subsetKind === "explicit" ? "implied by ids" : "primary"
+                      }
+                    >
+                      TaskSets
+                    </FieldLabel>
+                    <BenchmarkPicker
+                      items={(evalTaskSets.data?.items ?? [])
+                        .filter(
+                          (ts) =>
+                            ts.status === "ready" || ts.status === "partial",
+                        )
+                        .map(
+                          (ts) =>
+                            ({
+                              id: ts.task_set_id,
+                              display_name: ts.display_name,
+                              task_count: ts.task_count,
+                              readiness_state: "ready",
+                              readiness_label: ts.status,
+                              selectable: true,
+                            }) satisfies BenchmarkItem,
+                        )}
+                      loading={evalTaskSets.isPending}
+                      loadingLabel="Loading TaskSets…"
+                      emptyLabel="No ready or partial TaskSets in this team yet."
+                      sourceKind="TaskSet"
+                      flat
+                      selected={selectedBenchmarks}
+                      onChange={setSelectedBenchmarks}
+                    />
+                  </div>
                 ) : null}
+
+                <div className="min-w-0">
+                  <FieldLabel
+                    hint={
+                      subsetKind === "explicit"
+                        ? "implied by ids"
+                        : batchPurpose === "evaluation"
+                          ? "required"
+                          : "optional"
+                    }
+                  >
+                    Official benchmarks
+                  </FieldLabel>
+                  <BenchmarkPicker
+                    items={(benchmarks.data?.items ?? []) as BenchmarkItem[]}
+                    loading={benchmarks.isPending}
+                    loadingLabel="Loading benchmarks…"
+                    emptyLabel="No runnable benchmarks are provisioned in this environment yet."
+                    sourceKind="benchmark"
+                    selected={selectedBenchmarks}
+                    onChange={setSelectedBenchmarks}
+                  />
+                  {!benchmarks.isPending &&
+                  (benchmarks.data?.items.length ?? 0) === 0 ? (
+                    <Help>
+                      Ask an admin or operator to run the staging catalog
+                      provisioning step from the deployment runbook, then
+                      refresh this page.
+                    </Help>
+                  ) : null}
+                </div>
               </fieldset>
 
               {subsetKind !== "explicit" && selectedBenchmarks.size > 0 ? (
@@ -2190,6 +2278,19 @@ export default function NewBatch(): JSX.Element {
                           />
                           Per-episode beta coin
                         </label>
+                        <label className="flex items-center gap-2 text-sm text-slate-700">
+                          <input
+                            type="radio"
+                            name="multiModelPolicy"
+                            checked={
+                              advanced.multiModelPolicy === "student_to_teacher_turns"
+                            }
+                            onChange={() =>
+                              setAdv("multiModelPolicy", "student_to_teacher_turns")
+                            }
+                          />
+                          Turn schedule (rising beta + latch)
+                        </label>
                       </fieldset>
                       {advanced.multiModelPolicy === "beta_mixture" ? (
                         <>
@@ -2208,6 +2309,55 @@ export default function NewBatch(): JSX.Element {
                             <Help>
                               Teacher drives the episode when the replay-safe
                               hash is less than beta.
+                            </Help>
+                          </label>
+                          <label className="block max-w-md">
+                            <FieldLabel>Mix seed (optional)</FieldLabel>
+                            <Input
+                              value={advanced.multiModelSeed}
+                              onChange={(e) =>
+                                setAdv("multiModelSeed", e.target.value)
+                              }
+                              placeholder="Server generates one if empty"
+                            />
+                          </label>
+                        </>
+                      ) : advanced.multiModelPolicy === "student_to_teacher_turns" ? (
+                        <>
+                          <label className="block max-w-xs">
+                            <FieldLabel>Step start (call ordinal)</FieldLabel>
+                            <Input
+                              type="number"
+                              min={2}
+                              value={advanced.multiModelStepStart}
+                              onChange={(e) =>
+                                setAdv(
+                                  "multiModelStepStart",
+                                  clampInt(e.target.value, 2, 1000),
+                                )
+                              }
+                            />
+                            <Help>
+                              Always student before this turn. Rising teacher
+                              probability from here until step end.
+                            </Help>
+                          </label>
+                          <label className="block max-w-xs">
+                            <FieldLabel>Step end (force teacher)</FieldLabel>
+                            <Input
+                              type="number"
+                              min={3}
+                              value={advanced.multiModelStepEnd}
+                              onChange={(e) =>
+                                setAdv(
+                                  "multiModelStepEnd",
+                                  clampInt(e.target.value, 3, 1000),
+                                )
+                              }
+                            />
+                            <Help>
+                              Force teacher at this turn and latch for the rest
+                              of the trial.
                             </Help>
                           </label>
                           <label className="block max-w-md">

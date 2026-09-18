@@ -784,7 +784,7 @@ describe("NewBatch", () => {
     await pickBackend();
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     expect(
-      await screen.findByText(/Pick at least one benchmark or TaskSet\./i),
+      await screen.findByText(/Pick at least one native benchmark\./i),
     ).toBeInTheDocument();
     expect(batchCall(spy)).toBeNull();
   });
@@ -1270,6 +1270,43 @@ describe("NewBatch", () => {
       subset_kind: "all",
       task_set_ids: ["ts/team-uuid/sample-tasks"],
     });
+  });
+
+  it("shows TaskSets only under trajectory and benchmarks under both purposes", async () => {
+    mockEndpoints();
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+
+    expect(screen.getByText(/^Official benchmarks$/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^TaskSets$/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", {
+        name: /Select TaskSet ts\/team-uuid\/sample-tasks/i,
+      }),
+    ).toBeNull();
+    expect(
+      await screen.findByRole("checkbox", {
+        name: /Select benchmark humaneval/i,
+      }),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("radio", { name: /Trajectory generation/i }),
+    );
+    expect(screen.getByText(/^TaskSets$/i)).toBeInTheDocument();
+    expect(screen.getByText(/^Official benchmarks$/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/^Official benchmarks$/i).parentElement,
+    ).toHaveTextContent(/optional/i);
+    expect(
+      await screen.findByRole("checkbox", {
+        name: /Select TaskSet ts\/team-uuid\/sample-tasks/i,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("checkbox", { name: /Select benchmark humaneval/i }),
+    ).toBeInTheDocument();
   });
 
   it("emits tag_filters and surfaces the real count from /tasks/count", async () => {
