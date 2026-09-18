@@ -32,13 +32,62 @@ runs database migrations, and creates the local access token. Inspect status
 and logs with:
 
 ```bash
-loom service status --environment local
+loom service status 
 docker compose ps
 docker compose logs --tail=200
 ```
 
 Use `loom service up --help` and `loom service status --help` for the exact
 options supported by the installed candidate.
+
+## Non-default local ports
+
+The Compose file binds services to loopback addresses by default. If another
+local service already uses a port, set the corresponding `LOOM_DEV_*_PORT`
+value in `.env`, then use `docker compose ... ps` to see the actual published
+ports.
+
+When PostgreSQL or the Control Plane use non-default host ports, pass matching
+targets to `loom service up` so the host-side migration and bootstrap steps
+reach the stack. For example, with PostgreSQL on `15432` and the Control Plane
+on `28080`:
+
+```bash
+loom service up --environment local \
+  --db-url 'postgresql+psycopg://loom:loom@localhost:15432/loom' \
+  --cp-url http://localhost:28080
+```
+
+Adapt the database user, password, database name, and ports to the values in
+your `.env`; do not put credentials in documentation or shell history shared
+with others.
+
+### Fresh database migration recovery
+
+On a fresh database, Control Plane intentionally refuses to start until its
+Alembic schema is at head. If Compose reports that `control-plane` is
+unhealthy and its logs say that the schema is not at Alembic head, migrate the
+database before starting the rest of the stack:
+
+```bash
+dc() {
+  docker compose --env-file .env -f deploy/docker-compose.dev.yml "$@"
+}
+
+dc up -d --wait postgres
+
+dc run --rm --no-deps control-plane sh -ec '
+  export LOOM_DB_URL="$LOOM_CP_DB_URL"
+  alembic -c migrations/alembic.ini upgrade head
+  alembic -c migrations/alembic.ini current
+'
+
+dc restart control-plane
+dc up -d --wait
+dc ps
+```
+
+The `current` output should report the repository's Alembic head revision.
 
 ## Develop the SPA
 
