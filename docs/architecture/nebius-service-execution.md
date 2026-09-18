@@ -276,7 +276,10 @@ provider scale headroom.
 
 At zero nodes, admission can reuse measured allocatable capacity and resident
 DaemonSet overhead from a historical observation of the same node group, raw
-resource shape, node template, and DaemonSet revisions, requests and scheduling.
+resource shape, node template, and DaemonSet packing fingerprint: the same
+DaemonSet uid set with equal resource requests and scheduling rules. Controller
+`generation` alone does not invalidate that sample; revision counters bump on
+any spec write even when reserved resources and placement rules are unchanged.
 Adding custom node-template labels does not invalidate that sample when every
 old label retains its value and none of the added keys appears anywhere in the
 observed DaemonSet scheduling data. This includes selector keys, affinity label
@@ -284,8 +287,9 @@ references, and topology keys. The scan deliberately treats any exact occurrence
 in scheduling data as relevant; it does not attempt to prove equivalent selector
 expressions. Label deletion or value changes, malformed labels, other template
 changes (including OS, Kubernetes version, Pod slots and taints), or DaemonSet
-changes still require a matching observed sample. Without one, admission waits
-with `execution_capacity_node_allocatable_unknown`. This rule reuses measured
+inventory, request, or scheduling changes still require a matching observed
+sample. Without one, admission waits with
+`execution_capacity_node_allocatable_unknown`. This rule reuses measured
 capacity; it does not invent a bootstrap capacity estimate.
 
 Each successful decision is an immutable, lease-bound

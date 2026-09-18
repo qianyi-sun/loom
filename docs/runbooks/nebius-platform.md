@@ -167,19 +167,20 @@ never reads live quota to infer policy. Existing manually configured Kubernetes
 limits must be copied into this map before rendering an upgrade.
 
 Scale-from-zero also requires a previously collected **placement-format node
-sample** matching the current native node template and DaemonSet inventory.
-Older aggregate-only capacity observations cannot supply the missing allocatable
-resources or Pod slots. If upgrading while the execution group is at zero with
-no compatible sample, admission reports
-`execution_capacity_node_allocatable_unknown`; deployment alone cannot unblock
-or automatically scale that first workload. Plan and obtain authorization for a
-bounded initial node warmup through the existing Terraform/operator path,
-collect a fresh placement observation from the Ready node, and read back its
-native shape, allocatable resources, Pod slots and resident DaemonSet requests.
-Only then verify ordinary task admission and native scale-to-zero. A template or
-DaemonSet change can invalidate that sample and requires the same explicit
-warmup planning. Do not replace this dependency with guessed capacity or a
-runtime cloud writer.
+sample** matching the current native node template and DaemonSet packing
+fingerprint (uid set, resource requests, and scheduling). Older aggregate-only
+capacity observations cannot supply the missing allocatable resources or Pod
+slots. If upgrading while the execution group is at zero with no compatible
+sample, admission reports `execution_capacity_node_allocatable_unknown`;
+deployment alone cannot unblock or automatically scale that first workload.
+Plan and obtain authorization for a bounded initial node warmup through the
+existing Terraform/operator path, collect a fresh placement observation from
+the Ready node, and read back its native shape, allocatable resources, Pod
+slots and resident DaemonSet requests. Only then verify ordinary task admission
+and native scale-to-zero. A template change, or a DaemonSet inventory /
+requests / scheduling change, can invalidate that sample and requires the same
+explicit warmup planning. DaemonSet controller `generation` bumps alone do not.
+Do not replace this dependency with guessed capacity or a runtime cloud writer.
 
 ## Single-region capacity admission and recovery
 
