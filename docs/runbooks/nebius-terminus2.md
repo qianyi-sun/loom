@@ -267,9 +267,12 @@ loom datasets publish-local /path/to/benchmark \
 That profile forces `cpu_arch=x86_64`, `gateway-only` networking, fills missing
 `cpus`/`memory_mb`/`storage_mb` (defaults 1 / 2048 / 4096), sets
 `user=agent` + compatible `/app` workdir, strips custom verifier identity,
-points the verifier at relative `verifier/run.sh`, drops Harbor TB2.1
-artifact globs that admission rejects, installs the offline Nebius wrapper
-when missing or Harbor-online, then dry-runs
+points the verifier at relative `verifier/run.sh`, drops Harbor
+artifact globs that admission rejects, and installs a `verifier/run.sh` that
+calls `tests/test.sh` then translates `/logs/verifier/reward.txt` into Loom
+JSON. That wrapper replaces a missing script, an online `pip`/`apt`/`curl`
+bootstrap, or the old `/opt/verifier/bin/pytest` wrapper. A script that already
+runs `tests/test.sh` is left alone. The profile then dry-runs
 `automatic_service_execution_rejections` before upsert. Bucket creation stays
 opt-in via `--create-bucket` ([#1993](https://github.com/qianyi-sun/loom/issues/1993) /
 [#1994](https://github.com/qianyi-sun/loom/pull/1994)); prefer an infra-managed

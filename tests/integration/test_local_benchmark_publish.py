@@ -599,7 +599,8 @@ async def test_publish_nebius_terminus_profile_adapts_harbor_pack(
         if key.endswith("bundle/verifier/run.sh")
     ]
     assert wrapper_bodies
-    assert b"/opt/verifier/bin/pytest" in wrapper_bodies[0]
+    assert b"tests/test.sh" in wrapper_bodies[0]
+    assert b"/opt/verifier/bin/pytest" not in wrapper_bodies[0]
     assert b"pip install" not in wrapper_bodies[0]
 
     engine = create_async_engine(postgres_url)
