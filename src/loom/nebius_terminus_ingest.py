@@ -30,28 +30,106 @@ VERIFIER_SCRIPT_PATH = "verifier/run.sh"
 _GLOB_MAGIC = re.compile(r"[][*?]")
 
 
-# Catalog offline wrapper (deploy/catalog/nebius-terminal-bench/.../verifier/run.sh).
-# Embedded so ingest works when the package is installed without the deploy tree.
-_OFFLINE_VERIFIER_RUN_SH = b"""#!/bin/sh
-# Offline environment preparation for the unchanged Harbor test assertions.
-set -eu
-: "${LOOM_VERIFIER_OUTPUT:?LOOM_VERIFIER_OUTPUT is required}"
-task_dir="${LOOM_TASK_DIR:-/app}"
-mkdir -p /tests /logs/verifier /loom/verifier
-cp "$task_dir/tests/test_outputs.py" /tests/test_outputs.py
-rm -f /logs/verifier/reward.txt /logs/verifier/ctrf.json
+# Harbor grader bridge. Calls tests/test.sh and only translates reward.txt
+# into Loom's verifier JSON. Not loaded from the Harbor90 catalog file: that
+# copy still runs /opt/verifier/bin/pytest and is provenance, not this profile.
+_TEST_SH_VERIFIER_RUN_SH = b"""#!/usr/bin/env bash
+# Harbor verifier bridge for Nebius Terminus publish.
+#
+# Native tasks write a numeric reward to /logs/verifier/reward.txt. A numeric
+# zero is a valid benchmark outcome. Missing, empty, malformed, or non-finite
+# evidence is a verifier failure: this script exits non-zero without emitting a
+# result JSON, so ScriptVerifier records its execution failure rather than
+# coercing it into a model score of zero.
+
+set -u
+
+TASK_DIR="${LOOM_TASK_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}"
+LOG_DIR="${TB21_VERIFIER_LOG_DIR:-/logs/verifier}"
+REWARD_PATH="${TB21_REWARD_PATH:-$LOG_DIR/reward.txt}"
+TEST_MOUNT_DIR="${TB21_TEST_MOUNT_DIR:-/tests}"
+: "${LOOM_VERIFIER_OUTPUT:?LOOM_VERIFIER_OUTPUT must be set}"
+
+mkdir -p "$LOG_DIR" "$TEST_MOUNT_DIR" "$(dirname "$LOOM_VERIFIER_OUTPUT")"
+rm -f "$REWARD_PATH"
+
+if [ ! -f "$TASK_DIR/tests/test.sh" ]; then
+    echo "tb_reward_error=missing_tests" >&2
+    exit 1
+fi
+
+cp -R "$TASK_DIR/tests/." "$TEST_MOUNT_DIR/"
 set +e
-/opt/verifier/bin/pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA
-rc=$?
+(
+    cd "$TASK_DIR" || exit 1
+    bash "$TASK_DIR/tests/test.sh"
+)
+verifier_rc=$?
 set -e
-reward=0
-passed=false
-if [ "$rc" -eq 0 ]; then reward=1; passed=true; fi
-printf '%s\\n' "$reward" > /logs/verifier/reward.txt
-mkdir -p "$(dirname "$LOOM_VERIFIER_OUTPUT")"
-cat > "$LOOM_VERIFIER_OUTPUT" <<JSONEOF
-{"rewards":{"resolved":$reward,"passed":$reward},"checks":[{"name":"harbor_test_sh","passed":$passed,"score":$reward,"message":"exit=$rc"}],"structured":{"exit_code":$rc,"reward":$reward}}
-JSONEOF
+
+if [ "$verifier_rc" -eq 124 ]; then
+    echo "tb_reward_error=timeout" >&2
+    exit 1
+fi
+
+python3 - "$LOOM_VERIFIER_OUTPUT" "$REWARD_PATH" "$LOG_DIR" "$verifier_rc" <<'PY'
+import json
+import math
+import sys
+from pathlib import Path
+
+output_path = Path(sys.argv[1])
+reward_path = Path(sys.argv[2])
+log_dir = Path(sys.argv[3])
+test_returncode = int(sys.argv[4])
+
+try:
+    raw = reward_path.read_text(encoding="utf-8")
+except OSError:
+    print("tb_reward_error=missing_reward", file=sys.stderr)
+    raise SystemExit(1)
+
+stripped = raw.strip()
+if not stripped:
+    print("tb_reward_error=empty_reward", file=sys.stderr)
+    raise SystemExit(1)
+try:
+    reward = float(stripped)
+except ValueError:
+    print("tb_reward_error=malformed_reward", file=sys.stderr)
+    raise SystemExit(1)
+if not math.isfinite(reward):
+    print("tb_reward_error=malformed_reward", file=sys.stderr)
+    raise SystemExit(1)
+
+ctrf_path = log_dir / "ctrf.json"
+output_log_path = log_dir / "output.log"
+output_log_tail = None
+if output_log_path.exists():
+    output_log_tail = output_log_path.read_text(
+        encoding="utf-8", errors="replace",
+    )[-4000:]
+
+output_path.write_text(json.dumps({
+    "rewards": {"resolved": reward},
+    "checks": [{
+        "name": "harbor_tests",
+        "passed": reward > 0.0,
+        "score": reward,
+        "message": f"tests/test.sh rc={test_returncode}; reward={stripped}",
+    }],
+    "structured": {
+        "reward_raw": raw,
+        "test_sh_returncode": test_returncode,
+        "output_log_tail": output_log_tail,
+        "artifacts": {
+            "reward_path": str(reward_path),
+            "ctrf_path": str(ctrf_path) if ctrf_path.exists() else None,
+            "output_log_path": str(output_log_path) if output_log_path.exists() else None,
+        },
+    },
+}) + "\\n", encoding="utf-8")
+PY
 """
 
 _ONLINE_BOOTSTRAP_MARKERS = (
@@ -62,11 +140,10 @@ _ONLINE_BOOTSTRAP_MARKERS = (
     b"wget ",
     b"apt-get",
 )
-_HARBOR_BRIDGE_MARKERS = (
+_REPLACE_VERIFIER_MARKERS = (
+    b"/opt/verifier/bin/pytest",
     b"harbor loom bridge",
-    b"tests/test.sh",
 )
-_OFFLINE_MARKER = b"/opt/verifier/bin/pytest"
 
 
 @dataclass(frozen=True)
@@ -95,30 +172,26 @@ def resolve_execution_profile(value: str | None) -> str | None:
 
 
 def offline_verifier_run_sh_bytes() -> bytes:
-    """Return the Nebius offline ``verifier/run.sh`` template bytes."""
+    """Return the Nebius ``verifier/run.sh`` template.
 
-    catalog = (
-        Path(__file__).resolve().parents[2]
-        / "deploy"
-        / "catalog"
-        / "nebius-terminal-bench"
-        / "file-archive-manifest"
-        / "verifier"
-        / "run.sh"
-    )
-    if catalog.is_file():
-        return catalog.read_bytes()
-    return _OFFLINE_VERIFIER_RUN_SH
+    The script calls Harbor's ``tests/test.sh`` and translates ``reward.txt``.
+    The Harbor90 catalog copy under ``deploy/`` is left untouched.
+    """
+
+    return _TEST_SH_VERIFIER_RUN_SH
 
 
-def _needs_offline_verifier_wrapper(existing: bytes | None) -> bool:
+def _needs_verifier_wrapper(existing: bytes | None) -> bool:
+    """Install when missing, online-bootstrapping, or still the pytest-only wrapper.
+
+    A script that already runs ``tests/test.sh`` is left alone.
+    """
+
     if existing is None:
         return True
-    if _OFFLINE_MARKER in existing:
-        return False
     if any(marker in existing for marker in _ONLINE_BOOTSTRAP_MARKERS):
         return True
-    if any(marker in existing for marker in _HARBOR_BRIDGE_MARKERS):
+    if any(marker in existing for marker in _REPLACE_VERIFIER_MARKERS):
         return True
     return False
 
@@ -126,7 +199,7 @@ def _needs_offline_verifier_wrapper(existing: bytes | None) -> bool:
 def _ensure_offline_verifier_wrapper(staged: Path) -> bool:
     target = staged / "verifier" / "run.sh"
     existing = target.read_bytes() if target.is_file() else None
-    if not _needs_offline_verifier_wrapper(existing):
+    if not _needs_verifier_wrapper(existing):
         return False
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(offline_verifier_run_sh_bytes())

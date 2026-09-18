@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from loom.terminal_bench_normalize import (
     DEFAULT_AGENT_TIMEOUT_SEC,
+    DEFAULT_HARBOR_DOCKER_BUILD_CONTEXT,
+    DEFAULT_HARBOR_DOCKERFILE,
     DEFAULT_VERIFIER_SCRIPT_PATH,
     DEFAULT_VERIFIER_TIMEOUT_SEC,
     is_terminal_bench_shape,
@@ -12,6 +14,8 @@ from loom.terminal_bench_normalize import (
 
 __all__ = [
     "DEFAULT_AGENT_TIMEOUT_SEC",
+    "DEFAULT_HARBOR_DOCKER_BUILD_CONTEXT",
+    "DEFAULT_HARBOR_DOCKERFILE",
     "DEFAULT_VERIFIER_SCRIPT_PATH",
     "DEFAULT_VERIFIER_TIMEOUT_SEC",
     "is_terminal_bench_shape",

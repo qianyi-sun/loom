@@ -94,7 +94,9 @@ def test_adapt_fills_resources_forces_gateway_and_verifier(tmp_path: Path) -> No
     wrapper = staged / "verifier" / "run.sh"
     assert wrapper.is_file()
     assert wrapper.stat().st_mode & 0o111
-    assert b"/opt/verifier/bin/pytest" in wrapper.read_bytes()
+    body = wrapper.read_bytes()
+    assert b"tests/test.sh" in body
+    assert b"/opt/verifier/bin/pytest" not in body
 
 
 def test_adapt_preserves_complete_resource_triple(tmp_path: Path) -> None:
@@ -132,7 +134,27 @@ def test_adapt_replaces_harbor_online_bridge_wrapper(tmp_path: Path) -> None:
     assert b"pip install" not in body
 
 
-def test_adapt_keeps_existing_offline_wrapper(tmp_path: Path) -> None:
+def test_adapt_replaces_old_pytest_only_wrapper(tmp_path: Path) -> None:
+    staged = tmp_path / "bundle"
+    staged.mkdir()
+    verifier = staged / "verifier"
+    verifier.mkdir()
+    old = verifier / "run.sh"
+    old.write_text(
+        "#!/bin/sh\n/opt/verifier/bin/pytest /tests/test_outputs.py\n",
+        encoding="utf-8",
+    )
+    old.chmod(0o755)
+
+    _, stats = adapt_bundle_for_nebius_terminus(staged, _harbor_shaped_config())
+    assert stats.verifier_wrapper_installed
+    body = old.read_bytes()
+    assert body == offline_verifier_run_sh_bytes()
+    assert b"tests/test.sh" in body
+    assert b"/opt/verifier/bin/pytest" not in body
+
+
+def test_adapt_keeps_script_that_already_runs_test_sh(tmp_path: Path) -> None:
     staged = tmp_path / "bundle"
     staged.mkdir()
     verifier = staged / "verifier"
@@ -194,17 +216,3 @@ def test_preflight_rejects_unadapted_harbor_config(tmp_path: Path) -> None:
     assert "custom_verifier_identity_unsupported" in reasons
     assert "shared_script_verifier_required" in reasons
     assert "private_verifier_directory_required" in reasons
-
-
-def test_offline_template_matches_catalog_when_present() -> None:
-    catalog = (
-        Path(__file__).resolve().parents[2]
-        / "deploy"
-        / "catalog"
-        / "nebius-terminal-bench"
-        / "file-archive-manifest"
-        / "verifier"
-        / "run.sh"
-    )
-    if catalog.is_file():
-        assert offline_verifier_run_sh_bytes() == catalog.read_bytes()
