@@ -1639,6 +1639,7 @@ async def _create_batch_record(
         "team_id": str(b.team_id),
         "name": b.name,
         "description": b.description,
+        "purpose": b.purpose,
         "expected_trial_count": expected,
         "n_per_task": b.n_per_task,
         "backend": b.backend,
