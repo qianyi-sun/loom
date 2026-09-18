@@ -10,6 +10,14 @@ Loom's product boundary and architecture are in the
 [repo README](../README.md). Provider setup for hosted APIs and self-hosted
 GPU-cluster vLLM lives in [`provider-onboarding.md`](integrations/provider-onboarding.md).
 
+Loom executes new workloads on **x86_64 (Docker platform `linux/amd64`) only**.
+Architecture-independent tasks (`cpu_arch = "any"`) run and build on x86_64.
+ARM task bundles and worker registration are rejected with an explicit error;
+existing ARM run records remain available for inspection. Using the browser or
+CLI on an Apple Silicon Mac is supported: the client host does not determine
+the remote task architecture. These are the current supported-workload bounds
+for #1548/#1538; older dual-architecture acceptance records are historical.
+
 ## Install
 
 ```bash
@@ -1422,6 +1430,16 @@ loom datasets publish-local ./team-evals --bucket loom-benchmarks
 
 loom datasets audit team-evals
 ```
+
+`publish-local` publishes into an **existing bucket** by default and needs object
+write access, not bucket-management permissions. It does not call `HeadBucket`
+or create a bucket. For a local bootstrap with a bucket-capable identity, opt in
+with `--create-bucket`. Missing buckets and denied object writes remain errors;
+failed publication does not commit catalog rows.
+
+For `publish-local` and `audit`, set `--minio-region` to the storage region or
+export `LOOM_MINIO_REGION` (fallback: `LOOM_SVC_MINIO_REGION`). The default is
+`us-east-1`; native Nebius storage must use its configured region.
 
 `publish-local` uploads each task bundle under the immutable revision prefix
 `s3://loom-benchmarks/team-evals/<task-id>/.loom-revisions/<task-checksum>/<mode-manifest-sha256>/`

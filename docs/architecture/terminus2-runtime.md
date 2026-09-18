@@ -59,6 +59,31 @@ Harbor artifacts copied into the trial sandbox:
 Step runner always includes `.loom/agent/**` in artifact patterns for
 `terminus-2` trials.
 
+## Exception identity
+
+Loom embeds Harbor's agent rather than Harbor's Trial orchestrator. When the
+embedded agent raises, Loom preserves the original exception class even if its
+message is empty (for example, `ContextLengthExceededError`). Agent wrappers are
+unwrapped without replacing an SDK exception with its lower-level transport
+cause. Messages use the standard secret redactor; tracebacks and local variables
+are not added to the public failure record.
+
+The worker path retains `steps[].error.exception_type`, its sanitized `message`
+and timestamp in the Trial result. Native Nebius execution publishes optional
+`diagnostics/agent-exception.json` and `diagnostics/verifier-exception.json` files
+from the trusted controller workspace. Each contains `exception_type`,
+`exception_message` and `occurred_at`. Materialization projects the failing
+phase's identity into the canonical `trial_error` event and
+`trial.result.exception_info`; accounting reconciliation preserves it. Canonical
+bundle downloads retain the diagnostic files, and raw delivery
+`execution_result.json` retains the enriched Trial result.
+
+The existing `failure_reason`, terminal state and retry policy remain unchanged:
+exception identity supplies detail, not a second retry taxonomy or a claim that
+Harbor's verifier/orchestrator ran. Older results without these optional fields
+remain readable. Previously lost exception types cannot be reconstructed from
+an empty historical message.
+
 ## Attempt deadline and step-credential lifecycle (#1748)
 
 > **Evidence boundary:** this section defines the repository contract. It does
@@ -241,12 +266,12 @@ without observation on a full episode) fail closed via `CheckpointBridgeError`
 `terminus-2` does **not** use per-trial `AgentAdapter.install_script` layering.
 It requires the worker image built from the current `Dockerfile.worker`.
 
-## ARM64 / GB10
+## Execution architecture
 
-Task bundles that `FROM mictern2/terminus2-full:latest` trigger
-`_ensure_terminus_2_arm64_base_if_needed` on ARM64 workers (GB10 pool) before
-the task image build. See [service-mode.md](service-mode.md) § Runtime-fallback
-base image registry.
+New workloads and workers use x86_64 (`linux/amd64`). `cpu_arch = "any"`
+resolves to x86_64. The former GB10 ARM substitute-image build and importer
+promotion have been removed; ARM task declarations must be migrated explicitly.
+Historical ARM records remain readable, and ARM clients may submit remotely.
 
 ## Staging acceptance (Gate 3)
 

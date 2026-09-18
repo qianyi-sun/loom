@@ -406,10 +406,15 @@ async def test_retry_clears_harbor_fixed_tmux_session_before_each_setup(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("empty_message", [False, True])
 async def test_runtime_cleanup_leaves_process_env_unchanged_on_failure(
     tmp_path: Path,
     monkeypatch,
+    empty_message: bool,
 ) -> None:
+    class ContextLengthExceededError(Exception):
+        pass
+
     class _FailingTerminus2:
         def __init__(self, logs_dir, **kwargs: object) -> None:
             self._logs_dir = logs_dir
@@ -425,6 +430,8 @@ async def test_runtime_cleanup_leaves_process_env_unchanged_on_failure(
         ) -> None:
             traj = self._logs_dir / "trajectory.json"
             traj.write_text(json.dumps({"steps": []}), encoding="utf-8")
+            if empty_message:
+                raise ContextLengthExceededError
             raise RuntimeError("harbor boom")
 
     class _FakeContext:
@@ -478,7 +485,7 @@ async def test_runtime_cleanup_leaves_process_env_unchanged_on_failure(
         min_part_bytes=0,
     )
 
-    with pytest.raises(AgentError, match="harbor boom"):
+    with pytest.raises(AgentError) as caught:
         async with writer:
             await runtime.run(
                 instruction="x",
@@ -488,6 +495,7 @@ async def test_runtime_cleanup_leaves_process_env_unchanged_on_failure(
                 skills_dir=PurePosixPath("/workspace"),
                 step_id="main",
             )
+    assert ("ContextLengthExceededError" if empty_message else "RuntimeError") in str(caught.value)
 
     assert os.environ.get("OPENAI_API_KEY") == prior_api_key
     assert os.environ.get("OPENAI_BASE_URL") == prior_base

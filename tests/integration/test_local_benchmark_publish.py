@@ -6,6 +6,7 @@ import hashlib
 from pathlib import Path
 
 import pytest
+from botocore.exceptions import ClientError
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -17,6 +18,7 @@ from loom.trajectory.storage import (
     FakeObjectStore,
     bundle_file_metadata_sha256,
 )
+from loom_cli.benchmark_readiness import run_bundle_presence_audit
 from loom_cli.local_benchmark_publish import (
     PUBLISH_IMPORTED_BY,
     S3_FOLDER_KIND,
@@ -97,14 +99,21 @@ def _write_environment_path_mismatch_layout(root: Path) -> None:
     )
 
 
+class ObjectOnlyStore(FakeObjectStore):
+    async def ensure_bucket(self, bucket: str) -> None:
+        raise ClientError({"Error": {"Code": "403"}}, "HeadBucket")
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("create_bucket", [False, True], ids=["object-only", "bootstrap"])
 async def test_publish_local_benchmark_uploads_and_registers(
     postgres_url: str,
     tmp_path: Path,
+    create_bucket: bool,
 ) -> None:
     root = tmp_path / "team-evals"
     _write_layout(root)
-    store = FakeObjectStore()
+    store = FakeObjectStore() if create_bucket else ObjectOnlyStore()
     task_dir = root / "tasks" / "alpha"
     expected_checksum = task_checksum(task_dir)
     metadata_digest = bundle_file_metadata_sha256(task_dir).removeprefix("sha256:")
@@ -117,8 +126,10 @@ async def test_publish_local_benchmark_uploads_and_registers(
         db_url=postgres_url,
         object_store=store,
         bucket="loom-benchmarks",
+        **({"create_bucket": True} if create_bucket else {}),
     )
 
+    assert ("loom-benchmarks" in store.buckets) is create_bucket
     assert stats.benchmark_id == "team-evals"
     assert stats.task_count == 1
     assert stats.inserted == 1
@@ -179,6 +190,10 @@ async def test_publish_local_benchmark_uploads_and_registers(
                 out_dir=downloaded,
             )
             assert task_checksum(downloaded) == task.checksum
+            audit = await run_bundle_presence_audit(
+                db_url=postgres_url, object_store=store, benchmark="team-evals",
+            )
+            assert audit.verified == 1 and audit.failed == 0
     finally:
         async with factory() as session:
             await session.execute(
@@ -461,4 +476,193 @@ async def test_publish_local_explicit_flatten_override_records_evidence(
                 delete(Benchmark).where(Benchmark.id == "source-useful-compat"),
             )
             await session.commit()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_code", ["AccessDenied", "NoSuchBucket"])
+async def test_publish_object_failure_propagates_without_database_commit(
+    postgres_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_code: str,
+) -> None:
+    root = tmp_path / "team-evals"
+    _write_layout(root)
+    store = ObjectOnlyStore()
+    original_put = store.put_object
+    put_count = 0
+
+    async def reject_second_put(*, bucket: str, key: str, body: bytes) -> None:
+        nonlocal put_count
+        put_count += 1
+        if put_count == 2:
+            raise ClientError({"Error": {"Code": error_code}}, "PutObject")
+        await original_put(bucket=bucket, key=key, body=body)
+
+    monkeypatch.setattr(store, "put_object", reject_second_put)
+    engine = create_async_engine(postgres_url)
+    try:
+        with pytest.raises(ClientError) as error:
+            await publish_local_benchmark(
+                root, db_url=postgres_url, object_store=store, bucket="loom-benchmarks",
+            )
+        assert error.value.operation_name == "PutObject"
+        assert error.value.response["Error"]["Code"] == error_code
+        assert put_count == 2
+        async with async_sessionmaker(engine)() as session:
+            assert await session.get(Benchmark, "team-evals") is None
+            assert await session.get(TaskRow, "team-evals/alpha") is None
+    finally:
+        await engine.dispose()
+
+
+_HARBOR_TASK_TOML = """\
+schema_version = "1.1"
+
+[task]
+name = "terminal-bench/harbor-sample"
+description = "Harbor-shaped sample for Nebius profile"
+
+[environment]
+dockerfile = "environment/Dockerfile"
+docker_build_context = "environment"
+build_timeout_sec = 600.0
+user = "root"
+architecture = "x86_64"
+allow_internet = true
+
+[agent]
+timeout_sec = 900.0
+
+[verifier]
+timeout_sec = 900.0
+user = "root"
+"""
+
+
+def _write_harbor_layout(root: Path) -> None:
+    root.mkdir(parents=True)
+    (root / "benchmark.toml").write_text(
+        "schema_version = 1\n"
+        'id = "harbor-nebius-profile"\n'
+        'display_name = "Harbor Nebius profile fixture"\n'
+        'series = "terminal-bench"\n'
+        'license_spdx = "MIT"\n',
+    )
+    task = root / "tasks" / "harbor-sample"
+    environment = task / "environment"
+    environment.mkdir(parents=True)
+    (task / "task.toml").write_text(_HARBOR_TASK_TOML)
+    (task / "instruction.md").write_text("do the harbor thing\n")
+    (environment / "Dockerfile").write_text("FROM python:3.11-alpine\n")
+    tests = task / "tests"
+    tests.mkdir()
+    (tests / "test_outputs.py").write_text("def test_ok():\n    assert True\n")
+    online = task / "verifier" / "run.sh"
+    online.parent.mkdir()
+    online.write_text(
+        "#!/bin/sh\n"
+        "echo 'harbor loom bridge: tests/test.sh not found' >&2\n"
+        "python3 -m pip install -q pytest\n",
+        encoding="utf-8",
+    )
+    online.chmod(0o755)
+
+
+@pytest.mark.asyncio
+async def test_publish_nebius_terminus_profile_adapts_harbor_pack(
+    postgres_url: str,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "harbor-nebius-profile"
+    _write_harbor_layout(root)
+    store = ObjectOnlyStore()
+
+    stats = await publish_local_benchmark(
+        root,
+        db_url=postgres_url,
+        object_store=store,
+        bucket="loom-benchmarks",
+        execution_profile="nebius-terminus",
+    )
+
+    assert stats.execution_profile == "nebius-terminus"
+    assert stats.profile_stats is not None
+    assert stats.profile_stats.adapted_tasks == 1
+    assert stats.profile_stats.verifier_wrappers_installed == 1
+    assert stats.profile_stats.preflight_passed == 1
+    assert any(
+        key.endswith("bundle/verifier/run.sh")
+        for (_bucket, key) in store.objects
+    )
+    wrapper_bodies = [
+        body
+        for (_bucket, key), body in store.objects.items()
+        if key.endswith("bundle/verifier/run.sh")
+    ]
+    assert wrapper_bodies
+    assert b"/opt/verifier/bin/pytest" in wrapper_bodies[0]
+    assert b"pip install" not in wrapper_bodies[0]
+
+    engine = create_async_engine(postgres_url)
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            task = (
+                await session.execute(
+                    select(TaskRow).where(
+                        TaskRow.id == "harbor-nebius-profile/harbor-sample",
+                    ),
+                )
+            ).scalar_one()
+            env = task.config["environment"]
+            assert env["cpu_arch"] == "x86_64"
+            assert env["user"] == "agent"
+            assert env["workdir"] == "/app"
+            assert env["cpus"] == 1
+            assert env["memory_mb"] == 2048
+            assert env["storage_mb"] == 4096
+            assert env["network_policies_supported"] == ["gateway-only"]
+            assert env["baseline_network_policy"] == {"kind": "gateway-only"}
+            assert "user" not in task.config["verifier"]
+            assert task.config["verifier"]["env_mode"] == "shared"
+            assert task.config["verifier"]["args"]["script_path"] == "verifier/run.sh"
+            assert "service_execution_input" in task.source_provenance
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_publish_without_profile_keeps_harbor_root_verifier(
+    postgres_url: str,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "harbor-nebius-profile"
+    _write_harbor_layout(root)
+    store = ObjectOnlyStore()
+
+    await publish_local_benchmark(
+        root,
+        db_url=postgres_url,
+        object_store=store,
+        bucket="loom-benchmarks",
+    )
+
+    engine = create_async_engine(postgres_url)
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            task = (
+                await session.execute(
+                    select(TaskRow).where(
+                        TaskRow.id == "harbor-nebius-profile/harbor-sample",
+                    ),
+                )
+            ).scalar_one()
+            assert task.config["verifier"].get("user") == "root"
+            assert task.config["verifier"]["args"]["script_path"] == (
+                "/app/verifier/run.sh"
+            )
+            assert task.config["environment"].get("cpu_arch") == "x86_64"
+            assert task.config["environment"].get("network_policies_supported") != [
+                "gateway-only"
+            ]
+            assert task.config["environment"].get("user") == "root"
+    finally:
         await engine.dispose()

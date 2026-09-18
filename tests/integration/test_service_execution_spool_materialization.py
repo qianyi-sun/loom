@@ -33,6 +33,7 @@ from loom.db.schema import (
     TrialEvent,
     TrialTaskImageMaterialization,
 )
+from loom.execution_runtime_contract import RuntimeOutputDeclarationV1
 from loom.pipeline.artifact_commit import ArtifactCommitService, PartReceiptV1
 from loom.pipeline.keys import canonical_document, digest_bytes
 from loom.service_execution_terminus_trace import terminus_usage
@@ -126,13 +127,15 @@ async def _wait_for_minio_bucket(container: MinioContainer, bucket: str) -> None
 
 
 @pytest.mark.parametrize(
-    "terminus,legacy_repair,prepared_snapshot",
-    [(False, False, False), (True, False, False), (True, True, False), (True, True, True)],
+    "terminus,legacy_repair,prepared_snapshot,typed_failure",
+    [(False, False, False, False), (True, False, False, False), (True, True, False, False),
+     (True, True, True, False), (True, False, False, True)],
 )
 async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
     terminus: bool,
     legacy_repair: bool,
     prepared_snapshot: bool,
+    typed_failure: bool,
     monkeypatch: pytest.MonkeyPatch,
     isolated_migration_postgres_url: str,
     independent_minio_endpoints: tuple[MinioContainer, MinioContainer],
@@ -143,6 +146,12 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)
     plan = _complete_output_contract(now=now)
+    exception = {"exception_type": "ContextLengthExceededError",
+                 "exception_message": "ContextLengthExceededError", "occurred_at": now.isoformat().replace("+00:00", "Z")}
+    if typed_failure:
+        plan = plan.model_copy(update={"output_declarations": (*plan.output_declarations,
+            RuntimeOutputDeclarationV1(source_path=".loom/agent/exception.json",
+                relative_path="diagnostics/agent-exception.json", kind="agent_native", required=False))})
 
     def materializer() -> ServiceExecutionMaterializer:
         # Zero retention/claim TTL advances time locally without waiting a day.
@@ -335,6 +344,11 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             # authoritative Gateway rows for the later correction.
             monkeypatch.setattr(materializer_module, "read_service_execution_llm_calls", legacy_without_ledger)
         result = _runtime_result_payload(lease, started_at=now)
+        if typed_failure:
+            payloads["diagnostics/agent-exception.json"] = canonical_document(exception)
+            result["status"] = "task_error"
+            result["partial_evidence"] = True
+            result["phases"][0]["exit_code"] = 1
         result.update(
             outputs=[
                 {
@@ -460,7 +474,7 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 assert current.materialization_error_code == "transient_materialization_error"
                 assert current.cleanup_state == "complete"
                 assert current.deleted_at is not None
-                assert trial.state == "materializing"
+                assert trial.state == ("failed" if typed_failure else "materializing")
             for key, expected in source_snapshot.items():
                 assert await source_store.get_object(bucket="artifacts", key=key) == expected
         finally:
@@ -493,7 +507,11 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             assert current.materialization_state == "committed"
             assert current.materialization_attempts == 3
             assert current.source_cleanup_state == "retained"
-            assert trial.state == "succeeded"
+            assert trial.state == ("failed" if typed_failure else "succeeded")
+            if typed_failure:
+                assert trial.result["exception_info"] == exception
+                assert trial.failure_reason == "task_error"
+                assert "ContextLengthExceededError" in trial.failure_message
             artifact = (
                 await session.scalars(
                     select(Artifact).where(
@@ -515,7 +533,9 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                     )
                 )
             )
-            assert len(events) == (27 if legacy_repair else 28 if terminus else 7)
+            assert len(events) == (27 if legacy_repair else 28 if terminus else 7) + typed_failure
+            if typed_failure:
+                assert next(event.payload for event in events if event.kind == "trial_error")["error_type"] == "ContextLengthExceededError"
             assert len({event.seq for event in events}) == len(events)
 
         if legacy_repair:
@@ -705,7 +725,9 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 assert artifact.storage["source_evidence"] == original_evidence
                 assert trial.trajectory_index != original_index
                 corrected_events = list((await session.scalars(select(TrialEvent).where(TrialEvent.trial_id == trial_id))).all())
-                assert len(corrected_events) == 29
+                assert len(corrected_events) == 29 + typed_failure
+                if typed_failure:
+                    assert next(event.payload for event in corrected_events if event.kind == "trial_error")["error_type"] == "ContextLengthExceededError"
                 assert sum(event.kind == "llm_call" for event in corrected_events) == 7
                 published_index = copy.deepcopy(trial.trajectory_index)
                 bundle = canonical_bundle_from_artifact(artifact, trial=trial)
@@ -723,6 +745,8 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                     assert tar.extractfile("source/trajectory/events.jsonl").read() == payloads["trajectory/events.jsonl"]
                     names = tar.getnames()
                     assert len(names) == len(set(names))
+                    if typed_failure:
+                        assert json.load(tar.extractfile("files/diagnostics/agent-exception.json")) == exception
             finally:
                 archive.body.close()
             atif_key = published_index["atif_uri"].removeprefix("s3://trajectories/")

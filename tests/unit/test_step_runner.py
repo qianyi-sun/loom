@@ -166,10 +166,14 @@ async def test_run_step_applies_effective_timeout_before_agent_run(
     assert agent.observed_step_token_ttl_sec == 9301
 
 
-async def test_run_step_records_agent_error(context: TrialContext, tmp_path: Path):
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_run_step_records_agent_error(context: TrialContext, tmp_path: Path, wrapped: bool):
     """If the agent raises AgentError, run_step records it as a phase=agent
     StepError and still emits step_end."""
     from loom.errors import AgentError
+
+    class ContextLengthExceededError(Exception):
+        pass
 
     class _BoomAgent:
         mode = "out-of-box"
@@ -179,6 +183,11 @@ async def test_run_step_records_agent_error(context: TrialContext, tmp_path: Pat
         model = None
 
         async def run(self, **_):  # type: ignore[no-untyped-def]
+            if wrapped:
+                try:
+                    raise ContextLengthExceededError
+                except ContextLengthExceededError as exc:
+                    raise AgentError("") from exc
             raise AgentError("boom")
 
     context.agent = _BoomAgent()  # type: ignore[assignment]
@@ -199,6 +208,9 @@ async def test_run_step_records_agent_error(context: TrialContext, tmp_path: Pat
     assert sr.error is not None
     assert sr.error.phase == "agent"
     assert sr.error.reason == "exception"
+    assert sr.error.exception_type == ("ContextLengthExceededError" if wrapped else "AgentError")
+    assert sr.error.message == ("ContextLengthExceededError" if wrapped else "boom")
+    assert StepResult.model_validate_json(sr.model_dump_json()).error == sr.error
     # step_end still fires.
     reader = TrajectoryReader(context.local_trajectory_path)
     kinds = [e.kind for e in reader.iter_all()]
