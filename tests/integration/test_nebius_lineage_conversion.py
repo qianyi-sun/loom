@@ -212,7 +212,7 @@ def test_conversion_preserves_history_and_reaches_dev(
             assert after == before
             assert (
                 connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-                == "0150"
+                == "0151"
             )
             assert connection.exec_driver_sql(
                 "SELECT to_regclass('gateway_dispatch_receipts')"
@@ -326,7 +326,7 @@ def test_job_command_inspects_applies_and_sanitizes_rejection(
         with engine.connect() as connection:
             assert (
                 connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-                == "0150"
+                == "0151"
             )
         result = subprocess.run(
             [*argv, "--apply"], env=environment, capture_output=True, text=True, timeout=60

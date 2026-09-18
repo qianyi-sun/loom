@@ -230,9 +230,9 @@ def _acceptance_plan(
         "postgres": {
             "dump_sha256": "b" * 64,
             "image": release.images.postgres,
-            "restored_schema_head": "0150",
+            "restored_schema_head": "0151",
             "restored_state_sha256": "c" * 64,
-            "source_schema_head": "0150",
+            "source_schema_head": "0151",
             "source_state_sha256": "c" * 64,
         },
         "release_sha256": release_digest,
@@ -333,7 +333,7 @@ def _acceptance_plan(
         "source": {"commit": release.source_sha, "tree": release.source_tree},
         "storage": {
             "backup_restore_evidence_sha256": hashlib.sha256(backup_payload).hexdigest(),
-            "schema_head": "0150",
+            "schema_head": "0151",
         },
         "window": {
             "expires_at": "2099-12-31T23:00:00Z",
@@ -1507,7 +1507,7 @@ def test_render_schema_transition_real_cli_binds_exact_checkout_and_inputs(
         "--expected-predecessor-schema-head",
         "0112",
         "--expected-target-schema-head",
-        "0150",
+        "0151",
     ]
     program = (
         "import json, sys\n"

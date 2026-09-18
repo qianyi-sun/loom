@@ -5,9 +5,9 @@ through `0132` with `dev`. Its `0133`–`0135` mean reward projection, zero-quot
 observations, and native task-image attempt evidence. Those changes are
 `0144`–`0146` on `dev`; `dev`'s own `0133`–`0143` must also run. Nebius later
 added native resource usage at `0136`; dev retains its published migrations
-through `0149` and appends native usage as `0150`.
+through `0149`, appends native usage as `0150`, and batch purpose as `0151`.
 
-`migrations/nebius_lineage.py` converts that fork to **0150**. Normal Alembic
+`migrations/nebius_lineage.py` converts that fork to **0151**. Normal Alembic
 upgrades continue to reject ambiguous historical revision numbers. The converter
 checks the exact expected revision, absence of dev-only tables, the native-build
 column definition, the historical quota constraint, and the complete native
@@ -33,7 +33,7 @@ directly to the live database or manually stamp its revision.
    migration history. In the isolated restore Job, set `LOOM_DB_URL` to the
    restored PostgreSQL instance and run the inspection command below. Add
    `--apply` to convert the restored database. Compare logical schema with a fresh
-   database migrated to `0150`, and compare retained data, including native-build
+   database migrated to `0151`, and compare retained data, including native-build
    JSON, zero-quota observations, rewards, LLM calls/tokens, and object identities.
    Exercise application readback with the candidate. A passing synthetic test is
    not actual-backup qualification.
@@ -51,7 +51,7 @@ directly to the live database or manually stamp its revision.
    remove probes and lifecycle hooks from the conversion init container.
    Use the normal deployer with this reviewed render, so backup completion and
    cluster checks remain required. Do not enable automatic Job retries.
-6. Verify the conversion Job succeeded and the database reports `0150` before
+6. Verify the conversion Job succeeded and the database reports `0151` before
    ordinary bootstrap/application rollout continues. Later dev revisions can then
    use ordinary Alembic upgrades. Restore writer counts/schedules only with the
    compatible candidate, then verify retained results, artifacts, accounting,
@@ -69,7 +69,7 @@ The command takes the connection only from `LOOM_DB_URL`, never a command-line
 credential. Inspection uses a read-only transaction. Application requires direct
 PostgreSQL, READ COMMITTED and driver autocommit disabled. It locks all existing
 public tables with `ACCESS EXCLUSIVE NOWAIT`, applies the missing dev migrations
-through `0150` and updates `alembic_version` last. It skips only verified
+through `0151` and updates `alembic_version` last. It skips only verified
 preexisting additions: native-build `0146` for source `0135`/`0136`, and native
 resource-usage `0150` for source `0136`. DDL and the revision transition commit
 together.
@@ -82,7 +82,7 @@ native-build JSON is never dropped or copied away.
 Busy writers, conflicting schema markers, missing migrations, or any migration
 error abort the transaction. Locks are nonwaiting and statements have a 120-second
 timeout. Retain the sanitized failure; diagnose before retrying. A repeated
-conversion against `0150` is rejected rather than reinterpreting dev as Nebius;
+conversion against `0151` is rejected rather than reinterpreting dev as Nebius;
 confirm successful readback and use ordinary deployment continuation. A lost Job
 acknowledgement requires revision/schema readback before replacing that Job.
 
@@ -101,7 +101,7 @@ normal dev schema, and checks retained data and atomic failure. It supplements
 the ordinary migration-lineage rejection test; neither test grants live
 deployment authority or replaces actual-backup evidence.
 
-The current fresh-install protected schema reference is `0150/guard_0035`,
+The current fresh-install protected schema reference is `0151/guard_0035`,
 independently provisioned for PostgreSQL 16 and 17. Historical references retain
 their original recipes and fingerprints. Conversion qualification compares logical
 schema and retained data; it does not prove a restored historical database matches

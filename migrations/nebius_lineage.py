@@ -22,7 +22,7 @@ from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.exc import SQLAlchemyError
 
 SOURCE_REVISIONS = ("0133", "0134", "0135", "0136")
-TARGET_REVISION = "0150"
+TARGET_REVISION = "0151"
 _DEV_TABLES = (
     "gateway_dispatch_receipts",
     "task_image_publication_keys",
@@ -220,7 +220,7 @@ def convert_lineage(
     )
     inspect_lineage(connection, expected_revision)
     with Operations.context(MigrationContext.configure(connection)):
-        for number in range(133, 151):
+        for number in range(133, 152):
             revision = f"{number:04}"
             script = scripts.get_revision(revision)
             if script is None or script.down_revision != f"{number - 1:04}":
