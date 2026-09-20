@@ -21,7 +21,7 @@ from pydantic import (
 
 from loom.models.task import TaskConfig, TaskSidecarConfig
 from loom.task_image_materialization import (
-    required_task_image_architectures,
+    declared_task_image_architectures,
     task_bundle_content_manifest_digest,
     task_image_materialization_key,
 )
@@ -450,7 +450,7 @@ def derive_task_image_build_plan(
     if task.task.id != row.task_id:
         raise ValueError("frozen task identity differs from its materialization")
     components = _derived_components(task, raw_environment)
-    if row.cpu_arch not in required_task_image_architectures(task):
+    if row.cpu_arch not in declared_task_image_architectures(task):
         raise ValueError("materialization architecture is not required by the frozen task")
     if _BARE_DIGEST_RE.fullmatch(row.task_checksum) is None or row.task_checksum == "0" * 64:
         raise ValueError("task-image materialization checksum is invalid")

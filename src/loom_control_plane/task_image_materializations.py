@@ -22,6 +22,7 @@ from loom.db.schema import (
     Trial,
     TrialTaskImageMaterialization,
 )
+from loom.execution_architecture import execution_cpu_arch
 from loom.models.task import TaskConfig
 from loom.task_image_materialization import (
     _assert_no_pending_task_image_writes,
@@ -314,6 +315,7 @@ async def claim_task_image_materialization(
     nebius_pool_id: str | None = None,
 ) -> TaskImageMaterialization | None:
     """Atomically claim queued work or recover one expired lease."""
+    cpu_arch = execution_cpu_arch(cpu_arch)
     _assert_no_pending_task_image_writes(session)
     # Queue maintenance writes precede candidate selection. Establish retained
     # ownership before those writes, not only after learning the candidate's
@@ -321,11 +323,8 @@ async def claim_task_image_materialization(
     from loom.task_bundle_source_journal import require_task_bundle_transaction
 
     await require_task_bundle_transaction(session)
-
     scope: tuple[ColumnElement[bool], ...] = ()
     if nebius_pool_id is not None:
-        if cpu_arch != "x86_64":
-            raise ValueError("Nebius task image preparation requires x86_64")
         if not nebius_pool_id.strip():
             raise ValueError("nebius_pool_id must not be empty")
         scope = (_nebius_demand_exists(TaskImageMaterialization, pool_id=nebius_pool_id),)

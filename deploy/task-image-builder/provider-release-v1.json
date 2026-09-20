@@ -224,7 +224,7 @@
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/publication_http_integration_test.go",
-        "sha256": "233b1b81950cfbb5c96e912f20fbd635ce1ac18587c1509e2f3794f9fea1c31b"
+        "sha256": "22dd5d34199067aaaa32be463c4a24b0e7fae3576ffa17f61c86184bd143a101"
       },
       {
         "path": "cmd/loom-task-image-builder-supervisor/publication_lifecycle.go",

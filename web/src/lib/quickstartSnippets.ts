@@ -51,6 +51,7 @@ export function benchmarkCatalogCommands(serverOrigin: string): string[] {
 export function oracleSmokeBatchCommand(): string {
   return [
     "loom eval batch create",
+    "  --purpose evaluation",
     "  --name-suffix oracle-smoke",
     "  --benchmark humaneval",
     "  --subset first_n",
@@ -66,6 +67,7 @@ export function providerSmokeBatchCommand(
 ): string {
   return [
     "loom eval batch create",
+    "  --purpose evaluation",
     "  --name-suffix provider-smoke",
     "  --benchmark humaneval",
     "  --subset first_n",

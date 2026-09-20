@@ -10,12 +10,12 @@ import hashlib
 import json
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 import rfc8785
 
-from loom.driver.task_image import dockerfile_text_uses_runtime_arm64_fallback_base
+from loom.execution_architecture import execution_cpu_arch
 from loom.models.task import TaskConfig, normalize_steps
 from loom.task_image_bundle_manifest import (
     TaskImageBundleContentManifestV1,
@@ -72,33 +72,10 @@ class RegisteredTaskBundle:
         }
 
 
-def _promote_registered_runtime_architecture(
-    normalized: dict[str, Any],
-    task_dir: Path,
-    manifest: TaskImageBundleContentManifestV1,
-) -> None:
-    environment = normalized.get("environment")
-    if not isinstance(environment, dict) or "cpu_arch" in environment:
-        return
-    relative = environment.get("dockerfile")
-    if not isinstance(relative, str):
-        return
-    path = PurePosixPath(relative).as_posix()
-    entry = next((item for item in manifest.files if item.path == path), None)
-    if entry is None:
-        return
-    if entry.size_bytes > MAX_REGISTRATION_TEXT_BYTES:
-        raise ValueError("registered Dockerfile exceeds text size limit")
-    content = read_verified_task_image_bundle_file(task_dir, entry).decode("utf-8")
-    if dockerfile_text_uses_runtime_arm64_fallback_base(content):
-        environment["cpu_arch"] = "any"
-
-
 def prepare_task_bundle_registration(
     task_dir: Path,
     *,
     task_id: str,
-    promote_runtime_architecture: bool = False,
 ) -> RegisteredTaskBundle:
     """Bind normalized catalog config to exactly the captured authored file.
 
@@ -115,9 +92,8 @@ def prepare_task_bundle_registration(
         raise ValueError("registered task.toml exceeds text size limit")
     payload = read_verified_task_image_bundle_file(task_dir, task_file)
     normalized = normalize_terminal_bench_task_toml(tomllib.loads(payload.decode("utf-8")))
-    if promote_runtime_architecture:
-        _promote_registered_runtime_architecture(normalized, task_dir, manifest)
     authored = normalize_steps(TaskConfig.model_validate(normalized))
+    execution_cpu_arch(authored.environment.cpu_arch)
     bundle_id = _task_id(authored.task.id)
     registered = authored.model_dump(mode="json")
     registered["task"]["id"] = catalog_id

@@ -267,7 +267,7 @@ def _run_probe_container(arguments: list[str], *, timeout: int, env=None):
     name = f"loom-phase2c-{uuid4().hex}"
     try:
         return subprocess.run(
-            ["docker", "run", "--rm", "--name", name, *arguments],
+            ["docker", "run", "--rm", "--platform", "linux/amd64", "--name", name, *arguments],
             env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             check=False, timeout=timeout,
         )
@@ -307,7 +307,7 @@ async def test_real_authority_guard_socket_and_go_orchestrator_flow(
     settings = _settings(
         tmp_path,
         isolated_migration_postgres_url,
-        principal_document=_principal_document(principal_id="gb10-trt-gb10-1"),
+        principal_document=_principal_document(principal_id="oldlab-trt-eai-oldlab-1"),
         bundle_public_https_origin="https://objects.example",
         bundle_expected_bucket="loom-bundles",
         bundle_url_expiry_seconds=600,
@@ -346,8 +346,12 @@ async def test_real_authority_guard_socket_and_go_orchestrator_flow(
         _peer.executable_sha256 = SUPERVISOR_SHA256
         service.config = replace(
             service.config,
+            cluster_id="oldlab",
+            cpu_arch="x86_64",
+            node_name="trt-eai-oldlab-1",
             slurm=replace(
                 service.config.slurm,
+                qos=_policy().qos,
                 request_sha256=canonical_request_sha256(_policy().request_identity()),
             ),
             containment=replace(
@@ -408,7 +412,7 @@ async def test_real_authority_guard_socket_and_go_orchestrator_flow(
                 "LOOM_PHASE2C_SOCKET": str(service.config.protocol.socket_path),
                 "LOOM_PHASE2C_GRANT_ID": str(GRANT_ID),
                 "LOOM_PHASE2C_MATERIALIZATION_ID": str(materialization_id),
-                "LOOM_PHASE2C_GOARCH_OVERRIDE": "arm64",
+                "LOOM_PHASE2C_GOARCH_OVERRIDE": "amd64",
             },
         )
         service.stop()

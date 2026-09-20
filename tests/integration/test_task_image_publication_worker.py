@@ -117,7 +117,7 @@ class Signer:
 async def _prepared(
     factory, registry, token_key, *, names=("task",), delay=0, lifetime_seconds=1800
 ):
-    reader, root, _ = _graph(arch="arm64")
+    reader, root, _ = _graph(arch="amd64")
     issuer = _issuer(registry, token_key)
     private = Ed25519PrivateKey.generate()
     key = PublicationKeyRecord("publication-1", private.public_key().public_bytes_raw(), NOW)

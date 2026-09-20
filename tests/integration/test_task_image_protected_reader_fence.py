@@ -44,7 +44,7 @@ async def _ready_task(database, issuer, *, native):
                 image.state = "ready"
                 image.registry_images = {"task": "registry.example/task@sha256:" + "d" * 64}
                 assert image.ready_publication_operation_id is None
-            assert image.cpu_arch == "arm64"
+            assert image.cpu_arch == "x86_64"
             session.add(
                 Task(
                     id=image.task_id,
@@ -91,20 +91,20 @@ def test_protected_arm_reader_excludes_native_but_claims_phase1(
     native,
 ):
     database = capacity_guard_database
-    hostname = "gb10-1"
+    hostname = "oldlab-1"
     seeded = asyncio.run(
         _seed_protected_worker(
             database,
-            pool_id="gb10",
+            pool_id="oldlab",
             hostname=hostname,
-            cpu_arch="arm64",
+            cpu_arch="x86_64",
         )
     )
     projection = _public_registration_payload()
     projection.update(
-        hostname=hostname, pool_name="gb10", supported_work_kinds=["trial", "execution_attempt"]
+        hostname=hostname, pool_name="oldlab", supported_work_kinds=["trial", "execution_attempt"]
     )
-    projection["capabilities"][0]["cpu_arch"] = "arm64"
+    projection["capabilities"][0]["cpu_arch"] = "x86_64"
     projected = asyncio.run(_project_worker(database, payload=projection))
     task_id = asyncio.run(_ready_task(database, registry_issuer, native=native))
     worker_bearer = _seed_worker_bearer(database)
@@ -142,7 +142,7 @@ def test_protected_arm_reader_excludes_native_but_claims_phase1(
                 headers={"Authorization": "Bearer " + submit_token},
                 json={
                     "task_id": task_id,
-                    "required_worker_pool": "gb10",
+                    "required_worker_pool": "oldlab",
                     "config": {"agent_name": "oracle", "agent_model": None},
                 },
             )
@@ -168,7 +168,7 @@ def test_protected_arm_reader_excludes_native_but_claims_phase1(
                 protected_attempt_id=attempt["protected_attempt_id"],
                 execution_generation=attempt["execution_generation"],
                 requirements_digest=attempt["requirements_digest"],
-                cpu_arch="arm64",
+                cpu_arch="x86_64",
             )
         )
         with engine.connect() as connection:

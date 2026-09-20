@@ -177,9 +177,13 @@ def build_service_execution_input_manifest(
     task_checksum: str,
 ) -> ServiceExecutionInputManifestV1:
     files: list[ServiceExecutionInputFileV1] = []
-    for path in sorted(bundle_dir.rglob("*")):
-        if path.is_dir():
-            continue
+    # Canonical inventory order is UTF-8 of the relative POSIX path — not
+    # pathlib component order (e.g. tests/test.sh sorts before tests/test/).
+    file_paths = [path for path in bundle_dir.rglob("*") if not path.is_dir()]
+    file_paths.sort(
+        key=lambda path: path.relative_to(bundle_dir).as_posix().encode("utf-8"),
+    )
+    for path in file_paths:
         if path.is_symlink() or not path.is_file():
             raise ValueError("service execution input contains a non-regular file")
         body = path.read_bytes()

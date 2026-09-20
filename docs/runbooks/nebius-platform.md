@@ -9,6 +9,26 @@ This renderer accepts only `environment=development`, with the public UI at
 the dedicated origin's root. Staging/production route and promotion semantics
 are outside this integration lane and are explicitly rejected.
 
+## Development and release branch
+
+`dev` is the sole active development and Nebius publication branch. The former
+`codex/nebius-main` branch is retained as history after consolidation; do not
+publish or deploy new candidates from it. Use the successful `nebius-candidate`
+run for the exact merged `dev` commit, with its matching candidate and runtime
+profile. Candidate publication does not itself deploy the environment.
+
+For the batch-purpose release, the existing dev database advances from `0150`
+to `0151` through the normal migration Job after backup. Do not deploy the old
+integration branch's `0137_batch_purpose` migration against a dev-lineage database,
+rename already-applied revisions, or stamp over a schema mismatch. New batch
+creation requires explicit `purpose` (`evaluation` or `trajectory_generation`);
+existing rows retain their identities and backfill to `trajectory_generation`.
+
+The batch-purpose migration retains a database default for older replicas during
+rolling upgrades. The API still requires an explicit purpose; the compatibility
+default does not permit omitted purpose in new API requests. Shared-batch clones
+preserve purpose, while artifact-derived batches use trajectory generation.
+
 ## Inputs and rendering
 
 New Nebius candidates use `images.harbor_runtime` (`loom-harbor-runtime`) for

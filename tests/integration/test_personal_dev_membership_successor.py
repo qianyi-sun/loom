@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -391,6 +392,7 @@ async def test_successor_migration_preserves_history_and_rejects_lossy_downgrade
     cfg = Config(str(repo / "migrations/alembic.ini"))
     cfg.set_main_option("script_location", str(repo / "migrations"))
     cfg.set_main_option("sqlalchemy.url", isolated_migration_postgres_url)
+    current_head = ScriptDirectory.from_config(cfg).get_current_head()
 
     async def snapshot():
         async with sessions() as session:
@@ -415,10 +417,10 @@ async def test_successor_migration_preserves_history_and_rejects_lossy_downgrade
         else:
             await asyncio.to_thread(command.downgrade, cfg, "0139")
             await asyncio.to_thread(command.upgrade, cfg, "0140")
-            await asyncio.to_thread(command.upgrade, cfg, "0150")
+            await asyncio.to_thread(command.upgrade, cfg, current_head)
         assert await snapshot() == before
         async with sessions() as session:
-            assert (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0150"
+            assert (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == current_head
             # Existing historical outcomes never gain invented successor authority.
             parent = await SqlAlchemyPersonalDevEnvironmentAuthority(session).get_operation(claim.operation.id)
             assert (parent.membership_successor_operation_id is not None) is with_successor

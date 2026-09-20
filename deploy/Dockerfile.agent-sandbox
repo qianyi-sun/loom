@@ -56,7 +56,8 @@ RUN set -eux; \
 COPY packages/loom-launcher /tmp/agent-sandbox/loom-launcher
 
 RUN set -eux; \
-    python -m pip install -e /tmp/agent-sandbox/loom-launcher
+    python -m pip install -e /tmp/agent-sandbox/loom-launcher; \
+    python -m pip check
 
 RUN set -eux; \
     python -c 'from pathlib import Path; from loom_launcher.adapters._aider_install import AIDER_INSTALL_SCRIPT; Path("/tmp/loom-aider-install.sh").write_text(AIDER_INSTALL_SCRIPT, encoding="utf-8")'; \

@@ -166,7 +166,7 @@ async def _queued_job(
                 base_resolution={
                     "schema": "loom.task-image-base-resolution/v1",
                     "solve_ref": "solve-1",
-                    "platform": "linux/arm64",
+                    "platform": "linux/amd64",
                     "output_digest": legacy.manifest_digest,
                     "observed_base_digests": [],
                 },

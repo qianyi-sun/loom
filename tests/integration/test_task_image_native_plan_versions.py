@@ -41,7 +41,7 @@ from tests.unit.test_task_bundle_registration import _bundle
 async def _retained_strong_attempt(factory, tmp_path, *, mismatched=False):
     directory = _bundle(tmp_path)
     config = directory / "task.toml"
-    config.write_text(config.read_text().replace("[environment]", '[environment]\ncpu_arch = "arm64"'))
+    config.write_text(config.read_text().replace("[environment]", '[environment]\ncpu_arch = "x86_64"'))
     spec = TaskBundleSourceSpecV1.from_registration(
         prepare_task_bundle_registration(directory, task_id="benchmark/" + uuid4().hex),
         bucket="task-sources",
@@ -80,7 +80,7 @@ async def test_v2_receipt_flows_through_credentials_publication_and_retirement_s
         request = TaskImagePublicationCandidateRequestV2.model_validate(dict(
             legacy.model_dump(), schema_version=2, base_resolution={
                 "schema": "loom.task-image-base-resolution/v1", "solve_ref": "same-solve_1",
-                "platform": "linux/arm64", "output_digest": "sha256:" + "a" * 64,
+                "platform": "linux/amd64", "output_digest": "sha256:" + "a" * 64,
                 "observed_base_digests": [],
             },
         ))

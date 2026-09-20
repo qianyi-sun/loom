@@ -245,7 +245,7 @@ spec:
         - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_OBSERVER_PRIVATE_KEY_FILE
           value: /var/run/loom-personal-dev-capacity/observer-private-key.pem
         - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_POOL_CAPABILITIES_JSON
-          value: '[{"capability_id":"oldlab-x86-none","pool_id":"oldlab","operating_system":"linux","cpu_architecture":"x86_64","gpu_vendor":"none","network_policies":["public"]},{"capability_id":"gb10-arm-none","pool_id":"gb10","operating_system":"linux","cpu_architecture":"arm64","gpu_vendor":"none","network_policies":["public"]}]'
+          value: '[{"capability_id":"oldlab-x86-none","pool_id":"oldlab","operating_system":"linux","cpu_architecture":"x86_64","gpu_vendor":"none","network_policies":["public"]}]'
         - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_PRIVATE_KEY_FILE
           value: /var/run/loom-personal-dev-capacity/private-key.pem
         - name: LOOM_SVC_PERSONAL_DEV_GLOBAL_LIVE_INSTANCE_LIMIT

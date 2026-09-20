@@ -151,6 +151,7 @@ def _seed_batch(url: str, task_filter: dict[str, object]) -> UUID:
             {
                 "id": batch_id,
                 "team_id": team_id,
+                "purpose": "evaluation",
                 "task_filter": json.dumps(task_filter),
                 "trial_config": json.dumps({}),
             },

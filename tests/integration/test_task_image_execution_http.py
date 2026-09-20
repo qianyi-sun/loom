@@ -50,7 +50,7 @@ async def test_provisional_scheduler_claim_does_not_wait_on_publication_signing_
                 result = await claim_work(session, worker_id=UUID(claim.worker_id),
                     capability_snapshot_digest=digest, worker_token_hash=hashlib.sha256(RAW_TOKEN.encode()).digest(),
                     supported_work_kinds=["trial", "execution_attempt"], free_slots=1,
-                    worker_os=["linux"], worker_cpu_arches=["arm64"], worker_gpu_vendors=["none"],
+                    worker_os=["linux"], worker_cpu_arches=["x86_64"], worker_gpu_vendors=["none"],
                     worker_network_policies=["public"], allow_signed_task_images=True)
                 assert result is not None
                 assert result[0]["claim_id"] != UUID(claim.claim_id)

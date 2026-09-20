@@ -18,7 +18,7 @@ from pydantic import TypeAdapter
 from loom.models.task import TaskConfig
 from loom.task_image_materialization import (
     MAX_TASK_IMAGE_COMPONENTS,
-    required_task_image_architectures,
+    declared_task_image_architectures,
     required_task_image_components,
 )
 from loom_task_image_authority.contracts import Digest
@@ -93,7 +93,7 @@ def verify_publication_set(
         raise ValueError("publication set differs from frozen task components")
     first = unsigneds[0]
     arch = "arm64" if first.platform == "linux/arm64" else "x86_64"
-    if first.task_id != task.task.id or arch not in required_task_image_architectures(task):
+    if first.task_id != task.task.id or arch not in declared_task_image_architectures(task):
         raise ValueError("publication set differs from frozen task identity or architecture")
     common = first.model_dump(mode="json", by_alias=True, exclude_none=True, exclude=_COMPONENT_FIELDS)
     if any(item.model_dump(mode="json", by_alias=True, exclude_none=True, exclude=_COMPONENT_FIELDS) != common for item in unsigneds):

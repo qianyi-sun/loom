@@ -83,6 +83,12 @@ from loom_service.auth_guards import (
     require_team_or_admin,
 )
 from loom_service.batch_identity import build_batch_identity
+from loom_service.batch_purpose import (
+    BatchPurpose,
+    validate_purpose_resolved_tasks,
+    validate_purpose_task_filter,
+    validate_purpose_trial_config,
+)
 from loom_service.combination_summary import combination_summary_for_batch
 from loom_service.debug_evidence import build_batch_debug_evidence
 from loom_service.dependencies import AdminSessionAndCtx, SessionAndCtx
@@ -222,6 +228,9 @@ class _CreateBatch(BaseModel):
     name: str | None = Field(default=None, max_length=200)
     name_suffix: str | None = Field(default=None, max_length=80)
     description: str | None = None
+    # evaluation = native benchmarks only, verification required;
+    # trajectory_generation = TaskSets and/or benchmarks (transition).
+    purpose: BatchPurpose
     task_filter: dict[str, Any]
     trial_config: dict[str, Any]
     # Plan 23: n-sampling for single-combination batches. Ignored
@@ -396,8 +405,8 @@ def _reject_if_k8s_worker_unavailable(
         detail=(
             "required_worker_pool 'k8s-worker' is not available on this "
             "cluster: k8s_worker.enabled=false in the deployed profile "
-            "(#383). Use 'oldlab' for x86_64 coverage or 'gb10' "
-            "for arm64 coverage."
+            "(#383). Choose an available x86_64 execution pool. "
+            "ARM execution is no longer supported."
         ),
     )
 
@@ -992,6 +1001,7 @@ def _serialize(
         "team_id": str(b.team_id),
         "name": b.name,
         "description": b.description,
+        "purpose": b.purpose,
         "task_filter": b.task_filter,
         "trial_config": b.trial_config,
         "state": b.state,
@@ -1071,6 +1081,23 @@ async def _create_batch_record(
     catalog = known_names()
     trial_config = _sanitize_trial_config(payload.trial_config)
     _reject_invalid_workspace_staging_policy_name(trial_config)
+    purpose_trial_err = validate_purpose_trial_config(payload.purpose, trial_config)
+    if purpose_trial_err is not None:
+        _reject_submission(
+            reason=purpose_trial_err,
+            status_code=400,
+            detail=purpose_trial_err,
+        )
+    purpose_filter_err = validate_purpose_task_filter(
+        payload.purpose,
+        payload.task_filter,
+    )
+    if purpose_filter_err is not None:
+        _reject_submission(
+            reason=purpose_filter_err,
+            status_code=400,
+            detail=purpose_filter_err,
+        )
     required_worker_pools = _normalize_required_worker_pools(
         getattr(payload, "required_worker_pools", []) or [],
     )
@@ -1362,6 +1389,27 @@ async def _create_batch_record(
             detail=invalid_task_config_detail(invalid_tasks),
         )
 
+    if payload.purpose == "evaluation":
+        purpose_task_rows = (
+            (
+                await s.execute(
+                    select(Task.task_set_id).where(Task.id.in_(list(valid_task_ids))),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        purpose_resolved_err = validate_purpose_resolved_tasks(
+            payload.purpose,
+            task_set_ids=purpose_task_rows,
+        )
+        if purpose_resolved_err is not None:
+            _reject_submission(
+                reason=purpose_resolved_err,
+                status_code=400,
+                detail=purpose_resolved_err,
+            )
+
     # A live worker is immediately executable. A fresh compatible pool policy
     # is only cold-start authority, but it must be allowed to observe the queued
     # trials created below; otherwise min_slots=0 can never scale up.
@@ -1497,6 +1545,7 @@ async def _create_batch_record(
         team_id=submission_team_id,
         name=batch_name,
         description=batch_description,
+        purpose=payload.purpose,
         task_filter=dict(payload.task_filter),
         resolved_task_ids=list(task_result.task_ids),
         source_provenance=list(task_result.benchmark_selection_provenance),
@@ -1590,6 +1639,7 @@ async def _create_batch_record(
         "team_id": str(b.team_id),
         "name": b.name,
         "description": b.description,
+        "purpose": b.purpose,
         "expected_trial_count": expected,
         "n_per_task": b.n_per_task,
         "backend": b.backend,
@@ -2949,6 +2999,7 @@ async def rerun_failed_batch(
         team_id=b.team_id,
         name=f"{b.name} failed-case rerun",
         description=(f"Reruns {len(targets)} transient failed case(s) from batch {b.id}."),
+        purpose=b.purpose,
         task_filter={"subset_kind": "explicit", "task_ids": task_ids},
         resolved_task_ids=list(rerun_task_result.task_ids),
         trial_config=apply_plan_mode(

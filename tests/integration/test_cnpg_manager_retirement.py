@@ -174,8 +174,24 @@ def cnpg_probe(tmp_path, pinned_manager, request):
             lambda result: result.returncode == 0, "disposable API unready", seconds=90,
         )
         kube("apply", "--server-side", "-f", "-", data=manifest.encode(), timeout=120)
-        kube("-n", "cnpg-system", "rollout", "status", "deployment/cnpg-controller-manager",
-             "--timeout=300s", timeout=310)
+        try:
+            kube("-n", "cnpg-system", "rollout", "status", "deployment/cnpg-controller-manager",
+                 "--timeout=300s", timeout=310)
+        except AssertionError:
+            # Preserve the disposable cluster's cause before teardown. Never
+            # dump kubeconfigs, Secrets, environment values or container logs.
+            for resource, columns in (
+                ("deployments", "NAME:.metadata.name,GEN:.metadata.generation,OBSERVED:.status.observedGeneration,READY:.status.readyReplicas"),
+                ("pods", "NAME:.metadata.name,PHASE:.status.phase,WAITING:.status.containerStatuses[*].state.waiting.reason,REASON:.status.reason"),
+                ("events", "REASON:.reason,MESSAGE:.message"),
+                ("nodes", "NAME:.metadata.name,CONDITION:.status.conditions[*].type,STATUS:.status.conditions[*].status"),
+            ):
+                diagnostic = subprocess.run(
+                    argv("-n", "cnpg-system", "get", resource, "-o", f"custom-columns={columns}"),
+                    capture_output=True, timeout=10, check=False,
+                )
+                print(f"disposable CNPG {resource}:\n" + diagnostic.stdout[-8192:].decode(errors="replace"))
+            raise
         if staging:
             kube("create", "namespace", namespace)
         kube("apply", "-f", "-", data=yaml.safe_dump({

@@ -79,17 +79,18 @@ PROVIDER_RELEASE_SHA256 = "a" * 64
 CGROUP_PATH = "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_12345/step_batch"
 
 
-def _policy() -> SlurmBuildEnvironmentPolicyV1:
+def _policy(*, cpu_arch: str = "x86_64") -> SlurmBuildEnvironmentPolicyV1:
+    cluster = "oldlab" if cpu_arch == "x86_64" else "gb10"
     return SlurmBuildEnvironmentPolicyV1(
         schema="loom.task-image-build-environment-policy/v1",
         enabled=False,
         activation_blockers=("guard_missing",),
-        slurm_cluster_id="gb10",
-        cpu_arch="arm64",
+        slurm_cluster_id=cluster,
+        cpu_arch=cpu_arch,
         submitting_identity="loom-builder",
         partition="loom-task-builder",
         account="loom-task-builder",
-        qos="loom-task-image-builder-rootless-gb10",
+        qos=f"loom-task-image-builder-rootless-{cluster}",
         feature_constraint="loom_rootless_buildkit",
         supervisor_path="/usr/local/libexec/loom-task-builder-supervisor",
         sbatch_path="/usr/bin/sbatch",
@@ -105,16 +106,17 @@ def _policy() -> SlurmBuildEnvironmentPolicyV1:
     )
 
 
-def _grant(*, expires_at: datetime = NOW + timedelta(hours=2), grant_id: UUID = GRANT_ID):
-    policy = _policy()
+def _grant(*, expires_at: datetime = NOW + timedelta(hours=2), grant_id: UUID = GRANT_ID,
+           cpu_arch: str = "x86_64"):
+    policy = _policy(cpu_arch=cpu_arch)
     authority = TaskImageBuildGrantAuthorityV2(
         schema_version=2,
         purpose="production",
         shadow_campaign_id=None,
         environment="staging",
-        pool_id="staging-gb10-task-image",
-        slurm_cluster_id="gb10",
-        cpu_arch="arm64",
+        pool_id=f"staging-{policy.slurm_cluster_id}-task-image",
+        slurm_cluster_id=policy.slurm_cluster_id,
+        cpu_arch=cpu_arch,
         slurm_request_sha256=canonical_request_sha256(policy.request_identity()),
         builder_release_sha256=PROVIDER_RELEASE_SHA256,
         supervisor_executable_sha256=SUPERVISOR_SHA256,
@@ -133,9 +135,9 @@ def _grant(*, expires_at: datetime = NOW + timedelta(hours=2), grant_id: UUID = 
 
 def _principal(**changes: object) -> TaskImageGuardPrincipalV1:
     values: dict[str, object] = {
-        "principal_id": "gb10-trt-gb10-1",
-        "slurm_cluster_id": "gb10",
-        "node_name": "trt-gb10-1",
+        "principal_id": "oldlab-trt-eai-oldlab-1",
+        "slurm_cluster_id": "oldlab",
+        "node_name": "trt-eai-oldlab-1",
         "scopes": ("task-image:project", "task-image:attest"),
     }
     values.update(changes)
@@ -147,9 +149,9 @@ def _request(**changes: object) -> TaskImageProjectionRequestV1:
         "request_id": REQUEST_ID,
         "grant_id": GRANT_ID,
         "observed_at": NOW + timedelta(seconds=3),
-        "node_name": "trt-gb10-1",
+        "node_name": "trt-eai-oldlab-1",
         "node_boot_id": NODE_BOOT_ID,
-        "slurm_cluster_id": "gb10",
+        "slurm_cluster_id": "oldlab",
         "slurm_job_id": "12345",
         "supervisor_pid": 42100,
         "supervisor_uid": 993,
@@ -160,8 +162,8 @@ def _request(**changes: object) -> TaskImageProjectionRequestV1:
         "submitting_identity": "loom-builder",
         "slurm_account": "loom-task-builder",
         "slurm_partition": "loom-task-builder",
-        "slurm_qos": "loom-task-image-builder-rootless-gb10",
-        "cpu_arch": "arm64",
+        "slurm_qos": "loom-task-image-builder-rootless-oldlab",
+        "cpu_arch": "x86_64",
         "slurm_request_sha256": canonical_request_sha256(_policy().request_identity()),
     }
     values.update(changes)
@@ -196,9 +198,9 @@ def _proof(*, challenge_nonce: UUID = CHALLENGE_NONCE, **changes: object):
         "request_sha256": canonical_authority_sha256(_request()),
         "challenge_nonce": challenge_nonce,
         "observed_at": NOW + timedelta(seconds=5),
-        "node_name": "trt-gb10-1",
+        "node_name": "trt-eai-oldlab-1",
         "node_boot_id": NODE_BOOT_ID,
-        "slurm_cluster_id": "gb10",
+        "slurm_cluster_id": "oldlab",
         "slurm_job_id": "12345",
         "cgroup_path": CGROUP_PATH,
         "cgroup_inode": 987654,
@@ -216,8 +218,9 @@ async def _release_grant(
     expires_at: datetime = NOW + timedelta(hours=2),
     grant_id: UUID = GRANT_ID,
     job_id: str = "12345",
+    cpu_arch: str = "x86_64",
 ):
-    grant = _grant(expires_at=expires_at, grant_id=grant_id)
+    grant = _grant(expires_at=expires_at, grant_id=grant_id, cpu_arch=cpu_arch)
     await issue_task_image_build_grant(
         session,
         environment="staging",
@@ -393,7 +396,7 @@ async def test_challenge_is_durable_exactly_replayable_and_conflict_bound(
 @pytest.mark.parametrize(
     ("field", "changed_value"),
     [
-        ("principal_id", "gb10-attacker"),
+        ("principal_id", "oldlab-attacker"),
         ("supervisor_pid", 42101),
         ("supervisor_uid", 994),
         ("supervisor_gid", 981),
@@ -638,9 +641,9 @@ async def test_challenge_rejects_untrusted_or_stale_job_facts_before_state(
     if drift == "principal_scope":
         principal = _principal(scopes=("task-image:attest",))
     elif drift == "principal_node":
-        principal = _principal(node_name="trt-gb10-2")
+        principal = _principal(node_name="trt-eai-oldlab-2")
     elif drift == "principal_cluster":
-        principal = _principal(slurm_cluster_id="oldlab")
+        principal = _principal(slurm_cluster_id="gb10")
     elif drift == "job_id":
         request = _request(slurm_job_id="54321")
     elif drift == "account":
@@ -650,7 +653,7 @@ async def test_challenge_rejects_untrusted_or_stale_job_facts_before_state(
     elif drift == "partition":
         request = request.model_copy(update={"slurm_partition": "loom-other"})
     elif drift == "architecture":
-        request = request.model_copy(update={"cpu_arch": "x86_64"})
+        request = request.model_copy(update={"cpu_arch": "arm64"})
     elif drift == "request_digest":
         request = _request(slurm_request_sha256="a" * 64)
     elif drift == "supervisor_uid":
@@ -886,11 +889,11 @@ async def test_projection_rejects_invalid_proof_before_creating_a_secret(
     elif drift == "changed_request_digest":
         proof = _proof(request_sha256="a" * 64)
     elif drift == "changed_node":
-        proof = _proof(node_name="trt-gb10-2")
+        proof = _proof(node_name="trt-eai-oldlab-2")
     elif drift == "changed_node_boot":
         proof = _proof(node_boot_id=uuid4())
     elif drift == "changed_cluster":
-        proof = _proof(slurm_cluster_id="oldlab")
+        proof = _proof(slurm_cluster_id="gb10")
     elif drift == "changed_job":
         proof = _proof(slurm_job_id="54321")
     elif drift == "changed_cgroup":
@@ -1053,10 +1056,14 @@ async def _project_grant(
     session: AsyncSession,
     *,
     secret_store: _MemorySecretStore,
+    cpu_arch: str = "x86_64",
 ):
-    grant = await _release_grant(session)
-    principal = _principal()
-    request = _request()
+    grant = await _release_grant(session, cpu_arch=cpu_arch)
+    policy = _policy(cpu_arch=cpu_arch)
+    principal = _principal(slurm_cluster_id=policy.slurm_cluster_id)
+    request = _request(cpu_arch=cpu_arch, slurm_cluster_id=policy.slurm_cluster_id,
+                       slurm_qos=policy.qos,
+                       slurm_request_sha256=canonical_request_sha256(policy.request_identity()))
     await request_task_image_projection(
         session,
         principal=principal,
@@ -1064,7 +1071,8 @@ async def _project_grant(
         now=NOW + timedelta(seconds=4),
         challenge_nonce_factory=lambda: CHALLENGE_NONCE,
     )
-    proof = _proof()
+    proof = _proof(slurm_cluster_id=policy.slurm_cluster_id,
+                   request_sha256=canonical_authority_sha256(request))
     receipt = await complete_task_image_projection(
         session,
         principal=principal,
@@ -1375,8 +1383,8 @@ async def test_renewal_atomically_advances_session_and_attestation_with_exact_re
 @pytest.mark.parametrize(
     "principal_changes",
     [
-        {"principal_id": "gb10-trt-gb10-2"},
-        {"node_name": "trt-gb10-2"},
+        {"principal_id": "oldlab-trt-eai-oldlab-2"},
+        {"node_name": "trt-eai-oldlab-2"},
         {"slurm_cluster_id": "oldlab", "node_name": "trt-eai-oldlab-3"},
         {"scopes": ("task-image:attest",)},
     ],
@@ -1437,7 +1445,7 @@ async def test_exchange_replay_rejects_another_node_before_secret_lookup(
         with pytest.raises(TaskImageProjectionAuthorizationError):
             await exchange_task_image_bootstrap(
                 session,
-                principal=_principal(node_name="trt-gb10-2"),
+                principal=_principal(node_name="trt-eai-oldlab-2"),
                 request=exchange,
                 now=NOW + timedelta(seconds=9),
                 secret_store=secrets,
@@ -1795,8 +1803,8 @@ async def test_monotonic_attestation_authorizes_only_a_fresh_exact_session(
         assert authorization.grant_id == GRANT_ID
         assert authorization.session_id == build_session.session_id
         assert authorization.purpose == "production"
-        assert authorization.pool_id == "staging-gb10-task-image"
-        assert authorization.cpu_arch == "arm64"
+        assert authorization.pool_id == "staging-oldlab-task-image"
+        assert authorization.cpu_arch == "x86_64"
         assert authorization.attestation_generation == 1
         assert authorization.attestation_sha256 == canonical_authority_sha256(generation_one)
         assert authorization.grant_expires_at == grant.authority.expires_at
@@ -1952,12 +1960,12 @@ async def test_renewal_rejects_skips_or_attachment_drift(
         elif drift == "principal_scope":
             principal = _principal(scopes=("task-image:project",))
         elif drift == "principal_node":
-            principal = _principal(node_name="trt-gb10-2")
+            principal = _principal(node_name="trt-eai-oldlab-2")
         elif drift == "node_name":
             candidate = _attestation(
                 proof,
                 generation=2,
-                node_name="trt-gb10-2",
+                node_name="trt-eai-oldlab-2",
             )
         elif drift == "node_boot_id":
             candidate = _attestation(proof, generation=2, node_boot_id=uuid4())
@@ -1965,7 +1973,7 @@ async def test_renewal_rejects_skips_or_attachment_drift(
             candidate = _attestation(
                 proof,
                 generation=2,
-                slurm_cluster_id="oldlab",
+                slurm_cluster_id="gb10",
             )
         elif drift == "job_id":
             candidate = _attestation(
@@ -2134,7 +2142,7 @@ async def test_guard_revocation_binds_principal_grant_time_reason_and_event(
 
         rejected_calls = [
             (
-                _principal(node_name="trt-gb10-2"),
+                _principal(node_name="trt-eai-oldlab-2"),
                 _revocation(),
                 NOW + timedelta(seconds=10),
             ),

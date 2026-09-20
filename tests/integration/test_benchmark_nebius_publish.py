@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from loom.db.schema import Benchmark
+from loom.db.schema import Benchmark, TaskImageMaterialization
 from loom.db.schema import Task as TaskRow
 from loom.models.task import TaskConfig
 from loom.models.task_checksum import task_checksum
@@ -159,6 +159,9 @@ instruction_file = "instruction.md"
         assert "unchanged=1" in (await publish()).stdout
     finally:
         async with sessions() as session:
+            await session.execute(delete(TaskImageMaterialization).where(
+                TaskImageMaterialization.task_id == "native-benchmark/alpha",
+            ))
             await session.execute(delete(TaskRow).where(TaskRow.benchmark_id == "native-benchmark"))
             await session.execute(delete(Benchmark).where(Benchmark.id == "native-benchmark"))
             await session.commit()

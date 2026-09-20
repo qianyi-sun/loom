@@ -84,13 +84,13 @@ async def authority_materialization_session(
         await engine.dispose()
 
 
-def _config(*, task_id: str = "phase2c/session-bound") -> dict[str, object]:
+def _config(*, task_id: str = "phase2c/session-bound", cpu_arch: str = "x86_64") -> dict[str, object]:
     return {
         "schema_version": "1",
         "task": {"id": task_id, "name": "session-bound"},
         "environment": {
             "os": "linux",
-            "cpu_arch": "arm64",
+            "cpu_arch": cpu_arch,
             "dockerfile": "environment/Dockerfile",
             "build_timeout_sec": 600.0,
         },
@@ -104,17 +104,18 @@ async def _queued_materialization(
     *,
     task_id: str = "phase2c/session-bound",
     checksum: str = "4" * 64,
+    cpu_arch: str = "x86_64",
 ) -> TaskImageMaterialization:
     row = TaskImageMaterialization(
         materialization_key=task_image_materialization_key(
             task_id=task_id,
             task_checksum=checksum,
-            cpu_arch="arm64",
+            cpu_arch=cpu_arch,
         ),
         task_id=task_id,
         task_checksum=checksum,
-        cpu_arch="arm64",
-        task_config=_config(task_id=task_id),
+        cpu_arch=cpu_arch,
+        task_config=_config(task_id=task_id, cpu_arch=cpu_arch),
         task_source=f"s3://loom-bundles/{task_id}/",
         task_source_provenance={
             "bundle_file_metadata_sha256": "sha256:" + "5" * 64,
@@ -126,7 +127,7 @@ async def _queued_materialization(
 
 
 async def _active_authorization(
-    session: AsyncSession,
+    session: AsyncSession, *, cpu_arch: str = "x86_64",
 ) -> tuple[
     TaskImageBuildSessionAuthorization,
     object,
@@ -138,6 +139,7 @@ async def _active_authorization(
     _grant, principal, proof, receipt = await _project_grant(
         session,
         secret_store=secrets,
+        cpu_arch=cpu_arch,
     )
     build_session = await exchange_task_image_bootstrap(
         session,
@@ -833,7 +835,7 @@ async def test_renewal_supersedes_old_session_but_preserves_grant_owned_lease(
         },
         {"environment": "other"},
         {"pool_id": "other-pool"},
-        {"cpu_arch": "x86_64"},
+        {"cpu_arch": "arm64"},
         {"attestation_generation": 2},
         {"attestation_sha256": "8" * 64},
         {"attestation_expires_at": NOW + timedelta(seconds=41)},
@@ -858,3 +860,45 @@ async def test_mutated_session_authorization_is_rejected_before_claim(
                 now=NOW + timedelta(seconds=10),
                 lease_seconds=300,
             )
+
+
+async def test_new_arm_session_claim_rejected_without_queue_mutation(
+    authority_materialization_session,
+) -> None:
+    async with authority_materialization_session() as session:
+        authorization, *_ = await _active_authorization(session, cpu_arch="arm64")
+        row = await _queued_materialization(session, cpu_arch="arm64")
+        with pytest.raises(TaskImageSessionMaterializationAuthorizationError, match="x86_64 only"):
+            await claim_session_materialization(
+                session, authorization=authorization, claim_id=CLAIM_ID,
+                now=NOW + timedelta(seconds=10), lease_seconds=300,
+            )
+        await session.refresh(row)
+        assert row.state == "queued" and row.lease_epoch == 0
+        assert await session.scalar(select(func.count()).select_from(TaskImageMaterializationAttempt)) == 0
+
+
+async def test_historical_arm_session_receipt_replay_remains_readable(
+    authority_materialization_session, monkeypatch,
+) -> None:
+    from loom_task_image_authority import materializations
+
+    async with authority_materialization_session() as session:
+        authorization, *_ = await _active_authorization(session, cpu_arch="arm64")
+        row = await _queued_materialization(session, cpu_arch="arm64")
+        # Seed the frozen receipt exactly as the previous ARM-supporting release did.
+        with monkeypatch.context() as previous_release:
+            previous_release.setattr(materializations, "execution_cpu_arch", lambda arch: arch)
+            original = await claim_session_materialization(
+                session, authorization=authorization, claim_id=CLAIM_ID,
+                now=NOW + timedelta(seconds=10), lease_seconds=300,
+            )
+        assert original is not None
+        await session.flush()
+        replay = await claim_session_materialization(
+            session, authorization=authorization, claim_id=CLAIM_ID,
+            now=NOW + timedelta(seconds=11), lease_seconds=300,
+        )
+        assert replay is not None and replay[0].id == row.id
+        assert replay[1] == original[1] and replay[1].cpu_arch == "arm64"
+        assert await session.scalar(select(func.count()).select_from(TaskImageMaterializationAttempt)) == 1

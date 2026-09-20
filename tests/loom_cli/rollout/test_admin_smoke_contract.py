@@ -48,6 +48,7 @@ def test_authority_round_trips_and_builds_exact_payload() -> None:
         "name": "rehearsal-abc123",
         "represented_username": "devansh",
         "team_id": "11111111-1111-4111-8111-111111111111",
+        "purpose": "evaluation",
         "task_filter": {"task_ids": ["loom-smoke/gb10-oracle-hello-world"]},
         "trial_config": {"agent_name": "oracle", "agent_model": None},
         "n_per_task": 1,
@@ -87,6 +88,7 @@ def test_model_backed_authority_builds_bounded_payload_and_requires_exact_recove
         "name": "rollout-real-model",
         "represented_username": "devansh",
         "team_id": authority.team_id,
+        "purpose": "evaluation",
         "task_filter": {"task_ids": [authority.task_id]},
         "trial_config": expected_trial_config,
         "n_per_task": 1,
@@ -101,6 +103,7 @@ def test_model_backed_authority_builds_bounded_payload_and_requires_exact_recove
             "username": "devansh",
             "team_id": authority.team_id,
         },
+        "purpose": "evaluation",
         "task_filter": {"task_ids": [authority.task_id]},
     }
     assert (

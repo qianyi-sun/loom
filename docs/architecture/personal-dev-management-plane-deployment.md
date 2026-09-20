@@ -241,7 +241,10 @@ replacement, or in-place races. Its fixed invariants are:
 - personal namespace prefix: `loom-dev-`;
 - minimum slots default: `0`;
 - user-visible maximum slots: finite and at most `8` per environment;
-- pool capabilities: exactly OLDLAB x86_64 and GB10 arm64, with no weight;
+- pool capabilities: nonempty configured x86_64 offers, with no weight. The
+  default is OLDLAB x86_64; startup no longer requires an ARM pool. Historical
+  ARM wire records remain readable, but new capacity must follow the shared
+  x86-only execution policy;
 - in-cluster worker and personal Control Plane Slurm actuator: disabled;
 - personal candidate scope: `personal-dev-only`, never promotable; and
 - executable new-capacity ceiling: `0`.
