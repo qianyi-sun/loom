@@ -148,16 +148,47 @@ and mixed/common test modules stay in daily validation.
 
 | Manual compatibility only | Reason | Daily coverage retained |
 | --- | --- | --- |
-| Historical CLI `rollout` tests and protected application bootstrap/workload/generation tests | Nebius uses the independent `deploy_nebius_platform` operator | Nebius deployment/render/restore, common schema/migrations and DB authorization |
+| Historical CLI `rollout`, protected database ownership/login handoff and the six-profile schema-reference matrix | Nebius uses `deploy_nebius_platform` and `nebius_platform_bootstrap.bootstrap_database`, without the old sealed-owner takeover protocol | Nebius bootstrap/deployment/render/restore, application migration authority, runtime grants, schema inventory and common migrations |
 | Dedicated OLDLAB/GB10/Slurm modules and existing `legacy_pool` cases in mixed modules | Nebius disables the Slurm controller and uses its execution actuator | Nebius quota/capacity, scheduling, registration and common execution contracts |
 | CNPG operator handoff/fencing tests | Independent Nebius deployment does not use the historical CNPG takeover chain | Common PostgreSQL migrations, privileges, backup and restore |
-| Historical capacity-executor/scanner image and personal-dev workload lifecycle integration | Nebius declares no personal-dev capacity pools and disables its native builder | Shared storage secret admission, transfer, schema and object-store tests |
+| Historical capacity-executor/scanner image, personal-dev Kubernetes namespaces/secrets/job lifecycle and native-builder installers | Nebius declares no personal-dev capacity pools, disables its native builder and does not enable the old dev-instance provisioner | Shared SQL authorization, transfer, schema and object-store tests; current Nebius Kubernetes contracts |
 
 The old staging cluster render/isolation checks use the same manual scope;
 daily cluster smoke retains the execution actuator and Nebius platform/runtime
 contracts. These are runnable tests, not ignored/deleted ownership entries. Fixtures remain
 importable by common tests. A shared fixture change still selects its potential
 consumer jobs; scope filtering only removes the explicitly historical tests.
+
+### Runtime scope audit after #2007
+
+File names and the `legacy_pool` marker do not identify every historical test.
+For example, `test_protected_global_autoscaling_frozen.py` and
+`test_executable_global_capacity_bridge.py` exercise both OLDLAB and GB10 through
+the protected rollout/Slurm harnesses. The explicit compatibility list now also
+includes these modules, delegated old rollout transport, and dedicated Slurm
+backends/installers whose filenames start with another component's name.
+
+The `test_application_*` family is deliberately split. Ownership transfer,
+admission closure, migrator retirement, login restoration and the version ×
+PostgreSQL × legacy-profile reference matrix belong to the old operator. Real
+Alembic migration authority, runtime SQL grants and schema inventory stay daily.
+The current Nebius bootstrap test independently verifies its actual role and
+privilege setup. No blanket `test_application_*`, `test_capacity_*`,
+`test_personal_dev_*` or task-image exclusion is used.
+
+Personal-dev namespace/Secret fencing and Job reservation tests construct the
+old `KubectlPersonalDevCapacityInstaller` and `dev_instance_runtime` provisioner.
+Those disposable Kubernetes lifecycle tests are compatibility-only. Common
+PostgreSQL/MinIO storage, transfer primitives and current task-image publication
+remain daily. Removing a module from collection does not remove its fixtures:
+retained tests can still import them normally.
+
+For comparison, integration-branch CI runs 35394447854 and 35155582621 completed
+in about 14.5 minutes. The final #2007 run 35492370318 took 38m41s and passed 7,341
+ordinary integration cases across four shards, versus 1,821 across two shards in
+35394447854. Those runs have different test populations; the change targets
+unneeded work before changing runner size or adding shards. Measure the new
+current-head run before claiming an end-to-end speedup.
 
 Run the full compatibility tests, including both integration tiers:
 
@@ -172,5 +203,6 @@ gh workflow run ci.yml --ref dev -f legacy_compatibility=true -f coverage_summar
 
 This validates disposable fixtures and does not publish or deploy. Historical
 image publication retains its separate manual controller entry point. Known
-PostgreSQL/k3s fixture failures tracked in #2008 remain real compatibility issues;
-they are not retried, swallowed or declared fixed by this scope change.
+PostgreSQL/k3s fixture failures recorded in #2008 remain unresolved compatibility
+issues. The owner closed that investigation as not planned; changing daily CI
+scope does not claim a fix or add retries for those defects.

@@ -12,11 +12,33 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.parametrize("lane,legacy,common", [
-    ("tests-root", "tests/loom_cli/rollout/operator/test_application_guard_retention.py", "tests/unit/test_nebius_platform_render.py"),
-    ("integration", "tests/integration/test_application_capacity_bootstrap_runtime.py", "tests/integration/test_application_schema_reference.py"),
-    ("integration-docker", "tests/integration/test_application_workload_recovery.py", "tests/integration/test_nebius_restore.py"),
-    ("cluster-smoke", "tests/cluster/test_staging_k3s_render_contract.py", "tests/integration/test_nebius_platform_k3s.py"),
-    ("integration", "tests/integration/test_personal_dev_storage_workload_write.py", "tests/integration/test_personal_dev_storage_secret_admission.py"),
+    ("tests-root", (
+        "tests/loom_cli/rollout/operator/test_application_guard_retention.py",
+        "tests/ops/test_install_gb10_autoscaler_controller.py",
+        "tests/unit/test_capacity_executor_slurm_backend.py",
+    ), ("tests/unit/test_nebius_platform_render.py",)),
+    ("integration", (
+        "tests/integration/test_application_capacity_bootstrap_runtime.py",
+        "tests/integration/test_application_schema_reference.py",
+        "tests/integration/test_application_runtime_login.py",
+        "tests/integration/test_protected_global_autoscaling_frozen.py",
+        "tests/integration/test_executable_global_capacity_bridge.py",
+        "tests/integration/test_personal_dev_storage_workload_write.py",
+        "tests/integration/test_personal_dev_storage_namespace.py",
+        "tests/integration/test_personal_dev_storage_secret_admission.py",
+    ), (
+        "tests/integration/test_nebius_platform_bootstrap.py",
+        "tests/integration/test_application_migration_authority.py",
+        "tests/integration/test_application_runtime_grants.py",
+        "tests/integration/test_alembic_migrations.py",
+        "tests/integration/test_personal_dev_storage_transfer_primitives.py",
+        "tests/integration/test_task_image_publication_jobs.py",
+    )),
+    ("integration-docker", ("tests/integration/test_application_workload_recovery.py",),
+     ("tests/integration/test_nebius_restore.py",)),
+    ("cluster-smoke", ("tests/cluster/test_staging_k3s_render_contract.py",),
+     ("tests/integration/test_nebius_platform_k3s.py",)),
+    ("go-checks", (), ("tests/integration/test_task_image_publication_full_flow.py",)),
 ])
 def test_real_cli_preserves_common_tests_and_manual_compatibility(lane, legacy, common):
     for scope in ("nebius", "all"):
@@ -24,8 +46,9 @@ def test_real_cli_preserves_common_tests_and_manual_compatibility(lane, legacy, 
                               "--lane", lane, "--test-scope", scope], cwd=ROOT, capture_output=True, text=True)
         assert run.returncode == 0, run.stderr
         paths = run.stdout.splitlines()
-        assert common in paths
-        assert (legacy in paths) == (scope == "all")
+        assert set(common) <= set(paths)
+        for path in legacy:
+            assert (path in paths) == (scope == "all"), path
 
 
 def test_compatibility_scope_does_not_disable_test_ownership():
