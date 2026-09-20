@@ -215,7 +215,7 @@ def test_go_checks_executes_required_python_go_v2_handoff() -> None:
         "LOOM_GO_V2_TEST_REQUIRED": "1",
     }
     assert handoff["run"] == (
-        "uv run --no-sync pytest "
+        'uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" '
         "tests/integration/test_task_image_builder_guard_local_flow.py "
         "tests/integration/test_task_image_publication_full_flow.py"
     )
@@ -454,7 +454,9 @@ def test_pytest_jobs_consume_manifest_owned_lane_paths(job_name: str, lane: str)
         f"uv run --no-sync python scripts/component_ownership.py test-paths --lane {lane}"
         in scripts
     )
-    assert 'uv run --no-sync pytest "${test_paths[@]}"' in scripts
+    assert any(line.strip().startswith("uv run --no-sync pytest ")
+               and '"${test_paths[@]}"' in line for line in scripts.splitlines())
+    assert "CI_PYTEST_MARKERS" in scripts
 
 
 def test_cluster_smoke_consumes_manifest_owned_lane_paths() -> None:
@@ -468,7 +470,9 @@ def test_cluster_smoke_consumes_manifest_owned_lane_paths() -> None:
     )
     assert "uv sync --locked --all-packages --extra dev --extra cluster" in scripts
     assert "uv pip check --python .venv/bin/python" in scripts
-    assert 'uv run --no-sync pytest "${test_paths[@]}"' in scripts
+    assert any(line.strip().startswith("uv run --no-sync pytest ")
+               and '"${test_paths[@]}"' in line for line in scripts.splitlines())
+    assert "CI_PYTEST_MARKERS" in scripts
     assert "scripts/validate_environment_isolation.py" in scripts
     normalized_scripts = " ".join(scripts.replace("\\\n", " ").split())
     for config in (
@@ -2165,7 +2169,7 @@ def test_staging_gate_consumes_manifest_owned_system_smoke_lane() -> None:
         "uv run --no-sync python scripts/component_ownership.py test-paths --lane system-smoke"
         in scripts
     )
-    assert 'uv run --no-sync pytest --timeout=1200 "${test_paths[@]}"' in scripts
+    assert 'pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" --timeout=1200 "${test_paths[@]}"' in scripts
     assert (
         "--profile worker --profile task-image-builder down -v --remove-orphans" in cleanup_script
     )
@@ -2192,7 +2196,8 @@ def test_repository_checks_writes_default_fast_coverage_summary() -> None:
     )
 
     assert "GITHUB_STEP_SUMMARY" in coverage_step["run"]
-    assert "coverage report --fail-under=70" in coverage_step["run"]
+    assert "coverage_floor=(--fail-under=70)" in coverage_step["run"]
+    assert '"${CI_TEST_SCOPE:-all}" == "all"' in coverage_step["run"]
 
 
 def test_combined_coverage_summary_is_opt_in() -> None:
@@ -2266,7 +2271,7 @@ def test_pytest_workflow_preserves_tests_and_failures_with_optional_integration_
     if not instrumented:
         assert args[args.index("-p") + 1] == "no:cov"
     if lane == "integration":
-        assert args[args.index("-m") + 1] == "not docker"
+        assert args[args.index("-m") + 1] == "not docker and (not legacy_pool)"
         assert job["env"]["COVERAGE_ENABLED"] == "${{ needs.workflow-plan.outputs.coverage_summary }}"
         upload = next(s for s in job["steps"] if s.get("name") == "Upload integration coverage data")
         assert "env.COVERAGE_ENABLED == 'true'" in upload["if"]

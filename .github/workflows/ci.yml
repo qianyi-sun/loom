@@ -65,13 +65,18 @@ on:
     - cron: "23 8 * * *"
   workflow_dispatch:
     inputs:
+      legacy_compatibility:
+        description: "Include historical platform tests and both integration tiers (manual only)"
+        required: false
+        type: boolean
+        default: false
       integration:
         description: "Run fast integration tier (testcontainers, no real Docker driver)"
         required: false
         type: boolean
         default: false
       coverage_summary:
-        description: "Run full Python tests with coverage accounting and the 70% fast-tier floor"
+        description: "Collect full selected-scope coverage (historical 70% floor applies only to compatibility scope)"
         required: false
         type: boolean
         default: false
@@ -100,6 +105,10 @@ permissions:
   contents: read
   # No pull-requests:write needed — coverage report is published via
   # the GitHub Actions step summary, not as a PR comment.
+
+env:
+  CI_TEST_SCOPE: ${{ ((github.event_name == 'workflow_dispatch' && inputs.legacy_compatibility) || github.ref == 'refs/heads/main' || github.base_ref == 'main') && 'all' || 'nebius' }}
+  CI_PYTEST_MARKERS: ${{ ((github.event_name == 'workflow_dispatch' && inputs.legacy_compatibility) || github.ref == 'refs/heads/main' || github.base_ref == 'main') && 'legacy_pool or not legacy_pool' || 'not legacy_pool' }}
 
 jobs:
   workflow-plan:
@@ -183,8 +192,8 @@ jobs:
           PR_ACTION_LABEL: ${{ github.event.label.name }}
           PR_DRAFT: ${{ github.event.pull_request.draft || false }}
           PR_BASE_CHANGED: ${{ github.event.changes.base != null }}
-          DISPATCH_INTEGRATION: ${{ inputs.integration }}
-          DISPATCH_INTEGRATION_DOCKER: ${{ inputs.integration_docker }}
+          DISPATCH_INTEGRATION: ${{ inputs.integration || inputs.legacy_compatibility }}
+          DISPATCH_INTEGRATION_DOCKER: ${{ inputs.integration_docker || inputs.legacy_compatibility }}
           DISPATCH_COVERAGE_SUMMARY: ${{ inputs.coverage_summary }}
         run: |
           set -euo pipefail
@@ -420,7 +429,7 @@ jobs:
         run: |
           set -euo pipefail
           manifest_paths_file="${RUNNER_TEMP}/tests-root-manifest.txt"
-          uv run --no-sync python scripts/component_ownership.py test-paths --lane tests-root \
+          uv run --no-sync python scripts/component_ownership.py test-paths --lane tests-root --test-scope "${CI_TEST_SCOPE:-all}" \
             --changed-paths-json "$TEST_CHANGED_PATHS" \
             --shard-index "${SHARD_INDEX}" --shard-count "${SHARD_COUNT}" \
             > "${manifest_paths_file}"
@@ -433,7 +442,7 @@ jobs:
           if [[ "$COVERAGE_ENABLED" == "true" ]]; then
             coverage_args=(--cov=src --cov=packages --cov-report=)
           fi
-          uv run --no-sync pytest "${test_paths[@]}" \
+          uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" "${test_paths[@]}" \
             --durations=25 \
             "${coverage_args[@]}"
 
@@ -583,7 +592,7 @@ jobs:
         run: |
           set -euo pipefail
           manifest_paths_file="${RUNNER_TEMP}/tests-packages-manifest.txt"
-          uv run --no-sync python scripts/component_ownership.py test-paths --lane tests-packages \
+          uv run --no-sync python scripts/component_ownership.py test-paths --lane tests-packages --test-scope "${CI_TEST_SCOPE:-all}" \
             --changed-paths-json "$TEST_CHANGED_PATHS" > "$manifest_paths_file"
           mapfile -t test_paths < "$manifest_paths_file"
           if [[ ${#test_paths[@]} -eq 0 ]]; then
@@ -594,7 +603,7 @@ jobs:
           if [[ "$COVERAGE_ENABLED" == "true" ]]; then
             coverage_args=(--cov=src --cov=packages --cov-report=)
           fi
-          uv run --no-sync pytest "${test_paths[@]}" \
+          uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" "${test_paths[@]}" \
             "${coverage_args[@]}"
 
       - name: Upload package coverage data
@@ -782,15 +791,21 @@ jobs:
           include-hidden-files: true
           if-no-files-found: warn
 
-      # Explicit full coverage runs retain the 70% fast-tier floor.
-      # Ordinary PRs run the same tests without coverage instrumentation.
+      # The 70% baseline belongs to the historical all-platform population.
+      # Nebius reports coverage without comparing it to that different population.
       - name: Coverage gate + summary (fast tier)
         if: >-
           needs.workflow-plan.outputs.coverage_summary == 'true' &&
           needs.workflow-plan.outputs.gate_mode == 'full'
         run: |
           set +e
-          uv run --no-sync coverage report --fail-under=70 | tee coverage-report.txt
+          coverage_floor=()
+          coverage_note="Nebius scope; historical all-platform floor is not comparable"
+          if [[ "${CI_TEST_SCOPE:-all}" == "all" ]]; then
+            coverage_floor=(--fail-under=70)
+            coverage_note="all-platform gate >= 70 %"
+          fi
+          uv run --no-sync coverage report "${coverage_floor[@]}" | tee coverage-report.txt
           status=${PIPESTATUS[0]}
           set -e
           fast_pct=$(uv run --no-sync coverage report --format=total)
@@ -798,7 +813,7 @@ jobs:
           {
             echo "## Coverage report"
             echo ""
-            echo "**Fast tier: ${fast_pct} %** (gate >= 70 %)."
+            echo "**Fast tier: ${fast_pct} %** (${coverage_note})."
             echo ""
             echo '```'
             echo "${fast_summary}"
@@ -859,7 +874,7 @@ jobs:
         env:
           LOOM_GO_V2_TEST_BINARY: ${{ runner.temp }}/loom-task-image-builder-supervisor.test
           LOOM_GO_V2_TEST_REQUIRED: "1"
-        run: uv run --no-sync pytest tests/integration/test_task_image_builder_guard_local_flow.py tests/integration/test_task_image_publication_full_flow.py
+        run: uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" tests/integration/test_task_image_builder_guard_local_flow.py tests/integration/test_task_image_publication_full_flow.py
 
   # Required frontend gate. It builds and serves the production bundle under
   # a route prefix, then exercises logged-out, user, and admin paths at both
@@ -901,7 +916,7 @@ jobs:
                 -f scripts/component_ownership.py ]] && \
              python3 scripts/component_ownership.py --help | grep -q -- 'test-paths'; then
             mapfile -t owned_tests < <(
-              python3 scripts/component_ownership.py test-paths --lane frontend
+              python3 scripts/component_ownership.py test-paths --lane frontend --test-scope "${CI_TEST_SCOPE:-all}"
             )
             [[ ${#owned_tests[@]} -gt 0 ]]
             web_tests=()
@@ -991,7 +1006,7 @@ jobs:
         run: |
           set -euo pipefail
           manifest_paths_file="${RUNNER_TEMP}/integration-manifest.txt"
-          uv run --no-sync python scripts/component_ownership.py test-paths --lane integration \
+          uv run --no-sync python scripts/component_ownership.py test-paths --lane integration --test-scope "${CI_TEST_SCOPE:-all}" \
             --changed-paths-json "$TEST_CHANGED_PATHS" \
             --shard-index "${SHARD_INDEX}" --shard-count "${SHARD_COUNT}" \
             > "${manifest_paths_file}"
@@ -1005,7 +1020,7 @@ jobs:
             coverage_args=(--cov=src --cov=packages --cov-report=)
           fi
           uv run --no-sync pytest "${test_paths[@]}" \
-            -m "not docker" \
+            -m "not docker and (${CI_PYTEST_MARKERS:-not legacy_pool})" \
             --maxfail=1 \
             --durations=15 \
             "${coverage_args[@]}"
@@ -1064,14 +1079,14 @@ jobs:
         run: |
           set -euo pipefail
           manifest_paths_file="${RUNNER_TEMP}/integration-docker-manifest.txt"
-          uv run --no-sync python scripts/component_ownership.py test-paths --lane integration-docker \
+          uv run --no-sync python scripts/component_ownership.py test-paths --lane integration-docker --test-scope "${CI_TEST_SCOPE:-all}" \
             --changed-paths-json "$TEST_CHANGED_PATHS" > "$manifest_paths_file"
           mapfile -t test_paths < "$manifest_paths_file"
           if [[ ${#test_paths[@]} -eq 0 ]]; then
             echo "No selected tests belong to this lane."
             exit 0
           fi
-          uv run --no-sync pytest "${test_paths[@]}" \
+          uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" "${test_paths[@]}" \
             --durations=15
 
   # Optional combined coverage summary for PRs and manual diagnostics.
@@ -1154,7 +1169,7 @@ jobs:
           {
             echo "## Coverage report"
             echo ""
-            echo "**Fast tier: ${fast_pct} %** (gate ≥ 70 %)."
+            echo "**Fast tier: ${fast_pct} %** (scope: ${CI_TEST_SCOPE:-all})."
             echo ""
             echo "${combined_block}"
             echo ""

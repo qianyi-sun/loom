@@ -123,6 +123,7 @@ class Manifest:
     components: tuple[Component, ...]
     test_suites: tuple[TestSuite, ...]
     test_sharding: tuple[TestShardPolicy, ...]
+    compatibility_test_paths: tuple[str, ...] = ()
 
     def ci_ignores_path(self, path: str) -> bool:
         normalized = _safe_path(path, context="query path")
@@ -600,6 +601,7 @@ def load_manifest(path: Path) -> Manifest:
             "schema_version",
             "ci_lanes",
             "ci_ignored_paths",
+            "compatibility_test_paths",
             "execution_policies",
             "execution_cases",
             "smoke_owners",
@@ -636,6 +638,13 @@ def load_manifest(path: Path) -> Manifest:
     ci_ignored_paths = tuple(
         _safe_path(item, context="manifest.ci_ignored_paths", allow_glob=True)
         for item in raw_ci_ignored_paths
+    )
+    compatibility = raw.get("compatibility_test_paths", [])
+    if not isinstance(compatibility, list) or not all(isinstance(item, str) for item in compatibility):
+        raise ManifestError("manifest.compatibility_test_paths must be a string array")
+    compatibility_test_paths = tuple(
+        _safe_path(item, context="manifest.compatibility_test_paths", allow_glob=True)
+        for item in compatibility
     )
     if not isinstance(raw_components, list) or not all(
         isinstance(item, dict) for item in raw_components
@@ -707,6 +716,7 @@ def load_manifest(path: Path) -> Manifest:
         schema_version=2,
         ci_lanes=ci_lanes,
         ci_ignored_paths=ci_ignored_paths,
+        compatibility_test_paths=compatibility_test_paths,
         execution_policies=execution_policies,
         execution_cases=execution_cases,
         smoke_owners=_slug_registry(raw, "smoke_owners"),
@@ -778,6 +788,9 @@ def validate_manifest(
     """Return deterministic authority errors for tracked repository inputs."""
 
     errors: list[str] = []
+    for pattern in manifest.compatibility_test_paths:
+        if not any(_is_runnable_test_path(path) and matches_path(path, pattern) for path in tracked_paths):
+            errors.append(f"compatibility test pattern matches no tracked test: {pattern}")
     for pattern in manifest.ci_ignored_paths:
         if not any(matches_path(path, pattern) for path in tracked_paths):
             errors.append(f"CI ignored path pattern matches no tracked path: {pattern}")
@@ -1194,6 +1207,16 @@ def test_paths_for_lane(
     )
 
 
+def select_test_scope(manifest: Manifest, paths: tuple[str, ...], *, scope: str) -> tuple[str, ...]:
+    """Keep platform-common tests by default; compatibility exclusion is explicit."""
+    if scope not in {"all", "nebius"}:
+        raise ManifestError(f"unknown test scope: {scope}")
+    if scope == "all":
+        return paths
+    return tuple(path for path in paths
+                 if not any(matches_path(path, pattern) for pattern in manifest.compatibility_test_paths))
+
+
 def narrow_test_only_changes(
     paths: tuple[str, ...], *, changed_paths: tuple[str, ...],
     tracked_paths: tuple[str, ...], repo_root: Path,
@@ -1420,6 +1443,7 @@ def _parser() -> argparse.ArgumentParser:
         help="Print every tracked test path assigned to one CI lane.",
     )
     test_paths.add_argument("--lane", required=True)
+    test_paths.add_argument("--test-scope", choices=("all", "nebius"), default="all")
     test_paths.add_argument("--changed-paths-json", default="[]",
                             help="Narrow independent test-only edits; [] always runs the full lane.")
     test_paths.add_argument("--shard-index", type=int, default=0)
@@ -1585,6 +1609,7 @@ def main(argv: list[str] | None = None) -> int:
                 tracked_paths=tracked_paths, repo_root=repo_root,
             )
             paths = select_affected_test_suites(manifest, paths, changed_paths=tuple(changed_paths))
+            paths = select_test_scope(manifest, paths, scope=args.test_scope)
             for path in paths:
                 print(path)
             return 0

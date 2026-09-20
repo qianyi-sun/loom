@@ -53,9 +53,9 @@ run-name: >-
                     contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
              github.event.pull_request.number || 'none') }}
 
-# Validates the version-controlled multi-node k3s render contract used by live
-# staging. This PR gate is intentionally mutation-free: candidate deployment
-# and live k3s readiness remain separately authorized protected acceptance.
+# Validates Nebius and common disposable Kubernetes contracts. Historical
+# staging render/isolation checks run only in explicit compatibility/main scope.
+# This workflow does not deploy to live environments.
 #
 # Trigger model:
 #   - workflow_dispatch (manual)
@@ -64,6 +64,12 @@ run-name: >-
 
 on:
   workflow_dispatch:
+    inputs:
+      legacy_compatibility:
+        description: "Include historical platform contracts (manual only)"
+        required: false
+        type: boolean
+        default: false
   push:
     branches: [dev]
     paths:
@@ -92,6 +98,10 @@ concurrency:
     ${{ github.event_name == 'pull_request' &&
         !(github.event.pull_request.draft ||
           github.event.action == 'converted_to_draft') }}
+
+env:
+  CI_TEST_SCOPE: ${{ ((github.event_name == 'workflow_dispatch' && inputs.legacy_compatibility) || github.ref == 'refs/heads/main' || github.base_ref == 'main') && 'all' || 'nebius' }}
+  CI_PYTEST_MARKERS: ${{ ((github.event_name == 'workflow_dispatch' && inputs.legacy_compatibility) || github.ref == 'refs/heads/main' || github.base_ref == 'main') && 'legacy_pool or not legacy_pool' || 'not legacy_pool' }}
 
 jobs:
   plan:
@@ -218,26 +228,28 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t test_paths < <(
-            uv run --no-sync python scripts/component_ownership.py test-paths --lane cluster-smoke
+            uv run --no-sync python scripts/component_ownership.py test-paths --lane cluster-smoke --test-scope "${CI_TEST_SCOPE:-all}"
           )
           [[ ${#test_paths[@]} -gt 0 ]]
-          uv run --no-sync pytest "${test_paths[@]}"
-          uv run --no-sync python scripts/validate_environment_isolation.py \
-            --profiles-dir deploy/environments \
-            --workflow .github/workflows/deploy-environment.yml
-          candidate_render_dir="$(mktemp -d)"
-          trap 'rm -rf "${candidate_render_dir}"' EXIT
-          for config in \
-            deploy/environments/staging.multinode.cluster.toml \
-            deploy/environments/production.cluster.toml
-          do
-            rendered="${candidate_render_dir}/$(basename "${config}" .toml).yaml"
-            uv run --no-sync loom cluster render \
-              --config "${config}" > "${rendered}"
-            test -s "${rendered}"
-            uv run --no-sync loom cluster audit \
-              --config "${config}"
-          done
+          uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" "${test_paths[@]}"
+          if [[ "${CI_TEST_SCOPE:-all}" == "all" ]]; then
+            uv run --no-sync python scripts/validate_environment_isolation.py \
+              --profiles-dir deploy/environments \
+              --workflow .github/workflows/deploy-environment.yml
+            candidate_render_dir="$(mktemp -d)"
+            trap 'rm -rf "${candidate_render_dir}"' EXIT
+            for config in \
+              deploy/environments/staging.multinode.cluster.toml \
+              deploy/environments/production.cluster.toml
+            do
+              rendered="${candidate_render_dir}/$(basename "${config}" .toml).yaml"
+              uv run --no-sync loom cluster render \
+                --config "${config}" > "${rendered}"
+              test -s "${rendered}"
+              uv run --no-sync loom cluster audit \
+                --config "${config}"
+            done
+          fi
 
   cluster-smoke-gate:
     name: >-

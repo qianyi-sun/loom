@@ -13,7 +13,8 @@ work; selected failures, cancellations and unexpected skips still block merging.
 Draft filtering, current-head/base requirements, and native squash auto-merge
 retain the [repository contract](../../CONTRIBUTING.md).
 
-The manifest retains both existing-platform and Nebius tests. PR image CI uses the same seven-image Nebius set as candidate publication,
+The manifest retains ownership of both historical and Nebius tests. Daily dev CI
+selects Nebius and common contracts; historical compatibility is manual. PR image CI uses the same seven-image Nebius set as candidate publication,
 builds only affected AMD64 images and scans the resulting artifacts. Existing signed publication
 consumers retain their declared architecture manifests until migrated. Disposable
 Kubernetes checks include the Nebius platform and execution contracts. Candidate
@@ -50,8 +51,10 @@ The actual tests are selected from `config/component-ownership.toml`.
 
 Python root/package/integration tests normally run without coverage instrumentation.
 Request `ci:coverage-summary` or dispatch CI with `coverage_summary=true` for
-full test selection, combined accounting and the **70%** fast-tier floor.
-Once requested, coverage failures still block the repository gate. Frontend
+full selection within the active scope and combined accounting. Nebius coverage
+is reported without applying the historical all-platform **70%** floor to a
+different test population. The floor still applies in compatibility/main scope.
+Coverage collection/reporting errors still block the repository gate. Frontend
 coverage thresholds remain separate. No p50/p90 speedup is claimed before live
 measurement; the removed instrumentation and artifact work is deterministic.
 
@@ -64,7 +67,7 @@ test inputs select their possible consumer jobs as well as retaining all files
 inside those jobs, including when mixed with source changes. Runtime,
 migration, configuration, fixture, deleted-file and unknown changes stay full
 unless a suite explicitly declares an audited unaffected component.
-CI selector labels and manual runs request full regression; ordinary labels such
+CI selector labels and manual runs request full regression within the active scope; ordinary labels such
 as `bug` do not change test selection. Sharding happens before filtering,
 so ownership and paired-fixture ordering remain stable. Empty selections do not
 invoke pytest, and selector errors fail the job.
@@ -114,7 +117,7 @@ stops existing OLDLAB services. Migrating those consumers remains separate work.
 ## Daily regression and expensive components
 
 CI runs once daily at 08:23 UTC on the default branch (`dev`). It uses the same
-jobs with full root/package/Go/Web/integration/Docker selection and coverage;
+jobs with full Nebius/common root/package/Go/Web/integration/Docker selection and coverage;
 it does not publish or deploy and adds no PR admission context. The scheduled
 result is named `repository-checks-scheduled`.
 
@@ -130,3 +133,44 @@ and failure propagation as ordinary integration.
 The pre-change integration sample (run `35485701767`, shard 3) spent 41m55s in
 pytest and about 22s preparing the runner and dependencies. This identifies test
 work as the dominant cost; it is not a measurement of this change's speedup.
+
+
+## Daily tests and manual compatibility
+
+The existing CI workflow accepts `legacy_compatibility=true`; no new workflow or
+required check is introduced. Daily PRs, normal dispatch and scheduled runs use
+`CI_TEST_SCOPE=nebius` plus the pytest expression `not legacy_pool`. Main production
+validation and an explicit compatibility dispatch use `all`. Scope filtering is
+after stable sharding, so shard pins and fixture ordering do not move. Unknown
+and mixed/common test modules stay in daily validation.
+
+`config/component-ownership.toml` owns the explicit `compatibility_test_paths`:
+
+| Manual compatibility only | Reason | Daily coverage retained |
+| --- | --- | --- |
+| Historical CLI `rollout` tests and protected application bootstrap/workload/generation tests | Nebius uses the independent `deploy_nebius_platform` operator | Nebius deployment/render/restore, common schema/migrations and DB authorization |
+| Dedicated OLDLAB/GB10/Slurm modules and existing `legacy_pool` cases in mixed modules | Nebius disables the Slurm controller and uses its execution actuator | Nebius quota/capacity, scheduling, registration and common execution contracts |
+| CNPG operator handoff/fencing tests | Independent Nebius deployment does not use the historical CNPG takeover chain | Common PostgreSQL migrations, privileges, backup and restore |
+| Historical capacity-executor/scanner image and personal-dev workload lifecycle integration | Nebius declares no personal-dev capacity pools and disables its native builder | Shared storage secret admission, transfer, schema and object-store tests |
+
+The old staging cluster render/isolation checks use the same manual scope;
+daily cluster smoke retains the execution actuator and Nebius platform/runtime
+contracts. These are runnable tests, not ignored/deleted ownership entries. Fixtures remain
+importable by common tests. A shared fixture change still selects its potential
+consumer jobs; scope filtering only removes the explicitly historical tests.
+
+Run the full compatibility tests, including both integration tiers:
+
+```sh
+gh workflow run ci.yml --ref dev -f legacy_compatibility=true
+# Historical Kubernetes/system contracts use the existing smoke workflows:
+gh workflow run cluster-smoke.yml --ref dev -f legacy_compatibility=true
+gh workflow run staging-smoke.yml --ref dev -f legacy_compatibility=true
+# Also request the historical all-platform coverage floor:
+gh workflow run ci.yml --ref dev -f legacy_compatibility=true -f coverage_summary=true
+```
+
+This validates disposable fixtures and does not publish or deploy. Historical
+image publication retains its separate manual controller entry point. Known
+PostgreSQL/k3s fixture failures tracked in #2008 remain real compatibility issues;
+they are not retried, swallowed or declared fixed by this scope change.

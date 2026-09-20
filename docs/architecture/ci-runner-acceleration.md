@@ -12,9 +12,11 @@ replacement gate publisher.
 
 Python root, package and integration tests run without coverage instrumentation
 by default. Use the existing `ci:coverage-summary` selector or dispatch CI with
-`coverage_summary=true` for the full coverage report and 70% fast-tier floor.
+`coverage_summary=true` for the selected-scope coverage report. The historical
+70% floor applies only to all-platform compatibility validation.
 The selector adds work and never suppresses relevant tests. Daily CI also runs
-full regression and coverage at 08:23 UTC.
+Nebius/common regression and coverage at 08:23 UTC.
+Historical tests are available through CI dispatch `legacy_compatibility=true`.
 
 Dev PR image builds select from the seven AMD64 Nebius platform images.
 Historical personal-dev publication is manual; main production publication
@@ -29,7 +31,7 @@ only the edited modules assigned to it. A test module referenced elsewhere is
 potentially a shared fixture and retains full validation. Runtime, migration,
 configuration, fixture, deleted-file and unknown changes also retain full lanes,
 except explicitly audited unrelated components in the ownership manifest.
-A CI selector label or manual CI dispatch requests full regression. Ordinary
+A CI selector label or manual CI dispatch requests full regression within the active test scope. Ordinary
 labels do not affect selection. Empty selected
 shards finish without invoking pytest; failures while selecting files still fail
 the job. Tests are assigned to shards before filtering so ownership stays stable.

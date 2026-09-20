@@ -108,13 +108,15 @@ for release promotion PRs from `dev`.
 The [Nebius CI integration](docs/ops/nebius-ci.md) retains `dev`'s four protected
 checks and uses GitHub-hosted runners with amd64 PR image builds. Python tests
 normally run without coverage instrumentation. Use `ci:coverage-summary` or the
-CI dispatch input `coverage_summary` for full coverage accounting and the 70%
-fast-tier floor. `ci:integration` requests full functional integration tests
+CI dispatch input `coverage_summary` for coverage accounting within the selected
+scope. The historical 70% floor applies only to all-platform compatibility runs. `ci:integration` requests full functional integration tests
 without coverage. Independent test-only edits select their owning test files;
 shared-fixture, deleted-test and cross-module fixture changes select all Python
 test consumers and retain complete lanes, including in mixed source/test diffs. Audited component
 selection avoids unrelated backend jobs and schema-reference provisioning. A daily
-full regression at 08:23 UTC retains complete test selection and coverage. Dev PRs
+Nebius/common regression at 08:23 UTC retains complete selection within that scope
+and coverage reporting. Use CI dispatch `legacy_compatibility=true` to include
+historical platform tests and both integration tiers. Dev PRs
 use the seven-image Nebius set; historical personal-dev publication is manual.
 
 Deployment environments are separated from branch workflow: `development`

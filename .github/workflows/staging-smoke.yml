@@ -60,6 +60,12 @@ run-name: >-
 
 on:
   workflow_dispatch:
+    inputs:
+      legacy_compatibility:
+        description: "Include historical platform contracts (manual only)"
+        required: false
+        type: boolean
+        default: false
   pull_request:
     types: [labeled, unlabeled, opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
   merge_group:
@@ -79,6 +85,10 @@ concurrency:
     ${{ github.event_name == 'pull_request' &&
         !(github.event.pull_request.draft ||
           github.event.action == 'converted_to_draft') }}
+
+env:
+  CI_TEST_SCOPE: ${{ ((github.event_name == 'workflow_dispatch' && inputs.legacy_compatibility) || github.ref == 'refs/heads/main' || github.base_ref == 'main') && 'all' || 'nebius' }}
+  CI_PYTEST_MARKERS: ${{ ((github.event_name == 'workflow_dispatch' && inputs.legacy_compatibility) || github.ref == 'refs/heads/main' || github.base_ref == 'main') && 'legacy_pool or not legacy_pool' || 'not legacy_pool' }}
 
 jobs:
   plan:
@@ -197,10 +207,10 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t test_paths < <(
-            uv run --no-sync python scripts/component_ownership.py test-paths --lane system-smoke
+            uv run --no-sync python scripts/component_ownership.py test-paths --lane system-smoke --test-scope "${CI_TEST_SCOPE:-all}"
           )
           [[ ${#test_paths[@]} -gt 0 ]]
-          uv run --no-sync pytest --timeout=1200 "${test_paths[@]}"
+          uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" --timeout=1200 "${test_paths[@]}"
 
       - name: Show system-smoke compose diagnostics
         if: failure()
