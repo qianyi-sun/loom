@@ -9,9 +9,19 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING or __package__:
-    from scripts.component_ownership import Manifest, load_manifest
+    from scripts.component_ownership import (
+        Manifest,
+        _tracked_paths,
+        load_manifest,
+        narrow_test_only_changes,
+    )
 else:
-    from component_ownership import Manifest, load_manifest
+    from component_ownership import (
+        Manifest,
+        _tracked_paths,
+        load_manifest,
+        narrow_test_only_changes,
+    )
 
 HEAVY_CHECKS = (
     "integration",
@@ -20,6 +30,8 @@ HEAVY_CHECKS = (
     "cluster_smoke",
     "staging_smoke",
 )
+
+BASELINE_CHECKS = ("tests_root", "tests_packages", "go_checks", "runtime_payload", "nebius_iac", "locked_environments")
 
 SUPPORTED_EVENTS = {"merge_group", "pull_request", "push", "workflow_dispatch"}
 
@@ -176,6 +188,13 @@ class ValidationPlan:
     web_checks: bool
     reasons: dict[str, tuple[str, ...]]
     test_changes: tuple[str, ...] = ()
+    tests_root: bool = True
+    tests_packages: bool = True
+    go_checks: bool = True
+    runtime_payload: bool = True
+    nebius_iac: bool = True
+    locked_environments: bool = True
+
 
     def selected_heavy_checks(self) -> set[str]:
         return {name for name in HEAVY_CHECKS if getattr(self, name)}
@@ -189,6 +208,7 @@ class ValidationPlan:
                 "docs_only",
                 "unowned_runtime",
                 *HEAVY_CHECKS,
+                *BASELINE_CHECKS,
                 "coverage_summary",
                 "web_checks",
             )
@@ -478,7 +498,7 @@ def plan_validations(
             for name in HEAVY_CHECKS:
                 select(name, f"dependency-authority:{path}")
             matched_owner = True
-        if _matches(path, exact=integration_exact, prefixes=integration_prefixes):
+        if path.startswith("tests/contract/") or (not test_owner_lanes and _matches(path, exact=integration_exact, prefixes=integration_prefixes)):
             select("integration", f"path:{path}")
             matched_owner = True
         elif not test_owner_lanes and not (
@@ -487,7 +507,7 @@ def plan_validations(
             # Frontend inputs already select web/image/system contracts below.
             # They do not change the Python runtime exercised by this lane.
             select("integration", f"non-doc-path:{path}")
-        if _matches(path, exact=docker_exact, prefixes=docker_prefixes):
+        if path in docker_exact or (not test_owner_lanes and _matches(path, exact=set(), prefixes=docker_prefixes)):
             select("integration_docker", f"path:{path}")
             matched_owner = True
         image_match = _matches(
@@ -519,6 +539,39 @@ def plan_validations(
     if any(selected[name] for name in ("integration", "integration_docker", "coverage_summary")):
         docs_only = False
 
+    runtime_paths = tuple(path for path in paths if not _is_documentation_path(path))
+    force_baseline = (
+        not paths or event_name == "workflow_dispatch" or unowned_runtime
+        or selected["coverage_summary"]
+        or any(path in PLANNER_PATHS | OWNERSHIP_AUTHORITY_PATHS
+               or path == ".github/workflows/ci.yml"
+               or _is_dependency_authority_path(path) for path in paths)
+    )
+    backend_paths = tuple(path for path in runtime_paths
+                          if not path.startswith("web/") and path != "deploy/Dockerfile.web")
+    baseline = {name: bool(backend_paths) for name in BASELINE_CHECKS}
+    baseline["nebius_iac"] = any(
+        _matches(path, exact=NEBIUS_IAC_EXACT, prefixes=NEBIUS_IAC_PREFIXES)
+        for path in runtime_paths
+    )
+    # Only independently editable test modules may suppress other owning jobs.
+    # The existing shared-fixture fallback keeps all Python owners when unsure.
+    if (runtime_paths and not force_baseline and not set(labels) & LABEL_TO_CHECK.keys()
+            and all(Path(path).name.startswith("test_") and path.endswith(".py") for path in runtime_paths)):
+        tracked = _tracked_paths(REPO_ROOT)
+        independent = narrow_test_only_changes(
+            tracked, changed_paths=runtime_paths, tracked_paths=tracked, repo_root=REPO_ROOT,
+        )
+        if independent != tracked:
+            owners = {lane for path in independent for lane in _test_owner_lanes(path)}
+            baseline.update(tests_root="tests-root" in owners,
+                            tests_packages="tests-packages" in owners,
+                            go_checks="go-checks" in owners,
+                            runtime_payload="runtime-payload" in owners,
+                            locked_environments=False)
+    if force_baseline:
+        baseline = dict.fromkeys(BASELINE_CHECKS, True)
+
     return ValidationPlan(
         event_relevant=event_relevant,
         full_gate=full_gate,
@@ -534,7 +587,8 @@ def plan_validations(
         web_checks=selected["web_checks"],
         reasons={name: tuple(values) for name, values in reasons.items()},
         # Explicit selector labels and manual runs retain full regression.
-        test_changes=paths if event_name in {"pull_request", "merge_group"} and not labels else (),
+        test_changes=paths if event_name in {"pull_request", "merge_group"} and not set(labels) & LABEL_TO_CHECK.keys() else (),
+        **baseline,
     )
 
 

@@ -178,17 +178,10 @@ def test_ci_wires_phase2c_supervisor_go_checks_explicitly() -> None:
         for step in _workflow(".github/workflows/ci.yml")["jobs"]["go-checks"]["steps"]
     }
 
-    assert steps["gofmt supervisor"] == (
-        "out=$(gofmt -l ./cmd/loom-task-image-builder-supervisor)\n"
-        'if [ -n "$out" ]; then\n'
-        '  echo "$out"\n'
-        '  echo "gofmt found supervisor issues; run '
-        '\\`gofmt -w ./cmd/loom-task-image-builder-supervisor\\` to fix"\n'
-        "  exit 1\n"
-        "fi\n"
-    )
-    assert steps["go vet supervisor"] == ("go vet ./cmd/loom-task-image-builder-supervisor")
-    assert steps["go test supervisor"] == ("go test -race ./cmd/loom-task-image-builder-supervisor")
+    assert "gofmt -l ./cmd/" in steps["gofmt"]
+    assert steps["go vet"] == "go vet ./cmd/..."
+    assert steps["go test"] == "go test -race ./cmd/..."
+    assert not any(name.endswith(" supervisor") for name in steps if name)
 
 
 def test_go_checks_executes_required_python_go_v2_handoff() -> None:
@@ -1266,7 +1259,8 @@ def test_manual_and_filtered_contexts_have_distinct_event_specific_names() -> No
             {
                 "EVENT_NAME": "pull_request",
                 "BUILD_RESULT": "skipped",
-                "HARNESS_BUILD_RESULT": "skipped",
+                "HARBOR_REQUIRED": "true",
+        "HARNESS_BUILD_RESULT": "skipped",
                 "SCANNER_BUILD_RESULT": "skipped",
                 "PUBLISH_RESULT": "skipped",
             },
@@ -1385,7 +1379,8 @@ def test_images_gate_separates_untrusted_build_from_trusted_publish(
             "GATE_MODE": "full",
             "REQUIRED": required,
             "BUILD_RESULT": build_result,
-            "HARNESS_BUILD_RESULT": build_result,
+            "HARBOR_REQUIRED": "true",
+        "HARNESS_BUILD_RESULT": build_result,
             "SCANNER_BUILD_RESULT": "skipped",
             "PUBLISH_RESULT": publish_result,
             "MANIFEST_RESULT": manifest_result,
@@ -1436,7 +1431,8 @@ def test_images_gate_requires_personal_release_only_for_protected_selected_publi
             "GATE_MODE": "full",
             "REQUIRED": required,
             "BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
-            "HARNESS_BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
+            "HARBOR_REQUIRED": "true",
+        "HARNESS_BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
             "SCANNER_BUILD_RESULT": "skipped"
             if protected_publish or required == "false"
             else "success",
@@ -1478,7 +1474,8 @@ def test_images_gate_rejects_cross_lane_or_ambiguous_results(
             "GATE_MODE": "full",
             "REQUIRED": required,
             "BUILD_RESULT": build_result,
-            "HARNESS_BUILD_RESULT": build_result,
+            "HARBOR_REQUIRED": "true",
+        "HARNESS_BUILD_RESULT": build_result,
             "SCANNER_BUILD_RESULT": "skipped",
             "PUBLISH_RESULT": publish_result,
         },
@@ -1507,6 +1504,7 @@ def test_repository_checks_fails_closed_for_invalid_planner_booleans(
         "PLAN_RESULT": "success",
         "GATE_MODE": "full",
         "FAST_RESULT": "success",
+        "GO_SELECTED": "true",
         "GO_RESULT": "success",
         "DOCS_ONLY": "false",
         "INTEGRATION_SELECTED": "false",
@@ -1550,7 +1548,8 @@ def test_repository_checks_preserves_result_semantics(
             "PLAN_RESULT": "success",
             "GATE_MODE": "full",
             "FAST_RESULT": "success",
-            "GO_RESULT": "success",
+            "GO_SELECTED": "true",
+        "GO_RESULT": "success",
             "DOCS_ONLY": "false",
             "INTEGRATION_SELECTED": selected,
             "INTEGRATION_RESULT": validation_result,
@@ -1594,7 +1593,8 @@ def test_repository_checks_enforces_docs_only_go_result_semantics(
             "PLAN_RESULT": "success",
             "GATE_MODE": "full",
             "FAST_RESULT": "success",
-            "GO_RESULT": go_result,
+            "GO_SELECTED": "true",
+        "GO_RESULT": go_result,
             "DOCS_ONLY": docs_only,
             "INTEGRATION_SELECTED": "false",
             "INTEGRATION_RESULT": "skipped",
@@ -1642,7 +1642,8 @@ def test_repository_checks_enforces_docs_only_fast_result_semantics(
             "PLAN_RESULT": "success",
             "GATE_MODE": "full",
             "FAST_RESULT": fast_result,
-            "GO_RESULT": "skipped" if docs_only == "true" else "success",
+            "GO_SELECTED": "true",
+        "GO_RESULT": "skipped" if docs_only == "true" else "success",
             "DOCS_ONLY": docs_only,
             "INTEGRATION_SELECTED": "false",
             "INTEGRATION_RESULT": "skipped",
@@ -1745,7 +1746,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     assert "gate_mode == 'preflight'" not in jobs["fast-checks"]["if"]
     assert set(jobs["integration"]["needs"]) == {"workflow-plan"}
     assert set(jobs["integration-docker"]["needs"]) == {"workflow-plan"}
-    assert "docs_only != 'true'" in jobs["go-checks"]["if"]
+    assert "go_checks == 'true'" in jobs["go-checks"]["if"]
     assert "gate_mode == 'full'" in jobs["integration"]["if"]
     assert "gate_mode == 'full'" in jobs["integration-docker"]["if"]
     assert "repository-checks" in jobs["repository-checks"]["name"]
@@ -1798,6 +1799,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "PLAN_RESULT": "${{ needs.workflow-plan.result }}",
         "GATE_MODE": "${{ needs.workflow-plan.outputs.gate_mode }}",
         "FAST_RESULT": "${{ needs.fast-checks.result }}",
+        "GO_SELECTED": "${{ needs.workflow-plan.outputs.go_checks }}",
         "GO_RESULT": "${{ needs.go-checks.result }}",
         "DOCS_ONLY": "${{ needs.workflow-plan.outputs.docs_only }}",
         "INTEGRATION_SELECTED": "${{ needs.workflow-plan.outputs.integration }}",

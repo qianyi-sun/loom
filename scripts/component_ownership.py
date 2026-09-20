@@ -1473,12 +1473,17 @@ def main(argv: list[str] | None = None) -> int:
                 fallback_all=args.fallback_all,
                 image_set=args.image_set,
             )
+            harbor_required = any(row["image"] == "harbor-runtime" for row in select_release_image_matrix(
+                manifest, changed_paths=changed_paths, force_all=args.force_all,
+                fallback_all=args.fallback_all, image_set="nebius",
+            ))
             payload = json.dumps(matrix, separators=(",", ":"))
             native_payload = json.dumps(
                 native_release_image_matrix(matrix),
                 separators=(",", ":"),
             )
             with args.github_output.open("a", encoding="utf-8") as handle:
+                handle.write(f"harbor_required={str(harbor_required).lower()}\n")
                 handle.write(f"images={payload}\n")
                 handle.write(f"native_builds={native_payload}\n")
                 handle.write(f"required={str(bool(matrix)).lower()}\n")

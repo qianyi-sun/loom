@@ -116,6 +116,12 @@ jobs:
       staging_smoke: ${{ steps.plan.outputs.staging_smoke || steps.event.outputs.staging_smoke }}
       coverage_summary: ${{ steps.plan.outputs.coverage_summary || steps.event.outputs.coverage_summary }}
       web_checks: ${{ steps.plan.outputs.web_checks || steps.event.outputs.web_checks }}
+      tests_root: ${{ steps.plan.outputs.tests_root || 'false' }}
+      tests_packages: ${{ steps.plan.outputs.tests_packages || 'false' }}
+      go_checks: ${{ steps.plan.outputs.go_checks || 'false' }}
+      runtime_payload: ${{ steps.plan.outputs.runtime_payload || 'false' }}
+      nebius_iac: ${{ steps.plan.outputs.nebius_iac || 'false' }}
+      locked_environments: ${{ steps.plan.outputs.locked_environments || 'false' }}
       test_changes: ${{ steps.plan.outputs.test_changes || '[]' }}
     steps:
       - name: Classify filtered event before checkout
@@ -234,7 +240,7 @@ jobs:
   locked-environments:
     name: locked-environment (${{ matrix.target }})
     needs: workflow-plan
-    if: needs.workflow-plan.outputs.docs_only != 'true'
+    if: needs.workflow-plan.outputs.locked_environments == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -362,7 +368,7 @@ jobs:
     needs: [workflow-plan]
     timeout-minutes: 40
     if: >-
-      needs.workflow-plan.outputs.docs_only != 'true' &&
+      needs.workflow-plan.outputs.tests_root == 'true' &&
       needs.workflow-plan.outputs.gate_mode == 'full'
     strategy:
       fail-fast: false
@@ -424,7 +430,7 @@ jobs:
             "${coverage_args[@]}"
 
       - name: Produce synthetic global capacity shadow evidence
-        if: matrix.shard_index == 0
+        if: matrix.shard_index == 0 && needs.workflow-plan.outputs.runtime_payload == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -448,7 +454,7 @@ jobs:
           PY
 
       - name: Build and exercise non-editable runtime wheel
-        if: matrix.shard_index == 0
+        if: matrix.shard_index == 0 && needs.workflow-plan.outputs.runtime_payload == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -539,7 +545,7 @@ jobs:
     needs: [workflow-plan]
     timeout-minutes: 10
     if: >-
-      needs.workflow-plan.outputs.docs_only != 'true' &&
+      needs.workflow-plan.outputs.tests_packages == 'true' &&
       needs.workflow-plan.outputs.gate_mode == 'full'
     env:
       COVERAGE_ENABLED: ${{ needs.workflow-plan.outputs.coverage_summary }}
@@ -598,7 +604,7 @@ jobs:
     needs: [workflow-plan]
     timeout-minutes: 10
     if: >-
-      needs.workflow-plan.outputs.docs_only != 'true' &&
+      needs.workflow-plan.outputs.runtime_payload == 'true' &&
       (needs.workflow-plan.outputs.gate_mode == 'full' ||
        needs.workflow-plan.outputs.gate_mode == 'preflight')
     steps:
@@ -613,7 +619,7 @@ jobs:
     needs: [workflow-plan]
     timeout-minutes: 10
     if: >-
-      needs.workflow-plan.outputs.docs_only != 'true' &&
+      needs.workflow-plan.outputs.nebius_iac == 'true' &&
       (needs.workflow-plan.outputs.gate_mode == 'full' ||
        needs.workflow-plan.outputs.gate_mode == 'preflight')
     steps:
@@ -687,20 +693,20 @@ jobs:
             echo "Only docs/repo metadata changed; heavy checks skipped."
             exit 0
           fi
-          for result in \
-            "${{ needs.workflow-plan.result }}" \
-            "${{ needs.locked-environments.result }}" \
-            "${{ needs.lint-and-static.result }}" \
-            "${{ needs.runtime-payload.result }}" \
-            "${{ needs.nebius-iac.result }}" \
-            "${{ needs.tests-root.result }}" \
-            "${{ needs.tests-packages.result }}"
-          do
-            if [[ "${result}" != "success" ]]; then
-              echo "Required parallel check result was ${result}" >&2
-              exit 1
-            fi
-          done
+          require_selected() {
+            local selected="$1" name="$2" result="$3"
+            case "$selected:$result" in
+              true:success|false:skipped|false:success) ;;
+              *) echo "FAIL: ${name} selected=${selected} result=${result}" >&2; exit 1 ;;
+            esac
+          }
+          require_selected true workflow-plan "${{ needs.workflow-plan.result }}"
+          require_selected true lint-and-static "${{ needs.lint-and-static.result }}"
+          require_selected "${{ needs.workflow-plan.outputs.locked_environments }}" locked-environments "${{ needs.locked-environments.result }}"
+          require_selected "${{ needs.workflow-plan.outputs.runtime_payload }}" runtime-payload "${{ needs.runtime-payload.result }}"
+          require_selected "${{ needs.workflow-plan.outputs.nebius_iac }}" nebius-iac "${{ needs.nebius-iac.result }}"
+          require_selected "${{ needs.workflow-plan.outputs.tests_root }}" tests-root "${{ needs.tests-root.result }}"
+          require_selected "${{ needs.workflow-plan.outputs.tests_packages }}" tests-packages "${{ needs.tests-packages.result }}"
 
       - name: Install exact uv
         if: needs.workflow-plan.outputs.coverage_summary == 'true'
@@ -803,7 +809,7 @@ jobs:
     needs: [workflow-plan]
     if: >-
       needs.workflow-plan.outputs.gate_mode == 'full' &&
-      needs.workflow-plan.outputs.docs_only != 'true'
+      needs.workflow-plan.outputs.go_checks == 'true'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Set up Go
@@ -823,19 +829,6 @@ jobs:
         run: go vet ./cmd/...
       - name: go test
         run: go test -race ./cmd/...
-      - name: gofmt supervisor
-        run: |
-          out=$(gofmt -l ./cmd/loom-task-image-builder-supervisor)
-          if [ -n "$out" ]; then
-            echo "$out"
-            echo "gofmt found supervisor issues; run \`gofmt -w ./cmd/loom-task-image-builder-supervisor\` to fix"
-            exit 1
-          fi
-      - name: go vet supervisor
-        run: go vet ./cmd/loom-task-image-builder-supervisor
-      - name: go test supervisor
-        run: go test -race ./cmd/loom-task-image-builder-supervisor
-
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
@@ -1182,6 +1175,7 @@ jobs:
           PLAN_RESULT: ${{ needs.workflow-plan.result }}
           GATE_MODE: ${{ needs.workflow-plan.outputs.gate_mode }}
           FAST_RESULT: ${{ needs.fast-checks.result }}
+          GO_SELECTED: ${{ needs.workflow-plan.outputs.go_checks }}
           GO_RESULT: ${{ needs.go-checks.result }}
           DOCS_ONLY: ${{ needs.workflow-plan.outputs.docs_only }}
           INTEGRATION_SELECTED: ${{ needs.workflow-plan.outputs.integration }}
@@ -1226,6 +1220,7 @@ jobs:
               exit 1
             fi
           }
+          require_boolean go_checks "$GO_SELECTED"
           require_boolean docs_only "$DOCS_ONLY"
           require_boolean integration "$INTEGRATION_SELECTED"
           require_boolean integration_docker "$DOCKER_SELECTED"
@@ -1237,7 +1232,7 @@ jobs:
             require_selected false go-checks "$GO_RESULT"
           else
             require_success fast-checks "$FAST_RESULT"
-            require_success go-checks "$GO_RESULT"
+            require_selected "$GO_SELECTED" go-checks "$GO_RESULT"
           fi
           require_selected "$WEB_SELECTED" web-checks "$WEB_RESULT"
           require_selected "$INTEGRATION_SELECTED" integration "$INTEGRATION_RESULT"

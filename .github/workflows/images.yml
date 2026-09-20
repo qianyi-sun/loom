@@ -112,6 +112,7 @@ jobs:
       required: ${{ steps.plan.outputs.required || steps.event.outputs.required }}
       gate_mode: ${{ steps.required.outputs.gate_mode || steps.event.outputs.gate_mode }}
       images: ${{ steps.plan.outputs.images || steps.event.outputs.images }}
+      harbor_required: ${{ steps.plan.outputs.harbor_required || 'false' }}
       native_builds: ${{ steps.plan.outputs.native_builds || steps.event.outputs.native_builds }}
       ordinary_builds: ${{ steps.build-matrices.outputs.ordinary_builds || '[]' }}
       scanner_cache_builds: ${{ steps.build-matrices.outputs.scanner_cache_builds || '[]' }}
@@ -665,7 +666,7 @@ jobs:
       needs.plan.outputs.trusted_publish != 'true' &&
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true' &&
-      needs.plan.outputs.ordinary_builds != '[]'
+      needs.plan.outputs.harbor_required == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -1998,6 +1999,7 @@ jobs:
           GATE_MODE: ${{ needs.plan.outputs.gate_mode }}
           REQUIRED: ${{ needs.plan.outputs.required }}
           BUILD_RESULT: ${{ needs.build.result }}
+          HARBOR_REQUIRED: ${{ needs.plan.outputs.harbor_required }}
           HARNESS_BUILD_RESULT: ${{ needs.nebius-harness-build.result }}
           SCANNER_BUILD_RESULT: ${{ needs.scanner-cache-build.result }}
           PUBLISH_RESULT: ${{ needs.publish.result }}
@@ -2025,6 +2027,10 @@ jobs:
           case "$EVENT_NAME" in
             pull_request|merge_group|workflow_dispatch|push) ;;
             *) echo "FAIL: invalid event name" >&2; exit 1 ;;
+          esac
+          case "$HARBOR_REQUIRED" in
+            true|false) ;;
+            *) echo "FAIL: invalid Harbor selection" >&2; exit 1 ;;
           esac
           case "$REQUIRED" in
             true|false) ;;
@@ -2069,12 +2075,15 @@ jobs:
                 [[ "$MANIFEST_RESULT" == "success" ]] || exit 1
               fi
             else
-              if [[ "$ordinary_selected" == "true" ]]; then
-                [[ "$BUILD_RESULT" == "success" ]] || exit 1
+              if [[ "$HARBOR_REQUIRED" == "true" ]]; then
                 [[ "$HARNESS_BUILD_RESULT" == "success" ]] || exit 1
               else
-                [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
                 [[ "$HARNESS_BUILD_RESULT" == "skipped" ]] || exit 1
+              fi
+              if [[ "$ordinary_selected" == "true" ]]; then
+                [[ "$BUILD_RESULT" == "success" ]] || exit 1
+              else
+                [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
               fi
               if [[ "$scanner_selected" == "true" ]]; then
                 [[ "$SCANNER_BUILD_RESULT" == "success" ]] || exit 1

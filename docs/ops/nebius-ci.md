@@ -22,8 +22,11 @@ PR checks do not receive its credentials. CI does not deploy the live platform.
 
 ## Nebius path routing
 
-Every non-documentation change retains root/package tests, static checks and
-the ordinary baseline. Additional heavy validation follows the changed files:
+Static checks remain the ordinary baseline. Frontend-only changes do not start
+Python test, Go, runtime-payload, dependency-lock or Terraform runners. Independent
+test edits start their owning test jobs. Shared and unknown inputs retain the full
+baseline; Terraform runs for its own inputs and full-regression requests. Additional
+heavy validation follows the changed files:
 
 | Changed file | Additional validation |
 | --- | --- |
@@ -32,7 +35,7 @@ the ordinary baseline. Additional heavy validation follows the changed files:
 | Platform renderer unit tests | Kubernetes |
 | Deployment/render operator scripts and `deploy/nebius/` configuration | Integration, Kubernetes |
 | Restore verifier operator script | Integration |
-| Nebius Terraform and its checker | Integration, plus the baseline IaC checks |
+| Nebius Terraform and its checker | Integration, the IaC checks |
 | Candidate workflow/publisher, registry authentication, shared scan validator | Full validation |
 | Unknown runtime or operator files | Full validation |
 
@@ -56,7 +59,8 @@ An edit consisting only of independent Python test modules runs those files in
 their owning lanes. Any external reference to an edited test module name keeps
 full validation because test modules can provide shared fixtures. Runtime,
 migration, configuration, fixture, deleted-file and unknown changes stay full.
-Labels and manual runs request full regression. Sharding happens before filtering,
+CI selector labels and manual runs request full regression; ordinary labels such
+as `bug` do not change test selection. Sharding happens before filtering,
 so ownership and paired-fixture ordering remain stable. Empty selections do not
 invoke pytest, and selector errors fail the job.
 
@@ -82,3 +86,7 @@ All four source workflows use GitHub-hosted runners directly. The OLDLAB route
 action, lease broker, controller, custom CheckRun publisher and dedicated KVM
 runner assets have been removed. This does not stop existing host services or
 cancel in-flight jobs. See [runner placement](../architecture/ci-runner-acceleration.md).
+
+Harbor runtime builds follow its manifest-owned inputs rather than every image
+change. The Go recursive vet/race-test commands cover the supervisor once; its
+compiled binary remains available for the Python–Go interoperability tests.
