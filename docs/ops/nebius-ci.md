@@ -25,14 +25,16 @@ PR checks do not receive its credentials. CI does not deploy the live platform.
 Static checks remain the ordinary baseline. Frontend-only changes do not start
 Python test, Go, runtime-payload, dependency-lock or Terraform runners. Independent
 test edits start their owning test jobs. Shared and unknown inputs retain the full
-baseline; Terraform runs for its own inputs and full-regression requests. Additional
+baseline; Terraform runs for its own inputs and full-regression requests.
+Manifest-ignored retired inputs do not allocate backend test runners; static
+validation still runs. Additional
 heavy validation follows the changed files:
 
 | Changed file | Additional validation |
 | --- | --- |
 | Frontend source or web Dockerfile | Web, affected images and system smoke; auth/ingress contracts also select Kubernetes |
 | Platform renderer source | Integration, affected images, Kubernetes |
-| Platform renderer unit tests | Kubernetes |
+| Independent platform renderer unit tests | Kubernetes |
 | Deployment/render operator scripts and `deploy/nebius/` configuration | Integration, Kubernetes |
 | Restore verifier operator script | Integration |
 | Nebius Terraform and its checker | Integration, the IaC checks |
@@ -57,7 +59,9 @@ measurement; the removed instrumentation and artifact work is deterministic.
 
 An edit consisting only of independent Python test modules runs those files in
 their owning lanes. Any external reference to an edited test module name keeps
-full validation because test modules can provide shared fixtures. Runtime,
+full validation because test modules can provide shared fixtures. Shared or deleted
+test inputs select their possible consumer jobs as well as retaining all files
+inside those jobs, including when mixed with source changes. Runtime,
 migration, configuration, fixture, deleted-file and unknown changes stay full
 unless a suite explicitly declares an audited unaffected component.
 CI selector labels and manual runs request full regression; ordinary labels such

@@ -118,12 +118,12 @@ jobs:
       staging_smoke: ${{ steps.plan.outputs.staging_smoke || steps.event.outputs.staging_smoke }}
       coverage_summary: ${{ steps.plan.outputs.coverage_summary || steps.event.outputs.coverage_summary }}
       web_checks: ${{ steps.plan.outputs.web_checks || steps.event.outputs.web_checks }}
-      tests_root: ${{ steps.plan.outputs.tests_root || 'false' }}
-      tests_packages: ${{ steps.plan.outputs.tests_packages || 'false' }}
-      go_checks: ${{ steps.plan.outputs.go_checks || 'false' }}
-      runtime_payload: ${{ steps.plan.outputs.runtime_payload || 'false' }}
-      nebius_iac: ${{ steps.plan.outputs.nebius_iac || 'false' }}
-      locked_environments: ${{ steps.plan.outputs.locked_environments || 'false' }}
+      tests_root: ${{ steps.plan.outputs.tests_root || steps.event.outputs.tests_root }}
+      tests_packages: ${{ steps.plan.outputs.tests_packages || steps.event.outputs.tests_packages }}
+      go_checks: ${{ steps.plan.outputs.go_checks || steps.event.outputs.go_checks }}
+      runtime_payload: ${{ steps.plan.outputs.runtime_payload || steps.event.outputs.runtime_payload }}
+      nebius_iac: ${{ steps.plan.outputs.nebius_iac || steps.event.outputs.nebius_iac }}
+      locked_environments: ${{ steps.plan.outputs.locked_environments || steps.event.outputs.locked_environments }}
       test_changes: ${{ steps.plan.outputs.test_changes || '[]' }}
     steps:
       - name: Classify filtered event before checkout
@@ -150,6 +150,12 @@ jobs:
               echo 'staging_smoke=false'
               echo 'coverage_summary=false'
               echo 'web_checks=false'
+              echo 'tests_root=false'
+              echo 'tests_packages=false'
+              echo 'go_checks=false'
+              echo 'runtime_payload=false'
+              echo 'nebius_iac=false'
+              echo 'locked_environments=false'
             } >> "$GITHUB_OUTPUT"
           else
             echo 'checkout_required=true' >> "$GITHUB_OUTPUT"

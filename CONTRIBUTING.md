@@ -111,7 +111,8 @@ normally run without coverage instrumentation. Use `ci:coverage-summary` or the
 CI dispatch input `coverage_summary` for full coverage accounting and the 70%
 fast-tier floor. `ci:integration` requests full functional integration tests
 without coverage. Independent test-only edits select their owning test files;
-shared-fixture and unknown changes retain complete lanes. Audited component
+shared-fixture, deleted-test and cross-module fixture changes select all Python
+test consumers and retain complete lanes, including in mixed source/test diffs. Audited component
 selection avoids unrelated backend jobs and schema-reference provisioning. A daily
 full regression at 08:23 UTC retains complete test selection and coverage. Dev PRs
 use the seven-image Nebius set; historical personal-dev publication is manual.

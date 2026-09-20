@@ -33,8 +33,16 @@ def test_explicit_coverage_restores_python_lanes_for_frontend_change():
     assert outputs["tests_root"] == outputs["tests_packages"] == "true"
 
 
-def test_owned_go_flow_test_does_not_select_docker_or_generic_integration():
-    outputs = plan("tests/integration/test_task_image_builder_guard_local_flow.py").github_outputs()
+def test_owned_go_flow_test_does_not_select_docker_or_generic_integration(tmp_path, monkeypatch):
+    import scripts.plan_ci_validations as planner
+
+    path = "tests/integration/test_task_image_builder_guard_local_flow.py"
+    module = tmp_path / path
+    module.parent.mkdir(parents=True)
+    module.write_text("def test_independent(): pass\n")
+    monkeypatch.setattr(planner, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(planner, "_tracked_paths", lambda _: (path, "README.md"))
+    outputs = plan(path).github_outputs()
     assert outputs["go_checks"] == "true"
     assert outputs["integration_docker"] == outputs["integration"] == "false"
 
@@ -42,7 +50,7 @@ def test_owned_go_flow_test_does_not_select_docker_or_generic_integration():
 @pytest.mark.parametrize("selected,result,accepted", [
     ("false", "skipped", True), ("true", "success", True),
     ("true", "skipped", False), ("true", "failure", False),
-    ("false", "cancelled", False), ("invalid", "success", False),
+    ("false", "cancelled", False), ("invalid", "success", False), ("", "skipped", False),
 ])
 def test_baseline_aggregator_checks_selected_results(selected, result, accepted):
     import re
@@ -139,3 +147,65 @@ def test_cli_component_selection_preserves_full_and_affected_modes():
         assert run.returncode == 0, run.stderr
         assert (heavy in run.stdout.splitlines()) is expected
         assert "tests/integration/test_application_runtime_login.py" in run.stdout.splitlines()
+
+
+@pytest.mark.parametrize("path", [
+    "tests/conftest.py", "tests/integration/conftest.py",
+    "tests/integration/taskset_fixtures.py", "packages/loom-launcher/tests/conftest.py",
+])
+def test_shared_test_inputs_select_consumer_lanes(path):
+    p = plan(path)
+    assert p.tests_root and p.tests_packages and p.go_checks and p.runtime_payload
+    assert p.integration and p.integration_docker and p.cluster_smoke and p.staging_smoke
+
+
+@pytest.mark.parametrize("extra", [(), ("web/src/App.tsx",), ("src/loom_service/app.py",)])
+@pytest.mark.parametrize("deleted", [False, True])
+def test_shared_or_deleted_test_module_restores_consumer_jobs(tmp_path, monkeypatch, extra, deleted):
+    import scripts.plan_ci_validations as planner
+
+    changed = "tests/unit/test_shared_fixture.py"
+    consumer = "tests/integration/test_consumer.py"
+    for name, source in [(changed, "def fixture(): pass\n"),
+                         (consumer, "from tests.unit.test_shared_fixture import fixture\n")]:
+        target = tmp_path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source)
+    if deleted:
+        (tmp_path / changed).unlink()
+    monkeypatch.setattr(planner, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(planner, "_tracked_paths", lambda _: (changed, consumer))
+    p = planner.plan_validations(changed_paths=(changed, *extra), labels=(), event_name="pull_request")
+    assert p.integration and p.integration_docker and p.cluster_smoke and p.staging_smoke
+    assert p.tests_root and p.tests_packages and p.go_checks and p.runtime_payload
+
+
+@pytest.mark.parametrize("workflow_name", ["ci", "images"])
+def test_missing_plan_output_is_not_silently_treated_as_unselected(workflow_name):
+    from pathlib import Path
+
+    import yaml
+    from scripts.plan_ci_validations import BASELINE_CHECKS
+
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / f".github/workflows/{workflow_name}.yml").read_text())
+    job = "workflow-plan" if workflow_name == "ci" else "plan"
+    for lane in BASELINE_CHECKS if workflow_name == "ci" else ("harbor_required",):
+        expression = workflow["jobs"][job]["outputs"][lane]
+        # With both step outputs absent, GitHub resolves references to empty
+        # strings. A literal false fallback would hide that missing decision.
+        operands = expression.removeprefix("${{").removesuffix("}}").strip().split("||")
+        missing = next((part.strip().strip("'") for part in operands
+                        if part.strip().startswith("'")), "")
+        assert missing == "", f"{lane} masks an absent planner decision: {expression}"
+
+
+@pytest.mark.parametrize("extra", [(), ("web/src/App.tsx",)])
+def test_retired_ignored_inputs_do_not_restart_backend_jobs(extra):
+    from scripts.plan_ci_validations import BASELINE_CHECKS
+
+    p = plan_validations(changed_paths=("src/loom/pipeline/stage1_smoke.py", *extra),
+                         labels=(), event_name="pull_request")
+    assert not any(getattr(p, lane) for lane in BASELINE_CHECKS)
+    assert not p.integration and not p.integration_docker
+    assert p.web_checks == bool(extra)

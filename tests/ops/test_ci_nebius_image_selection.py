@@ -38,3 +38,24 @@ def test_legacy_publication_is_not_automatic_on_dev():
     controller = yaml.safe_load((ROOT / '.github/workflows/trusted-image-release-controller.yml').read_text())
     assert 'schedule' not in controller[True]
     assert 'workflow_dispatch' in controller[True]
+
+
+@pytest.mark.parametrize("image,required,build,harness,accepted", [
+    ("web", "false", "success", "skipped", True),
+    ("web", "false", "success", "failure", False),
+    ("harbor-runtime", "true", "skipped", "success", True),
+    ("harbor-runtime", "true", "skipped", "skipped", False),
+    ("harbor-runtime", "true", "skipped", "failure", False),
+    ("harbor-runtime", "true", "skipped", "cancelled", False),
+    ("harbor-runtime", "", "skipped", "skipped", False),
+])
+def test_scoped_image_gate_requires_selected_builds(image, required, build, harness, accepted):
+    workflow = yaml.safe_load((ROOT / ".github/workflows/images.yml").read_text())
+    step = workflow["jobs"]["images-gate"]["steps"][0]
+    env = {**os.environ, **dict.fromkeys(step["env"], "skipped"),
+           "EVENT_NAME": "pull_request", "TRUSTED_PUBLISH": "false",
+           "PLAN_RESULT": "success", "GATE_MODE": "full", "REQUIRED": "true",
+           "HARBOR_REQUIRED": required, "BUILD_RESULT": build, "HARNESS_BUILD_RESULT": harness,
+           "STANDARD_IMAGES": json.dumps([{"image": image}])}
+    run = subprocess.run(["bash", "-c", step["run"]], env=env, capture_output=True, text=True)
+    assert (run.returncode == 0) is accepted, run.stderr

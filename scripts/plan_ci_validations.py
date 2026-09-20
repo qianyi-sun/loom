@@ -537,13 +537,34 @@ def plan_validations(
             for name in HEAVY_CHECKS:
                 select(name, reason)
 
+    # Ownership globs include fixture libraries, not just executable tests.
+    # Reuse the same independence check as test-paths before omitting consumer
+    # jobs; retaining every file inside a skipped job would not provide coverage.
+    # Inspect the test subset even in a mixed runtime/test diff.
+    test_inputs = tuple(path for path in paths
+                        if (path.startswith("tests/") or (path.startswith("packages/") and "/tests/" in path))
+                        and not _is_documentation_path(path)
+                        and not _component_ownership_manifest().ci_ignores_path(path))
+    independent_tests: tuple[str, ...] | None = None
+    if test_inputs:
+        tracked = _tracked_paths(REPO_ROOT)
+        independent = narrow_test_only_changes(
+            tracked, changed_paths=test_inputs, tracked_paths=tracked, repo_root=REPO_ROOT,
+        )
+        if independent != tracked:
+            independent_tests = independent
+        else:
+            for name in ("integration", "integration_docker", "cluster_smoke", "staging_smoke"):
+                select(name, "shared-or-unknown-test-input")
+
     if selected["coverage_summary"]:
         select("integration", "coverage-summary-requires-integration")
 
     if any(selected[name] for name in ("integration", "integration_docker", "coverage_summary")):
         docs_only = False
 
-    runtime_paths = tuple(path for path in paths if not _is_documentation_path(path))
+    runtime_paths = tuple(path for path in paths if not _is_documentation_path(path)
+                          and not _component_ownership_manifest().ci_ignores_path(path))
     force_baseline = (
         not paths or event_name in {"workflow_dispatch", "schedule"} or unowned_runtime
         or selected["coverage_summary"]
@@ -559,20 +580,14 @@ def plan_validations(
         for path in runtime_paths
     )
     # Only independently editable test modules may suppress other owning jobs.
-    # The existing shared-fixture fallback keeps all Python owners when unsure.
-    if (runtime_paths and not force_baseline and not set(labels) & LABEL_TO_CHECK.keys()
-            and all(Path(path).name.startswith("test_") and path.endswith(".py") for path in runtime_paths)):
-        tracked = _tracked_paths(REPO_ROOT)
-        independent = narrow_test_only_changes(
-            tracked, changed_paths=runtime_paths, tracked_paths=tracked, repo_root=REPO_ROOT,
-        )
-        if independent != tracked:
-            owners = {lane for path in independent for lane in _test_owner_lanes(path)}
-            baseline.update(tests_root="tests-root" in owners,
-                            tests_packages="tests-packages" in owners,
-                            go_checks="go-checks" in owners,
-                            runtime_payload="runtime-payload" in owners,
-                            locked_environments=False)
+    if (runtime_paths == test_inputs and independent_tests is not None
+            and not force_baseline and not set(labels) & LABEL_TO_CHECK.keys()):
+        owners = {lane for path in independent_tests for lane in _test_owner_lanes(path)}
+        baseline.update(tests_root="tests-root" in owners,
+                        tests_packages="tests-packages" in owners,
+                        go_checks="go-checks" in owners,
+                        runtime_payload="runtime-payload" in owners,
+                        locked_environments=False)
     if force_baseline:
         baseline = dict.fromkeys(BASELINE_CHECKS, True)
 

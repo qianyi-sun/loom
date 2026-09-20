@@ -112,7 +112,7 @@ jobs:
       required: ${{ steps.plan.outputs.required || steps.event.outputs.required }}
       gate_mode: ${{ steps.required.outputs.gate_mode || steps.event.outputs.gate_mode }}
       images: ${{ steps.plan.outputs.images || steps.event.outputs.images }}
-      harbor_required: ${{ steps.plan.outputs.harbor_required || 'false' }}
+      harbor_required: ${{ steps.plan.outputs.harbor_required || steps.event.outputs.harbor_required }}
       native_builds: ${{ steps.plan.outputs.native_builds || steps.event.outputs.native_builds }}
       ordinary_builds: ${{ steps.build-matrices.outputs.ordinary_builds || '[]' }}
       scanner_cache_builds: ${{ steps.build-matrices.outputs.scanner_cache_builds || '[]' }}
@@ -134,6 +134,7 @@ jobs:
               echo 'checkout_required=false'
               echo 'gate_mode=filtered'
               echo 'required=false'
+              echo 'harbor_required=false'
               echo 'images=[]'
               echo 'native_builds=[]'
             } >> "$GITHUB_OUTPUT"
