@@ -220,9 +220,14 @@ async def test_go_guard_http_worker_commits_exact_receipt_after_source_refresh(
     )
     service.config = replace(
         service.config,
+        cluster_id="oldlab",
+        cpu_arch="x86_64",
+        node_name="trt-eai-oldlab-1",
         identity=replace(service.config.identity, supervisor_sha256=projection.SUPERVISOR_SHA256),
         slurm=replace(
-            service.config.slurm, request_sha256=projection._request().slurm_request_sha256
+            service.config.slurm,
+            qos=projection._policy().qos,
+            request_sha256=projection._request().slurm_request_sha256
         ),
         containment=replace(
             service.config.containment,

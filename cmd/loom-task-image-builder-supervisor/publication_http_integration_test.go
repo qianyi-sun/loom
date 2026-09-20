@@ -19,14 +19,14 @@ func TestGoPublicationHTTPOrchestratorHelper(t *testing.T) {
 	}
 	useTestProtocolPolicy(t)
 	previousArch := runtimeGOARCH
-	runtimeGOARCH = func() string { return "arm64" }
+	runtimeGOARCH = func() string { return "amd64" }
 	t.Cleanup(func() { runtimeGOARCH = previousArch })
 	size, err := strconv.ParseInt(os.Getenv("LOOM_GO_HTTP_ROOT_SIZE"), 10, 64)
 	if err != nil {
 		t.Fatal("fixture size missing")
 	}
 	output := OCIOutput{Path: "/fixture/not-read.tar", TopLevelDigest: os.Getenv("LOOM_GO_HTTP_ROOT"), ManifestSize: size,
-		ManifestMediaType: ociManifestMediaType, FileSHA256: strings.Repeat("b", 64), SizeBytes: 4096, OS: "linux", Architecture: "arm64"}
+		ManifestMediaType: ociManifestMediaType, FileSHA256: strings.Repeat("b", 64), SizeBytes: 4096, OS: "linux", Architecture: "amd64"}
 	uploader := publicationUploadFunc(func(ctx context.Context, output OCIOutput, source RegistryUploadCredentialSource) (UploadedManifest, error) {
 		credential, err := source.Next(ctx, nil)
 		if err != nil {
@@ -57,7 +57,7 @@ func TestGoPublicationHTTPOrchestratorHelper(t *testing.T) {
 		RegistryOrigin: os.Getenv("LOOM_GO_HTTP_REGISTRY"), RegistryService: "registry.test", RegistryIssuer: "loom-task-image-authority", RegistryKeyID: os.Getenv("LOOM_GO_HTTP_REGISTRY_KEY")}}
 	executor := &httpFixtureExecutor{output: output}
 	var outcomes []BuildOutcome
-	o := Orchestrator{GrantID: "11111111-1111-1111-1111-111111111111", Config: Config{CPUArch: "arm64"},
+	o := Orchestrator{GrantID: "11111111-1111-1111-1111-111111111111", Config: Config{CPUArch: "amd64"},
 		Guard: NewGuardClient(os.Getenv("LOOM_GO_HTTP_SOCKET"), 32768, 5*time.Second), Clock: realClock{}, Handoff: handoff,
 		IdleGrace: time.Millisecond, CleanupGrace: 5 * time.Second,
 		NewExecutor:   func(Config, *AllocationCapabilities, BuildPlan) (BuildExecutor, error) { return executor, nil },
@@ -91,5 +91,5 @@ func (e *httpFixtureExecutor) Build(_ context.Context, component BuildComponent)
 	if component.Name != "task" {
 		return BuildResult{}, errors.New("unexpected fixture component")
 	}
-	return BuildResult{Output: e.output, BaseResolution: testBaseResolutionEvidence("http-solve", "linux/arm64", e.output.TopLevelDigest)}, nil
+	return BuildResult{Output: e.output, BaseResolution: testBaseResolutionEvidence("http-solve", "linux/amd64", e.output.TopLevelDigest)}, nil
 }
