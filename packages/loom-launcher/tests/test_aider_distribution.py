@@ -25,15 +25,16 @@ from loom_launcher.aider_distribution import (
 )
 
 SOURCE_NAME = "aider_chat-0.86.2-py3-none-any.whl"
-OUTPUT_NAME = "aider_chat-0.86.2+loom.2-py3-none-any.whl"
+OUTPUT_NAME = "aider_chat-0.86.2+loom.3-py3-none-any.whl"
 DIST_INFO = "aider_chat-0.86.2.dist-info"
-LOCAL_DIST_INFO = "aider_chat-0.86.2+loom.2.dist-info"
+LOCAL_DIST_INFO = "aider_chat-0.86.2+loom.3.dist-info"
 APPLICATION = b'__version__ = "0.86.2"\n'
 METADATA = (
     b"Metadata-Version: 2.1\n"
     b"Name: aider-chat\n"
     b"Version: 0.86.2\n"
     b"Summary: fixture\n"
+    b"Requires-Dist: anyio==4.12.1\n"
     b"Requires-Dist: litellm==1.81.10\n"
     b"Requires-Dist: importlib-metadata==7.2.1\n"
     b"Requires-Dist: gitpython==3.1.46\n"
@@ -49,7 +50,7 @@ WHEEL = (
 RECORD = (
     b"aider/__init__.py,sha256=p2w1lOZCsNixTcC4CwTkeqA-kqhIGKq5OE-mIQKipaY,23\n"
     b"aider_chat-0.86.2.dist-info/METADATA,"
-    b"sha256=j_ebo_kDdcb62_wa_jx3zZBgMM_vMdWiAV-Dqz1-EVI,264\n"
+    b"sha256=gARx2vHfmaY46W0SpI2g0o3jiSAbEz16UjPmXxO2ULQ,293\n"
     b"aider_chat-0.86.2.dist-info/RECORD,,\n"
     b"aider_chat-0.86.2.dist-info/WHEEL,"
     b"sha256=2_IrOF1jR2xNXEM3zpoG00Cl9D_z2vSqNSI6jX8JKVo,79\n"
@@ -166,7 +167,8 @@ def test_rebuilds_only_distribution_metadata_and_generates_a_valid_record(
     assert stat.S_IMODE(output.stat().st_mode) == 0o444
     with zipfile.ZipFile(output) as archive:
         metadata = BytesParser().parsebytes(archive.read(f"{LOCAL_DIST_INFO}/METADATA"))
-        assert metadata["Version"] == "0.86.2+loom.2"
+        assert metadata["Version"] == "0.86.2+loom.3"
+        assert "anyio==4.14.2" in metadata.get_all("Requires-Dist")
         assert "litellm==1.84.1" in metadata.get_all("Requires-Dist")
         assert "importlib-metadata==8.9.0" in metadata.get_all("Requires-Dist")
         assert "gitpython==3.1.59" in metadata.get_all("Requires-Dist")
@@ -344,6 +346,8 @@ def test_rejects_wrong_wheel_identity_or_layout(
 @pytest.mark.parametrize(
     "metadata",
     [
+        METADATA.replace(b"Requires-Dist: anyio==4.12.1\n", b""),
+        METADATA + b"Requires-Dist: anyio==4.12.1\n",
         METADATA.replace(b"Requires-Dist: litellm==1.81.10\n", b""),
         METADATA + b"Requires-Dist: litellm==1.81.10\n",
         METADATA.replace(b"Requires-Dist: importlib-metadata==7.2.1\n", b""),
@@ -352,7 +356,7 @@ def test_rejects_wrong_wheel_identity_or_layout(
         METADATA + b"Requires-Dist: gitpython==3.1.46\n",
     ],
     ids=[
-        "missing-litellm", "duplicate-litellm", "missing-importlib", "duplicate-importlib",
+        "missing-anyio", "duplicate-anyio", "missing-litellm", "duplicate-litellm", "missing-importlib", "duplicate-importlib",
         "missing-gitpython", "duplicate-gitpython",
     ],
 )
