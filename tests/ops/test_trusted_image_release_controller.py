@@ -448,8 +448,7 @@ def test_controller_workflow_is_default_branch_only_and_least_privilege() -> Non
     )
     on_config = workflow.get("on", workflow.get(True))
 
-    assert set(on_config) == {"schedule", "workflow_dispatch"}
-    assert on_config["schedule"] == [{"cron": "17,47 * * * *"}]
+    assert set(on_config) == {"workflow_dispatch"}
     assert workflow["permissions"] == {"contents": "read"}
     job = workflow["jobs"]["reconcile"]
     assert job["permissions"] == {"actions": "write", "contents": "read"}

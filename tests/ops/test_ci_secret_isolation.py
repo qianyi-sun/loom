@@ -284,7 +284,6 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
 
     assert set(jobs) == {
         "plan",
-        "image-route",
         "trivy-binary",
         "personal-dev-scanner-cache-assets",
         "build",
@@ -308,12 +307,6 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         assert "environment" not in jobs[job_name]
         assert "id-token" not in effective
         assert all(value != "write" for value in effective.values())
-
-    assert jobs["image-route"]["permissions"] == {
-        "checks": "read",
-        "contents": "read",
-    }
-    assert "environment" not in jobs["image-route"]
 
     scanner_cache_assets = jobs["personal-dev-scanner-cache-assets"]
     assert scanner_cache_assets["permissions"] == {
@@ -411,12 +404,9 @@ def test_staging_pr_gate_is_credential_free_and_does_not_depend_on_real_aws() ->
     assert "${{ secrets." not in str(workflow)
     assert "ci-aws" not in str(workflow)
 
-    for job_name, job in jobs.items():
+    for job in jobs.values():
         effective = job.get("permissions", workflow["permissions"])
-        if job_name == "staging-route":
-            assert effective == {"checks": "read", "contents": "read"}
-        else:
-            assert effective == {"contents": "read"}
+        assert effective == {"contents": "read"}
         assert "environment" not in job
         assert "id-token" not in effective
         assert all(value != "write" for value in effective.values())
@@ -506,9 +496,10 @@ def test_image_input_validation_rejects_shell_metacharacters_and_ambiguous_value
     workflow = _workflow(".github/workflows/images.yml")
     step = _named_step(workflow["jobs"][job_name], "Validate image build inputs")
     env = {
-        "IMAGE_NAME": "worker",
-        "IMAGE_DIGEST_NAME": "loom-worker",
-        "DOCKERFILE": "deploy/Dockerfile.worker",
+        "IMAGE_SET": "nebius" if job_name == "build" else "legacy",
+        "IMAGE_NAME": "service",
+        "IMAGE_DIGEST_NAME": "loom-service",
+        "DOCKERFILE": "deploy/Dockerfile.service",
         "BUILD_CONTEXT": ".",
         "EVENT_NAME": "pull_request" if job_name == "build" else "push",
         "REF_NAME": "feature-safe" if job_name == "build" else "dev",
@@ -537,9 +528,10 @@ def test_image_input_validation_never_evaluates_command_substitution(
     result = _run_validation_step(
         step,
         env={
+            "IMAGE_SET": "nebius" if job_name == "build" else "legacy",
             "IMAGE_NAME": f"worker$(touch {sentinel})",
-            "IMAGE_DIGEST_NAME": "loom-worker",
-            "DOCKERFILE": "deploy/Dockerfile.worker",
+            "IMAGE_DIGEST_NAME": "loom-service",
+            "DOCKERFILE": "deploy/Dockerfile.service",
             "BUILD_CONTEXT": ".",
             "EVENT_NAME": "pull_request",
             "REF_NAME": "42/merge",
@@ -579,9 +571,10 @@ def test_image_input_validation_accepts_actual_github_context_shapes(
     result = _run_validation_step(
         step,
         env={
-            "IMAGE_NAME": "worker",
-            "IMAGE_DIGEST_NAME": "loom-worker",
-            "DOCKERFILE": "deploy/Dockerfile.worker",
+            "IMAGE_SET": "nebius" if job_name == "build" else "legacy",
+        "IMAGE_NAME": "service",
+            "IMAGE_DIGEST_NAME": "loom-service",
+            "DOCKERFILE": "deploy/Dockerfile.service",
             "BUILD_CONTEXT": ".",
             "EVENT_NAME": event_name,
             "REF_NAME": ref_name,

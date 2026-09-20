@@ -6,6 +6,31 @@ from scripts.plan_ci_validations import HEAVY_CHECKS, plan_validations
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture
+def independent_test_repo(tmp_path, monkeypatch):
+    """Exercise owner routing separately from shared-fixture expansion."""
+    import scripts.plan_ci_validations as planner
+
+    def prepare(path):
+        if not path.startswith("tests/"):
+            return
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("def test_independent(): pass\n")
+        monkeypatch.setattr(planner, "REPO_ROOT", tmp_path)
+        monkeypatch.setattr(planner, "_tracked_paths", lambda _: (path, "README.md"))
+
+    return prepare
+
+
+@pytest.mark.parametrize("path", ["web/src/App.tsx", "web/src/auth/AuthContext.tsx", "deploy/Dockerfile.web"])
+def test_frontend_changes_do_not_select_unrelated_python_integration(path: str) -> None:
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+    assert plan.web_checks and plan.images and plan.staging_smoke
+    assert not plan.integration
+    assert not plan.integration_docker
+
+
 @pytest.mark.parametrize("path", [
     "src/loom_task_image_builder_guard/service.py",
     "src/loom_task_image_authority/api.py",
@@ -296,7 +321,8 @@ def test_cluster_template_change_selects_cluster_and_staging() -> None:
         "tests/ops/test_nebius_iac.py",
     ],
 )
-def test_nebius_iac_change_uses_owned_validation_route(path: str) -> None:
+def test_nebius_iac_change_uses_owned_validation_route(path: str, independent_test_repo) -> None:
+    independent_test_repo(path)
     plan = plan_validations(
         changed_paths=[path],
         labels=set(),
@@ -422,7 +448,8 @@ def test_planner_change_selects_every_heavy_gate() -> None:
         "tests/ops/test_release_runbook.py",
     ],
 )
-def test_manifest_owned_root_tests_do_not_select_unrelated_heavy_lanes(path: str) -> None:
+def test_manifest_owned_root_tests_do_not_select_unrelated_heavy_lanes(path: str, independent_test_repo) -> None:
+    independent_test_repo(path)
     plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
 
     assert plan.docs_only is False
@@ -430,7 +457,8 @@ def test_manifest_owned_root_tests_do_not_select_unrelated_heavy_lanes(path: str
     assert plan.selected_heavy_checks() == set()
 
 
-def test_docs_plus_manifest_owned_root_test_keeps_only_the_root_test_lane() -> None:
+def test_docs_plus_manifest_owned_root_test_keeps_only_the_root_test_lane(independent_test_repo) -> None:
+    independent_test_repo("tests/unit/test_metrics_enumeration.py")
     plan = plan_validations(
         changed_paths=["docs/user-guide.md", "tests/unit/test_metrics_enumeration.py"],
         labels=set(),
@@ -457,7 +485,9 @@ def test_docs_plus_manifest_owned_root_test_keeps_only_the_root_test_lane() -> N
 def test_manifest_owned_heavy_tests_select_their_required_lanes(
     path: str,
     expected: set[str],
+    independent_test_repo,
 ) -> None:
+    independent_test_repo(path)
     plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
 
     assert plan.unowned_runtime is False
@@ -721,7 +751,8 @@ def test_unowned_merge_group_runtime_path_remains_fail_closed() -> None:
     ("src/loom/nebius_platform_render.py", {"integration", "images", "cluster_smoke"}),
     ("tests/unit/test_nebius_platform_render.py", {"cluster_smoke"}),
 ])
-def test_nebius_operator_paths_select_their_consumers(path, checks):
+def test_nebius_operator_paths_select_their_consumers(path, checks, independent_test_repo):
+    independent_test_repo(path)
     plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
     assert not plan.docs_only
     assert not plan.unowned_runtime

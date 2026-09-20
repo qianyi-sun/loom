@@ -59,7 +59,7 @@ def test_matrix_partition_preserves_each_selected_native_build(
         input=step["run"],
         text=True,
         capture_output=True,
-        env={**os.environ, "NATIVE_BUILDS": json.dumps(native), "GITHUB_OUTPUT": str(output)},
+        env={**os.environ, "NATIVE_BUILDS": json.dumps(native), "GITHUB_OUTPUT": str(output), "PUBLISHING": "true"},
         check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -139,6 +139,7 @@ def test_gate_enforces_both_selected_build_results(
         "REQUIRED": "true" if images else "false",
         "STANDARD_IMAGES": json.dumps([{"image": image} for image in images]),
         "BUILD_RESULT": "failure" if fault == "ordinary" else ordinary,
+        "HARBOR_REQUIRED": "true" if ordinary_selected else "false",
         "HARNESS_BUILD_RESULT": "failure" if fault == "ordinary" else ordinary,
         "SCANNER_BUILD_RESULT": "failure" if fault == "scanner" else scanner,
         "PUBLISH_RESULT": "failure" if fault == "publish" else publish_result,
@@ -182,6 +183,7 @@ def test_gate_rejects_missing_selected_matrix_after_dependency_failure(
         "REQUIRED": "true",
         "STANDARD_IMAGES": '[{"image":"service"},{"image":"personal-dev-scanner-cache"}]',
         "BUILD_RESULT": "success",
+        "HARBOR_REQUIRED": "true",
         "HARNESS_BUILD_RESULT": "success",
         "SCANNER_BUILD_RESULT": "success",
         "PUBLISH_RESULT": "skipped",
@@ -270,8 +272,11 @@ def test_asset_preparation_is_absent_when_scanner_image_is_not_selected(event: s
     assert not _condition(_jobs()["personal-dev-scanner-cache-assets"]["if"], values)
 
 
-@pytest.mark.parametrize("job", ["build", "scanner-cache-build"])
-@pytest.mark.parametrize("failed_dependency", ["plan", "trivy-binary", "specific"])
+@pytest.mark.parametrize(("job", "failed_dependency"), [
+    ("build", "plan"), ("build", "trivy-binary"),
+    ("scanner-cache-build", "plan"), ("scanner-cache-build", "trivy-binary"),
+    ("scanner-cache-build", "personal-dev-scanner-cache-assets"),
+])
 def test_untrusted_builds_do_not_run_after_required_dependency_failure(
     job: str, failed_dependency: str
 ) -> None:
@@ -288,8 +293,6 @@ def test_untrusted_builds_do_not_run_after_required_dependency_failure(
         }
     )
     dependency = failed_dependency
-    if dependency == "specific":
-        dependency = "image-route" if job == "build" else "personal-dev-scanner-cache-assets"
     assert _condition(selected["if"], values)
     for result in ("failure", "skipped", "cancelled"):
         values[f"needs.{dependency}.result"] = result

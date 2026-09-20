@@ -106,10 +106,18 @@ Feature branches, including Nebius work, cut from `dev`. PRs target `dev`.
 for release promotion PRs from `dev`.
 
 The [Nebius CI integration](docs/ops/nebius-ci.md) retains `dev`'s four protected
-checks, existing platform tests and native AMD64/ARM64 builds. Python root/package
-coverage still enforces its 70% floor. Integration coverage is an optional diagnostic:
-use `ci:coverage-summary` or the CI dispatch input `coverage_summary`. The
-`ci:integration` label requests functional integration tests without that diagnostic.
+checks and uses GitHub-hosted runners with amd64 PR image builds. Python tests
+normally run without coverage instrumentation. Use `ci:coverage-summary` or the
+CI dispatch input `coverage_summary` for coverage accounting within the selected
+scope. The historical 70% floor applies only to all-platform compatibility runs. `ci:integration` requests full functional integration tests
+without coverage. Independent test-only edits select their owning test files;
+shared-fixture, deleted-test and cross-module fixture changes select all Python
+test consumers and retain complete lanes, including in mixed source/test diffs. Audited component
+selection avoids unrelated backend jobs and schema-reference provisioning. A daily
+Nebius/common regression at 08:23 UTC retains complete selection within that scope
+and coverage reporting. Use CI dispatch `legacy_compatibility=true` to include
+historical platform tests and both integration tiers. Dev PRs
+use the seven-image Nebius set; historical personal-dev publication is manual.
 
 Deployment environments are separated from branch workflow: `development`
 uses `https://yylx.world/dev`, `staging` uses

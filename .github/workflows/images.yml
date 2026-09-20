@@ -75,7 +75,7 @@ on:
   merge_group:
     types: [checks_requested]
   push:
-    branches: [dev, main]
+    branches: [main]
   workflow_dispatch:
     inputs:
       trusted_publish:
@@ -112,9 +112,11 @@ jobs:
       required: ${{ steps.plan.outputs.required || steps.event.outputs.required }}
       gate_mode: ${{ steps.required.outputs.gate_mode || steps.event.outputs.gate_mode }}
       images: ${{ steps.plan.outputs.images || steps.event.outputs.images }}
+      harbor_required: ${{ steps.plan.outputs.harbor_required || steps.event.outputs.harbor_required }}
       native_builds: ${{ steps.plan.outputs.native_builds || steps.event.outputs.native_builds }}
       ordinary_builds: ${{ steps.build-matrices.outputs.ordinary_builds || '[]' }}
       scanner_cache_builds: ${{ steps.build-matrices.outputs.scanner_cache_builds || '[]' }}
+      image_set: ${{ steps.plan.outputs.image_set || 'nebius' }}
       trusted_publish: ${{ steps.trust.outputs.trusted_publish || 'false' }}
     steps:
       - name: Classify filtered event before checkout
@@ -132,6 +134,7 @@ jobs:
               echo 'checkout_required=false'
               echo 'gate_mode=filtered'
               echo 'required=false'
+              echo 'harbor_required=false'
               echo 'images=[]'
               echo 'native_builds=[]'
             } >> "$GITHUB_OUTPUT"
@@ -258,6 +261,7 @@ jobs:
         env:
           REQUIRED: ${{ steps.required.outputs.images }}
           UNOWNED_RUNTIME: ${{ steps.required.outputs.unowned_runtime }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref || github.event.merge_group.base_ref || github.ref_name }}
           EVENT_NAME: ${{ github.event_name }}
           TRUSTED_PUBLISH: ${{ steps.trust.outputs.trusted_publish }}
           CHANGED_FILES: /tmp/loom-changed-files.txt
@@ -269,8 +273,14 @@ jobs:
               exit 1
             }
           done
+          image_set=nebius
+          if [[ "$EVENT_NAME" == "push" || "$TRUSTED_PUBLISH" == "true" || "${BASE_BRANCH:-dev}" == "main" || "${BASE_BRANCH:-dev}" == "refs/heads/main" ]]; then
+            image_set=legacy
+          fi
+          echo "image_set=$image_set" >> "$GITHUB_OUTPUT"
           args=(
             plan-images
+            --image-set "$image_set"
             --changed-files "$CHANGED_FILES"
             --github-output "$GITHUB_OUTPUT"
           )
@@ -286,6 +296,7 @@ jobs:
         id: build-matrices
         if: steps.event.outputs.checkout_required == 'true'
         env:
+          PUBLISHING: ${{ github.event_name == 'push' || steps.trust.outputs.trusted_publish == 'true' }}
           NATIVE_BUILDS: ${{ steps.plan.outputs.native_builds }}
         run: |
           set -euo pipefail
@@ -299,94 +310,19 @@ jobs:
               or not item["image"] for item in builds
           ):
               raise SystemExit("FAIL: invalid native image matrix")
+          # Server execution is amd64. Historical publication consumers are
+          # migrated separately; never change their manifest shape implicitly.
+          if os.environ.get("PUBLISHING", "false") != "true":
+              builds = [item for item in builds if item["architecture"] == "amd64"]
           scanner = "personal-dev-scanner-cache"
           partitions = {
-              "ordinary_builds": [item for item in builds if item["image"] != scanner],
+              "ordinary_builds": [item for item in builds if item["image"] not in {scanner, "harbor-runtime"}],
               "scanner_cache_builds": [item for item in builds if item["image"] == scanner],
           }
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               for name, rows in partitions.items():
                   print(f"{name}={json.dumps(rows, separators=(',', ':'))}", file=output)
           PYTHON
-
-  image-route:
-    name: resolve oldlab-first image routes
-    needs: plan
-    if: >-
-      github.event_name != 'push' &&
-      needs.plan.outputs.trusted_publish != 'true' &&
-      needs.plan.outputs.gate_mode == 'full' &&
-      needs.plan.outputs.required == 'true' &&
-      needs.plan.outputs.images != '[]'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      checks: read
-      contents: read
-    outputs:
-      routes: ${{ steps.route.outputs.routes || '{}' }}
-    steps:
-      - name: Checkout trusted route action
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          repository: qianyi-sun/loom
-          ref: 66b83fc57a3141197a997c9f6d4ce6e2a98ee3de
-          sparse-checkout: .github/actions/ci-runner-route
-          path: .loom-ci-route-action
-          persist-credentials: false
-
-      - name: Select native AMD64 image keys
-        id: keys
-        shell: bash
-        env:
-          NATIVE_BUILDS: ${{ needs.plan.outputs.native_builds }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-
-          builds = json.loads(os.environ["NATIVE_BUILDS"])
-          # The live lease broker may still run the preceding merged contract.
-          # Keep this new image on a hosted runner until that separately-owned
-          # control-plane rollout has occurred.
-          keys = [
-              item["image"]
-              for item in builds
-              if item["architecture"] == "amd64"
-              and item["image"] not in {
-                  "capacity-executor",
-                  "capacity-manager",
-                  "execution-actuator",
-                  "execution-runtime",
-                  "personal-dev-activation-agent",
-                  "personal-dev-builder",
-                  "personal-dev-native-builder-agent",
-                  "personal-dev-scanner-cache",
-                  "pipeline-core-fixture",
-                  "pipeline-orchestrator",
-              }
-          ]
-          if len(keys) != len(set(keys)):
-              raise SystemExit("native AMD64 route keys are duplicated")
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write("job_keys=" + json.dumps(keys, separators=(",", ":")) + "\n")
-              output.write("needs_route=" + ("true" if keys else "false") + "\n")
-          PY
-
-      - name: Resolve immutable assignments
-        id: route
-        if: steps.keys.outputs.needs_route == 'true'
-        uses: ./.loom-ci-route-action/.github/actions/ci-runner-route
-        with:
-          route-mode: ${{ vars.LOOM_CI_ROUTE_MODE || 'disabled' }}
-          repository: ${{ github.repository }}
-          workflow-name: images
-          workflow-id: '302898384'
-          workflow-run-id: ${{ github.run_id }}
-          run-attempt: ${{ github.run_attempt }}
-          head-sha: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          job-keys-json: ${{ steps.keys.outputs.job_keys }}
-          github-token: ${{ github.token }}
 
   trivy-binary:
     name: prepare verified Trivy binaries
@@ -406,11 +342,15 @@ jobs:
           persist-credentials: false
 
       - name: Install and record pinned Trivy binary
+        env:
+          PUBLISHING: ${{ github.event_name == 'push' || needs.plan.outputs.trusted_publish == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
           test "$(uname -m)" = x86_64
-          for architecture in amd64 arm64; do
+          architectures=(amd64)
+          if [[ "$PUBLISHING" == "true" ]]; then architectures+=(arm64); fi
+          for architecture in "${architectures[@]}"; do
             artifact_dir="/tmp/loom-trivy-binaries/${architecture}"
             mkdir -p "$artifact_dir"
             trivy_bin=$(python3 scripts/install_trivy.py \
@@ -497,17 +437,14 @@ jobs:
 
   build:
     name: ${{ matrix.image }} (${{ matrix.platform }})
-    needs: [plan, image-route, trivy-binary]
+    needs: [plan, trivy-binary]
     if: >-
       github.event_name != 'push' &&
       needs.plan.outputs.trusted_publish != 'true' &&
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.ordinary_builds != '[]'
-    runs-on: >-
-      ${{ matrix.architecture == 'arm64' && fromJSON('["ubuntu-24.04-arm"]') ||
-          (matrix.image == 'capacity-executor' || matrix.image == 'capacity-manager' || matrix.image == 'execution-actuator' || matrix.image == 'execution-runtime' || matrix.image == 'personal-dev-activation-agent' || matrix.image == 'personal-dev-builder' || matrix.image == 'personal-dev-native-builder-agent' || matrix.image == 'personal-dev-scanner-cache' || matrix.image == 'pipeline-core-fixture' || matrix.image == 'pipeline-orchestrator') && fromJSON('["ubuntu-24.04"]') ||
-          fromJSON(needs.image-route.outputs.routes)[matrix.image] }}
+    runs-on: ${{ matrix.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -552,7 +489,7 @@ jobs:
         shell: bash
         env:
           IMAGE_NAME: ${{ matrix.image }}
-          IMAGE_SET: ${{ matrix.image == 'harbor-runtime' && 'nebius' || 'legacy' }}
+          IMAGE_SET: ${{ matrix.image == 'harbor-runtime' && 'nebius' || needs.plan.outputs.image_set }}
           IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
           DOCKERFILE: ${{ matrix.dockerfile }}
           BUILD_CONTEXT: ${{ matrix.context }}
@@ -566,8 +503,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          python3 scripts/component_ownership.py validate-image \
-            --image-set "${IMAGE_SET:-legacy}" \
+          python3 scripts/component_ownership.py validate-image --image-set "${IMAGE_SET}" \
             --image "$IMAGE_NAME" \
             --image-name "$IMAGE_DIGEST_NAME" \
             --dockerfile "$DOCKERFILE" \
@@ -742,7 +678,7 @@ jobs:
       needs.plan.outputs.trusted_publish != 'true' &&
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true' &&
-      needs.plan.outputs.ordinary_builds != '[]'
+      needs.plan.outputs.harbor_required == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -2075,6 +2011,7 @@ jobs:
           GATE_MODE: ${{ needs.plan.outputs.gate_mode }}
           REQUIRED: ${{ needs.plan.outputs.required }}
           BUILD_RESULT: ${{ needs.build.result }}
+          HARBOR_REQUIRED: ${{ needs.plan.outputs.harbor_required }}
           HARNESS_BUILD_RESULT: ${{ needs.nebius-harness-build.result }}
           SCANNER_BUILD_RESULT: ${{ needs.scanner-cache-build.result }}
           PUBLISH_RESULT: ${{ needs.publish.result }}
@@ -2103,6 +2040,10 @@ jobs:
             pull_request|merge_group|workflow_dispatch|push) ;;
             *) echo "FAIL: invalid event name" >&2; exit 1 ;;
           esac
+          case "$HARBOR_REQUIRED" in
+            true|false) ;;
+            *) echo "FAIL: invalid Harbor selection" >&2; exit 1 ;;
+          esac
           case "$REQUIRED" in
             true|false) ;;
             *) echo "FAIL: invalid planner boolean required=${REQUIRED@Q}" >&2; exit 1 ;;
@@ -2120,7 +2061,7 @@ jobs:
               "personal-dev-scanner-cache",
           }
           print(
-              "true" if selected - {"personal-dev-scanner-cache"} else "false",
+              "true" if selected - {"personal-dev-scanner-cache", "harbor-runtime"} else "false",
               "true" if "personal-dev-scanner-cache" in selected else "false",
               "true" if required <= selected else "false",
           )
@@ -2146,12 +2087,15 @@ jobs:
                 [[ "$MANIFEST_RESULT" == "success" ]] || exit 1
               fi
             else
-              if [[ "$ordinary_selected" == "true" ]]; then
-                [[ "$BUILD_RESULT" == "success" ]] || exit 1
+              if [[ "$HARBOR_REQUIRED" == "true" ]]; then
                 [[ "$HARNESS_BUILD_RESULT" == "success" ]] || exit 1
               else
-                [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
                 [[ "$HARNESS_BUILD_RESULT" == "skipped" ]] || exit 1
+              fi
+              if [[ "$ordinary_selected" == "true" ]]; then
+                [[ "$BUILD_RESULT" == "success" ]] || exit 1
+              else
+                [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
               fi
               if [[ "$scanner_selected" == "true" ]]; then
                 [[ "$SCANNER_BUILD_RESULT" == "success" ]] || exit 1

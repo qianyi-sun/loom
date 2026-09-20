@@ -166,9 +166,8 @@ def test_workflows_use_checksum_verified_uv_locked_sync_and_safe_caches() -> Non
         assert inputs.get("cache-dependency-glob") == "uv.lock", path
 
 
-def test_ci_requires_real_locked_installs_on_both_linux_runner_architectures() -> None:
-    # Per-PR locked-install validation gates the two Linux architectures Loom
-    # actually deploys to (x86_64 services + aarch64 GB10 workers). The macOS
+def test_ci_requires_real_locked_install_on_nebius_server_architecture() -> None:
+    # Per-PR server validation follows the amd64-only Nebius runtime. The macOS
     # target stays in the uv.lock authority (TARGET_ENVIRONMENTS) and is
     # exercised by the nightly `macos-locked-environment.yml` schedule rather
     # than billed at ~10x on every pull request.
@@ -176,7 +175,7 @@ def test_ci_requires_real_locked_installs_on_both_linux_runner_architectures() -
     jobs = workflow["jobs"]
     matrix_job = jobs["locked-environments"]
 
-    assert matrix_job["if"] == "needs.workflow-plan.outputs.docs_only != 'true'"
+    assert matrix_job["if"] == "needs.workflow-plan.outputs.locked_environments == 'true'"
     assert matrix_job["strategy"]["fail-fast"] is False
     assert matrix_job["strategy"]["matrix"]["include"] == [
         {
@@ -185,13 +184,6 @@ def test_ci_requires_real_locked_installs_on_both_linux_runner_architectures() -
             "expected_system": "Linux",
             "expected_machine": "x86_64",
             "uv_checksum": UV_CHECKSUMS["linux-x86_64"],
-        },
-        {
-            "target": "linux-arm64",
-            "runner": "ubuntu-24.04-arm",
-            "expected_system": "Linux",
-            "expected_machine": "aarch64",
-            "uv_checksum": UV_CHECKSUMS["linux-arm64"],
         },
     ]
     script = "\n".join(str(step.get("run", "")) for step in matrix_job["steps"] if "run" in step)
