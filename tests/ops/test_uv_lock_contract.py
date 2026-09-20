@@ -175,7 +175,7 @@ def test_ci_requires_real_locked_install_on_nebius_server_architecture() -> None
     jobs = workflow["jobs"]
     matrix_job = jobs["locked-environments"]
 
-    assert matrix_job["if"] == "needs.workflow-plan.outputs.docs_only != 'true'"
+    assert matrix_job["if"] == "needs.workflow-plan.outputs.locked_environments == 'true'"
     assert matrix_job["strategy"]["fail-fast"] is False
     assert matrix_job["strategy"]["matrix"]["include"] == [
         {

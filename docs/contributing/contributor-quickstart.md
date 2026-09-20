@@ -60,7 +60,8 @@ running `loom service up --environment local`.
 
 ```bash
 # One-time — uv 0.11.26 creates .venv/ from the tracked universal lock.
-# The workspace lock covers macOS arm64, Linux x86_64, and Linux arm64.
+# The workspace lock covers macOS arm64, Linux x86_64, and legacy Linux arm64.
+# Daily server CI validates the Nebius Linux x86_64 target.
 uv python install 3.11
 uv sync --locked --all-packages --extra dev --python 3.11
 source .venv/bin/activate
@@ -150,15 +151,20 @@ select all heavy lanes until they gain an explicit owner.
 Rollout and production-release authority paths are fail-closed owners: changes
 under `src/loom_cli/rollout/` and their tests, installed staging-rollout assets,
 deployment/release workflows, or release evidence verification select every
-heavy lane. The selected `cluster-smoke-gate` validates environment isolation
-and renders and audits both the staging and production cluster profiles. These
-checks are credential-free candidate evidence; real Yibu-backed tasks and live
-environment readiness remain staging promotion gates rather than PR jobs.
+heavy lane. The selected `cluster-smoke-gate` validates Nebius/common Kubernetes
+contracts. Historical staging/production profile rendering and environment
+isolation commands run only in main or manual compatibility scope. These checks
+are credential-free candidate evidence; real model-backed tasks and live
+environment readiness require deployment acceptance rather than PR jobs.
 
-For non-document changes, static checks, two root-test shards and package tests
-run in parallel on GitHub-hosted runners. `fast-checks` verifies their results.
-Coverage instrumentation, aggregation and the 70% fast-tier floor run only when
-requested with `ci:coverage-summary` or `coverage_summary=true`. Independent
+Changed paths select static checks, two root-test shards and package tests as
+needed, in parallel on GitHub-hosted runners. Web-only changes skip backend
+baseline jobs; dependency, shared and unknown changes retain them.
+`fast-checks` verifies every selected result. Coverage instrumentation and
+aggregation run when requested with `ci:coverage-summary` or
+`coverage_summary=true`, and in the daily full Nebius regression. Nebius coverage
+is reported without the historical all-platform 70% floor; main and manual
+compatibility coverage retain that floor. Report errors still fail. Independent
 test-only edits select their owning files; shared fixtures and runtime changes
 retain full lanes. Root shards have a 40-minute budget and integration shards
 have a 75-minute budget; selection does not relax per-test timeouts or failures.
@@ -219,12 +225,26 @@ contain no deployment credentials.
 ```bash
 uv run --no-sync ruff check src tests packages migrations
 uv run --no-sync mypy
-mapfile -t root_tests < <(uv run --no-sync python scripts/component_ownership.py test-paths --lane tests-root)
-uv run --no-sync pytest "${root_tests[@]}" --cov=src --cov=packages --cov-report=term
-mapfile -t package_tests < <(uv run --no-sync python scripts/component_ownership.py test-paths --lane tests-packages)
-uv run --no-sync pytest "${package_tests[@]}" --cov=src --cov=packages --cov-append --cov-report=term
+mapfile -t root_tests < <(uv run --no-sync python scripts/component_ownership.py test-paths --lane tests-root --test-scope nebius)
+uv run --no-sync pytest "${root_tests[@]}" -m "not legacy_pool" -p no:cov
+mapfile -t package_tests < <(uv run --no-sync python scripts/component_ownership.py test-paths --lane tests-packages --test-scope nebius)
+uv run --no-sync pytest "${package_tests[@]}" -m "not legacy_pool" -p no:cov
+```
+
+For the historical all-platform fast-tier coverage check, select all modules
+and include legacy cases explicitly. Both commands contribute to the report:
+
+```bash
+mapfile -t root_tests < <(uv run --no-sync python scripts/component_ownership.py test-paths --lane tests-root --test-scope all)
+uv run --no-sync pytest "${root_tests[@]}" -m "legacy_pool or not legacy_pool" --cov=src --cov=packages --cov-report=term
+mapfile -t package_tests < <(uv run --no-sync python scripts/component_ownership.py test-paths --lane tests-packages --test-scope all)
+uv run --no-sync pytest "${package_tests[@]}" -m "legacy_pool or not legacy_pool" --cov=src --cov=packages --cov-append --cov-report=term
 uv run --no-sync coverage report --fail-under=70
 ```
+
+The existing CI and smoke workflow dispatches accept `legacy_compatibility=true`
+to restore historical platform tests. On CI, also set `coverage_summary=true`
+when the all-platform coverage report and floor are needed.
 
 Local verification should use Python 3.11, matching the `repository-checks`
 job. The repository root `.python-version` pins uv-managed virtualenv creation
@@ -248,10 +268,10 @@ LOOM_RUN_MODAL_INTEGRATION=1 \
   pytest tests/integration/test_modal_driver.py -v
 ```
 
-On GitHub, selected non-Docker integration tests are split into two disjoint,
+On GitHub, selected non-Docker integration tests are split into four disjoint,
 contiguous ranges of the manifest-owned filename order. Contiguous ordering
 preserves the suite's session-scoped Postgres setup/cleanup contract while the
-two shards start directly after the planner, in parallel with the fast tier.
+four shards start directly after the planner, in parallel with the fast tier.
 The ownership manifest also pins measured slow modules to the shorter shard;
 these whole-file moves preserve filename order within each shard and keep every
 test assigned exactly once. Adjust pins from CI timing evidence, not by omitting
@@ -345,15 +365,14 @@ pull requests, merge groups, and manual dispatches use the checked-in read-only
 build path, do not log in to GHCR, and do not use a publication cache. Manual
 dispatch is build-only. PR image validation builds AMD64 on GitHub-hosted native CPUs. Existing
 signed publication consumers retain their declared AMD64/ARM64 manifest
-contract until their consumers migrate. Only the checked-in architecture-specific `publish` jobs and their
-manifest joiner on a push to `dev`/`main`, or an exact protected-head recovery
-from `trusted-image-release-controller`, request job-scoped `packages: write`
-authority. The scheduled controller exists because GitHub suppresses push
-workflows when the preceding squash auto-merge used its workflow
-`GITHUB_TOKEN`. It dispatches only the current protected `dev` head, starting
-at the nearest successful trusted release ancestor; ordinary manual dispatch
-remains build-only. The joiner verifies that the final tag contains exactly the
-AMD64 and ARM64 members. Same-repository branch workflow code still runs on the read-only PR
+contract until their consumers migrate. `nebius-candidate` is the sole automatic
+dev publisher and uses the seven-image Nebius AMD64 set. Historical publication
+jobs in `images` run automatically only on main pushes. The
+`trusted-image-release-controller` has no schedule; its manual dispatch supports
+protected-head personal-dev compatibility publication. These publication jobs
+request job-scoped `packages: write`; ordinary `images` manual dispatch remains
+build-only. The legacy manifest joiner verifies both AMD64 and ARM64 members.
+Same-repository branch workflow code still runs on the read-only PR
 path; autonomous-agent hard isolation requires
 fork-only execution or an external trusted workflow/App.
 
@@ -366,40 +385,23 @@ trusted post-merge/release workflow rather than the required PR context.
 
 - **Ordinary PRs:** affected functional Python tests run without coverage instrumentation.
 - **Daily regression:** CI runs full Python/Go/Web and both integration tiers at
-  08:23 UTC on dev, with coverage, without publishing or deploying.
+  08:23 UTC on dev in Nebius/common scope, with coverage, without publishing or deploying.
 - **Explicit coverage runs:** add `ci:coverage-summary` or dispatch CI with
   `coverage_summary=true`. This requests full root/package/integration tests,
-  enforces the **70%** fast-tier floor, and produces the combined report.
-  Coverage failures still fail `repository-checks` when requested.
+  within the selected scope and produces the combined report. Nebius coverage
+  is reported without reusing the historical all-platform floor. Main and
+  `legacy_compatibility=true` coverage keep the **70%** fast-tier floor.
+  Collection/report errors still fail the selected check in either scope.
 - `ci:integration` requests the full functional integration lane without coverage.
 - `coverage.xml` ships as a workflow artifact for external tools.
 
-To reproduce the protected fast coverage gate locally, run the equivalent
-serial form of the two pytest coverage steps, then run the threshold check.
-CI runs these pytest commands in parallel and combines their coverage data in
-`fast-checks` while independent integration lanes are still running. The final
-`repository-checks` job validates the selected result instead of recomputing
-coverage. Local serial runs need `--cov-append` on the second command:
-
-```bash
-rm -f .coverage coverage.xml
-uv run --no-sync pytest \
-  tests/unit tests/contract tests/property tests/loom_cli tests/ops \
-  --cov=src --cov=packages \
-  --cov-report=term --cov-report=xml
-uv run --no-sync pytest \
-  packages/loom-launcher/tests \
-  packages/loom-benchmarks/tests \
-  packages/loom-benchmark-terminal-bench-2/tests \
-  --cov=src --cov=packages --cov-append \
-  --cov-report=term --cov-report=xml
-uv run --no-sync coverage report --fail-under=70
-```
-
-The first pytest command alone is not the fast coverage gate: it measures the
-package source directories in `--cov=packages` before the sibling package tests
-have appended their coverage, so it can report a lower partial total. The gate
-is the final `coverage report` after both pytest commands have completed.
+Use the manifest-selected commands in [Tests](#tests) for local reproduction.
+For Nebius coverage, select `--test-scope nebius`, keep `-m "not legacy_pool"`,
+replace `-p no:cov` with the coverage arguments shown there, and report without
+`--fail-under=70`. The second command needs `--cov-append`; reporting before both
+root and package tests finish gives an incomplete total. CI combines these
+parallel results in `fast-checks`; `repository-checks` validates that result
+without recomputing coverage.
 
 ## Workflow
 

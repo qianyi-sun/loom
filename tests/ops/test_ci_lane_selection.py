@@ -21,7 +21,10 @@ def test_unrelated_label_preserves_test_selection():
     assert json.loads(plan(p, ["bug"]).github_outputs()["test_changes"]) == [p]
 
 
-@pytest.mark.parametrize("path", ["uv.lock", "config/component-ownership.toml", "unknown/runtime.bin"])
+@pytest.mark.parametrize("path", [
+    "uv.lock", "pyproject.toml", "packages/loom-launcher/pyproject.toml",
+    "config/component-ownership.toml", "unknown/runtime.bin",
+])
 def test_shared_or_unknown_change_retains_baseline(path):
     outputs = plan(path).github_outputs()
     for lane in ("tests_root", "tests_packages", "go_checks", "runtime_payload", "nebius_iac", "locked_environments"):
