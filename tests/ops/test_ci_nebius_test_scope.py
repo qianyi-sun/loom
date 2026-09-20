@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
         "tests/unit/test_capacity_allocator.py",
         "tests/unit/test_service_personal_dev_lifecycle.py",
         "tests/ops/test_task_image_authority_deployment.py",
+        "tests/unit/test_task_image_registry_reader.py",
         "tests/unit/test_native_sandbox_consumer.py",
     ), ("tests/unit/test_nebius_platform_render.py",
         "tests/unit/test_native_build_source_isolation.py",
@@ -35,6 +36,7 @@ ROOT = Path(__file__).resolve().parents[2]
         "tests/integration/test_capacity_management_store.py",
         "tests/integration/test_personal_dev_storage_transfer_primitives.py",
         "tests/integration/test_task_image_publication_jobs.py",
+        "tests/integration/test_task_image_retired_admission.py",
     ), (
         "tests/integration/test_nebius_platform_bootstrap.py",
         "tests/integration/test_application_migration_authority.py",
@@ -174,3 +176,14 @@ def test_go_package_selection_preserves_current_runtimes(tmp_path, scope):
     assert run.returncode == 0, run.stderr
     selected = env_file.read_text().strip().removeprefix("GO_PACKAGES=").split()
     assert selected == (packages if scope == "all" else packages[:4])
+
+
+def test_non_pytest_legacy_hooks_are_manual_compatibility_only():
+    jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
+    audit = next(s for s in jobs["lint-and-static"]["steps"]
+                 if s.get("name") == "Global capacity Package 3 no-scheduler-mutation audit")
+    shadow = next(s for s in jobs["tests-root"]["steps"]
+                  if s.get("name") == "Produce synthetic global capacity shadow evidence")
+    assert audit["if"] == "env.CI_TEST_SCOPE == 'all'"
+    assert "env.CI_TEST_SCOPE == 'all'" in shadow["if"]
+    assert "matrix.shard_index == 0" in shadow["if"]

@@ -24,7 +24,10 @@ PR checks do not receive its credentials. CI does not deploy the live platform.
 ## Nebius path routing
 
 Static checks remain the ordinary baseline. Frontend-only changes do not start
-Python test, Go, runtime-payload, dependency-lock or Terraform runners. Independent
+Python test, Go, runtime-payload, dependency-lock, Terraform, Compose or Kubernetes
+runners. The Compose system fixture has no Web service; browser/auth changes are
+covered by the frontend job. Backend/frontend mixed changes and explicit smoke
+labels still select the corresponding checks. Independent
 test edits start their owning test jobs. Shared and unknown inputs retain the full
 baseline; Terraform runs for its own inputs and full-regression requests.
 Manifest-ignored retired inputs do not allocate backend test runners; static
@@ -33,7 +36,7 @@ heavy validation follows the changed files:
 
 | Changed file | Additional validation |
 | --- | --- |
-| Frontend source or web Dockerfile | Web, affected images and system smoke; auth/ingress contracts also select Kubernetes |
+| Frontend source, Web Dockerfile, Nginx SPA config or browser runtime config | Web type/lint/unit/coverage/browser checks and affected images |
 | Platform renderer source | Integration, affected images, Kubernetes |
 | Independent platform renderer unit tests | Kubernetes |
 | Deployment/render operator scripts and `deploy/nebius/` configuration | Integration, Kubernetes |
@@ -186,12 +189,49 @@ builds using current materialization and execution-capacity stores.
 Integration-branch runs 35394447854 and 35155582621 completed in about 14.5 minutes.
 The final #2007 run 35492370318 took 38m41s, passing 7,341 ordinary integration
 cases (7,351 including skips), versus 1,821 passes across two shards in 35394447854.
-At the #2011 audit base, real pytest collection drops from 7,351 to **2,391**:
-1,863 cases in modules already present on the integration branch and 528 in 45
-added modules. The latter include gateway audit/deadline, Nebius lineage/fairness,
-shared migration and task-source/materialization consistency tests. This is a
-collection measurement, not a passing-test or wall-clock claim. Measure the new
-current-head source run before claiming an end-to-end speedup.
+The initial #2011 runtime-family correction collected 2,391 cases: 1,863 in
+existing integration-branch modules and 528 in 45 added modules. The next audit
+also isolated standalone authority cleanup/credential tests, reducing ordinary
+integration to **2,277 cases in 295 files**, from 7,351 in 519 files before #2011.
+Current migration/source/materialization/lease boundary tests remain. These are
+collection counts, not a claim that every selected test has passed on each head.
+
+### Full PR lane audit
+
+The table audits every remaining lane, including work outside pytest selection.
+Timings below are job wall times from #2011 head `187872c9d`, not estimates for
+later amendments. CI run 35495791483 succeeded in **10m26s**, versus **38m41s**
+for #2007. Its companion cluster run failed with a Kubernetes TLS EOF, so this
+head did **not** pass complete four-context admission. Do not conflate the CI
+workflow timing with full PR acceptance or live Nebius verification.
+
+| Check | Observed job time | Current scope and decision |
+| --- | --- | --- |
+| Lint/static/codegen | 47s | Keep shared Python type/import, syntax, settings and dependency contracts. Only the inactive global-capacity no-mutation audit moves to manual compatibility. |
+| Independent locked install | 16s | Ordinary source changes reuse `uv sync --locked` and `uv pip check` in their test jobs. Keep this separate probe for dependency/CI authority, unknown inputs and full manual/scheduled/coverage requests. |
+| Root tests | 6m11s / 8m12s | 600 files at measured head; now 566 after tracing standalone image-authority clients, old staging attachments and standalone host tools. Current build plans, source isolation, GPU capability contracts and mixed worker/CI security modules stay. |
+| Package tests | 38s | Keep all 58 manifest-owned benchmark/launcher/checksum package files. These serve current imports, runtime and catalogs. |
+| Ordinary integration | 6m24s–9m42s across four shards | Keep current API/auth, gateway, SQL/migrations, scheduling, source/image materialization and execution leases. Standalone authority issuance/retirement inventory is manual; mixed shared-store fencing stays daily. |
+| Docker integration | 1m57s | Keep 21 files covering actual driver/network/gateway/artifact and Nebius TLS/restore behavior. Old KVM/personal-dev/authority chains are already manual. |
+| Go | 43s | Keep current execution/gateway/sandbox packages and future packages by default. Historical builder supervisor/Python handoff is manual. |
+| Runtime payload | 24s | Ten current/common fixture files remain. Two GB10 catalog cases now obey the same manifest compatibility scope, including when invoked by the standalone runner. |
+| Installed wheel | Included in root shard 1 | Verify installed Nebius renderer/actuator imports and packaged settings schema. Old cluster/rollout imports, templates and dashboard/Envoy assets are checked only in compatibility. Keep this packaging boundary because editable source tests cannot detect missing wheel files. |
+| Frontend | 2m35s | Keep all 83 owned files plus production build, browser, accessibility, network/console, type/lint and coverage checks. Pure frontend edits no longer start a backend Compose stack that does not serve the UI. |
+| Images | About 3m17s for the source workflow | Keep affected AMD64 builds and artifact vulnerability scans for the seven Nebius images. Historical publishers stay manual; existing integrity boundaries are unchanged. |
+| Kubernetes contract | 1m59s, failed | Keep three modules covering current manifests and actuator/runtime behavior. `test_runtime_executes_task_native_sidecar_and_verifier_without_docker_socket` hit TLS EOF while reading its broker Pod; do not skip or relabel it as legacy. This CI fixture result is not a live platform observation. |
+| Backend system smoke | 6m33s | Keep eight files for cross-service API/database/gateway/worker behavior, cancellation/crash recovery and benchmark ingestion. It is a disposable common backend regression, not full Nebius deployment acceptance. |
+
+The validator itself was also profiled: the expanded compatibility list repeatedly
+classified the entire tracked tree for each pattern. It now computes runnable
+paths once per invocation, retaining full ownership, syntax and marker validation.
+Three local real-CLI runs improved from 3.009/3.012/3.131s to
+2.195/2.177/2.180s. There is no persistent cache or stale-file trust shortcut.
+
+Tests of old attachment tools named `nebius_staging_*` are compatibility-only:
+they connect Nebius to the historical CNPG/staging deployment. The independent
+platform bootstrap, renderer, current capacity API and task-image actuator remain
+in daily scope. CI reliability reporting and release policy tests with shared
+semantics stay; a legacy reference alone does not justify dropping a mixed test.
 
 Run the full compatibility tests, including both integration tiers:
 

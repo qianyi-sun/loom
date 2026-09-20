@@ -1731,7 +1731,9 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     runtime_payload_scripts = "\n".join(
         step.get("run", "") for step in jobs["runtime-payload"]["steps"]
     ).strip()
-    assert runtime_payload_scripts == "python3 scripts/runtime_payload_conformance.py"
+    assert runtime_payload_scripts == (
+        'python3 scripts/runtime_payload_conformance.py --test-scope "${CI_TEST_SCOPE:-all}"'
+    )
     assert "continue-on-error" not in jobs["runtime-payload"]
 
     assert {

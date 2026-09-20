@@ -788,8 +788,11 @@ def validate_manifest(
     """Return deterministic authority errors for tracked repository inputs."""
 
     errors: list[str] = []
+    # Classify paths once, not once per compatibility pattern. This remains a
+    # full validation of the current tree; no persistent result is cached.
+    runnable_paths = tuple(path for path in tracked_paths if _is_runnable_test_path(path))
     for pattern in manifest.compatibility_test_paths:
-        if not any(_is_runnable_test_path(path) and matches_path(path, pattern) for path in tracked_paths):
+        if not any(matches_path(path, pattern) for path in runnable_paths):
             errors.append(f"compatibility test pattern matches no tracked test: {pattern}")
     for pattern in manifest.ci_ignored_paths:
         if not any(matches_path(path, pattern) for path in tracked_paths):
@@ -1304,6 +1307,7 @@ def lane_execution_plan(
     *,
     tracked_paths: tuple[str, ...],
     lane: str,
+    test_scope: str = "all",
 ) -> tuple[dict[str, Any], ...]:
     """Render the exact policy-grouped execution plan for a policy lane."""
 
@@ -1322,6 +1326,7 @@ def lane_execution_plan(
     for path in lane_paths:
         if cases_by_path[path].policy != manifest.test_owner_for_path(path).execution_policy:
             raise ManifestError(f"execution case policy differs from CI lane owner: {path}")
+    lane_paths = select_test_scope(manifest, lane_paths, scope=test_scope)
     plan: tuple[dict[str, Any], ...] = tuple(
         {
             "policy": asdict(policy),

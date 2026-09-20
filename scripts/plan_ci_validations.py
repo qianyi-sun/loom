@@ -251,6 +251,13 @@ def _matches(path: str, *, exact: set[str], prefixes: tuple[str, ...]) -> bool:
     return path in exact or path.startswith(prefixes)
 
 
+def _is_frontend_input(path: str) -> bool:
+    return path.startswith("web/") or path in {
+        "deploy/Dockerfile.web", "deploy/nginx-spa.conf",
+        "deploy/nginx-spa-security-headers.conf", "deploy/web-runtime-config.sh",
+    }
+
+
 def _is_dependency_authority_path(path: str) -> bool:
     return path in {"config/uv-toolchain.toml", "pyproject.toml", "uv.lock"} or (
         path.startswith("packages/") and path.endswith("/pyproject.toml")
@@ -505,10 +512,8 @@ def plan_validations(
         if path.startswith("tests/contract/") or (not test_owner_lanes and _matches(path, exact=integration_exact, prefixes=integration_prefixes)):
             select("integration", f"path:{path}")
             matched_owner = True
-        elif not test_owner_lanes and not (
-            path.startswith("web/") or path == "deploy/Dockerfile.web"
-        ):
-            # Frontend inputs already select web/image/system contracts below.
+        elif not test_owner_lanes and not _is_frontend_input(path):
+            # Frontend inputs already select browser and image contracts below.
             # They do not change the Python runtime exercised by this lane.
             select("integration", f"non-doc-path:{path}")
         if path in docker_exact or (not test_owner_lanes and _matches(path, exact=set(), prefixes=docker_prefixes)):
@@ -522,10 +527,10 @@ def plan_validations(
         if image_match:
             select("images", f"path:{path}")
             matched_owner = True
-        if _matches(path, exact=cluster_exact, prefixes=cluster_prefixes):
+        if not _is_frontend_input(path) and _matches(path, exact=cluster_exact, prefixes=cluster_prefixes):
             select("cluster_smoke", f"path:{path}")
             matched_owner = True
-        if _matches(path, exact=staging_exact, prefixes=staging_prefixes):
+        if not _is_frontend_input(path) and _matches(path, exact=staging_exact, prefixes=staging_prefixes):
             select("staging_smoke", f"path:{path}")
             matched_owner = True
         if path.startswith("web/") or path in web_quality_exact:
@@ -573,8 +578,12 @@ def plan_validations(
                or _is_dependency_authority_path(path) for path in paths)
     )
     backend_paths = tuple(path for path in runtime_paths
-                          if not path.startswith("web/") and path != "deploy/Dockerfile.web")
+                          if not _is_frontend_input(path))
     baseline = {name: bool(backend_paths) for name in BASELINE_CHECKS}
+    # Every Python validation job already syncs/checks the locked workspace.
+    # The standalone install lane is for dependency/CI authority changes and
+    # full regression, handled by force_baseline below.
+    baseline["locked_environments"] = False
     baseline["nebius_iac"] = any(
         _matches(path, exact=NEBIUS_IAC_EXACT, prefixes=NEBIUS_IAC_PREFIXES)
         for path in runtime_paths

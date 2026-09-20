@@ -350,6 +350,7 @@ jobs:
         run: uv run --no-sync mypy
 
       - name: Global capacity Package 3 no-scheduler-mutation audit
+        if: env.CI_TEST_SCOPE == 'all'
         shell: bash
         run: |
           set -euo pipefail
@@ -447,7 +448,7 @@ jobs:
             "${coverage_args[@]}"
 
       - name: Produce synthetic global capacity shadow evidence
-        if: matrix.shard_index == 0 && needs.workflow-plan.outputs.runtime_payload == 'true'
+        if: env.CI_TEST_SCOPE == 'all' && matrix.shard_index == 0 && needs.workflow-plan.outputs.runtime_payload == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -497,13 +498,14 @@ jobs:
           from pathlib import Path
 
           import loom_cli
-          import loom_cli.rollout.operator.broker
-          from loom_cli.cluster_cmd import render_manifests
-          from loom_cli.cluster_config import ClusterConfig
+          import loom.nebius_platform_render
+          import loom_execution_actuator.task_image_controller
 
           repo_root = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
-          module_path = Path(loom_cli.__file__).resolve()
-          assert not module_path.is_relative_to(repo_root / "src"), module_path
+          for module in (loom_cli, loom.nebius_platform_render,
+                         loom_execution_actuator.task_image_controller):
+              module_path = Path(module.__file__).resolve()
+              assert not module_path.is_relative_to(repo_root / "src"), module_path
           runtime_assets = {
               Path("config/loom-schema.toml"): ("loom-schema.toml",),
               Path("deploy/grafana/dashboards/operator-overview.json"): (
@@ -531,20 +533,27 @@ jobs:
                   "egress-proxy.yaml",
               ),
           }
+          if os.environ.get("CI_TEST_SCOPE", "all") != "all":
+              runtime_assets = {Path("config/loom-schema.toml"): ("loom-schema.toml",)}
           package_root = resources.files("loom_cli.data")
           for source_path, resource_parts in runtime_assets.items():
               assert package_root.joinpath(*resource_parts).read_bytes() == (
                   repo_root / source_path
               ).read_bytes()
-          assert (
-              resources.files("loom_cli.templates.k8s")
-              .joinpath("_env.j2")
-              .read_text(encoding="utf-8")
-              .strip()
-          )
-          rendered = render_manifests(ClusterConfig())
-          assert "kind: ConfigMap" in rendered
-          assert "name: loom-grafana-dashboards" in rendered
+          if os.environ.get("CI_TEST_SCOPE", "all") == "all":
+              assert (
+                  resources.files("loom_cli.templates.k8s")
+                  .joinpath("_env.j2")
+                  .read_text(encoding="utf-8")
+                  .strip()
+              )
+              import loom_cli.rollout.operator.broker
+              from loom_cli.cluster_cmd import render_manifests
+              from loom_cli.cluster_config import ClusterConfig
+
+              rendered = render_manifests(ClusterConfig())
+              assert "kind: ConfigMap" in rendered
+              assert "name: loom-grafana-dashboards" in rendered
           PY
 
       - name: Upload root coverage data
@@ -628,7 +637,7 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Execute manifest-owned runtime payload conformance
-        run: python3 scripts/runtime_payload_conformance.py
+        run: python3 scripts/runtime_payload_conformance.py --test-scope "${CI_TEST_SCOPE:-all}"
 
   nebius-iac:
     name: nebius-iac
