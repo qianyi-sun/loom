@@ -61,6 +61,8 @@ on:
     # Required if dev later enables GitHub merge queue: queued merge groups
     # need to emit the same required `repository-checks` context as PRs.
     types: [checks_requested]
+  schedule:
+    - cron: "23 8 * * *"
   workflow_dispatch:
     inputs:
       integration:
@@ -198,7 +200,7 @@ jobs:
                   > /tmp/loom-changed-files.txt
               fi
               ;;
-            workflow_dispatch)
+            workflow_dispatch|schedule)
               git show --pretty=format: --name-only "$HEAD_SHA" \
                 > /tmp/loom-changed-files.txt
               PR_LABELS_JSON="$(python3 - <<'PYLABELS'
@@ -1026,6 +1028,8 @@ jobs:
     if: >-
       needs.workflow-plan.outputs.gate_mode == 'full' &&
       needs.workflow-plan.outputs.integration_docker == 'true'
+    env:
+      TEST_CHANGED_PATHS: ${{ needs.workflow-plan.outputs.test_changes }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -1053,10 +1057,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t test_paths < <(
-            uv run --no-sync python scripts/component_ownership.py test-paths --lane integration-docker
-          )
-          [[ ${#test_paths[@]} -gt 0 ]]
+          manifest_paths_file="${RUNNER_TEMP}/integration-docker-manifest.txt"
+          uv run --no-sync python scripts/component_ownership.py test-paths --lane integration-docker \
+            --changed-paths-json "$TEST_CHANGED_PATHS" > "$manifest_paths_file"
+          mapfile -t test_paths < "$manifest_paths_file"
+          if [[ ${#test_paths[@]} -eq 0 ]]; then
+            echo "No selected tests belong to this lane."
+            exit 0
+          fi
           uv run --no-sync pytest "${test_paths[@]}" \
             --durations=15
 
@@ -1153,7 +1161,8 @@ jobs:
 
   repository-checks:
     name: >-
-      ${{ github.event_name == 'workflow_dispatch' && 'repository-checks-manual' ||
+      ${{ github.event_name == 'schedule' && 'repository-checks-scheduled' ||
+          github.event_name == 'workflow_dispatch' && 'repository-checks-manual' ||
           github.event_name == 'push' && 'repository-checks-push' ||
           needs.workflow-plan.outputs.gate_mode == 'full' && 'repository-checks' ||
           'repository-checks-filtered' }}

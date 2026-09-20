@@ -361,6 +361,9 @@ def test_source_gate_names_are_native_and_stable() -> None:
                 "'images-gate-trusted-publish' || "
             )
 
+        if workflow_path == ".github/workflows/ci.yml":
+            trusted_recovery = "github.event_name == 'schedule' && 'repository-checks-scheduled' || "
+
         assert expression == _normalized_expression(
             "${{ "
             f"{trusted_recovery}"

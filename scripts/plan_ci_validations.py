@@ -33,7 +33,7 @@ HEAVY_CHECKS = (
 
 BASELINE_CHECKS = ("tests_root", "tests_packages", "go_checks", "runtime_payload", "nebius_iac", "locked_environments")
 
-SUPPORTED_EVENTS = {"merge_group", "pull_request", "push", "workflow_dispatch"}
+SUPPORTED_EVENTS = {"merge_group", "pull_request", "push", "workflow_dispatch", "schedule"}
 
 LABEL_TO_CHECK = {
     "ci:integration": "integration",
@@ -317,6 +317,10 @@ def plan_validations(
         selected[name] = True
         reasons[name].append(reason)
 
+    if event_name == "schedule":
+        for name in selected:
+            select(name, "scheduled-full-regression")
+
     for label in sorted(labels):
         if check := LABEL_TO_CHECK.get(label):
             select(check, f"label:{label}")
@@ -541,7 +545,7 @@ def plan_validations(
 
     runtime_paths = tuple(path for path in paths if not _is_documentation_path(path))
     force_baseline = (
-        not paths or event_name == "workflow_dispatch" or unowned_runtime
+        not paths or event_name in {"workflow_dispatch", "schedule"} or unowned_runtime
         or selected["coverage_summary"]
         or any(path in PLANNER_PATHS | OWNERSHIP_AUTHORITY_PATHS
                or path == ".github/workflows/ci.yml"

@@ -69,6 +69,7 @@ class TestSuite:
     lane: str
     execution_policy: str | None
     ci_enabled: bool
+    unaffected_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -399,6 +400,7 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
             "exclude_paths",
             "execution_policy",
             "ci_enabled",
+            "unaffected_paths",
         },
         context,
     )
@@ -429,6 +431,11 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
     ci_enabled = raw.get("ci_enabled", True)
     if type(ci_enabled) is not bool:
         raise ManifestError(f"{context}.ci_enabled must be a boolean")
+    raw_unaffected = raw.get("unaffected_paths", [])
+    if not isinstance(raw_unaffected, list) or not all(isinstance(item, str) for item in raw_unaffected):
+        raise ManifestError(f"{context}.unaffected_paths must be a string array")
+    unaffected_paths = tuple(_safe_path(item, context=f"{context}.unaffected_paths", allow_glob=True)
+                             for item in raw_unaffected)
     return TestSuite(
         id=_required_slug(raw, "id", context),
         language=language,
@@ -437,6 +444,7 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
         lane=lane,
         execution_policy=execution_policy,
         ci_enabled=ci_enabled,
+        unaffected_paths=unaffected_paths,
     )
 
 
@@ -1221,6 +1229,32 @@ def narrow_test_only_changes(
     return tuple(path for path in paths if path in changed)
 
 
+def select_affected_test_suites(
+    manifest: Manifest, paths: tuple[str, ...], *, changed_paths: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Skip an expensive suite only for its explicitly audited unrelated inputs.
+
+    No diff (nightly/manual/coverage), unknown paths, mixed dependencies and
+    the suite's own tests retain coverage. Unannotated suites remain complete.
+    """
+    if not changed_paths:
+        return paths
+    selected = []
+    for path in paths:
+        owners = manifest.test_owners_for_path(path)
+        if len(owners) != 1:
+            raise ManifestError(f"test path has no unique owner: {path}")
+        owner = owners[0]
+        if all(
+            any(matches_path(change, pattern) for pattern in owner.unaffected_paths)
+            and owner not in manifest.test_owners_for_path(change)
+            for change in changed_paths
+        ):
+            continue
+        selected.append(path)
+    return tuple(selected)
+
+
 def test_paths_for_policy(
     manifest: Manifest,
     *,
@@ -1545,10 +1579,12 @@ def main(argv: list[str] | None = None) -> int:
             changes = json.loads(args.changed_paths_json)
             if not isinstance(changes, list) or not all(isinstance(path, str) for path in changes):
                 raise ManifestError("changed paths must be a JSON string array")
+            changed_paths = tuple(_safe_path(path, context="changed path") for path in changes)
             paths = narrow_test_only_changes(
-                paths, changed_paths=tuple(_safe_path(path, context="changed path") for path in changes),
+                paths, changed_paths=changed_paths,
                 tracked_paths=tracked_paths, repo_root=repo_root,
             )
+            paths = select_affected_test_suites(manifest, paths, changed_paths=tuple(changed_paths))
             for path in paths:
                 print(path)
             return 0

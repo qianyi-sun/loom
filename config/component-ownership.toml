@@ -946,6 +946,7 @@ include_paths = [
   "tests/integrations/**/*.py",
 ]
 exclude_paths = [
+  "tests/integration/test_application_schema_reference.py",
   "tests/integration/test_task_image_builder_guard_local_flow.py",
   "tests/integration/test_task_image_publication_full_flow.py",
   "tests/integration/test_execution_actuator_k3s.py",
@@ -994,6 +995,16 @@ exclude_paths = [
   "tests/integration/test_pipeline_stage1_smoke_authority.py",
   "tests/integrations/behavior/**/*.py",
 ]
+
+# This matrix provisions 6 historical revisions x 2 PostgreSQL versions x 6
+# owner profiles. Its generator imports loom/loom_cli, migrations and provisioning
+# scripts, not the HTTP service or gateway. Keep unknown/shared inputs full.
+[[test_suites]]
+id = "application-schema-reference"
+language = "python"
+lane = "integration"
+include_paths = ["tests/integration/test_application_schema_reference.py"]
+unaffected_paths = ["src/loom_service/**", "src/loom_llm_gateway/**", "web/**", "docs/**"]
 
 [[test_suites]]
 id = "python-behavior-disabled"

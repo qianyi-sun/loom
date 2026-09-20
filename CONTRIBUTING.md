@@ -111,8 +111,10 @@ normally run without coverage instrumentation. Use `ci:coverage-summary` or the
 CI dispatch input `coverage_summary` for full coverage accounting and the 70%
 fast-tier floor. `ci:integration` requests full functional integration tests
 without coverage. Independent test-only edits select their owning test files;
-runtime, shared-fixture and unknown changes retain complete lanes. Existing
-signed publication consumers retain their declared architecture manifests.
+shared-fixture and unknown changes retain complete lanes. Audited component
+selection avoids unrelated backend jobs and schema-reference provisioning. A daily
+full regression at 08:23 UTC retains complete test selection and coverage. Dev PRs
+use the seven-image Nebius set; historical personal-dev publication is manual.
 
 Deployment environments are separated from branch workflow: `development`
 uses `https://yylx.world/dev`, `staging` uses

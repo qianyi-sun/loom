@@ -364,7 +364,9 @@ trusted post-merge/release workflow rather than the required PR context.
 
 ## Coverage gates
 
-- **Ordinary PRs:** functional Python tests run without coverage instrumentation.
+- **Ordinary PRs:** affected functional Python tests run without coverage instrumentation.
+- **Daily regression:** CI runs full Python/Go/Web and both integration tiers at
+  08:23 UTC on dev, with coverage, without publishing or deploying.
 - **Explicit coverage runs:** add `ci:coverage-summary` or dispatch CI with
   `coverage_summary=true`. This requests full root/package/integration tests,
   enforces the **70%** fast-tier floor, and produces the combined report.

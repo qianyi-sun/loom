@@ -39,7 +39,7 @@ heavy validation follows the changed files:
 | Candidate workflow/publisher, registry authentication, shared scan validator | Full validation |
 | Unknown runtime or operator files | Full validation |
 
-Mixed changes take the union of their requirements. Labels can add checks and
+Mixed changes take the union of their requirements. CI labels can add checks and
 cannot subtract path-selected checks. This avoids treating known deployment
 files as unknown code while retaining full validation for publication authority.
 The actual tests are selected from `config/component-ownership.toml`.
@@ -58,7 +58,8 @@ measurement; the removed instrumentation and artifact work is deterministic.
 An edit consisting only of independent Python test modules runs those files in
 their owning lanes. Any external reference to an edited test module name keeps
 full validation because test modules can provide shared fixtures. Runtime,
-migration, configuration, fixture, deleted-file and unknown changes stay full.
+migration, configuration, fixture, deleted-file and unknown changes stay full
+unless a suite explicitly declares an audited unaffected component.
 CI selector labels and manual runs request full regression; ordinary labels such
 as `bug` do not change test selection. Sharding happens before filtering,
 so ownership and paired-fixture ordering remain stable. Empty selections do not
@@ -105,3 +106,23 @@ performs the bot-authenticated trusted `images.yml` dispatch, and
 the controller has no schedule. Existing main-branch production publication is
 unchanged. This CI change neither retires personal-dev product functionality nor
 stops existing OLDLAB services. Migrating those consumers remains separate work.
+
+## Daily regression and expensive components
+
+CI runs once daily at 08:23 UTC on the default branch (`dev`). It uses the same
+jobs with full root/package/Go/Web/integration/Docker selection and coverage;
+it does not publish or deploy and adds no PR admission context. The scheduled
+result is named `repository-checks-scheduled`.
+
+The schema-reference suite provisions all historical revisions, PostgreSQL majors
+and owner profiles. Its full matrix still runs for DB/library/CLI/provisioning,
+dependency, fixture, unknown or mixed changes, and for nightly/manual/coverage
+runs. Only audited unrelated service, gateway, Web and documentation-only changes
+can omit this suite. The manifest owns this small component map; other integration
+suites continue to run. No shared mutable database or cached schema substitutes
+for independent provisioning. Docker test-only changes now use the same selection
+and failure propagation as ordinary integration.
+
+The pre-change integration sample (run `35485701767`, shard 3) spent 41m55s in
+pytest and about 22s preparing the runner and dependencies. This identifies test
+work as the dominant cost; it is not a measurement of this change's speedup.

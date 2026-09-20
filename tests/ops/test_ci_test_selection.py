@@ -66,7 +66,7 @@ def test_explicit_full_requests_do_not_export_a_reduced_test_diff(event: str, la
     assert json.loads(plan.github_outputs()["test_changes"]) == []
 
 
-@pytest.mark.parametrize("lane", ["tests-root", "tests-packages", "integration"])
+@pytest.mark.parametrize("lane", ["tests-root", "tests-packages", "integration", "integration-docker"])
 @pytest.mark.parametrize("selection_exit", [0, 17])
 def test_empty_selection_is_safe_and_selector_failure_still_fails_the_job(
     tmp_path: Path, lane: str, selection_exit: int,
