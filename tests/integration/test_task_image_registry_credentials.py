@@ -672,7 +672,7 @@ async def test_candidate_replay_rejects_persisted_public_scalar_drift(
         {"credential_id": NEXT_CREDENTIAL_ID},
         {"credential_generation": 2},
         {"component": "sidecar:missing"},
-        {"platform": "linux/amd64"},
+        {"platform": "linux/arm64"},
     ],
 )
 async def test_candidate_rejects_cross_binding_without_changing_materialization(

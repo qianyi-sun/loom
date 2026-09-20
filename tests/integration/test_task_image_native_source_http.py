@@ -39,7 +39,7 @@ async def test_registered_native_http_bundle_rechecks_source_and_preserves_exact
 ):
     directory = _bundle(tmp_path)
     config = directory / "task.toml"
-    config.write_text(config.read_text().replace("[environment]", '[environment]\ncpu_arch = "arm64"'))
+    config.write_text(config.read_text().replace("[environment]", '[environment]\ncpu_arch = "x86_64"'))
     spec = TaskBundleSourceSpecV1.from_registration(
         prepare_task_bundle_registration(directory, task_id="benchmark/" + uuid4().hex),
         bucket="loom-bundles",

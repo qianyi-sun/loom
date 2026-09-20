@@ -267,7 +267,7 @@ def _run_probe_container(arguments: list[str], *, timeout: int, env=None):
     name = f"loom-phase2c-{uuid4().hex}"
     try:
         return subprocess.run(
-            ["docker", "run", "--rm", "--name", name, *arguments],
+            ["docker", "run", "--rm", "--platform", "linux/amd64", "--name", name, *arguments],
             env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             check=False, timeout=timeout,
         )
@@ -346,8 +346,12 @@ async def test_real_authority_guard_socket_and_go_orchestrator_flow(
         _peer.executable_sha256 = SUPERVISOR_SHA256
         service.config = replace(
             service.config,
+            cluster_id="oldlab",
+            cpu_arch="x86_64",
+            node_name="trt-eai-oldlab-1",
             slurm=replace(
                 service.config.slurm,
+                qos=_policy().qos,
                 request_sha256=canonical_request_sha256(_policy().request_identity()),
             ),
             containment=replace(
