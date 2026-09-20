@@ -286,6 +286,7 @@ jobs:
         id: build-matrices
         if: steps.event.outputs.checkout_required == 'true'
         env:
+          PUBLISHING: ${{ github.event_name == 'push' || steps.trust.outputs.trusted_publish == 'true' }}
           NATIVE_BUILDS: ${{ steps.plan.outputs.native_builds }}
         run: |
           set -euo pipefail
@@ -299,6 +300,10 @@ jobs:
               or not item["image"] for item in builds
           ):
               raise SystemExit("FAIL: invalid native image matrix")
+          # Server execution is amd64. Historical publication consumers are
+          # migrated separately; never change their manifest shape implicitly.
+          if os.environ.get("PUBLISHING", "false") != "true":
+              builds = [item for item in builds if item["architecture"] == "amd64"]
           scanner = "personal-dev-scanner-cache"
           partitions = {
               "ordinary_builds": [item for item in builds if item["image"] != scanner],
@@ -308,85 +313,6 @@ jobs:
               for name, rows in partitions.items():
                   print(f"{name}={json.dumps(rows, separators=(',', ':'))}", file=output)
           PYTHON
-
-  image-route:
-    name: resolve oldlab-first image routes
-    needs: plan
-    if: >-
-      github.event_name != 'push' &&
-      needs.plan.outputs.trusted_publish != 'true' &&
-      needs.plan.outputs.gate_mode == 'full' &&
-      needs.plan.outputs.required == 'true' &&
-      needs.plan.outputs.images != '[]'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      checks: read
-      contents: read
-    outputs:
-      routes: ${{ steps.route.outputs.routes || '{}' }}
-    steps:
-      - name: Checkout trusted route action
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          repository: qianyi-sun/loom
-          ref: 66b83fc57a3141197a997c9f6d4ce6e2a98ee3de
-          sparse-checkout: .github/actions/ci-runner-route
-          path: .loom-ci-route-action
-          persist-credentials: false
-
-      - name: Select native AMD64 image keys
-        id: keys
-        shell: bash
-        env:
-          NATIVE_BUILDS: ${{ needs.plan.outputs.native_builds }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-
-          builds = json.loads(os.environ["NATIVE_BUILDS"])
-          # The live lease broker may still run the preceding merged contract.
-          # Keep this new image on a hosted runner until that separately-owned
-          # control-plane rollout has occurred.
-          keys = [
-              item["image"]
-              for item in builds
-              if item["architecture"] == "amd64"
-              and item["image"] not in {
-                  "capacity-executor",
-                  "capacity-manager",
-                  "execution-actuator",
-                  "execution-runtime",
-                  "personal-dev-activation-agent",
-                  "personal-dev-builder",
-                  "personal-dev-native-builder-agent",
-                  "personal-dev-scanner-cache",
-                  "pipeline-core-fixture",
-                  "pipeline-orchestrator",
-              }
-          ]
-          if len(keys) != len(set(keys)):
-              raise SystemExit("native AMD64 route keys are duplicated")
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write("job_keys=" + json.dumps(keys, separators=(",", ":")) + "\n")
-              output.write("needs_route=" + ("true" if keys else "false") + "\n")
-          PY
-
-      - name: Resolve immutable assignments
-        id: route
-        if: steps.keys.outputs.needs_route == 'true'
-        uses: ./.loom-ci-route-action/.github/actions/ci-runner-route
-        with:
-          route-mode: ${{ vars.LOOM_CI_ROUTE_MODE || 'disabled' }}
-          repository: ${{ github.repository }}
-          workflow-name: images
-          workflow-id: '302898384'
-          workflow-run-id: ${{ github.run_id }}
-          run-attempt: ${{ github.run_attempt }}
-          head-sha: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          job-keys-json: ${{ steps.keys.outputs.job_keys }}
-          github-token: ${{ github.token }}
 
   trivy-binary:
     name: prepare verified Trivy binaries
@@ -497,17 +423,14 @@ jobs:
 
   build:
     name: ${{ matrix.image }} (${{ matrix.platform }})
-    needs: [plan, image-route, trivy-binary]
+    needs: [plan, trivy-binary]
     if: >-
       github.event_name != 'push' &&
       needs.plan.outputs.trusted_publish != 'true' &&
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.ordinary_builds != '[]'
-    runs-on: >-
-      ${{ matrix.architecture == 'arm64' && fromJSON('["ubuntu-24.04-arm"]') ||
-          (matrix.image == 'capacity-executor' || matrix.image == 'capacity-manager' || matrix.image == 'execution-actuator' || matrix.image == 'execution-runtime' || matrix.image == 'personal-dev-activation-agent' || matrix.image == 'personal-dev-builder' || matrix.image == 'personal-dev-native-builder-agent' || matrix.image == 'personal-dev-scanner-cache' || matrix.image == 'pipeline-core-fixture' || matrix.image == 'pipeline-orchestrator') && fromJSON('["ubuntu-24.04"]') ||
-          fromJSON(needs.image-route.outputs.routes)[matrix.image] }}
+    runs-on: ${{ matrix.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 45
     permissions:
       contents: read

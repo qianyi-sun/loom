@@ -6,6 +6,14 @@ from scripts.plan_ci_validations import HEAVY_CHECKS, plan_validations
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize("path", ["web/src/App.tsx", "web/src/auth/AuthContext.tsx", "deploy/Dockerfile.web"])
+def test_frontend_changes_do_not_select_unrelated_python_integration(path: str) -> None:
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+    assert plan.web_checks and plan.images and plan.staging_smoke
+    assert not plan.integration
+    assert not plan.integration_docker
+
+
 @pytest.mark.parametrize("path", [
     "src/loom_task_image_builder_guard/service.py",
     "src/loom_task_image_authority/api.py",

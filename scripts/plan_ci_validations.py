@@ -175,6 +175,7 @@ class ValidationPlan:
     coverage_summary: bool
     web_checks: bool
     reasons: dict[str, tuple[str, ...]]
+    test_changes: tuple[str, ...] = ()
 
     def selected_heavy_checks(self) -> set[str]:
         return {name for name in HEAVY_CHECKS if getattr(self, name)}
@@ -193,6 +194,7 @@ class ValidationPlan:
             )
         }
         outputs["gate_mode"] = self.gate_mode
+        outputs["test_changes"] = json.dumps(self.test_changes, separators=(",", ":"))
         outputs["reasons_json"] = json.dumps(self.reasons, sort_keys=True, separators=(",", ":"))
         return outputs
 
@@ -479,7 +481,11 @@ def plan_validations(
         if _matches(path, exact=integration_exact, prefixes=integration_prefixes):
             select("integration", f"path:{path}")
             matched_owner = True
-        elif not test_owner_lanes:
+        elif not test_owner_lanes and not (
+            path.startswith("web/") or path == "deploy/Dockerfile.web"
+        ):
+            # Frontend inputs already select web/image/system contracts below.
+            # They do not change the Python runtime exercised by this lane.
             select("integration", f"non-doc-path:{path}")
         if _matches(path, exact=docker_exact, prefixes=docker_prefixes):
             select("integration_docker", f"path:{path}")
@@ -527,6 +533,8 @@ def plan_validations(
         coverage_summary=selected["coverage_summary"],
         web_checks=selected["web_checks"],
         reasons={name: tuple(values) for name, values in reasons.items()},
+        # Explicit selector labels and manual runs retain full regression.
+        test_changes=paths if event_name in {"pull_request", "merge_group"} and not labels else (),
     )
 
 

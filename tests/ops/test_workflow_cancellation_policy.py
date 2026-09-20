@@ -10,9 +10,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 EXPLICIT_NON_CANCELLABLE_WORKFLOWS = {
     ".github/workflows/ci-retry.yml": "classified-ci-retry-${{ inputs.source_run_id }}",
-    ".github/workflows/ci-runner-route-publisher.yml": (
-        "ci-runner-route-publisher-${{ inputs.signature }}"
-    ),
     ".github/workflows/deploy-environment.yml": "deploy-${{ inputs.environment }}",
     ".github/workflows/main-promotion-gate.yml": (
         "main-promotion-gate-${{ inputs.candidate_sha }}"

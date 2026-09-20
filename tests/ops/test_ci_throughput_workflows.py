@@ -119,9 +119,6 @@ def _normalized_expression(value: str) -> str:
     return " ".join(value.split())
 
 
-OLDLAB_UV_MANIFEST = (
-    "${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}"
-)
 
 GITHUB_HOSTED_CONTROL_JOBS = {
     ".github/workflows/ci.yml": {
@@ -136,7 +133,7 @@ GITHUB_HOSTED_CONTROL_JOBS = {
 }
 
 
-def test_accelerated_workflows_use_local_uv_manifest_only_on_oldlab() -> None:
+def test_hosted_workflows_do_not_depend_on_a_private_uv_mirror() -> None:
     workflow_paths = (
         ".github/workflows/ci.yml",
         ".github/workflows/cluster-smoke.yml",
@@ -152,7 +149,7 @@ def test_accelerated_workflows_use_local_uv_manifest_only_on_oldlab() -> None:
         ]
         assert setup_steps
         for step in setup_steps:
-            assert step["with"]["manifest-file"] == OLDLAB_UV_MANIFEST
+            assert "manifest-file" not in step["with"]
 
 
 def test_planners_gates_publish_and_aggregation_stay_github_hosted() -> None:
@@ -166,13 +163,6 @@ def test_native_image_publish_jobs_stay_on_architecture_matched_github_hosts() -
     jobs = _workflow(".github/workflows/images.yml")["jobs"]
 
     build_runs_on = jobs["build"]["runs-on"]
-    assert "matrix.image == 'capacity-executor'" in build_runs_on
-    assert "matrix.image == 'capacity-manager'" in build_runs_on
-    assert "matrix.image == 'personal-dev-activation-agent'" in build_runs_on
-    assert "matrix.image == 'personal-dev-builder'" in build_runs_on
-    assert "matrix.image == 'personal-dev-scanner-cache'" in build_runs_on
-    assert "matrix.image == 'pipeline-core-fixture'" in build_runs_on
-    assert "matrix.image == 'pipeline-orchestrator'" in build_runs_on
     assert "ubuntu-24.04" in build_runs_on
     publish_runs_on = jobs["publish"]["runs-on"]
     assert "matrix.architecture == 'arm64'" in publish_runs_on
@@ -210,7 +200,6 @@ def test_go_checks_executes_required_python_go_v2_handoff() -> None:
     assert setup_uv["with"] == {
         "version": "0.11.26",
         "checksum": "6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0",
-        "manifest-file": OLDLAB_UV_MANIFEST,
         "enable-cache": True,
         "save-cache": (
             "${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}"
@@ -235,85 +224,6 @@ def test_go_checks_executes_required_python_go_v2_handoff() -> None:
         "tests/integration/test_task_image_builder_guard_local_flow.py "
         "tests/integration/test_task_image_publication_full_flow.py"
     )
-
-
-def test_hosted_only_amd64_builds_bypass_live_lease_routes(tmp_path: Path) -> None:
-    workflow = _workflow(".github/workflows/images.yml")
-    route_step = next(
-        step
-        for step in workflow["jobs"]["image-route"]["steps"]
-        if step.get("name") == "Select native AMD64 image keys"
-    )
-    github_output = tmp_path / "github-output.txt"
-    result = subprocess.run(
-        ["bash"],
-        input=route_step["run"],
-        cwd=REPO_ROOT,
-        text=True,
-        capture_output=True,
-        env={
-            **os.environ,
-            "NATIVE_BUILDS": json.dumps(
-                [
-                    {"image": "capacity-executor", "architecture": "amd64"},
-                    {"image": "capacity-executor", "architecture": "arm64"},
-                    {"image": "capacity-manager", "architecture": "amd64"},
-                    {"image": "capacity-manager", "architecture": "arm64"},
-                    {"image": "personal-dev-scanner-cache", "architecture": "amd64"},
-                    {"image": "personal-dev-scanner-cache", "architecture": "arm64"},
-                    {"image": "pipeline-core-fixture", "architecture": "amd64"},
-                    {"image": "pipeline-core-fixture", "architecture": "arm64"},
-                    {"image": "worker", "architecture": "amd64"},
-                ]
-            ),
-            "GITHUB_OUTPUT": str(github_output),
-        },
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert json.loads(_github_output_value(github_output.read_text(), "job_keys")) == ["worker"]
-
-
-def test_hosted_only_image_matrix_requires_no_live_lease_route(tmp_path: Path) -> None:
-    workflow = _workflow(".github/workflows/images.yml")
-    route_job = workflow["jobs"]["image-route"]
-    route_step = next(
-        step for step in route_job["steps"] if step.get("name") == "Select native AMD64 image keys"
-    )
-    resolve_step = next(
-        step for step in route_job["steps"] if step.get("name") == "Resolve immutable assignments"
-    )
-    github_output = tmp_path / "github-output.txt"
-    result = subprocess.run(
-        ["bash"],
-        input=route_step["run"],
-        cwd=REPO_ROOT,
-        text=True,
-        capture_output=True,
-        env={
-            **os.environ,
-            "NATIVE_BUILDS": json.dumps(
-                [
-                    {"image": "capacity-executor", "architecture": "amd64"},
-                    {"image": "capacity-executor", "architecture": "arm64"},
-                    {"image": "capacity-manager", "architecture": "amd64"},
-                    {"image": "capacity-manager", "architecture": "arm64"},
-                    {"image": "pipeline-core-fixture", "architecture": "amd64"},
-                    {"image": "pipeline-core-fixture", "architecture": "arm64"},
-                ]
-            ),
-            "GITHUB_OUTPUT": str(github_output),
-        },
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-    output = github_output.read_text()
-    assert json.loads(_github_output_value(output, "job_keys")) == []
-    assert _github_output_value(output, "needs_route") == "false"
-    assert resolve_step["if"] == "steps.keys.outputs.needs_route == 'true'"
-    assert route_job["outputs"]["routes"] == "${{ steps.route.outputs.routes || '{}' }}"
 
 
 def test_coverage_artifacts_map_hosted_and_oldlab_checkout_roots() -> None:
@@ -487,10 +397,6 @@ def test_no_workflow_can_write_custom_authoritative_states() -> None:
         assert "AUTHORITATIVE_CONTEXT" not in workflow_source
         workflow_permissions = workflow.get("permissions", {})
         assert isinstance(workflow_permissions, dict)
-        if workflow_path == ".github/workflows/ci-runner-route-publisher.yml":
-            assert workflow_permissions == {"contents": "read", "checks": "write"}
-            assert "scripts/ops/ci_runner_route_publisher.py" in workflow_source
-            continue
         assert workflow_permissions.get("checks") != "write"
         assert workflow_permissions.get("statuses") != "write"
 
@@ -520,7 +426,6 @@ def test_images_builds_use_planner_selection() -> None:
     assert "steps.event.outputs.required" in required_output
     assert set(jobs["build"]["needs"]) == {
         "plan",
-        "image-route",
         "trivy-binary",
     }
     assert "needs.plan.outputs.required == 'true'" in jobs["build"]["if"]
@@ -590,7 +495,6 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     build = jobs["build"]
     assert set(build["needs"]) == {
         "plan",
-        "image-route",
         "trivy-binary",
     }
     assert build["strategy"]["matrix"]["include"] == (
@@ -905,7 +809,6 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
     assert upload["with"]["overwrite"] is True
     assert build["needs"] == [
         "plan",
-        "image-route",
         "trivy-binary",
     ]
     assert publish["needs"] == [
@@ -1476,6 +1379,7 @@ def test_images_gate_separates_untrusted_build_from_trusted_publish(
         text=True,
         capture_output=True,
         env={
+            "PATH": os.environ["PATH"],
             "EVENT_NAME": event_name,
             "PLAN_RESULT": "success",
             "GATE_MODE": "full",
@@ -1525,6 +1429,7 @@ def test_images_gate_requires_personal_release_only_for_protected_selected_publi
         text=True,
         capture_output=True,
         env={
+            "PATH": os.environ["PATH"],
             "EVENT_NAME": event_name,
             "TRUSTED_PUBLISH": "false",
             "PLAN_RESULT": "success",
@@ -1839,7 +1744,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     assert "docs_only != 'true'" in jobs["fast-checks"]["if"]
     assert "gate_mode == 'preflight'" not in jobs["fast-checks"]["if"]
     assert set(jobs["integration"]["needs"]) == {"workflow-plan"}
-    assert set(jobs["integration-docker"]["needs"]) == {"workflow-plan", "ci-route"}
+    assert set(jobs["integration-docker"]["needs"]) == {"workflow-plan"}
     assert "docs_only != 'true'" in jobs["go-checks"]["if"]
     assert "gate_mode == 'full'" in jobs["integration"]["if"]
     assert "gate_mode == 'full'" in jobs["integration-docker"]["if"]
@@ -1860,7 +1765,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "tests-packages",
         "runtime-payload",
     ):
-        assert set(jobs[job_name]["needs"]) == {"workflow-plan", "ci-route"}
+        assert set(jobs[job_name]["needs"]) == {"workflow-plan"}
     assert "gate_mode == 'full'" in jobs["runtime-payload"]["if"]
     assert "gate_mode == 'preflight'" in jobs["runtime-payload"]["if"]
 
@@ -1916,7 +1821,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     ):
         assert f'"${result_name}"' in aggregate_script
 
-    assert set(jobs["web-checks"]["needs"]) == {"workflow-plan", "ci-route"}
+    assert set(jobs["web-checks"]["needs"]) == {"workflow-plan"}
     assert "needs.workflow-plan.outputs.web_checks == 'true'" in jobs["web-checks"]["if"]
     web_script = "\n".join(
         step.get("run", "") for step in jobs["web-checks"]["steps"] if "run" in step
@@ -2299,7 +2204,7 @@ def test_staging_gate_consumes_manifest_owned_system_smoke_lane() -> None:
     )
     cleanup_script = " ".join(cleanup_step["run"].replace("\\\n", " ").split())
 
-    assert set(system_smoke["needs"]) == {"plan", "staging-route"}
+    assert set(system_smoke["needs"]) == {"plan"}
     assert "needs.plan.outputs.required == 'true'" in system_smoke["if"]
     assert "uv sync --locked --all-packages --extra dev --extra cluster --extra rollout" in scripts
     assert "uv pip check --python .venv/bin/python" in scripts
@@ -2392,6 +2297,7 @@ def test_pytest_workflow_preserves_tests_and_failures_with_optional_integration_
         env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}",
              "RUNNER_TEMP": str(tmp_path), "SHARD_INDEX": "0", "SHARD_COUNT": "2",
              "COVERAGE_ENABLED": coverage_enabled, "ARGV_FILE": str(argv_file),
+             "TEST_CHANGED_PATHS": "[]",
              "TEST_EXIT": str(test_exit)},
     )
     assert result.returncode == test_exit, result.stderr
@@ -2399,7 +2305,7 @@ def test_pytest_workflow_preserves_tests_and_failures_with_optional_integration_
     assert [arg for arg in args if arg.startswith("tests/")] == [
         "tests/selected_first.py", "tests/selected_second.py",
     ]
-    instrumented = lane != "integration" or coverage_enabled == "true"
+    instrumented = coverage_enabled == "true"
     assert ("--cov=src" in args) is instrumented
     assert ("--cov=packages" in args) is instrumented
     assert ("--cov-report=" in args) is instrumented

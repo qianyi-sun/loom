@@ -155,20 +155,13 @@ and renders and audits both the staging and production cluster profiles. These
 checks are credential-free candidate evidence; real Yibu-backed tasks and live
 environment readiness remain staging promotion gates rather than PR jobs.
 
-For non-document changes, `fast-checks` is the fast-tier coverage aggregator:
-ruff/mypy/static checks, two root-test shards, and sibling-package tests run in
-parallel jobs, then it combines their coverage artifacts, applies the 70%
-fast-tier gate, and writes the default fast-tier coverage summary.
-Each root shard has a bounded 40-minute whole-job budget, including environment
-setup, tests, wheel verification, coverage upload, and cleanup. This leaves
-headroom after the observed approximately 29-minute test phase; it does not
-relax per-test timeouts or remove any required checks.
-Each integration shard has a bounded 120-minute whole-job budget. The expanded
-PostgreSQL handoff suite exhausted the previous 90-minute limit while still
-progressing; its remaining suffix took about nine minutes in an earlier run.
-This headroom includes setup, runner variation, coverage upload, and cleanup
-without changing test selection, per-test timeouts, or the requirement for every
-selected shard to pass.
+For non-document changes, static checks, two root-test shards and package tests
+run in parallel on GitHub-hosted runners. `fast-checks` verifies their results.
+Coverage instrumentation, aggregation and the 70% fast-tier floor run only when
+requested with `ci:coverage-summary` or `coverage_summary=true`. Independent
+test-only edits select their owning files; shared fixtures and runtime changes
+retain full lanes. Root shards have a 40-minute budget and integration shards
+have a 75-minute budget; selection does not relax per-test timeouts or failures.
 `repository-checks` enforces every selected result after the independent lanes
 finish. Docs-only PRs skip the no-input `fast-checks` job and let
 `repository-checks` validate that skipped result directly, avoiding a no-op
@@ -350,9 +343,9 @@ build only the web image, Dockerfile-only changes build the matching component,
 and shared Python/runtime changes rebuild the affected Python images. Relevant
 pull requests, merge groups, and manual dispatches use the checked-in read-only
 build path, do not log in to GHCR, and do not use a publication cache. Manual
-dispatch is build-only. Image validation builds AMD64 and ARM64 in separate
-jobs on matching native CPUs; the ARM job uses `ubuntu-24.04-arm` instead of
-QEMU. Only the checked-in architecture-specific `publish` jobs and their
+dispatch is build-only. PR image validation builds AMD64 on GitHub-hosted native CPUs. Existing
+signed publication consumers retain their declared AMD64/ARM64 manifest
+contract until their consumers migrate. Only the checked-in architecture-specific `publish` jobs and their
 manifest joiner on a push to `dev`/`main`, or an exact protected-head recovery
 from `trusted-image-release-controller`, request job-scoped `packages: write`
 authority. The scheduled controller exists because GitHub suppresses push
@@ -371,17 +364,12 @@ trusted post-merge/release workflow rather than the required PR context.
 
 ## Coverage gates
 
-- **Fast tier:** gated at **70 %** via
-  `coverage report --fail-under=70` in CI. Drops below fail
-  `fast-checks`, which makes the final `repository-checks` gate fail for
-  non-document changes. `fast-checks` also writes the default fast-tier
-  coverage summary to the GitHub Actions step summary; docs-only PRs skip it
-  because they produce no coverage inputs.
-- **Combined fast + integration:** collected on request with the PR label
-  `ci:coverage-summary` or the CI dispatch input `coverage_summary=true`.
-  Either request selects integration tests and their coverage instrumentation.
-  `ci:integration` runs the functional tests without this diagnostic.
-  The combined report has no coverage threshold; the fast-tier 70% floor remains.
+- **Ordinary PRs:** functional Python tests run without coverage instrumentation.
+- **Explicit coverage runs:** add `ci:coverage-summary` or dispatch CI with
+  `coverage_summary=true`. This requests full root/package/integration tests,
+  enforces the **70%** fast-tier floor, and produces the combined report.
+  Coverage failures still fail `repository-checks` when requested.
+- `ci:integration` requests the full functional integration lane without coverage.
 - `coverage.xml` ships as a workflow artifact for external tools.
 
 To reproduce the protected fast coverage gate locally, run the equivalent

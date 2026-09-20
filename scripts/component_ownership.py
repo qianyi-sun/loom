@@ -1186,6 +1186,41 @@ def test_paths_for_lane(
     )
 
 
+def narrow_test_only_changes(
+    paths: tuple[str, ...], *, changed_paths: tuple[str, ...],
+    tracked_paths: tuple[str, ...], repo_root: Path,
+) -> tuple[str, ...]:
+    """Narrow independent test edits; runtime/shared/unknown changes stay full.
+
+    Test modules are also used as fixture libraries. Any reference to an edited
+    module name outside the edit set retains the complete lane, including string
+    imports. This deliberately avoids inventing a general dependency graph.
+    An empty diff is the manual/full-regression path.
+    """
+    if not changed_paths:
+        return paths
+    changed = set(changed_paths)
+    tracked = set(tracked_paths)
+    if any(
+        name not in tracked or not (name.startswith("tests/") or "/tests/" in name)
+        or not Path(name).name.startswith("test_") or not name.endswith(".py")
+        or name.startswith("tests/support/") or not (repo_root / name).is_file()
+        for name in changed
+    ):
+        return paths
+    identifiers = re.compile(r"\b(?:" + "|".join(re.escape(Path(name).stem) for name in changed) + r")\b")
+    for name in tracked_paths:
+        if name in changed or not name.endswith(".py"):
+            continue
+        try:
+            source = (repo_root / name).read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return paths
+        if identifiers.search(source):
+            return paths
+    return tuple(path for path in paths if path in changed)
+
+
 def test_paths_for_policy(
     manifest: Manifest,
     *,
@@ -1351,6 +1386,8 @@ def _parser() -> argparse.ArgumentParser:
         help="Print every tracked test path assigned to one CI lane.",
     )
     test_paths.add_argument("--lane", required=True)
+    test_paths.add_argument("--changed-paths-json", default="[]",
+                            help="Narrow independent test-only edits; [] always runs the full lane.")
     test_paths.add_argument("--shard-index", type=int, default=0)
     test_paths.add_argument("--shard-count", type=int, default=1)
     test_paths.add_argument(
@@ -1500,7 +1537,15 @@ def main(argv: list[str] | None = None) -> int:
                     f"CI lane shard has no tracked test paths: {args.lane} "
                     f"({args.shard_index}/{args.shard_count})"
                 )
-            print("\n".join(paths))
+            changes = json.loads(args.changed_paths_json)
+            if not isinstance(changes, list) or not all(isinstance(path, str) for path in changes):
+                raise ManifestError("changed paths must be a JSON string array")
+            paths = narrow_test_only_changes(
+                paths, changed_paths=tuple(_safe_path(path, context="changed path") for path in changes),
+                tracked_paths=tracked_paths, repo_root=repo_root,
+            )
+            for path in paths:
+                print(path)
             return 0
         if args.command == "execution-plan":
             print(
