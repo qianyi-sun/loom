@@ -39,6 +39,9 @@ from loom.personal_dev_control_plane_status import (
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
+_CURRENT_SCHEMA_HEAD = json.loads(
+    (_ROOT / "config/staging-migration-policy.json").read_text(encoding="utf-8")
+)["expected_head"]
 _MANAGED_BY = "loom-personal-dev-control-plane"
 _NOW = datetime(2026, 8, 17, 21, 0, 0, tzinfo=UTC)
 _STATEFULSET_UIDS = {
@@ -709,7 +712,7 @@ def _acceptance_inputs(
         "source": {"commit": release.source_sha, "tree": release.source_tree},
         "storage": {
             "backup_restore_evidence_sha256": "b" * 64,
-            "schema_head": "0150",
+            "schema_head": _CURRENT_SCHEMA_HEAD,
         },
         "window": {
             "expires_at": "2099-12-31T23:00:00Z",

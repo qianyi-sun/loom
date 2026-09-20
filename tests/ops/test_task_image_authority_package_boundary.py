@@ -75,7 +75,12 @@ ALLOWED_AUTHORITY_MODULE_IMPORTS = {
     "bundle_s3_transport.py": {"loom.task_image_bundle_manifest"},
     # Native V2 admission uses only the frozen source type and transactional
     # journal preflight. No storage SDK/client factory is admitted to the API.
-    "materializations.py": {"loom.task_bundle_source", "loom.task_bundle_source_journal"},
+    "materializations.py": {
+        "loom.task_bundle_source",
+        "loom.task_bundle_source_journal",
+        # Pure architecture policy shared by new signed-session build claims.
+        "loom.execution_architecture",
+    },
 }
 
 

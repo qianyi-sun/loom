@@ -38,6 +38,9 @@ from loom_service.config import LoomServiceSettings
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
+_CURRENT_SCHEMA_HEAD = json.loads(
+    (_ROOT / "config/staging-migration-policy.json").read_text(encoding="utf-8")
+)["expected_head"]
 _NOW = datetime(2026, 8, 17, 21, 0, tzinfo=UTC)
 _MANAGEMENT_FILES = {
     "admin-secrets.toml",
@@ -314,7 +317,7 @@ def _acceptance_render(tmp_path: Path):
         "source": {"commit": release.source_sha, "tree": release.source_tree},
         "storage": {
             "backup_restore_evidence_sha256": "b" * 64,
-            "schema_head": "0150",
+            "schema_head": _CURRENT_SCHEMA_HEAD,
         },
         "window": {
             "expires_at": "2026-08-17T23:00:00Z",
