@@ -1,9 +1,9 @@
 # Nebius CI on dev
 
 `dev` supports Nebius and remains the pre-main branch for the combined repository.
-The earlier `codex/nebius-main` CI supplied useful path routing and optional Python
-coverage collection. Its platform retirement and single-check admission policy
-belonged to that isolated branch.
+The earlier `codex/nebius-main` CI supplied path routing, optional Python coverage
+and a smaller runtime scope. Daily dev CI now follows the same Nebius runtime
+boundary while retaining the four protected admission contexts.
 
 ## Retained validation
 
@@ -24,7 +24,10 @@ PR checks do not receive its credentials. CI does not deploy the live platform.
 ## Nebius path routing
 
 Static checks remain the ordinary baseline. Frontend-only changes do not start
-Python test, Go, runtime-payload, dependency-lock or Terraform runners. Independent
+Python test, Go, runtime-payload, dependency-lock, Terraform, Compose or Kubernetes
+runners. The Compose system fixture has no Web service; browser/auth changes are
+covered by the frontend job. Backend/frontend mixed changes and explicit smoke
+labels still select the corresponding checks. Independent
 test edits start their owning test jobs. Shared and unknown inputs retain the full
 baseline; Terraform runs for its own inputs and full-regression requests.
 Manifest-ignored retired inputs do not allocate backend test runners; static
@@ -33,7 +36,7 @@ heavy validation follows the changed files:
 
 | Changed file | Additional validation |
 | --- | --- |
-| Frontend source or web Dockerfile | Web, affected images and system smoke; auth/ingress contracts also select Kubernetes |
+| Frontend source, Web Dockerfile, Nginx SPA config or browser runtime config | Web type/lint/unit/coverage/browser checks and affected images |
 | Platform renderer source | Integration, affected images, Kubernetes |
 | Independent platform renderer unit tests | Kubernetes |
 | Deployment/render operator scripts and `deploy/nebius/` configuration | Integration, Kubernetes |
@@ -73,7 +76,9 @@ so ownership and paired-fixture ordering remain stable. Empty selections do not
 invoke pytest, and selector errors fail the job.
 
 Go/Python guard and publication interoperability tests have one owner,
-`go-checks`, rather than running again in ordinary integration shards.
+`go-checks`, and run only in manual compatibility/main scope. Ordinary Go checks
+retain execution runtime, gateway sandbox and sandbox runtime; they do not install
+Python or build the historical task-image-builder supervisor test binary.
 
 ## Integration shard balance
 
@@ -96,8 +101,8 @@ runner assets have been removed. This does not stop existing host services or
 cancel in-flight jobs. See [runner placement](../architecture/ci-runner-acceleration.md).
 
 Harbor runtime builds follow its manifest-owned inputs rather than every image
-change. The Go recursive vet/race-test commands cover the supervisor once; its
-compiled binary remains available for the Python–Go interoperability tests.
+change. Manual compatibility retains recursive Go vet/race checks and the compiled
+supervisor binary required by Python–Go interoperability tests.
 
 ## Publication ownership
 
@@ -121,14 +126,13 @@ jobs with full Nebius/common root/package/Go/Web/integration/Docker selection an
 it does not publish or deploy and adds no PR admission context. The scheduled
 result is named `repository-checks-scheduled`.
 
-The schema-reference suite provisions all historical revisions, PostgreSQL majors
-and owner profiles. Its full matrix still runs for DB/library/CLI/provisioning,
-dependency, fixture, unknown or mixed changes, and for nightly/manual/coverage
-runs. Only audited unrelated service, gateway, Web and documentation-only changes
-can omit this suite. The manifest owns this small component map; other integration
-suites continue to run. No shared mutable database or cached schema substitutes
-for independent provisioning. Docker test-only changes now use the same selection
-and failure propagation as ordinary integration.
+The historical schema-reference matrix is manual compatibility only. Nebius
+bootstrap, migration lineage, Alembic upgrades, application migration authority,
+runtime grants and schema inventory remain daily. Within manual compatibility,
+the existing component selector can omit the historical matrix for audited
+unrelated changes; full compatibility and coverage requests still run it.
+Docker test-only changes use the same selection and failure propagation as
+ordinary integration.
 
 The pre-change integration sample (run `35485701767`, shard 3) spent 41m55s in
 pytest and about 22s preparing the runner and dependencies. This identifies test
@@ -148,16 +152,86 @@ and mixed/common test modules stay in daily validation.
 
 | Manual compatibility only | Reason | Daily coverage retained |
 | --- | --- | --- |
-| Historical CLI `rollout` tests and protected application bootstrap/workload/generation tests | Nebius uses the independent `deploy_nebius_platform` operator | Nebius deployment/render/restore, common schema/migrations and DB authorization |
+| Historical CLI `rollout`, protected database ownership/login handoff and the six-profile schema-reference matrix | Nebius uses `deploy_nebius_platform` and `nebius_platform_bootstrap.bootstrap_database`, without the old sealed-owner takeover protocol | Nebius bootstrap/deployment/render/restore, application migration authority, runtime grants, schema inventory and common migrations |
 | Dedicated OLDLAB/GB10/Slurm modules and existing `legacy_pool` cases in mixed modules | Nebius disables the Slurm controller and uses its execution actuator | Nebius quota/capacity, scheduling, registration and common execution contracts |
 | CNPG operator handoff/fencing tests | Independent Nebius deployment does not use the historical CNPG takeover chain | Common PostgreSQL migrations, privileges, backup and restore |
-| Historical capacity-executor/scanner image and personal-dev workload lifecycle integration | Nebius declares no personal-dev capacity pools and disables its native builder | Shared storage secret admission, transfer, schema and object-store tests |
+| Capacity-manager/agent/guard/executor, global fleet, personal-dev stores/provisioners/builders and old native host recovery | These services are not deployed by the Nebius renderer; `dev_instances_enabled` defaults to false, personal-dev pools are empty and its native builder is disabled | Current execution capacity, Nebius quota/autoscaling, service execution, common auth/storage and shared migrations |
+| Standalone task-image authority/guard/signer/publication, historical KVM builder and Python–Go supervisor handoff | Nebius uses `NativeTaskImageController`, not the standalone authority and personal-dev build service chain | Build plans, registration, materialization, source journals, ready bindings, execution pins and mixed shared-store tests |
 
 The old staging cluster render/isolation checks use the same manual scope;
 daily cluster smoke retains the execution actuator and Nebius platform/runtime
-contracts. These are runnable tests, not ignored/deleted ownership entries. Fixtures remain
-importable by common tests. A shared fixture change still selects its potential
-consumer jobs; scope filtering only removes the explicitly historical tests.
+contracts. Ownership is retained, and excluded modules remain importable as
+fixtures. Scope selection does not alter source lint, runtime configuration,
+image publication or branch protection.
+
+### Runtime scope audit after #2007
+
+The integration branch's small test population was primarily due to its
+`ci_ignored_paths` excluding entire inactive runtime families. Merely excluding
+GB10/Slurm filenames and `legacy_pool` cases on dev left thousands of capacity,
+personal-dev and standalone image-authority tests in normal admission.
+
+These families now use `compatibility_test_paths`, so manual validation restores
+them without dropping their ownership. This is a runtime boundary, not a fixed
+test-count budget. New tests outside the audited compatibility families remain
+daily by default. Do not copy every historical exclusion: for example,
+`test_worker_pool_autoscaler_api.py` now tests Nebius finance APIs and stays daily.
+`test_native_build_source_isolation.py` and `test_task_image_build_plan.py` also
+exercise current execution and remain daily. Shared fixture imports do not mean
+the disabled service's entire test suite must execute.
+
+Current render/config evidence is in `src/loom/nebius_platform_render.py`,
+`src/loom_service/app.py` and `src/loom_control_plane/app.py`: the old dev-instance
+provisioner and standalone task-image execution service are not configured.
+`src/loom_execution_actuator/task_image_controller.py` directly owns Nebius image
+builds using current materialization and execution-capacity stores.
+
+Integration-branch runs 35394447854 and 35155582621 completed in about 14.5 minutes.
+The final #2007 run 35492370318 took 38m41s, passing 7,341 ordinary integration
+cases (7,351 including skips), versus 1,821 passes across two shards in 35394447854.
+The initial #2011 runtime-family correction collected 2,391 cases: 1,863 in
+existing integration-branch modules and 528 in 45 added modules. The next audit
+also isolated standalone authority cleanup/credential tests, reducing ordinary
+integration to **2,277 cases in 295 files**, from 7,351 in 519 files before #2011.
+Current migration/source/materialization/lease boundary tests remain. These are
+collection counts, not a claim that every selected test has passed on each head.
+
+### Full PR lane audit
+
+The table audits every remaining lane, including work outside pytest selection.
+Timings below are job wall times from #2011 head `187872c9d`, not estimates for
+later amendments. CI run 35495791483 succeeded in **10m26s**, versus **38m41s**
+for #2007. Its companion cluster run failed with a Kubernetes TLS EOF, so this
+head did **not** pass complete four-context admission. Do not conflate the CI
+workflow timing with full PR acceptance or live Nebius verification.
+
+| Check | Observed job time | Current scope and decision |
+| --- | --- | --- |
+| Lint/static/codegen | 47s | Keep shared Python type/import, syntax, settings and dependency contracts. Only the inactive global-capacity no-mutation audit moves to manual compatibility. |
+| Independent locked install | 16s | Ordinary source changes reuse `uv sync --locked` and `uv pip check` in their test jobs. Keep this separate probe for dependency/CI authority, unknown inputs and full manual/scheduled/coverage requests. |
+| Root tests | 6m11s / 8m12s | 600 files at measured head; now 566 after tracing standalone image-authority clients, old staging attachments and standalone host tools. Current build plans, source isolation, GPU capability contracts and mixed worker/CI security modules stay. |
+| Package tests | 38s | Keep all 58 manifest-owned benchmark/launcher/checksum package files. These serve current imports, runtime and catalogs. |
+| Ordinary integration | 6m24s–9m42s across four shards | Keep current API/auth, gateway, SQL/migrations, scheduling, source/image materialization and execution leases. Standalone authority issuance/retirement inventory is manual; mixed shared-store fencing stays daily. |
+| Docker integration | 1m57s | Keep 21 files covering actual driver/network/gateway/artifact and Nebius TLS/restore behavior. Old KVM/personal-dev/authority chains are already manual. |
+| Go | 43s | Keep current execution/gateway/sandbox packages and future packages by default. Historical builder supervisor/Python handoff is manual. |
+| Runtime payload | 24s | Ten current/common fixture files remain. Two GB10 catalog cases now obey the same manifest compatibility scope, including when invoked by the standalone runner. |
+| Installed wheel | Included in root shard 1 | Verify installed Nebius renderer/actuator imports and packaged settings schema. Old cluster/rollout imports, templates and dashboard/Envoy assets are checked only in compatibility. Keep this packaging boundary because editable source tests cannot detect missing wheel files. |
+| Frontend | 2m35s | Keep all 83 owned files plus production build, browser, accessibility, network/console, type/lint and coverage checks. Pure frontend edits no longer start a backend Compose stack that does not serve the UI. |
+| Images | About 3m17s for the source workflow | Keep affected AMD64 builds and artifact vulnerability scans for the seven Nebius images. Historical publishers stay manual; existing integrity boundaries are unchanged. |
+| Kubernetes contract | 1m59s, failed | Keep three modules covering current manifests and actuator/runtime behavior. `test_runtime_executes_task_native_sidecar_and_verifier_without_docker_socket` hit TLS EOF while reading its broker Pod; do not skip or relabel it as legacy. This CI fixture result is not a live platform observation. |
+| Backend system smoke | 6m33s | Keep eight files for cross-service API/database/gateway/worker behavior, cancellation/crash recovery and benchmark ingestion. It is a disposable common backend regression, not full Nebius deployment acceptance. |
+
+The validator itself was also profiled: the expanded compatibility list repeatedly
+classified the entire tracked tree for each pattern. It now computes runnable
+paths once per invocation, retaining full ownership, syntax and marker validation.
+Three local real-CLI runs improved from 3.009/3.012/3.131s to
+2.195/2.177/2.180s. There is no persistent cache or stale-file trust shortcut.
+
+Tests of old attachment tools named `nebius_staging_*` are compatibility-only:
+they connect Nebius to the historical CNPG/staging deployment. The independent
+platform bootstrap, renderer, current capacity API and task-image actuator remain
+in daily scope. CI reliability reporting and release policy tests with shared
+semantics stay; a legacy reference alone does not justify dropping a mixed test.
 
 Run the full compatibility tests, including both integration tiers:
 
@@ -172,5 +246,6 @@ gh workflow run ci.yml --ref dev -f legacy_compatibility=true -f coverage_summar
 
 This validates disposable fixtures and does not publish or deploy. Historical
 image publication retains its separate manual controller entry point. Known
-PostgreSQL/k3s fixture failures tracked in #2008 remain real compatibility issues;
-they are not retried, swallowed or declared fixed by this scope change.
+PostgreSQL/k3s fixture failures recorded in #2008 remain unresolved compatibility
+issues. The owner closed that investigation as not planned; changing daily CI
+scope does not claim a fix or add retries for those defects.

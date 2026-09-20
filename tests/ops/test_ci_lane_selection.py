@@ -212,3 +212,37 @@ def test_retired_ignored_inputs_do_not_restart_backend_jobs(extra):
     assert not any(getattr(p, lane) for lane in BASELINE_CHECKS)
     assert not p.integration and not p.integration_docker
     assert p.web_checks == bool(extra)
+
+
+@pytest.mark.parametrize("path", ["src/loom_service/app.py", "src/loom_control_plane/service_execution.py",
+                                  "src/loom/nebius_platform_render.py", "cmd/loom-execution-runtime/main.go"])
+def test_ordinary_source_reuses_locked_install_in_owning_jobs(path):
+    p = plan(path)
+    assert p.tests_root
+    assert not p.locked_environments
+
+
+@pytest.mark.parametrize("event", ["workflow_dispatch", "schedule"])
+def test_full_regression_keeps_independent_locked_install(event):
+    p = plan_validations(changed_paths=["src/loom_service/app.py"], labels=set(), event_name=event)
+    assert p.locked_environments
+
+
+@pytest.mark.parametrize("path", ["web/src/App.tsx", "web/src/auth/AuthContext.tsx",
+                                  "web/package-lock.json", "deploy/Dockerfile.web",
+                                  "deploy/nginx-spa.conf", "deploy/nginx-spa-security-headers.conf",
+                                  "deploy/web-runtime-config.sh"])
+def test_frontend_runtime_has_browser_and_image_checks_without_unrelated_compose(path):
+    p = plan(path)
+    assert p.web_checks and p.images
+    assert not any((p.integration, p.integration_docker, p.cluster_smoke, p.staging_smoke,
+                    p.tests_root, p.tests_packages, p.go_checks, p.runtime_payload,
+                    p.locked_environments, p.nebius_iac))
+
+
+def test_mixed_frontend_backend_and_explicit_labels_keep_system_smoke():
+    p = plan_validations(changed_paths=["web/src/App.tsx", "src/loom_service/app.py"],
+                         labels=set(), event_name="pull_request")
+    assert p.staging_smoke and p.integration and p.tests_root and p.web_checks
+    assert plan("web/src/App.tsx", ["staging-smoke"]).staging_smoke
+    assert plan("web/src/App.tsx", ["cluster-smoke"]).cluster_smoke

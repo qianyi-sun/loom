@@ -174,15 +174,15 @@ def test_native_image_publish_jobs_stay_on_architecture_matched_github_hosts() -
     assert jobs["publish-manifest"]["runs-on"] == "ubuntu-24.04"
 
 
-def test_ci_wires_phase2c_supervisor_go_checks_explicitly() -> None:
+def test_ci_checks_nebius_go_packages_and_keeps_manual_supervisor() -> None:
     steps = {
         step.get("name"): str(step.get("run", ""))
         for step in _workflow(".github/workflows/ci.yml")["jobs"]["go-checks"]["steps"]
     }
 
     assert "gofmt -l ./cmd/" in steps["gofmt"]
-    assert steps["go vet"] == "go vet ./cmd/..."
-    assert steps["go test"] == "go test -race ./cmd/..."
+    assert 'go vet "${packages[@]}"' in steps["go vet"]
+    assert 'go test -race "${packages[@]}"' in steps["go test"]
     assert not any(name.endswith(" supervisor") for name in steps if name)
 
 
@@ -209,6 +209,9 @@ def test_go_checks_executes_required_python_go_v2_handoff() -> None:
         'go test -race -c -o "${RUNNER_TEMP}/loom-task-image-builder-supervisor.test" '
         "./cmd/loom-task-image-builder-supervisor"
     )
+    for name in ("Install uv", "Set up Python 3.11", "Sync locked workspace",
+                 "Build Go V2 handoff test binary", "Python-Go V2 handoff"):
+        assert step_by_name[name]["if"] == "env.CI_TEST_SCOPE == 'all'"
     handoff = step_by_name["Python-Go V2 handoff"]
     assert handoff["env"] == {
         "LOOM_GO_V2_TEST_BINARY": ("${{ runner.temp }}/loom-task-image-builder-supervisor.test"),
@@ -1728,7 +1731,9 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     runtime_payload_scripts = "\n".join(
         step.get("run", "") for step in jobs["runtime-payload"]["steps"]
     ).strip()
-    assert runtime_payload_scripts == "python3 scripts/runtime_payload_conformance.py"
+    assert runtime_payload_scripts == (
+        'python3 scripts/runtime_payload_conformance.py --test-scope "${CI_TEST_SCOPE:-all}"'
+    )
     assert "continue-on-error" not in jobs["runtime-payload"]
 
     assert {

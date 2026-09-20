@@ -256,3 +256,19 @@ def test_conformance_run_requires_exact_planned_evidence(
 
     assert set(executed_paths) == EXPECTED_PAYLOAD_PATHS
     assert [item["path"] for item in evidence] == executed_paths
+
+
+@pytest.mark.parametrize("scope", ["nebius", "all"])
+def test_scoped_payload_execution_omits_only_legacy_cases(monkeypatch, scope):
+    executed = []
+    monkeypatch.setattr(conformance, "_pull_image", lambda **_: None)
+    def execute(*, path, **kwargs):
+        executed.append(path)
+        return {"path": path, "executed": ["test_conformance"]}
+    monkeypatch.setattr(conformance, "_run_payload", execute)
+    evidence = conformance.run(repo_root=REPO_ROOT,
+                               manifest_path=REPO_ROOT / "config/component-ownership.toml",
+                               test_scope=scope)
+    expected = {p for p in EXPECTED_PAYLOAD_PATHS
+                if scope == "all" or not p.startswith("deploy/catalog/gb10-smoke/")}
+    assert {e["path"] for e in evidence} == set(executed) == expected

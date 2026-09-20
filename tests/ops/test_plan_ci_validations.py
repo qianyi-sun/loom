@@ -26,7 +26,8 @@ def independent_test_repo(tmp_path, monkeypatch):
 @pytest.mark.parametrize("path", ["web/src/App.tsx", "web/src/auth/AuthContext.tsx", "deploy/Dockerfile.web"])
 def test_frontend_changes_do_not_select_unrelated_python_integration(path: str) -> None:
     plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
-    assert plan.web_checks and plan.images and plan.staging_smoke
+    assert plan.web_checks and plan.images
+    assert not plan.staging_smoke
     assert not plan.integration
     assert not plan.integration_docker
 
@@ -374,14 +375,20 @@ def test_k3s_staging_contract_selects_cluster_and_staging(path: str) -> None:
         "web/src/main.tsx",
     ],
 )
-def test_frontend_route_contract_selects_staging_smoke(path: str) -> None:
+def test_backend_smoke_routes_do_not_confuse_browser_inputs_with_compose(path: str) -> None:
     plan = plan_validations(
         changed_paths=[path],
         labels=set(),
         event_name="pull_request",
     )
 
-    assert plan.staging_smoke is True
+    frontend = path.startswith("web/") or path in {
+        "deploy/Dockerfile.web", "deploy/nginx-spa.conf",
+        "deploy/nginx-spa-security-headers.conf", "deploy/web-runtime-config.sh",
+    }
+    assert plan.staging_smoke is not frontend
+    if frontend:
+        assert plan.web_checks
 
 
 @pytest.mark.parametrize(
@@ -414,15 +421,16 @@ def test_frontend_quality_contract_selects_web_checks(path: str) -> None:
         "web/src/auth/AuthContext.tsx",
     ],
 )
-def test_browser_auth_contract_selects_cluster_and_staging(path: str) -> None:
+def test_browser_auth_contract_is_covered_by_browser_job(path: str) -> None:
     plan = plan_validations(
         changed_paths=[path],
         labels=set(),
         event_name="pull_request",
     )
 
-    assert plan.cluster_smoke is True
-    assert plan.staging_smoke is True
+    assert plan.web_checks
+    assert not plan.cluster_smoke
+    assert not plan.staging_smoke
 
 
 def test_planner_change_selects_every_heavy_gate() -> None:
