@@ -33,6 +33,7 @@ from loom.task_image_materialization import (
     ensure_task_image_materializations,
     get_trial_task_image_execution_grant,
     resolve_prepared_task,
+    task_image_materialization_key,
 )
 from loom_control_plane.service_execution import ServiceExecutionConflict, reserve_trial_execution
 from loom_control_plane.service_execution_scheduler import reserve_next_service_execution
@@ -96,6 +97,25 @@ async def _seed_preparing_trial(
         "file_count": 3, "total_bytes": 4096,
     }}
     rows = await ensure_task_image_materializations(session, task_row=task)
+    assert {row.cpu_arch for row in rows} == {"x86_64"}
+    # Historical ARM records may remain linked to frozen Trials. Insert one
+    # explicitly so readiness/tamper checks still prove it cannot authorize an
+    # x86 execution; new preparation must never enqueue another ARM build.
+    legacy_arm = TaskImageMaterialization(
+        id=uuid4(),
+        materialization_key=task_image_materialization_key(
+            task_id=task.id, task_checksum=task.checksum, cpu_arch="arm64",
+        ),
+        task_id=task.id,
+        task_checksum=task.checksum,
+        cpu_arch="arm64",
+        task_config=deepcopy(task.config),
+        task_source=task.source,
+        task_source_provenance=deepcopy(task.source_provenance),
+        state="failed",
+    )
+    session.add(legacy_arm)
+    session.add(TrialTaskImageMaterialization(trial_id=trial_id, materialization_id=legacy_arm.id))
     for row in rows:
         row.state = state
         session.add(TrialTaskImageMaterialization(trial_id=trial_id, materialization_id=row.id))
@@ -103,7 +123,7 @@ async def _seed_preparing_trial(
         ExecutionBudgetPolicy.scope_key.in_((target.logical_pool_id, target.target_id)),
     ))
     await session.commit()
-    return trial_id, {row.cpu_arch: row.id for row in rows}
+    return trial_id, {**{row.cpu_arch: row.id for row in rows}, "arm64": legacy_arm.id}
 
 
 async def _assert_no_execution(session: AsyncSession, trial_id: UUID) -> None:

@@ -67,7 +67,7 @@ async def _trial(session, image, team_id, *, priority):
     return trial
 
 
-async def _identities(session, *, cpu_arch="arm64"):
+async def _identities(session, *, cpu_arch="x86_64"):
     team = Team(id=uuid4(), name="legacy-reader-" + uuid4().hex)
     worker = Worker(
         id=uuid4(),
@@ -143,7 +143,7 @@ async def test_unsigned_snapshot_refuses_native_ready_image(
             await get_trial_task_image_execution_grant(
                 session,
                 trial_id=native_trial.id,
-                cpu_arches=["arm64"],
+                cpu_arches=["x86_64"],
             )
 
 
@@ -203,7 +203,7 @@ async def test_strong_source_is_not_mistaken_for_native_readiness(
             assert claimed is not None and claimed["id"] == trial.id
 
 
-@pytest.mark.parametrize("architectures", [["x86_64"], ["arm64", "x86_64"]])
+@pytest.mark.parametrize("architectures", [["arm64"], ["x86_64", "arm64"]])
 async def test_native_architecture_does_not_veto_same_task_legacy_snapshot(
     registry_authority_session,
     registry_issuer,
@@ -226,11 +226,11 @@ async def test_native_architecture_does_not_veto_same_task_legacy_snapshot(
             materialization_key=task_image_materialization_key(
                 task_id=native.task_id,
                 task_checksum=native.task_checksum,
-                cpu_arch="x86_64",
+                cpu_arch="arm64",
             ),
             task_id=native.task_id,
             task_checksum=native.task_checksum,
-            cpu_arch="x86_64",
+            cpu_arch="arm64",
             task_config=native.task_config,
             task_source=native.task_source,
             task_source_provenance=native.task_source_provenance,
@@ -247,5 +247,5 @@ async def test_native_architecture_does_not_veto_same_task_legacy_snapshot(
             cpu_arches=architectures,
         )
         assert grant is not None and grant.materialization_id == legacy.id
-        assert grant.cpu_arch == "x86_64"
+        assert grant.cpu_arch == "arm64"
         assert native.ready_publication_operation_id is not None

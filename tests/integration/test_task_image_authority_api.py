@@ -148,9 +148,9 @@ def _owner_file(path: Path, payload: str | bytes) -> Path:
 def _principal_document(
     *,
     bearer: str = _BEARER,
-    principal_id: str = "gb10-trt-gb10-1",
-    cluster: str = "gb10",
-    node: str = "trt-gb10-1",
+    principal_id: str = "oldlab-trt-eai-oldlab-1",
+    cluster: str = "oldlab",
+    node: str = "trt-eai-oldlab-1",
     scopes: tuple[str, ...] = ("task-image:attest", "task-image:project"),
 ) -> dict[str, object]:
     return {
@@ -236,11 +236,11 @@ async def _seed_materialization(
                     materialization_key=task_image_materialization_key(
                         task_id="phase2c/session-bound",
                         task_checksum=checksum,
-                        cpu_arch="arm64",
+                        cpu_arch="x86_64",
                     ),
                     task_id="phase2c/session-bound",
                     task_checksum=checksum,
-                    cpu_arch="arm64",
+                    cpu_arch="x86_64",
                     task_config=task_config
                     or {
                         "schema_version": "1",
@@ -250,7 +250,7 @@ async def _seed_materialization(
                         },
                         "environment": {
                             "os": "linux",
-                            "cpu_arch": "arm64",
+                            "cpu_arch": "x86_64",
                             "dockerfile": "environment/Dockerfile",
                             "build_timeout_sec": 600.0,
                         },
@@ -486,7 +486,7 @@ def _publication_candidate_request(
         manifest_size=512,
         oci_file_sha256="b" * 64,
         oci_file_size=4096,
-        platform="linux/arm64",
+        platform="linux/amd64",
     )
 
 
@@ -503,8 +503,8 @@ def _publication_candidate_request_v2(
             "schema_version": 2,
             "base_resolution": {
                 "schema": "loom.task-image-base-resolution/v1",
-                "solve_ref": "solve_1-arm64",
-                "platform": "linux/arm64",
+                "solve_ref": "solve_1-amd64",
+                "platform": "linux/amd64",
                 "output_digest": "sha256:" + "a" * 64,
                 "observed_base_digests": [
                     "sha256:" + "1" * 64,
@@ -843,7 +843,7 @@ async def test_registry_routes_issue_exact_credentials_and_record_only_inert_can
     )
     assert credential.credential_id == _REGISTRY_CREDENTIAL_ID
     assert credential.repository == (
-        f"loom-task-image-attempts/arm64/{claim.attempt_id}/task"
+        f"loom-task-image-attempts/x86_64/{claim.attempt_id}/task"
     )
     assert _put(authority_api, credential_path, credential_request).content == (
         credential_response.content
@@ -1195,8 +1195,8 @@ async def test_materialization_routes_bind_session_path_attempt_and_guard_identi
         json.dumps(
             _principal_document(
                 bearer=wrong_bearer,
-                principal_id="gb10-trt-gb10-2",
-                node="trt-gb10-2",
+                principal_id="oldlab-trt-eai-oldlab-2",
+                node="trt-eai-oldlab-2",
             )
         ),
     )
@@ -1340,7 +1340,7 @@ async def test_oversized_claim_response_is_rejected_before_a_lease_is_committed(
         "task": {"id": "phase2c/session-bound", "name": "session-bound"},
         "environment": {
             "os": "linux",
-            "cpu_arch": "arm64",
+            "cpu_arch": "x86_64",
             "dockerfile": "environment/Dockerfile",
             "build_timeout_sec": 600.0,
             "sidecars": [
@@ -1551,17 +1551,17 @@ async def test_authentication_scope_and_store_failures_use_bounded_responses(
             "wrong-node-private-bearer",
             _principal_document(
                 bearer="wrong-node-private-bearer",
-                principal_id="gb10-trt-gb10-2",
-                node="trt-gb10-2",
+                principal_id="oldlab-trt-eai-oldlab-2",
+                node="trt-eai-oldlab-2",
             ),
         ),
         (
             "wrong-cluster-private-bearer",
             _principal_document(
                 bearer="wrong-cluster-private-bearer",
-                principal_id="oldlab-trt-eai-oldlab-3",
-                cluster="oldlab",
-                node="trt-eai-oldlab-3",
+                principal_id="gb10-trt-gb10-3",
+                cluster="gb10",
+                node="trt-gb10-3",
             ),
         ),
     ],
@@ -1958,8 +1958,8 @@ async def test_metrics_are_aggregate_only_and_never_expose_authority_inputs(
     for private in (
         _BEARER,
         str(GRANT_ID),
-        "trt-gb10-1",
-        "gb10-trt-gb10-1",
+        "trt-eai-oldlab-1",
+        "oldlab-trt-eai-oldlab-1",
         "guard_attestation_lost",
         _BOOTSTRAP,
         _SESSION,

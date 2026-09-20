@@ -201,6 +201,12 @@ def test_conversion_preserves_history_and_reaches_dev(
             assert inspect_lineage(connection, revision) == revision
         with engine.begin() as connection:
             convert_lineage(connection, _scripts(), revision)
+            assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0150"
+        # Conversion is pinned to its audited dev checkpoint; normal Alembic
+        # migrations advance that lineage to the current release afterward.
+        config = Config("migrations/alembic.ini")
+        config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
+        command.upgrade(config, "head")
         with engine.connect() as connection:
             assert _schema(connection) == expected_schema
             after = _snapshot(connection)
@@ -212,7 +218,7 @@ def test_conversion_preserves_history_and_reaches_dev(
             assert after == before
             assert (
                 connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-                == "0150"
+                == "0151"
             )
             assert connection.exec_driver_sql(
                 "SELECT to_regclass('gateway_dispatch_receipts')"

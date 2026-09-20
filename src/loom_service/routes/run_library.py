@@ -2193,6 +2193,7 @@ async def clone_run_library_batch_config(
     )
     clone = Batch(
         id=clone_id,
+        purpose=source.purpose,
         team_id=ctx.team_id,
         name=payload.name,
         description=payload.description or (f"Cloned config from shared batch {source.id}."),
@@ -2391,6 +2392,7 @@ async def reuse_run_library_artifact(
     )
     derived = Batch(
         id=derived_id,
+        purpose="trajectory_generation",
         team_id=ctx.team_id,
         name=payload.name,
         description=payload.description

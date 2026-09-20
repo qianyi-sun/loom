@@ -64,7 +64,7 @@ async def test_builder_verifies_manifest_before_both_component_cache_lookups(
         materialization_key=task_image_materialization_key(
             task_id=_claim().task_id,
             task_checksum=manifest.task_checksum,
-            cpu_arch="arm64",
+            cpu_arch="x86_64",
             bundle_content_manifest_sha256=manifest.digest,
         ),
         task_source_provenance={
@@ -98,7 +98,7 @@ async def test_builder_verifies_manifest_before_both_component_cache_lookups(
     async def architecture(**_kwargs):
         return None
 
-    monkeypatch.setattr(task_image_builder, "host_cpu_arch", lambda: "arm64")
+    monkeypatch.setattr(task_image_builder, "host_cpu_arch", lambda: "x86_64")
     monkeypatch.setattr(task_image_builder, "_build_worker_object_store", lambda _settings: None)
     monkeypatch.setattr(task_image_builder, "_materialize_task_dir", materialize)
     monkeypatch.setattr(task_image_builder, "resolve_task_image", main)

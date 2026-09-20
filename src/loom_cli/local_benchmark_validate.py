@@ -18,6 +18,7 @@ from loom.config.benchmarks import (
     LocalBenchmarkEntry,
     normalize_source_subdir,
 )
+from loom.execution_architecture import execution_cpu_arch
 from loom.models.task import TaskConfig
 from loom.nebius_terminus_ingest import (
     NEBIUS_TERMINUS_PROFILE,
@@ -215,7 +216,8 @@ def _validate_task_toml(path: Path) -> None:
         # Loom TaskConfig before validation so `publish-local` accepts
         # user-provided TB imports without operator-side conversion.
         normalized = normalize_terminal_bench_task_toml(raw)
-        TaskConfig.model_validate(normalized)
+        task = TaskConfig.model_validate(normalized)
+        execution_cpu_arch(task.environment.cpu_arch)
     except Exception as exc:
         raise LocalBenchmarkValidationError(
             f"invalid task.toml at {path}: {exc}", exit_code=1,

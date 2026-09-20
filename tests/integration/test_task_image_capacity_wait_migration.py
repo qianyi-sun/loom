@@ -68,7 +68,7 @@ def test_live_wait_refuses_downgrade_then_expiry_allows_roundtrip(wait_migration
     with pytest.raises(DBAPIError, match="native builder capacity waits must expire"):
         command.downgrade(config, "0148")
     with engine.begin() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0150"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0151"
         assert connection.scalar(text("SELECT count(*) FROM task_image_capacity_waits")) == 1
         connection.execute(text("UPDATE task_image_capacity_waits SET "
                                 "first_waited_at = now() - interval '121 seconds', "
@@ -155,7 +155,7 @@ def test_wait_downgrade_refuses_busy_table_without_partial_schema(wait_migration
         with pytest.raises(DBAPIError, match="could not obtain lock"):
             command.downgrade(config, "0148")
         with engine.connect() as check:
-            assert check.scalar(text("SELECT version_num FROM alembic_version")) == "0150"
+            assert check.scalar(text("SELECT version_num FROM alembic_version")) == "0151"
             assert check.scalar(text("SELECT to_regclass('task_image_capacity_waits')")) is not None
     command.downgrade(config, "0148")
     command.upgrade(config, "0149")

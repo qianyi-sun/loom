@@ -642,7 +642,7 @@ async def test_replay_revalidates_frozen_semantics(
             elif corruption == "plan_checksum":
                 payload["task_checksum"] = "e" * 64
             else:
-                payload["cpu_arch"], payload["platform"] = "x86_64", "linux/amd64"
+                payload["cpu_arch"], payload["platform"] = "arm64", "linux/arm64"
             attempt.claim_plan_json = payload
             attempt.claim_plan_sha256 = hashlib.sha256(rfc8785.dumps(payload)).hexdigest()
         elif corruption in ("credential_origin", "credential_schema"):
@@ -720,7 +720,7 @@ async def test_successor_session_replay_preserves_initial_containment(
                 base_resolution={
                     "schema": "loom.task-image-base-resolution/v1",
                     "solve_ref": "original-solve",
-                    "platform": "linux/arm64",
+                    "platform": "linux/amd64",
                     "output_digest": legacy.manifest_digest,
                     "observed_base_digests": [],
                 },

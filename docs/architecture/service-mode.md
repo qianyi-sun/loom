@@ -446,30 +446,13 @@ UPDATE trials t
            t.attempt_count;
 ```
 
-The `cpu_arch` predicate is backward-compatible and conservative: legacy trial
-rows without `requires_caps.cpu_arch` are treated as `x86_64`. ARM64 remote
-workers therefore only claim tasks explicitly submitted with
-`environment.cpu_arch = "arm64"` or `"any"`.
+New task submissions and worker registrations require x86_64. Task declarations
+of `any` resolve to x86_64; historical ARM records remain readable but are not
+eligible for new execution. Legacy trial rows without `requires_caps.cpu_arch`
+retain the x86_64 default. ARM clients may submit to remote x86 workers.
 
-### Runtime-fallback base image registry
-
-A small set of amd64-only base images have known arm64 substitutes the
-worker can materialize on demand at trial start (currently just
-`mictern2/terminus2-full:latest` — see
-`_ensure_terminus_2_arm64_base_if_needed` in
-`src/loom/driver/task_image.py`, tag-shadowed by a Debian slim +
-Python 3.13 + Terminus 2 toolchain build). The Terminus 2 launcher install
-script also provisions the `tmux` and `asciinema` binaries that upstream
-Terminal-Bench needs before the first model call.
-
-Because the worker guarantees an arm64-compatible base at build time,
-task bundles whose Dockerfile `FROM`s an image in
-`RUNTIME_ARM64_FALLBACK_BASES` are safe to route to arm64 pools. Both
-the canonical Terminal-Bench-2 adapter and `loom datasets publish-local`
-detect this and promote an unspecified `environment.cpu_arch` to
-`"any"` at import time so the scheduler's claim query includes GB10
-workers. Explicit user choices (`cpu_arch = "x86_64"`) are never
-overridden.
+Importers no longer promote base-image matches to `any`, and workers no longer
+build ARM substitute base images. Task images are built for `linux/amd64`.
 
 Ordering, most-important to least:
 1. Lowest `in_flight_count / fair_share_weight` (Dominant Resource

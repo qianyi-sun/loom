@@ -14,10 +14,7 @@ import hashlib
 import json
 import logging
 import os
-import platform
 import re
-import tempfile
-import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -30,6 +27,7 @@ from loom.driver.build_containment import (
     ImageBuildForbiddenError,
     forbid_build_when_contained,
 )
+from loom.execution_architecture import execution_cpu_arch
 from loom.models.task import TaskConfig
 
 logger = logging.getLogger(__name__)
@@ -50,65 +48,6 @@ DEFAULT_BUILD_CONTEXT_MAX_FILES = 2_000
 DEFAULT_BUILD_CONTEXT_MAX_BYTES = 512 * 1024 * 1024
 ENV_BUILD_CONTEXT_MAX_FILES = "LOOM_TASK_IMAGE_BUILD_MAX_FILES"
 ENV_BUILD_CONTEXT_MAX_BYTES = "LOOM_TASK_IMAGE_BUILD_MAX_BYTES"
-TERMINUS_2_FULL_IMAGE = "mictern2/terminus2-full:latest"
-_TERMINUS_2_BASE_LOCK = threading.Lock()
-
-#: Base images the worker materializes an arm64 substitute for at trial
-#: start (see :func:`_ensure_terminus_2_arm64_base_if_needed`). Task
-#: bundles whose Dockerfile ``FROM`` targets one of these can safely
-#: declare ``cpu_arch = "any"`` — the worker will produce a working
-#: arm64 tag on demand even though the upstream is amd64-only.
-#:
-#: When a new base image joins the runtime-fallback set, adapters and
-#: the publish-local promotion in
-#: :mod:`loom_cli.local_benchmark_publish` will automatically start
-#: routing matching tasks to arm64 pools too. #342.
-RUNTIME_ARM64_FALLBACK_BASES: frozenset[str] = frozenset({TERMINUS_2_FULL_IMAGE})
-_TERMINUS_2_ARM64_BASE_DOCKERFILE = """\
-FROM python:3.13-slim
-
-ENV DEBIAN_FRONTEND=noninteractive \\
-    PIP_ROOT_USER_ACTION=ignore \\
-    PYTHONDONTWRITEBYTECODE=1
-
-WORKDIR /app
-
-RUN apt-get update && apt-get install -y --no-install-recommends \\
-    bash \\
-    build-essential \\
-    ca-certificates \\
-    cmake \\
-    coreutils \\
-    curl \\
-    findutils \\
-    gawk \\
-    git \\
-    iproute2 \\
-    iputils-ping \\
-    jq \\
-    libffi-dev \\
-    libssl-dev \\
-    net-tools \\
-    nodejs \\
-    npm \\
-    openssh-client \\
-    patch \\
-    pkg-config \\
-    procps \\
-    python-is-python3 \\
-    python3 \\
-    python3-pip \\
-    python3-venv \\
-    rsync \\
-    socat \\
-    sudo \\
-    tmux \\
-    unzip \\
-    xz-utils \\
-    zip \\
-    zlib1g-dev \\
-  && rm -rf /var/lib/apt/lists/*
-"""
 
 
 class TaskImageBuildError(RuntimeError):
@@ -128,20 +67,15 @@ class TaskImageBuildTimeoutError(TaskImageBuildError):
 
 
 def _native_cpu_arch(task_config: TaskConfig, cpu_arch: str | None) -> str:
-    selected = cpu_arch or task_config.environment.cpu_arch
-    if selected == "any":
-        machine = platform.machine().lower()
-        if machine in {"amd64", "x86_64"}:
-            selected = "x86_64"
-        elif machine in {"aarch64", "arm64"}:
-            selected = "arm64"
-    if selected not in {"x86_64", "arm64"}:
-        raise ValueError("cpu_arch must resolve to x86_64 or arm64")
-    return selected
+    # A selected worker architecture cannot reinterpret an ARM-only task.
+    execution_cpu_arch(task_config.environment.cpu_arch)
+    # A Mac/ARM CLI host does not change the remote workload architecture.
+    return execution_cpu_arch(cpu_arch or task_config.environment.cpu_arch)
 
 
 def _docker_platform(cpu_arch: str) -> str:
-    return "linux/amd64" if cpu_arch == "x86_64" else "linux/arm64"
+    execution_cpu_arch(cpu_arch)
+    return "linux/amd64"
 
 
 def task_image_tag(
@@ -209,6 +143,7 @@ async def resolve_task_image(
     is a cheap `client.images.get(tag)` on the local daemon. #275.
     """
 
+    _native_cpu_arch(task_config, cpu_arch)
     if task_config.environment.dockerfile is None:
         return task_config.environment.docker_image or DEFAULT_TASK_IMAGE
 
@@ -561,11 +496,6 @@ def _ensure_dockerfile_image(
         forbid_build_when_contained(require_containment, tag)
         rel_dockerfile = dockerfile.relative_to(build_context).as_posix()
         _enforce_build_context_limits(build_context)
-        _ensure_terminus_2_arm64_base_if_needed(
-            client=client,
-            dockerfile=dockerfile,
-            require_containment=require_containment,
-        )
         client.images.build(
             path=str(build_context),
             dockerfile=rel_dockerfile,
@@ -634,158 +564,6 @@ def _ensure_dockerfile_image(
     finally:
         with contextlib.suppress(Exception):
             client.close()
-
-
-def _ensure_terminus_2_arm64_base_if_needed(
-    *,
-    client: Any,
-    dockerfile: Path,
-    require_containment: bool = False,
-) -> None:
-    if not _dockerfile_uses_base_image(dockerfile, TERMINUS_2_FULL_IMAGE):
-        return
-    if not _is_linux_arm64_docker_daemon(client):
-        return
-
-    with _TERMINUS_2_BASE_LOCK:
-        try:
-            existing_base = client.images.get(TERMINUS_2_FULL_IMAGE)
-            if _is_arm64_docker_image(existing_base):
-                return
-        except ImageNotFound:
-            pass
-
-        # #1146: refuse the base build on a containment-required worker.
-        forbid_build_when_contained(require_containment, TERMINUS_2_FULL_IMAGE)
-        try:
-            with tempfile.TemporaryDirectory(
-                prefix="loom-terminus-2-arm64-base-",
-            ) as context_dir:
-                dockerfile_path = Path(context_dir) / "Dockerfile"
-                dockerfile_path.write_text(
-                    _TERMINUS_2_ARM64_BASE_DOCKERFILE,
-                    encoding="utf-8",
-                )
-                client.images.build(
-                    path=context_dir,
-                    dockerfile="Dockerfile",
-                    tag=TERMINUS_2_FULL_IMAGE,
-                    rm=True,
-                    forcerm=True,
-                    pull=False,
-                    labels={
-                        "loom.managed_base": "terminus-2-arm64",
-                        "loom.managed_base.upstream": TERMINUS_2_FULL_IMAGE,
-                    },
-                )
-        except BuildError as exc:
-            tail, full_log = _format_build_log_sections(exc.build_log)
-            diagnostic_detail = (
-                "failed to build managed arm64 Terminus 2 base image "
-                f"{TERMINUS_2_FULL_IMAGE!r}: {exc}"
-                + (f"\nbuild log (full):\n{full_log}" if full_log else "")
-            )
-            raise TaskImageBuildError(
-                "failed to build managed arm64 Terminus 2 base image "
-                f"{TERMINUS_2_FULL_IMAGE!r}: {exc}"
-                + (f"\nbuild log (last {_BUILD_LOG_TAIL_LINES} lines):\n{tail}" if tail else ""),
-                diagnostic_detail=diagnostic_detail,
-            ) from exc
-        except Exception as exc:
-            raise TaskImageBuildError(
-                "failed to build managed arm64 Terminus 2 base image "
-                f"{TERMINUS_2_FULL_IMAGE!r}: {exc}",
-            ) from exc
-
-
-def _is_linux_arm64_docker_daemon(client: Any) -> bool:
-    with contextlib.suppress(Exception):
-        info = client.info()
-        if isinstance(info, dict):
-            os_type = str(info.get("OSType") or "").lower()
-            architecture = str(info.get("Architecture") or "").lower()
-            if os_type and os_type != "linux":
-                return False
-            if architecture in {"aarch64", "arm64"}:
-                return True
-            if architecture:
-                return False
-    return _is_linux_arm64_worker()
-
-
-def _is_linux_arm64_worker() -> bool:
-    return platform.system().lower() == "linux" and platform.machine().lower() in {
-        "aarch64",
-        "arm64",
-    }
-
-
-def _is_arm64_docker_image(image: Any) -> bool:
-    attrs = getattr(image, "attrs", None)
-    if not isinstance(attrs, dict):
-        return False
-    architecture = str(attrs.get("Architecture") or "").lower()
-    return architecture in {"aarch64", "arm64"}
-
-
-def _dockerfile_uses_base_image(dockerfile: Path, image: str) -> bool:
-    try:
-        content = dockerfile.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise TaskImageBuildError(
-            f"failed to read Dockerfile {dockerfile}: {exc}",
-        ) from exc
-    return _dockerfile_text_uses_base_image(content, image)
-
-
-def _dockerfile_text_uses_base_image(content: str, image: str) -> bool:
-    normalized_image = _normalize_docker_image_name(image)
-    for raw_line in content.splitlines():
-        stripped = raw_line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        parts = stripped.split()
-        if not parts:
-            continue
-        instruction = parts[0].lower()
-        if instruction == "arg":
-            continue
-        if instruction != "from":
-            continue
-        from_args = [part for part in parts[1:] if not part.startswith("--")]
-        if not from_args:
-            return False
-        return _normalize_docker_image_name(from_args[0]) == normalized_image
-    return False
-
-
-def dockerfile_text_uses_runtime_arm64_fallback_base(content: str) -> bool:
-    """Apply the same base probe to already verified, owned Dockerfile bytes."""
-    return any(
-        _dockerfile_text_uses_base_image(content, base) for base in RUNTIME_ARM64_FALLBACK_BASES
-    )
-
-
-def dockerfile_uses_runtime_arm64_fallback_base(dockerfile: Path) -> bool:
-    """True if the Dockerfile's first ``FROM`` targets a base image the
-    worker will substitute an arm64 build for at trial start.
-
-    Used by adapters and the publish-local pipeline to decide whether a
-    task can safely claim ``cpu_arch = "any"`` even though the declared
-    base image only ships an amd64 manifest. #342.
-    """
-    for base in RUNTIME_ARM64_FALLBACK_BASES:
-        if _dockerfile_uses_base_image(dockerfile, base):
-            return True
-    return False
-
-
-def _normalize_docker_image_name(image: str) -> str:
-    if image.startswith("docker.io/"):
-        return image.removeprefix("docker.io/")
-    if image.startswith("registry-1.docker.io/"):
-        return image.removeprefix("registry-1.docker.io/")
-    return image
 
 
 def _format_build_log_tail(build_log: Any) -> str:

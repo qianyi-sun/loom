@@ -5521,6 +5521,7 @@ class Batch(Base):
         Text,
         nullable=False,
         default="trajectory_generation",
+        server_default=text("'trajectory_generation'"),
     )
     task_filter: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     trial_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)

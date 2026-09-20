@@ -307,7 +307,7 @@ async def test_real_authority_guard_socket_and_go_orchestrator_flow(
     settings = _settings(
         tmp_path,
         isolated_migration_postgres_url,
-        principal_document=_principal_document(principal_id="gb10-trt-gb10-1"),
+        principal_document=_principal_document(principal_id="oldlab-trt-eai-oldlab-1"),
         bundle_public_https_origin="https://objects.example",
         bundle_expected_bucket="loom-bundles",
         bundle_url_expiry_seconds=600,
@@ -408,7 +408,7 @@ async def test_real_authority_guard_socket_and_go_orchestrator_flow(
                 "LOOM_PHASE2C_SOCKET": str(service.config.protocol.socket_path),
                 "LOOM_PHASE2C_GRANT_ID": str(GRANT_ID),
                 "LOOM_PHASE2C_MATERIALIZATION_ID": str(materialization_id),
-                "LOOM_PHASE2C_GOARCH_OVERRIDE": "arm64",
+                "LOOM_PHASE2C_GOARCH_OVERRIDE": "amd64",
             },
         )
         service.stop()

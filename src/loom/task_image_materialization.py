@@ -27,6 +27,7 @@ from loom.db.schema import (
     Trial,
     TrialTaskImageMaterialization,
 )
+from loom.execution_architecture import execution_cpu_arch
 from loom.models.task import TaskConfig
 
 if TYPE_CHECKING:
@@ -70,7 +71,7 @@ class TaskImageExecutionGrantV1(BaseModel):
     @model_validator(mode="after")
     def matches_frozen_task_snapshot(self) -> TaskImageExecutionGrantV1:
         task = TaskConfig.model_validate(self.task_config)
-        if self.cpu_arch not in required_task_image_architectures(task):
+        if self.cpu_arch not in declared_task_image_architectures(task):
             raise ValueError("cpu_arch is not required by the frozen task snapshot")
         expected = required_task_image_components(task)
         if set(self.registry_images) != expected:
@@ -136,6 +137,13 @@ def current_task_image_reference(row: Any) -> ColumnElement[bool]:
 
 
 def required_task_image_architectures(task: TaskConfig) -> tuple[NativeCPUArch, ...]:
+    """Plan new builds only for supported execution architectures."""
+    architecture = execution_cpu_arch(task.environment.cpu_arch)
+    return (architecture,) if declared_task_image_architectures(task) else ()
+
+
+def declared_task_image_architectures(task: TaskConfig) -> tuple[NativeCPUArch, ...]:
+    """Read historical grants without rewriting their architecture identity."""
     has_dockerfile = task.environment.dockerfile is not None or any(
         sidecar.dockerfile is not None for sidecar in task.environment.sidecars
     )

@@ -167,7 +167,7 @@ def _candidate_request(
         "manifest_size": 512,
         "oci_file_sha256": "b" * 64,
         "oci_file_size": 4096,
-        "platform": "linux/arm64",
+        "platform": "linux/amd64",
     }
     values.update(changes)
     return TaskImagePublicationCandidateRequestV1.model_validate(values)
@@ -237,7 +237,7 @@ async def test_first_credential_is_exact_persisted_without_raw_token_and_replaye
         assert credential.generation == 1
         assert credential.expires_at == NOW + timedelta(seconds=40)
         assert credential.repository == (
-            f"loom-task-image-attempts/arm64/{attempt.id}/task"
+            f"loom-task-image-attempts/x86_64/{attempt.id}/task"
         )
         stored = (
             await session.scalars(select(TaskImageRegistryCredentialGeneration))

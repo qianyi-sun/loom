@@ -9,14 +9,24 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import tomllib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import tomli_w
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import Task
+from loom.models.task import TaskConfig
+from loom.nebius_terminus_ingest import (
+    NEBIUS_TERMINUS_PROFILE,
+    NebiusTerminusProfileStats,
+    adapt_bundle_for_nebius_terminus,
+    merge_profile_stats,
+    preflight_nebius_terminus_admission,
+)
 from loom.task_bundle_catalog import publish_task_bundle_catalog
 from loom.task_bundle_compat import (
     CompatibilitySeverity,
@@ -27,6 +37,7 @@ from loom.task_bundle_registration import prepare_task_bundle_registration
 from loom.task_bundle_source import TaskBundleSourceSpecV1, task_bundle_catalog_prefix
 from loom.task_bundle_source_journal import TaskBundleUpload
 from loom.task_bundle_source_publisher import TaskBundleSourcePublisher
+from loom.terminal_bench_normalize import normalize_terminal_bench_task_toml
 from loom.trajectory.storage import ObjectStore
 from loom_benchmark_tool.db_url import normalize_db_url
 from loom_cli.local_benchmark_publish import (
@@ -48,6 +59,8 @@ async def publish_versioned_local_benchmark(
     bucket: str,
     imported_by: str | None,
     compat_flatten_environment: bool,
+    create_bucket: bool = False,
+    execution_profile: str | None = None,
 ) -> LocalBenchmarkPublishStats:
     entry = result.entry
     source_prefix = f"s3://{bucket}/{task_bundle_catalog_prefix(entry.id)}"
@@ -58,8 +71,10 @@ async def publish_versioned_local_benchmark(
     )
     prepared: dict[str, tuple[TaskBundleSourceSpecV1, TaskBundleUpload]] = {}
     inserted = updated = unchanged = uploaded_objects = compat_flattened_files = 0
+    profile_stats = NebiusTerminusProfileStats()
     try:
-        await object_store.ensure_bucket(bucket)
+        if create_bucket:
+            await object_store.ensure_bucket(bucket)
         for task_toml in result.task_tomls:
             relative = task_toml.parent.relative_to(result.task_root)
             task_id = entry.id if relative == Path(".") else f"{entry.id}/{relative.as_posix()}"
@@ -77,10 +92,29 @@ async def publish_versioned_local_benchmark(
                         f"task bundle compatibility preflight failed for {task_id}:\n"
                         + format_compatibility_issues(issues),
                     )
+                adapt_stats = None
+                if execution_profile == NEBIUS_TERMINUS_PROFILE:
+                    authored = staged / "task.toml"
+                    normalized = normalize_terminal_bench_task_toml(tomllib.loads(authored.read_text()))
+                    adapted, adapt_stats = adapt_bundle_for_nebius_terminus(staged, normalized)
+                    # Versioned registration binds config to the staged authored
+                    # bytes; capture the opt-in adaptation before registration.
+                    adapted_document = TaskConfig.model_validate(adapted).model_dump(
+                        mode="json", exclude_none=True,
+                    )
+                    authored.write_text(tomli_w.dumps(adapted_document))
                 registration = prepare_task_bundle_registration(
-                    staged, task_id=task_id, promote_runtime_architecture=True,
+                    staged, task_id=task_id,
                 )
                 spec = TaskBundleSourceSpecV1.from_registration(registration, bucket=bucket)
+                if adapt_stats is not None:
+                    reasons = preflight_nebius_terminus_admission(spec.task_config, spec.provenance)
+                    if reasons:
+                        raise LocalBenchmarkValidationError(
+                            f"nebius-terminus admission preflight failed for {task_id}: "
+                            + ", ".join(reasons),
+                        )
+                    profile_stats = merge_profile_stats(profile_stats, adapt_stats, preflight_ok=True)
                 ticket = await publisher.prepare(spec, staged)
                 prepared[task_id] = (spec, ticket)
                 uploaded_objects += 0 if ticket.available else len(ticket.intents)
@@ -129,5 +163,6 @@ async def publish_versioned_local_benchmark(
         benchmark_id=entry.id, task_count=result.task_count, inserted=inserted,
         updated=updated, unchanged=unchanged, uploaded_objects=uploaded_objects,
         compat_flattened_files=compat_flattened_files, bucket=bucket,
-        source_prefix=source_prefix,
+        source_prefix=source_prefix, execution_profile=execution_profile,
+        profile_stats=profile_stats if execution_profile else None,
     )

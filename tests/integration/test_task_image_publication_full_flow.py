@@ -154,7 +154,7 @@ async def test_go_guard_http_worker_commits_exact_receipt_after_source_refresh(
         monkeypatch.setattr(authority_api, name, trace_publication(name))
     now = datetime.now(UTC)
     monkeypatch.setattr(projection, "NOW", now - timedelta(seconds=10))
-    reader, root, _ = _graph(arch="arm64")
+    reader, root, _ = _graph(arch="amd64")
     issuer = _issuer(tls_registry, token_key)
     private = Ed25519PrivateKey.generate()
     key = PublicationKeyRecord(

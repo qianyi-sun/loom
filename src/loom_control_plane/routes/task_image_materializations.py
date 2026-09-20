@@ -39,7 +39,7 @@ class _StrictModel(BaseModel):
 
 class ClaimRequest(_StrictModel):
     builder_id: BuilderID
-    cpu_arch: Literal["x86_64", "arm64"]
+    cpu_arch: Literal["x86_64"]
 
 
 class LeaseRequest(_StrictModel):

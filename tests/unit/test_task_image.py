@@ -9,11 +9,8 @@ from docker.errors import ImageNotFound
 
 from loom.driver import task_image
 from loom.driver.task_image import (
-    RUNTIME_ARM64_FALLBACK_BASES,
-    TERMINUS_2_FULL_IMAGE,
     TaskImageBuildError,
     TaskImageBuildTimeoutError,
-    dockerfile_uses_runtime_arm64_fallback_base,
     resolve_task_image,
     task_image_tag,
 )
@@ -262,138 +259,23 @@ async def test_resolve_task_image_reports_exact_materialized_digest_pull_timeout
     )
 
 
-async def test_resolve_task_image_prewarms_terminus_2_base_on_arm64_linux(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+@pytest.mark.parametrize("daemon_arch", ["amd64", "aarch64"])
+async def test_task_build_uses_amd64_without_arm_substitute(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, daemon_arch: str,
 ) -> None:
     task_dir = tmp_path / "task"
     dockerfile = task_dir / "environment" / "Dockerfile"
     dockerfile.parent.mkdir(parents=True)
-    dockerfile.write_text(
-        "FROM mictern2/terminus2-full:latest\nRUN echo ready\n",
-    )
-    fake_images = _FakeImages()
-    fake_client = _FakeDockerClient(fake_images)
-    monkeypatch.setattr(task_image.docker, "from_env", lambda: fake_client)
-    monkeypatch.setattr(
-        task_image,
-        "platform",
-        SimpleNamespace(
-            system=lambda: "Linux",
-            machine=lambda: "aarch64",
-        ),
-        raising=False,
-    )
+    dockerfile.write_text("FROM mictern2/terminus2-full:latest\nRUN echo ready\n")
+    images = _FakeImages()
+    client = _FakeDockerClient(images, info={"OSType": "linux", "Architecture": daemon_arch})
+    monkeypatch.setattr(task_image.docker, "from_env", lambda: client)
     cfg = _task_config(dockerfile="environment/Dockerfile")
-
-    image = await resolve_task_image(
-        task_config=cfg,
-        task_dir=task_dir,
-        task_checksum="abc123",
-    )
-
-    # Duplicate `image` entry is the pre-build cache probe (#275); the
-    # third element is the terminus-2 base pre-warm check.
-    assert fake_images.get_calls == [
-        image,
-        image,
-        "mictern2/terminus2-full:latest",
-    ]
-    base_build, task_build = fake_images.build_calls
-    assert base_build["tag"] == "mictern2/terminus2-full:latest"
-    assert base_build["dockerfile"] == "Dockerfile"
-    assert base_build["rm"] is True
-    assert base_build["forcerm"] is True
-    assert base_build["pull"] is False
-    assert base_build["labels"] == {
-        "loom.managed_base": "terminus-2-arm64",
-        "loom.managed_base.upstream": "mictern2/terminus2-full:latest",
-    }
-    assert task_build["path"] == str(task_dir)
-    assert task_build["dockerfile"] == "environment/Dockerfile"
-    assert task_build["tag"] == image
-    assert fake_client.closed is True
-
-
-async def test_resolve_task_image_prewarms_terminus_2_base_for_arm64_daemon(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-) -> None:
-    task_dir = tmp_path / "task"
-    dockerfile = task_dir / "environment" / "Dockerfile"
-    dockerfile.parent.mkdir(parents=True)
-    dockerfile.write_text(
-        "FROM mictern2/terminus2-full:latest\nRUN echo ready\n",
-    )
-    fake_images = _FakeImages()
-    fake_client = _FakeDockerClient(
-        fake_images,
-        info={"OSType": "linux", "Architecture": "aarch64"},
-    )
-    monkeypatch.setattr(task_image.docker, "from_env", lambda: fake_client)
-    monkeypatch.setattr(
-        task_image,
-        "platform",
-        SimpleNamespace(
-            system=lambda: "Linux",
-            machine=lambda: "x86_64",
-        ),
-        raising=False,
-    )
-    cfg = _task_config(dockerfile="environment/Dockerfile")
-
-    await resolve_task_image(
-        task_config=cfg,
-        task_dir=task_dir,
-        task_checksum="abc123",
-    )
-
-    assert [call["tag"] for call in fake_images.build_calls] == [
-        "mictern2/terminus2-full:latest",
-        task_image_tag(cfg, task_checksum="abc123"),
-    ]
-
-
-async def test_resolve_task_image_rebuilds_non_managed_terminus_2_tag_on_arm64(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-) -> None:
-    task_dir = tmp_path / "task"
-    dockerfile = task_dir / "environment" / "Dockerfile"
-    dockerfile.parent.mkdir(parents=True)
-    dockerfile.write_text("FROM mictern2/terminus2-full:latest\n")
-    fake_images = _FakeImages(
-        cached_images={"mictern2/terminus2-full:latest"},
-        image_attrs={
-            "mictern2/terminus2-full:latest": {
-                "Architecture": "amd64",
-                "Config": {"Labels": {}},
-            },
-        },
-    )
-    fake_client = _FakeDockerClient(fake_images)
-    monkeypatch.setattr(task_image.docker, "from_env", lambda: fake_client)
-    monkeypatch.setattr(
-        task_image,
-        "platform",
-        SimpleNamespace(
-            system=lambda: "Linux",
-            machine=lambda: "aarch64",
-        ),
-        raising=False,
-    )
-    cfg = _task_config(dockerfile="environment/Dockerfile")
-
-    await resolve_task_image(
-        task_config=cfg,
-        task_dir=task_dir,
-        task_checksum="abc123",
-    )
-
-    assert [call["tag"] for call in fake_images.build_calls] == [
-        "mictern2/terminus2-full:latest",
-        task_image_tag(cfg, task_checksum="abc123"),
-    ]
+    image = await resolve_task_image(task_config=cfg, task_dir=task_dir, task_checksum="abc123")
+    assert len(images.build_calls) == 1
+    assert images.build_calls[0]["tag"] == image
+    assert images.build_calls[0]["platform"] == "linux/amd64"
+    assert "mictern2/terminus2-full:latest" not in images.get_calls
 
 
 async def test_resolve_task_image_passes_docker_api_timeout(
@@ -711,48 +593,6 @@ async def test_resolve_task_image_empty_build_log_still_raises(
     assert "build log" not in msg.lower()
 
 
-class TestRuntimeArm64FallbackBases:
-    """Registry + Dockerfile probe for #342."""
-
-    def test_terminus_2_full_is_a_fallback_base(self) -> None:
-        assert TERMINUS_2_FULL_IMAGE in RUNTIME_ARM64_FALLBACK_BASES
-
-    def test_dockerfile_with_terminus_2_from_is_detected(self, tmp_path) -> None:
-        dockerfile = tmp_path / "Dockerfile"
-        dockerfile.write_text(
-            f"# comment\nFROM {TERMINUS_2_FULL_IMAGE}\nRUN echo ok\n",
-        )
-        assert dockerfile_uses_runtime_arm64_fallback_base(dockerfile) is True
-
-    def test_dockerfile_with_docker_io_qualifier_is_detected(
-        self,
-        tmp_path,
-    ) -> None:
-        dockerfile = tmp_path / "Dockerfile"
-        dockerfile.write_text(
-            f"FROM docker.io/{TERMINUS_2_FULL_IMAGE}\n",
-        )
-        assert dockerfile_uses_runtime_arm64_fallback_base(dockerfile) is True
-
-    def test_dockerfile_with_unrelated_base_is_not_detected(
-        self,
-        tmp_path,
-    ) -> None:
-        dockerfile = tmp_path / "Dockerfile"
-        dockerfile.write_text("FROM python:3.11-slim\nRUN echo ok\n")
-        assert dockerfile_uses_runtime_arm64_fallback_base(dockerfile) is False
-
-    def test_dockerfile_with_arg_before_from_still_detected(
-        self,
-        tmp_path,
-    ) -> None:
-        dockerfile = tmp_path / "Dockerfile"
-        dockerfile.write_text(
-            f"ARG VERSION=1\nFROM {TERMINUS_2_FULL_IMAGE}\n",
-        )
-        assert dockerfile_uses_runtime_arm64_fallback_base(dockerfile) is True
-
-
 # ──────────────────────────────────────────────────────────────────────
 # #275: build slot serialization
 # ──────────────────────────────────────────────────────────────────────
@@ -949,17 +789,12 @@ def test_registry_tag_for_splits_on_last_colon_for_ported_registry() -> None:
     )
 
 
-def test_task_image_tag_is_native_architecture_qualified() -> None:
+def test_task_image_tag_rejects_arm_execution_but_any_resolves_to_x86() -> None:
     cfg = _task_config(dockerfile="environment/Dockerfile")
-
-    assert task_image_tag(
-        cfg,
-        task_checksum="abc123",
-        cpu_arch="x86_64",
-    ) != task_image_tag(
-        cfg,
-        task_checksum="abc123",
-        cpu_arch="arm64",
+    with pytest.raises(ValueError, match="x86_64 only"):
+        task_image_tag(cfg, task_checksum="abc123", cpu_arch="arm64")
+    assert task_image_tag(cfg, task_checksum="abc123", cpu_arch="any") == task_image_tag(
+        cfg, task_checksum="abc123", cpu_arch="x86_64",
     )
 
 

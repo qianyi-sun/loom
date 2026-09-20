@@ -35,9 +35,9 @@ def upgrade() -> None:
         "batches",
         "purpose IN ('evaluation', 'trajectory_generation')",
     )
-    # Application create paths must set purpose explicitly; keep no
-    # lingering default that would hide missing API fields in new envs.
-    op.alter_column("batches", "purpose", server_default=None)
+    # Older service replicas omit this field during a rolling upgrade. Keep
+    # their historical meaning compatible; the new API requires purpose and
+    # rejects missing values independently of this database compatibility default.
 
 
 def downgrade() -> None:

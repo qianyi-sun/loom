@@ -405,8 +405,8 @@ def _reject_if_k8s_worker_unavailable(
         detail=(
             "required_worker_pool 'k8s-worker' is not available on this "
             "cluster: k8s_worker.enabled=false in the deployed profile "
-            "(#383). Use 'oldlab' for x86_64 coverage or 'gb10' "
-            "for arm64 coverage."
+            "(#383). Choose an available x86_64 execution pool. "
+            "ARM execution is no longer supported."
         ),
     )
 

@@ -2103,8 +2103,9 @@ async def test_typed_registry_policy_controls_reuse_and_records_provenance(
     sync_engine.dispose()
 
 
+@pytest.mark.parametrize("purpose", ["evaluation", "trajectory_generation"])
 async def test_clone_config_uses_destination_provider_and_records_provenance(
-    run_library_setup: dict[str, object],
+    run_library_setup: dict[str, object], purpose: str,
 ) -> None:
     app = run_library_setup["app"]
     raw_b = run_library_setup["raw_b"]
@@ -2120,7 +2121,7 @@ async def test_clone_config_uses_destination_provider_and_records_provenance(
         conn.execute(
             update(Batch)
             .where(Batch.id == batch_shared)
-            .values(required_worker_pools=["gpu-a", "gpu-b"]),
+            .values(required_worker_pools=["gpu-a", "gpu-b"], purpose=purpose),
         )
     sync_engine.dispose()
 
@@ -2160,6 +2161,7 @@ async def test_clone_config_uses_destination_provider_and_records_provenance(
             select(Batch).where(Batch.id == UUID(body["batch_id"])),
         ).scalar_one()
         assert row.team_id == team_b
+        assert row.purpose == purpose
         assert row.submitted_by_user_id == user_b
         assert row.provider_connection_id == conn_b
         assert row.provider_connection_id != conn_a

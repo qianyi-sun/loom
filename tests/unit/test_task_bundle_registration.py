@@ -7,6 +7,7 @@ import importlib
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import rfc8785
@@ -125,14 +126,12 @@ def test_registration_views_cannot_change_the_frozen_binding(tmp_path):
 
 
 @pytest.mark.parametrize("explicit_arch", [None, "x86_64", "arm64", "any"])
-def test_registration_runtime_architecture_promotion_preserves_explicit_choices(
+def test_registration_rejects_arm_without_rewriting_architecture(
     tmp_path,
     explicit_arch,
 ):
-    from loom.driver.task_image import TERMINUS_2_FULL_IMAGE
-
     root = _bundle(tmp_path)
-    (root / "Dockerfile").write_text(f"FROM {TERMINUS_2_FULL_IMAGE}\n")
+    (root / "Dockerfile").write_text("FROM mictern2/terminus2-full:latest\n")
     if explicit_arch is not None:
         path = root / "task.toml"
         path.write_text(
@@ -142,47 +141,16 @@ def test_registration_runtime_architecture_promotion_preserves_explicit_choices(
             )
         )
     unchanged = capture_task_image_bundle_manifest(root)
-    registered = _module().prepare_task_bundle_registration(
-        root,
-        task_id="bench/local-id",
-        promote_runtime_architecture=True,
-    )
-    assert registered.task_config.environment.cpu_arch == (explicit_arch or "any")
-    assert registered.manifest == unchanged
-    if explicit_arch is None:
-        assert (
-            _module()
-            .prepare_task_bundle_registration(
-                root,
-                task_id="bench/local-id",
-            )
-            .task_config.environment.cpu_arch
-            == "x86_64"
-        )
+    if explicit_arch == "arm64":
+        with pytest.raises(ValueError, match="x86"):
+            _module().prepare_task_bundle_registration(root, task_id="bench/local-id")
+    else:
+        registered = _module().prepare_task_bundle_registration(root, task_id="bench/local-id")
+        assert registered.task_config.environment.cpu_arch == (explicit_arch or "x86_64")
+        assert registered.manifest == unchanged
 
 
-def test_architecture_promotion_rejects_dockerfile_changed_after_capture(tmp_path, monkeypatch):
-    from loom.driver.task_image import TERMINUS_2_FULL_IMAGE
-
-    root = _bundle(tmp_path)
-    module = _module()
-    original_capture = module.capture_task_image_bundle_manifest
-
-    def capture_then_change(path):
-        manifest = original_capture(path)
-        (path / "Dockerfile").write_text(f"FROM {TERMINUS_2_FULL_IMAGE}\n")
-        return manifest
-
-    monkeypatch.setattr(module, "capture_task_image_bundle_manifest", capture_then_change)
-    with pytest.raises(ValueError):
-        module.prepare_task_bundle_registration(
-            root,
-            task_id="bench/local-id",
-            promote_runtime_architecture=True,
-        )
-
-
-@pytest.mark.parametrize("name", ["task.toml", "Dockerfile"])
+@pytest.mark.parametrize("name", ["task.toml"])
 def test_registration_bounds_parsed_text_before_allocating_verified_payload(
     tmp_path,
     monkeypatch,
@@ -207,7 +175,6 @@ def test_registration_bounds_parsed_text_before_allocating_verified_payload(
         module.prepare_task_bundle_registration(
             root,
             task_id="bench/local-id",
-            promote_runtime_architecture=True,
         )
     assert oversized_reads == []
 
@@ -237,7 +204,7 @@ print(json.dumps([value.source_provenance, config], sort_keys=True))
     snapshots = [
         subprocess.run(
             [sys.executable, "-c", script, str(root)],
-            env={"PYTHONHASHSEED": str(seed)},
+            env={"PYTHONHASHSEED": str(seed), "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")},
             check=True,
             text=True,
             capture_output=True,
