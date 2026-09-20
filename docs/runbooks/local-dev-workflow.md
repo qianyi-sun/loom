@@ -32,9 +32,9 @@ runs database migrations, and creates the local access token. Inspect status
 and logs with:
 
 ```bash
-loom service status 
-docker compose ps
-docker compose logs --tail=200
+loom service status
+docker compose --env-file .env -f deploy/docker-compose.dev.yml ps
+docker compose --env-file .env -f deploy/docker-compose.dev.yml logs --tail=200
 ```
 
 Use `loom service up --help` and `loom service status --help` for the exact
@@ -83,11 +83,18 @@ dc run --rm --no-deps control-plane sh -ec '
 '
 
 dc restart control-plane
-dc up -d --wait
+loom service up --environment local
 dc ps
 ```
 
 The `current` output should report the repository's Alembic head revision.
+Re-running `loom service up` completes token seeding, batch-runner credential
+creation, and container recreation that the initial failed startup skipped.
+Reuse `--db-url` and `--cp-url` above if you configured non-default ports.
+
+This procedure is for a fresh database or one behind the current checkout.
+If the database was migrated by newer code, use that compatible checkout or a
+separate local database; do not stamp its revision to make older code start.
 
 ## Develop the SPA
 
