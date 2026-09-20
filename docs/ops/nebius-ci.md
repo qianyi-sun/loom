@@ -13,8 +13,8 @@ work; selected failures, cancellations and unexpected skips still block merging.
 Draft filtering, current-head/base requirements, and native squash auto-merge
 retain the [repository contract](../../CONTRIBUTING.md).
 
-The manifest retains both existing-platform and Nebius tests. PR image CI
-builds AMD64 and scans the resulting artifacts. Existing signed publication
+The manifest retains both existing-platform and Nebius tests. PR image CI uses the same seven-image Nebius set as candidate publication,
+builds only affected AMD64 images and scans the resulting artifacts. Existing signed publication
 consumers retain their declared architecture manifests until migrated. Disposable
 Kubernetes checks include the Nebius platform and execution contracts. Candidate
 publication uses the protected `nebius-integration` Environment from `dev`;
@@ -90,3 +90,18 @@ cancel in-flight jobs. See [runner placement](../architecture/ci-runner-accelera
 Harbor runtime builds follow its manifest-owned inputs rather than every image
 change. The Go recursive vet/race-test commands cover the supervisor once; its
 compiled binary remains available for the Python–Go interoperability tests.
+
+## Publication ownership
+
+`nebius-candidate.yml` is the only automatic **dev** image publisher. `images.yml`
+uses the Nebius manifest set for dev PRs and untrusted manual validation. Harbor
+uses its own selection, so a Web-only PR builds one image and a complete platform
+validation builds seven, without a second Harbor build. PR scanner preparation
+fetches only AMD64.
+
+Historical personal-dev consumers still require dual-architecture manifests.
+Their compatibility publication remains available through a manual `trusted-image-release-controller.yml` dispatch; that workflow
+performs the bot-authenticated trusted `images.yml` dispatch, and
+the controller has no schedule. Existing main-branch production publication is
+unchanged. This CI change neither retires personal-dev product functionality nor
+stops existing OLDLAB services. Migrating those consumers remains separate work.

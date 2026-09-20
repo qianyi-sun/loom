@@ -496,9 +496,10 @@ def test_image_input_validation_rejects_shell_metacharacters_and_ambiguous_value
     workflow = _workflow(".github/workflows/images.yml")
     step = _named_step(workflow["jobs"][job_name], "Validate image build inputs")
     env = {
-        "IMAGE_NAME": "worker",
-        "IMAGE_DIGEST_NAME": "loom-worker",
-        "DOCKERFILE": "deploy/Dockerfile.worker",
+        "IMAGE_SET": "nebius" if job_name == "build" else "legacy",
+        "IMAGE_NAME": "service",
+        "IMAGE_DIGEST_NAME": "loom-service",
+        "DOCKERFILE": "deploy/Dockerfile.service",
         "BUILD_CONTEXT": ".",
         "EVENT_NAME": "pull_request" if job_name == "build" else "push",
         "REF_NAME": "feature-safe" if job_name == "build" else "dev",
@@ -527,9 +528,10 @@ def test_image_input_validation_never_evaluates_command_substitution(
     result = _run_validation_step(
         step,
         env={
+            "IMAGE_SET": "nebius" if job_name == "build" else "legacy",
             "IMAGE_NAME": f"worker$(touch {sentinel})",
-            "IMAGE_DIGEST_NAME": "loom-worker",
-            "DOCKERFILE": "deploy/Dockerfile.worker",
+            "IMAGE_DIGEST_NAME": "loom-service",
+            "DOCKERFILE": "deploy/Dockerfile.service",
             "BUILD_CONTEXT": ".",
             "EVENT_NAME": "pull_request",
             "REF_NAME": "42/merge",
@@ -569,9 +571,10 @@ def test_image_input_validation_accepts_actual_github_context_shapes(
     result = _run_validation_step(
         step,
         env={
-            "IMAGE_NAME": "worker",
-            "IMAGE_DIGEST_NAME": "loom-worker",
-            "DOCKERFILE": "deploy/Dockerfile.worker",
+            "IMAGE_SET": "nebius" if job_name == "build" else "legacy",
+        "IMAGE_NAME": "service",
+            "IMAGE_DIGEST_NAME": "loom-service",
+            "DOCKERFILE": "deploy/Dockerfile.service",
             "BUILD_CONTEXT": ".",
             "EVENT_NAME": event_name,
             "REF_NAME": ref_name,

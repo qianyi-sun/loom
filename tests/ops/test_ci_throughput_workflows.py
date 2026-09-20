@@ -69,6 +69,8 @@ def _run_image_matrix_plan(
         env={
             **os.environ,
             "EVENT_NAME": "pull_request",
+            "TRUSTED_PUBLISH": "false",
+            "BASE_BRANCH": "dev",
             "REQUIRED": required,
             "UNOWNED_RUNTIME": unowned_runtime,
             "CHANGED_FILES": str(changed_files),
@@ -496,7 +498,7 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     plan_script = "\n".join(step.get("run", "") for step in jobs["plan"]["steps"] if "run" in step)
     assert "scripts/component_ownership.py" in plan_script
     assert "plan-images" in plan_script
-    assert push_trigger == {"branches": ["dev", "main"]}
+    assert push_trigger == {"branches": ["main"]}
 
 
 def test_ci_push_safety_net_excludes_already_admitted_dev_merges() -> None:
@@ -534,32 +536,10 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
     matrix = json.loads(_github_output_value(output, "images"))
     native_matrix = json.loads(_github_output_value(output, "native_builds"))
     assert _github_output_value(output, "required") == "true"
-    assert len(matrix) == 21
-    assert {entry["image"] for entry in matrix} == {
-        "agent-sandbox",
-        "capacity-executor",
-        "capacity-manager",
-        "control-plane",
-        "egress-xds",
-        "execution-actuator",
-        "execution-runtime",
-        "family-orchestrator",
-        "pipeline-orchestrator",
-        "pipeline-core-fixture",
-        "llm-gateway",
-        "llm-gateway-sandbox",
-        "personal-dev-activation-agent",
-        "personal-dev-builder",
-        "personal-dev-native-builder-agent",
-        "personal-dev-scanner-cache",
-        "rehearsal-postgres",
-        "service",
-        "staging-admin-browser-smoke",
-        "web",
-        "worker",
-    }
+    assert len(matrix) == 7
+    assert {entry["image"] for entry in matrix} == {'web', 'service', 'llm-gateway', 'execution-runtime', 'control-plane', 'execution-actuator', 'harbor-runtime'}
     assert all(set(entry) == {"image", "image_name", "dockerfile", "context"} for entry in matrix)
-    assert len(native_matrix) == 42
+    assert len(native_matrix) == 14
     assert {(entry["architecture"], entry["platform"]) for entry in native_matrix} == {
         ("amd64", "linux/amd64"),
         ("arm64", "linux/arm64"),
@@ -576,29 +556,7 @@ def test_images_mixed_known_and_unowned_paths_select_all_images(tmp_path: Path) 
 
     assert result.returncode == 0, result.stderr
     matrix = json.loads(_github_output_value(output, "images"))
-    assert {entry["image"] for entry in matrix} == {
-        "agent-sandbox",
-        "capacity-executor",
-        "capacity-manager",
-        "worker",
-        "service",
-        "control-plane",
-        "egress-xds",
-        "execution-actuator",
-        "execution-runtime",
-        "family-orchestrator",
-        "pipeline-orchestrator",
-        "pipeline-core-fixture",
-        "personal-dev-activation-agent",
-        "personal-dev-builder",
-        "personal-dev-native-builder-agent",
-        "personal-dev-scanner-cache",
-        "llm-gateway",
-        "staging-admin-browser-smoke",
-        "web",
-        "llm-gateway-sandbox",
-        "rehearsal-postgres",
-    }
+    assert {entry["image"] for entry in matrix} == {'web', 'service', 'llm-gateway', 'execution-runtime', 'control-plane', 'execution-actuator', 'harbor-runtime'}
 
 
 def test_frontend_security_policy_change_selects_only_web_image(tmp_path: Path) -> None:
@@ -631,18 +589,7 @@ def test_manifest_owned_markdown_build_input_requires_images(tmp_path: Path) -> 
     assert result.returncode == 0, result.stderr
     assert _github_output_value(output, "required") == "true"
     matrix = json.loads(_github_output_value(output, "images"))
-    assert {entry["image"] for entry in matrix} == {
-        "capacity-executor",
-        "capacity-manager",
-        "control-plane",
-        "execution-runtime",
-        "family-orchestrator",
-        "pipeline-orchestrator",
-        "llm-gateway",
-        "personal-dev-activation-agent",
-        "service",
-        "worker",
-    }
+    assert {entry["image"] for entry in matrix} == {'service', 'execution-runtime', 'control-plane', 'llm-gateway'}
 
 
 def test_unowned_static_documentation_does_not_require_images(tmp_path: Path) -> None:
@@ -794,7 +741,8 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
         for step in trivy_binary["steps"]
         if step.get("name") == "Upload exact verified Trivy binary"
     )
-    assert "for architecture in amd64 arm64" in install["run"]
+    assert "architectures=(amd64)" in install["run"]
+    assert 'if [[ "$PUBLISHING" == "true" ]]; then architectures+=(arm64); fi' in install["run"]
     assert "python3 scripts/install_trivy.py" in install["run"]
     assert '--architecture "$architecture"' in install["run"]
     assert "sha256sum --check trivy.sha256" in install["run"]

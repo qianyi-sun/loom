@@ -75,7 +75,7 @@ on:
   merge_group:
     types: [checks_requested]
   push:
-    branches: [dev, main]
+    branches: [main]
   workflow_dispatch:
     inputs:
       trusted_publish:
@@ -116,6 +116,7 @@ jobs:
       native_builds: ${{ steps.plan.outputs.native_builds || steps.event.outputs.native_builds }}
       ordinary_builds: ${{ steps.build-matrices.outputs.ordinary_builds || '[]' }}
       scanner_cache_builds: ${{ steps.build-matrices.outputs.scanner_cache_builds || '[]' }}
+      image_set: ${{ steps.plan.outputs.image_set || 'nebius' }}
       trusted_publish: ${{ steps.trust.outputs.trusted_publish || 'false' }}
     steps:
       - name: Classify filtered event before checkout
@@ -259,6 +260,7 @@ jobs:
         env:
           REQUIRED: ${{ steps.required.outputs.images }}
           UNOWNED_RUNTIME: ${{ steps.required.outputs.unowned_runtime }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref || github.event.merge_group.base_ref || github.ref_name }}
           EVENT_NAME: ${{ github.event_name }}
           TRUSTED_PUBLISH: ${{ steps.trust.outputs.trusted_publish }}
           CHANGED_FILES: /tmp/loom-changed-files.txt
@@ -270,8 +272,14 @@ jobs:
               exit 1
             }
           done
+          image_set=nebius
+          if [[ "$EVENT_NAME" == "push" || "$TRUSTED_PUBLISH" == "true" || "${BASE_BRANCH:-dev}" == "main" || "${BASE_BRANCH:-dev}" == "refs/heads/main" ]]; then
+            image_set=legacy
+          fi
+          echo "image_set=$image_set" >> "$GITHUB_OUTPUT"
           args=(
             plan-images
+            --image-set "$image_set"
             --changed-files "$CHANGED_FILES"
             --github-output "$GITHUB_OUTPUT"
           )
@@ -307,7 +315,7 @@ jobs:
               builds = [item for item in builds if item["architecture"] == "amd64"]
           scanner = "personal-dev-scanner-cache"
           partitions = {
-              "ordinary_builds": [item for item in builds if item["image"] != scanner],
+              "ordinary_builds": [item for item in builds if item["image"] not in {scanner, "harbor-runtime"}],
               "scanner_cache_builds": [item for item in builds if item["image"] == scanner],
           }
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
@@ -333,11 +341,15 @@ jobs:
           persist-credentials: false
 
       - name: Install and record pinned Trivy binary
+        env:
+          PUBLISHING: ${{ github.event_name == 'push' || needs.plan.outputs.trusted_publish == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
           test "$(uname -m)" = x86_64
-          for architecture in amd64 arm64; do
+          architectures=(amd64)
+          if [[ "$PUBLISHING" == "true" ]]; then architectures+=(arm64); fi
+          for architecture in "${architectures[@]}"; do
             artifact_dir="/tmp/loom-trivy-binaries/${architecture}"
             mkdir -p "$artifact_dir"
             trivy_bin=$(python3 scripts/install_trivy.py \
@@ -476,7 +488,7 @@ jobs:
         shell: bash
         env:
           IMAGE_NAME: ${{ matrix.image }}
-          IMAGE_SET: ${{ matrix.image == 'harbor-runtime' && 'nebius' || 'legacy' }}
+          IMAGE_SET: ${{ matrix.image == 'harbor-runtime' && 'nebius' || needs.plan.outputs.image_set }}
           IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
           DOCKERFILE: ${{ matrix.dockerfile }}
           BUILD_CONTEXT: ${{ matrix.context }}
@@ -490,8 +502,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          python3 scripts/component_ownership.py validate-image \
-            --image-set "${IMAGE_SET:-legacy}" \
+          python3 scripts/component_ownership.py validate-image --image-set "${IMAGE_SET}" \
             --image "$IMAGE_NAME" \
             --image-name "$IMAGE_DIGEST_NAME" \
             --dockerfile "$DOCKERFILE" \
@@ -2049,7 +2060,7 @@ jobs:
               "personal-dev-scanner-cache",
           }
           print(
-              "true" if selected - {"personal-dev-scanner-cache"} else "false",
+              "true" if selected - {"personal-dev-scanner-cache", "harbor-runtime"} else "false",
               "true" if "personal-dev-scanner-cache" in selected else "false",
               "true" if required <= selected else "false",
           )
