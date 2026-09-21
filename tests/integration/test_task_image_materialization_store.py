@@ -24,10 +24,44 @@ from loom.task_image_materialization import (
 from loom_control_plane.task_image_materializations import (
     TaskImageLeaseConflictError,
     claim_task_image_materialization,
+    claim_task_image_registry_gc,
+    complete_task_image_registry_gc,
     fail_task_image_materialization,
     record_task_image_publication,
     retry_task_image_materialization,
 )
+
+
+async def test_registry_gc_scopes_observation_and_claim_to_native_inventory(
+    materialization_session: async_sessionmaker[AsyncSession],
+) -> None:
+    identities = [uuid4(), uuid4()]
+    old = datetime.now(UTC) - timedelta(days=31)
+    async with materialization_session() as session, session.begin():
+        for number, identity in enumerate(identities):
+            await session.execute(insert(TaskImageMaterialization).values(
+                id=identity, materialization_key=str(number + 1) * 64,
+                task_id=f"retention/{identity}", task_checksum="a" * 64, cpu_arch="x86_64",
+                task_config={}, task_source=f"s3://test/{identity}", state="failed",
+                registry_images={"task": f"registry.test/task@sha256:{number + 1:064x}"},
+                unreferenced_at=old,
+            ))
+    async with materialization_session() as session, session.begin():
+        assert await claim_task_image_registry_gc(
+            session, gc_id="test", grace_hours=720, materialization_ids=[],
+        ) is None
+        row = await claim_task_image_registry_gc(
+            session, gc_id="test", grace_hours=720, materialization_ids=[identities[0]],
+        )
+        assert row is not None and row.id == identities[0] and row.state == "retiring"
+        epoch = row.lease_epoch
+    async with materialization_session() as session, session.begin():
+        other = await session.get(TaskImageMaterialization, identities[1])
+        assert other is not None and other.state == "failed" and other.unreferenced_at == old
+        retired = await complete_task_image_registry_gc(
+            session, materialization_id=identities[0], gc_id="test", lease_epoch=epoch,
+        )
+        assert retired.state == "retired" and not retired.registry_images
 
 
 def _task_values(*, task_id: str, checksum: str) -> dict[str, object]:
