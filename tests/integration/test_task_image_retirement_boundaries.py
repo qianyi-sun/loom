@@ -41,6 +41,9 @@ from tests.integration.test_task_image_registry_credentials import (
 )
 from tests.integration.test_task_image_retirement_snapshot import ORIGIN, _setup
 from tests.integration.test_task_image_retirement_store import observe, store
+from tests.integration.test_task_image_retirement_store import (
+    observe_positive_semantics as _observe_positive_semantics,
+)
 
 
 async def _wait_for_real_idle_abort(factory, session):
@@ -60,19 +63,6 @@ async def _wait_for_real_idle_abort(factory, session):
             ):
                 await asyncio.sleep(0.02)
     return backend
-
-
-async def _observe_positive_semantics(factory, attempt_id, instant):
-    # An idle-aborted transaction has not observed or retired anything. This
-    # positive pin-semantics test may restart the entire supported operation;
-    # timeout/rollback/cancellation tests below continue to call observe directly.
-    for attempt in range(3):
-        try:
-            return await observe(factory, attempt_id, instant)
-        except DBAPIError as exc:
-            if getattr(exc.orig, "sqlstate", None) != "25P03" or attempt == 2:
-                raise
-    raise AssertionError("positive observation retry loop exhausted without outcome")
 
 
 async def test_positive_observation_retries_one_real_idle_abort(
@@ -116,7 +106,9 @@ async def test_positive_observation_retry_is_bounded_and_sqlstate_specific(monke
         calls.append(args)
         raise error
 
-    monkeypatch.setattr(boundaries, "observe", unavailable)
+    import tests.integration.test_task_image_retirement_store as observation
+
+    monkeypatch.setattr(observation, "observe", unavailable)
     with pytest.raises(DBAPIError) as caught:
         await boundaries._observe_positive_semantics(factory, attempt, instant)
     assert caught.value is error

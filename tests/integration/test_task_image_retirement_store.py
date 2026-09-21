@@ -44,6 +44,19 @@ async def observe(factory, attempt_id, instant, **kwargs):
     )
 
 
+async def observe_positive_semantics(factory, attempt_id, instant):
+    # An idle-aborted transaction has not observed or retired anything. This
+    # positive pin-semantics test may restart the entire supported operation;
+    # timeout/rollback/cancellation tests below continue to call observe directly.
+    for attempt in range(3):
+        try:
+            return await observe(factory, attempt_id, instant)
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) != "25P03" or attempt == 2:
+                raise
+    raise AssertionError("positive observation retry loop exhausted without outcome")
+
+
 @pytest.mark.parametrize("issued", [False, True])
 async def test_abandoned_observation_grace_retirement_and_permanent_replay(
     registry_authority_session,
@@ -53,18 +66,18 @@ async def test_abandoned_observation_grace_retirement_and_permanent_replay(
     factory = registry_authority_session
     _, attempt, options = await _setup(factory, registry_issuer, issued=issued)
     instant = NOW + timedelta(hours=1)
-    first = await observe(factory, attempt.id, instant)
+    first = await observe_positive_semantics(factory, attempt.id, instant)
     assert first.status == "observing" and first.unreferenced_since == instant
     assert (
-        await observe(factory, attempt.id, instant + timedelta(hours=24, microseconds=-1))
+        await observe_positive_semantics(factory, attempt.id, instant + timedelta(hours=24, microseconds=-1))
     ).status == "observing"
-    retired = await observe(factory, attempt.id, instant + timedelta(hours=24))
+    retired = await observe_positive_semantics(factory, attempt.id, instant + timedelta(hours=24))
     assert retired.status == "retired" and retired.retired_at == instant + timedelta(hours=24)
     async with factory() as session:
         row = await session.get(TaskImageAttemptRetention, attempt.id)
         frozen = (row.observed_at, row.canonical_inventory, row.inventory_sha256)
         assert hashlib.sha256(row.canonical_inventory).hexdigest() == row.inventory_sha256
-    assert await observe(factory, attempt.id, NOW) == retired
+    assert await observe_positive_semantics(factory, attempt.id, NOW) == retired
     async with factory() as session:
         row = await session.get(TaskImageAttemptRetention, attempt.id)
         assert (row.observed_at, row.canonical_inventory, row.inventory_sha256) == frozen
@@ -75,17 +88,17 @@ async def test_abandoned_observation_grace_retirement_and_permanent_replay(
 async def test_live_build_pin_resets_observed_grace(registry_authority_session, registry_issuer):
     factory = registry_authority_session
     row, attempt, _ = await _setup(factory, registry_issuer)
-    first = await observe(factory, attempt.id, NOW + timedelta(seconds=12))
+    first = await observe_positive_semantics(factory, attempt.id, NOW + timedelta(seconds=12))
     assert first.status == "pinned" and first.pins == ("build_lease",)
     instant = NOW + timedelta(hours=1)
-    await observe(factory, attempt.id, instant)
+    await observe_positive_semantics(factory, attempt.id, instant)
     async with factory() as session:
         current = await session.get(TaskImageMaterialization, row.id)
         current.lease_expires_at = instant + timedelta(hours=2)
         await session.commit()
-    pinned = await observe(factory, attempt.id, instant + timedelta(hours=1))
+    pinned = await observe_positive_semantics(factory, attempt.id, instant + timedelta(hours=1))
     assert pinned.status == "pinned" and pinned.unreferenced_since is None
-    fresh = await observe(factory, attempt.id, instant + timedelta(hours=24))
+    fresh = await observe_positive_semantics(factory, attempt.id, instant + timedelta(hours=24))
     assert fresh.status == "observing" and fresh.unreferenced_since == instant + timedelta(hours=24)
 
 
@@ -147,9 +160,9 @@ async def test_job_total_deadline_pins_after_builder_lease_expires(
         job, _ = await _submit(session, registry_issuer)
         await session.commit()
     attempt_id = UUID(job.snapshot.attempt_id)
-    pinned = await observe(factory, attempt_id, job.deadline - timedelta(seconds=1))
+    pinned = await observe_positive_semantics(factory, attempt_id, job.deadline - timedelta(seconds=1))
     assert pinned.status == "pinned" and pinned.pins == ("publication_job",)
-    assert (await observe(factory, attempt_id, job.deadline)).status == "observing"
+    assert (await observe_positive_semantics(factory, attempt_id, job.deadline)).status == "observing"
 
 
 @pytest.mark.parametrize("catalog_checksum", [None, "matching", "prefixed", "different"])
@@ -171,16 +184,16 @@ async def test_completed_grace_catalog_pin_and_atomic_ready_clear(
         await session.commit()
     attempt_id = UUID(receipt.attempt_id)
     instant = NOW + timedelta(hours=1)
-    first = await observe(factory, attempt_id, instant)
+    first = await observe_positive_semantics(factory, attempt_id, instant)
     if catalog_checksum in ("matching", "prefixed"):
         assert first.status == "pinned" and first.pins == ("current_task",)
-        assert (await observe(factory, attempt_id, instant + timedelta(days=8))).status == "pinned"
+        assert (await observe_positive_semantics(factory, attempt_id, instant + timedelta(days=8))).status == "pinned"
         return
     assert first.status == "observing"
     assert (
-        await observe(factory, attempt_id, instant + timedelta(hours=168, microseconds=-1))
+        await observe_positive_semantics(factory, attempt_id, instant + timedelta(hours=168, microseconds=-1))
     ).status == "observing"
-    assert (await observe(factory, attempt_id, instant + timedelta(hours=168))).status == "retired"
+    assert (await observe_positive_semantics(factory, attempt_id, instant + timedelta(hours=168))).status == "retired"
     async with factory() as session:
         current = await session.get(TaskImageMaterialization, row.id)
         assert current.state == "retired" and current.registry_images == {}
@@ -209,7 +222,7 @@ async def test_busy_fence_fails_promptly_and_releases_catalog(
 ):
     factory = registry_authority_session
     _, attempt, _ = await _setup(factory, registry_issuer)
-    await observe(factory, attempt.id, NOW + timedelta(hours=1))
+    await observe_positive_semantics(factory, attempt.id, NOW + timedelta(hours=1))
     async with factory() as blocker:
         if table == "tasks":
             await blocker.execute(text("LOCK TABLE public.tasks IN ROW EXCLUSIVE MODE"))
@@ -265,7 +278,7 @@ async def test_clock_regression_rolls_back_observation(registry_authority_sessio
     factory = registry_authority_session
     _, attempt, _ = await _setup(factory, registry_issuer)
     instant = NOW + timedelta(hours=1)
-    await observe(factory, attempt.id, instant)
+    await observe_positive_semantics(factory, attempt.id, instant)
     with pytest.raises(ValueError, match="clock"):
         await observe(factory, attempt.id, instant - timedelta(seconds=1))
     async with factory() as session:
