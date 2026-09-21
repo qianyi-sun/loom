@@ -87,7 +87,8 @@ def test_worker_registration_and_claim_are_local_only(monkeypatch, environment, 
     ))
     paths = app.openapi()["paths"]
     assert not any("slurm-worker" in path or "gb10-worker" in path or "worker-pool-autoscaler" in path for path in paths)
-    for path in ("/workers/register", "/trials/claim", "/work/claim"):
+    for path in ("/workers/register", "/trials/claim", "/work/claim",
+                 "/api/v1/internal/task-image-materializations/claim"):
         assert (path in paths) is expected
 
 
@@ -123,3 +124,19 @@ def test_pipeline_submission_is_local_only_and_retained_results_remain(monkeypat
     assert "get" in paths["/api/v1/pipeline-runs"]
     assert "get" in paths["/api/v1/pipeline-runs/{run_id}"]
     assert "/api/v1/pipeline-runs/{run_id}/cancel" in paths
+
+
+@pytest.mark.parametrize("handler", ["issue_task_image_builder_token", "issue_task_image_registry_gc_token"])
+async def test_hosted_cannot_mint_local_task_image_credentials(monkeypatch, handler):
+    from types import SimpleNamespace
+
+    from loom_control_plane.routes import admin
+
+    monkeypatch.setenv("LOOM_ENV", "production")
+    monkeypatch.setenv("LOOM_LOCAL_EXECUTION", "1")
+    monkeypatch.setattr(admin, "_require_admin_scope", AsyncMock())
+    with pytest.raises(HTTPException) as error:
+        await getattr(admin, handler)(
+            SimpleNamespace(), admin._TaskImageServiceTokenPayload(expires_in_days=1), None,
+        )
+    assert error.value.status_code == 409

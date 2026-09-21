@@ -201,12 +201,8 @@ async def resolve_task_image(
     ):
         return tag
 
-    # #1169: before building, try the shared trial-image registry. A
-    # containment-required (non-exclusive Slurm) worker cannot build (it would
-    # escape the job cgroup, #1146) — but it CAN pull a pre-built base image
-    # that a non-contained builder pushed. Mirrors the layered-image path in
-    # `trial_cache.py`. On a miss, fall through to the build (which is refused
-    # under containment, with a self-explaining message per #1169 part 2).
+    # Prefer a published image before a local Docker build, matching the
+    # layered-image cache in trial_cache.py.
     if registry_repo and await _try_registry_pull_task_image(
         tag=tag,
         registry_repo=registry_repo,

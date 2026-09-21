@@ -1139,7 +1139,7 @@ _TEMPLATE_ORDER: tuple[str, ...] = (
     # in-cluster gateway through. Carries its own NetworkPolicy.
     "gateway-router.yaml.j2",
     # worker-router DaemonSet — per-node hostPort forwarder giving
-    # EXTERNAL workers (GB10) a stable private-network node-IP:30080
+    # local external workers a stable private-network node-IP:30080
     # endpoint into the in-cluster control-plane. Bearer-token auth is
     # enforced at the control-plane behind it; boundary-allowlisted.
     "worker-router.yaml.j2",

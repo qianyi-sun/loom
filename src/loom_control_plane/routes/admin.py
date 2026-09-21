@@ -432,6 +432,12 @@ async def issue_task_image_builder_token(
     """Mint a least-privilege credential for exclusive image builders."""
     await _require_admin_scope(request, authorization, "admin:tokens")
 
+    if not local_execution_enabled():
+        raise HTTPException(
+            status_code=409,
+            detail="local task-image credentials require explicit local development",
+        )
+
     raw = "loom_tib_" + secrets.token_bytes(32).hex()
     token_hash = hashlib.sha256(raw.encode()).digest()
     expires_at = datetime.now(UTC) + timedelta(days=payload.expires_in_days)
@@ -494,6 +500,12 @@ async def issue_task_image_registry_gc_token(
 ) -> dict[str, str]:
     """Mint a least-privilege credential for the registry-retention controller."""
     await _require_admin_scope(request, authorization, "admin:tokens")
+
+    if not local_execution_enabled():
+        raise HTTPException(
+            status_code=409,
+            detail="local task-image credentials require explicit local development",
+        )
 
     raw = "loom_tigc_" + secrets.token_bytes(32).hex()
     token_hash = hashlib.sha256(raw.encode()).digest()

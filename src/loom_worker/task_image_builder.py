@@ -1,9 +1,7 @@
-"""Exclusive task-image builder worker.
+"""Task-image builder for explicit local development and disposable tests.
 
-Run with ``python -m loom_worker.task_image_builder`` inside an exclusive
-Slurm allocation. It consumes architecture-specific materialization leases,
-builds every Dockerfile-backed component, and publishes immutable registry
-digests before marking the prerequisite ready.
+The local compose harness consumes materialization leases and publishes immutable
+image digests. Hosted builds use the Nebius native task-image controller.
 """
 
 from __future__ import annotations

@@ -1496,9 +1496,7 @@ async def _spawn_trial(
             sandbox_extra_hosts=_sandbox_extra_hosts_for_url(subprocess_gateway_url_str),
             family_state_volumes=family_state_volumes,
             workspace_staging_policy=workspace_staging_policy,
-            # #896: per-container hard caps for non-exclusive (packed)
-            # workers. Loom Slurm admission rejects 0/unset; non-Slurm callers
-            # retain their own defaults. Applied to both the trial container
+            # Apply configured local resource limits to both the trial container
             # (via TrialContext → StartOptions) and the setup sidecars.
             container_cpus=settings.container_cpus,
             container_memory_mib=settings.container_memory_mib,

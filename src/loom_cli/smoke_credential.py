@@ -1,7 +1,7 @@
 """Provision a deployment-managed headless smoke-user credential.
 
 The release-gate / operator trajectory smoke (``s13_smoke``,
-``submit_mode="user-token"``) submits ``oracle × gb10-smoke`` via
+``submit_mode="user-token"``) submits a smoke trial via
 ``POST /api/v1/trials``. That route requires a *user-owned* API token:
 ``require_submitting_user`` rejects anything whose ``ctx.user_id`` is
 ``None`` (a bare admin or "legacy" team token cannot submit user-facing

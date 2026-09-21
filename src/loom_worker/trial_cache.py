@@ -173,9 +173,7 @@ def _build_layered_image_sync(
             RUN bash /tmp/install.sh && rm /tmp/install.sh
         """)
         )
-        # #1146: layered builds run outside the Slurm job cgroup — refuse on
-        # containment-required (non-exclusive) workers; the layered image must
-        # be pre-built/pushed to the shared trial-image cache instead.
+        # Local development builds the image through the configured Docker daemon.
         try:
             client.images.build(
                 path=str(ctx_path),

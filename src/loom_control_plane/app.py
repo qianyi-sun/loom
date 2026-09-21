@@ -285,6 +285,7 @@ def create_app(
     app.include_router(service_executions.router)
     if local_execution_enabled():
         app.include_router(workers.router)
+        app.include_router(task_image_materializations.router)
     app.include_router(state.router)
     app.include_router(trajectory.router)
     app.include_router(artifacts.router)
@@ -293,7 +294,6 @@ def create_app(
     app.include_router(admin.router)
     app.include_router(step_tokens.router)
     app.include_router(trial_cache.router)
-    app.include_router(task_image_materializations.router)
     app.include_router(task_image_execution.router)
     # /metrics: standard prometheus_client ASGI app. Mounted at the
     # top-level for prometheus scrapers (operator-supplied
