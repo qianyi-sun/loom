@@ -174,6 +174,16 @@ class TerminalBench2Adapter:
             raise upstream.TB21LockError(
                 f"native TB2.1 task TOML is invalid: {source_task_toml}",
             ) from exc
+        # Fail closed on the upstream TOML. Harbor normalize may invent a
+        # default environment/Dockerfile for publish-local; TB2.1 lock convert
+        # still requires an explicit docker_image or dockerfile in source.
+        source_environment = native_config.get("environment")
+        if not isinstance(source_environment, dict) or not (
+            source_environment.get("docker_image") or source_environment.get("dockerfile")
+        ):
+            raise upstream.TB21LockError(
+                f"native TB2.1 task has no explicit runnable image: {source_task_toml}",
+            )
         try:
             normalized = normalize_terminal_bench_task_toml(native_config)
         except ValueError as exc:
@@ -184,13 +194,6 @@ class TerminalBench2Adapter:
         if not isinstance(task, dict):
             raise upstream.TB21LockError(
                 f"native TB2.1 task has no normalizable [task] section: {source_task_toml}",
-            )
-        environment = normalized.get("environment")
-        if not isinstance(environment, dict) or not (
-            environment.get("docker_image") or environment.get("dockerfile")
-        ):
-            raise upstream.TB21LockError(
-                f"native TB2.1 task has no explicit runnable image: {source_task_toml}",
             )
         task["id"] = task_id
         (out_dir / "task.toml").write_text(tomli_w.dumps(normalized))

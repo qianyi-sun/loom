@@ -269,8 +269,8 @@ _normalize_native_tb21_task_toml = _normalize_harbor_native_task_toml
 
 __all__ = [
     "DEFAULT_AGENT_TIMEOUT_SEC",
-    "DEFAULT_HARBOR_DOCKER_BUILD_CONTEXT",
     "DEFAULT_HARBOR_DOCKERFILE",
+    "DEFAULT_HARBOR_DOCKER_BUILD_CONTEXT",
     "DEFAULT_VERIFIER_SCRIPT_PATH",
     "DEFAULT_VERIFIER_TIMEOUT_SEC",
     "is_terminal_bench_shape",
