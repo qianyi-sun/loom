@@ -14,7 +14,7 @@ from loom_worker.control_plane_client import TaskImageBuildClaim
 from loom_worker.trial_cache import ManagedImageCleanupResult
 
 
-def _claim(*, cpu_arch: str = "arm64") -> TaskImageBuildClaim:
+def _claim(*, cpu_arch: str = "x86_64") -> TaskImageBuildClaim:
     task_id = "benchmark/task"
     return TaskImageBuildClaim(
         id=UUID("00000000-0000-0000-0000-000000000123"),
@@ -277,7 +277,7 @@ async def test_materialization_rejects_non_native_builder_architecture(
 async def test_published_image_architecture_must_match_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    image = SimpleNamespace(attrs={"Architecture": "amd64"})
+    image = SimpleNamespace(attrs={"Architecture": "arm64"})
     client = SimpleNamespace(
         images=SimpleNamespace(get=lambda _tag: image),
         close=lambda: None,
@@ -286,8 +286,8 @@ async def test_published_image_architecture_must_match_claim(
 
     with pytest.raises(task_image_builder.TaskImageBuildError, match="architecture mismatch"):
         await task_image_builder.verify_local_image_architecture(
-            tag="loom-task:arm64",
-            expected_cpu_arch="arm64",
+            tag="loom-task:x86_64",
+            expected_cpu_arch="x86_64",
             docker_api_timeout_sec=30,
         )
 
@@ -302,7 +302,7 @@ async def test_materialization_builds_and_publishes_every_dockerfile_component(
     (task_dir / "environment" / "Dockerfile").write_text("FROM alpine\n")
     (task_dir / "environment" / "database.Dockerfile").write_text("FROM postgres\n")
     observed: dict[str, Any] = {}
-    monkeypatch.setattr(task_image_builder, "host_cpu_arch", lambda: "arm64")
+    monkeypatch.setattr(task_image_builder, "host_cpu_arch", lambda: "x86_64")
     monkeypatch.setattr(task_image_builder, "_build_worker_object_store", lambda _s: object())
 
     async def materialize(**kwargs: Any) -> Path:
@@ -351,8 +351,8 @@ async def test_materialization_builds_and_publishes_every_dockerfile_component(
         "task": "registry.example/loom-task@sha256:" + "1" * 64,
         "sidecar:database": "registry.example/loom-task@sha256:" + "2" * 64,
     }
-    assert observed["resolve"]["cpu_arch"] == "arm64"
-    assert observed["sidecars"]["cpu_arch"] == "arm64"
+    assert observed["resolve"]["cpu_arch"] == "x86_64"
+    assert observed["sidecars"]["cpu_arch"] == "x86_64"
     assert observed["publish"] == [
         ("loom-task:base", "registry.example/loom-task"),
         ("loom-sidecar:database", "registry.example/loom-task"),
@@ -362,10 +362,10 @@ async def test_materialization_builds_and_publishes_every_dockerfile_component(
         ("sidecar:database", "registry.example/loom-task@sha256:" + "2" * 64),
     ]
     assert observed["verified"] == [
-        {"tag": "loom-task:base", "expected_cpu_arch": "arm64", "docker_api_timeout_sec": 120},
+        {"tag": "loom-task:base", "expected_cpu_arch": "x86_64", "docker_api_timeout_sec": 120},
         {
             "tag": "loom-sidecar:database",
-            "expected_cpu_arch": "arm64",
+            "expected_cpu_arch": "x86_64",
             "docker_api_timeout_sec": 120,
         },
     ]
@@ -381,7 +381,7 @@ async def test_publication_recorder_failure_retains_just_pushed_digest(
     (task_dir / "environment").mkdir(parents=True)
     (task_dir / "environment" / "Dockerfile").write_text("FROM alpine\n")
     registry_image = "registry.example/loom-task@sha256:" + "4" * 64
-    monkeypatch.setattr(task_image_builder, "host_cpu_arch", lambda: "arm64")
+    monkeypatch.setattr(task_image_builder, "host_cpu_arch", lambda: "x86_64")
     monkeypatch.setattr(task_image_builder, "_build_worker_object_store", lambda _s: object())
 
     async def materialize(**_kwargs: Any) -> Path:
@@ -432,7 +432,7 @@ async def test_materialization_rejects_bundle_metadata_drift(
     task_dir = tmp_path / "task"
     (task_dir / "environment").mkdir(parents=True)
     (task_dir / "environment" / "Dockerfile").write_text("FROM alpine\n")
-    monkeypatch.setattr(task_image_builder, "host_cpu_arch", lambda: "arm64")
+    monkeypatch.setattr(task_image_builder, "host_cpu_arch", lambda: "x86_64")
     monkeypatch.setattr(task_image_builder, "_build_worker_object_store", lambda _s: object())
 
     async def materialize(**_kwargs: Any) -> Path:

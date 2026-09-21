@@ -133,7 +133,10 @@ def test_ordinary_trial_only_registration_keeps_measured_signed_reader_identity(
     if case in {"no-reader", "wrong-digest"}:
         assert response.status_code in {400, 409}
     else:
-        assert response.status_code == 200, response.text
+        assert response.status_code == (400 if case == "arm64" else 200), response.text
+        if case == "arm64":
+            assert "x86_64 only" in response.json()["detail"]
+            return
         assert response.json()["supported_work_kinds"] == ["trial"]
         assert response.json()["capability_snapshot_digest"] == snapshot.digest
 
@@ -210,19 +213,19 @@ def test_gpu_registration_requires_exact_slurm_pool_and_persists_evidence(
     postgres_url: str,
 ):  # type: ignore[no-untyped-def]
     evidence = {
-        "allocation_id": "gb10:123",
-        "slurm_cluster_id": "gb10",
+        "allocation_id": "oldlab:123",
+        "slurm_cluster_id": "oldlab",
         "job_id": "123",
-        "node_name": "trt-gb10-3",
-        "partition": "gb10",
-        "gpu_tres": "gpu:gb10:1",
-        "allocated_device_ids": [0],
-        "device_uuids": ["GPU-GB10"],
-        "variant_id": "gb10-shared-1gpu",
+        "node_name": "trt-eai-oldlab-3",
+        "partition": "all",
+        "gpu_tres": "gpu:rtx5080:2",
+        "allocated_device_ids": [0, 1],
+        "device_uuids": ["GPU-5080-0", "GPU-5080-1"],
+        "variant_id": "oldlab-rtx5080-2gpu",
     }
     snapshot = {
         "schema_version": "loom.worker-capabilities.v1",
-        "cpu_arch": "arm64",
+        "cpu_arch": "x86_64",
         "cpu_cores": 20,
         "memory_bytes": 128 << 30,
         "scratch_bytes": 200 << 30,
@@ -234,35 +237,36 @@ def test_gpu_registration_requires_exact_slurm_pool_and_persists_evidence(
         ],
         "gpu_devices": [
             {
-                "allocation_id": "gb10:123",
-                "device_uuid": "GPU-GB10",
+                "allocation_id": "oldlab:123",
+                "device_uuid": device_uuid,
                 "vendor": "nvidia",
-                "model": "NVIDIA GB10",
-                "memory_kind": "unified",
-                "memory_mb": None,
-                "unified_memory_mb": 124_000,
+                "model": "NVIDIA GeForce RTX 5080",
+                "memory_kind": "dedicated",
+                "memory_mb": 16_384,
+                "unified_memory_mb": None,
                 "nvidia_driver_version": "580.12.0",
-                "mig_mode": "not_supported",
+                "mig_mode": "disabled",
             }
+            for device_uuid in evidence["device_uuids"]
         ],
         "input_cache_capacity_bytes": 1_649_267_441_664,
         "input_cache_reserved_bytes": 0,
         "input_cache_ready_bytes": 0,
     }
     payload = {
-        "hostname": "trt-gb10-3",
+        "hostname": "trt-eai-oldlab-3",
         "version": "0.1",
         "capabilities": [
             {
                 **_VALID_CAP,
-                "cpu_arch": "arm64",
+                "cpu_arch": "x86_64",
                 "gpu_vendor": "nvidia",
                 "network_policies": ["allowlist", "no-network"],
             }
         ],
         "supported_work_kinds": ["trial", "execution_attempt"],
         "max_concurrent": 1,
-        "pool_name": "behavior-gpu-gb10",
+        "pool_name": "behavior-gpu-oldlab",
         "capability_snapshot": snapshot,
         "slurm_gpu_allocation_evidence": evidence,
     }
@@ -270,7 +274,7 @@ def test_gpu_registration_requires_exact_slurm_pool_and_persists_evidence(
         rejected = client.post(
             "/workers/register",
             headers={"Authorization": f"Bearer {worker_token}"},
-            json={**payload, "pool_name": "gb10"},
+            json={**payload, "pool_name": "oldlab"},
         )
         assert rejected.status_code == 409
         response = client.post(
@@ -295,8 +299,8 @@ def test_gpu_registration_requires_exact_slurm_pool_and_persists_evidence(
             ).one()
     finally:
         engine.dispose()
-    assert row[0] == "arm64"
-    assert row[1] == "gb10:123"
+    assert row[0] == "x86_64"
+    assert row[1] == "oldlab:123"
     assert row[2].startswith("sha256:")
 
 
@@ -359,3 +363,16 @@ def test_register_rejects_extra_keys(app, worker_token):  # type: ignore[no-unty
             json={"hostname": "h", "version": "v", "capabilities": [bad]},
         )
         assert r.status_code == 400
+
+
+def test_register_rejects_arm_without_creating_worker(app, worker_token, postgres_url):
+    engine = create_engine(postgres_url)
+    with TestClient(app) as client:
+        r = client.post("/workers/register", headers={"Authorization": f"Bearer {worker_token}"},
+            json={"hostname": "arm-rejected", "version": "0.1",
+                  "capabilities": [{**_VALID_CAP, "cpu_arch": "arm64"}]})
+    assert r.status_code == 400, r.text
+    assert "x86_64 only" in r.text
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM workers WHERE hostname='arm-rejected'")).scalar() == 0
+    engine.dispose()

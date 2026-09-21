@@ -69,6 +69,7 @@ class TestSuite:
     lane: str
     execution_policy: str | None
     ci_enabled: bool
+    unaffected_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -122,6 +123,7 @@ class Manifest:
     components: tuple[Component, ...]
     test_suites: tuple[TestSuite, ...]
     test_sharding: tuple[TestShardPolicy, ...]
+    compatibility_test_paths: tuple[str, ...] = ()
 
     def ci_ignores_path(self, path: str) -> bool:
         normalized = _safe_path(path, context="query path")
@@ -399,6 +401,7 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
             "exclude_paths",
             "execution_policy",
             "ci_enabled",
+            "unaffected_paths",
         },
         context,
     )
@@ -429,6 +432,11 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
     ci_enabled = raw.get("ci_enabled", True)
     if type(ci_enabled) is not bool:
         raise ManifestError(f"{context}.ci_enabled must be a boolean")
+    raw_unaffected = raw.get("unaffected_paths", [])
+    if not isinstance(raw_unaffected, list) or not all(isinstance(item, str) for item in raw_unaffected):
+        raise ManifestError(f"{context}.unaffected_paths must be a string array")
+    unaffected_paths = tuple(_safe_path(item, context=f"{context}.unaffected_paths", allow_glob=True)
+                             for item in raw_unaffected)
     return TestSuite(
         id=_required_slug(raw, "id", context),
         language=language,
@@ -437,6 +445,7 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
         lane=lane,
         execution_policy=execution_policy,
         ci_enabled=ci_enabled,
+        unaffected_paths=unaffected_paths,
     )
 
 
@@ -592,6 +601,7 @@ def load_manifest(path: Path) -> Manifest:
             "schema_version",
             "ci_lanes",
             "ci_ignored_paths",
+            "compatibility_test_paths",
             "execution_policies",
             "execution_cases",
             "smoke_owners",
@@ -628,6 +638,13 @@ def load_manifest(path: Path) -> Manifest:
     ci_ignored_paths = tuple(
         _safe_path(item, context="manifest.ci_ignored_paths", allow_glob=True)
         for item in raw_ci_ignored_paths
+    )
+    compatibility = raw.get("compatibility_test_paths", [])
+    if not isinstance(compatibility, list) or not all(isinstance(item, str) for item in compatibility):
+        raise ManifestError("manifest.compatibility_test_paths must be a string array")
+    compatibility_test_paths = tuple(
+        _safe_path(item, context="manifest.compatibility_test_paths", allow_glob=True)
+        for item in compatibility
     )
     if not isinstance(raw_components, list) or not all(
         isinstance(item, dict) for item in raw_components
@@ -699,6 +716,7 @@ def load_manifest(path: Path) -> Manifest:
         schema_version=2,
         ci_lanes=ci_lanes,
         ci_ignored_paths=ci_ignored_paths,
+        compatibility_test_paths=compatibility_test_paths,
         execution_policies=execution_policies,
         execution_cases=execution_cases,
         smoke_owners=_slug_registry(raw, "smoke_owners"),
@@ -770,6 +788,12 @@ def validate_manifest(
     """Return deterministic authority errors for tracked repository inputs."""
 
     errors: list[str] = []
+    # Classify paths once, not once per compatibility pattern. This remains a
+    # full validation of the current tree; no persistent result is cached.
+    runnable_paths = tuple(path for path in tracked_paths if _is_runnable_test_path(path))
+    for pattern in manifest.compatibility_test_paths:
+        if not any(matches_path(path, pattern) for path in runnable_paths):
+            errors.append(f"compatibility test pattern matches no tracked test: {pattern}")
     for pattern in manifest.ci_ignored_paths:
         if not any(matches_path(path, pattern) for path in tracked_paths):
             errors.append(f"CI ignored path pattern matches no tracked path: {pattern}")
@@ -1186,6 +1210,77 @@ def test_paths_for_lane(
     )
 
 
+def select_test_scope(manifest: Manifest, paths: tuple[str, ...], *, scope: str) -> tuple[str, ...]:
+    """Keep platform-common tests by default; compatibility exclusion is explicit."""
+    if scope not in {"all", "nebius"}:
+        raise ManifestError(f"unknown test scope: {scope}")
+    if scope == "all":
+        return paths
+    return tuple(path for path in paths
+                 if not any(matches_path(path, pattern) for pattern in manifest.compatibility_test_paths))
+
+
+def narrow_test_only_changes(
+    paths: tuple[str, ...], *, changed_paths: tuple[str, ...],
+    tracked_paths: tuple[str, ...], repo_root: Path,
+) -> tuple[str, ...]:
+    """Narrow independent test edits; runtime/shared/unknown changes stay full.
+
+    Test modules are also used as fixture libraries. Any reference to an edited
+    module name outside the edit set retains the complete lane, including string
+    imports. This deliberately avoids inventing a general dependency graph.
+    An empty diff is the manual/full-regression path.
+    """
+    if not changed_paths:
+        return paths
+    changed = set(changed_paths)
+    tracked = set(tracked_paths)
+    if any(
+        name not in tracked or not (name.startswith("tests/") or "/tests/" in name)
+        or not Path(name).name.startswith("test_") or not name.endswith(".py")
+        or name.startswith("tests/support/") or not (repo_root / name).is_file()
+        for name in changed
+    ):
+        return paths
+    identifiers = re.compile(r"\b(?:" + "|".join(re.escape(Path(name).stem) for name in changed) + r")\b")
+    for name in tracked_paths:
+        if name in changed or not name.endswith(".py"):
+            continue
+        try:
+            source = (repo_root / name).read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return paths
+        if identifiers.search(source):
+            return paths
+    return tuple(path for path in paths if path in changed)
+
+
+def select_affected_test_suites(
+    manifest: Manifest, paths: tuple[str, ...], *, changed_paths: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Skip an expensive suite only for its explicitly audited unrelated inputs.
+
+    No diff (nightly/manual/coverage), unknown paths, mixed dependencies and
+    the suite's own tests retain coverage. Unannotated suites remain complete.
+    """
+    if not changed_paths:
+        return paths
+    selected = []
+    for path in paths:
+        owners = manifest.test_owners_for_path(path)
+        if len(owners) != 1:
+            raise ManifestError(f"test path has no unique owner: {path}")
+        owner = owners[0]
+        if all(
+            any(matches_path(change, pattern) for pattern in owner.unaffected_paths)
+            and owner not in manifest.test_owners_for_path(change)
+            for change in changed_paths
+        ):
+            continue
+        selected.append(path)
+    return tuple(selected)
+
+
 def test_paths_for_policy(
     manifest: Manifest,
     *,
@@ -1212,6 +1307,7 @@ def lane_execution_plan(
     *,
     tracked_paths: tuple[str, ...],
     lane: str,
+    test_scope: str = "all",
 ) -> tuple[dict[str, Any], ...]:
     """Render the exact policy-grouped execution plan for a policy lane."""
 
@@ -1230,6 +1326,7 @@ def lane_execution_plan(
     for path in lane_paths:
         if cases_by_path[path].policy != manifest.test_owner_for_path(path).execution_policy:
             raise ManifestError(f"execution case policy differs from CI lane owner: {path}")
+    lane_paths = select_test_scope(manifest, lane_paths, scope=test_scope)
     plan: tuple[dict[str, Any], ...] = tuple(
         {
             "policy": asdict(policy),
@@ -1351,6 +1448,9 @@ def _parser() -> argparse.ArgumentParser:
         help="Print every tracked test path assigned to one CI lane.",
     )
     test_paths.add_argument("--lane", required=True)
+    test_paths.add_argument("--test-scope", choices=("all", "nebius"), default="all")
+    test_paths.add_argument("--changed-paths-json", default="[]",
+                            help="Narrow independent test-only edits; [] always runs the full lane.")
     test_paths.add_argument("--shard-index", type=int, default=0)
     test_paths.add_argument("--shard-count", type=int, default=1)
     test_paths.add_argument(
@@ -1436,12 +1536,17 @@ def main(argv: list[str] | None = None) -> int:
                 fallback_all=args.fallback_all,
                 image_set=args.image_set,
             )
+            harbor_required = any(row["image"] == "harbor-runtime" for row in select_release_image_matrix(
+                manifest, changed_paths=changed_paths, force_all=args.force_all,
+                fallback_all=args.fallback_all, image_set="nebius",
+            ))
             payload = json.dumps(matrix, separators=(",", ":"))
             native_payload = json.dumps(
                 native_release_image_matrix(matrix),
                 separators=(",", ":"),
             )
             with args.github_output.open("a", encoding="utf-8") as handle:
+                handle.write(f"harbor_required={str(harbor_required).lower()}\n")
                 handle.write(f"images={payload}\n")
                 handle.write(f"native_builds={native_payload}\n")
                 handle.write(f"required={str(bool(matrix)).lower()}\n")
@@ -1500,7 +1605,18 @@ def main(argv: list[str] | None = None) -> int:
                     f"CI lane shard has no tracked test paths: {args.lane} "
                     f"({args.shard_index}/{args.shard_count})"
                 )
-            print("\n".join(paths))
+            changes = json.loads(args.changed_paths_json)
+            if not isinstance(changes, list) or not all(isinstance(path, str) for path in changes):
+                raise ManifestError("changed paths must be a JSON string array")
+            changed_paths = tuple(_safe_path(path, context="changed path") for path in changes)
+            paths = narrow_test_only_changes(
+                paths, changed_paths=changed_paths,
+                tracked_paths=tracked_paths, repo_root=repo_root,
+            )
+            paths = select_affected_test_suites(manifest, paths, changed_paths=tuple(changed_paths))
+            paths = select_test_scope(manifest, paths, scope=args.test_scope)
+            for path in paths:
+                print(path)
             return 0
         if args.command == "execution-plan":
             print(

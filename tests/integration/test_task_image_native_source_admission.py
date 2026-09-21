@@ -51,7 +51,7 @@ from tests.unit.test_task_bundle_registration import _bundle
 async def _setup(factory, tmp_path):
     directory = _bundle(tmp_path)
     config = directory / "task.toml"
-    config.write_text(config.read_text().replace("[environment]", '[environment]\ncpu_arch = "arm64"'))
+    config.write_text(config.read_text().replace("[environment]", '[environment]\ncpu_arch = "x86_64"'))
     spec = TaskBundleSourceSpecV1.from_registration(
         prepare_task_bundle_registration(directory, task_id="benchmark/" + uuid4().hex),
         bucket="task-sources",
@@ -300,7 +300,7 @@ async def test_native_claim_refreshes_cached_materialization_epoch(journal, tmp_
 async def test_native_claim_refuses_an_unregistered_source_without_creating_attempt(journal, tmp_path):
     directory = _bundle(tmp_path)
     config = directory / "task.toml"
-    config.write_text(config.read_text().replace("[environment]", '[environment]\ncpu_arch = "arm64"'))
+    config.write_text(config.read_text().replace("[environment]", '[environment]\ncpu_arch = "x86_64"'))
     spec = TaskBundleSourceSpecV1.from_registration(
         prepare_task_bundle_registration(directory, task_id="benchmark/" + uuid4().hex),
         bucket="task-sources",
@@ -309,11 +309,11 @@ async def test_native_claim_refuses_an_unregistered_source_without_creating_atte
         authorization, *_ = await _active_authorization(session)
         image = TaskImageMaterialization(
             task_id=spec.catalog_task_id, task_checksum=spec.manifest.task_checksum,
-            cpu_arch="arm64", task_config=spec.task_config, task_source=spec.source_uri,
+            cpu_arch="x86_64", task_config=spec.task_config, task_source=spec.source_uri,
             task_source_provenance=spec.provenance, bundle_content_manifest_sha256=spec.manifest.digest,
             materialization_key=task_image_materialization_key(
                 task_id=spec.catalog_task_id, task_checksum=spec.manifest.task_checksum,
-                cpu_arch="arm64", bundle_content_manifest_sha256=spec.manifest.digest,
+                cpu_arch="x86_64", bundle_content_manifest_sha256=spec.manifest.digest,
             ),
         )
         session.add(image)

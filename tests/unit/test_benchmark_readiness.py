@@ -174,3 +174,19 @@ def test_readiness_renderers_are_stable() -> None:
     assert payload["items"][0]["id"] == "fake-bench"
     assert "READINESS" in render_readiness_table([item])
     assert "fake-bench" in render_readiness_table([item])
+
+
+def test_arm_catalog_stays_visible_with_explicit_unsupported_diagnostic() -> None:
+    from loom.benchmark_readiness import readiness_display_fields
+    config = _valid_task_config()
+    config["environment"]["cpu_arch"] = "arm64"
+    item = build_readiness_item(_benchmark(), tasks=[TaskAuditSource(
+        id="fake-bench/task-001", config=config, source="s3://tasks/task-001/",
+    )], registry_names={"fake-bench"})
+    assert item.raw_task_count == item.valid_task_config_count == 1
+    assert item.invalid_task_config_count == 0
+    assert item.license_allowed_task_count == 0
+    assert item.blocker_reason == "unsupported_cpu_architecture"
+    display = readiness_display_fields(item)
+    assert display["selectable"] is False
+    assert "x86_64 only" in display["readiness_message"]

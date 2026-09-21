@@ -27,6 +27,9 @@ from tests.unit.test_personal_dev_control_plane_render import _release_value
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
+_CURRENT_SCHEMA_HEAD = json.loads(
+    (_ROOT / "config/staging-migration-policy.json").read_text(encoding="utf-8")
+)["expected_head"]
 
 
 def _write_json(path: Path, value: object) -> str:
@@ -283,7 +286,7 @@ def _transition_inputs(
         "predecessor_shadow_sha256": predecessor_shadow_sha256,
         "alembic_ini_path": _ROOT / "migrations/alembic.ini",
         "expected_predecessor_head": "0112",
-        "expected_target_head": "0150",
+        "expected_target_head": _CURRENT_SCHEMA_HEAD,
     }
 
 
@@ -328,7 +331,7 @@ def test_transition_preparation_binds_backup_graph_and_exact_migration_job(
     assert plan["namespace"] == "loom-dev"
     assert plan["capacity"]["executable_new_capacity_ceiling"] == 0
     assert plan["predecessor"]["schema_head"] == "0112"
-    assert plan["target"]["schema_head"] == "0150"
+    assert plan["target"]["schema_head"] == _CURRENT_SCHEMA_HEAD
     predecessor_documents = list(
         yaml.safe_load_all(inputs["predecessor_shadow_path"].read_text(encoding="utf-8"))
     )
@@ -384,6 +387,7 @@ def test_transition_preparation_binds_backup_graph_and_exact_migration_job(
         "0148",
         "0149",
         "0150",
+        "0151",
     ]
     assert (
         hashlib.sha256(prepared.migration_job_json).hexdigest() == plan["migration"]["job_sha256"]

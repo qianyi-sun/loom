@@ -99,7 +99,7 @@ def _profile() -> ServiceExecutionRuntimeProfileV1:
 
 
 @pytest.mark.parametrize("architecture", ["x86_64", "arm64", "any"])
-async def test_x86_policy_is_scoped_to_nebius(architecture: str) -> None:
+async def test_x86_policy_applies_to_shared_validation_and_image_planning(architecture: str) -> None:
     from unittest.mock import AsyncMock, MagicMock
 
     from loom.task_image_materialization import required_task_image_architectures
@@ -113,13 +113,18 @@ async def test_x86_policy_is_scoped_to_nebius(architecture: str) -> None:
     session = AsyncMock()
     session.execute.return_value = result
 
-    # Shared batch validation and image planning still admit ARM outside Nebius.
+    # All new execution uses x86; generic architecture selects that target.
     valid, invalid = await split_valid_task_configs(session, [task.task.id])
-    assert valid == [task.task.id]
-    assert invalid == []
-    assert set(required_task_image_architectures(task)) == (
-        {"x86_64", "arm64"} if architecture == "any" else {architecture}
-    )
+    if architecture == "arm64":
+        assert valid == []
+        assert [item.task_id for item in invalid] == [task.task.id]
+        assert "x86_64 only" in invalid[0].detail
+        with pytest.raises(ValueError, match="x86_64 only"):
+            required_task_image_architectures(task)
+    else:
+        assert valid == [task.task.id]
+        assert invalid == []
+        assert required_task_image_architectures(task) == ("x86_64",)
     reasons = automatic_service_execution_rejections(
         task, _trial(), source_provenance=_provenance(), allow_task_image_preparation=True,
     )
@@ -144,6 +149,27 @@ def test_input_manifest_is_canonical_and_preserves_executable_mode(tmp_path: Pat
     ]
     assert [item.mode for item in manifest.files] == ["0644", "0755"]
     assert json.loads(manifest.canonical_bytes()) == manifest.model_dump(mode="json")
+
+
+def test_input_manifest_sorts_by_utf8_relative_path_not_pathlib(
+    tmp_path: Path,
+) -> None:
+    # Pathlib component order puts tests/test/ before tests/test.sh; UTF-8
+    # byte order of the relative POSIX path does the opposite ('.' < '/').
+    nested = tmp_path / "tests" / "test"
+    nested.mkdir(parents=True)
+    (nested / "01-factorial.scm").write_text("1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    manifest = build_service_execution_input_manifest(
+        tmp_path,
+        task_checksum=_REVISION,
+    )
+
+    assert [item.relative_path for item in manifest.files] == [
+        "tests/test.sh",
+        "tests/test/01-factorial.scm",
+    ]
 
 
 def test_prepare_service_execution_input_manifest_binding_matches_body(

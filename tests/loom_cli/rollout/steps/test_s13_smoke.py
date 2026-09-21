@@ -734,6 +734,7 @@ def test_admin_on_behalf_smoke_submits_batch_with_admin_source_ref(
             ).hexdigest()[:16],
             "represented_username": "devansh",
             "team_id": "11111111-1111-4111-8111-111111111111",
+            "purpose": "evaluation",
             "task_filter": {"task_ids": ["loom-smoke/gb10-oracle-hello-world"]},
             "trial_config": {"agent_name": "oracle", "agent_model": None},
             "n_per_task": 1,
@@ -998,6 +999,7 @@ def test_admin_on_behalf_smoke_reuses_existing_deterministic_batch(
                                     "username": "Devansh",
                                     "team_id": ("11111111-1111-4111-8111-111111111111"),
                                 },
+                                "purpose": "evaluation",
                                 "task_filter": {
                                     "task_ids": ["loom-smoke/gb10-oracle-hello-world"],
                                 },

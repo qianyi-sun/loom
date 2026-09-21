@@ -169,7 +169,7 @@ def _run_payload(
     return result
 
 
-def run(*, repo_root: Path, manifest_path: Path) -> tuple[dict[str, Any], ...]:
+def run(*, repo_root: Path, manifest_path: Path, test_scope: str = "all") -> tuple[dict[str, Any], ...]:
     manifest = load_manifest(manifest_path)
     tracked_paths = _tracked_paths(repo_root)
     errors = validate_manifest(manifest, repo_root=repo_root, tracked_paths=tracked_paths)
@@ -179,6 +179,7 @@ def run(*, repo_root: Path, manifest_path: Path) -> tuple[dict[str, Any], ...]:
         manifest,
         tracked_paths=tracked_paths,
         lane="runtime-payload",
+        test_scope=test_scope,
     )
     planned = [case["path"] for entry in plan for case in entry["cases"]]
     evidence: list[dict[str, Any]] = []
@@ -219,10 +220,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-root", type=Path, default=default_root)
     parser.add_argument("--manifest", type=Path, default=None)
+    parser.add_argument("--test-scope", choices=("all", "nebius"), default="all")
     args = parser.parse_args()
     repo_root = args.repo_root.resolve()
     manifest_path = args.manifest or repo_root / "config/component-ownership.toml"
-    evidence = run(repo_root=repo_root, manifest_path=manifest_path)
+    evidence = run(repo_root=repo_root, manifest_path=manifest_path, test_scope=args.test_scope)
     function_count = sum(len(item["executed"]) for item in evidence)
     print(
         f"runtime payload conformance passed: {len(evidence)} files, "

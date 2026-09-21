@@ -27,6 +27,7 @@ from loom.db.schema import (
     TaskImageMaterializationAttempt,
     TaskImageMaterializationOperationEvent,
 )
+from loom.execution_architecture import execution_cpu_arch
 from loom.security.secret_store import SecretStore
 from loom.task_image_build_plan import (
     TaskImageBuildPlan,
@@ -461,6 +462,13 @@ async def claim_session_materialization(
     )
     if replay is not None:
         return replay
+
+    # An existing ARM receipt remains readable; only a new claim crosses
+    # execution admission and must use the supported architecture.
+    try:
+        execution_cpu_arch(authorization.cpu_arch)
+    except ValueError as error:
+        raise TaskImageSessionMaterializationAuthorizationError(str(error)) from None
 
     live_materialization_id = await session.scalar(
         select(TaskImageMaterialization.id)

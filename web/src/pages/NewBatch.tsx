@@ -100,6 +100,28 @@ const RETRY_REASONS = [
 type RetryReason = (typeof RETRY_REASONS)[number]["value"];
 
 type SubsetKind = "all" | "first_n" | "last_n" | "random_n" | "explicit";
+type BatchPurpose = "evaluation" | "trajectory_generation";
+
+const PURPOSE_OPTIONS: Array<{
+  value: BatchPurpose;
+  title: string;
+  blurb: string;
+  /** Accessible name for tests + screen readers. */
+  radioName: string;
+}> = [
+  {
+    value: "evaluation",
+    title: "Evaluate",
+    blurb: "Official benchmarks with verification",
+    radioName: "Evaluation",
+  },
+  {
+    value: "trajectory_generation",
+    title: "Generate trajectories",
+    blurb: "TaskSets first; benchmarks optional",
+    radioName: "Trajectory generation",
+  },
+];
 
 function clampInt(raw: string, min: number, max: number): string {
   if (raw === "") return raw;
@@ -367,11 +389,15 @@ function FieldLabel({
   hint?: React.ReactNode;
 }): JSX.Element {
   return (
-    <div className="mb-1 flex items-baseline justify-between gap-2">
-      <span className="text-xs font-medium uppercase tracking-wider text-slate-500">
+    <div className="mb-1 flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+      <span className="min-w-0 text-xs font-medium uppercase tracking-wider text-slate-500">
         {children}
       </span>
-      {hint ? <span className="text-xs text-slate-600">{hint}</span> : null}
+      {hint ? (
+        <span className="shrink-0 text-xs font-normal normal-case tracking-normal text-slate-500">
+          {hint}
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -424,11 +450,20 @@ function BenchmarkPicker({
   loading,
   selected,
   onChange,
+  loadingLabel = "Loading…",
+  emptyLabel = "No sources available.",
+  sourceKind = "benchmark",
+  flat = false,
 }: {
   items: BenchmarkItem[];
   loading: boolean;
   selected: Set<string>;
   onChange: (next: Set<string>) => void;
+  loadingLabel?: string;
+  emptyLabel?: string;
+  sourceKind?: "benchmark" | "TaskSet";
+  /** Skip series group headers (use for a single-kind TaskSet list). */
+  flat?: boolean;
 }): JSX.Element {
   const groups = useMemo(() => {
     const bySeries = new Map<string, BenchmarkItem[]>();
@@ -472,13 +507,14 @@ function BenchmarkPicker({
   };
 
   if (loading && items.length === 0) {
-    return (
-      <p className="mt-1 text-xs text-slate-500">Loading task sources…</p>
-    );
+    return <p className="mt-1 text-xs text-slate-500">{loadingLabel}</p>;
+  }
+  if (!loading && items.length === 0) {
+    return <p className="mt-1 text-xs text-slate-500">{emptyLabel}</p>;
   }
 
   return (
-    <div className="mt-1 max-h-72 overflow-y-auto rounded-lg border border-slate-200 bg-white">
+    <div className="mt-1 max-h-72 min-w-0 overflow-x-hidden overflow-y-auto rounded-lg border border-slate-200 bg-white">
       {groups.map(({ series, rows }) => {
         const seriesLabel = series === "" ? "Other" : series;
         const selectableRows = rows.filter(benchmarkSelectable);
@@ -488,66 +524,71 @@ function BenchmarkPicker({
         const someOn =
           !allOn && selectableRows.some((r) => selected.has(r.id));
         const populated = selectableRows.length;
+        const rowPad = flat
+          ? "flex min-w-0 items-center gap-2 px-3 py-1.5 text-sm"
+          : "flex min-w-0 items-center gap-2 pl-9 pr-3 py-1.5 text-sm";
         return (
-          <div key={seriesLabel} className="border-b border-slate-100 last:border-b-0">
-            <label
-              className={
-                populated > 0
-                  ? "flex items-center gap-2 bg-indigo-50/60 px-3 py-2 text-sm font-semibold text-indigo-900"
-                  : "flex items-center gap-2 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-600"
-              }
-            >
-              <input
-                type="checkbox"
-                checked={allOn}
-                ref={(el) => {
-                  if (el) el.indeterminate = someOn;
-                }}
-                onChange={() => toggleGroup(rows)}
-                disabled={populated === 0}
-                aria-label={`Select all in series ${seriesLabel}`}
-                title={
-                  populated > 0
-                    ? `Select or clear all ready sources in the ${seriesLabel} group.`
-                    : `The ${seriesLabel} group has no ready sources to select.`
-                }
-                className="h-4 w-4 border-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
-              />
-              <span
+          <div key={seriesLabel || "flat"} className="min-w-0 border-b border-slate-100 last:border-b-0">
+            {!flat ? (
+              <label
                 className={
                   populated > 0
-                    ? "inline-block h-2 w-2 rounded-full bg-indigo-400"
-                    : "inline-block h-2 w-2 rounded-full bg-slate-300"
-                }
-                aria-hidden="true"
-              />
-              <span className="uppercase tracking-wider text-xs">
-                {seriesLabel}
-              </span>
-              <span
-                className={
-                  populated > 0
-                    ? "ml-auto font-normal normal-case text-xs text-indigo-800"
-                    : "ml-auto font-normal normal-case text-xs text-slate-600"
+                    ? "flex min-w-0 items-center gap-2 bg-indigo-50/60 px-3 py-2 text-sm font-semibold text-indigo-900"
+                    : "flex min-w-0 items-center gap-2 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-600"
                 }
               >
-                {populated}/{rows.length} ready
-              </span>
-            </label>
+                <input
+                  type="checkbox"
+                  checked={allOn}
+                  ref={(el) => {
+                    if (el) el.indeterminate = someOn;
+                  }}
+                  onChange={() => toggleGroup(rows)}
+                  disabled={populated === 0}
+                  aria-label={`Select all in series ${seriesLabel}`}
+                  title={
+                    populated > 0
+                      ? `Select or clear all ready sources in the ${seriesLabel} group.`
+                      : `The ${seriesLabel} group has no ready sources to select.`
+                  }
+                  className="h-4 w-4 shrink-0 border-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
+                />
+                <span
+                  className={
+                    populated > 0
+                      ? "inline-block h-2 w-2 shrink-0 rounded-full bg-indigo-400"
+                      : "inline-block h-2 w-2 shrink-0 rounded-full bg-slate-300"
+                  }
+                  aria-hidden="true"
+                />
+                <span className="min-w-0 truncate uppercase tracking-wider text-xs">
+                  {seriesLabel}
+                </span>
+                <span
+                  className={
+                    populated > 0
+                      ? "ml-auto shrink-0 font-normal normal-case text-xs text-indigo-800"
+                      : "ml-auto shrink-0 font-normal normal-case text-xs text-slate-600"
+                  }
+                >
+                  {populated}/{rows.length} ready
+                </span>
+              </label>
+            ) : null}
             {rows.map((r) => {
               const label = r.display_name ?? r.id;
               const countText = benchmarkCountText(r);
               const selectable = benchmarkSelectable(r);
               const readinessLabel = benchmarkReadinessLabel(r);
               const readinessMessage = benchmarkReadinessMessage(r);
-              const sourceKind = isTaskSetId(r.id) ? "TaskSet" : "benchmark";
+              const rowKind = isTaskSetId(r.id) ? "TaskSet" : sourceKind;
               return (
                 <label
                   key={r.id}
                   className={
                     !selectable
-                      ? "flex items-center gap-2 pl-9 pr-3 py-1.5 text-sm text-slate-600 cursor-not-allowed"
-                      : "flex items-center gap-2 pl-9 pr-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+                      ? `${rowPad} cursor-not-allowed text-slate-600`
+                      : `${rowPad} text-slate-700 hover:bg-slate-50`
                   }
                   title={readinessMessage}
                 >
@@ -556,29 +597,24 @@ function BenchmarkPicker({
                     checked={selected.has(r.id)}
                     onChange={() => toggleOne(r.id)}
                     disabled={!selectable}
-                    aria-label={`Select ${sourceKind} ${r.id}`}
-                    className="h-4 w-4 border-slate-300 disabled:cursor-not-allowed"
+                    aria-label={`Select ${rowKind} ${r.id}`}
+                    className="h-4 w-4 shrink-0 border-slate-300 disabled:cursor-not-allowed"
                   />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate">{label}</span>
-                    {!selectable && readinessMessage ? (
-                      <span className="block truncate text-xs text-slate-500">
-                        {readinessMessage}
-                      </span>
-                    ) : null}
                   </span>
                   {countText ? (
                     <span
                       className={
                         !selectable
-                          ? "text-xs italic text-slate-600"
-                          : "text-xs text-slate-600"
+                          ? "shrink-0 text-xs italic text-slate-600"
+                          : "shrink-0 text-xs text-slate-600"
                       }
                     >
                       {countText}
                     </span>
                   ) : null}
-                  <span className={benchmarkReadinessBadgeClass(r)}>
+                  <span className={`shrink-0 ${benchmarkReadinessBadgeClass(r)}`}>
                     {readinessLabel}
                   </span>
                 </label>
@@ -871,6 +907,7 @@ export default function NewBatch(): JSX.Element {
   const { currentTeamId } = useAuth();
   const [nameSuffix, setNameSuffix] = useState("");
   const [backend, setBackend] = useState("");
+  const [batchPurpose, setBatchPurpose] = useState<BatchPurpose>("evaluation");
   const [selectedBenchmarks, setSelectedBenchmarks] = useState<Set<string>>(
     () => new Set(),
   );
@@ -901,9 +938,10 @@ export default function NewBatch(): JSX.Element {
     staleTime: 5 * 60 * 1000,
   });
   const evalTaskSets = useQuery({
-    queryKey: ["taskSets", "evaluation-ready"],
+    queryKey: ["taskSets", "batch-purpose", batchPurpose],
     queryFn: () => api.listTaskSets(),
     staleTime: 5 * 60 * 1000,
+    enabled: batchPurpose === "trajectory_generation",
   });
   const agents = useQuery({
     queryKey: ["agents"],
@@ -926,6 +964,21 @@ export default function NewBatch(): JSX.Element {
     queryFn: () => api.listModels("default"),
     staleTime: 5 * 60 * 1000,
   });
+
+  // Drop TaskSet selections when switching to evaluation (native
+  // benchmarks only). Clear skip_verifier so evaluation cannot carry it.
+  useEffect(() => {
+    if (batchPurpose !== "evaluation") return;
+    setSelectedBenchmarks((prev) => {
+      const next = new Set(
+        Array.from(prev).filter((id) => !isTaskSetId(id)),
+      );
+      return next.size === prev.size ? prev : next;
+    });
+    setAdvanced((prev) =>
+      prev.skipVerifier ? { ...prev, skipVerifier: false } : prev,
+    );
+  }, [batchPurpose]);
 
   // Default-pick the backend once the catalog loads: docker if
   // advertised, else the first `available` backend, else the first
@@ -1011,7 +1064,7 @@ export default function NewBatch(): JSX.Element {
   // query is in flight.
   const hasTagFilter = Object.values(tagFilters).some((v) => v.size > 0);
   const sumOfSelectedTasks = useMemo(() => {
-    if (!benchmarks.data || !evalTaskSets.data || selectedBenchmarks.size === 0) {
+    if (!benchmarks.data || selectedBenchmarks.size === 0) {
       return undefined;
     }
     let total = 0;
@@ -1024,16 +1077,30 @@ export default function NewBatch(): JSX.Element {
       }
       total += b.task_count;
     }
-    for (const ts of evalTaskSets.data.items) {
-      if (!selectedBenchmarks.has(ts.task_set_id)) continue;
-      if (typeof ts.task_count !== "number") {
-        allKnown = false;
-        break;
+    if (batchPurpose === "trajectory_generation" && evalTaskSets.data) {
+      for (const ts of evalTaskSets.data.items) {
+        if (!selectedBenchmarks.has(ts.task_set_id)) continue;
+        if (typeof ts.task_count !== "number") {
+          allKnown = false;
+          break;
+        }
+        total += ts.task_count;
       }
-      total += ts.task_count;
+    } else if (
+      batchPurpose === "trajectory_generation" &&
+      taskSetIdsSorted.length > 0 &&
+      !evalTaskSets.data
+    ) {
+      allKnown = false;
     }
     return allKnown ? total : undefined;
-  }, [benchmarks.data, evalTaskSets.data, selectedBenchmarks]);
+  }, [
+    benchmarks.data,
+    evalTaskSets.data,
+    selectedBenchmarks,
+    batchPurpose,
+    taskSetIdsSorted.length,
+  ]);
 
   // Build the same `task_filter` the submit handler would send. The
   // count endpoint returns the runnable count after stored TaskConfig
@@ -1259,7 +1326,11 @@ export default function NewBatch(): JSX.Element {
       }
     } else {
       if (selectedBenchmarks.size === 0) {
-        setLocalError("Pick at least one benchmark or TaskSet.");
+        setLocalError(
+          batchPurpose === "evaluation"
+            ? "Pick at least one native benchmark."
+            : "Pick at least one benchmark or TaskSet.",
+        );
         return;
       }
       if (subsetKind !== "all") {
@@ -1321,7 +1392,11 @@ export default function NewBatch(): JSX.Element {
       return;
     }
 
-    const adv = buildAdvancedConfig(advanced);
+    const adv = buildAdvancedConfig(
+      batchPurpose === "evaluation"
+        ? { ...advanced, skipVerifier: false }
+        : advanced,
+    );
     if (!adv.ok) {
       setLocalError(`Advanced options: ${adv.error}`);
       return;
@@ -1396,6 +1471,7 @@ export default function NewBatch(): JSX.Element {
 
     const payload: CreateBatchBody = {
       team_id: currentTeamId,
+      purpose: batchPurpose,
       backend,
       task_filter,
       trial_config,
@@ -1426,7 +1502,10 @@ export default function NewBatch(): JSX.Element {
   if (subsetKind === "explicit") {
     countSummary = "";
   } else if (selectedBenchmarks.size === 0) {
-    countSummary = "Pick at least one benchmark or TaskSet to count matching tasks.";
+    countSummary =
+      batchPurpose === "evaluation"
+        ? "Pick at least one native benchmark to count matching tasks."
+        : "Pick at least one benchmark or TaskSet to count matching tasks.";
   } else if (hasTagFilter && exactCount.isLoading) {
     // Real count is in flight; show the running upper-bound while we
     // wait so the page stays responsive.
@@ -1544,13 +1623,54 @@ export default function NewBatch(): JSX.Element {
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
         {/* LEFT column */}
-        <div className="space-y-6">
+        <div className="min-w-0 space-y-6">
           <Card>
             <Card.Header
               title="Task selection"
-              description="Choose benchmark or TaskSet tasks to run. You can select whole sources, narrow benchmarks by tags, take a subset, or paste exact task IDs."
+              description="Pick a purpose, then choose sources for this batch."
             />
-            <Card.Body className="space-y-4">
+            <Card.Body className="min-w-0 space-y-5">
+              <fieldset className="min-w-0">
+                <legend className="mb-2 block text-xs font-medium uppercase tracking-wider text-slate-500">
+                  Purpose
+                </legend>
+                <div
+                  className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2"
+                  role="presentation"
+                >
+                  {PURPOSE_OPTIONS.map((option) => {
+                    const selected = batchPurpose === option.value;
+                    return (
+                      <label
+                        key={option.value}
+                        className={
+                          selected
+                            ? "flex min-w-0 cursor-pointer flex-col gap-0.5 rounded-lg border border-slate-800 bg-slate-50 px-3 py-3 shadow-sm"
+                            : "flex min-w-0 cursor-pointer flex-col gap-0.5 rounded-lg border border-slate-200 bg-white px-3 py-3 hover:border-slate-300 hover:bg-slate-50/80"
+                        }
+                      >
+                        <span className="flex min-w-0 items-center gap-2">
+                          <input
+                            type="radio"
+                            name="batch-purpose"
+                            value={option.value}
+                            checked={selected}
+                            onChange={() => setBatchPurpose(option.value)}
+                            aria-label={option.radioName}
+                            className="h-4 w-4 shrink-0 border-slate-300"
+                          />
+                          <span className="min-w-0 truncate text-sm font-semibold text-slate-900">
+                            {option.title}
+                          </span>
+                        </span>
+                        <span className="pl-6 text-xs leading-snug text-slate-500">
+                          {option.blurb}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </fieldset>
               <label className="block max-w-sm">
                 <FieldLabel hint="required">Backend</FieldLabel>
                 <select
@@ -1579,7 +1699,7 @@ export default function NewBatch(): JSX.Element {
                     selectedBackend.cold_start_available ? (
                       <span className="mt-0.5 block text-sky-700">
                         No live worker is required at submission. This backend
-                        has fresh scale-from-zero authority through {" "}
+                        has fresh scale-from-zero authority through{" "}
                         {selectedBackend.cold_start_pools.join(", ")}.
                       </span>
                     ) : selectedBackend?.available === false ? (
@@ -1591,49 +1711,83 @@ export default function NewBatch(): JSX.Element {
                   </Help>
                 ) : (
                   <Help>
-                    The sandbox provider that runs each trial. Loom ships
-                    explicit execution backends. Docker uses GB10/OLDLAB;
-                    Nebius uses the Nebius Kubernetes pool. Loom never falls
-                    back from one selected backend to another.
+                    Execution sandbox for each trial. Loom does not fall back
+                    across backends.
                   </Help>
                 )}
               </label>
               <fieldset
-                className="block"
+                className="block min-w-0 space-y-5"
                 disabled={subsetKind === "explicit"}
                 aria-label="Task sources"
               >
-                <FieldLabel hint={subsetKind === "explicit" ? "implied by ids" : "required"}>
-                  Task sources
-                </FieldLabel>
-                <BenchmarkPicker
-                  items={[
-                    ...((benchmarks.data?.items ?? []) as BenchmarkItem[]),
-                    ...((evalTaskSets.data?.items ?? [])
-                      .filter((ts) => ts.evaluation_ready && ts.status === "ready")
-                      .map((ts) => ({
-                        id: ts.task_set_id,
-                        display_name: ts.display_name,
-                        task_count: ts.task_count,
-                        readiness_state: "ready",
-                        readiness_label: "evaluation-ready",
-                        selectable: true,
-                        series: "User Task Sets",
-                      } satisfies BenchmarkItem))),
-                  ]}
-                  loading={benchmarks.isPending || evalTaskSets.isPending}
-                  selected={selectedBenchmarks}
-                  onChange={setSelectedBenchmarks}
-                />
-                {!benchmarks.isPending &&
-                (benchmarks.data?.items.length ?? 0) === 0 ? (
-                  <Help>
-                    No runnable benchmarks are provisioned in this
-                    environment yet. Ask an admin or operator to run the
-                    staging catalog provisioning step from the deployment
-                    runbook, then refresh this page.
-                  </Help>
+                {batchPurpose === "trajectory_generation" ? (
+                  <div className="min-w-0">
+                    <FieldLabel
+                      hint={
+                        subsetKind === "explicit" ? "implied by ids" : "primary"
+                      }
+                    >
+                      TaskSets
+                    </FieldLabel>
+                    <BenchmarkPicker
+                      items={(evalTaskSets.data?.items ?? [])
+                        .filter(
+                          (ts) =>
+                            ts.status === "ready" || ts.status === "partial",
+                        )
+                        .map(
+                          (ts) =>
+                            ({
+                              id: ts.task_set_id,
+                              display_name: ts.display_name,
+                              task_count: ts.task_count,
+                              readiness_state: "ready",
+                              readiness_label: ts.status,
+                              selectable: true,
+                            }) satisfies BenchmarkItem,
+                        )}
+                      loading={evalTaskSets.isPending}
+                      loadingLabel="Loading TaskSets…"
+                      emptyLabel="No ready or partial TaskSets in this team yet."
+                      sourceKind="TaskSet"
+                      flat
+                      selected={selectedBenchmarks}
+                      onChange={setSelectedBenchmarks}
+                    />
+                  </div>
                 ) : null}
+
+                <div className="min-w-0">
+                  <FieldLabel
+                    hint={
+                      subsetKind === "explicit"
+                        ? "implied by ids"
+                        : batchPurpose === "evaluation"
+                          ? "required"
+                          : "optional"
+                    }
+                  >
+                    Official benchmarks
+                  </FieldLabel>
+                  <BenchmarkPicker
+                    items={(benchmarks.data?.items ?? []) as BenchmarkItem[]}
+                    loading={benchmarks.isPending}
+                    loadingLabel="Loading benchmarks…"
+                    emptyLabel="No runnable benchmarks are provisioned in this environment yet."
+                    sourceKind="benchmark"
+                    selected={selectedBenchmarks}
+                    onChange={setSelectedBenchmarks}
+                  />
+                  {!benchmarks.isPending &&
+                  (benchmarks.data?.items.length ?? 0) === 0 ? (
+                    <Help>
+                      Ask an admin or operator to run the staging catalog
+                      provisioning step from the deployment runbook, then
+                      refresh this page.
+                    </Help>
+                  ) : null}
+                </div>
               </fieldset>
 
               {subsetKind !== "explicit" && selectedBenchmarks.size > 0 ? (
@@ -1835,20 +1989,27 @@ export default function NewBatch(): JSX.Element {
                       </Help>
                     </span>
                   </label>
-                  <label className="flex items-start gap-2 text-sm text-slate-700">
-                    <input
-                      type="checkbox"
-                      checked={advanced.skipVerifier}
-                      onChange={(e) => setAdv("skipVerifier", e.target.checked)}
-                      className="mt-1 h-4 w-4 rounded border-slate-300"
-                    />
-                    <span>
-                      Skip verifier
-                      <Help>
-                        Default: off. When on, no grading happens.
-                      </Help>
-                    </span>
-                  </label>
+                  {batchPurpose === "trajectory_generation" ? (
+                    <label className="flex items-start gap-2 text-sm text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={advanced.skipVerifier}
+                        onChange={(e) => setAdv("skipVerifier", e.target.checked)}
+                        className="mt-1 h-4 w-4 rounded border-slate-300"
+                      />
+                      <span>
+                        Skip verifier
+                        <Help>
+                          Allowed for trajectory generation. Evaluation always
+                          runs verification.
+                        </Help>
+                      </span>
+                    </label>
+                  ) : (
+                    <p className="text-xs text-slate-500">
+                      Evaluation always runs the verifier; skip is unavailable.
+                    </p>
+                  )}
                   <label className="block max-w-sm">
                     <FieldLabel hint="default: task setting">Verifier env mode</FieldLabel>
                     <select

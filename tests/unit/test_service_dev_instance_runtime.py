@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from loom.personal_dev_capacity import CapacityManagerPersonalDevProjector
+from loom.personal_dev_capacity_runtime import parse_pool_capabilities
 from loom_service.config import LoomServiceSettings
 from loom_service.dev_instance_runtime import (
     build_dev_instance_provisioner_factory,
@@ -331,3 +332,26 @@ def test_controller_rejects_unmanaged_worker_env_path(tmp_path: Path) -> None:
     )
     with pytest.raises(RuntimeError, match="derived protected template"):
         build_dev_instance_provisioner_factory(settings, minio_client=_Minio())
+
+
+def test_capacity_parser_accepts_the_default_x86_pool_without_an_arm_pool(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    capabilities = parse_pool_capabilities(settings.personal_dev_capacity_pool_capabilities_json)
+    assert capabilities
+    assert {item.cpu_architecture for item in capabilities} == {"x86_64"}
+
+
+@pytest.mark.parametrize("case", ["empty", "arm", "duplicate", "unknown-pool"])
+def test_capacity_parser_rejects_invalid_or_unsupported_offers(case: str, tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    payload = json.loads(settings.personal_dev_capacity_pool_capabilities_json)
+    if case == "empty":
+        payload = []
+    elif case == "arm":
+        payload[0]["cpu_architecture"] = "arm64"
+    elif case == "duplicate":
+        payload.append(payload[0])
+    else:
+        payload[0]["pool_id"] = "unknown-pool"
+    with pytest.raises(ValueError, match="pool capabilities JSON is invalid"):
+        parse_pool_capabilities(json.dumps(payload))

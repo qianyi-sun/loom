@@ -335,7 +335,7 @@ async def test_versioned_local_producer_registers_authored_identity_and_reuses_i
                     )
                 )
             )
-            assert {row.cpu_arch for row in rows} == {"x86_64", "arm64"}
+            assert {row.cpu_arch for row in rows} == {"x86_64"}
             assert all(row.state == "queued" and row.task_source == task.source for row in rows)
             identities = {row.id for row in rows}
             registered_versions = await session.scalar(
@@ -433,5 +433,47 @@ async def test_versioned_local_publication_failure_keeps_recovery_not_partial_ca
             assert admin.head_object(
                 Bucket=bucket, Key=key, VersionId=receipt.version_id,
             )["ContentLength"] >= 0
+    finally:
+        await engine.dispose()
+
+
+async def test_versioned_nebius_profile_binds_adapted_bytes_without_bucket_admin(
+    isolated_migration_postgres_url, tmp_path, minio_tls, monkeypatch,
+):
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from loom.db.schema import Task
+    from loom.nebius_terminus_ingest import preflight_nebius_terminus_admission
+    from loom_cli.local_benchmark_publish import publish_local_benchmark
+    from tests.integration.test_local_benchmark_publish import _write_harbor_layout
+
+    root = tmp_path / "harbor"
+    _write_harbor_layout(root)
+    authored = root / "tasks" / "harbor-sample" / "task.toml"
+    original = authored.read_bytes()
+    bucket = "profile-" + uuid4().hex
+    admin = minio_tls[3]
+    admin.create_bucket(Bucket=bucket)
+    admin.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
+    store = _store(minio_tls)
+
+    async def denied_bucket_admin(bucket):
+        raise AssertionError("publication must not require bucket administration")
+
+    monkeypatch.setattr(store, "ensure_bucket", denied_bucket_admin)
+    args = dict(db_url=isolated_migration_postgres_url, object_store=store, bucket=bucket,
+                source_registration_mode="versioned-v1", execution_profile="nebius-terminus")
+    first = await publish_local_benchmark(root, **args)
+    assert first.inserted == 1 and first.execution_profile == "nebius-terminus"
+    assert authored.read_bytes() == original
+    engine = create_async_engine(isolated_migration_postgres_url)
+    try:
+        async with async_sessionmaker(engine)() as session:
+            task = await session.get(Task, "harbor-nebius-profile/harbor-sample")
+            assert not preflight_nebius_terminus_admission(task.config, task.source_provenance)
+            assert task.config["environment"]["cpu_arch"] == "x86_64"
+            assert task.source_provenance["bundle_task_identity"]["bundle_task_id"] != task.id
+        again = await publish_local_benchmark(root, **args)
+        assert again.unchanged == 1 and again.uploaded_objects == 0
     finally:
         await engine.dispose()

@@ -394,6 +394,7 @@ async def test_post_batch_materializes_count(
             json={
                 "name": "MIT slate",
                 "description": "all MIT-licensed tasks",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {"agent": {"name": "oracle"}},
             },
@@ -406,6 +407,7 @@ async def test_post_batch_materializes_count(
     body = r.json()
     assert body["expected_trial_count"] == 3
     assert body["state"] == "submitted"
+    assert body["purpose"] == "evaluation"
     UUID(body["batch_id"])  # parseable
     assert detail.status_code == 200, detail.text
     detail_body = detail.json()
@@ -482,6 +484,7 @@ async def test_post_batch_accepts_owned_task_set_filter(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "TaskSet slate",
+                "purpose": "trajectory_generation",
                 "task_filter": {"task_set_id": task_set_id},
                 "trial_config": {"agent": {"name": "oracle"}},
             },
@@ -490,6 +493,75 @@ async def test_post_batch_accepts_owned_task_set_filter(
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["expected_trial_count"] == 1
+
+
+async def test_post_batch_evaluation_rejects_task_set_and_skip_verifier(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    task_set_id = f"ts/{team_id}/purpose-reject"
+    task_id = f"{task_set_id}/tasks/row-1"
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(TaskSet).values(
+                id=task_set_id,
+                owning_team_id=team_id,
+                slug="purpose-reject",
+                display_name="Purpose Reject",
+                status="ready",
+                intents=["trajectory_generation"],
+                evaluation_ready=False,
+                task_count=1,
+                manifest_blob_uri=f"s3://bucket/tasksets/user/{team_id}/purpose-reject/manifest.yaml",
+            ),
+        )
+        conn.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="x" * 64,
+                config=_valid_task_config(task_id),
+                source=f"s3://bucket/tasksets/user/{team_id}/purpose-reject/tasks/row-1/",
+                task_set_id=task_set_id,
+                benchmark_id=None,
+            ),
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        reject_task_set = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "eval-with-taskset",
+                "purpose": "evaluation",
+                "task_filter": {"task_set_id": task_set_id},
+                "trial_config": {"agent": {"name": "oracle"}},
+            },
+        )
+        reject_skip = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "eval-skip",
+                "purpose": "evaluation",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {
+                    "agent": {"name": "oracle"},
+                    "skip_verifier": True,
+                },
+            },
+        )
+
+    assert reject_task_set.status_code == 400, reject_task_set.text
+    assert "evaluation_disallows_task_set" in reject_task_set.text
+    assert reject_skip.status_code == 400, reject_skip.text
+    assert "evaluation_disallows_skip_verifier" in reject_skip.text
 
 
 async def test_post_batch_unions_benchmark_and_task_set_filters(
@@ -560,6 +632,7 @@ async def test_post_batch_unions_benchmark_and_task_set_filters(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "Mixed source slate",
+                "purpose": "trajectory_generation",
                 "task_filter": {
                     "benchmark_ids": ["humaneval"],
                     "task_set_ids": [task_set_id],
@@ -647,6 +720,7 @@ async def test_post_batch_rejects_cross_team_task_set_filter(
             headers={"Authorization": f"Bearer {raw_b}"},
             json={
                 "name": "Cross-team TaskSet",
+                "purpose": "trajectory_generation",
                 "task_filter": {"task_set_id": task_set_id},
                 "trial_config": {"agent": {"name": "oracle"}},
             },
@@ -732,6 +806,7 @@ async def test_post_batch_rejects_cross_team_explicit_task_set_task_id(
             headers={"Authorization": f"Bearer {raw_b}"},
             json={
                 "name": "Cross-team explicit TaskSet task",
+                "purpose": "trajectory_generation",
                 "task_filter": {"task_ids": [task_id], "subset_kind": "explicit"},
                 "trial_config": {"agent": {"name": "oracle"}},
             },
@@ -821,6 +896,7 @@ async def test_post_batch_rejects_mixed_visible_and_cross_team_explicit_task_ids
             headers={"Authorization": f"Bearer {raw_b}"},
             json={
                 "name": "Mixed visible and private explicit tasks",
+                "purpose": "trajectory_generation",
                 "task_filter": {
                     "task_ids": ["local/mit-0", private_task_id],
                     "subset_kind": "explicit",
@@ -866,6 +942,7 @@ async def test_admin_submit_on_behalf_records_represented_user_owner_access_and_
                 "represented_username": represented_username,
                 "team_id": str(team_id),
                 "name": "admin canary",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {"agent": {"name": "oracle"}},
             },
@@ -963,6 +1040,7 @@ async def test_admin_submit_on_behalf_requires_admin_actor(
                 "represented_username": "BatchOwner-missing",
                 "team_id": str(team_id),
                 "name": "missing actor",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {"agent": {"name": "oracle"}},
             },
@@ -1013,6 +1091,7 @@ async def test_admin_submit_on_behalf_rejects_inactive_represented_user(
                 "represented_username": "InactiveBatchOwner",
                 "team_id": str(team_id),
                 "name": "inactive user",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {"agent": {"name": "oracle"}},
             },
@@ -1056,6 +1135,7 @@ async def test_admin_submit_on_behalf_rejects_non_member_user(
                 "represented_username": "ActiveNonMember",
                 "team_id": str(team_id),
                 "name": "non member",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {"agent": {"name": "oracle"}},
             },
@@ -1103,6 +1183,7 @@ async def test_legacy_team_token_cannot_submit_on_behalf(
                 "represented_username": represented_username,
                 "team_id": str(team_id),
                 "name": "legacy token on-behalf",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {"agent": {"name": "oracle"}},
             },
@@ -1177,6 +1258,7 @@ async def test_post_batch_soft_budget_requires_confirmation_when_estimate_exceed
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "soft-budget-needs-confirm",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {},
                 "provider_connection_id": str(provider_connection_id),
@@ -1213,6 +1295,7 @@ async def test_post_batch_hard_budget_rejects_when_estimate_exceeds(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "hard-budget-reject",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {},
                 "provider_connection_id": str(provider_connection_id),
@@ -1251,6 +1334,7 @@ async def test_post_batch_confirmed_soft_budget_persists_budget_projection(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "confirmed-soft-budget",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {},
                 "provider_connection_id": str(provider_connection_id),
@@ -1307,6 +1391,7 @@ async def test_post_batch_combination_provider_budget_summarizes_per_combo(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "combination-budget",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {},
                 "combinations": [
@@ -1392,6 +1477,7 @@ async def test_legacy_team_token_cannot_create_batch(
             headers={"Authorization": f"Bearer {legacy_raw}"},
             json={
                 "name": "legacy token batch",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {"agent": {"name": "oracle"}},
             },
@@ -1416,6 +1502,7 @@ async def test_post_batch_sanitizes_trial_request_params(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "request params",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {
                     "agent_name": "litellm",
@@ -1522,6 +1609,7 @@ async def test_post_batch_generates_concise_identity_when_name_omitted(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name_suffix": "canary",
+                "purpose": "evaluation",
                 "task_filter": {
                     "benchmark_ids": ["humaneval", "mbpp"],
                     "subset_kind": "random_n",
@@ -1574,6 +1662,7 @@ async def test_post_batch_keeps_explicit_identity_over_generated_values(
                 "name": "Manual display name",
                 "name_suffix": "ignored",
                 "description": "Manual description",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {"agent_name": "oracle", "agent_model": None},
             },
@@ -1627,6 +1716,7 @@ async def test_post_batch_accepts_noncommercial_license_tasks(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "NC slate",
+                "purpose": "evaluation",
                 "task_filter": {"license": "CC-BY-NC-4.0"},
                 "trial_config": {"agent": {"name": "oracle"}},
             },
@@ -1661,6 +1751,7 @@ async def test_post_batch_with_n_per_task_multiplies_count(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "MIT-x3",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {},
                 "n_per_task": 3,
@@ -1687,6 +1778,7 @@ async def test_post_batch_rejects_required_worker_pools_on_user_path(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "MIT with deterministic pool coverage",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {},
                 "required_worker_pools": [" oldlab ", "k8s-worker", "oldlab"],
@@ -1726,6 +1818,7 @@ async def test_admin_on_behalf_required_worker_pools_adds_coverage_count(
                 "represented_username": represented_username,
                 "team_id": str(team_id),
                 "name": "MIT with deterministic pool coverage",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {},
                 "required_worker_pools": [" oldlab ", "k8s-worker", "oldlab"],
@@ -1782,6 +1875,7 @@ async def test_admin_on_behalf_rejects_k8s_worker_pool_when_disabled(
                     "represented_username": represented_username,
                     "team_id": str(team_id),
                     "name": "coverage on disabled cluster",
+                    "purpose": "evaluation",
                     "task_filter": {"license": "MIT"},
                     "trial_config": {},
                     "required_worker_pools": ["oldlab", "k8s-worker"],
@@ -1794,7 +1888,7 @@ async def test_admin_on_behalf_rejects_k8s_worker_pool_when_disabled(
     detail = r.json()["detail"]
     assert "k8s-worker" in detail
     assert "k8s_worker.enabled=false" in detail
-    assert "oldlab" in detail
+    assert "available x86_64 execution pool" in detail
 
 
 async def test_admin_on_behalf_without_k8s_worker_pool_still_works_when_disabled(
@@ -1828,6 +1922,7 @@ async def test_admin_on_behalf_without_k8s_worker_pool_still_works_when_disabled
                     "represented_username": represented_username,
                     "team_id": str(team_id),
                     "name": "oldlab-only coverage on disabled cluster",
+                    "purpose": "evaluation",
                     "task_filter": {"license": "MIT"},
                     "trial_config": {},
                     "required_worker_pools": ["oldlab"],
@@ -1870,6 +1965,7 @@ async def test_paused_team_rejects_batch_and_records_reason(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "paused-submit",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {},
             },
@@ -1899,6 +1995,7 @@ async def test_post_batch_rejects_n_per_task_out_of_range(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "bad-n",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {},
                 "n_per_task": 0,
@@ -1924,6 +2021,7 @@ async def test_post_batch_rejects_unknown_agent_name(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "phantom-agent",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {
                     "agent_name": "not-an-agent",
@@ -1949,6 +2047,7 @@ async def test_post_batch_rejects_agent_name_without_agent_model(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "missing-agent-model",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {"agent_name": "oracle"},
             },
@@ -2005,6 +2104,7 @@ async def test_post_batch_rejects_agent_without_service_runtime(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "opencode-not-provisioned",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {
                     "agent_name": "opencode",
@@ -2041,6 +2141,7 @@ async def test_post_rejects_unknown_filter_key(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "broken",
+                "purpose": "evaluation",
                 "task_filter": {"liscense": "MIT"},
                 "trial_config": {},
             },
@@ -2066,6 +2167,7 @@ async def test_post_rejects_empty_filter_match(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "empty",
+                "purpose": "evaluation",
                 "task_filter": {"license": "no-such-license"},
                 "trial_config": {},
             },
@@ -2117,6 +2219,7 @@ async def test_post_rejects_unsupported_ui_benchmark_filter(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "unsupported-ui-benchmark",
+                "purpose": "evaluation",
                 "task_filter": {"benchmark_id": "osworld"},
                 "trial_config": {"agent": {"name": "oracle"}},
             },
@@ -2169,6 +2272,7 @@ async def test_post_rejects_non_v1_builtin_benchmark_filter(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "non-v1-benchmark",
+                "purpose": "evaluation",
                 "task_filter": {"benchmark_id": "browsecomp"},
                 "trial_config": {"agent": {"name": "oracle"}},
             },
@@ -2206,6 +2310,7 @@ async def test_post_rejects_invalid_task_config(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "broken-task",
+                "purpose": "evaluation",
                 "task_filter": {"task_ids": ["local/broken-config"]},
                 "trial_config": {},
             },
@@ -2241,6 +2346,7 @@ async def test_post_rejects_when_no_worker_advertises_backend(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "lonely",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {},
                 "backend": "docker",
@@ -2285,6 +2391,7 @@ async def test_post_docker_does_not_implicitly_select_nebius(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "service-only",
+                "purpose": "evaluation",
                 "task_filter": {
                     "subset_kind": "explicit",
                     "task_ids": [task_id],
@@ -2364,6 +2471,7 @@ async def test_post_accepts_explicit_nebius_backend_without_legacy_worker(
                 headers={"Authorization": f"Bearer {raw}"},
                 json={
                     "name": "explicit-nebius",
+                    "purpose": "evaluation",
                     "task_filter": {
                         "subset_kind": "explicit",
                         "task_ids": [task_id],
@@ -2548,6 +2656,7 @@ async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
         async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
             payload: dict[str, object] = {
                 "name": f"automatic-nebius-{suffix}",
+                "purpose": "evaluation",
                 "task_filter": {
                     "subset_kind": "explicit",
                     "task_ids": [task_id],
@@ -2629,6 +2738,7 @@ async def test_post_nebius_rejects_task_without_nebius_binding(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "incompatible-nebius",
+                "purpose": "evaluation",
                 "task_filter": {
                     "subset_kind": "explicit",
                     "task_ids": ["local/mit-0"],
@@ -2682,6 +2792,7 @@ async def test_post_rejects_mixed_service_and_legacy_without_capacity(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "mixed-service-legacy",
+                "purpose": "evaluation",
                 "task_filter": {
                     "subset_kind": "explicit",
                     "task_ids": [service_task_id, "local/mit-0"],
@@ -2748,6 +2859,7 @@ async def test_post_admits_docker_when_healthy_pool_can_scale_from_zero(
                 headers={"Authorization": f"Bearer {raw}"},
                 json={
                     "name": "cold-start-oldlab",
+                    "purpose": "evaluation",
                     "task_filter": {
                         "subset_kind": "explicit",
                         "task_ids": ["local/mit-0"],
@@ -2883,6 +2995,7 @@ async def test_post_rejects_unusable_scale_from_zero_pool(
                 headers={"Authorization": f"Bearer {raw}"},
                 json={
                     "name": "unusable-cold-start",
+                    "purpose": "evaluation",
                     "task_filter": {
                         "subset_kind": "explicit",
                         "task_ids": [task_id],
@@ -2939,6 +3052,7 @@ async def test_post_rejects_when_no_worker_serves_specific_backend(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "wants-modal",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {},
                 "backend": "modal",
@@ -2975,6 +3089,7 @@ async def test_post_rejects_when_only_worker_is_inactive(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "stale-only",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {},
                 "backend": "docker",
@@ -3020,6 +3135,7 @@ async def test_post_rejects_when_worker_heartbeat_is_stale(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "stale-hb",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {},
                 "backend": "docker",
@@ -3061,6 +3177,7 @@ async def test_post_requires_submit_scope(
             headers={"Authorization": f"Bearer {no_submit_raw}"},
             json={
                 "name": "X",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {},
             },
@@ -3083,6 +3200,7 @@ async def test_list_batches(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "C1",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {},
             },
@@ -3092,6 +3210,7 @@ async def test_list_batches(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "C2",
+                "purpose": "evaluation",
                 "task_filter": {"license": "Apache-2.0"},
                 "trial_config": {},
             },
@@ -3184,6 +3303,7 @@ async def test_list_batches_filters_by_benchmark_agent_and_model(
                     "id": wanted_id,
                     "team_id": team_id,
                     "name": "wanted",
+                    "purpose": "evaluation",
                     "task_filter": {"benchmark_ids": ["mbpp"]},
                     "trial_config": {
                         "agent_name": "litellm",
@@ -3197,6 +3317,7 @@ async def test_list_batches_filters_by_benchmark_agent_and_model(
                     "id": wrong_agent_id,
                     "team_id": team_id,
                     "name": "wrong-agent",
+                    "purpose": "evaluation",
                     "task_filter": {"benchmark_ids": ["mbpp"]},
                     "trial_config": {
                         "agent_name": "swe-agent",
@@ -3210,6 +3331,7 @@ async def test_list_batches_filters_by_benchmark_agent_and_model(
                     "id": wrong_benchmark_id,
                     "team_id": team_id,
                     "name": "wrong-benchmark",
+                    "purpose": "evaluation",
                     "task_filter": {"benchmark_id": "humaneval"},
                     "trial_config": {
                         "agent_name": "litellm",
@@ -3286,6 +3408,7 @@ async def test_list_batches_filters_by_query_provider_and_model_fields(
                     "team_id": team_id,
                     "name": "skilllearnbench codex qwen sweep",
                     "description": "Needle text for generated identity search",
+                    "purpose": "evaluation",
                     "task_filter": {"benchmark_ids": ["skilllearnbench"]},
                     "trial_config": {},
                     "state": "submitted",
@@ -3311,6 +3434,7 @@ async def test_list_batches_filters_by_query_provider_and_model_fields(
                     "team_id": team_id,
                     "name": "skilllearnbench codex qwen other provider",
                     "description": "Needle text for generated identity search",
+                    "purpose": "evaluation",
                     "task_filter": {"benchmark_ids": ["skilllearnbench"]},
                     "trial_config": {},
                     "state": "submitted",
@@ -3334,6 +3458,7 @@ async def test_list_batches_filters_by_query_provider_and_model_fields(
                     "team_id": team_id,
                     "name": "unrelated batch",
                     "description": "No matching terms here",
+                    "purpose": "evaluation",
                     "task_filter": {"benchmark_ids": ["skilllearnbench"]},
                     "trial_config": {
                         "agent_name": "codex",
@@ -3391,6 +3516,7 @@ async def test_get_batch_detail_with_rollup(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "rollup-test",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {},
             },
@@ -3692,6 +3818,7 @@ async def test_get_batch_detail_includes_per_benchmark_rollup(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "mixed benchmarks",
+                "purpose": "evaluation",
                 "task_filter": {
                     "subset_kind": "all",
                     "benchmark_ids": ["humaneval-420", "mbpp-420"],
@@ -5708,6 +5835,7 @@ async def test_cancel_batch_cascades_to_active_trials(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "to-cancel",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {},
             },
@@ -5816,6 +5944,7 @@ async def test_post_batch_rejects_oracle_against_non_pytest_tasks(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "oracle-on-script-task",
+                "purpose": "evaluation",
                 "task_filter": {
                     "task_ids": ["local/script-only-0"],
                     "subset_kind": "explicit",
@@ -5868,6 +5997,7 @@ async def test_post_batch_allows_oracle_against_terminal_bench_tasks(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "oracle-on-terminal-bench-task",
+                "purpose": "evaluation",
                 "task_filter": {
                     "task_ids": [task_id],
                     "subset_kind": "explicit",
@@ -5898,6 +6028,7 @@ async def test_post_batch_allows_oracle_against_pytest_tasks(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "oracle-on-pytest-tasks",
+                "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {
                     "agent_name": "oracle",
@@ -5942,6 +6073,7 @@ async def test_post_batch_does_not_filter_when_agent_has_no_requirements(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "litellm-on-script-task",
+                "purpose": "evaluation",
                 "task_filter": {
                     "task_ids": ["local/script-only-1"],
                     "subset_kind": "explicit",
@@ -5988,6 +6120,7 @@ async def test_post_batch_rejects_completion_agent_for_workspace_task(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "completion-on-workspace",
+                "purpose": "evaluation",
                 "task_filter": {
                     "task_ids": [task_id],
                     "subset_kind": "explicit",
@@ -6037,6 +6170,7 @@ async def test_post_batch_allows_workspace_agent_for_workspace_task(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "terminus-on-workspace",
+                "purpose": "evaluation",
                 "task_filter": {
                     "task_ids": [task_id],
                     "subset_kind": "explicit",

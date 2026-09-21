@@ -46,20 +46,16 @@ def test_contributor_quickstart_uses_ci_python_for_local_verification() -> None:
     assert "uv sync --locked --all-packages --extra dev --python 3.11" in text
 
 
-def test_contributor_quickstart_documents_full_fast_coverage_gate() -> None:
+def test_contributor_quickstart_documents_nebius_and_compatibility_verification() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
     root_job = workflow["jobs"]["tests-root"]
     root_steps = root_job["steps"]
     package_steps = workflow["jobs"]["tests-packages"]["steps"]
-    fast_steps = workflow["jobs"]["fast-checks"]["steps"]
     root_pytest_step = next(
         step for step in root_steps if step.get("name") == "Pytest — manifest-owned root shard"
     )
     sibling_pytest_step = next(
         step for step in package_steps if step.get("name") == "Pytest — manifest-owned package lane"
-    )
-    coverage_gate_step = next(
-        step for step in fast_steps if step.get("name") == "Coverage gate + summary (fast tier)"
     )
 
     text = (REPO_ROOT / "docs/contributing/contributor-quickstart.md").read_text(encoding="utf-8")
@@ -74,6 +70,8 @@ def test_contributor_quickstart_documents_full_fast_coverage_gate() -> None:
     assert "test-paths --lane tests-root" in normalized_text
     assert "test-paths --lane tests-packages" in normalized_text
     assert "--cov-append" in normalized_text
-    assert "coverage report --fail-under=70" in coverage_gate_step["run"]
+    assert "--test-scope nebius" in normalized_text
+    assert '-m "not legacy_pool" -p no:cov' in normalized_text
+    assert "--test-scope all" in normalized_text
+    assert 'legacy_compatibility=true' in text
     assert "uv run --no-sync coverage report --fail-under=70" in text
-    assert "first pytest command alone is not the fast coverage gate" in text

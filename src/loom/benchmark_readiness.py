@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
+from loom.execution_architecture import execution_cpu_arch
 from loom.models.task import TaskConfig
 
 ReadinessState = Literal["adapter_available", "registered", "runnable", "blocked"]
@@ -165,12 +166,17 @@ def build_readiness_item(
     adapter_status = "available" if benchmark.id in registry_names else "missing"
     raw_count = len(tasks)
     valid_count = 0
+    unsupported_architectures = 0
     for task in tasks:
         try:
-            TaskConfig.model_validate(task.config)
+            config = TaskConfig.model_validate(task.config)
         except ValidationError:
             continue
         valid_count += 1
+        try:
+            execution_cpu_arch(config.environment.cpu_arch)
+        except ValueError:
+            unsupported_architectures += 1
     invalid_count = raw_count - valid_count
     unsupported_runtime = is_unsupported_runtime_benchmark(benchmark.id)
     deferred_support = is_deferred_support_benchmark(benchmark.id)
@@ -178,7 +184,7 @@ def build_readiness_item(
     license_allowed_count = (
         0
         if unsupported_runtime or deferred_support or non_v1_supported
-        else valid_count
+        else valid_count - unsupported_architectures
     )
     license_blocked_count = 0
 
@@ -201,6 +207,9 @@ def build_readiness_item(
     elif non_v1_supported:
         readiness_state = "blocked"
         blocker_reason = NON_V1_SUPPORTED_BLOCKER_REASON
+    elif unsupported_architectures:
+        readiness_state = "blocked"
+        blocker_reason = "unsupported_cpu_architecture"
     elif raw_count == 0:
         readiness_state = "blocked"
         blocker_reason = "manifest_missing"
@@ -247,6 +256,13 @@ def readiness_display_fields(item: BenchmarkReadinessItem) -> dict[str, Any]:
         else:
             message += " is registered."
         selectable = True
+    elif item.blocker_reason == "unsupported_cpu_architecture":
+        label = "Unsupported architecture"
+        message = (
+            "This benchmark includes ARM tasks. Loom execution supports x86_64 only. "
+            "Publish x86_64 task bundles before selecting it; historical records remain readable."
+        )
+        selectable = False
     elif item.blocker_reason == "manifest_missing":
         label = "Needs publish"
         message = "Publish/register tasks before selecting this benchmark."

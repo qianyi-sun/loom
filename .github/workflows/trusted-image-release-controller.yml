@@ -1,15 +1,9 @@
 name: trusted-image-release-controller
 
-# Auto-merge is enabled with the workflow GITHUB_TOKEN. GitHub intentionally
-# suppresses push-triggered workflows for the resulting merge commit. This
-# trusted default-branch controller reconciles that gap by dispatching the
-# images workflow for the exact protected dev head and the nearest successful
-# trusted release ancestor. The images workflow independently validates the
-# actor, branch, ancestry, and immutable commit range before gaining package
-# write authority.
+# Manual compatibility entry point for the historical personal-dev publisher.
+# Daily dev publication belongs to nebius-candidate; do not reconcile a second
+# release chain on a timer.
 on:
-  schedule:
-    - cron: "17,47 * * * *"
   workflow_dispatch:
 
 permissions:

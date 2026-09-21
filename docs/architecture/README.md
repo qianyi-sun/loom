@@ -101,8 +101,8 @@ than mixed with current behavior.
   pooled database URLs, rendering, health checks, and fallback.
 - **[Configuration schema](configuration.md)** — generated settings,
   cluster configuration, and secret projection from `loom-schema.toml`.
-- **[CI runner acceleration](ci-runner-acceleration.md)** — current
-  hosted/self-hosted runner selection and isolation requirements.
+- **[CI runner placement](ci-runner-acceleration.md)** — current
+  GitHub-hosted placement and optional coverage accounting.
 
 ## Local model serving
 

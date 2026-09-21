@@ -213,7 +213,8 @@ def test_repository_checks_run_environment_isolation_tests() -> None:
     assert any(
         "component_ownership.py test-paths --lane tests-root" in str(step["run"])
         and "--shard-index" in str(step["run"])
-        and 'uv run --no-sync pytest "${test_paths[@]}"' in str(step["run"])
+        and '"${test_paths[@]}"' in str(step["run"])
+        and "CI_PYTEST_MARKERS" in str(step["run"])
         for step in pytest_steps
     )
 

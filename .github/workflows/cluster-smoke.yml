@@ -53,9 +53,9 @@ run-name: >-
                     contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
              github.event.pull_request.number || 'none') }}
 
-# Validates the version-controlled multi-node k3s render contract used by live
-# staging. This PR gate is intentionally mutation-free: candidate deployment
-# and live k3s readiness remain separately authorized protected acceptance.
+# Validates Nebius and common disposable Kubernetes contracts. Historical
+# staging render/isolation checks run only in explicit compatibility/main scope.
+# This workflow does not deploy to live environments.
 #
 # Trigger model:
 #   - workflow_dispatch (manual)
@@ -64,6 +64,12 @@ run-name: >-
 
 on:
   workflow_dispatch:
+    inputs:
+      legacy_compatibility:
+        description: "Include historical platform contracts (manual only)"
+        required: false
+        type: boolean
+        default: false
   push:
     branches: [dev]
     paths:
@@ -92,6 +98,10 @@ concurrency:
     ${{ github.event_name == 'pull_request' &&
         !(github.event.pull_request.draft ||
           github.event.action == 'converted_to_draft') }}
+
+env:
+  CI_TEST_SCOPE: ${{ ((github.event_name == 'workflow_dispatch' && inputs.legacy_compatibility) || github.ref == 'refs/heads/main' || github.base_ref == 'main') && 'all' || 'nebius' }}
+  CI_PYTEST_MARKERS: ${{ ((github.event_name == 'workflow_dispatch' && inputs.legacy_compatibility) || github.ref == 'refs/heads/main' || github.base_ref == 'main') && 'legacy_pool or not legacy_pool' || 'not legacy_pool' }}
 
 jobs:
   plan:
@@ -183,51 +193,13 @@ jobs:
             --pull-request-base-changed "$PR_BASE_CHANGED" \
             --github-output "$GITHUB_OUTPUT"
 
-  cluster-route:
-    name: resolve oldlab-first cluster route
-    needs: plan
-    if: >-
-      needs.plan.outputs.gate_mode == 'full' &&
-      needs.plan.outputs.required == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      checks: read
-      contents: read
-    outputs:
-      routes: ${{ steps.route.outputs.routes }}
-    steps:
-      - name: Checkout trusted route action
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          repository: qianyi-sun/loom
-          ref: 66b83fc57a3141197a997c9f6d4ce6e2a98ee3de
-          sparse-checkout: .github/actions/ci-runner-route
-          path: .loom-ci-route-action
-          persist-credentials: false
-
-      - name: Resolve immutable assignment
-        id: route
-        uses: ./.loom-ci-route-action/.github/actions/ci-runner-route
-        with:
-          route-mode: ${{ vars.LOOM_CI_ROUTE_MODE || 'disabled' }}
-          repository: ${{ github.repository }}
-          workflow-name: cluster-smoke
-          workflow-id: '302898381'
-          workflow-run-id: ${{ github.run_id }}
-          run-attempt: ${{ github.run_attempt }}
-          head-sha: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          job-keys-json: '["cluster-contract"]'
-          github-token: ${{ github.token }}
-
   cluster-contract:
     name: cluster contract (render live k3s topology)
-    needs: [plan, cluster-route]
+    needs: [plan]
     if: >-
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true'
-    runs-on: >-
-      ${{ fromJSON(needs.cluster-route.outputs.routes)['cluster-contract'] }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -239,7 +211,6 @@ jobs:
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
-          manifest-file: ${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}
           enable-cache: true
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock
@@ -257,26 +228,28 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t test_paths < <(
-            uv run --no-sync python scripts/component_ownership.py test-paths --lane cluster-smoke
+            uv run --no-sync python scripts/component_ownership.py test-paths --lane cluster-smoke --test-scope "${CI_TEST_SCOPE:-all}"
           )
           [[ ${#test_paths[@]} -gt 0 ]]
-          uv run --no-sync pytest "${test_paths[@]}"
-          uv run --no-sync python scripts/validate_environment_isolation.py \
-            --profiles-dir deploy/environments \
-            --workflow .github/workflows/deploy-environment.yml
-          candidate_render_dir="$(mktemp -d)"
-          trap 'rm -rf "${candidate_render_dir}"' EXIT
-          for config in \
-            deploy/environments/staging.multinode.cluster.toml \
-            deploy/environments/production.cluster.toml
-          do
-            rendered="${candidate_render_dir}/$(basename "${config}" .toml).yaml"
-            uv run --no-sync loom cluster render \
-              --config "${config}" > "${rendered}"
-            test -s "${rendered}"
-            uv run --no-sync loom cluster audit \
-              --config "${config}"
-          done
+          uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" "${test_paths[@]}"
+          if [[ "${CI_TEST_SCOPE:-all}" == "all" ]]; then
+            uv run --no-sync python scripts/validate_environment_isolation.py \
+              --profiles-dir deploy/environments \
+              --workflow .github/workflows/deploy-environment.yml
+            candidate_render_dir="$(mktemp -d)"
+            trap 'rm -rf "${candidate_render_dir}"' EXIT
+            for config in \
+              deploy/environments/staging.multinode.cluster.toml \
+              deploy/environments/production.cluster.toml
+            do
+              rendered="${candidate_render_dir}/$(basename "${config}" .toml).yaml"
+              uv run --no-sync loom cluster render \
+                --config "${config}" > "${rendered}"
+              test -s "${rendered}"
+              uv run --no-sync loom cluster audit \
+                --config "${config}"
+            done
+          fi
 
   cluster-smoke-gate:
     name: >-

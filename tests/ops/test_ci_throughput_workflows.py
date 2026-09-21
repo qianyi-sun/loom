@@ -69,6 +69,8 @@ def _run_image_matrix_plan(
         env={
             **os.environ,
             "EVENT_NAME": "pull_request",
+            "TRUSTED_PUBLISH": "false",
+            "BASE_BRANCH": "dev",
             "REQUIRED": required,
             "UNOWNED_RUNTIME": unowned_runtime,
             "CHANGED_FILES": str(changed_files),
@@ -119,9 +121,6 @@ def _normalized_expression(value: str) -> str:
     return " ".join(value.split())
 
 
-OLDLAB_UV_MANIFEST = (
-    "${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}"
-)
 
 GITHUB_HOSTED_CONTROL_JOBS = {
     ".github/workflows/ci.yml": {
@@ -136,7 +135,7 @@ GITHUB_HOSTED_CONTROL_JOBS = {
 }
 
 
-def test_accelerated_workflows_use_local_uv_manifest_only_on_oldlab() -> None:
+def test_hosted_workflows_do_not_depend_on_a_private_uv_mirror() -> None:
     workflow_paths = (
         ".github/workflows/ci.yml",
         ".github/workflows/cluster-smoke.yml",
@@ -152,7 +151,7 @@ def test_accelerated_workflows_use_local_uv_manifest_only_on_oldlab() -> None:
         ]
         assert setup_steps
         for step in setup_steps:
-            assert step["with"]["manifest-file"] == OLDLAB_UV_MANIFEST
+            assert "manifest-file" not in step["with"]
 
 
 def test_planners_gates_publish_and_aggregation_stay_github_hosted() -> None:
@@ -166,13 +165,6 @@ def test_native_image_publish_jobs_stay_on_architecture_matched_github_hosts() -
     jobs = _workflow(".github/workflows/images.yml")["jobs"]
 
     build_runs_on = jobs["build"]["runs-on"]
-    assert "matrix.image == 'capacity-executor'" in build_runs_on
-    assert "matrix.image == 'capacity-manager'" in build_runs_on
-    assert "matrix.image == 'personal-dev-activation-agent'" in build_runs_on
-    assert "matrix.image == 'personal-dev-builder'" in build_runs_on
-    assert "matrix.image == 'personal-dev-scanner-cache'" in build_runs_on
-    assert "matrix.image == 'pipeline-core-fixture'" in build_runs_on
-    assert "matrix.image == 'pipeline-orchestrator'" in build_runs_on
     assert "ubuntu-24.04" in build_runs_on
     publish_runs_on = jobs["publish"]["runs-on"]
     assert "matrix.architecture == 'arm64'" in publish_runs_on
@@ -182,23 +174,16 @@ def test_native_image_publish_jobs_stay_on_architecture_matched_github_hosts() -
     assert jobs["publish-manifest"]["runs-on"] == "ubuntu-24.04"
 
 
-def test_ci_wires_phase2c_supervisor_go_checks_explicitly() -> None:
+def test_ci_checks_nebius_go_packages_and_keeps_manual_supervisor() -> None:
     steps = {
         step.get("name"): str(step.get("run", ""))
         for step in _workflow(".github/workflows/ci.yml")["jobs"]["go-checks"]["steps"]
     }
 
-    assert steps["gofmt supervisor"] == (
-        "out=$(gofmt -l ./cmd/loom-task-image-builder-supervisor)\n"
-        'if [ -n "$out" ]; then\n'
-        '  echo "$out"\n'
-        '  echo "gofmt found supervisor issues; run '
-        '\\`gofmt -w ./cmd/loom-task-image-builder-supervisor\\` to fix"\n'
-        "  exit 1\n"
-        "fi\n"
-    )
-    assert steps["go vet supervisor"] == ("go vet ./cmd/loom-task-image-builder-supervisor")
-    assert steps["go test supervisor"] == ("go test -race ./cmd/loom-task-image-builder-supervisor")
+    assert "gofmt -l ./cmd/" in steps["gofmt"]
+    assert 'go vet "${packages[@]}"' in steps["go vet"]
+    assert 'go test -race "${packages[@]}"' in steps["go test"]
+    assert not any(name.endswith(" supervisor") for name in steps if name)
 
 
 def test_go_checks_executes_required_python_go_v2_handoff() -> None:
@@ -210,7 +195,6 @@ def test_go_checks_executes_required_python_go_v2_handoff() -> None:
     assert setup_uv["with"] == {
         "version": "0.11.26",
         "checksum": "6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0",
-        "manifest-file": OLDLAB_UV_MANIFEST,
         "enable-cache": True,
         "save-cache": (
             "${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}"
@@ -225,95 +209,19 @@ def test_go_checks_executes_required_python_go_v2_handoff() -> None:
         'go test -race -c -o "${RUNNER_TEMP}/loom-task-image-builder-supervisor.test" '
         "./cmd/loom-task-image-builder-supervisor"
     )
+    for name in ("Install uv", "Set up Python 3.11", "Sync locked workspace",
+                 "Build Go V2 handoff test binary", "Python-Go V2 handoff"):
+        assert step_by_name[name]["if"] == "env.CI_TEST_SCOPE == 'all'"
     handoff = step_by_name["Python-Go V2 handoff"]
     assert handoff["env"] == {
         "LOOM_GO_V2_TEST_BINARY": ("${{ runner.temp }}/loom-task-image-builder-supervisor.test"),
         "LOOM_GO_V2_TEST_REQUIRED": "1",
     }
     assert handoff["run"] == (
-        "uv run --no-sync pytest "
+        'uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" '
         "tests/integration/test_task_image_builder_guard_local_flow.py "
         "tests/integration/test_task_image_publication_full_flow.py"
     )
-
-
-def test_hosted_only_amd64_builds_bypass_live_lease_routes(tmp_path: Path) -> None:
-    workflow = _workflow(".github/workflows/images.yml")
-    route_step = next(
-        step
-        for step in workflow["jobs"]["image-route"]["steps"]
-        if step.get("name") == "Select native AMD64 image keys"
-    )
-    github_output = tmp_path / "github-output.txt"
-    result = subprocess.run(
-        ["bash"],
-        input=route_step["run"],
-        cwd=REPO_ROOT,
-        text=True,
-        capture_output=True,
-        env={
-            **os.environ,
-            "NATIVE_BUILDS": json.dumps(
-                [
-                    {"image": "capacity-executor", "architecture": "amd64"},
-                    {"image": "capacity-executor", "architecture": "arm64"},
-                    {"image": "capacity-manager", "architecture": "amd64"},
-                    {"image": "capacity-manager", "architecture": "arm64"},
-                    {"image": "personal-dev-scanner-cache", "architecture": "amd64"},
-                    {"image": "personal-dev-scanner-cache", "architecture": "arm64"},
-                    {"image": "pipeline-core-fixture", "architecture": "amd64"},
-                    {"image": "pipeline-core-fixture", "architecture": "arm64"},
-                    {"image": "worker", "architecture": "amd64"},
-                ]
-            ),
-            "GITHUB_OUTPUT": str(github_output),
-        },
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert json.loads(_github_output_value(github_output.read_text(), "job_keys")) == ["worker"]
-
-
-def test_hosted_only_image_matrix_requires_no_live_lease_route(tmp_path: Path) -> None:
-    workflow = _workflow(".github/workflows/images.yml")
-    route_job = workflow["jobs"]["image-route"]
-    route_step = next(
-        step for step in route_job["steps"] if step.get("name") == "Select native AMD64 image keys"
-    )
-    resolve_step = next(
-        step for step in route_job["steps"] if step.get("name") == "Resolve immutable assignments"
-    )
-    github_output = tmp_path / "github-output.txt"
-    result = subprocess.run(
-        ["bash"],
-        input=route_step["run"],
-        cwd=REPO_ROOT,
-        text=True,
-        capture_output=True,
-        env={
-            **os.environ,
-            "NATIVE_BUILDS": json.dumps(
-                [
-                    {"image": "capacity-executor", "architecture": "amd64"},
-                    {"image": "capacity-executor", "architecture": "arm64"},
-                    {"image": "capacity-manager", "architecture": "amd64"},
-                    {"image": "capacity-manager", "architecture": "arm64"},
-                    {"image": "pipeline-core-fixture", "architecture": "amd64"},
-                    {"image": "pipeline-core-fixture", "architecture": "arm64"},
-                ]
-            ),
-            "GITHUB_OUTPUT": str(github_output),
-        },
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-    output = github_output.read_text()
-    assert json.loads(_github_output_value(output, "job_keys")) == []
-    assert _github_output_value(output, "needs_route") == "false"
-    assert resolve_step["if"] == "steps.keys.outputs.needs_route == 'true'"
-    assert route_job["outputs"]["routes"] == "${{ steps.route.outputs.routes || '{}' }}"
 
 
 def test_coverage_artifacts_map_hosted_and_oldlab_checkout_roots() -> None:
@@ -456,6 +364,9 @@ def test_source_gate_names_are_native_and_stable() -> None:
                 "'images-gate-trusted-publish' || "
             )
 
+        if workflow_path == ".github/workflows/ci.yml":
+            trusted_recovery = "github.event_name == 'schedule' && 'repository-checks-scheduled' || "
+
         assert expression == _normalized_expression(
             "${{ "
             f"{trusted_recovery}"
@@ -487,10 +398,6 @@ def test_no_workflow_can_write_custom_authoritative_states() -> None:
         assert "AUTHORITATIVE_CONTEXT" not in workflow_source
         workflow_permissions = workflow.get("permissions", {})
         assert isinstance(workflow_permissions, dict)
-        if workflow_path == ".github/workflows/ci-runner-route-publisher.yml":
-            assert workflow_permissions == {"contents": "read", "checks": "write"}
-            assert "scripts/ops/ci_runner_route_publisher.py" in workflow_source
-            continue
         assert workflow_permissions.get("checks") != "write"
         assert workflow_permissions.get("statuses") != "write"
 
@@ -520,7 +427,6 @@ def test_images_builds_use_planner_selection() -> None:
     assert "steps.event.outputs.required" in required_output
     assert set(jobs["build"]["needs"]) == {
         "plan",
-        "image-route",
         "trivy-binary",
     }
     assert "needs.plan.outputs.required == 'true'" in jobs["build"]["if"]
@@ -551,7 +457,9 @@ def test_pytest_jobs_consume_manifest_owned_lane_paths(job_name: str, lane: str)
         f"uv run --no-sync python scripts/component_ownership.py test-paths --lane {lane}"
         in scripts
     )
-    assert 'uv run --no-sync pytest "${test_paths[@]}"' in scripts
+    assert any(line.strip().startswith("uv run --no-sync pytest ")
+               and '"${test_paths[@]}"' in line for line in scripts.splitlines())
+    assert "CI_PYTEST_MARKERS" in scripts
 
 
 def test_cluster_smoke_consumes_manifest_owned_lane_paths() -> None:
@@ -565,7 +473,9 @@ def test_cluster_smoke_consumes_manifest_owned_lane_paths() -> None:
     )
     assert "uv sync --locked --all-packages --extra dev --extra cluster" in scripts
     assert "uv pip check --python .venv/bin/python" in scripts
-    assert 'uv run --no-sync pytest "${test_paths[@]}"' in scripts
+    assert any(line.strip().startswith("uv run --no-sync pytest ")
+               and '"${test_paths[@]}"' in line for line in scripts.splitlines())
+    assert "CI_PYTEST_MARKERS" in scripts
     assert "scripts/validate_environment_isolation.py" in scripts
     normalized_scripts = " ".join(scripts.replace("\\\n", " ").split())
     for config in (
@@ -590,7 +500,6 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     build = jobs["build"]
     assert set(build["needs"]) == {
         "plan",
-        "image-route",
         "trivy-binary",
     }
     assert build["strategy"]["matrix"]["include"] == (
@@ -599,7 +508,7 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     plan_script = "\n".join(step.get("run", "") for step in jobs["plan"]["steps"] if "run" in step)
     assert "scripts/component_ownership.py" in plan_script
     assert "plan-images" in plan_script
-    assert push_trigger == {"branches": ["dev", "main"]}
+    assert push_trigger == {"branches": ["main"]}
 
 
 def test_ci_push_safety_net_excludes_already_admitted_dev_merges() -> None:
@@ -637,32 +546,10 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
     matrix = json.loads(_github_output_value(output, "images"))
     native_matrix = json.loads(_github_output_value(output, "native_builds"))
     assert _github_output_value(output, "required") == "true"
-    assert len(matrix) == 21
-    assert {entry["image"] for entry in matrix} == {
-        "agent-sandbox",
-        "capacity-executor",
-        "capacity-manager",
-        "control-plane",
-        "egress-xds",
-        "execution-actuator",
-        "execution-runtime",
-        "family-orchestrator",
-        "pipeline-orchestrator",
-        "pipeline-core-fixture",
-        "llm-gateway",
-        "llm-gateway-sandbox",
-        "personal-dev-activation-agent",
-        "personal-dev-builder",
-        "personal-dev-native-builder-agent",
-        "personal-dev-scanner-cache",
-        "rehearsal-postgres",
-        "service",
-        "staging-admin-browser-smoke",
-        "web",
-        "worker",
-    }
+    assert len(matrix) == 7
+    assert {entry["image"] for entry in matrix} == {'web', 'service', 'llm-gateway', 'execution-runtime', 'control-plane', 'execution-actuator', 'harbor-runtime'}
     assert all(set(entry) == {"image", "image_name", "dockerfile", "context"} for entry in matrix)
-    assert len(native_matrix) == 42
+    assert len(native_matrix) == 14
     assert {(entry["architecture"], entry["platform"]) for entry in native_matrix} == {
         ("amd64", "linux/amd64"),
         ("arm64", "linux/arm64"),
@@ -679,29 +566,7 @@ def test_images_mixed_known_and_unowned_paths_select_all_images(tmp_path: Path) 
 
     assert result.returncode == 0, result.stderr
     matrix = json.loads(_github_output_value(output, "images"))
-    assert {entry["image"] for entry in matrix} == {
-        "agent-sandbox",
-        "capacity-executor",
-        "capacity-manager",
-        "worker",
-        "service",
-        "control-plane",
-        "egress-xds",
-        "execution-actuator",
-        "execution-runtime",
-        "family-orchestrator",
-        "pipeline-orchestrator",
-        "pipeline-core-fixture",
-        "personal-dev-activation-agent",
-        "personal-dev-builder",
-        "personal-dev-native-builder-agent",
-        "personal-dev-scanner-cache",
-        "llm-gateway",
-        "staging-admin-browser-smoke",
-        "web",
-        "llm-gateway-sandbox",
-        "rehearsal-postgres",
-    }
+    assert {entry["image"] for entry in matrix} == {'web', 'service', 'llm-gateway', 'execution-runtime', 'control-plane', 'execution-actuator', 'harbor-runtime'}
 
 
 def test_frontend_security_policy_change_selects_only_web_image(tmp_path: Path) -> None:
@@ -734,18 +599,7 @@ def test_manifest_owned_markdown_build_input_requires_images(tmp_path: Path) -> 
     assert result.returncode == 0, result.stderr
     assert _github_output_value(output, "required") == "true"
     matrix = json.loads(_github_output_value(output, "images"))
-    assert {entry["image"] for entry in matrix} == {
-        "capacity-executor",
-        "capacity-manager",
-        "control-plane",
-        "execution-runtime",
-        "family-orchestrator",
-        "pipeline-orchestrator",
-        "llm-gateway",
-        "personal-dev-activation-agent",
-        "service",
-        "worker",
-    }
+    assert {entry["image"] for entry in matrix} == {'service', 'execution-runtime', 'control-plane', 'llm-gateway'}
 
 
 def test_unowned_static_documentation_does_not_require_images(tmp_path: Path) -> None:
@@ -897,7 +751,8 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
         for step in trivy_binary["steps"]
         if step.get("name") == "Upload exact verified Trivy binary"
     )
-    assert "for architecture in amd64 arm64" in install["run"]
+    assert "architectures=(amd64)" in install["run"]
+    assert 'if [[ "$PUBLISHING" == "true" ]]; then architectures+=(arm64); fi' in install["run"]
     assert "python3 scripts/install_trivy.py" in install["run"]
     assert '--architecture "$architecture"' in install["run"]
     assert "sha256sum --check trivy.sha256" in install["run"]
@@ -905,7 +760,6 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
     assert upload["with"]["overwrite"] is True
     assert build["needs"] == [
         "plan",
-        "image-route",
         "trivy-binary",
     ]
     assert publish["needs"] == [
@@ -1363,7 +1217,8 @@ def test_manual_and_filtered_contexts_have_distinct_event_specific_names() -> No
             {
                 "EVENT_NAME": "pull_request",
                 "BUILD_RESULT": "skipped",
-                "HARNESS_BUILD_RESULT": "skipped",
+                "HARBOR_REQUIRED": "true",
+        "HARNESS_BUILD_RESULT": "skipped",
                 "SCANNER_BUILD_RESULT": "skipped",
                 "PUBLISH_RESULT": "skipped",
             },
@@ -1476,12 +1331,14 @@ def test_images_gate_separates_untrusted_build_from_trusted_publish(
         text=True,
         capture_output=True,
         env={
+            "PATH": os.environ["PATH"],
             "EVENT_NAME": event_name,
             "PLAN_RESULT": "success",
             "GATE_MODE": "full",
             "REQUIRED": required,
             "BUILD_RESULT": build_result,
-            "HARNESS_BUILD_RESULT": build_result,
+            "HARBOR_REQUIRED": "true",
+        "HARNESS_BUILD_RESULT": build_result,
             "SCANNER_BUILD_RESULT": "skipped",
             "PUBLISH_RESULT": publish_result,
             "MANIFEST_RESULT": manifest_result,
@@ -1525,13 +1382,15 @@ def test_images_gate_requires_personal_release_only_for_protected_selected_publi
         text=True,
         capture_output=True,
         env={
+            "PATH": os.environ["PATH"],
             "EVENT_NAME": event_name,
             "TRUSTED_PUBLISH": "false",
             "PLAN_RESULT": "success",
             "GATE_MODE": "full",
             "REQUIRED": required,
             "BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
-            "HARNESS_BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
+            "HARBOR_REQUIRED": "true",
+        "HARNESS_BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
             "SCANNER_BUILD_RESULT": "skipped"
             if protected_publish or required == "false"
             else "success",
@@ -1573,7 +1432,8 @@ def test_images_gate_rejects_cross_lane_or_ambiguous_results(
             "GATE_MODE": "full",
             "REQUIRED": required,
             "BUILD_RESULT": build_result,
-            "HARNESS_BUILD_RESULT": build_result,
+            "HARBOR_REQUIRED": "true",
+        "HARNESS_BUILD_RESULT": build_result,
             "SCANNER_BUILD_RESULT": "skipped",
             "PUBLISH_RESULT": publish_result,
         },
@@ -1602,6 +1462,7 @@ def test_repository_checks_fails_closed_for_invalid_planner_booleans(
         "PLAN_RESULT": "success",
         "GATE_MODE": "full",
         "FAST_RESULT": "success",
+        "GO_SELECTED": "true",
         "GO_RESULT": "success",
         "DOCS_ONLY": "false",
         "INTEGRATION_SELECTED": "false",
@@ -1645,7 +1506,8 @@ def test_repository_checks_preserves_result_semantics(
             "PLAN_RESULT": "success",
             "GATE_MODE": "full",
             "FAST_RESULT": "success",
-            "GO_RESULT": "success",
+            "GO_SELECTED": "true",
+        "GO_RESULT": "success",
             "DOCS_ONLY": "false",
             "INTEGRATION_SELECTED": selected,
             "INTEGRATION_RESULT": validation_result,
@@ -1689,7 +1551,8 @@ def test_repository_checks_enforces_docs_only_go_result_semantics(
             "PLAN_RESULT": "success",
             "GATE_MODE": "full",
             "FAST_RESULT": "success",
-            "GO_RESULT": go_result,
+            "GO_SELECTED": "true",
+        "GO_RESULT": go_result,
             "DOCS_ONLY": docs_only,
             "INTEGRATION_SELECTED": "false",
             "INTEGRATION_RESULT": "skipped",
@@ -1737,7 +1600,8 @@ def test_repository_checks_enforces_docs_only_fast_result_semantics(
             "PLAN_RESULT": "success",
             "GATE_MODE": "full",
             "FAST_RESULT": fast_result,
-            "GO_RESULT": "skipped" if docs_only == "true" else "success",
+            "GO_SELECTED": "true",
+        "GO_RESULT": "skipped" if docs_only == "true" else "success",
             "DOCS_ONLY": docs_only,
             "INTEGRATION_SELECTED": "false",
             "INTEGRATION_RESULT": "skipped",
@@ -1839,8 +1703,8 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     assert "docs_only != 'true'" in jobs["fast-checks"]["if"]
     assert "gate_mode == 'preflight'" not in jobs["fast-checks"]["if"]
     assert set(jobs["integration"]["needs"]) == {"workflow-plan"}
-    assert set(jobs["integration-docker"]["needs"]) == {"workflow-plan", "ci-route"}
-    assert "docs_only != 'true'" in jobs["go-checks"]["if"]
+    assert set(jobs["integration-docker"]["needs"]) == {"workflow-plan"}
+    assert "go_checks == 'true'" in jobs["go-checks"]["if"]
     assert "gate_mode == 'full'" in jobs["integration"]["if"]
     assert "gate_mode == 'full'" in jobs["integration-docker"]["if"]
     assert "repository-checks" in jobs["repository-checks"]["name"]
@@ -1860,14 +1724,16 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "tests-packages",
         "runtime-payload",
     ):
-        assert set(jobs[job_name]["needs"]) == {"workflow-plan", "ci-route"}
+        assert set(jobs[job_name]["needs"]) == {"workflow-plan"}
     assert "gate_mode == 'full'" in jobs["runtime-payload"]["if"]
     assert "gate_mode == 'preflight'" in jobs["runtime-payload"]["if"]
 
     runtime_payload_scripts = "\n".join(
         step.get("run", "") for step in jobs["runtime-payload"]["steps"]
     ).strip()
-    assert runtime_payload_scripts == "python3 scripts/runtime_payload_conformance.py"
+    assert runtime_payload_scripts == (
+        'python3 scripts/runtime_payload_conformance.py --test-scope "${CI_TEST_SCOPE:-all}"'
+    )
     assert "continue-on-error" not in jobs["runtime-payload"]
 
     assert {
@@ -1893,6 +1759,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "PLAN_RESULT": "${{ needs.workflow-plan.result }}",
         "GATE_MODE": "${{ needs.workflow-plan.outputs.gate_mode }}",
         "FAST_RESULT": "${{ needs.fast-checks.result }}",
+        "GO_SELECTED": "${{ needs.workflow-plan.outputs.go_checks }}",
         "GO_RESULT": "${{ needs.go-checks.result }}",
         "DOCS_ONLY": "${{ needs.workflow-plan.outputs.docs_only }}",
         "INTEGRATION_SELECTED": "${{ needs.workflow-plan.outputs.integration }}",
@@ -1916,7 +1783,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     ):
         assert f'"${result_name}"' in aggregate_script
 
-    assert set(jobs["web-checks"]["needs"]) == {"workflow-plan", "ci-route"}
+    assert set(jobs["web-checks"]["needs"]) == {"workflow-plan"}
     assert "needs.workflow-plan.outputs.web_checks == 'true'" in jobs["web-checks"]["if"]
     web_script = "\n".join(
         step.get("run", "") for step in jobs["web-checks"]["steps"] if "run" in step
@@ -2299,7 +2166,7 @@ def test_staging_gate_consumes_manifest_owned_system_smoke_lane() -> None:
     )
     cleanup_script = " ".join(cleanup_step["run"].replace("\\\n", " ").split())
 
-    assert set(system_smoke["needs"]) == {"plan", "staging-route"}
+    assert set(system_smoke["needs"]) == {"plan"}
     assert "needs.plan.outputs.required == 'true'" in system_smoke["if"]
     assert "uv sync --locked --all-packages --extra dev --extra cluster --extra rollout" in scripts
     assert "uv pip check --python .venv/bin/python" in scripts
@@ -2307,7 +2174,7 @@ def test_staging_gate_consumes_manifest_owned_system_smoke_lane() -> None:
         "uv run --no-sync python scripts/component_ownership.py test-paths --lane system-smoke"
         in scripts
     )
-    assert 'uv run --no-sync pytest --timeout=1200 "${test_paths[@]}"' in scripts
+    assert 'pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" --timeout=1200 "${test_paths[@]}"' in scripts
     assert (
         "--profile worker --profile task-image-builder down -v --remove-orphans" in cleanup_script
     )
@@ -2334,7 +2201,8 @@ def test_repository_checks_writes_default_fast_coverage_summary() -> None:
     )
 
     assert "GITHUB_STEP_SUMMARY" in coverage_step["run"]
-    assert "coverage report --fail-under=70" in coverage_step["run"]
+    assert "coverage_floor=(--fail-under=70)" in coverage_step["run"]
+    assert '"${CI_TEST_SCOPE:-all}" == "all"' in coverage_step["run"]
 
 
 def test_combined_coverage_summary_is_opt_in() -> None:
@@ -2392,6 +2260,7 @@ def test_pytest_workflow_preserves_tests_and_failures_with_optional_integration_
         env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}",
              "RUNNER_TEMP": str(tmp_path), "SHARD_INDEX": "0", "SHARD_COUNT": "2",
              "COVERAGE_ENABLED": coverage_enabled, "ARGV_FILE": str(argv_file),
+             "TEST_CHANGED_PATHS": "[]",
              "TEST_EXIT": str(test_exit)},
     )
     assert result.returncode == test_exit, result.stderr
@@ -2399,7 +2268,7 @@ def test_pytest_workflow_preserves_tests_and_failures_with_optional_integration_
     assert [arg for arg in args if arg.startswith("tests/")] == [
         "tests/selected_first.py", "tests/selected_second.py",
     ]
-    instrumented = lane != "integration" or coverage_enabled == "true"
+    instrumented = coverage_enabled == "true"
     assert ("--cov=src" in args) is instrumented
     assert ("--cov=packages" in args) is instrumented
     assert ("--cov-report=" in args) is instrumented
@@ -2407,7 +2276,7 @@ def test_pytest_workflow_preserves_tests_and_failures_with_optional_integration_
     if not instrumented:
         assert args[args.index("-p") + 1] == "no:cov"
     if lane == "integration":
-        assert args[args.index("-m") + 1] == "not docker"
+        assert args[args.index("-m") + 1] == "not docker and (not legacy_pool)"
         assert job["env"]["COVERAGE_ENABLED"] == "${{ needs.workflow-plan.outputs.coverage_summary }}"
         upload = next(s for s in job["steps"] if s.get("name") == "Upload integration coverage data")
         assert "env.COVERAGE_ENABLED == 'true'" in upload["if"]

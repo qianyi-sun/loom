@@ -126,7 +126,7 @@ class LoomServiceSettings(BaseSettings):
     personal_dev_capacity_observer_ca_file: Path = Path("/var/run/loom-personal-dev-capacity/observer-ca.pem")
     personal_dev_capacity_observer_certificate_file: Path = Path("/var/run/loom-personal-dev-capacity/observer-certificate.pem")
     personal_dev_capacity_observer_private_key_file: Path = Path("/var/run/loom-personal-dev-capacity/observer-private-key.pem")
-    personal_dev_capacity_pool_capabilities_json: str = "[{\"capability_id\":\"oldlab-x86-none\",\"pool_id\":\"oldlab\",\"operating_system\":\"linux\",\"cpu_architecture\":\"x86_64\",\"gpu_vendor\":\"none\",\"network_policies\":[\"public\"]},{\"capability_id\":\"gb10-arm-none\",\"pool_id\":\"gb10\",\"operating_system\":\"linux\",\"cpu_architecture\":\"arm64\",\"gpu_vendor\":\"none\",\"network_policies\":[\"public\"]}]"
+    personal_dev_capacity_pool_capabilities_json: str = "[{\"capability_id\":\"oldlab-x86-none\",\"pool_id\":\"oldlab\",\"operating_system\":\"linux\",\"cpu_architecture\":\"x86_64\",\"gpu_vendor\":\"none\",\"network_policies\":[\"public\"]}]"
     personal_dev_capacity_private_key_file: Path = Path("/var/run/loom-personal-dev-capacity/private-key.pem")
     personal_dev_global_live_instance_limit: int = 16
     personal_dev_membership_binding_json: str = "{}"

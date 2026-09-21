@@ -1186,3 +1186,21 @@ def test_registry_gc_completion_requeues_image_referenced_during_delete(
     assert completed.status_code == 200, completed.text
     assert completed.json()["state"] == "queued"
     assert completed.json()["registry_images"] == {}
+
+
+def test_arm_builder_claim_is_rejected_before_claiming_historical_work(
+    client: TestClient, builder_token: str, create_materialization: Callable[..., UUID],
+    postgres_url: str,
+) -> None:
+    arm_id = create_materialization(cpu_arch="arm64")
+    with TestClient(client.app, raise_server_exceptions=False) as http:
+        response = _claim(http, builder_token, builder_id="legacy-arm-builder", cpu_arch="arm64")
+    assert response.status_code == 422, response.text
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            row = session.get(TaskImageMaterialization, arm_id)
+            assert row is not None and row.state == "queued"
+            assert row.attempt_count == 0 and row.claimed_by is None
+    finally:
+        engine.dispose()

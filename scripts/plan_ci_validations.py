@@ -9,9 +9,19 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING or __package__:
-    from scripts.component_ownership import Manifest, load_manifest
+    from scripts.component_ownership import (
+        Manifest,
+        _tracked_paths,
+        load_manifest,
+        narrow_test_only_changes,
+    )
 else:
-    from component_ownership import Manifest, load_manifest
+    from component_ownership import (
+        Manifest,
+        _tracked_paths,
+        load_manifest,
+        narrow_test_only_changes,
+    )
 
 HEAVY_CHECKS = (
     "integration",
@@ -21,7 +31,9 @@ HEAVY_CHECKS = (
     "staging_smoke",
 )
 
-SUPPORTED_EVENTS = {"merge_group", "pull_request", "push", "workflow_dispatch"}
+BASELINE_CHECKS = ("tests_root", "tests_packages", "go_checks", "runtime_payload", "nebius_iac", "locked_environments")
+
+SUPPORTED_EVENTS = {"merge_group", "pull_request", "push", "workflow_dispatch", "schedule"}
 
 LABEL_TO_CHECK = {
     "ci:integration": "integration",
@@ -175,6 +187,14 @@ class ValidationPlan:
     coverage_summary: bool
     web_checks: bool
     reasons: dict[str, tuple[str, ...]]
+    test_changes: tuple[str, ...] = ()
+    tests_root: bool = True
+    tests_packages: bool = True
+    go_checks: bool = True
+    runtime_payload: bool = True
+    nebius_iac: bool = True
+    locked_environments: bool = True
+
 
     def selected_heavy_checks(self) -> set[str]:
         return {name for name in HEAVY_CHECKS if getattr(self, name)}
@@ -188,11 +208,13 @@ class ValidationPlan:
                 "docs_only",
                 "unowned_runtime",
                 *HEAVY_CHECKS,
+                *BASELINE_CHECKS,
                 "coverage_summary",
                 "web_checks",
             )
         }
         outputs["gate_mode"] = self.gate_mode
+        outputs["test_changes"] = json.dumps(self.test_changes, separators=(",", ":"))
         outputs["reasons_json"] = json.dumps(self.reasons, sort_keys=True, separators=(",", ":"))
         return outputs
 
@@ -227,6 +249,13 @@ def _is_documentation_path(path: str) -> bool:
 
 def _matches(path: str, *, exact: set[str], prefixes: tuple[str, ...]) -> bool:
     return path in exact or path.startswith(prefixes)
+
+
+def _is_frontend_input(path: str) -> bool:
+    return path.startswith("web/") or path in {
+        "deploy/Dockerfile.web", "deploy/nginx-spa.conf",
+        "deploy/nginx-spa-security-headers.conf", "deploy/web-runtime-config.sh",
+    }
 
 
 def _is_dependency_authority_path(path: str) -> bool:
@@ -294,6 +323,10 @@ def plan_validations(
     def select(name: str, reason: str) -> None:
         selected[name] = True
         reasons[name].append(reason)
+
+    if event_name == "schedule":
+        for name in selected:
+            select(name, "scheduled-full-regression")
 
     for label in sorted(labels):
         if check := LABEL_TO_CHECK.get(label):
@@ -476,12 +509,14 @@ def plan_validations(
             for name in HEAVY_CHECKS:
                 select(name, f"dependency-authority:{path}")
             matched_owner = True
-        if _matches(path, exact=integration_exact, prefixes=integration_prefixes):
+        if path.startswith("tests/contract/") or (not test_owner_lanes and _matches(path, exact=integration_exact, prefixes=integration_prefixes)):
             select("integration", f"path:{path}")
             matched_owner = True
-        elif not test_owner_lanes:
+        elif not test_owner_lanes and not _is_frontend_input(path):
+            # Frontend inputs already select browser and image contracts below.
+            # They do not change the Python runtime exercised by this lane.
             select("integration", f"non-doc-path:{path}")
-        if _matches(path, exact=docker_exact, prefixes=docker_prefixes):
+        if path in docker_exact or (not test_owner_lanes and _matches(path, exact=set(), prefixes=docker_prefixes)):
             select("integration_docker", f"path:{path}")
             matched_owner = True
         image_match = _matches(
@@ -492,10 +527,10 @@ def plan_validations(
         if image_match:
             select("images", f"path:{path}")
             matched_owner = True
-        if _matches(path, exact=cluster_exact, prefixes=cluster_prefixes):
+        if not _is_frontend_input(path) and _matches(path, exact=cluster_exact, prefixes=cluster_prefixes):
             select("cluster_smoke", f"path:{path}")
             matched_owner = True
-        if _matches(path, exact=staging_exact, prefixes=staging_prefixes):
+        if not _is_frontend_input(path) and _matches(path, exact=staging_exact, prefixes=staging_prefixes):
             select("staging_smoke", f"path:{path}")
             matched_owner = True
         if path.startswith("web/") or path in web_quality_exact:
@@ -507,11 +542,63 @@ def plan_validations(
             for name in HEAVY_CHECKS:
                 select(name, reason)
 
+    # Ownership globs include fixture libraries, not just executable tests.
+    # Reuse the same independence check as test-paths before omitting consumer
+    # jobs; retaining every file inside a skipped job would not provide coverage.
+    # Inspect the test subset even in a mixed runtime/test diff.
+    test_inputs = tuple(path for path in paths
+                        if (path.startswith("tests/") or (path.startswith("packages/") and "/tests/" in path))
+                        and not _is_documentation_path(path)
+                        and not _component_ownership_manifest().ci_ignores_path(path))
+    independent_tests: tuple[str, ...] | None = None
+    if test_inputs:
+        tracked = _tracked_paths(REPO_ROOT)
+        independent = narrow_test_only_changes(
+            tracked, changed_paths=test_inputs, tracked_paths=tracked, repo_root=REPO_ROOT,
+        )
+        if independent != tracked:
+            independent_tests = independent
+        else:
+            for name in ("integration", "integration_docker", "cluster_smoke", "staging_smoke"):
+                select(name, "shared-or-unknown-test-input")
+
     if selected["coverage_summary"]:
         select("integration", "coverage-summary-requires-integration")
 
     if any(selected[name] for name in ("integration", "integration_docker", "coverage_summary")):
         docs_only = False
+
+    runtime_paths = tuple(path for path in paths if not _is_documentation_path(path)
+                          and not _component_ownership_manifest().ci_ignores_path(path))
+    force_baseline = (
+        not paths or event_name in {"workflow_dispatch", "schedule"} or unowned_runtime
+        or selected["coverage_summary"]
+        or any(path in PLANNER_PATHS | OWNERSHIP_AUTHORITY_PATHS
+               or path == ".github/workflows/ci.yml"
+               or _is_dependency_authority_path(path) for path in paths)
+    )
+    backend_paths = tuple(path for path in runtime_paths
+                          if not _is_frontend_input(path))
+    baseline = {name: bool(backend_paths) for name in BASELINE_CHECKS}
+    # Every Python validation job already syncs/checks the locked workspace.
+    # The standalone install lane is for dependency/CI authority changes and
+    # full regression, handled by force_baseline below.
+    baseline["locked_environments"] = False
+    baseline["nebius_iac"] = any(
+        _matches(path, exact=NEBIUS_IAC_EXACT, prefixes=NEBIUS_IAC_PREFIXES)
+        for path in runtime_paths
+    )
+    # Only independently editable test modules may suppress other owning jobs.
+    if (runtime_paths == test_inputs and independent_tests is not None
+            and not force_baseline and not set(labels) & LABEL_TO_CHECK.keys()):
+        owners = {lane for path in independent_tests for lane in _test_owner_lanes(path)}
+        baseline.update(tests_root="tests-root" in owners,
+                        tests_packages="tests-packages" in owners,
+                        go_checks="go-checks" in owners,
+                        runtime_payload="runtime-payload" in owners,
+                        locked_environments=False)
+    if force_baseline:
+        baseline = dict.fromkeys(BASELINE_CHECKS, True)
 
     return ValidationPlan(
         event_relevant=event_relevant,
@@ -527,6 +614,9 @@ def plan_validations(
         coverage_summary=selected["coverage_summary"],
         web_checks=selected["web_checks"],
         reasons={name: tuple(values) for name, values in reasons.items()},
+        # Explicit selector labels and manual runs retain full regression.
+        test_changes=paths if event_name in {"pull_request", "merge_group"} and not set(labels) & LABEL_TO_CHECK.keys() else (),
+        **baseline,
     )
 
 

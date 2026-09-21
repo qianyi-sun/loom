@@ -35,7 +35,7 @@ async def test_gc_refreshes_cached_rootless_map_after_phase1_rebuild(
         async with registry_authority_session() as writer:
             await retry_task_image_materialization(writer, materialization_id=row.id)
             current = await claim_task_image_materialization(
-                writer, builder_id="phase1", cpu_arch="arm64"
+                writer, builder_id="phase1", cpu_arch="x86_64"
             )
             assert current is not None
             await start_task_image_materialization(

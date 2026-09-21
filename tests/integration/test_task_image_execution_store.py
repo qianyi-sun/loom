@@ -54,7 +54,7 @@ from tests.unit.test_task_image_publication_keyset import _sign, _time
 async def ready(factory, issuer, tmp_path, monkeypatch):
     directory = _bundle(tmp_path)
     toml = directory / "task.toml"
-    toml.write_text(toml.read_text().replace("[environment]", '[environment]\ncpu_arch="arm64"\nsidecars=[]'))
+    toml.write_text(toml.read_text().replace("[environment]", '[environment]\ncpu_arch="x86_64"\nsidecars=[]'))
     spec = TaskBundleSourceSpecV1.from_registration(
         prepare_task_bundle_registration(directory, task_id="benchmark/" + uuid4().hex),
         bucket="task-sources",
@@ -96,12 +96,12 @@ async def ready(factory, issuer, tmp_path, monkeypatch):
         await session.flush()
         trial = await session.get(Trial, UUID(claim.trial_id))
         trial.task_id = spec.catalog_task_id
-        trial.requires_caps = dict(trial.requires_caps, cpu_arch="arm64")
+        trial.requires_caps = dict(trial.requires_caps, cpu_arch="x86_64")
         image = (await session.scalars(select(TaskImageMaterialization))).one()
         session.add(TrialTaskImageMaterialization(trial_id=UUID(claim.trial_id), materialization_id=image.id))
         worker = await session.get(Worker, UUID(claim.worker_id))
-        worker.capabilities = [dict(cap, cpu_arch="arm64") for cap in worker.capabilities]
-        snapshot = dict(worker.capability_snapshot_json, cpu_arch="arm64")
+        worker.capabilities = [dict(cap, cpu_arch="x86_64") for cap in worker.capabilities]
+        snapshot = dict(worker.capability_snapshot_json, cpu_arch="x86_64")
         worker.capability_snapshot_json = snapshot
         worker.capability_snapshot_digest = canonical_digest(snapshot)
     return claim, root, private, now, directory
@@ -135,7 +135,7 @@ async def test_current_signed_grant_consumes_once_after_real_source_verification
         keyset_wire=delivery.keyset.encode(), trust_root=root, expected_claim=claim,
         expected_purpose="production", expected_shadow_campaign_id=None, task_dir=directory,
         task_config=TaskConfig.model_validate(json.loads(grant.canonical_task_config)),
-        task_checksum=grant.task_checksum, cpu_arch="arm64", task_image=grant.components[0].image,
+        task_checksum=grant.task_checksum, cpu_arch="x86_64", task_image=grant.components[0].image,
         consume=consume, clock=lambda: now,
     )
     assert await consumer.authorize() is True

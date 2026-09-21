@@ -83,7 +83,9 @@ async def test_ensure_versions_strong_rows_and_preserves_exact_historical_trial_
             task.source, task.source_provenance = second_spec.source_uri, second_spec.provenance
             second = await ensure_task_image_materializations(session, task_row=task)
             await session.commit()
-            assert len({row.materialization_key for row in (*legacy, *first, *second)}) == 6
+            assert len(legacy) == len(first) == len(second) == 1
+            assert {row.cpu_arch for row in (*legacy, *first, *second)} == {"x86_64"}
+            assert len({row.materialization_key for row in (*legacy, *first, *second)}) == 3
             # Catalog retention follows the full identity, not the old checksum.
             for rows, expected in ((legacy, False), (first, False), (second, True)):
                 for row in rows:
@@ -118,7 +120,8 @@ async def test_ensure_versions_strong_rows_and_preserves_exact_historical_trial_
             )
             await session.commit()
             assert await session.scalar(select(_durable_reference_exists(legacy[0])))
-            assert not await session.scalar(select(_durable_reference_exists(legacy[1])))
+            # Pinning one historical version must not retain a different superseded manifest.
+            assert not await session.scalar(select(_durable_reference_exists(first[0])))
             assert legacy[0].state == "ready"
     finally:
         await engine.dispose()

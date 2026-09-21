@@ -201,6 +201,7 @@ async def test_public_batch_freezes_versions_and_rerun_keeps_snapshot(
         ]
         payload = {
             "name": "version freeze",
+            "purpose": "evaluation",
             "task_filter": {"task_ids": [task_id], "subset_kind": "explicit"},
             "backend": "nebius",
             "trial_config": {

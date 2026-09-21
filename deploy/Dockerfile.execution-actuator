@@ -10,7 +10,7 @@ ENV PYTHONPATH=/app/src
 WORKDIR /app
 COPY deploy/execution-actuator-requirements.txt ./deploy/execution-actuator-requirements.txt
 RUN pip install --no-cache-dir --requirement deploy/execution-actuator-requirements.txt
-COPY src/loom/__init__.py src/loom/execution_contract.py \
+COPY src/loom/__init__.py src/loom/execution_contract.py src/loom/execution_architecture.py \
     src/loom/execution_image_admission.py src/loom/execution_runtime_contract.py \
     src/loom/task_image_materialization.py src/loom/task_image_build_plan.py \
     src/loom/nebius_kubernetes.py src/loom/startup_retry.py src/loom/terminal_result_semantics.py src/loom/resource_usage_store.py ./src/loom/

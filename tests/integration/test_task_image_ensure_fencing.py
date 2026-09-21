@@ -1,4 +1,4 @@
-"""Reference ensure must refresh retired state and lock architectures consistently."""
+"""Reference ensure must refresh retired state and serialize retirement with new x86 admission."""
 
 import asyncio
 from datetime import UTC, datetime
@@ -30,7 +30,7 @@ async def test_cached_ready_state_cannot_survive_committed_retirement(registry_a
     async with registry_authority_session() as session:
         await session.execute(
             update(TaskImageMaterialization)
-            .where(TaskImageMaterialization.id == ids["arm64"])
+            .where(TaskImageMaterialization.id == ids["x86_64"])
             .values(
                 state="ready",
                 ready_at=datetime.now(UTC),
@@ -39,7 +39,7 @@ async def test_cached_ready_state_cannot_survive_committed_retirement(registry_a
         )
         await session.commit()
     async with registry_authority_session() as referrer, registry_authority_session() as retire:
-        cached = await referrer.get(TaskImageMaterialization, ids["arm64"])
+        cached = await referrer.get(TaskImageMaterialization, ids["x86_64"])
         assert cached.state == "ready" and cached.registry_images
         await retire.execute(
             update(TaskImageMaterialization)
@@ -48,7 +48,7 @@ async def test_cached_ready_state_cannot_survive_committed_retirement(registry_a
         )
         await retire.commit()
         ensured = await ensure_task_image_materializations(referrer, task_row=task)
-        assert [row.cpu_arch for row in ensured] == ["x86_64", "arm64"]
+        assert [row.cpu_arch for row in ensured] == ["x86_64"]
         current = next(row for row in ensured if row.id == cached.id)
         assert (
             current.state == "queued" and current.registry_images == {} and current.ready_at is None
@@ -58,40 +58,32 @@ async def test_cached_ready_state_cannot_survive_committed_retirement(registry_a
         assert (
             await session.scalar(
                 select(TaskImageMaterialization.state).where(
-                    TaskImageMaterialization.id == ids["arm64"]
+                    TaskImageMaterialization.id == ids["x86_64"]
                 )
             )
             == "queued"
         )
 
 
-async def test_ensure_locks_arm64_before_x86_64_independent_of_heap_order(
+async def test_ensure_waits_for_committed_retirement_before_requeue(
     registry_authority_session,
 ):
     task, ids = await _prepared(registry_authority_session)
     async with registry_authority_session() as earlier, registry_authority_session() as ensurer:
-        await earlier.scalar(
+        retiring = await earlier.scalar(
             select(TaskImageMaterialization)
-            .where(TaskImageMaterialization.id == ids["arm64"])
+            .where(TaskImageMaterialization.id == ids["x86_64"])
             .with_for_update()
         )
-        # The queue inserted x86_64 first. Force heap traversal so the unordered
-        # query cannot accidentally appear safe because of a particular index.
-        await ensurer.execute(text("SET LOCAL enable_indexscan = off"))
-        await ensurer.execute(text("SET LOCAL enable_bitmapscan = off"))
         pid = await ensurer.scalar(text("SELECT pg_backend_pid()"))
         waiting = asyncio.create_task(ensure_task_image_materializations(ensurer, task_row=task))
         try:
             await _blocked(earlier, pid, waiting)
-            later = await earlier.scalar(
-                select(TaskImageMaterialization)
-                .where(TaskImageMaterialization.id == ids["x86_64"])
-                .with_for_update(nowait=True)
-            )
-            assert later is not None
+            retiring.state = "retired"
             await earlier.commit()
             rows = await asyncio.wait_for(waiting, 5)
-            assert [row.cpu_arch for row in rows] == ["x86_64", "arm64"]
+            assert [row.cpu_arch for row in rows] == ["x86_64"]
+            assert rows[0].state == "queued"
             await ensurer.commit()
         finally:
             await earlier.rollback()
@@ -104,7 +96,7 @@ async def test_suppressed_autoflush_cannot_discard_pending_materialization_chang
 ):
     task, ids = await _prepared(registry_authority_session)
     async with registry_authority_session() as session:
-        row = await session.get(TaskImageMaterialization, ids["arm64"])
+        row = await session.get(TaskImageMaterialization, ids["x86_64"])
         row.failure_message = "pending caller change"
         with session.no_autoflush, pytest.raises(RuntimeError, match="pending materialization"):
             await ensure_task_image_materializations(session, task_row=task)

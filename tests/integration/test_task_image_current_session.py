@@ -101,7 +101,7 @@ async def test_internal_current_session_matches_bearer_without_secret_access(
         assert internal.authority_version == 2
         assert internal.builder_release_sha256 == PROVIDER_RELEASE_SHA256
         assert internal.supervisor_executable_sha256 == SUPERVISOR_SHA256
-        assert internal.pool_id == "staging-gb10-task-image"
+        assert internal.pool_id == "staging-oldlab-task-image"
         assert current.session_token not in repr(internal)
         for session_id, generation, token in [
             (current.session_id, 2 if renewed else 1, "loom_tibs_" + "Z" * 64),

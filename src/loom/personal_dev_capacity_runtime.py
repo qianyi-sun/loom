@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.dev_instance import DevInstanceIdentity
 from loom.dev_instance_runtime import KubectlClient, fixture_database_url
+from loom.execution_architecture import execution_cpu_arch
 from loom.personal_dev_capacity import (
     CapacityManagerPersonalDevProjector,
     PersonalDevCapacityAvailability,
@@ -2625,10 +2626,10 @@ def parse_pool_capabilities(raw: str) -> tuple[AgentPoolCapabilityV1, ...]:
         if not isinstance(payload, list):
             raise TypeError
         values = tuple(AgentPoolCapabilityV1.model_validate(item) for item in payload)
-        if {item.pool_id for item in values} != {"oldlab", "gb10"} or {
-            item.cpu_architecture for item in values
-        } != {"x86_64", "arm64"}:
-            raise ValueError
+        # Validate actual configured offers; an ARM pool is no longer required
+        # for a valid x86 deployment. The wire schema still owns pool identities.
+        for item in values:
+            execution_cpu_arch(item.cpu_architecture)
         # Exercise canonical duplicate and bound checks once at startup.
         marker = uuid4()
         ReporterConfigurationV1(

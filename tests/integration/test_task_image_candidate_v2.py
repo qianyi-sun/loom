@@ -74,7 +74,7 @@ async def _prepared(
     evidence = {
         "schema": "loom.task-image-base-resolution/v1",
         "solve_ref": "same-solve_1",
-        "platform": "linux/arm64",
+        "platform": "linux/amd64",
         "output_digest": "sha256:" + "a" * 64,
         "observed_base_digests": list(bases),
     }
@@ -180,7 +180,7 @@ async def test_v2_candidate_persists_full_evidence_replays_and_remains_inert(
         assert stored.response_json["base_resolution"] == {
             "schema": "loom.task-image-base-resolution/v1",
             "solve_ref": "same-solve_1",
-            "platform": "linux/arm64",
+            "platform": "linux/amd64",
             "output_digest": "sha256:" + "a" * 64,
             "observed_base_digests": list(bases),
         }
@@ -339,8 +339,8 @@ async def test_v2_candidate_store_rejects_invalid_or_unauthorized_request_before
         else:
             values = request.model_dump()
             if change == "platform":
-                values["platform"] = "linux/amd64"
-                values["base_resolution"]["platform"] = "linux/amd64"
+                values["platform"] = "linux/arm64"
+                values["base_resolution"]["platform"] = "linux/arm64"
             elif change == "component":
                 values["component"] = "sidecar:absent"
             else:

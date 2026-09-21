@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import verify_bearer_token
 from loom.db.schema import TaskImageMaterialization, TrialTaskImageMaterialization, Worker
+from loom.execution_architecture import execution_cpu_arch
 from loom.integrations.terminalgen.authority import (
     TERMINALGEN_POOL_POLICIES,
     TerminalGenAuthorityError,
@@ -91,6 +92,14 @@ async def _model_switch_plan_payload(session: Any, trial_id: UUID) -> dict[str, 
 
 
 _WORKER_HEARTBEAT_STATUSES = {"active", "idle-exit", "shutting-down"}
+
+
+def _require_supported_worker_architectures(capabilities: list[dict[str, Any]]) -> None:
+    try:
+        for capability in capabilities:
+            execution_cpu_arch(capability.get("cpu_arch", "x86_64"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 async def _terminalgen_authorization_for_claim(
@@ -248,6 +257,8 @@ async def claim_trial(
             status_code=400,
             detail=f"worker_id + caps required: {exc}",
         ) from exc
+
+    _require_supported_worker_architectures(caps)
 
     if protected_worker_claim is not None:
         try:
@@ -436,6 +447,7 @@ async def claim_any_work(
         if worker is None:
             raise HTTPException(status_code=409, detail="worker_unknown")
         caps = list(worker["capabilities"])
+        _require_supported_worker_architectures(caps)
         worker_os = sorted({item["os"] for item in caps})
         worker_cpu_arches = sorted({item.get("cpu_arch", "x86_64") for item in caps})
         worker_gpu = sorted({item["gpu_vendor"] for item in caps})
@@ -1069,6 +1081,8 @@ async def register_worker(
             status_code=400,
             detail=f"invalid capabilities: {exc.errors()}",
         ) from exc
+
+    _require_supported_worker_architectures(validated_caps)
 
     raw_max_concurrent = payload.get("max_concurrent", 1)
     try:

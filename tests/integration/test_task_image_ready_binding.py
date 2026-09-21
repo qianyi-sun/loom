@@ -43,7 +43,7 @@ async def test_legacy_gc_does_not_claim_rootless_ready(
         async def queued_after_phase1(session):
             row = await _queued_materialization(session)
             claimed = await claim_task_image_materialization(
-                session, builder_id="phase1", cpu_arch="arm64"
+                session, builder_id="phase1", cpu_arch="x86_64"
             )
             assert claimed is row
             await start_task_image_materialization(
@@ -107,7 +107,7 @@ async def test_retry_and_phase1_completion_preserve_historical_rootless_receipt(
         assert row.ready_publication_operation_id is None
         assert row.ready_at is None and row.registry_images == {}
         await session.commit()
-        row = await claim_task_image_materialization(session, builder_id="phase1", cpu_arch="arm64")
+        row = await claim_task_image_materialization(session, builder_id="phase1", cpu_arch="x86_64")
         assert row is not None
         await start_task_image_materialization(
             session, materialization_id=row.id, builder_id="phase1", lease_epoch=row.lease_epoch

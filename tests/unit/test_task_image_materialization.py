@@ -45,13 +45,14 @@ def test_prebuilt_only_task_needs_no_materialization() -> None:
     assert required_task_image_architectures(task) == ()
 
 
-def test_main_dockerfile_needs_declared_native_architecture() -> None:
+def test_arm_dockerfile_is_rejected_for_new_materialization() -> None:
     task = _task_config(cpu_arch="arm64", dockerfile="environment/Dockerfile")
 
-    assert required_task_image_architectures(task) == ("arm64",)
+    with pytest.raises(ValueError, match="x86_64 only"):
+        required_task_image_architectures(task)
 
 
-def test_any_architecture_expands_for_dockerfile_sidecar() -> None:
+def test_any_architecture_builds_only_x86_for_dockerfile_sidecar() -> None:
     task = _task_config(
         cpu_arch="any",
         docker_image="registry.example/prebuilt:latest",
@@ -63,7 +64,7 @@ def test_any_architecture_expands_for_dockerfile_sidecar() -> None:
         ],
     )
 
-    assert required_task_image_architectures(task) == ("x86_64", "arm64")
+    assert required_task_image_architectures(task) == ("x86_64",)
 
 
 def test_prebuilt_sidecars_do_not_create_build_work() -> None:
@@ -247,3 +248,19 @@ def test_strong_execution_grant_requires_manifest_qualified_key() -> None:
         TaskImageExecutionGrantV1.model_validate(payload).materialization_key
         == payload["materialization_key"]
     )
+
+
+@pytest.mark.parametrize("declared_arch", ["arm64", "any"])
+def test_historical_arm_execution_grant_remains_readable(declared_arch: str) -> None:
+    grant = TaskImageExecutionGrantV1.model_validate({
+        "schema_version": "loom.task-image-execution-grant.v1",
+        "materialization_id": "00000000-0000-0000-0000-000000000123",
+        "materialization_key": "1" * 64,
+        "cpu_arch": "arm64",
+        "task_checksum": "2" * 64,
+        "task_config": _task_config(cpu_arch=declared_arch, dockerfile="Dockerfile").model_dump(mode="json"),
+        "task_source": None,
+        "task_source_provenance": {},
+        "registry_images": {"task": "registry.example/loom-task@sha256:" + "3" * 64},
+    })
+    assert TaskImageExecutionGrantV1.model_validate_json(grant.model_dump_json()).cpu_arch == "arm64"

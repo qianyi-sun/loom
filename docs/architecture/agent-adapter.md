@@ -376,9 +376,10 @@ The image provisions Node 22 CLI adapters (`claude`, `codex`, `gemini`,
 `mini-swe-agent`, `openhands`, `openhands-sdk`, and `swe-agent`. `aider`
 and `mini-swe-agent` live in isolated virtual environments with PATH
 shims. The shared Aider installer rebuilds the digest-pinned upstream 0.86.2 wheel
-as `0.86.2+loom.2`, changing only distribution metadata and its wheel RECORD.
+as `0.86.2+loom.3`, changing only distribution metadata and its wheel RECORD.
 It declares the reviewed LiteLLM 1.84.1, importlib-metadata 8.9.0 and GitPython
-3.1.59 pins; the latter fixes CVE-2026-78676. Application code remains unchanged.
+3.1.59 pins, plus AnyIO 4.14.2 (CVE-2026-63374); GitPython fixes
+CVE-2026-78676. Application code remains unchanged.
 Both dynamic installation and the sandbox image use this same installer, with
 dependency consistency and import/CLI smoke checks after installation.
 In the all-agent sandbox image, OpenHands, the Loom-owned OpenHands SDK
@@ -394,13 +395,18 @@ The compatibility name `openhands` is SDK-backed as well;
 trials.
 
 Aider uses the shared installer in `loom-launcher`, including in the prebuilt
-sandbox. Its `0.86.2+loom.2` distribution preserves upstream application code and
+sandbox. Its `0.86.2+loom.3` distribution preserves upstream application code and
 updates dependency metadata, including both normal and browser-extra GitPython
 pins to `3.1.59`. This fixes
 [CVE-2026-78676](https://github.com/gitpython-developers/GitPython/security/advisories/GHSA-284h-m62q-gf8w),
 where rewriting an untrusted multiline Git configuration could introduce active
 directives. The installer resolves the patched wheel's dependencies normally and
 runs `pip check` plus import/CLI smoke checks.
+
+The main sandbox environment also constrains AnyIO to 4.14.2 and resolves
+OpenHands/browser-use dependencies normally, then runs `pip check`. This prevents
+new upstream browser-use releases with an older exact AnyIO pin from silently
+reintroducing the TLS hostname-validation vulnerability.
 
 The audit runs dependency probes inside the named Docker image and
 reports one row per displayed agent. `blocked` means an executable or
