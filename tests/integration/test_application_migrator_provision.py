@@ -8,6 +8,7 @@ import pytest
 from psycopg import sql
 
 from loom.application_handoff_completion import complete_application_handoff_database
+from loom.db.schema_startup import service_schema_head
 from tests.integration.test_application_handoff_completion import _closed
 from tests.integration.test_application_ownership_transfer import (
     transfer_database,  # noqa: F401
@@ -136,7 +137,7 @@ async def test_migrator_creation_never_adopts_ambient_role_or_outlives_failed_jo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transfer_database", ["baseline"], indirect=True)
-@pytest.mark.parametrize("target_revision", ["0142", "0146", "0147", "0148", "0149", "0150", "0151"])
+@pytest.mark.parametrize("target_revision", ["0142", "0146", "0147", "0148", "0149", "0150", "0151", service_schema_head()])
 async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(transfer_database, monkeypatch, target_revision):  # noqa: F811
     from pathlib import Path
 
@@ -169,7 +170,7 @@ async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(tra
         target = args["target"]
         authority = dict(target=target, coordination_guard=args["coordination_guard"],
             provisioner_role=next(n for n, a in args["role_bindings"].items() if a == "provisioner"))
-        if target_revision in {"0147", "0148", "0149", "0150", "0151"}:
+        if target_revision in {"0147", "0148", "0149", "0150", "0151", service_schema_head()}:
             from loom.application_guard_claim_compatibility import ensure_guard_claim_compatibility
             guard_owner = next(name for name, binding in args["role_bindings"].items() if binding == "guard-owner")
             metadata_query = """SELECT p.oid,p.proowner,p.proacl,p.prosecdef,p.proconfig,
@@ -200,7 +201,7 @@ async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(tra
             command.upgrade(config, target_revision)
             assert peer.execute("SELECT version_num FROM public.alembic_version").fetchone() == (target_revision,)
             assert peer.execute("SELECT result->>'aggregate_reward' FROM trials WHERE id=%s", (trial,)).fetchone() == (
-                "1.0" if target_revision in {"0146", "0147", "0148", "0149", "0150", "0151"} else None,)
+                "1.0" if target_revision in {"0146", "0147", "0148", "0149", "0150", "0151", service_schema_head()} else None,)
             observe_completed_application_authority(peer, target=target, runtime_password=args["password"], successor=identity)
         finally:
             seal_application_migrator(maintenance, **authority, identity=identity)

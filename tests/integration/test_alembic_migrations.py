@@ -25,6 +25,7 @@ from loom.db.schema import (
     Team,
     User,
 )
+from loom.db.schema_startup import service_schema_head
 from loom.personal_dev_activation import (
     PersonalDevActivationAcknowledgement,
     PersonalDevActivationSigner,
@@ -221,7 +222,7 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
                     ),
                     {"name": coordinate_name},
                 ).one()
-            assert revision == "0151"
+            assert revision == service_schema_head()
             assert tuple(coordinates) == (
                 f"loom-dev-{coordinate_name}",
                 "loom_dev_coordinate_repair",

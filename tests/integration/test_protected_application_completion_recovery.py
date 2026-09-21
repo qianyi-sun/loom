@@ -11,6 +11,7 @@ import psycopg
 import pytest
 
 from loom.application_handoff_completion import complete_application_handoff_database
+from loom.application_schema_reference import BUNDLED_APPLICATION_SCHEMA_REVISION
 from loom_cli.rollout.operator.protected_application_guard_retention import (
     application_guard_is_retained,
 )
@@ -58,7 +59,7 @@ async def test_recovery_completes_without_reclosing_a_restored_database(
 
         monkeypatch.setattr(completion, "transfer_application_ownership", refuse_once)
     password = "ab" * 16
-    plan, live = _sources(tmp_path, password=password, schema_revision="0151/guard_0035")
+    plan, live = _sources(tmp_path, password=password, schema_revision=BUNDLED_APPLICATION_SCHEMA_REVISION)
     journal = _journal(tmp_path)
     for path in (tmp_path / "state", tmp_path / "state/requests", journal.attempt_root.parent.parent, journal.attempt_root.parent):
         path.chmod(0o700)

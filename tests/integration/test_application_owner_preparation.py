@@ -8,7 +8,10 @@ import pytest
 from psycopg import sql
 from testcontainers.postgres import PostgresContainer
 
-from loom.application_schema_reference import application_schema_reference
+from loom.application_schema_reference import (
+    BUNDLED_APPLICATION_SCHEMA_REVISION,
+    application_schema_reference,
+)
 from loom_cli.rollout.operator.protected_application_guard_retention import (
     application_guard_is_retained,
 )
@@ -142,7 +145,7 @@ async def test_initial_database_phase_recovers_each_commit_without_recapturing_c
 
     _, journal = _setup(tmp_path)
     password = "the-original-runtime-password"
-    plan, live = _sources(tmp_path, password=password, schema_revision="0151/guard_0035")
+    plan, live = _sources(tmp_path, password=password, schema_revision=BUNDLED_APPLICATION_SCHEMA_REVISION)
     evidence = _guard(plan)
     request = dict(request_id=plan.request_id, candidate_sha=plan.candidate_sha,
                    candidate_tree=plan.candidate_tree, generation=evidence.generation)

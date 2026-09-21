@@ -13,7 +13,9 @@ from typing import Any
 
 import pytest
 import yaml  # type: ignore[import-untyped]
+from alembic.script import ScriptDirectory
 
+from loom.db.schema_startup import service_schema_head
 from loom.personal_dev_control_plane_config import (
     load_personal_dev_control_plane_profile,
     load_personal_dev_trusted_release,
@@ -27,9 +29,7 @@ from tests.unit.test_personal_dev_control_plane_render import _release_value
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
-_CURRENT_SCHEMA_HEAD = json.loads(
-    (_ROOT / "config/staging-migration-policy.json").read_text(encoding="utf-8")
-)["expected_head"]
+_CURRENT_SCHEMA_HEAD = service_schema_head()
 
 
 def _write_json(path: Path, value: object) -> str:
@@ -348,48 +348,10 @@ def test_transition_preparation_binds_backup_graph_and_exact_migration_job(
         "networkpolicy.networking.k8s.io/loom-personal-dev-web-ingress",
         "service/loom-personal-dev-web",
     ]
-    assert plan["migration"]["revisions"] == [
-        "0113",
-        "0114",
-        "0115",
-        "0116",
-        "0117",
-        "0118",
-        "0119",
-        "0120",
-        "0121",
-        "0122",
-        "0123",
-        "0124",
-        "0125",
-        "0126",
-        "0127",
-        "0128",
-        "0129",
-        "0130",
-        "0131",
-        "0132",
-        "0133",
-        "0134",
-        "0135",
-        "0136",
-        "0137",
-        "0138",
-        "0139",
-        "0140",
-        "0141",
-        "0142",
-        "0143",
-        "0144",
-        "0145",
-        "0146",
-        "0147",
-        "0148",
-        "0149",
-        "0150",
-        "0151",
-        "0152",
-    ]
+    revisions = ScriptDirectory(str(_ROOT / "migrations")).iterate_revisions(
+        service_schema_head(), plan["predecessor"]["schema_head"],
+    )
+    assert plan["migration"]["revisions"] == [row.revision for row in revisions][::-1]
     assert (
         hashlib.sha256(prepared.migration_job_json).hexdigest() == plan["migration"]["job_sha256"]
     )

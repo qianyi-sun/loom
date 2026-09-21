@@ -17,6 +17,7 @@ from loom.application_database_admission import (
     close_application_database_admission,
 )
 from loom.application_login_sealing import seal_application_login
+from loom.application_schema_reference import BUNDLED_APPLICATION_SCHEMA_REVISION
 from loom.staging_mutation_coordination import (
     STAGING_MUTATION_TRY_LOCK_SQL,
     rollout_guard_application_name,
@@ -202,7 +203,7 @@ async def test_completion_recovers_each_committed_phase_with_original_guard(tran
 
     url, owner, _bindings = transfer_database
     with _closed(transfer_database) as (peer, maintenance, guard, arguments):
-        arguments["schema_revision"] = ("0134/guard_0030" if request.node.callspec.params["transfer_database"] == "baseline" else "0151/guard_0035")
+        arguments["schema_revision"] = ("0134/guard_0030" if request.node.callspec.params["transfer_database"] == "baseline" else BUNDLED_APPLICATION_SCHEMA_REVISION)
         if request.node.callspec.params["transfer_database"] in {"cnpg", "baseline"}:
             arguments["schema_acl_profile"] = "cnpg-staging"
         original_backend = guard.info.backend_pid
@@ -392,7 +393,7 @@ async def test_revision_marker_drift_refuses_before_ownership_change(transfer_da
 
     with _closed(transfer_database) as (peer, maintenance, _guard, arguments):
         arguments.update(schema_acl_profile="cnpg-staging", schema_revision=(
-            "0134/guard_0030" if request.node.callspec.params["transfer_database"] == "baseline" else "0151/guard_0035"))
+            "0134/guard_0030" if request.node.callspec.params["transfer_database"] == "baseline" else BUNDLED_APPLICATION_SCHEMA_REVISION))
         peer.execute("UPDATE " + marker + " SET version_num='unexpected'")
         with pytest.raises(RuntimeError, match="revision"):
             complete_application_handoff_database(peer, maintenance=maintenance, **arguments)

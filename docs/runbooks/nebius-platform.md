@@ -1055,6 +1055,14 @@ workload images/readiness, then deletes its own guard. It preserves live task
 resource requests and builder concurrency. Older workflow reruns cannot replace
 a newer deployed commit. There is no extra PR admission gate or paid batch test.
 
+Migration readiness resolves `expected_head: "head"` from the selected candidate's
+Alembic graph. Adding a migration does not require updating a numeric head or
+revision count in rollout configuration or upgrade-to-head tests. The graph must
+still have one head and a closed migration lineage; the live database does not
+define the expected version. Historical ownership/restore inventories retain
+their explicit revisions and are generated/tested at those revisions, independent
+of the latest deployment target.
+
 Enable once, after installing the guard-aware release:
 
 1. Keep repository variable `NEBIUS_AUTO_ROLLOUT_ENABLED` unset/false during the

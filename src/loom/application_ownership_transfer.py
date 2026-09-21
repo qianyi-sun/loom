@@ -29,6 +29,7 @@ from loom.application_password import require_sealed_runtime_password
 from loom.application_runtime_grants import application_runtime_grants_ddl
 from loom.application_schema_inventory import read_application_schema_inventory
 from loom.application_schema_reference import (
+    BUNDLED_APPLICATION_SCHEMA_REVISION,
     ApplicationSchemaAclProfile,
     ApplicationSchemaRevision,
     application_schema_profile,
@@ -63,7 +64,7 @@ def transfer_application_ownership(
     admission_target: ApplicationDatabaseAdmissionTarget | None = None,
     coordination_guard: ApplicationDatabaseCoordinationGuard | None = None,
     schema_acl_profile: ApplicationSchemaAclProfile = "application-only",
-    schema_revision: ApplicationSchemaRevision = "0151/guard_0035",
+    schema_revision: ApplicationSchemaRevision = BUNDLED_APPLICATION_SCHEMA_REVISION,
 ) -> None:
     """Transfer an admitted legacy database, or validate an exact sealed replay.
 

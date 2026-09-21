@@ -11,6 +11,7 @@ from alembic.script import ScriptDirectory
 from scripts.build_application_schema_reference import build_application_schema_reference
 
 from loom.application_schema_reference import (
+    APPLICATION_SCHEMA_REVISIONS,
     ApplicationSchemaReferenceError,
     application_schema_reference,
     require_application_schema_reference,
@@ -18,7 +19,7 @@ from loom.application_schema_reference import (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("revision", ["0152/guard_0035", "0151/guard_0035", "0150/guard_0035", "0149/guard_0035", "0148/guard_0035", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"])
+@pytest.mark.parametrize("revision", APPLICATION_SCHEMA_REVISIONS)
 @pytest.mark.parametrize("postgres_major", [16, 17])
 @pytest.mark.parametrize("profile", ["legacy-owner", "sealed-owner", "staging-readonly-legacy-owner", "staging-readonly-sealed-owner", "cnpg-staging-legacy-owner", "cnpg-staging-sealed-owner"])
 async def test_bundled_reference_matches_independent_actual_provisioning(
@@ -73,7 +74,7 @@ def test_sealed_reference_is_distinct_from_legacy_reference() -> None:
     assert sealed.profile == "sealed-owner"
 
 
-def test_bundled_reference_pins_actual_release_image_and_migration_heads() -> None:
+def test_bundled_reference_pins_image_and_existing_historical_revisions() -> None:
     root = Path(__file__).resolve().parents[2]
     expected = application_schema_reference()
     external = json.loads((root / "deploy/dev-fleet/personal-dev-external-images.json").read_text())
@@ -84,4 +85,4 @@ def test_bundled_reference_pins_actual_release_image_and_migration_heads() -> No
     ):
         config = Config(str(root / directory / "alembic.ini"))
         config.set_main_option("script_location", str(root / directory))
-        assert ScriptDirectory.from_config(config).get_heads() == [head]
+        assert ScriptDirectory.from_config(config).get_revision(head).revision == head

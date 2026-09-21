@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.exc import DBAPIError
 
 from loom.db.schema import TaskImagePublicationCandidate, TaskImageRegistryCredentialGeneration
+from loom.db.schema_startup import service_schema_head
 from tests.integration.test_task_image_candidate_v2 import _prepared, _record
 from tests.integration.test_task_image_publication_jobs import (
     registry_authority_session as registry_authority_session,
@@ -100,7 +101,7 @@ async def test_downgrade_cannot_remove_first_credential_protection(
         await session.rollback()
         with pytest.raises(DBAPIError, match="publication authority cannot be discarded"):
             command.downgrade(_config(isolated_migration_postgres_url), "0134")
-        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0151"
+        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == service_schema_head()
         assert (
             await session.execute(text("SELECT * FROM task_image_registry_credentials"))
         ).one() == before
@@ -147,7 +148,7 @@ async def test_busy_audit_refuses_downgrade_without_blocking_publication(
             await session.execute(
                 text("LOCK TABLE task_image_publication_jobs IN ROW SHARE MODE NOWAIT")
             )
-            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0151"
+            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == service_schema_head()
         finally:
             await session.rollback()
             await asyncio.gather(task, return_exceptions=True)

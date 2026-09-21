@@ -7,7 +7,7 @@ module neither authenticates its own installation nor authorizes a transfer.
 """
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, get_args
 
 from loom.application_database_connection import ApplicationDatabaseConnection
 from loom.application_schema_inventory import ApplicationSchemaInventory
@@ -38,6 +38,11 @@ ApplicationSchemaProfile = Literal[
     "cnpg-staging-sealed-owner",
 ]
 ApplicationSchemaRevision = Literal["0152/guard_0035", "0151/guard_0035", "0150/guard_0035", "0149/guard_0035", "0148/guard_0035", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"]
+
+# These are immutable historical ownership/restore inventories, not the target
+# of a normal Nebius rollout. Add a profile only when publishing that inventory.
+APPLICATION_SCHEMA_REVISIONS: tuple[ApplicationSchemaRevision, ...] = get_args(ApplicationSchemaRevision)
+BUNDLED_APPLICATION_SCHEMA_REVISION = APPLICATION_SCHEMA_REVISIONS[0]
 
 ApplicationSchemaAclProfile = Literal["application-only", "staging-readonly", "cnpg-staging"]
 
@@ -83,7 +88,7 @@ def application_reference_postgres_image(*, postgres_major: int = 16) -> str:
 
 def application_schema_reference(
     *, profile: ApplicationSchemaProfile = "legacy-owner", postgres_major: int = 16,
-    revision: ApplicationSchemaRevision = "0152/guard_0035",
+    revision: ApplicationSchemaRevision = BUNDLED_APPLICATION_SCHEMA_REVISION,
 ) -> ApplicationSchemaReference:
     """Select one bundled profile, never a caller-selected digest."""
     profiles: tuple[ApplicationSchemaProfile, ...] = (
@@ -264,7 +269,7 @@ def application_schema_reference(
 
 def require_application_schema_reference(
     observed: ApplicationSchemaInventory, *, profile: ApplicationSchemaProfile = "legacy-owner",
-    revision: ApplicationSchemaRevision = "0152/guard_0035",
+    revision: ApplicationSchemaRevision = BUNDLED_APPLICATION_SCHEMA_REVISION,
 ) -> None:
     """Compare only; caller still owns trusted role binding, quiescence and locks."""
     if type(observed.postgres_major) is not int or observed.postgres_major not in {16, 17}:

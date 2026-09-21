@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 import yaml
 
+from loom.db.schema_startup import service_schema_head
 from loom.personal_dev_control_plane_config import (
     PersonalDevAcceptancePlanError,
     PersonalDevOperationalPlanError,
@@ -38,9 +39,7 @@ from loom_service.config import LoomServiceSettings
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
-_CURRENT_SCHEMA_HEAD = json.loads(
-    (_ROOT / "config/staging-migration-policy.json").read_text(encoding="utf-8")
-)["expected_head"]
+_CURRENT_SCHEMA_HEAD = service_schema_head()
 _NOW = datetime(2026, 8, 17, 21, 0, tzinfo=UTC)
 _MANAGEMENT_FILES = {
     "admin-secrets.toml",

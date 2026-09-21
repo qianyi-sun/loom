@@ -8,6 +8,8 @@ from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
+from loom.db.schema_startup import service_schema_head
+
 
 def test_0151_preserves_batches_and_rolling_upgrade_compatibility(
     isolated_migration_postgres_url: str,
@@ -32,7 +34,7 @@ def test_0151_preserves_batches_and_rolling_upgrade_compatibility(
                 "SELECT name,purpose FROM batches WHERE id=:id"
             ), {"id": batch_id}).one()
             assert tuple(row) == ("preserved", "trajectory_generation")
-            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0151"
+            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == service_schema_head()
         column = next(row for row in inspect(engine).get_columns("batches") if row["name"] == "purpose")
         assert column["nullable"] is False
         assert "trajectory_generation" in column["default"]

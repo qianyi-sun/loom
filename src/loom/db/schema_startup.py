@@ -47,6 +47,14 @@ def service_schema_heads(alembic_ini: Path | None = None) -> frozenset[str]:
     return frozenset(_script_heads(alembic_ini))
 
 
+def service_schema_head(alembic_ini: Path | None = None) -> str:
+    """Resolve the candidate's single migration head, never infer it from the live DB."""
+    heads = service_schema_heads(alembic_ini)
+    if len(heads) != 1:
+        raise RuntimeError("service release must contain exactly one migration head")
+    return next(iter(heads))
+
+
 async def _database_current_heads(engine: AsyncEngine) -> set[str]:
     async with engine.connect() as conn:
         return await conn.run_sync(_current_heads_sync)

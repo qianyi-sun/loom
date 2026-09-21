@@ -12,8 +12,8 @@ from tests.integration import test_service_execution_leases as execution
 
 
 @pytest.mark.asyncio
-async def test_idle_check_excludes_inflight_admission_and_persists_across_connections(postgres_url):
-    engine = create_async_engine(postgres_url)
+async def test_idle_check_excludes_inflight_admission_and_persists_across_connections(isolated_migration_postgres_url):
+    engine = create_async_engine(isolated_migration_postgres_url)
     try:
         async with AsyncSession(engine) as scheduler, AsyncSession(engine) as deploy:
             async with scheduler.begin():
@@ -45,8 +45,8 @@ async def test_idle_check_excludes_inflight_admission_and_persists_across_connec
 
 
 @pytest.mark.asyncio
-async def test_queued_work_does_not_block_but_reservations_do(postgres_url):
-    engine = create_async_engine(postgres_url)
+async def test_queued_work_does_not_block_but_reservations_do(isolated_migration_postgres_url):
+    engine = create_async_engine(isolated_migration_postgres_url)
     now = datetime.now(UTC)
     try:
         # Roll this fixture back; it must not leave active work in the shared DB.
@@ -65,12 +65,12 @@ async def test_queued_work_does_not_block_but_reservations_do(postgres_url):
         await engine.dispose()
 
 
-def test_operator_cli_acquires_and_releases(postgres_url, monkeypatch):
+def test_operator_cli_acquires_and_releases(isolated_migration_postgres_url, monkeypatch):
     import json
     import subprocess
     import sys
 
-    monkeypatch.setenv("LOOM_CP_DB_URL", postgres_url)
+    monkeypatch.setenv("LOOM_CP_DB_URL", isolated_migration_postgres_url)
     monkeypatch.setenv("LOOM_CP_MINIO_ACCESS_KEY", "test-access")
     monkeypatch.setenv("LOOM_CP_MINIO_SECRET_KEY", "test-secret")
     command = [sys.executable, "-m", "loom.nebius_rollout_guard"]
