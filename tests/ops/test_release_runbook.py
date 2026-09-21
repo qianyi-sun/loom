@@ -31,7 +31,6 @@ def test_current_release_docs_cover_executable_validation_and_promotion() -> Non
         "scripts/ops/release_gate.py validate",
         "scripts/ops/frontend_route_smoke.py --help",
         "scripts/staging_smoke_gate.py",
-        "scripts/ops/worker_capacity_manifest.py status",
         "gh workflow run release-promotion-gate.yml",
         "gh workflow run main-promotion-gate.yml",
     ):
@@ -40,7 +39,7 @@ def test_current_release_docs_cover_executable_validation_and_promotion() -> Non
     assert ".github/workflows/deploy-environment.yml" in operator
     assert "development and production only" in operator
     assert "does not deploy staging" in staging
-    assert "loom-staging-rollout --env staging start" in operator
+    assert "../ops/nebius-deployment.md" in operator
     assert "environment=production" in operator
     assert "successful `release_gate_run_id`" in operator
 
@@ -62,12 +61,12 @@ def test_current_release_docs_define_secret_safe_evidence() -> None:
         assert forbidden_example not in staging
 
 
-def test_current_release_docs_keep_staging_capacity_temporary() -> None:
+def test_current_release_docs_bound_native_staging_validation() -> None:
     staging = _read(STAGING_VALIDATION)
 
-    assert "any staging lease is bounded and released after validation" in staging
-    assert "release temporary staging\ncapacity" in staging
-    assert "Production-owned capacity remains available" in staging
+    assert "Staging validation stays within its configured quota" in staging
+    assert "clean up disposable staging" in staging
+    assert "cannot certify\nNebius native execution" in staging
 
 
 def test_current_release_docs_bind_identity_and_immutable_tags() -> None:

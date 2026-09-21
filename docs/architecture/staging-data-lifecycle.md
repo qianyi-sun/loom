@@ -1,5 +1,9 @@
 # Staging Data Lifecycle
 
+> Historical shared-cluster lifecycle record. The rollout backend and operator
+> commands described here are retired and unsupported. This document remains
+> only to explain retained database and backup lineage.
+
 Shared staging has an explicit retention authority, capacity high-water mark,
 mutation epoch, and journaled garbage collector. Unknown rows or object keys
 are reported or quarantined; they are never inferred to be safe for deletion.
@@ -210,6 +214,6 @@ and Attempt evidence. It preserves both payloads and queues the old active
 payload for ordinary retention; cleanup and retention never stand in for this
 cross-ledger recovery.
 
-See [protected staging rollout](staging-rollout.md) and
-[staging rollout preflight](staging-rollout-preflight.md) for the admission
-checks that consume this evidence.
+The protected shared-cluster rollout consumer is retired. These retained
+schema and lifecycle contracts explain historical data; current deployment
+and restore use the [Nebius procedures](../ops/nebius-deployment.md).

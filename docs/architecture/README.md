@@ -46,14 +46,6 @@ than mixed with current behavior.
 
 - **[DRF scheduling](drf-scheduling.md)** — eligibility, fairness, claim
   fencing, and recovery.
-- **[Global fleet capacity manager](global-fleet-capacity-manager.md)** — the
-  shadow-allocation service, personal subject projections, demand reports,
-  fenced dry-run grant/executor records, and the non-executable authority
-  boundary.
-- **[Global development-fleet autoscaler](global-dev-fleet-autoscaler.md)** —
-  implemented supervisor contract and the checked-in disabled boundary.
-- **[GB10 capacity](gb10-dynamic-capacity.md)** — inventory, health, dynamic
-  allocatable capacity, and placement rules.
 - **[LLM Gateway](llm-gateway.md)** — provider dialects, attribution, and
   routing.
 - **[Cost and rate cards](cost-and-rate-cards.md)** — usage snapshots,
@@ -69,17 +61,10 @@ than mixed with current behavior.
   supported workload trust mode.
 - **[Environment naming](env-naming-convention.md)** — canonical environment
   identities and route prefixes.
-- **[Personal-development native builder provider](personal-dev-native-builder-provider.md)**
-  — signed GB10 pull grants, dedicated Docker/gVisor containment, native
-  arm64/amd64 composition, release/readiness gates, and zero-task-capacity
-  rollout boundaries.
-
 ## Data, storage, and shared results
 
-- **[Staging data lifecycle](staging-data-lifecycle.md)** — data authority,
-  garbage collection, rollback leases, and checkpoints.
-- **[Staging rollout preflight](staging-rollout-preflight.md)** — candidate
-  checks, rehearsal, and attestations.
+- **[Historical staging data lifecycle](staging-data-lifecycle.md)** — retained
+  database and backup lineage from the retired shared-cluster backend.
 - **[Storage retention](storage-retention.md)** — lifecycle policy rendering
   and apply behavior for supported object stores.
 - **[Run Library](run-library.md)** — shared completed-run metadata, artifacts,
@@ -89,12 +74,6 @@ than mixed with current behavior.
 
 - **[Cluster deployment](cluster-deploy.md)** — `loom cluster` rendering,
   preflight, lifecycle, diagnostics, and secret bootstrap.
-- **[Protected staging rollout](staging-rollout.md)** —
-  candidate binding, locking, backup, evidence, and operator authority.
-- **[Personal development environments](multi-dev-environments.md)** —
-  opt-in source-fresh CLI/API lifecycle, identity, activation, capacity
-  publication, candidate artifact collection, manager-first teardown, and
-  limits.
 - **[Multi-node topology](multi-node-topology.md)** — Postgres, MinIO,
   storage, anti-affinity, and disruption budgets.
 - **[PgBouncer transaction mode](pgbouncer.md)** —

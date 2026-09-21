@@ -1,43 +1,22 @@
 # Staging release validation
 
-Use this checklist after the installed rollout authority has deployed an exact
-merged `dev` candidate to shared staging. It defines the current validation
-boundary for production promotion; it is not authority to mutate the cluster.
-This checklist consumes an installed-authority rollout and does not dispatch
-the generic workflow: `.github/workflows/deploy-environment.yml` does not deploy staging.
+Use this checklist after deploying an exact merged `dev` candidate to Nebius
+staging using the [Nebius deployment procedure](../ops/nebius-deployment.md).
+It describes release evidence, not authority to mutate a cluster. The legacy
+shared-cluster rollout authority is retired. The generic deployment workflow
+does not deploy staging.
 
 ## Candidate and environment identity
 
-Record the rollout request ID, candidate SHA, image tag and digests, rendered
-profile digest, migration result, backup manifest, and running build identity.
-They must all identify the same candidate.
+Record the candidate SHA, image tag and digests, rendered environment identity,
+migration result, verified backup and running build identity. They must all
+identify the same candidate. Preserve the deployer's sanitized phase records.
 
-Confirm the environment boundary:
-
-```bash
-uv run --no-sync python scripts/validate_environment_isolation.py \
-  --profiles-dir deploy/environments \
-  --workflow .github/workflows/deploy-environment.yml \
-  --dry-run-artifact release-evidence/environment-isolation-dry-run.json
-
-uv run --no-sync loom cluster audit \
-  --config deploy/environments/staging.multinode.cluster.toml
-```
-
-The audit must expose only the staged SPA and service API over TLS. The
-Control Plane, LLM Gateway, databases, object store, and internal routers must
-not become public backends.
-
-Use the installed authority for rollout inspection:
-
-```bash
-loom-staging-rollout --env staging status REQUEST_ID
-loom-staging-rollout --env staging logs REQUEST_ID
-```
-
-Do not run `loom cluster up`, `loom cluster rollout`, direct migration Jobs,
-environment-state mutation, tunnel installation, or worker reconfiguration
-outside that request.
+Confirm staging and production have separate namespaces, database state,
+object buckets, credentials and execution targets. Expose only the staged SPA
+and service API over TLS; internal services must remain private. Ambiguous
+historical database revisions require the
+[qualified lineage conversion](../ops/nebius-lineage-conversion.md).
 
 ## Public route and authentication checks
 
@@ -74,7 +53,7 @@ uv run --no-sync python scripts/staging_smoke_gate.py \
   --provider-model-name MODEL \
   --batch-id BATCH_ID \
   --trial-id TRIAL_ID \
-  --required-worker-pool gb10 \
+  --required-worker-pool local \
   --fail-on-skip \
   --json-output release-evidence/staging-smoke.json \
   --markdown-output release-evidence/staging-smoke.md
@@ -85,16 +64,21 @@ shown by `--help` when those checks are part of the candidate. A release report
 must have no failed required check and, when `--fail-on-skip` is used, no
 required skip.
 
+This worker-based script is a local/disposable diagnostic. It cannot certify
+Nebius native execution or fill missing hosted workload acceptance. Hosted
+acceptance must exercise supported native workloads and their durable attempt,
+artifact, reward, cancellation and recovery contracts.
+
 The gate covers public health and logged-out SPA behavior, team identities,
 providers and model catalog, ready agents and benchmarks, mirrored bundle
 objects, object-store write/delete, service restart count, batch/trial state,
 worker-pool coverage, owner downloads, cross-team boundaries, Run Library
 clone/reuse provenance, mutation denial, and secret/internal-URL scanning.
 
-## Benchmark and worker checks
+## Benchmark and native execution checks
 
 Before promotion, verify all of the following against the candidate-bound
-catalog and current worker inventory:
+catalog and Nebius execution targets:
 
 1. Catalog audit reports runnable tasks with complete internal bundle objects.
 2. The representative provider/model preflight succeeds through the Loom
@@ -105,18 +89,17 @@ catalog and current worker inventory:
    catalog contract.
 5. HF-mirrored tasks resolve from internal `s3://` objects; workers do not
    receive `HF_TOKEN`.
-6. Required Kubernetes and external worker pools are registered, healthy, and
-   represented by terminal trial evidence.
-7. Production-owned capacity remains available according to the checked-in
-   capacity policy; any staging lease is bounded and released after validation.
+6. Supported Nebius workloads produce terminal attempt, reward, trajectory and
+   artifact evidence under the expected Kubernetes Job identity.
+7. Staging validation stays within its configured quota and cleans up its
+   disposable resources. Desktop/GUI, Behavior GPU and unconverted pipeline
+   classes are gaps, not release claims of native parity.
 
 Useful offline checks:
 
 ```bash
 uv run --no-sync python scripts/benchmark_score_alignment_gate.py manifest \
   --manifest docs/score-alignment/manifest.json
-uv run --no-sync python scripts/ops/worker_capacity_manifest.py status \
-  --config deploy/worker-capacity/prod-first.toml
 ```
 
 ## Secret and isolation checks
@@ -128,8 +111,8 @@ secret name, never the value.
 
 The `prod_staging_isolation` evidence must describe both environments'
 namespaces, database names, object buckets, route/API bases, safe credential
-references, worker endpoints and image/source identities, and current staging
-capacity lease state. Production and staging values must be distinct where the
+references, execution targets and image/source identities, and current staging
+resource usage. Production and staging values must be distinct where the
 release gate requires separation.
 
 ## Promotion manifest
@@ -192,6 +175,6 @@ check failed or is missing, the redaction scan fails, a backup/recovery point
 is absent, worker or storage capacity is unsafe, staging and production state
 overlap, or the rollback plan is not executable.
 
-After collecting the final sanitized evidence, release temporary staging
-capacity and disposable credentials. Keep generated reports with the release
+After collecting the final sanitized evidence, clean up disposable staging
+resources and credentials. Keep generated reports with the release
 artifact, not under `docs/`.

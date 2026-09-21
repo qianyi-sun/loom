@@ -2,61 +2,21 @@
 
 Current procedures for Loom operators and developers. Start with the master
 operator runbook; use the narrower runbooks for the named environment or
-capacity workflow.
+deployment workflow.
 
 ## Cluster and release operations
+
+- **[Nebius deployment](../ops/nebius-deployment.md)** — hosted deployment, backup
+  protection, migration and readiness checks.
+- **[Nebius restore](../ops/nebius-restore.md)** — isolated restore verification.
 
 - **[Operator runbook](operator-runbook.md)** — deployment, upgrades,
   rollback, credentials, storage, capacity, monitoring, and incident response.
 - **[Staging release validation](staging-launch.md)** — candidate-bound checks
   required before production promotion.
-- **[Multi-node staging on k3s](deploy-staging-k3s.md)** — topology,
-  prerequisites, authorized host helper, verification, and recovery.
 
-## Capacity and development environments
+## Local development
 
-- **[Remote worker pool](remote-worker-pool.md)** — external Docker workers,
-  Slurm-backed capacity, tunnels, and recovery.
-- **[Developer sandboxes](developer-sandboxes.md)** — candidate-bound shared
-  development sandboxes.
-- **[Shared sandbox capacity](shared-sandbox-capacity-broker.md)** — disabled
-  compatibility ledger, offline request/lease checks, and recovery evidence.
-- **[Personal-development management-plane shadow](personal-dev-management-plane-shadow.md)**
-  — exact render, deploy, readiness, rollback, and stop conditions for the
-  inert shared management foundation in `loom-dev`.
-- **[Personal-development builder runtime](personal-dev-builder-runtime.md)**
-  — measured gVisor installation, sequential OLDLAB agent rollout,
-  RuntimeClass proof, cross-platform BuildKit conformance, and exact rollback.
-- **[Personal-development native builder runtime](personal-dev-native-builder-runtime.md)**
-  — protected GB10 dedicated-daemon/gVisor staging, exact image convergence,
-  agent activation, zero-capacity evidence, and byte-scoped rollback.
-- **[Personal-development native builder acceptance](personal-dev-native-builder-acceptance.md)**
-  — simultaneous native GB10 arm64 grants and OLDLAB amd64 Jobs for two owners,
-  immutable multi-platform publication, isolation, cleanup, and operational
-  restoration at executable ceiling zero.
-- **[Personal-development zero-capacity acceptance](personal-dev-zero-capacity-acceptance.md)**
-  — the approved #1280 sole-owner/two-environment lifecycle acceptance, exact
-  zero-ceiling observation, manager-first teardown, and byte-reviewed rollback.
-- **[Personal-development durable zero-capacity launch](personal-dev-durable-launch.md)**
-  — the corresponding #1280 sole-owner durable application-plane launch and
-  byte-reviewed rollback at executable ceiling zero.
-- **[Personal-development concurrent-owner zero-capacity acceptance](personal-dev-concurrent-owner-zero-capacity-acceptance.md)**
-  — the separate schema-v2 two-owner concurrency, cross-owner isolation,
-  retained-name lifecycle, cleanup, and inert-rollback certification.
-- **[Personal-development multi-owner durable zero-capacity launch](personal-dev-multi-owner-durable-launch.md)**
-  — the second-owner launch gate that verifies the exact schema-v2 result
-  before any operational render or apply.
-- **[Personal-development backup and isolated restore evidence](personal-dev-backup-restore-evidence.md)**
-  — owner-only Postgres and MinIO backup, isolated exact-image restore, semantic
-  state comparison, cleanup proof, and canonical plan-bound evidence.
-- **[Personal-development incompatible-schema transition](personal-dev-schema-transition.md)**
-  — exact predecessor backup binding, isolated forward/restore rehearsal,
-  writer quiescence, target migration, and mandatory full-restore recovery.
-- **[Executable global-capacity bridge rehearsal](executable-global-capacity-bridge-rehearsal.md)**
-  — separately gated zero-ceiling manager and two-pool preparation evidence.
-- **[Global fleet pool-executor dry run](global-fleet-pool-executor-dry-run.md)**
-  — non-executable reservation, permit, inventory, journaling, fencing, and
-  protected-release rehearsal for physical pool controllers.
 - **[Local development](local-dev-workflow.md)** — local Docker Compose stack and
   pre-push checks.
 
