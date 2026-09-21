@@ -16,7 +16,7 @@ test("member can distinguish image preparation and shared-node scheduling", asyn
       activity: null,
       targets: [{
         target_id: "primary", pool_id: "nebius-cpu", environment: "development", region: "eu-north1",
-        health_status: "healthy", policy: { max_nodes: 10 },
+        desired_state: "active", health_status: "healthy", policy: { max_nodes: 10 },
         observation: { is_fresh: true, observed_at: new Date().toISOString(), active_nodes: 1 },
         resource_profile: { immediate_executable_slots: 4 }, blockers: [], command_backlog: 0,
       }],

@@ -9,6 +9,8 @@ import {
   type RunLibraryArtifact,
   type RunLibraryBatchDetail,
 } from "../api/client";
+import { useAuth } from "../auth/useAuth";
+import { BatchDeliveryExport } from "../components/BatchDeliveryExport";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
@@ -310,6 +312,7 @@ function CombinationSummarySection({
 
 export default function RunLibraryBatchDetail(): JSX.Element {
   const { batchId } = useParams<{ batchId: string }>();
+  const auth = useAuth();
   const [providerConnectionId, setProviderConnectionId] = useState("");
 
   const query = useQuery({
@@ -591,6 +594,9 @@ export default function RunLibraryBatchDetail(): JSX.Element {
           description="Shared files are downloadable through Loom API URLs; blocked files stay owner-team diagnostics."
         />
         <Card.Body className="space-y-5">
+          {(auth.isAdmin || auth.currentTeamId === batch.team_id) ? (
+            <BatchDeliveryExport batchId={batch.id} state={batch.state} />
+          ) : null}
           {trialBundles.length > 0 ? (
             <section className="space-y-2">
               <div>

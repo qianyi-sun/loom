@@ -484,7 +484,7 @@ function TrialHeader({
                         Download artifact {label}
                       </span>
                       <span className="shrink-0 font-mono text-xs text-slate-600">
-                        {formatBytes(artifact.size)}
+                        {artifact.size == null ? "Size unknown" : formatBytes(artifact.size)}
                       </span>
                     </button>
                     <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">

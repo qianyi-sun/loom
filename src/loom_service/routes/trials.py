@@ -484,6 +484,29 @@ def _artifact_filename(key: str) -> str:
     return name or "artifact"
 
 
+def _artifact_size(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    try:
+        size = int(value)
+    except ValueError:
+        return None
+    return size if size >= 0 else None
+
+
+def _merge_projected_artifacts(
+    indexed: list[dict[str, Any]], canonical: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    # The download API identifies files by key within the authorized Trial.
+    # Canonical artifact records own size and sharing metadata; index entries
+    # can add step information but cannot override canonical sharing policy.
+    merged: dict[str, dict[str, Any]] = {}
+    for entry in [*indexed, *canonical]:
+        key = entry["key"]
+        merged[key] = {**merged.get(key, {}), **entry}
+    return list(merged.values())
+
+
 def _projected_artifacts(
     request: Request,
     *,
@@ -503,19 +526,10 @@ def _projected_artifacts(
         key = item.get("key")
         if not isinstance(key, str) or not key:
             continue
-        size = item.get("size")
-        if isinstance(size, int):
-            size_int = size
-        elif isinstance(size, str):
-            try:
-                size_int = int(size)
-            except ValueError:
-                size_int = 0
-        else:
-            size_int = 0
+        size_int = _artifact_size(item.get("size", item.get("size_bytes")))
         entry: dict[str, Any] = {
             "key": key,
-            "size": max(size_int, 0),
+            "size": size_int,
             "download_url": str(
                 public_url_for(
                     request,
@@ -604,11 +618,11 @@ def _projected_service_execution_artifacts(
             if key is None:
                 continue
             raw_size = file_item.get("size_bytes")
-            size = raw_size if isinstance(raw_size, int) and not isinstance(raw_size, bool) else 0
+            size = _artifact_size(raw_size)
             out.append(
                 {
                     "key": key,
-                    "size": max(size, 0),
+                    "size": size,
                     "sha256": file_item.get("sha256"),
                     "media_type": file_item.get("media_type") or "application/octet-stream",
                     "share_status": artifact.share_status,
@@ -912,14 +926,17 @@ async def get_trial(
     base["trajectory_ready"] = bool(trajectory_index.get("trajectory_uri")) or (
         trial.started_at is not None
     )
-    base["artifacts"] = _projected_artifacts(
-        request,
-        trajectory_index=trajectory_index,
-        trial_id=trial.id,
-    ) + _projected_service_execution_artifacts(
-        request,
-        trial_id=trial.id,
-        artifacts=service_execution_artifacts,
+    base["artifacts"] = _merge_projected_artifacts(
+        _projected_artifacts(
+            request,
+            trajectory_index=trajectory_index,
+            trial_id=trial.id,
+        ),
+        _projected_service_execution_artifacts(
+            request,
+            trial_id=trial.id,
+            artifacts=service_execution_artifacts,
+        ),
     )
     debug_evidence = build_trial_debug_evidence(
         request,
