@@ -99,6 +99,8 @@ architecture and retained data.
 
 ## Web application and observability
 
+- **[Nebius progress and placement](nebius-monitoring.md)** — shared progress stages, scheduling observations and scoped node views.
+
 - **[Pipeline preview](pipeline-live-preview.md)** — retained/local preview lifecycle and trust boundary.
 
 - **[Human-readable web UX](human-readable-spa-ux.md)** — default and
