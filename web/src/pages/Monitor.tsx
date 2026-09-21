@@ -367,11 +367,11 @@ function NebiusExecutionBreakdown({
               </StatusPill>
             </div>
             <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-5">
-              <CountBox label="Executable now" value={`${profile?.immediate_executable_slots ?? 0} slots`} />
-              <CountBox label="Scale headroom" value={`${profile?.configured_scale_headroom_slots ?? 0} slots`} />
-              <CountBox label="Configured total" value={`${profile?.configured_total_fit_slots ?? 0} slots`} />
+              <CountBox label="Executable now" value={profile?.immediate_executable_slots == null ? "Unknown" : `${profile.immediate_executable_slots} slots`} />
+              <CountBox label="Scale headroom" value={profile?.configured_scale_headroom_slots == null ? "Unknown" : `${profile.configured_scale_headroom_slots} slots`} />
+              <CountBox label="Configured total" value={profile?.configured_total_fit_slots == null ? "Unknown" : `${profile.configured_total_fit_slots} slots`} />
               <CountBox label="Capacity-accounted nodes" value={`${observation?.active_nodes ?? "unknown"}`} />
-              <CountBox label="Pending jobs" value={`${observation?.pending_jobs ?? 0}`} />
+              <CountBox label="Pending jobs" value={`${observation?.pending_jobs ?? "Unknown"}`} />
             </div>
             {observation?.node_states ? (
               <p className="mt-2 text-xs text-slate-600">
@@ -386,7 +386,7 @@ function NebiusExecutionBreakdown({
               <span>fresh until: {observation?.fresh_until ? formatLocalDateTime(observation.fresh_until) : "unavailable"}</span>
               <span>autoscaler: {observation?.autoscaler_state ?? "unknown"}</span>
               <span>provider: {observation?.provider_capacity_state ?? "unknown"}</span>
-              <span>quota: {Math.round((observation?.provider_used_vcpu_millis ?? 0) / 1000)} / {Math.round((observation?.provider_quota_vcpu_millis ?? 0) / 1000)} vCPU</span>
+              <span>quota: {observation?.provider_used_vcpu_millis == null ? "unknown" : Math.round(observation.provider_used_vcpu_millis / 1000)} / {observation?.provider_quota_vcpu_millis == null ? "unknown" : Math.round(observation.provider_quota_vcpu_millis / 1000)} vCPU</span>
               <span>commands waiting: {target.command_backlog}</span>
             </div>
             <NebiusPlacement targetId={target.target_id} />

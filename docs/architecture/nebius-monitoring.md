@@ -12,6 +12,13 @@ be inferred from output upload or archival. Shared image counts are distinct
 from affected Trial counts. Terminal Trial outcomes take precedence over later
 shared cache changes.
 
+The build container includes scratch cleanup after BuildKit exits. Its running
+state is displayed as building/cleanup, not a measured BuildKit-only duration.
+The per-command build budget and whole-Job lifecycle deadline introduced by
+PR #2020 remain distinct: timeout wording uses structured exit/Job conditions,
+falls back to a generic deadline if those are absent, and never parses logs to
+invent live phases. Bounded actuator logs remain outside the public projection.
+
 Migration 0153 adds a nullable Trial scheduling observation and a nullable
 capacity-wait reason. A scheduler rejection records a bounded reason and time;
 successful reservation retains the image-readiness boundary and lease identity

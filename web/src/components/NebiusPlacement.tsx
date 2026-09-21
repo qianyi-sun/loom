@@ -18,7 +18,7 @@ function Workloads({ items }: { items: Workload[] }): JSX.Element {
         {item.kind === "build" ? "Image build" : "Execution"}
       </span>{" · "}
       <Link to={`/trials/${item.trial_id}`} className="break-all text-accent underline">{item.label}</Link>
-      <p>{item.state} · {resources(item.requests)}</p>
+      <p>{item.kind === "build" && item.state === "build" ? "Building / cleaning scratch" : item.state} · {resources(item.requests)}</p>
       {item.wait_message ? <p className="mt-1 text-amber-800">{item.wait_message}</p> : null}
     </li>)}
   </ul>;

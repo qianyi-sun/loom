@@ -13,7 +13,7 @@ const labels: Record<string, string> = {
 };
 const details: Record<string, string> = {
   queued: "Queued for image preparation", capacity_wait: "Waiting for build resources",
-  prepare: "Preparing build context", build: "Building image", publish: "Publishing image",
+  prepare: "Preparing build context", build: "Building image / cleaning scratch", publish: "Publishing image",
   claimed: "Starting image build", pod_scheduling: "Waiting for Pod scheduling",
   environment_startup: "Pulling images / initializing sandbox",
 };
