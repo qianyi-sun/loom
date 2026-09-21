@@ -625,9 +625,9 @@ def test_capacity_guard_migration_change_selects_owned_integration_lane() -> Non
     assert plan.unowned_runtime is False
 
 
-def test_capacity_guard_source_change_selects_integration_lane() -> None:
+def test_unknown_retired_source_path_selects_integration_lane() -> None:
     plan = plan_validations(
-        changed_paths=["src/loom_capacity_guard/store.py"],
+        changed_paths=["src/unowned_retired_backend/store.py"],
         labels=set(),
         event_name="pull_request",
     )
