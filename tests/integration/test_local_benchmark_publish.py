@@ -559,10 +559,19 @@ def _write_harbor_layout(root: Path) -> None:
     environment.mkdir(parents=True)
     (task / "task.toml").write_text(_HARBOR_TASK_TOML)
     (task / "instruction.md").write_text("do the harbor thing\n")
-    (environment / "Dockerfile").write_text("FROM python:3.11-alpine\n")
+    (environment / "Dockerfile").write_text("FROM ubuntu:24.04\nWORKDIR /app\n")
     tests = task / "tests"
     tests.mkdir()
     (tests / "test_outputs.py").write_text("def test_ok():\n    assert True\n")
+    (tests / "test.sh").write_text(
+        "#!/bin/bash\napt-get update\napt-get install -y curl\n"
+        "curl -LsSf https://astral.sh/uv/0.9.5/install.sh | sh\n"
+        "source $HOME/.local/bin/env\n"
+        "uvx -p 3.13 -w pytest==8.4.1 -w pytest-json-ctrf==0.3.5 "
+        "pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA\n"
+        "if [ $? -eq 0 ]; then echo 1 > /logs/verifier/reward.txt; "
+        "else echo 0 > /logs/verifier/reward.txt; fi\n",
+    )
     online = task / "verifier" / "run.sh"
     online.parent.mkdir()
     online.write_text(
@@ -606,8 +615,13 @@ async def test_publish_nebius_terminus_profile_adapts_harbor_pack(
         if key.endswith("bundle/verifier/run.sh")
     ]
     assert wrapper_bodies
-    assert b"/opt/verifier/bin/pytest" in wrapper_bodies[0]
+    assert b"harbor-offline.sh" in wrapper_bodies[0]
     assert b"pip install" not in wrapper_bodies[0]
+    assert any(key.endswith("bundle/environment/Dockerfile.loom-nebius")
+               for (_bucket, key) in store.objects)
+    assert any(b"/opt/verifier/bin/pytest" in body
+               for (_bucket, key), body in store.objects.items()
+               if key.endswith("bundle/verifier/harbor-offline.sh"))
 
     engine = create_async_engine(postgres_url)
     try:
@@ -623,6 +637,7 @@ async def test_publish_nebius_terminus_profile_adapts_harbor_pack(
             assert env["cpu_arch"] == "x86_64"
             assert env["user"] == "agent"
             assert env["workdir"] == "/app"
+            assert env["dockerfile"] == "environment/Dockerfile.loom-nebius"
             assert env["cpus"] == 1
             assert env["memory_mb"] == 2048
             assert env["storage_mb"] == 4096

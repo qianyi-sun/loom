@@ -57,6 +57,21 @@ def _harbor_shaped_config(**env_updates: object) -> dict:
     }
 
 
+def _write_runtime_inputs(staged: Path) -> None:
+    (staged / "environment").mkdir(exist_ok=True)
+    (staged / "environment/Dockerfile").write_text("FROM ubuntu:24.04\nWORKDIR /app\n")
+    (staged / "tests").mkdir(exist_ok=True)
+    (staged / "tests/test.sh").write_text(
+        "#!/bin/bash\napt-get update\napt-get install -y curl\n"
+        "curl -LsSf https://astral.sh/uv/0.9.5/install.sh | sh\n"
+        "source $HOME/.local/bin/env\n"
+        "uvx -p 3.13 -w pytest==8.4.1 -w pytest-json-ctrf==0.3.5 "
+        "pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA\n"
+        "if [ $? -eq 0 ]; then echo 1 > /logs/verifier/reward.txt; "
+        "else echo 0 > /logs/verifier/reward.txt; fi\n",
+    )
+
+
 def test_resolve_execution_profile_accepts_known_and_rejects_unknown() -> None:
     assert resolve_execution_profile(None) is None
     assert resolve_execution_profile(NEBIUS_TERMINUS_PROFILE) == NEBIUS_TERMINUS_PROFILE
@@ -67,7 +82,8 @@ def test_resolve_execution_profile_accepts_known_and_rejects_unknown() -> None:
 def test_adapt_fills_resources_forces_gateway_and_verifier(tmp_path: Path) -> None:
     staged = tmp_path / "bundle"
     staged.mkdir()
-    (staged / "tests").mkdir()
+    _write_runtime_inputs(staged)
+    (staged / "tests").mkdir(exist_ok=True)
     (staged / "tests" / "test_outputs.py").write_text("def test_ok():\n    assert True\n")
 
     adapted, stats = adapt_bundle_for_nebius_terminus(staged, _harbor_shaped_config())
@@ -94,12 +110,15 @@ def test_adapt_fills_resources_forces_gateway_and_verifier(tmp_path: Path) -> No
     wrapper = staged / "verifier" / "run.sh"
     assert wrapper.is_file()
     assert wrapper.stat().st_mode & 0o111
-    assert b"/opt/verifier/bin/pytest" in wrapper.read_bytes()
+    assert b"harbor-offline.sh" in wrapper.read_bytes()
+    assert env["dockerfile"] != "environment/Dockerfile"
+    assert (staged / env["dockerfile"]).is_file()
 
 
 def test_adapt_preserves_complete_resource_triple(tmp_path: Path) -> None:
     staged = tmp_path / "bundle"
     staged.mkdir()
+    _write_runtime_inputs(staged)
     adapted, stats = adapt_bundle_for_nebius_terminus(
         staged,
         _harbor_shaped_config(cpus=2, memory_mb=4096, storage_mb=8192),
@@ -114,6 +133,7 @@ def test_adapt_preserves_complete_resource_triple(tmp_path: Path) -> None:
 def test_adapt_replaces_harbor_online_bridge_wrapper(tmp_path: Path) -> None:
     staged = tmp_path / "bundle"
     staged.mkdir()
+    _write_runtime_inputs(staged)
     verifier = staged / "verifier"
     verifier.mkdir()
     online = verifier / "run.sh"
@@ -135,9 +155,10 @@ def test_adapt_replaces_harbor_online_bridge_wrapper(tmp_path: Path) -> None:
 def test_adapt_keeps_existing_offline_wrapper(tmp_path: Path) -> None:
     staged = tmp_path / "bundle"
     staged.mkdir()
+    _write_runtime_inputs(staged)
     verifier = staged / "verifier"
     verifier.mkdir()
-    existing = offline_verifier_run_sh_bytes() + b"\n# operator note\n"
+    existing = offline_verifier_run_sh_bytes()
     target = verifier / "run.sh"
     target.write_bytes(existing)
     target.chmod(0o755)
@@ -147,9 +168,31 @@ def test_adapt_keeps_existing_offline_wrapper(tmp_path: Path) -> None:
     assert target.read_bytes() == existing
 
 
+def test_adapt_upgrades_old_pytest_only_wrapper(tmp_path: Path) -> None:
+    _write_runtime_inputs(tmp_path)
+    target = tmp_path / "verifier/run.sh"
+    target.parent.mkdir()
+    target.write_text("#!/bin/sh\n/opt/verifier/bin/pytest /tests/test_outputs.py\n")
+    _, stats = adapt_bundle_for_nebius_terminus(tmp_path, _harbor_shaped_config())
+    assert stats.verifier_wrapper_installed
+    assert b"harbor-offline.sh" in target.read_bytes()
+
+
+def test_adapt_rejects_unknown_custom_verifier(tmp_path: Path) -> None:
+    _write_runtime_inputs(tmp_path)
+    target = tmp_path / "verifier/run.sh"
+    target.parent.mkdir()
+    original = b"#!/bin/sh\nexec ./custom-evaluator\n"
+    target.write_bytes(original)
+    with pytest.raises(ValueError, match="custom verifier"):
+        adapt_bundle_for_nebius_terminus(tmp_path, _harbor_shaped_config())
+    assert target.read_bytes() == original
+
+
 def test_adapt_after_normalize_fixes_absolute_verifier_path(tmp_path: Path) -> None:
     staged = tmp_path / "bundle"
     staged.mkdir()
+    _write_runtime_inputs(staged)
     raw = {
         "schema_version": "1.1",
         "task": {
@@ -196,15 +239,8 @@ def test_preflight_rejects_unadapted_harbor_config(tmp_path: Path) -> None:
     assert "private_verifier_directory_required" in reasons
 
 
-def test_offline_template_matches_catalog_when_present() -> None:
-    catalog = (
-        Path(__file__).resolve().parents[2]
-        / "deploy"
-        / "catalog"
-        / "nebius-terminal-bench"
-        / "file-archive-manifest"
-        / "verifier"
-        / "run.sh"
-    )
-    if catalog.is_file():
-        assert offline_verifier_run_sh_bytes() == catalog.read_bytes()
+def test_offline_template_preserves_full_harbor_runner() -> None:
+    wrapper = offline_verifier_run_sh_bytes()
+    assert b'cp -R "$task_dir/tests/." /tests/' in wrapper
+    assert b'bash "$task_dir/verifier/harbor-offline.sh"' in wrapper
+    assert b"pip install" not in wrapper

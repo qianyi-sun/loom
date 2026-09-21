@@ -268,8 +268,25 @@ That profile forces `cpu_arch=x86_64`, `gateway-only` networking, fills missing
 `cpus`/`memory_mb`/`storage_mb` (defaults 1 / 2048 / 4096), sets
 `user=agent` + compatible `/app` workdir, strips custom verifier identity,
 points the verifier at relative `verifier/run.sh`, drops Harbor TB2.1
-artifact globs that admission rejects, installs the offline Nebius wrapper
-when missing or Harbor-online, then dry-runs
+artifact globs that admission rejects, and prepares a derived Dockerfile for the
+native non-root UID 65532. The original Dockerfile and `tests/test.sh` remain
+unchanged in the source bundle. The derived image prepares writable workspace,
+home and verifier directories, installs Terminus tools, and preinstalls the
+Python version and pinned verifier dependencies declared by the supported Harbor
+bootstrap. Build-time installation may run as root; task execution remains
+non-root with gateway-only networking.
+
+The generated `verifier/harbor-offline.sh` removes only recognized online
+bootstrap and replaces its `uvx` invocation with the preinstalled verifier.
+Task-specific setup, pytest arguments, reward logic and the complete private
+`tests/` tree are preserved. Unsupported bootstrap forms, custom verifier
+adapters or image shapes fail with an adaptation error; configuration admission
+alone is not proof that an arbitrary task image can execute. Validate a newly
+adapted image through sandbox upload, agent setup and offline verification
+before a model batch. This adapter supports Debian/Ubuntu final images and the
+Harbor uv 0.9.5 `uvx -p ... -w package==version ... pytest` bootstrap. Prebuilt
+images, custom Dockerfile `SHELL`, selected build targets and other installer
+forms need explicit adaptation. The publisher then dry-runs
 `automatic_service_execution_rejections` before upsert. Bucket creation stays
 opt-in via `--create-bucket` ([#1993](https://github.com/qianyi-sun/loom/issues/1993) /
 [#1994](https://github.com/qianyi-sun/loom/pull/1994)); prefer an infra-managed
