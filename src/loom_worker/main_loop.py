@@ -26,7 +26,6 @@ import platform
 import re
 import shutil
 import socket
-import subprocess
 import tempfile
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
@@ -54,7 +53,7 @@ from loom.models.result import FailureReason
 from loom.models.task import TaskConfig
 from loom.models.trial import RetryPolicy, RetryReason, TrialConfig
 from loom.models.types import ModelSpec
-from loom.models.worker_capabilities import GpuDeviceCapabilityV1, WorkerCapabilitySnapshotV1
+from loom.models.worker_capabilities import WorkerCapabilitySnapshotV1
 from loom.pipeline.keys import canonical_document
 from loom.pipeline.work_protocol import ExecutionAttemptClaimV1, WorkClaimV1
 from loom.retry import next_attempt_at
@@ -84,17 +83,12 @@ from loom.verifier.script_verifier import ScriptVerifier
 from loom_task_image_authority.execution_delivery import SignedWorkClaim, TaskImageExecutionDelivery
 from loom_task_image_authority.execution_grant import verify_execution_grant
 from loom_worker.artifact_input_journal import allocatable_capacity
+from loom_worker.capability_snapshot import build_worker_capability_snapshot
 from loom_worker.config import WorkerSettings
 from loom_worker.control_plane_client import (
     HttpControlPlaneClient,
     StepTokenClient,
     validate_task_image_execution_origin,
-)
-from loom_worker.gpu_capabilities import (
-    GpuCapabilityProbeError,
-    build_worker_capability_snapshot,
-    discover_slurm_gpu_allocation,
-    validate_oldlab_cpu_allocation,
 )
 from loom_worker.heartbeat import HeartbeatThread
 from loom_worker.materializers import (
@@ -117,7 +111,6 @@ from loom_worker.task_bundle_integrity import verified_task_image_cache_identity
 from loom_worker.task_image import TaskImageBuildError, resolve_task_image
 from loom_worker.task_image_execution import WorkerExecutionTrust, WorkerTaskImageExecution
 from loom_worker.task_sidecars import DockerTaskSidecarRuntime
-from loom_worker.terminal_task_validator import attest_terminal_task_validator
 from loom_worker.trial_cache import (
     _daemon_build_slot,
     evict_stale_managed_images_from_env,
@@ -246,71 +239,10 @@ def _pipeline_registration_payload(
     *,
     cache_fields: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
-    """Measure the canonical Pipeline identity; GPU pools fail before registration."""
+    """Measure CPU resources for an explicitly supplied local Pipeline runner."""
 
     cpu_arch = _host_cpu_arch()
     raw_filesystem_bytes = shutil.disk_usage(settings.trajectory_cache_dir).total
-    devices: tuple[GpuDeviceCapabilityV1, ...] = ()
-    allocation = None
-    cluster_id = os.environ.get("LOOM_SLURM_CLUSTER_ID", "")
-    gpu_pool = settings.pool_name in {"behavior-gpu-oldlab", "behavior-gpu-gb10"}
-    terminalgen_pool = settings.pool_name.startswith("terminalgen-")
-    cpu_slurm_pool = settings.pool_name == "behavior-cpu-data" or terminalgen_pool
-    if (gpu_pool or cpu_slurm_pool) and settings.max_concurrent != 1:
-        raise GpuCapabilityProbeError("Pipeline Slurm workers require concurrency exactly one")
-    if gpu_pool:
-        if cluster_id not in {"oldlab", "gb10"}:
-            raise GpuCapabilityProbeError("GPU pool has no policy-scoped Slurm cluster")
-        completed = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=index,uuid,name,memory.total,driver_version,mig.mode.current",
-                "--format=csv,noheader,nounits",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if completed.returncode != 0:
-            raise GpuCapabilityProbeError("nvidia-smi probe failed")
-        meminfo = Path("/proc/meminfo").read_text(encoding="utf-8")
-        devices, allocation = discover_slurm_gpu_allocation(
-            environment=os.environ,
-            cpu_arch=cpu_arch,
-            nvidia_smi_csv=completed.stdout,
-            meminfo=meminfo,
-        )
-    elif cpu_slurm_pool:
-        validate_oldlab_cpu_allocation(os.environ)
-    runtime_features = ["loom-secret-tmpfs-v1"]
-    if devices:
-        runtime_features.extend(("egl", "nvidia-container-runtime"))
-    if gpu_pool:
-        from loom_worker.pipeline_execution import production_pipeline_enabled
-
-        if production_pipeline_enabled(settings):
-            runtime_features.append("loom-stage1-smoke-worker-v1")
-    elif settings.pool_name in {
-        "terminalgen-generate-gateway",
-        "terminalgen-package-none",
-        "terminalgen-plan-none",
-        "terminalgen-validate-none",
-    }:
-        from loom_worker.pipeline_execution import production_pipeline_enabled
-
-        if production_pipeline_enabled(settings):
-            if settings.pool_name == "terminalgen-generate-gateway":
-                from loom_worker.pipeline_runtime_secret import require_runtime_secret_tmpfs
-
-                require_runtime_secret_tmpfs(settings.pipeline_runtime_secrets_dir)
-            elif settings.pool_name == "terminalgen-validate-none":
-                attest_terminal_task_validator(
-                    settings.pipeline_terminal_task_validator_path,
-                    settings.pipeline_terminal_task_validator_sha256,
-                )
-                runtime_features.append("loom-terminal-task-validator-v1")
-            runtime_features.append("loom-terminalgen-authoring-worker-v1")
     cache = dict(cache_fields or {})
     snapshot = build_worker_capability_snapshot(
         cpu_arch=cpu_arch,
@@ -318,13 +250,13 @@ def _pipeline_registration_payload(
         memory_bytes=_host_memory_bytes(),
         scratch_bytes=raw_filesystem_bytes,
         network_profiles=["gateway", "none"],
-        container_runtime_features=runtime_features,
+        container_runtime_features=[],
         input_cache_capacity_bytes=cache.get(
             "input_cache_capacity_bytes", allocatable_capacity(raw_filesystem_bytes)
         ),
         input_cache_reserved_bytes=cache.get("input_cache_reserved_bytes", 0),
         input_cache_ready_bytes=cache.get("input_cache_ready_bytes", 0),
-        gpu_devices=devices,
+        gpu_devices=(),
     )
     legacy_capabilities = _worker_capabilities(settings)
     legacy_capabilities[0].update(
@@ -338,9 +270,6 @@ def _pipeline_registration_payload(
         "input_cache_capacity_bytes": snapshot.input_cache_capacity_bytes,
         "input_cache_reserved_bytes": snapshot.input_cache_reserved_bytes,
         "input_cache_ready_bytes": snapshot.input_cache_ready_bytes,
-        "slurm_gpu_allocation_evidence": (
-            allocation.model_dump(mode="json") if allocation is not None else None
-        ),
     }
 
 
@@ -502,8 +431,7 @@ async def run_worker(
     state = ShutdownState()
     install_signal_handlers(state)
     # Evaluate the controller-owned containment binding before registration,
-    # cleanup, or claims. A non-exclusive worker must never become visible if
-    # its allocation cgroup was lost or replaced.
+    # cleanup, or claims. Reject a malformed local resource parent early.
     _worker_cgroup_parent(settings)
     settings.trajectory_cache_dir.mkdir(parents=True, exist_ok=True)
     _configure_blocking_io_executor(settings)
@@ -530,37 +458,17 @@ async def run_worker(
             _client=gw_http,
         )
 
-        production_runtime = None
-        if pipeline_run is None:
-            from loom_worker.pipeline_execution import (
-                PipelineWorkerRuntime,
-                production_pipeline_enabled,
-            )
-
-            if production_pipeline_enabled(settings):
-                production_runtime = PipelineWorkerRuntime(settings, cp_client)
-
-        pipeline_enabled = pipeline_run is not None or production_runtime is not None
-
         info = await _register_worker_with_retry(
             cp_client=cp_client,
             settings=settings,
-            pipeline_enabled=pipeline_enabled,
+            pipeline_enabled=pipeline_run is not None,
             execution_trust=execution_trust,
-            pipeline_cache_fields=(
-                production_runtime.registration_cache_fields()
-                if production_runtime is not None
-                else None
-            ),
         )
         worker_id = UUID(info["worker_id"])
         resource_usage_outbox = ResourceUsageOutbox(
             settings.trajectory_cache_dir / "resource-usage-outbox",
         )
         await resource_usage_outbox.replay(cp_client.report_resource_usage)
-        if production_runtime is not None:
-            production_runtime.bind_worker(worker_id)
-            pipeline_run = production_runtime.run_claim
         capability_snapshot_digest = info.get("capability_snapshot_digest")
         logger.info("worker_registered worker_id=%s", worker_id)
 
@@ -708,7 +616,6 @@ async def _register_worker_with_retry(
     retry_config: StartupRetryConfig = DEFAULT_STARTUP_RETRY_CONFIG,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     pipeline_enabled: bool = False,
-    pipeline_cache_fields: Mapping[str, int] | None = None,
     execution_trust: WorkerExecutionTrust | None = None,
 ) -> dict[str, Any]:
     if execution_trust is not None:
@@ -731,10 +638,8 @@ async def _register_worker_with_retry(
         register_kwargs["supported_work_kinds"] = ["trial", "execution_attempt"] if pipeline_enabled else ["trial"]
         if not pipeline_enabled:
             registration = _trial_execution_registration_payload(settings)
-        elif pipeline_cache_fields is None:
-            registration = _pipeline_registration_payload(settings)
         else:
-            registration = _pipeline_registration_payload(settings, cache_fields=pipeline_cache_fields)
+            registration = _pipeline_registration_payload(settings)
         register_kwargs.update(registration)
         if execution_trust is not None:
             raw_snapshot = dict(registration["capability_snapshot"])
@@ -1314,7 +1219,7 @@ async def _spawn_trial(
             )
             # #275: serialize concurrent task-image builds so a burst of
             # trials cannot fan out unbounded apt-get / dpkg / build
-            # containers on a shared host Docker daemon (e.g. OLDLAB).
+            # containers on the same local Docker daemon.
             task_image = await resolve_task_image(
                 task_config=task_config,
                 task_dir=task_dir,

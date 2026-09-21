@@ -57,10 +57,8 @@ class WorkerSettings(BaseSettings):
     pipeline_runtime_secrets_dir: Path = Path("/dev/shm")
     pipeline_terminal_task_validator_path: Path = Path("/usr/local/bin/loom-terminal-task-validator")
     pipeline_terminal_task_validator_sha256: str = ""
-    pipeline_terminalgen_authoring_enabled: bool = False
     pool_name: str = "default"
     pre_start_heartbeat_interval_sec: float = 60.0
-    require_cgroup_parent: bool = False
     sandbox_identity: str = ""
     sandbox_isolation: bool = False
     sandbox_singleton_image: str = "loom-llm-gateway-sandbox:dev"
@@ -74,7 +72,6 @@ class WorkerSettings(BaseSettings):
     setup_health_min_swap_free_mb: int = 1024
     setup_health_poll_interval_sec: float = 5.0
     setup_health_wait_timeout_sec: float = 300.0
-    slurm_job_id: str = ""
     storage_auth_kind: str = "static_keys"
     storage_backend: str = "minio"
     subprocess_gateway_url: HttpUrl | None = None

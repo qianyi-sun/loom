@@ -184,11 +184,6 @@
     "default": "''",
     "required": false
   },
-  "pipeline_terminalgen_authoring_enabled": {
-    "annotation": "<class 'bool'>",
-    "default": "False",
-    "required": false
-  },
   "pool_name": {
     "annotation": "<class 'str'>",
     "default": "'default'",
@@ -197,11 +192,6 @@
   "pre_start_heartbeat_interval_sec": {
     "annotation": "<class 'float'>",
     "default": "60.0",
-    "required": false
-  },
-  "require_cgroup_parent": {
-    "annotation": "<class 'bool'>",
-    "default": "False",
     "required": false
   },
   "sandbox_identity": {
@@ -267,11 +257,6 @@
   "setup_health_wait_timeout_sec": {
     "annotation": "<class 'float'>",
     "default": "300.0",
-    "required": false
-  },
-  "slurm_job_id": {
-    "annotation": "<class 'str'>",
-    "default": "''",
     "required": false
   },
   "storage_auth_kind": {

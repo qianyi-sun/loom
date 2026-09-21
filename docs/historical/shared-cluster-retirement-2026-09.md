@@ -40,7 +40,10 @@ compatibility inventory marks desktop/GUI and Behavior GPU service workloads
 unsupported; several pipeline and task classes still require conversion.
 Hosted pipeline creation/retry and the shared-cluster Stage 1 smoke endpoints
 are removed. Historical run reads, artifact access and cancellation remain;
-explicit local development keeps the pipeline submission path. The generated
+explicit local development keeps the pipeline submission path and disposable
+workers can receive an explicit runner callback. The automatic Slurm Stage 1
+and TerminalGen worker assembly is retired; it has no Nebius replacement.
+Direct local trial execution remains available. The generated
 compatibility report lists only `nebius-cpu`, with 66 conversion-required classes
 and three unsupported classes at retirement.
 These gaps remain explicit. Removing a hosted path does not certify native

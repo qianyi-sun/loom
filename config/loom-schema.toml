@@ -862,12 +862,6 @@ python_type = "int"
 default     = 0
 description = "Per-container hard PID cap for trial and setup-sidecar containers. Maps to Docker pids_limit. Non-exclusive Slurm policies require a positive ceiling and stay disabled when containment is incomplete."
 
-[service_config.pipeline_terminalgen_authoring_enabled]
-used_by     = ["worker"]
-python_type = "bool"
-default     = false
-description = "Disabled-by-default worker admission for the code-owned terminalgen-authoring@1 runtime. Enabling this flag alone grants no work: pool containment, immutable attempt grants, image contracts, provider bindings, and validation backend capabilities remain mandatory."
-
 [service_config.pipeline_terminal_task_validator_path]
 used_by     = ["worker"]
 python_type = "Path"
@@ -886,13 +880,6 @@ python_type = "Path"
 default     = "/dev/shm"
 description = "Operator-provisioned tmpfs root for attempt-private Pipeline step-JWT directories. Gateway workers fail before registration unless this path is a writable, real directory backed by tmpfs."
 
-[service_config.require_cgroup_parent]
-used_by     = ["worker"]
-python_type = "bool"
-default     = false
-description = "Controller-owned non-exclusive Slurm containment marker. When true, worker startup and every worker-created Docker container require the exact allocation-owned cgroup_parent; missing or malformed values fail closed."
-
-
 [service_config.cgroup_parent]
 used_by     = ["worker"]
 python_type = "str"
@@ -910,12 +897,6 @@ used_by     = ["worker"]
 python_type = "str"
 default     = ""
 description = "Optional exact lowercase 40-character source revision propagated to worker-created container labels."
-
-[service_config.slurm_job_id]
-used_by     = ["worker"]
-python_type = "str"
-default     = ""
-description = "Slurm allocation job ID injected by the batch script. Used with sandbox_identity and candidate_sha to scope Compose and Docker cleanup."
 
 [service_config.compose_project]
 used_by     = ["worker"]

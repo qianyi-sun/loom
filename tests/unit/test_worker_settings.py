@@ -42,7 +42,6 @@ _LOOM_WORKER_ENVS = [
     "LOOM_WORKER_CONTAINER_PIDS",
     "LOOM_WORKER_SANDBOX_IDENTITY",
     "LOOM_WORKER_CANDIDATE_SHA",
-    "LOOM_WORKER_SLURM_JOB_ID",
     "LOOM_WORKER_COMPOSE_PROJECT",
     "HF_TOKEN",
 ]
@@ -206,7 +205,6 @@ def test_slurm_runtime_identity_parses_from_env(
     monkeypatch.setenv("LOOM_WORKER_MINIO_SECRET_KEY", "y")
     monkeypatch.setenv("LOOM_WORKER_SANDBOX_IDENTITY", "dev-a")
     monkeypatch.setenv("LOOM_WORKER_CANDIDATE_SHA", "a" * 40)
-    monkeypatch.setenv("LOOM_WORKER_SLURM_JOB_ID", "12345")
     monkeypatch.setenv(
         "LOOM_WORKER_COMPOSE_PROJECT",
         "loom-dev-a-aaaaaaaaaaaa-12345",
@@ -216,7 +214,6 @@ def test_slurm_runtime_identity_parses_from_env(
 
     assert settings.sandbox_identity == "dev-a"
     assert settings.candidate_sha == "a" * 40
-    assert settings.slurm_job_id == "12345"
     assert settings.compose_project == "loom-dev-a-aaaaaaaaaaaa-12345"
 
 
