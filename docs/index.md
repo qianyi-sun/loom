@@ -7,9 +7,10 @@ databases, or object storage themselves.
 
 This page explains Loom from the outside in. Follow it in order for the system
 model; use the linked pages when you need the contract for one part. All pages
-under `docs/` describe current behavior. Historical decisions, completed
-migrations, research notes, and implementation plans live in
-[`archive/`](../archive/).
+under `docs/` describe current behavior except the explicitly marked
+[`historical/`](historical/shared-cluster-retirement-2026-09.md) records. Hosted
+Loom uses Nebius only. Older decisions, completed migrations, research notes,
+and implementation plans live in [`archive/`](../archive/).
 
 ## 1. Start with Loom's boundary
 

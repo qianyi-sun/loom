@@ -12,6 +12,7 @@ __pycache__/
 venv/
 
 # Node
+/web/coverage/
 node_modules/
 dist/
 build/

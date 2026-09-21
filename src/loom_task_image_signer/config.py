@@ -72,9 +72,8 @@ class SignerSettings(_Closed):
     certificate_file: Path
     private_key_file: Path
     execution: ExecutionSettings
-    publication: KeySettings
     selections: Annotated[tuple[PublicationSelection, ...], Field(min_length=1, max_length=128)]
-    peer_operations: Annotated[dict[Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")], tuple[Literal["keyset", "publication", "execution"], ...]], Field(min_length=1, max_length=128)]
+    peer_operations: Annotated[dict[Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")], tuple[Literal["keyset", "execution"], ...]], Field(min_length=1, max_length=128)]
     limits: SignerServerLimits = SignerServerLimits()
     policy_timeout_seconds: Annotated[float, Field(gt=0, le=10)] = 5.0
     keyset_lifetime_seconds: Annotated[int, Field(ge=1, le=900)] = 300
@@ -87,13 +86,11 @@ class SignerSettings(_Closed):
         root = self.trust_root()
         self.limits.__post_init__()
         if (
-            root.key_id == self.publication.key_id or root.public_key == self.publication.public_bytes()
-            or self.execution.seed_file == self.publication.seed_file
-            or any(selection.environment != root.environment for selection in self.selections)
+            any(selection.environment != root.environment for selection in self.selections)
             or len(set(self.selections)) != len(self.selections)
             or any(not operations or len(set(operations)) != len(operations) for operations in self.peer_operations.values())
         ):
-            raise ValueError("invalid separate signer authorities")
+            raise ValueError("invalid signer authority configuration")
         for path in (self.database_url_file, self.ca_file, self.certificate_file, self.private_key_file):
             if not path.is_absolute() or ".." in path.parts:
                 raise ValueError("signer configuration paths must be absolute")

@@ -197,8 +197,8 @@ def test_batch_debug_evidence_counts_claimed_without_started_trials() -> None:
 def test_batch_debug_evidence_reports_terminal_worker_pool_coverage() -> None:
     team_id = uuid4()
     batch_id = uuid4()
-    oldlab_worker_id = uuid4()
-    gb10_worker_id = uuid4()
+    local_cpu_worker_id = uuid4()
+    local_gpu_worker_id = uuid4()
     now = datetime.now(UTC)
     batch = SimpleNamespace(
         id=batch_id,
@@ -219,9 +219,9 @@ def test_batch_debug_evidence_reports_terminal_worker_pool_coverage() -> None:
         n_per_task=1,
         fanout_errors=None,
     )
-    oldlab_trial = SimpleNamespace(
+    local_cpu_trial = SimpleNamespace(
         id=uuid4(),
-        task_id="skilllearnbench/oldlab/oldlab-1",
+        task_id="skilllearnbench/local_cpu/local_cpu-1",
         state="succeeded",
         failure_reason=None,
         failure_message=None,
@@ -229,13 +229,13 @@ def test_batch_debug_evidence_reports_terminal_worker_pool_coverage() -> None:
         config={},
         provider_connection_id=None,
         provider_model_id=None,
-        worker_id=oldlab_worker_id,
+        worker_id=local_cpu_worker_id,
         claimed_at=now - timedelta(minutes=2),
         started_at=now - timedelta(minutes=1),
     )
-    gb10_trial = SimpleNamespace(
+    local_gpu_trial = SimpleNamespace(
         id=uuid4(),
-        task_id="skilllearnbench/gb10/gb10-1",
+        task_id="skilllearnbench/local_gpu/local_gpu-1",
         state="failed",
         failure_reason="internal_error",
         failure_message="provider disconnected",
@@ -243,24 +243,24 @@ def test_batch_debug_evidence_reports_terminal_worker_pool_coverage() -> None:
         config={},
         provider_connection_id=None,
         provider_model_id=None,
-        worker_id=gb10_worker_id,
+        worker_id=local_gpu_worker_id,
         claimed_at=now - timedelta(minutes=2),
         started_at=now - timedelta(minutes=1),
     )
 
     evidence = build_batch_debug_evidence(
         batch,  # type: ignore[arg-type]
-        trials=[oldlab_trial, gb10_trial],  # type: ignore[list-item]
+        trials=[local_cpu_trial, local_gpu_trial],  # type: ignore[list-item]
         llm_calls=[],
         worker_pool_names_by_id={
-            oldlab_worker_id: "oldlab",
-            gb10_worker_id: "gb10",
+            local_cpu_worker_id: "local_cpu",
+            local_gpu_worker_id: "local_gpu",
         },
     )
 
     assert evidence["trials"]["worker_pools"]["terminal"] == {
-        "gb10": 1,
-        "oldlab": 1,
+        "local_gpu": 1,
+        "local_cpu": 1,
     }
     assert evidence["trials"]["worker_pools"]["unknown_terminal"] == 0
 

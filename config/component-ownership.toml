@@ -62,7 +62,6 @@ compatibility_test_paths = [
   "tests/**/test_capacity_*.py",
   "tests/**/test_personal_dev_*.py",
   "tests/integration/test_protected_claim_application_migration.py",
-  # Keep worker_pool_autoscaler_api: it also validates current Nebius finance.
   # Standalone task-image authority, guard, signer and publication services are
   # not deployed. Nebius builds via NativeTaskImageController instead. Keep
   # build_plan, materialization, registration, pins, migrations and mixed tests.

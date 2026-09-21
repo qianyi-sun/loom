@@ -82,7 +82,9 @@ controllers to create that history.
 The standalone task-image build authority, projection/session APIs, bundle
 issuance, registry token signer, publication worker and collector are retired.
 `loom_task_image_authority` now retains signed execution readers and historical
-publication validation. Slurm cluster/job identifiers in immutable signed
+publication validation. The execution/keyset signer remains for explicit local
+execution of retained trusted images; new shared-cluster publication signing and
+its private-key configuration are removed. Slurm cluster/job identifiers in immutable signed
 publication schemas are required to verify existing records; they do not expose
 a build service. Nebius task-image builds use the native execution actuator.
 
@@ -97,3 +99,19 @@ The shared-cluster deployment workflow and shell deployer are removed. Protected
 release promotion and production evidence verification remain. Native Nebius
 render/apply tools replace the implementation; automated staging/production rollout
 awaits reviewed environment inputs and approval wiring. No deployment occurred.
+
+## Remaining reference classification
+
+[The tracked-reference audit](shared-cluster-reference-audit.json) lists each file
+with remaining legacy terminology, its matching-line count, and its retention
+category. Migration revisions and migration fixtures preserve published lineage;
+signed publication schemas and result snapshots preserve retained-data identity.
+Retirement/rejection tests prove old inputs do not restore hosted support. The
+vendored simulator GPU tuning and generic local resource logic are independent
+of hosted provider selection. Existing archive records are historical only; no
+retired implementation was moved into the archive. Git history remains the source
+archive. Generated coverage and orphan fleet fixtures were deleted.
+
+No cleanup migration drops historical rows. Worker/job evidence, signed image
+provenance and protected grant records remain part of qualified restores; deleting
+them without a retention decision would exceed this repository-only retirement.

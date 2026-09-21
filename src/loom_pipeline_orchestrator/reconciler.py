@@ -90,39 +90,6 @@ class PairedReadinessRuntime:
         return self.renderer.render(candidate, frozen)
 
 
-class CompositeReadinessRuntime:
-    """Fail closed unless exactly one code-owned runtime supports a candidate."""
-
-    def __init__(self, adapters: tuple[ReadinessRuntimeV1, ...]) -> None:
-        if not adapters:
-            raise ValueError("at least one readiness runtime is required")
-        self._adapters = adapters
-
-    def _select(self, candidate: ReadinessCandidate) -> ReadinessRuntimeV1:
-        supported = tuple(adapter for adapter in self._adapters if adapter.supports(candidate))
-        if len(supported) != 1:
-            raise ValueError(
-                "readiness candidate must match exactly one code-owned runtime adapter"
-            )
-        return supported[0]
-
-    def supports(self, candidate: ReadinessCandidate) -> bool:
-        supported = sum(adapter.supports(candidate) for adapter in self._adapters)
-        if supported > 1:
-            raise ValueError(
-                "readiness candidate matches multiple code-owned runtime adapters"
-            )
-        return supported == 1
-
-    async def resolve(self, candidate: ReadinessCandidate) -> FrozenReadiness:
-        return await self._select(candidate).resolve(candidate)
-
-    def render(
-        self, candidate: ReadinessCandidate, frozen: FrozenReadiness
-    ) -> RenderedAttempt:
-        return self._select(candidate).render(candidate, frozen)
-
-
 class PipelineReconciler:
     """Coordinates transaction phases while injected boundary work stays outside them."""
 

@@ -1782,7 +1782,7 @@ async def test_post_batch_rejects_required_worker_pools_on_user_path(
                 "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {},
-                "required_worker_pools": [" oldlab ", "k8s-worker", "oldlab"],
+                "required_worker_pools": [" local-worker ", "k8s-worker", "local-worker"],
             },
         )
 
@@ -1822,13 +1822,13 @@ async def test_admin_on_behalf_required_worker_pools_adds_coverage_count(
                 "purpose": "evaluation",
                 "task_filter": {"license": "MIT"},
                 "trial_config": {},
-                "required_worker_pools": [" oldlab ", "k8s-worker", "oldlab"],
+                "required_worker_pools": [" local-worker ", "k8s-worker", "local-worker"],
             },
         )
 
     assert r.status_code == 201, r.text
     body = r.json()
-    assert body["required_worker_pools"] == ["oldlab", "k8s-worker"]
+    assert body["required_worker_pools"] == ["local-worker", "k8s-worker"]
     assert body["expected_trial_count"] == 5
 
     sl = sessionmaker(sync_engine)
@@ -1837,7 +1837,7 @@ async def test_admin_on_behalf_required_worker_pools_adds_coverage_count(
             select(Batch).where(Batch.id == UUID(body["batch_id"])),
         ).scalar_one()
     sync_engine.dispose()
-    assert row.required_worker_pools == ["oldlab", "k8s-worker"]
+    assert row.required_worker_pools == ["local-worker", "k8s-worker"]
 
 
 async def test_admin_on_behalf_rejects_k8s_worker_pool_when_disabled(
@@ -1879,7 +1879,7 @@ async def test_admin_on_behalf_rejects_k8s_worker_pool_when_disabled(
                     "purpose": "evaluation",
                     "task_filter": {"license": "MIT"},
                     "trial_config": {},
-                    "required_worker_pools": ["oldlab", "k8s-worker"],
+                    "required_worker_pools": ["local-worker", "k8s-worker"],
                 },
             )
     finally:
@@ -1897,7 +1897,7 @@ async def test_admin_on_behalf_without_k8s_worker_pool_still_works_when_disabled
     postgres_url: str,
 ) -> None:
     """The rejection is targeted: a submission that only requires
-    `oldlab` on a k8s-worker-disabled cluster is unaffected."""
+    `local-worker` on a k8s-worker-disabled cluster is unaffected."""
     app, _raw, team_id = camp_setup
     sync_engine = create_engine(postgres_url)
     with sync_engine.begin() as conn:
@@ -1922,11 +1922,11 @@ async def test_admin_on_behalf_without_k8s_worker_pool_still_works_when_disabled
                 json={
                     "represented_username": represented_username,
                     "team_id": str(team_id),
-                    "name": "oldlab-only coverage on disabled cluster",
+                    "name": "local-worker-only coverage on disabled cluster",
                     "purpose": "evaluation",
                     "task_filter": {"license": "MIT"},
                     "trial_config": {},
-                    "required_worker_pools": ["oldlab"],
+                    "required_worker_pools": ["local-worker"],
                 },
             )
     finally:
@@ -3957,7 +3957,7 @@ async def test_get_batch_detail_combination_expected_counts_honor_required_pools
                 expected_trial_count=2,
                 result_status="partial_failed",
                 combinations=combinations,
-                required_worker_pools=["gb10-canary"],
+                required_worker_pools=["local-gpu-canary"],
                 fanout_errors=fanout_errors,
             )
         )

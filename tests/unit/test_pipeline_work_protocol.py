@@ -639,8 +639,6 @@ def test_cleanup_ack_enforces_exact_positive_observations() -> None:
 
 def test_local_attempt_claim_does_not_require_retired_allocation_fields() -> None:
     payload = attempt_claim()
-    payload.pop("slurm_gpu_allocation_evidence", None)
-    payload.pop("slurm_gpu_allocation_evidence_digest", None)
     assert ExecutionAttemptClaimV1.model_validate(payload).execution_attempt_id == ATTEMPT_ID
 
 

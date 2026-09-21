@@ -101,7 +101,7 @@ def test_trial_debug_evidence_includes_stale_running_activity_and_worker_heartbe
         attempt_count=1,
         next_attempt_at=None,
         worker_id=worker_id,
-        requires_caps={"worker_pool": "gb10"},
+        requires_caps={"worker_pool": "local_gpu"},
     )
     task = SimpleNamespace(
         benchmark_id="source-useful-frontier-5003",
@@ -114,8 +114,8 @@ def test_trial_debug_evidence_includes_stale_running_activity_and_worker_heartbe
     )
     worker = SimpleNamespace(
         id=worker_id,
-        hostname="trt-gb10-4",
-        pool_name="gb10",
+        hostname="trt-local_gpu-4",
+        pool_name="local_gpu",
         status="active",
         last_seen_at=worker_seen_at,
     )
@@ -167,8 +167,8 @@ def test_trial_debug_evidence_includes_stale_running_activity_and_worker_heartbe
     assert evidence["activity"]["last_llm_call_at"] == last_llm_at.isoformat()
     assert evidence["activity"]["last_activity_at"] == last_llm_at.isoformat()
     assert evidence["activity"]["silence_sec"] == 3600.0
-    assert evidence["worker"]["hostname"] == "trt-gb10-4"
-    assert evidence["worker"]["pool_name"] == "gb10"
+    assert evidence["worker"]["hostname"] == "trt-local_gpu-4"
+    assert evidence["worker"]["pool_name"] == "local_gpu"
     assert evidence["worker"]["last_heartbeat_at"] == worker_seen_at.isoformat()
     assert evidence["worker"]["heartbeat_age_sec"] == 5.0
     assert evidence["worker"]["heartbeat_fresh"] is True

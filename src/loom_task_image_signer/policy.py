@@ -1,7 +1,7 @@
 """Fixed signing policies over independently read, committed public authority.
 
-The authenticated publication verifier remains responsible for OCI build facts.
-This service checks configured provenance selection and current signing authority;
+Retained publication signatures preserve historical OCI build facts.
+This service checks their configured provenance and current execution authority;
 it does not claim to fetch registry bytes or grant complete-set readiness.
 """
 
@@ -17,12 +17,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import UUID
 
-from pydantic import TypeAdapter
 from sqlalchemy import exists, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from loom.db.schema import TaskImageExecutionGrant, TaskImageExecutionStart
-from loom_task_image_authority.contracts import Identifier
 from loom_task_image_authority.execution_grant import (
     EXECUTION_GRANT_DOMAIN,
     MAX_EXECUTION_GRANT_BYTES,
@@ -44,8 +42,6 @@ from loom_task_image_authority.keyset_signing_request import (
     decode_keyset_signing_request,
 )
 from loom_task_image_authority.publication_contracts import (
-    PUBLICATION_DOMAIN,
-    PublicationEnvelope,
     PublicationUnsignedInput,
     canonical_publication_bytes,
     decode_publication_envelope,
@@ -65,12 +61,6 @@ from loom_task_image_authority.publication_keyset_store import (
     StoredPublicationKeyset,
     prepare_keyset,
     read_keyset,
-)
-from loom_task_image_authority.publication_signing import (
-    DistributedKeysetSnapshot,
-    PublicationKeyRecord,
-    prepare_publication_statement,
-    verify_publication_reply,
 )
 
 
@@ -103,8 +93,8 @@ def _b64(value: bytes) -> str:
 class PublicationSelection:
     """Stable operator selection, not per-allocation attestation or job identity.
 
-    The authenticated verifier supplies dynamic build/containment facts. Those
-    facts remain signed and checked by the final publication authority.
+    Retained publications contain the historical build/containment facts.
+    Execution signing checks their provenance against this configured allowlist.
     """
 
     environment: str
@@ -145,13 +135,11 @@ class SignerPolicy:
 
     def __init__(
         self, engine: AsyncEngine, *, trust_root: ExecutionGrantTrustRoot,
-        publication_key_id: str, publication_provider: SigningProvider,
         execution_provider: SigningProvider, selections: tuple[PublicationSelection, ...],
         clock: Callable[[], datetime] = _clock, timeout_seconds: float = 5.0,
         keyset_lifetime_seconds: int = 300,
     ) -> None:
         trust_root.__post_init__()
-        TypeAdapter(Identifier).validate_python(publication_key_id, strict=True)
         if (
             type(timeout_seconds) is not float or not math.isfinite(timeout_seconds)
             or not 0 < timeout_seconds <= 10
@@ -159,18 +147,15 @@ class SignerPolicy:
             or type(selections) is not tuple or not 1 <= len(selections) <= 128
             or any(type(item) is not PublicationSelection or item.environment != trust_root.environment for item in selections)
             or len(set(selections)) != len(selections)
-            or type(publication_provider.public_key) is not bytes or len(publication_provider.public_key) != 32
             or execution_provider.public_key != trust_root.public_key
-            or publication_provider.public_key == execution_provider.public_key
-            or publication_key_id == trust_root.key_id
         ):
             raise ValueError("invalid fixed signer configuration")
-        self._engine, self._root, self._key_id = engine, trust_root, publication_key_id
-        self._publication, self._execution = publication_provider, execution_provider
+        self._engine, self._root = engine, trust_root
+        self._execution = execution_provider
         self._selections, self._clock, self._timeout = selections, clock, timeout_seconds
         self._lifetime = timedelta(seconds=keyset_lifetime_seconds)
 
-    async def _read(self, *, publication: bool) -> tuple[KeysetPreparation, StoredPublicationKeyset | None]:
+    async def _read(self) -> KeysetPreparation:
         async with self._engine.connect() as connection:
             await connection.execution_options(isolation_level="READ COMMITTED")
             async with AsyncSession(connection, expire_on_commit=False) as session, session.begin():
@@ -182,17 +167,12 @@ class SignerPolicy:
                     "pg_catalog.set_config('idle_in_transaction_session_timeout', :bound, true)"
                 ), {"bound": f"{math.ceil(self._timeout * 1000)}ms"})
                 prepared = await prepare_keyset(session, trust_root=self._root)
-                stored = await read_keyset(
-                    session, trust_root=self._root, expected_state=prepared.previous_state, clock=self._clock,
-                ) if publication else None
-        if stored is not None:
-            verify_publication_keyset(stored.wire, trust_root=self._root, expected_state=stored.state, now=self._clock())
-        return prepared, stored
+        return prepared
 
     async def sign_keyset(self, canonical_request: bytes) -> bytes:
         decode_keyset_signing_request(canonical_request)
         async with asyncio.timeout(self._timeout):
-            before, _ = await self._read(publication=False)
+            before = await self._read()
             if _request(before) != canonical_request:
                 raise ValueError("keyset request differs from current authority")
             now = self._clock()
@@ -213,7 +193,7 @@ class SignerPolicy:
                 key_id=self._root.key_id, algorithm="Ed25519", signature=_b64(signature),
             )
             wire = canonical_keyset_bytes(envelope)
-            after, _ = await self._read(publication=False)
+            after = await self._read()
             if after != before:
                 raise ValueError("keyset authority changed during signing")
             verify_publication_keyset(wire, trust_root=self._root, expected_state=before.proposed_state, now=self._clock())
@@ -291,43 +271,5 @@ class SignerPolicy:
                 publication_wires=tuple(item.encode() for item in request.publications), keyset_wire=stored.wire,
                 trust_root=self._root, expected_claim=before.claim, expected_purpose=before.purpose,
                 expected_shadow_campaign_id=before.shadow_campaign_id, now=self._clock(),
-            )
-            return wire
-
-    def _key(self, prepared: KeysetPreparation) -> PublicationKeyRecord:
-        key = next((member.record() for member in prepared.keys if member.key_id == self._key_id), None)
-        if key is None or key.public_key != self._publication.public_key:
-            raise ValueError("configured publication key is not registered")
-        return key
-
-    async def sign_publication(self, canonical_unsigned_input: bytes) -> bytes:
-        unsigned = decode_unsigned_input(canonical_unsigned_input)
-        if PublicationSelection.from_unsigned(unsigned) not in self._selections:
-            raise ValueError("publication provenance selection is not configured")
-        async with asyncio.timeout(self._timeout):
-            before, stored = await self._read(publication=True)
-            assert stored is not None
-            key = self._key(before)
-            distribution = DistributedKeysetSnapshot(
-                keyset_version=stored.state.keyset_version, revocation_epoch=stored.state.revocation_epoch,
-                key_ids=tuple(member.key_id for member in stored.keys),
-                issued_at=stored.issued_at, expires_at=stored.expires_at,
-            )
-            now = self._clock()
-            statement = prepare_publication_statement(
-                unsigned, key=key, state=stored.state, distribution=distribution, signer_now=now,
-            )
-            canonical = canonical_publication_bytes(statement)
-            signature = await self._publication.sign(PUBLICATION_DOMAIN + canonical)
-            wire = canonical_publication_bytes(PublicationEnvelope(
-                canonical_statement=canonical.decode(), statement_sha256=hashlib.sha256(canonical).hexdigest(),
-                key_id=key.key_id, algorithm="Ed25519", signature=_b64(signature),
-            ))
-            after, retained = await self._read(publication=True)
-            if after != before or retained != stored:
-                raise ValueError("publication authority changed during signing")
-            verify_publication_reply(
-                wire, unsigned=unsigned, key=key, state=stored.state, distribution=distribution,
-                requested_at=now, received_at=self._clock(),
             )
             return wire

@@ -2,7 +2,7 @@
 
 The adapter owns request validation, mounted-input identity, process topology,
 bounded artifact extraction, and the final closed rollout document.  It never
-submits Slurm work, performs fan-out, fetches source/data, or uploads outputs.
+submits cluster work, performs fan-out, fetches source/data, or uploads outputs.
 """
 
 from __future__ import annotations
@@ -133,6 +133,8 @@ class RolloutRuntimeContractV1(PipelineModel):
         roles = [role for device in self.devices for role in device.roles]
         if indexes != list(range(len(self.devices))) or sorted(roles) != ["sim", "vla"]:
             raise ValueError("GPU indexes must be contiguous and roles assigned exactly once")
+        if "sim" not in self.devices[0].roles:
+            raise ValueError("simulator role must use logical GPU zero")
         if set(self.system_env) - _BASE_SYSTEM_ENV_KEYS:
             raise ValueError("runtime contract contains an unapproved system environment key")
         for key, value in self.system_env.items():

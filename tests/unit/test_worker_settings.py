@@ -178,7 +178,7 @@ def test_container_caps_parse_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_container_caps_default_unbounded(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Absent env remains 0 for non-Slurm callers; Slurm admission rejects it.
+    # Local development defaults to no per-container caps.
     monkeypatch.setenv("LOOM_WORKER_CONTROL_PLANE_URL", "http://cp:8080")
     monkeypatch.setenv("LOOM_WORKER_GATEWAY_URL", "http://gw:9100")
     monkeypatch.setenv("LOOM_WORKER_TOKEN", "loom_w_test")
@@ -193,8 +193,7 @@ def test_container_caps_default_unbounded(monkeypatch: pytest.MonkeyPatch) -> No
     assert s.container_pids == 0
 
 
-@pytest.mark.legacy_pool
-def test_slurm_runtime_identity_parses_from_env(
+def test_local_runtime_identity_parses_from_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("LOOM_WORKER_CONTROL_PLANE_URL", "http://cp:8080")

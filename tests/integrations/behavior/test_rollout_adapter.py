@@ -1021,3 +1021,11 @@ def test_runtime_topology_is_closed() -> None:
             devices=[RolloutGpuV1(logical_index=0, model="local-gpu", roles=["sim", "vla"])],
             system_env={"API_KEY": "not-allowed"},
         )
+
+
+def test_runtime_rejects_swapped_simulator_device() -> None:
+    with pytest.raises(ValidationError, match="logical GPU zero"):
+        RolloutRuntimeContractV1(devices=[
+            RolloutGpuV1(logical_index=0, model="local-gpu", roles=["vla"]),
+            RolloutGpuV1(logical_index=1, model="local-gpu", roles=["sim"]),
+        ])

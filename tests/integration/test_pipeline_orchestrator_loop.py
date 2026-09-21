@@ -8,7 +8,6 @@ from sqlalchemy import text
 
 from loom.pipeline.keys import canonical_digest, canonical_document
 from loom_pipeline_orchestrator.reconciler import (
-    CompositeReadinessRuntime,
     PipelineReconciler,
     RenderedAttempt,
 )
@@ -58,15 +57,6 @@ class RequestlessRenderer(Renderer):
             stage_request_digest=None,
             reservations=(),
         )
-
-
-class RuntimeAdapter(Resolver, Renderer):
-    def __init__(self, *, supported: bool) -> None:
-        Renderer.__init__(self)
-        self._supported = supported
-
-    def supports(self, _candidate: object) -> bool:
-        return self._supported
 
 
 @pytest.mark.asyncio
@@ -150,15 +140,3 @@ def test_rendered_attempt_rejects_partial_request_group() -> None:
             stage_request_digest=None,
             reservations=(),
         )
-
-
-def test_composite_runtime_requires_exactly_one_adapter() -> None:
-    candidate = object()
-    none = CompositeReadinessRuntime((RuntimeAdapter(supported=False),))
-    assert not none.supports(candidate)  # type: ignore[arg-type]
-
-    ambiguous = CompositeReadinessRuntime(
-        (RuntimeAdapter(supported=True), RuntimeAdapter(supported=True))
-    )
-    with pytest.raises(ValueError, match="multiple code-owned"):
-        ambiguous.supports(candidate)  # type: ignore[arg-type]

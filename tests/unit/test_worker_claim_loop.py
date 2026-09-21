@@ -30,7 +30,6 @@ class _RegistrationSettings:
     pool_name = "worker-pool"
     sandbox_identity = "production"
     candidate_sha = "a" * 40
-    slurm_job_id = "40740"
     compose_project = "loom-production-aaaaaaaaaaaa-40740"
     executor_worker_credential = None
 

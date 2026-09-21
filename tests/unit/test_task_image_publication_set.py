@@ -23,7 +23,7 @@ def module():
 
 def fixture(*, change=None, all_change=None, cpu_arch="arm64", sidecar_name="db"):
     m = module()
-    c, s, private, key, state, distribution, original, _ = setup_signing()
+    c, _s, private, key, state, _distribution, original, _ = setup_signing()
     task = _task_config(cpu_arch=cpu_arch, dockerfile="Dockerfile", sidecars=[
         {"name": sidecar_name, "dockerfile": "db/Dockerfile"},
         {"name": "cache", "docker_image": "example/cache@sha256:" + "c" * 64},
@@ -60,7 +60,13 @@ def fixture(*, change=None, all_change=None, cpu_arch="arm64", sidecar_name="db"
                 "loom-task-image-attempts/", f"loom-task-image-shadow/{payload['shadow_campaign_id']}/",
             )
         unsigned = c.decode_unsigned_input(rfc8785.dumps(payload))
-        statement = s.prepare_publication_statement(unsigned, key=key, state=state, distribution=distribution, signer_now=NOW)
+        statement = c.PublicationStatement.model_validate({
+            **unsigned.model_dump(mode="json", by_alias=True, exclude_none=True),
+            "issued_at": NOW.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "signing_key_id": key.key_id,
+            "distributed_keyset_version": state.keyset_version,
+            "revocation_epoch": state.revocation_epoch,
+        })
         canonical = c.canonical_publication_bytes(statement)
         wire = rfc8785.dumps(dict(canonical_statement=canonical.decode(), statement_sha256=hashlib.sha256(canonical).hexdigest(),
                                 key_id=key.key_id, algorithm="Ed25519", signature=_b64(private.sign(DOMAIN + canonical))))

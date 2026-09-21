@@ -439,7 +439,7 @@ async def test_resolve_trial_image_serializes_builds_across_cache_keys(
 
     The worker must take a daemon-wide build slot before calling
     docker-py build so concurrent setup/install containers cannot
-    saturate a shared OLDLAB/k8s Docker daemon.
+    saturate a shared local Docker daemon.
     """
     cp = _StubCPClient()
     worker_id = uuid4()
