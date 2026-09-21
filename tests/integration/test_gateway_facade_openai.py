@@ -34,6 +34,7 @@ from loom.db.schema import (
     Token,
 )
 from loom.security.secret_store import LocalEncryptedSecretStore
+from loom_llm_gateway import dispatch_audit
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.egress_client_pool import EgressClientPool
@@ -68,6 +69,10 @@ async def facade_setup(
     Tests can override `captures["response"]` to inject different
     canned bodies / statuses.
     """
+    # Keep real audit persistence without turning route/ledger assertions into
+    # a one-second hosted-runner latency test. Admission timeout and fail-closed
+    # behavior are tested explicitly in test_gateway_dispatch_audit.
+    monkeypatch.setattr(dispatch_audit, "_AUDIT_TIMEOUT_SECONDS", 10.0)
     for k, v in {
         "LOOM_GW_DB_URL": postgres_url,
         "LOOM_SECRET_STORE_MASTER_KEY": _TEST_MASTER_KEY,
