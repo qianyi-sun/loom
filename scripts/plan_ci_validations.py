@@ -112,7 +112,6 @@ PROTECTED_DEPLOYMENT_EXACT = {
     "src/loom_cli/migration_readiness.py",
     "tests/loom_cli/test_migration_readiness.py",
     "tests/loom_cli/test_cluster_render.py",
-    "tests/loom_cli/test_environment_state.py",
     "tests/ops/test_deploy_environment_release_manifest.py",
     "tests/ops/test_environment_isolation.py",
     "tests/ops/test_release_identity.py",

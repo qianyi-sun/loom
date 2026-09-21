@@ -145,7 +145,7 @@ where = ["src", "."]
 include = ["loom*", "loom_drivers*", "capacity_guard_migrations*", "capacity_migrations*", "capacity_build_guard_migrations*"]
 
 [tool.setuptools.package-data]
-"loom_cli.data" = ["*.toml", "*.json", "grafana/*.json", "envoy/*.yaml"]
+"loom_cli.data" = ["*.toml", "grafana/*.json", "envoy/*.yaml"]
 # Jinja2 manifests rendered by `loom cluster render`.
 # `importlib.resources.files()` picks these up via the package
 # spec; without this entry they'd be excluded from the wheel.

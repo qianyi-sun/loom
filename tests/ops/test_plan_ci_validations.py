@@ -556,7 +556,6 @@ def test_dependency_authority_changes_select_every_heavy_gate(path: str) -> None
         "tests/ops/test_release_identity.py",
         "tests/ops/test_release_promotion_gate.py",
         "tests/loom_cli/test_cluster_render.py",
-        "tests/loom_cli/test_environment_state.py",
     ],
 )
 def test_protected_deployment_paths_select_every_heavy_gate(path: str) -> None:
