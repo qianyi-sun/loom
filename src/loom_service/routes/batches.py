@@ -240,8 +240,20 @@ class _CreateBatch(BaseModel):
     # when `combinations` is non-empty (each Combination carries
     # its own n_per_task).
     n_per_task: int = Field(default=1, ge=1, le=100)
-    # Hosted submissions default to Nebius. Disposable local stacks use Docker.
-    backend: str = Field(default_factory=lambda: "docker" if local_execution_enabled() else NEBIUS_BACKEND)
+    # Hosted submissions default to Nebius, so callers should omit this. An
+    # explicit "nebius" is compatibility input; any other hosted value is
+    # rejected by _reject_unsupported_hosted_backend before any work.
+    # Disposable local stacks (LOOM_LOCAL_EXECUTION=1) default to Docker.
+    backend: str = Field(
+        default_factory=lambda: "docker" if local_execution_enabled() else NEBIUS_BACKEND,
+        # Not `deprecated=True`: pydantic warns on every attribute read.
+        json_schema_extra={"deprecated": True},
+        description=(
+            "Deprecated. Hosted execution is Nebius-only: omit this field. "
+            "An explicit 'nebius' is accepted for compatibility; other hosted "
+            "values are rejected."
+        ),
+    )
     # Plan 28 PR-3: multi-(agent, model) combinations. Empty list
     # ⇒ single-combination behavior (agent + model come from
     # trial_config).
@@ -422,6 +434,26 @@ def _reject_submission(
     raise HTTPException(status_code=status_code, detail=detail)
 
 
+def _reject_unsupported_hosted_backend(backend: str) -> None:
+    """Reject any explicit non-Nebius backend outside disposable local execution.
+
+    Never reinterprets the request as Nebius: the caller is told to omit it.
+    """
+    if backend != NEBIUS_BACKEND and not local_execution_enabled():
+        _reject_submission(
+            reason="unsupported_hosted_backend",
+            status_code=400,
+            detail={
+                "reason": "unsupported_hosted_backend",
+                "backend": backend,
+                "message": (
+                    "Hosted execution supports Nebius only. "
+                    "Omit `backend` and resubmit."
+                ),
+            },
+        )
+
+
 async def _freeze_task_resource_requests(
     session: Any,
     *,
@@ -507,12 +539,7 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
     automatic_only: bool = False,
 ) -> ServiceExecutionRuntimeProfileV1 | None:
     """Require a native target, or a worker in explicit local development."""
-    if backend != NEBIUS_BACKEND and not local_execution_enabled():
-        _reject_submission(
-            reason="unsupported_hosted_backend", status_code=400,
-            detail={"reason": "unsupported_hosted_backend", "backend": backend,
-                    "message": "Hosted execution supports Nebius only."},
-        )
+    _reject_unsupported_hosted_backend(backend)
     selection_configs = [
         combo.model_dump(mode="json") if isinstance(combo, Combination) else combo
         for combo in combinations
@@ -1053,6 +1080,7 @@ async def _create_batch_record(
     usage_attributed_user_id: UUID | None,
     usage_attributed_actor: str | None,
 ) -> dict[str, Any]:
+    _reject_unsupported_hosted_backend(payload.backend)
     submission_team_id = await _resolve_submission_team_id(
         s,
         ctx,
@@ -2817,6 +2845,21 @@ async def rerun_failed_batch(
             detail="batch not found",
         )
     require_team_or_admin(ctx, b.team_id)
+    if b.backend != NEBIUS_BACKEND and not local_execution_enabled():
+        # Historical batch: readable, but a rerun would inherit its backend.
+        _reject_submission(
+            reason="unsupported_hosted_backend",
+            status_code=400,
+            detail={
+                "reason": "unsupported_hosted_backend",
+                "backend": b.backend,
+                "message": (
+                    f"Batch {batch_id} ran on backend {b.backend!r}, which hosted "
+                    "execution no longer supports. Submit a new batch instead of "
+                    "rerunning failed cases."
+                ),
+            },
+        )
     await _reject_if_team_paused(s, b.team_id)
     _reject_if_k8s_worker_unavailable(request, b.required_worker_pools or [])
 

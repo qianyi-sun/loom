@@ -1212,6 +1212,15 @@ def test_admin_batches_submit_on_behalf_posts_payload_and_actor_header(
     assert "loom_admin_abcdefgh" not in captured.err
 
 
+def test_admin_batches_submit_on_behalf_help_does_not_advertise_backend(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(["admin", "batches", "submit-on-behalf", "--help"])
+    assert excinfo.value.code in (0, None)
+    assert "--backend" not in capsys.readouterr().out
+
+
 def test_admin_batches_submit_on_behalf_requires_admin_actor_before_request(
     mock_server: _MockServer,
     capsys: pytest.CaptureFixture[str],

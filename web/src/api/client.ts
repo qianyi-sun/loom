@@ -494,14 +494,13 @@ export function retryPipelineStageRun(
   );
 }
 
-/** Backend catalog entry returned by GET /api/v1/backends. */
+/** Backend status returned by GET /api/v1/backends. Nebius is the only
+ * hosted backend, so this is a read-only status view: submissions never
+ * select a backend. */
 export interface Backend {
   name: string;
   description: string;
-  /** True when at least one live worker advertises this backend. The
-   * SPA renders unavailable backends as greyed-out so users see the
-   * full set of drivers Loom ships while understanding which can run
-   * a batch right now. */
+  /** True when at least one live worker advertises this backend. */
   available: boolean;
   /** True when a fresh, healthy autoscaler policy or service-execution target
    * can start compatible capacity. This is planning headroom, not immediately
@@ -588,7 +587,6 @@ export interface CreateBatchBody {
   description?: string;
   /** evaluation = native benchmarks + verification; trajectory_generation = TaskSets/benchmarks, verifier optional */
   purpose: "evaluation" | "trajectory_generation";
-  backend: string;
   task_filter: TaskFilter;
   trial_config: Record<string, unknown>;
   combinations?: Combination[];

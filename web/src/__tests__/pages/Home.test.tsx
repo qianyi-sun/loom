@@ -153,6 +153,9 @@ describe("Home overview", () => {
     expect(screen.getByText("1 ready")).toBeInTheDocument();
     expect(screen.getByText("1 runnable")).toBeInTheDocument();
     expect(screen.getByText("1 active")).toBeInTheDocument();
+    // Submissions always run on Nebius; legacy worker adapters are not shown.
+    expect(screen.queryByText("Backends")).not.toBeInTheDocument();
+    expect(screen.queryByText("docker, fake")).not.toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: "Create a batch" }),
     ).toHaveAttribute("href", "/batches/new");

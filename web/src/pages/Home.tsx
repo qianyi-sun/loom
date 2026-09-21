@@ -284,16 +284,6 @@ function OverviewContent({ data }: { data: OverviewSummary }): JSX.Element {
               title="Trials currently running for this team."
             />
           </div>
-          <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
-            <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">
-              Backends
-            </p>
-            <p className="mt-1 text-slate-700">
-              {data.worker_health.available_backends.length > 0
-                ? data.worker_health.available_backends.join(", ")
-                : "No active backend"}
-            </p>
-          </div>
           <LatestBatch data={data} />
         </HealthCard>
       </div>

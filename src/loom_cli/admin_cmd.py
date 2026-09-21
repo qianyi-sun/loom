@@ -31,6 +31,7 @@ from typing import Any, cast
 import httpx
 
 from loom.security.redaction import RedactedEnvironmentEntry, redact_environment_mapping
+from loom_cli.backend_flag import add_legacy_backend_flag, warn_legacy_backend_flag
 from loom_cli.secret_source import (
     SecretSourceError,
 )
@@ -1011,6 +1012,7 @@ def _admin_submit_batch_on_behalf(args: argparse.Namespace) -> int:
     if not admin_actor:
         sys.stderr.write("error: --admin-actor is required for admin on-behalf submission\n")
         return 2
+    warn_legacy_backend_flag(args.backend)
     if args.task_filter is not None and args.benchmark is not None:
         sys.stderr.write(
             "error: --benchmark and --task-filter are mutually exclusive "
@@ -1901,11 +1903,7 @@ def dispatch(argv: list[str]) -> int:
         default=None,
         help="Number of trials per task (1-100).",
     )
-    p_submit_on_behalf.add_argument(
-        "--backend",
-        default=None,
-        help="Worker backend (default: server default).",
-    )
+    add_legacy_backend_flag(p_submit_on_behalf)
     p_submit_on_behalf.add_argument(
         "--required-worker-pool",
         dest="required_worker_pool",

@@ -2408,11 +2408,117 @@ async def test_post_docker_does_not_implicitly_select_nebius(
 
 
 @pytest.mark.usefixtures("hosted_environment")
-async def test_post_accepts_explicit_nebius_backend_without_legacy_worker(
+@pytest.mark.parametrize("backend", ["docker", "modal", "fake", "Nebius"])
+async def test_post_rejects_unsupported_backend_when_hosted(
+    camp_setup: tuple[FastAPI, str, UUID],
+    backend: str,
+) -> None:
+    """Hosted execution is Nebius-only. Any other explicit value is rejected
+    before task resolution with an actionable error, even when a live worker
+    advertises it; it is never reinterpreted as Nebius."""
+    app, raw, _team_id = camp_setup
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "retired-backend",
+                "purpose": "evaluation",
+                # Would match zero tasks; the backend check must fire first.
+                "task_filter": {"license": "no-such-license"},
+                "trial_config": {},
+                "backend": backend,
+            },
+        )
+
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert detail["reason"] == "unsupported_hosted_backend"
+    assert detail["backend"] == backend
+    assert "Nebius only" in detail["message"]
+    assert "Omit `backend`" in detail["message"]
+
+
+@pytest.mark.usefixtures("hosted_environment")
+async def test_rerun_failed_rejects_batch_on_retired_backend_when_hosted(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
 ) -> None:
-    """The explicit Nebius backend is admitted by a fresh Nebius target."""
+    """Historical batches stay readable, but a hosted rerun cannot dispatch to
+    the backend they were originally submitted with."""
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="historical-docker",
+                task_filter={"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+                trial_config={
+                    "agent_name": "litellm",
+                    "agent_model": {"provider": "openai", "name": "qwen"},
+                },
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=1,
+                n_per_task=1,
+                backend="docker",
+                result_status="all_failed",
+                finished_at=datetime.now(UTC),
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=uuid4(),
+                task_id="local/mit-0",
+                team_id=team_id,
+                state="failed",
+                failure_reason="gateway_error",
+                failure_message="Loom gateway returned HTTP 503.",
+                config={},
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+                batch_id=batch_id,
+                sample_idx=0,
+                combination_idx=0,
+            )
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        rerun = await ac.post(
+            f"/api/v1/batches/{batch_id}/rerun-failed",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        detail = await ac.get(
+            f"/api/v1/batches/{batch_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    sync_engine.dispose()
+    assert rerun.status_code == 400, rerun.text
+    body = rerun.json()["detail"]
+    assert body["reason"] == "unsupported_hosted_backend"
+    assert "ran on backend 'docker'" in body["message"]
+    assert "Submit a new batch" in body["message"]
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["backend"] == "docker"
+
+
+@pytest.mark.usefixtures("hosted_environment")
+@pytest.mark.parametrize("send_backend", [True, False], ids=["explicit-nebius", "omitted"])
+async def test_post_accepts_explicit_nebius_backend_without_legacy_worker(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+    send_backend: bool,
+) -> None:
+    """Nebius is admitted by a fresh Nebius target, whether or not `backend`
+    is sent: an explicit "nebius" is compatibility input and an omitted value
+    resolves to Nebius server-side."""
     app, raw, team_id = camp_setup
     task_id = "local/explicit-nebius"
     target_id = "nebius-explicit-backend-test"
@@ -2479,7 +2585,7 @@ async def test_post_accepts_explicit_nebius_backend_without_legacy_worker(
                         "task_ids": [task_id],
                     },
                     "trial_config": {},
-                    "backend": "nebius",
+                    **({"backend": "nebius"} if send_backend else {}),
                 },
             )
 

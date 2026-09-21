@@ -1615,6 +1615,67 @@ def test_batch_create_forwards_optional_fields(
     assert body["backend"] == "fake"
 
 
+_BACKEND_CREATE_ARGV = [
+    "eval", "batch", "create", "--purpose", "evaluation",
+    "--provider", "openai-prod", "--model", "gpt-4o",
+    "--agent", "litellm", "--benchmark", "humaneval",
+]
+
+
+def test_batch_create_help_does_not_advertise_backend(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(["eval", "batch", "create", "--help"])
+    assert excinfo.value.code in (0, None)
+    assert "--backend" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("backend", ["nebius", "docker"])
+def test_batch_create_backend_flag_is_deprecated_but_forwarded(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+    backend: str,
+) -> None:
+    """The hidden legacy flag warns and forwards the value: the service is the
+    single authority (hosted accepts `nebius` and rejects the rest; a disposable
+    local stack defaults to a worker backend, so dropping `nebius` here would
+    silently reinterpret it)."""
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201, json={"batch_id": _BATCH_ID, "expected_trial_count": 1, "state": "submitted"},
+    )
+    assert main([*_BACKEND_CREATE_ARGV, "--backend", backend]) == 0
+    payload = json.loads(next(r.content for r in mock_server.requests if r.method == "POST"))
+    assert payload["backend"] == backend
+    assert "--backend is deprecated" in capsys.readouterr().err
+
+
+def test_batch_create_without_backend_flag_sends_no_backend(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201, json={"batch_id": _BATCH_ID, "expected_trial_count": 1, "state": "submitted"},
+    )
+    assert main(_BACKEND_CREATE_ARGV) == 0
+    payload = json.loads(next(r.content for r in mock_server.requests if r.method == "POST"))
+    assert "backend" not in payload
+    assert "deprecated" not in capsys.readouterr().err
+
+
+def test_batch_show_prints_historical_backend_without_inventing_one(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from loom_cli.eval_cmd import _print_batch_summary
+
+    _print_batch_summary({"batch_id": _BATCH_ID, "backend": "docker"})
+    assert "backend:               docker" in capsys.readouterr().out
+    _print_batch_summary({"batch_id": _BATCH_ID})
+    assert "backend:               (unknown)" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("agent_version", [None, "harbor-0.18.0-abc123"])
 def test_batch_create_serializes_selected_agent_version(mock_server, agent_version):
     _stub_connection_lookup(mock_server)

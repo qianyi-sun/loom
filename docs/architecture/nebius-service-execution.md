@@ -812,6 +812,30 @@ Historical `Batch.backend`, worker capabilities, pool names, routing decisions,
 and attempt records remain readable for audit and artifact access; their
 presence does not grant current execution authority.
 
+### Submission contract for `backend` (#1992)
+
+Users never choose a backend on Web, CLI or API. In a hosted environment:
+
+| Input | Result |
+| --- | --- |
+| `backend` omitted (Web, CLI and the default API call) | The server resolves it to `nebius`. |
+| Explicit `backend=nebius` (or the hidden, deprecated CLI `--backend nebius`) | Accepted as compatibility input only; it is not a choice. |
+| Any other explicit value (`docker`, `modal`, `fake`, other casing) | Rejected with a 400 (`unsupported_hosted_backend`) before any task, filter or capacity work. It is never reinterpreted as Nebius. |
+
+The CLI flag is hidden from `--help` and prints a deprecation warning; it still
+forwards the value so the service stays the single authority.
+
+A Batch already recorded on a retired backend (for example `docker`) stays
+readable with that backend as history. Rerun-failed, clone-config and artifact
+reuse refuse it in a hosted environment and tell the user to submit a new
+Batch, because they would otherwise inherit the retired backend or relabel it
+as Nebius without Nebius admission.
+
+Disposable local execution (`LOOM_LOCAL_EXECUTION=1` in a development
+environment) is a separate contract: its service default is a local worker
+backend and the checks above do not apply. `loom run --backend` remains local
+driver selection and is unchanged.
+
 Monitor and Trial Detail telemetry reports configured headroom separately from
 fresh executable slots, node/autoscaler/quota state, Pod lifecycle, canonical
 transfer backlog/retries, and source cleanup. Non-admin responses omit target
