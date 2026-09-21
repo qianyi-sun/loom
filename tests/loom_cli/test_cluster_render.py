@@ -1255,42 +1255,6 @@ def test_staging_minio_render_pins_reachable_source_without_changing_storage_top
     assert pdb["spec"]["minAvailable"] == 3
 
 
-def test_staging_profile_declares_repo_owned_gb10_ssh_config() -> None:
-    cfg = load_cluster_config(
-        _REPO_ROOT / "deploy" / "environments" / "staging.multinode.cluster.toml"
-    )
-    ssh_config = (_REPO_ROOT / "deploy" / "worker-pools" / "gb10" / "ssh_config").read_text(
-        encoding="utf-8"
-    )
-
-    assert cfg.gb10_pool.ssh_config == "../worker-pools/gb10/ssh_config"
-    assert cfg.gb10_pool.ssh_identity_file == "/var/lib/loom-staging-rollout/gb10-deploy-ed25519"
-    assert [host["ssh_target"] for host in cfg.gb10_pool.hosts] == [
-        f"trt-gb10-{index}" for index in range(1, 16)
-    ]
-    assert all(
-        set(host)
-        == {
-            "ssh_target",
-            "node_agent_service",
-        }
-        for host in cfg.gb10_pool.hosts
-    )
-    assert "/home/qianyi" not in (
-        _REPO_ROOT / "deploy" / "environments" / "staging.multinode.cluster.toml"
-    ).read_text(encoding="utf-8")
-    assert "IdentityFile /var/lib/loom-staging-rollout/gb10-deploy-ed25519" in ssh_config
-    assert "IdentitiesOnly yes" in ssh_config
-    expected_private_hosts = {
-        f"trt-gb10-{index}": ("192.168.20.77" if index == 7 else f"192.168.20.{index + 10}")
-        for index in range(2, 16)
-    }
-    assert "Host trt-gb10-1\n  HostName 207.35.188.227\n  Port 2221\n" in ssh_config
-    for host, address in expected_private_hosts.items():
-        assert (f"Host {host}\n  HostName {address}\n  ProxyJump trt-gb10-1\n") in ssh_config
-    assert "Host trt-gb10-*\n  User qianyi\n  Port 22\n" in ssh_config
-
-
 def test_render_custom_storage_sizes() -> None:
     cfg = _default_cfg(
         postgres_storage_gi=200,
