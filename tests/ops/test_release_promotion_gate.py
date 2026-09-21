@@ -1025,40 +1025,12 @@ def test_release_promotion_workflow_uploads_candidate_evidence() -> None:
         index for index, step in enumerate(job["steps"]) if "actions/upload-artifact" in str(step)
     )
     assert validate_step < verify_step < upload_step
-    assert "scripts/validate_environment_isolation.py" in str(job)
-    assert "deploy/environments/staging.multinode.cluster.toml" in str(job)
-    assert "deploy/environments/production.cluster.toml" in str(job)
+    assert "tests/unit/test_nebius_platform_render.py" in str(job)
+    assert "tests/ops/test_deploy_nebius_platform.py" in str(job)
     assert "actions/upload-artifact" in str(job)
     assert "release-gate-evidence" in str(job)
 
 
-def test_production_deploy_requires_successful_release_gate() -> None:
-    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/deploy-environment.yml").read_text())
-    dispatch_inputs = _workflow_on(workflow)["workflow_dispatch"]["inputs"]
-    assert dispatch_inputs["candidate_sha"]["required"] is False
-    assert dispatch_inputs["release_gate_run_id"]["required"] is False
-    assert workflow["permissions"]["actions"] == "read"
-
-    prod_job = workflow["jobs"]["deploy-production"]
-    assert prod_job["environment"]["name"] == "production"
-    assert prod_job["env"]["LOOM_CANDIDATE_SHA"] == "${{ inputs.candidate_sha }}"
-    assert prod_job["env"]["LOOM_RELEASE_GATE_RUN_ID"] == "${{ inputs.release_gate_run_id }}"
-    step_names = [step.get("name", "") for step in prod_job["steps"]]
-    assert step_names.index("Verify release gate evidence") < step_names.index("Deploy production")
-    assert "scripts/ops/verify_production_release_gate.sh" in str(prod_job)
-    assert "refs/heads/main" in prod_job["if"]
-    assert "refs/tags/" not in prod_job["if"]
-
-    steps = prod_job["steps"]
-    verify_index = next(
-        index
-        for index, step in enumerate(steps)
-        if step.get("name") == "Verify release gate evidence"
-    )
-    setup_uv_index = next(
-        index for index, step in enumerate(steps) if "astral-sh/setup-uv" in str(step)
-    )
-    assert verify_index < setup_uv_index
 
 
 def test_release_pr_template_requires_exact_promotion_evidence() -> None:

@@ -214,10 +214,6 @@ def test_ci_requires_real_locked_install_on_nebius_server_architecture() -> None
     assert setup_uv["with"]["checksum"] == MATRIX_CHECKSUM_EXPRESSION
 
 
-def test_deploy_environment_installs_locked_runtime() -> None:
-    deploy_script = (ROOT / "scripts/ops/deploy_environment.sh").read_text(encoding="utf-8")
-    assert "uv sync --locked --extra cluster --python 3.11" in deploy_script
-    assert "uv run --no-sync" in deploy_script
 
 
 

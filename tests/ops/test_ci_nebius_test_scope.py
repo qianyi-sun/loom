@@ -122,7 +122,7 @@ def test_scope_is_conservative_for_unknown_common_inputs_and_rejects_invalid_mod
 
 
 @pytest.mark.parametrize("scope", ["nebius", "all"])
-def test_old_cluster_render_and_isolation_commands_are_manual_only(tmp_path, scope):
+def test_cluster_gate_checks_supported_contracts_without_retired_render_commands(tmp_path, scope):
     workflow = yaml.safe_load((ROOT / ".github/workflows/cluster-smoke.yml").read_text())
     step = next(s for s in workflow["jobs"]["cluster-contract"]["steps"]
                 if s.get("name") == "Verify manifest-owned k3s and rollout candidate contracts")
@@ -137,8 +137,8 @@ def test_old_cluster_render_and_isolation_commands_are_manual_only(tmp_path, sco
                               "CI_TEST_SCOPE": scope, "CALL_LOG": str(calls)})
     assert run.returncode == 0, run.stderr
     observed = calls.read_text()
-    assert ("validate_environment_isolation.py" in observed) == (scope == "all")
-    assert ("loom cluster render" in observed) == (scope == "all")
+    assert "validate_environment_isolation.py" not in observed
+    assert "loom cluster render" not in observed
     assert "pytest" in observed
 
 

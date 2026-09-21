@@ -91,3 +91,8 @@ This is a repository retirement. It neither performs nor proves infrastructure
 shutdown, credential revocation, DNS changes, live data migration or cleanup.
 Those operations require their own scoped authority and recovery evidence.
 Ordinary CI is not proof of completed live migration or workload acceptance.
+
+The shared-cluster deployment workflow and shell deployer are removed. Protected
+release promotion and production evidence verification remain. Native Nebius
+render/apply tools replace the implementation; automated staging/production rollout
+awaits reviewed environment inputs and approval wiring. No deployment occurred.

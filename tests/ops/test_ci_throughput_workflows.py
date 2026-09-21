@@ -433,15 +433,8 @@ def test_cluster_smoke_consumes_manifest_owned_lane_paths() -> None:
     assert any(line.strip().startswith("uv run --no-sync pytest ")
                and '"${test_paths[@]}"' in line for line in scripts.splitlines())
     assert "CI_PYTEST_MARKERS" in scripts
-    assert "scripts/validate_environment_isolation.py" in scripts
-    normalized_scripts = " ".join(scripts.replace("\\\n", " ").split())
-    for config in (
-        "deploy/environments/staging.multinode.cluster.toml",
-        "deploy/environments/production.cluster.toml",
-    ):
-        assert config in normalized_scripts
-    assert 'loom cluster render --config "${config}"' in normalized_scripts
-    assert 'loom cluster audit --config "${config}"' in normalized_scripts
+    assert "validate_environment_isolation.py" not in scripts
+    assert "loom cluster render" not in scripts
     assert contract["timeout-minutes"] <= 15
 
 

@@ -17,21 +17,14 @@ GitHub Environment secrets separate.
 | staging | pinned `dev` SHA | `loom-staging` | `https://yylx.world/staging` | `https://yylx.world/staging/api` |
 | production | `main` | `loom-prod` | `https://yylx.world/prod` | `https://yylx.world/prod/api` |
 
-The checked-in profiles are under `deploy/environments/`. Validate their
-identity and the deployment workflow before promotion:
+Use the [native Nebius deployment procedure](../ops/nebius-deployment.md) with
+reviewed environment JSON, signed candidate, runtime profile and trusted keyring.
+The shared-cluster deployment workflow is retired. Automated hosted rollout is
+unavailable until environment-specific native inputs and approval wiring are
+reviewed; repository examples do not establish live staging or production identity.
 
-```bash
-uv run --no-sync python scripts/validate_environment_isolation.py \
-  --profiles-dir deploy/environments \
-  --workflow .github/workflows/deploy-environment.yml \
-  --dry-run-artifact release-evidence/environment-isolation-dry-run.json
-```
-
-The generic `.github/workflows/deploy-environment.yml` deployment path owns
-development and production only. It rejects staging; validation of the staging
-profile here does not grant the hosted workflow staging mutation authority.
-
-Dry-run evidence may contain safe secret references, but never credentials,
+Release promotion still requires candidate evidence and production approval.
+Evidence may contain safe secret references, never credentials,
 bearer tokens, signed URLs, object-store keys, or provider API keys.
 
 ## Locked operator environment
@@ -292,9 +285,11 @@ an arbitrary branch or tag.
    `main-promotion-gate` is the only merge authority for `main`.
    If `dev` advances, select and validate the new head rather than reusing stale
    evidence.
-6. Dispatch `.github/workflows/deploy-environment.yml` from `main` with
-   `environment=production`, the same `candidate_sha` and `image_tag`, and the
-   successful `release_gate_run_id`.
+6. For `environment=production`, verify the same `candidate_sha` and `image_tag`
+   with the successful `release_gate_run_id` using
+   `scripts/ops/verify_production_release_gate.sh` from `main`. Retain Production
+   Environment approval and reviewed native target evidence before following the
+   Nebius deployment procedure. The retired workflow cannot deploy this release.
 7. Put the recorded immutable `prod_tag` on the merged `main` commit. Never
    reuse or force-move a published production tag.
 

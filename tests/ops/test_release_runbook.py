@@ -27,7 +27,7 @@ def test_current_release_docs_cover_executable_validation_and_promotion() -> Non
     staging = _read(STAGING_VALIDATION)
 
     for fragment in (
-        "scripts/validate_environment_isolation.py",
+        "scripts/ops/verify_production_release_gate.sh",
         "scripts/ops/release_gate.py validate",
         "scripts/ops/frontend_route_smoke.py --help",
         "scripts/staging_smoke_gate.py",
@@ -36,8 +36,8 @@ def test_current_release_docs_cover_executable_validation_and_promotion() -> Non
     ):
         assert fragment in operator or fragment in staging
 
-    assert ".github/workflows/deploy-environment.yml" in operator
-    assert "development and production only" in operator
+    assert "shared-cluster deployment workflow is retired" in operator
+    assert "Automated hosted rollout is" in operator
     assert "does not deploy staging" in staging
     assert "../ops/nebius-deployment.md" in operator
     assert "environment=production" in operator
@@ -83,7 +83,7 @@ def test_current_release_docs_bind_identity_and_immutable_tags() -> None:
 def test_current_release_docs_dispatch_production_from_main_only() -> None:
     operator = _read(OPERATOR_RUNBOOK)
 
-    assert "deploy-environment.yml` from `main`" in operator
+    assert "verify_production_release_gate.sh` from `main`" in operator
     assert "not deployed from\nan arbitrary branch or tag" in operator
 
 
