@@ -17,6 +17,10 @@ publish or deploy new candidates from it. Use the successful `nebius-candidate`
 run for the exact merged `dev` commit, with its matching candidate and runtime
 profile. Candidate publication does not itself deploy the environment.
 
+Published platform and task images have a separate
+[image-retention maintenance workflow](nebius-image-retention.md). Its initial
+daily mode is preview; rollout skip decisions do not delete registry images.
+
 For the batch-purpose release, the existing dev database advances from `0150`
 to `0151` through the normal migration Job after backup. Do not deploy the old
 integration branch's `0137_batch_purpose` migration against a dev-lineage database,

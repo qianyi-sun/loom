@@ -1,0 +1,74 @@
+name: nebius-image-retention
+
+on:
+  schedule:
+    - cron: '23 7 * * *'
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Perform bounded deletion after reviewing a preview
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Separate from rollout's pending slot; the database idle guard coordinates
+# actual mutations without cancelling a pending version deployment.
+concurrency:
+  group: nebius-image-retention
+  cancel-in-progress: false
+
+jobs:
+  maintain:
+    if: github.repository == 'qianyi-sun/loom' && github.ref == 'refs/heads/dev' && vars.NEBIUS_RELEASE_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: nebius-integration
+      deployment: false
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: '0.11.26'
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+      - run: uv sync --locked --no-dev --extra cluster
+      - name: Preview or perform native image retention
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.NEBIUS_DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.NEBIUS_DEPLOY_SSH_KNOWN_HOSTS }}
+          LOOM_DEPLOY_SSH_TARGET: ${{ vars.NEBIUS_DEPLOY_SSH_TARGET }}
+          REMOTE_KUBECONFIG: ${{ vars.NEBIUS_DEPLOY_KUBECONFIG_PATH }}
+          CLUSTER_ID: ${{ vars.NEBIUS_DEPLOY_CLUSTER_ID }}
+          REGISTRY_PREFIX: ${{ vars.NEBIUS_REGISTRY_PREFIX }}
+          REGISTRY_CREDENTIALS: ${{ secrets.NEBIUS_REGISTRY_SERVICE_ACCOUNT_JSON }}
+          APPLY: ${{ github.event_name == 'workflow_dispatch' && inputs.apply || github.event_name == 'schedule' && vars.NEBIUS_IMAGE_RETENTION_APPLY == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          work=$(mktemp -d "$RUNNER_TEMP/nebius-retention.XXXXXX")
+          trap 'rm -rf -- "$work"' EXIT
+          export LOOM_DEPLOY_SSH_KEY_FILE="$work/ssh-key"
+          export LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE="$work/known-hosts"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$LOOM_DEPLOY_SSH_KEY_FILE"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"
+          printf '%s\n' "$REGISTRY_CREDENTIALS" > "$work/registry.json"
+          unset DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS REGISTRY_CREDENTIALS
+          args=()
+          if [[ "$APPLY" == 'true' ]]; then args+=(--apply); fi
+          uv run --no-sync python scripts/ops/nebius_image_retention.py \
+            --kubeconfig "$REMOTE_KUBECONFIG" --expected-cluster-id "$CLUSTER_ID" \
+            --registry-prefix "$REGISTRY_PREFIX" --credentials "$work/registry.json" \
+            --output "$RUNNER_TEMP/image-retention.json" "${args[@]}"
+      - name: Retain the decision and deletion report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nebius-image-retention-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/image-retention.json
+          if-no-files-found: ignore
+          retention-days: 30
