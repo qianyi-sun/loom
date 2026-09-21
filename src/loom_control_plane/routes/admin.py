@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -12,7 +11,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import insert, select, text, update
+from sqlalchemy import insert, text
 
 from loom.agent_runtime import AgentRuntimeReleaseV1
 from loom.agent_runtime_registry import AgentRuntimeConflictError, register_agent_runtime
@@ -22,9 +21,9 @@ from loom.db.schema import (
     ExecutionCapacityPolicy,
     ServiceExecutionTarget,
     Token,
-    WorkerPoolAutoscalerPolicy,
 )
 from loom.execution_image_admission import ImageAdmissionError, ImageAdmissionKeyring
+from loom.service_execution_backend import local_execution_enabled
 from loom_control_plane.execution_admission import (
     fetch_execution_admission_status,
     upsert_execution_admission_policy,
@@ -357,6 +356,12 @@ async def issue_worker_token(
 ) -> dict[str, str]:
     await _require_admin_scope(request, authorization, "admin:tokens")
 
+    if not local_execution_enabled():
+        raise HTTPException(
+            status_code=409,
+            detail="worker credentials are available only for explicit local development",
+        )
+
     raw_bytes = secrets.token_bytes(32)
     raw = "loom_w_" + raw_bytes.hex()
     token_hash = hashlib.sha256(raw.encode()).digest()
@@ -366,34 +371,6 @@ async def issue_worker_token(
         expires_at = datetime.now(UTC) + timedelta(days=int(days))
 
     async with request.app.state.session_factory() as session:
-        environment = os.environ.get("LOOM_ENV", "")
-        if environment.startswith("dev-"):
-            # The management supervisor is allowed to mint a worker credential
-            # only while this isolated instance has a live, non-zero external
-            # Slurm policy. Locking the policy serializes issuance with the
-            # drain-to-zero update; teardown therefore cannot race a late token
-            # into a keep-data database after bulk revocation.
-            policy = (
-                await session.execute(
-                    select(WorkerPoolAutoscalerPolicy)
-                    .where(
-                        WorkerPoolAutoscalerPolicy.environment == environment,
-                        WorkerPoolAutoscalerPolicy.actuator == "slurm",
-                        WorkerPoolAutoscalerPolicy.enabled.is_(True),
-                        WorkerPoolAutoscalerPolicy.max_slots > 0,
-                    )
-                    .with_for_update(),
-                )
-            ).scalar_one_or_none()
-            if (
-                policy is None
-                or not isinstance(policy.actuator_config, dict)
-                or policy.actuator_config.get("external_runner") is not True
-            ):
-                raise HTTPException(
-                    status_code=409,
-                    detail="worker credentials require an active development capacity policy",
-                )
         await session.execute(
             insert(Token).values(
                 token_hash=token_hash,
@@ -644,42 +621,6 @@ async def revoke_token(
         )
         await session.commit()
     return {"status": "revoked"}
-
-
-@router.delete("/worker-tokens")
-async def revoke_all_worker_tokens(
-    request: Request,
-    authorization: str | None = Header(default=None),
-) -> dict[str, int]:
-    """Revoke every worker credential in this isolated control-plane DB."""
-    await _require_admin_scope(request, authorization, "admin:tokens")
-    if not os.environ.get("LOOM_ENV", "").startswith("dev-"):
-        raise HTTPException(
-            status_code=403,
-            detail="bulk worker-token revocation is restricted to isolated dev instances",
-        )
-    async with request.app.state.session_factory() as session:
-        result = await session.execute(
-            update(Token)
-            .where(Token.type == "worker", Token.revoked_at.is_(None))
-            .values(revoked_at=datetime.now(UTC)),
-        )
-        await session.commit()
-    return {"revoked": int(result.rowcount or 0)}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 @router.put("/execution-admission-policies/{scope_kind}/{scope_key}")
