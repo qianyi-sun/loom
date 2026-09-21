@@ -680,6 +680,7 @@ describe("Monitor human-readable labels", () => {
             configured_total_fit_slots: null, blockers: ["resource_calibration_unavailable"],
           } },
           { ...target, target_id: "disabled", desired_state: "disabled", region: "eu-west1", observation: null },
+          { ...target, target_id: "draining", desired_state: "draining", region: "draining-region" },
         ],
       },
     });
@@ -688,6 +689,8 @@ describe("Monitor human-readable labels", () => {
     expect(screen.queryByText("blocked/stale")).not.toBeInTheDocument();
     expect(screen.getAllByText("Unknown")).toHaveLength(3);
     expect(screen.getByText(/eu-west1 · Disabled/)).toBeInTheDocument();
+    expect(screen.getByText("Draining")).toBeInTheDocument();
+    expect(screen.getByText("12 slots")).toBeInTheDocument();
   });
 
   it("shows stale Nebius capacity, blockers, and empty lifecycle evidence explicitly", async () => {

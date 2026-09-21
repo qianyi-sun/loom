@@ -52,6 +52,7 @@ projection returns unknown slot estimates when calibration/binding or fresh
 observations are unavailable, while retaining confirmed zero forecasts and
 unchanged admission decisions. Disabled targets appear under Inactive regions,
 not as active service faults; their historical observations remain in the API.
+Draining targets remain visible with node occupancy until their resources are released.
 
 Trial artifact listings merge trajectory-index references and canonical artifact
 records by the download API's file key. Canonical size and sharing metadata take
