@@ -65,52 +65,6 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
         "untrusted_workload_isolation = false\n",
         encoding="utf-8",
     )
-    environment_state_path = tmp_path / "staging.toml"
-    environment_state_path.write_text(
-        'environment = "staging"\n'
-        'control_plane_environment = "staging"\n'
-        'secret_example = "super-secret-token"\n'
-        "[[worker_pool_autoscaler_policies]]\n"
-        'pool_name = "oldlab"\n'
-        'actuator = "slurm"\n'
-        "[worker_pool_autoscaler_policies.actuator_config]\n"
-        'allowed_nodes = ["trt-eai-oldlab-3", "trt-eai-oldlab-4"]\n'
-        'env_file = "/secure/staging-oldlab-${IMAGE_TAG}.env"\n'
-        'repo_dir = "/srv/loom-${IMAGE_TAG}"\n'
-        "external_runner = true\n"
-        "[[external_slurm_autoscaler_supervisors]]\n"
-        'pool_name = "oldlab"\n'
-        'execution_host = "TRT-EAI-OLDLAB-1"\n'
-        "enabled = true\n"
-        "active = true\n"
-        "[external_slurm_runner_prerequisites]\n"
-        'pools = ["oldlab"]\n'
-        "materialize = true\n"
-        "require_external_allocation_authority = true\n"
-        "[[gb10_worker_pool_desired_states]]\n"
-        'pool_name = "gb10"\n'
-        'image_tag = "${IMAGE_TAG}"\n'
-        "max_concurrent = 10\n"
-        'env_config_version = "${ENV_CONFIG_VERSION}"\n'
-        'source_git_commit = "${GIT_SHA}"\n'
-        "target_slots = 150\n"
-        "[gb10_worker_pool_desired_states.host_intents]\n"
-        'trt-gb10-1 = "active"\n'
-        'trt-gb10-7 = "active"\n'
-        "[catalog_provisioning]\n"
-        "required = true\n"
-        'command = "loom datasets register skilllearnbench --hf-org PRHW '
-        '--revision \\"$PUBLISHED_SHA\\" --mirror-to-object-store '
-        "--bucket loom-benchmarks && "
-        'loom datasets audit --all --verify-bundles"\n'
-        'env_file = "/secure/staging-catalog.env"\n'
-        'required_env = ["PUBLISHED_SHA", "HF_TOKEN", "LOOM_SVC_DB_URL", '
-        '"LOOM_SVC_MINIO_ENDPOINT", "LOOM_SVC_MINIO_ACCESS_KEY", '
-        '"LOOM_SVC_MINIO_SECRET_KEY"]\n'
-        "[catalog_provisioning.env]\n"
-        'PUBLISHED_SHA = "79087002d62bb22169a704bc941c8d614082d880"\n',
-        encoding="utf-8",
-    )
     config = load_cluster_config(config_path)
     rendered = render_manifests(config)
 
@@ -121,8 +75,6 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
         environment="staging",
         image_tag="staging-abc123",
         git_sha="a" * 40,
-        environment_state_path=environment_state_path,
-        env_config_version="staging-abc123",
         generated_at="2026-07-01T00:00:00Z",
         loom_cli_version="test-version",
     )
@@ -184,72 +136,8 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
     alembic_heads = _alembic_heads()
     assert manifest["alembic"]["expected_heads"] == alembic_heads
     assert manifest["alembic"]["compatible_heads"] == alembic_heads
-    assert manifest["external_workers"]["environment_state_file"]["sha256"] == (
-        hashlib.sha256(environment_state_path.read_bytes()).hexdigest()
-    )
-    assert manifest["external_workers"]["control_plane_environment"] == "staging"
-    assert manifest["external_workers"]["slurm_pools"] == [
-        {
-            "pool_name": "oldlab",
-            "actuator": "slurm",
-            "enabled": False,
-            "disabled_reason": None,
-            "external_runner": True,
-            "allowed_nodes": ["trt-eai-oldlab-3", "trt-eai-oldlab-4"],
-            "env_file": "/secure/staging-oldlab-staging-abc123.env",
-            "repo_dir": "/srv/loom-staging-abc123",
-        },
-    ]
-    assert manifest["external_workers"]["external_slurm_runner_prerequisites"] == {
-        "pools": ["oldlab"],
-        "materialize": True,
-        "require_external_allocation_authority": True,
-    }
-    assert manifest["external_workers"]["external_slurm_autoscaler_supervisors"] == [
-        {
-            "pool_name": "oldlab",
-            "execution_host": "TRT-EAI-OLDLAB-1",
-            "enabled": True,
-            "active": True,
-        },
-    ]
-    assert manifest["external_workers"]["gb10_desired_states"] == [
-        {
-            "environment": "staging",
-            "pool_name": "gb10",
-            "image_tag": "staging-abc123",
-            "max_concurrent": 10,
-            "env_config_version": "staging-abc123",
-            "source_git_commit": "a" * 40,
-            "target_slots": 150,
-            "host_intents": {
-                "trt-gb10-1": "active",
-                "trt-gb10-7": "active",
-            },
-        },
-    ]
-    assert manifest["catalog_provisioning"] == {
-        "required": True,
-        "command": (
-            "loom datasets register skilllearnbench --hf-org PRHW "
-            '--revision "$PUBLISHED_SHA" --mirror-to-object-store '
-            "--bucket loom-benchmarks && "
-            "loom datasets audit --all --verify-bundles"
-        ),
-        "env_file": "/secure/staging-catalog.env",
-        "env": {
-            "PUBLISHED_SHA": "79087002d62bb22169a704bc941c8d614082d880",
-        },
-        "required_env": [
-            "PUBLISHED_SHA",
-            "HF_TOKEN",
-            "LOOM_SVC_DB_URL",
-            "LOOM_SVC_MINIO_ENDPOINT",
-            "LOOM_SVC_MINIO_ACCESS_KEY",
-            "LOOM_SVC_MINIO_SECRET_KEY",
-        ],
-    }
-    assert "super-secret-token" not in rendered_json
+    assert "external_workers" not in manifest
+    assert "catalog_provisioning" not in manifest
     assert render_release_manifest_json(manifest) == rendered_json
 
 

@@ -20,7 +20,6 @@ import ipaddress
 import json
 import os
 import re
-import stat
 import sys
 import tomllib
 from collections.abc import Callable
@@ -2270,10 +2269,6 @@ def _release_manifest(args: argparse.Namespace) -> int:
             environment=args.environment,
             image_tag=args.image_tag,
             git_sha=args.git_sha,
-            environment_state_path=(
-                Path(args.environment_state_file).resolve() if args.environment_state_file else None
-            ),
-            env_config_version=args.env_config_version,
             generated_at=args.generated_at,
             expected_image_identities=expected_image_identities,
         )
@@ -2368,44 +2363,6 @@ def _minio_storage_preflight(args: argparse.Namespace) -> int:
     return 0
 
 
-def _load_root_owned_external_slurm_authority(path: Path) -> dict[str, Any]:
-    """Read one immutable, non-candidate-owned GB10 authority artifact."""
-
-    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
-    try:
-        before = os.fstat(descriptor)
-        mode = stat.S_IMODE(before.st_mode)
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or before.st_uid != 0
-            or before.st_nlink != 1
-            or mode & 0o133 != 0
-        ):
-            raise ValueError(
-                "external Slurm authority must be one root-owned, non-writable regular file"
-            )
-        if not 0 < before.st_size <= 1024 * 1024:
-            raise ValueError("external Slurm authority size is invalid")
-        payload = os.read(descriptor, before.st_size + 1)
-        after = os.fstat(descriptor)
-        if len(payload) != before.st_size or (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-        ) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-        ):
-            raise ValueError("external Slurm authority changed while being read")
-    finally:
-        os.close(descriptor)
-    loaded = json.loads(payload.decode("utf-8"))
-    if not isinstance(loaded, dict):
-        raise ValueError("external Slurm authority JSON root must be an object")
-    return loaded
 
 
 def _release_gate(args: argparse.Namespace) -> int:
@@ -2450,34 +2407,6 @@ def _release_gate(args: argparse.Namespace) -> int:
         sys.stderr.write(f"error: release gate input invalid: {exc}\n")
         return 2
 
-    environment_state_check_artifact: dict[str, Any] | None = None
-    environment_state_check_path: str | None = None
-    environment_state_check_error: str | None = None
-    if args.environment_state_check:
-        check_path = Path(args.environment_state_check).resolve()
-        environment_state_check_path = str(check_path)
-        try:
-            loaded_check = json.loads(check_path.read_text(encoding="utf-8"))
-            if not isinstance(loaded_check, dict):
-                raise ValueError("environment-state check JSON root must be an object")
-            environment_state_check_artifact = loaded_check
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            environment_state_check_error = str(exc)
-
-    gb10_workers_status_artifact: dict[str, Any] | None = None
-    gb10_workers_status_path: str | None = None
-    gb10_workers_status_error: str | None = None
-    if args.gb10_workers_status:
-        gb10_path = Path(args.gb10_workers_status).resolve()
-        gb10_workers_status_path = str(gb10_path)
-        try:
-            loaded_gb10_status = json.loads(gb10_path.read_text(encoding="utf-8"))
-            if not isinstance(loaded_gb10_status, dict):
-                raise ValueError("GB10 worker status JSON root must be an object")
-            gb10_workers_status_artifact = loaded_gb10_status
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            gb10_workers_status_error = str(exc)
-
     minio_storage_preflight_artifact: dict[str, Any] | None = None
     minio_storage_preflight_path: str | None = None
     minio_storage_preflight_error: str | None = None
@@ -2491,31 +2420,6 @@ def _release_gate(args: argparse.Namespace) -> int:
             minio_storage_preflight_artifact = loaded_minio_storage
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             minio_storage_preflight_error = str(exc)
-
-    hf_mirror_boundary_artifact: dict[str, Any] | None = None
-    hf_mirror_boundary_path: str | None = None
-    hf_mirror_boundary_error: str | None = None
-    if args.hf_mirror_boundary_evidence:
-        boundary_path = Path(args.hf_mirror_boundary_evidence).resolve()
-        hf_mirror_boundary_path = str(boundary_path)
-        try:
-            loaded_hf_boundary = json.loads(boundary_path.read_text(encoding="utf-8"))
-            if not isinstance(loaded_hf_boundary, dict):
-                raise ValueError("HF mirror boundary JSON root must be an object")
-            hf_mirror_boundary_artifact = loaded_hf_boundary
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            hf_mirror_boundary_error = str(exc)
-
-    external_slurm_authority_artifact: dict[str, Any] | None = None
-    external_slurm_authority_error: str | None = None
-    if args.external_slurm_authority:
-        authority_path = Path(args.external_slurm_authority).resolve()
-        try:
-            external_slurm_authority_artifact = _load_root_owned_external_slurm_authority(
-                authority_path
-            )
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            external_slurm_authority_error = str(exc)
 
     if args.dry_run:
         live_alembic = None
@@ -2546,20 +2450,9 @@ def _release_gate(args: argparse.Namespace) -> int:
         database_target=database_target,
         live_alembic_error=live_alembic_error,
         live_alembic_evidence=live_alembic_evidence,
-        environment_state_check_artifact=environment_state_check_artifact,
-        environment_state_check_path=environment_state_check_path,
-        environment_state_check_error=environment_state_check_error,
-        gb10_workers_status_artifact=gb10_workers_status_artifact,
-        gb10_workers_status_path=gb10_workers_status_path,
-        gb10_workers_status_error=gb10_workers_status_error,
         minio_storage_preflight_artifact=minio_storage_preflight_artifact,
         minio_storage_preflight_path=minio_storage_preflight_path,
         minio_storage_preflight_error=minio_storage_preflight_error,
-        hf_mirror_boundary_artifact=hf_mirror_boundary_artifact,
-        hf_mirror_boundary_path=hf_mirror_boundary_path,
-        hf_mirror_boundary_error=hf_mirror_boundary_error,
-        external_slurm_authority_artifact=external_slurm_authority_artifact,
-        external_slurm_authority_error=external_slurm_authority_error,
     )
 
     if args.environment:
@@ -5920,22 +5813,6 @@ def dispatch(argv: list[str]) -> int:
         help="Candidate git SHA. Defaults to `git rev-parse HEAD`.",
     )
     p_release_manifest.add_argument(
-        "--environment-state-file",
-        default=None,
-        help=(
-            "Optional environment-state TOML file. The manifest records safe "
-            "fingerprints and release-managed worker references only."
-        ),
-    )
-    p_release_manifest.add_argument(
-        "--env-config-version",
-        default=None,
-        help=(
-            "Environment desired-state config version used to resolve "
-            "${ENV_CONFIG_VERSION}; defaults to --image-tag."
-        ),
-    )
-    p_release_manifest.add_argument(
         "--generated-at",
         default=None,
         help="Optional UTC timestamp override for deterministic tests.",
@@ -6074,47 +5951,11 @@ def dispatch(argv: list[str]) -> int:
         help="Optional logical environment guard; must match the manifest when set.",
     )
     p_release_gate.add_argument(
-        "--environment-state-check",
-        default=None,
-        help=(
-            "JSON artifact from `loom admin environment-state check --format json`. "
-            "Required when the release manifest records environment-state external "
-            "worker desired state."
-        ),
-    )
-    p_release_gate.add_argument(
-        "--gb10-workers-status",
-        default=None,
-        help=(
-            "JSON artifact from `loom admin gb10-workers status --format json`. "
-            "Required when the release manifest records GB10 worker desired state."
-        ),
-    )
-    p_release_gate.add_argument(
         "--minio-storage-preflight",
         default=None,
         help=(
             "JSON artifact from `loom cluster minio-storage-preflight --output`. "
             "When supplied, release-gate fails if the artifact outcome is stop."
-        ),
-    )
-    p_release_gate.add_argument(
-        "--hf-mirror-boundary-evidence",
-        default=None,
-        help=(
-            "Secret-safe JSON artifact proving SkillLearnBench uses mirrored "
-            "internal s3:// runtime sources, retains HF provenance, and does "
-            "not expose HF_TOKEN in GB10 worker env files or containers. "
-            "Required for staging/production when the release manifest records "
-            "the HF catalog gate."
-        ),
-    )
-    p_release_gate.add_argument(
-        "--external-slurm-authority",
-        default=None,
-        help=(
-            "Root-installed GB10 Slurm acceptance authority JSON for the exact "
-            "release candidate. Required when staging enables the GB10 Slurm pool."
         ),
     )
     p_release_gate.add_argument(
