@@ -22,7 +22,7 @@ from loom.pipeline.spec import (
     TerminalOutputsBindingV1,
 )
 
-SubmissionPolicy = Literal["ordinary", "acceptance_authorization_only"]
+SubmissionPolicy = Literal["ordinary"]
 RecipeFactory = Callable[[RecipeIdentityV1, Mapping[str, Any]], RunGraphSpecV1]
 
 _SECRET_KEY = re.compile(r"(?:^|_)(?:api_?key|password|passwd|secret|token|credential)(?:$|_)", re.I)
@@ -100,16 +100,8 @@ class OfficialRecipeRegistration:
             version=self.version,
             digest="sha256:" + "0" * 64,
         )
-        if self.submission_policy not in {"ordinary", "acceptance_authorization_only"}:
-            raise ValueError("invalid Recipe submission policy")
-        is_fixed_preflight = (self.name, self.version) == (
-            "behavior-recovery-acceptance-preflight",
-            1,
-        )
-        if (self.submission_policy == "acceptance_authorization_only") != is_fixed_preflight:
-            raise ValueError(
-                "only the fixed acceptance preflight Recipe may use, and must use, this policy"
-            )
+        if self.submission_policy != "ordinary":
+            raise ValueError("retired Recipe submission policy")
         for label, digest in (
             ("parameter contract", self.parameter_contract_digest),
             ("source lock", self.source_lock_digest),
@@ -247,27 +239,8 @@ class OfficialRecipeRegistry:
         self, name: str, version: int, parameters: Mapping[str, Any]
     ) -> RunGraphSpecV1:
         registration = self.get(name, version)
-        if registration.submission_policy != "ordinary":
-            raise PermissionError("acceptance-only Recipe is not available to ordinary submission")
         return registration.resolve(parameters, repo_root=self._repo_root)
 
-    def resolve_acceptance_preflight(
-        self,
-        *,
-        name: str,
-        version: int,
-        parameters: Mapping[str, Any],
-        active_same_team_matrix_authorization: bool,
-    ) -> RunGraphSpecV1:
-        registration = self.get(name, version)
-        if (
-            registration.submission_policy != "acceptance_authorization_only"
-            or (name, version) != ("behavior-recovery-acceptance-preflight", 1)
-        ):
-            raise PermissionError("Recipe is not the fixed acceptance preflight")
-        if not active_same_team_matrix_authorization:
-            raise PermissionError("active same-team matrix authorization is required")
-        return registration.resolve(parameters, repo_root=self._repo_root)
 
     def list_identities(self) -> tuple[RecipeIdentityV1, ...]:
         return tuple(

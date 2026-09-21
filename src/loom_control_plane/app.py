@@ -28,9 +28,6 @@ from loom_control_plane.artifact_commit_runtime import (
 )
 from loom_control_plane.artifact_read_service import ArtifactReadService
 from loom_control_plane.config import ControlPlaneSettings
-from loom_control_plane.input_materialization_evidence import (
-    PipelineInputMaterializationEvidenceService,
-)
 from loom_control_plane.live_preview import run_live_preview_reconciler_loop
 from loom_control_plane.metrics_refresher import run_metrics_refresher_loop
 from loom_control_plane.retry_exhausted_sweeper import (
@@ -158,9 +155,6 @@ def create_app(
             session_factory=session_factory,
         )
         app.state.execution_attempt_completion_service = ExecutionAttemptCompletionService()
-        app.state.input_materialization_evidence_service = (
-            PipelineInputMaterializationEvidenceService()
-        )
         app.state.artifact_read_service = ArtifactReadService(
             resolver=SqlArtifactInputResolver(
                 session_factory=session_factory,

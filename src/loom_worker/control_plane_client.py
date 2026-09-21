@@ -553,21 +553,6 @@ class HttpControlPlaneClient:
             payload={"events": [dict(event) for event in events]},
         )
 
-    async def report_input_materialization_evidence(
-        self,
-        *,
-        attempt_id: UUID,
-        claim: ExecutionAttemptClaimHeaders,
-        request_id: UUID,
-        payload: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        return await self._post_execution_attempt_report(
-            attempt_id=attempt_id,
-            operation="input-materialization-evidence",
-            claim=claim,
-            request_id=request_id,
-            payload=payload,
-        )
 
     async def report_execution_attempt_started(
         self,

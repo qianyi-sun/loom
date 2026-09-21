@@ -145,12 +145,6 @@ WITH worker_scope AS (
                   AND active_attempt.state IN ('claimed','running'))
             )
           )
-          AND NOT EXISTS (
-            SELECT 1
-              FROM pipeline_acceptance_preflight_prerequisites fence
-             WHERE fence.worker_id = w.id
-               AND fence.fence_state = 'active'
-          )
           AND NOT (
             COALESCE(
               w.capability_snapshot_json->'container_runtime_features',
@@ -359,10 +353,6 @@ WITH candidates AS (
      AND (
        NULLIF(t.requires_caps->>'worker_pool', '') IS NULL
        OR w.pool_name = t.requires_caps->>'worker_pool'
-     )
-     AND NOT EXISTS (
-       SELECT 1 FROM pipeline_acceptance_preflight_prerequisites fence
-        WHERE fence.worker_id = w.id AND fence.fence_state = 'active'
      )
      AND NOT (
        COALESCE(
@@ -620,45 +610,7 @@ WITH candidates AS (
      AND r.state IN ('submitted','running')
      AND ledger.terminal_cause IS NULL
      AND ledger.wall_deadline_at > NOW()
-     AND (
-       (r.acceptance_authorization_id IS NULL AND NOT EXISTS (
-         SELECT 1 FROM pipeline_acceptance_preflight_prerequisites any_fence
-          WHERE any_fence.worker_id = w.id AND any_fence.fence_state = 'active'
-       ))
-       OR (r.acceptance_authorization_id IS NOT NULL AND EXISTS (
-         SELECT 1 FROM pipeline_acceptance_preflight_prerequisites fence
-          WHERE fence.worker_id = w.id
-            AND fence.fence_state = 'active'
-            AND fence.pipeline_run_id = r.id
-            AND fence.worker_capability_snapshot_digest = w.capability_snapshot_digest
-            AND fence.worker_lease_epoch = w.lease_epoch
-            AND EXISTS (
-              SELECT 1
-                FROM pipeline_scoped_policy_activations activation
-               WHERE activation.environment = (
-                       SELECT job.environment
-                         FROM slurm_worker_jobs job
-                        WHERE job.worker_id = w.id AND job.state = 'running'
-                        ORDER BY job.updated_at DESC, job.id
-                        LIMIT 1
-                     )
-                 AND activation.policy_id = fence.policy_id
-                 AND activation.policy_config_sha256 = fence.policy_config_sha256
-                 AND activation.authority_kind = 'acceptance'
-                 AND activation.authority_id = fence.authorization_id
-                 AND activation.activation_epoch = fence.policy_activation_epoch
-                 AND activation.state = 'active'
-                 AND activation.desired_slots > 0
-            )
-            AND (
-              (s.node_key LIKE '%acceptance_preflight_cold'
-               AND fence.state = 'satisfied')
-              OR
-              (s.node_key LIKE '%acceptance_preflight_warm'
-               AND fence.state = 'consumed')
-            )
-       ))
-     )
+     AND r.acceptance_authorization_id IS NULL
 ), picked AS (
   SELECT work_kind, id, family_key, batch_id
     FROM candidates
@@ -743,31 +695,11 @@ WITH candidates AS (
             a.attempt_number, NULL::uuid AS provider_connection_id,
             NULL::text AS family_key, NULL::uuid AS batch_id,
             NULL::text AS task_image_reader_arch, NULL::bigint AS worker_lease_epoch
-), acceptance_consume AS (
-  UPDATE pipeline_acceptance_preflight_prerequisites fence
-     SET state = 'consumed',
-         consumed_attempt_id = a.id,
-         consumed_at = NOW(),
-         version = fence.version + 1
-    FROM claimed_attempt a, pipeline_stage_runs s
-   WHERE s.id = a.stage_run_id
-     AND s.node_key LIKE '%acceptance_preflight_cold'
-     AND fence.pipeline_run_id = a.pipeline_run_id
-     AND fence.fence_state = 'active'
-     AND fence.state = 'satisfied'
-  RETURNING a.id AS execution_attempt_id
 ), stage_claim AS (
   UPDATE pipeline_stage_runs s
      SET state = 'claimed', claimed_at = NOW(), version = s.version + 1
    FROM claimed_attempt a
    WHERE s.id = a.stage_run_id AND s.state = 'queued'
-     AND (
-       s.node_key NOT LIKE '%acceptance_preflight_cold'
-       OR EXISTS (
-         SELECT 1 FROM acceptance_consume consumed
-          WHERE consumed.execution_attempt_id = a.id
-       )
-     )
   RETURNING s.id
 )
 SELECT * FROM claimed_trial

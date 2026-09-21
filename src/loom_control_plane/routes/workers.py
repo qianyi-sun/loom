@@ -38,7 +38,6 @@ from loom.pipeline.stage1_smoke import (
     validate_stage1_smoke_authorization,
 )
 from loom.pipeline.work_protocol import (
-    AcceptancePreflightGrantV1,
     ArtifactInputDescriptorV1,
     ExecutionAttemptClaimV1,
     Stage1SmokeGrantV1,
@@ -460,14 +459,6 @@ async def claim_any_work(
                                s.secret_refs, r.id AS pipeline_run_id, r.team_id,
                                r.recipe_name, r.recipe_version,
                                r.recipe_digest, r.graph_spec_digest,
-                               p.authorization_id,
-                               p.authorization_snapshot_sha256,
-                               p.candidate_sha256, p.preflight_input_set_id,
-                               p.sealed_input_descriptor_set_sha256,
-                               p.exclusive_fence_id, p.policy_id,
-                               p.policy_config_sha256, p.policy_activation_epoch,
-                               p.slurm_cluster_id, p.slurm_cluster_config_sha256,
-                               p.slurm_allocation_id,
                                stage1.authorization_id AS stage1_authorization_id,
                                stage1.candidate_sha256 AS stage1_candidate_sha256,
                                stage1.authorization_sha256 AS stage1_authorization_sha256,
@@ -485,8 +476,6 @@ async def claim_any_work(
                           JOIN pipeline_stage_runs s ON s.id=a.stage_run_id
                           JOIN pipeline_runs r ON r.id=s.pipeline_run_id
                           JOIN workers w ON w.id=a.worker_id
-                          LEFT JOIN pipeline_acceptance_preflight_prerequisites p
-                            ON p.pipeline_run_id=r.id AND p.fence_state='active'
                           LEFT JOIN pipeline_stage1_smoke_authorizations stage1
                             ON stage1.pipeline_run_id=r.id
                            AND stage1.state IN ('submitted','running')
@@ -528,37 +517,6 @@ async def claim_any_work(
                     canonical_jcs_lf=bytes(attempt_row["stage_request_bytes"]).decode("utf-8"),
                     stage_request_sha256=attempt_row["stage_request_digest"],
                     size_bytes=len(attempt_row["stage_request_bytes"]),
-                )
-            acceptance = None
-            if attempt_row["exclusive_fence_id"] is not None:
-                phase = "cold" if node["node_key"].endswith("_cold") else "warm"
-                variant = node["node_key"].removesuffix(f"_acceptance_preflight_{phase}")
-                acceptance = AcceptancePreflightGrantV1(
-                    authorization_id=attempt_row["authorization_id"],
-                    authorization_snapshot_sha256=(attempt_row["authorization_snapshot_sha256"]),
-                    action="matrix",
-                    candidate_sha256=attempt_row["candidate_sha256"],
-                    preflight_input_set_id=attempt_row["preflight_input_set_id"],
-                    prerequisite_pipeline_run_id=attempt_row["pipeline_run_id"],
-                    exclusive_fence_id=attempt_row["exclusive_fence_id"],
-                    node_key=node["node_key"],
-                    backend_variant_id=variant,
-                    cache_expectation=(
-                        "cold_after_eviction" if phase == "cold" else "warm_reuse_only"
-                    ),
-                    sealed_input_descriptor_set_sha256=(
-                        attempt_row["sealed_input_descriptor_set_sha256"]
-                    ),
-                    policy_id=attempt_row["policy_id"],
-                    policy_config_sha256=attempt_row["policy_config_sha256"],
-                    policy_activation_epoch=attempt_row["policy_activation_epoch"],
-                    slurm_cluster_id=attempt_row["slurm_cluster_id"],
-                    slurm_cluster_config_sha256=(attempt_row["slurm_cluster_config_sha256"]),
-                    slurm_allocation_id=attempt_row["slurm_allocation_id"],
-                    image_runtime_contract_digest=(attempt_row["image_runtime_contract_digest"]),
-                    resource_profile_digest=attempt_row["resource_profile_digest"],
-                    network_profile="none",
-                    renderer_digest=renderer["digest"],
                 )
             stage1_smoke = None
             if attempt_row["stage1_authorization_id"] is not None:
@@ -696,7 +654,6 @@ async def claim_any_work(
                     fanout_commit=node["fanout_commit"],
                     stage_request=stage_request,
                     control_binding_snapshot=attempt_row["control_binding_snapshot"],
-                    acceptance_preflight=acceptance,
                     stage1_smoke=stage1_smoke,
                     terminalgen_authoring=terminalgen_authoring,
                     provider_connection_ref=attempt_row["provider_connection_ref"],

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any, Protocol, cast
+from typing import Annotated, Any, Protocol
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, Response
@@ -24,7 +24,6 @@ from loom.db.schema import (
     PipelineBudgetReservation,
     PipelineCancellationOutbox,
     PipelineEvent,
-    PipelineInputMaterializationEvidence,
     PipelineLivePreviewFrame,
     PipelineLivePreviewGeneration,
     PipelineRun,
@@ -59,7 +58,6 @@ from loom.pipeline.work_protocol import (
     FinalOutputFileCompleteV1,
     FinalOutputPrepareRequestV1,
     FinalOutputSessionCommitV1,
-    PipelineInputMaterializationEvidenceReportV1,
     UploadTokenRenewV1,
     WorkerLostCleanupAckV1,
 )
@@ -883,12 +881,6 @@ async def report_attempt_started(
                 select(PipelineStageRun).where(PipelineStageRun.id == attempt.stage_run_id)
             )
         ).scalar_one()
-        if stage.node_key.endswith(("acceptance_preflight_cold", "acceptance_preflight_warm")):
-            evidence = await session.get(PipelineInputMaterializationEvidence, attempt.id)
-            if evidence is None or evidence.input_view_sha256 != payload.input_view_digest:
-                raise HTTPException(
-                    status_code=409, detail="input_materialization_evidence_required"
-                )
         attempt.state = "running"
         attempt.started_at = datetime.now(UTC)
         attempt.container_id = payload.container_id
@@ -1345,53 +1337,6 @@ async def report_attempt_complete(
             resource_class=resource_class,
             result="succeeded",
         ).observe(stage_duration)
-        return response
-
-
-@router.post("/execution-attempts/{attempt_id}/input-materialization-evidence")
-async def report_input_materialization_evidence(
-    attempt_id: UUID,
-    payload: PipelineInputMaterializationEvidenceReportV1,
-    request: Request,
-    claim_id: ClaimIdHeader,
-    lease_epoch: LeaseEpochHeader,
-    lease_token: LeaseTokenHeader,
-    request_id: RequestIdHeader,
-    authorization: str | None = Header(default=None),
-) -> dict[str, Any]:
-    if payload.execution_attempt_id != attempt_id or payload.lease_epoch != lease_epoch:
-        raise HTTPException(status_code=409, detail="claim_fenced")
-    ctx = await _worker_auth(request, authorization, scope="worker:report")
-    async with request.app.state.session_factory() as session:
-        attempt, replay = await _begin_mutation(
-            session,
-            attempt_id=attempt_id,
-            ctx=ctx,
-            claim_id=claim_id,
-            lease_epoch=lease_epoch,
-            lease_token=lease_token,
-            request_id=request_id,
-            route="input-materialization-evidence",
-            payload=payload,
-        )
-        if replay is not None:
-            return replay
-        if attempt.worker_id != payload.worker_id:
-            raise HTTPException(status_code=409, detail="claim_fenced")
-        service = getattr(request.app.state, "input_materialization_evidence_service", None)
-        if service is None:
-            raise HTTPException(status_code=503, detail="input_materializer_unavailable")
-        evidence_ref = await service.persist(attempt=attempt, report=payload, session=session)
-        response = cast(dict[str, Any], evidence_ref.model_dump(mode="json"))
-        await _journal_response(
-            session,
-            attempt_id=attempt_id,
-            route="input-materialization-evidence",
-            request_id=request_id,
-            payload=payload,
-            response=response,
-        )
-        await session.commit()
         return response
 
 
