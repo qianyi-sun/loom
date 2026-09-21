@@ -27,7 +27,9 @@ from tests.integration.test_task_image_registry_credentials import NOW
 from tests.integration.test_task_image_registry_credentials import (
     registry_issuer as registry_issuer,
 )
-from tests.integration.test_task_image_retirement_store import observe
+from tests.integration.test_task_image_retirement_boundaries import (
+    _observe_positive_semantics as observe,
+)
 
 
 @pytest.mark.parametrize("names", [("task", "sidecar:db"), ("sidecar:db",)])
