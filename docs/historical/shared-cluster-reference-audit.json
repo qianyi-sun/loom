@@ -16,202 +16,202 @@
       "reason": "Prevents an old owner-local credential filename from entering Git; does not read or use it."
     },
     {
-      "path": "capacity_build_guard_migrations/versions/build_guard_0006_demand.py",
+      "path": "config/component-ownership.toml",
+      "matching_lines": 1,
+      "category": 1,
+      "reason": "Ownership selection for retained migration compatibility tests."
+    },
+    {
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0006_demand.py",
       "matching_lines": 1,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_build_guard_migrations/versions/build_guard_0009_execution.py",
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0009_execution.py",
       "matching_lines": 10,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_build_guard_migrations/versions/build_guard_0011_revocation.py",
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0011_revocation.py",
       "matching_lines": 1,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_build_guard_migrations/versions/build_guard_0012_withdrawal.py",
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0012_withdrawal.py",
       "matching_lines": 4,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_build_guard_migrations/versions/build_guard_0013_terminal_inventory.py",
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0013_terminal_inventory.py",
       "matching_lines": 2,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_build_guard_migrations/versions/build_guard_0015_hold_retirement.py",
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0015_hold_retirement.py",
       "matching_lines": 2,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_build_guard_migrations/versions/build_guard_0016_worker_registration.py",
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0016_worker_registration.py",
       "matching_lines": 3,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_build_guard_migrations/versions/build_guard_0020_terminal_outcomes.py",
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0020_terminal_outcomes.py",
       "matching_lines": 1,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_build_guard_migrations/versions/build_guard_0021_registered_release.py",
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0021_registered_release.py",
       "matching_lines": 1,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_build_guard_migrations/versions/build_guard_0032_native_recovery.py",
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0032_native_recovery.py",
       "matching_lines": 3,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_guard_migrations/env.py",
+      "path": "database/capacity_guard_migrations/env.py",
       "matching_lines": 24,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_guard_migrations/versions/guard_0003_prepared_admission.py",
+      "path": "database/capacity_guard_migrations/versions/guard_0003_prepared_admission.py",
       "matching_lines": 12,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_guard_migrations/versions/guard_0004_disconnected_claim_guard.py",
+      "path": "database/capacity_guard_migrations/versions/guard_0004_disconnected_claim_guard.py",
       "matching_lines": 2,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_guard_migrations/versions/guard_0005_inert_legacy_authority_fence.py",
+      "path": "database/capacity_guard_migrations/versions/guard_0005_inert_legacy_authority_fence.py",
       "matching_lines": 1,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_guard_migrations/versions/guard_0007_inert_trial_submission.py",
+      "path": "database/capacity_guard_migrations/versions/guard_0007_inert_trial_submission.py",
       "matching_lines": 1,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_guard_migrations/versions/guard_0008_complete_mutation_inventory.py",
+      "path": "database/capacity_guard_migrations/versions/guard_0008_complete_mutation_inventory.py",
       "matching_lines": 2,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_guard_migrations/versions/guard_0010_protected_release_fence.py",
+      "path": "database/capacity_guard_migrations/versions/guard_0010_protected_release_fence.py",
       "matching_lines": 2,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_guard_migrations/versions/guard_0011_atomic_trial_submission.py",
+      "path": "database/capacity_guard_migrations/versions/guard_0011_atomic_trial_submission.py",
       "matching_lines": 1,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_guard_migrations/versions/guard_0013_executable_admission.py",
+      "path": "database/capacity_guard_migrations/versions/guard_0013_executable_admission.py",
       "matching_lines": 15,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_guard_migrations/versions/guard_0017_executable_unregistered_withdrawal.py",
+      "path": "database/capacity_guard_migrations/versions/guard_0017_executable_unregistered_withdrawal.py",
       "matching_lines": 9,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_guard_migrations/versions/guard_0018_prepared_bootstrap_revocation.py",
+      "path": "database/capacity_guard_migrations/versions/guard_0018_prepared_bootstrap_revocation.py",
       "matching_lines": 6,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_guard_migrations/versions/guard_0021_current_assignment_assertion.py",
+      "path": "database/capacity_guard_migrations/versions/guard_0021_current_assignment_assertion.py",
       "matching_lines": 1,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_guard_migrations/versions/guard_0023_staging_worker_session.py",
+      "path": "database/capacity_guard_migrations/versions/guard_0023_staging_worker_session.py",
       "matching_lines": 87,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_guard_migrations/versions/guard_0028_terminal_inventory_recovery.py",
+      "path": "database/capacity_guard_migrations/versions/guard_0028_terminal_inventory_recovery.py",
       "matching_lines": 3,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_guard_migrations/versions/guard_0032_typed_terminal_inventory.py",
+      "path": "database/capacity_guard_migrations/versions/guard_0032_typed_terminal_inventory.py",
       "matching_lines": 2,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_migrations/versions/capacity_0003_fenced_grant_protocol.py",
+      "path": "database/capacity_migrations/versions/capacity_0003_fenced_grant_protocol.py",
       "matching_lines": 1,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_migrations/versions/capacity_0004_executable_bridge.py",
+      "path": "database/capacity_migrations/versions/capacity_0004_executable_bridge.py",
       "matching_lines": 71,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_migrations/versions/capacity_0006_executable_work_queue.py",
+      "path": "database/capacity_migrations/versions/capacity_0006_executable_work_queue.py",
       "matching_lines": 5,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_migrations/versions/capacity_0008_executable_bridge_completion.py",
+      "path": "database/capacity_migrations/versions/capacity_0008_executable_bridge_completion.py",
       "matching_lines": 101,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_migrations/versions/capacity_0014_protected_admission_plan.py",
+      "path": "database/capacity_migrations/versions/capacity_0014_protected_admission_plan.py",
       "matching_lines": 7,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_migrations/versions/capacity_0015_terminal_inventory_evidence.py",
+      "path": "database/capacity_migrations/versions/capacity_0015_terminal_inventory_evidence.py",
       "matching_lines": 2,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "capacity_migrations/versions/capacity_0018_personal_build_membership.py",
+      "path": "database/capacity_migrations/versions/capacity_0018_personal_build_membership.py",
       "matching_lines": 2,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
-    },
-    {
-      "path": "config/component-ownership.toml",
-      "matching_lines": 1,
-      "category": 1,
-      "reason": "Ownership selection for retained migration compatibility tests."
     },
     {
       "path": "docs/architecture/ci-runner-acceleration.md",

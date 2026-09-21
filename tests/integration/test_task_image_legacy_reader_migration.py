@@ -11,7 +11,7 @@ FUNCTION = "loom_capacity_guard.claim_staging_assigned_trial(uuid,text,jsonb)"
 
 
 def _configuration(database, monkeypatch):
-    root = Path(__file__).resolve().parents[2] / "capacity_guard_migrations"
+    root = Path(__file__).resolve().parents[2] / "database" / "capacity_guard_migrations"
     config = Config(str(root / "alembic.ini"))
     config.set_main_option("script_location", str(root))
     for option, key in (

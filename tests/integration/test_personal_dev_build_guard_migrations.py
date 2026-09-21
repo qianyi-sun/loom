@@ -37,7 +37,7 @@ def build_guard_database(isolated_migration_postgres_url):
             connection.exec_driver_sql(f"GRANT CREATE ON DATABASE {quote(url.database)} TO {quote(owner)}")
             connection.exec_driver_sql(f"GRANT USAGE ON SCHEMA public TO {quote(owner)}")
             connection.exec_driver_sql(f"GRANT REFERENCES ON public.personal_dev_build_platform_requests TO {quote(owner)}")
-        root = Path(__file__).resolve().parents[2] / "capacity_build_guard_migrations"
+        root = Path(__file__).resolve().parents[2] / "database" / "capacity_build_guard_migrations"
         config = Config(str(root / "alembic.ini"))
         config.set_main_option("script_location", str(root))
         config.set_main_option("sqlalchemy.url", url.set(username=migrator, password=password).render_as_string(hide_password=False).replace("%", "%%"))

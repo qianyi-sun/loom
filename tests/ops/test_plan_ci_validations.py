@@ -615,7 +615,7 @@ def test_migration_change_selects_both_integration_tiers_images_and_staging() ->
 def test_capacity_guard_migration_change_selects_owned_integration_lane() -> None:
     plan = plan_validations(
         changed_paths=[
-            "capacity_guard_migrations/versions/guard_0002_example.py",
+            "database/capacity_guard_migrations/versions/guard_0002_example.py",
         ],
         labels=set(),
         event_name="pull_request",

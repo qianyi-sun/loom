@@ -23,3 +23,6 @@ or current guidance. For example, inspect a specific old file with
 Current [restore](../runbooks/nebius-restore.md) and
 [lineage conversion](../runbooks/nebius-lineage-conversion.md) procedures remain
 under runbooks because they describe supported compatibility operations.
+
+The [retained migration package index](../../database/README.md) explains the
+three historical capacity chains and their current source and packaging layout.
