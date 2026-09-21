@@ -66,8 +66,8 @@ authorizing new execution on those backends. No tables or retained data have
 been dropped as part of the repository retirement.
 
 The application chain at the source baseline ends at `0150`; the refreshed
-`dev` baseline includes `0151` (batch purpose). Earlier Nebius
-and `dev` branches used revisions `0133`–`0136` for different changes. Preserve
+`dev` baseline includes `0151` (batch purpose) and `0152` (Nebius rollout guard).
+Earlier Nebius and `dev` branches used revisions `0133`–`0136` for different changes. Preserve
 the [qualified lineage conversion](../ops/nebius-lineage-conversion.md);
 revision labels alone cannot identify the correct database history. Preserve
 separate published capacity and guard migration chains and the helpers needed
@@ -97,8 +97,8 @@ Ordinary CI is not proof of completed live migration or workload acceptance.
 
 The shared-cluster deployment workflow and shell deployer are removed. Protected
 release promotion and production evidence verification remain. Native Nebius
-render/apply tools replace the implementation; automated staging/production rollout
-awaits reviewed environment inputs and approval wiring. No deployment occurred.
+render/apply tools and idle development rollout replace the implementation.
+Automated staging/production rollout awaits reviewed environment inputs and approval wiring. No deployment occurred.
 
 ## Remaining reference classification
 

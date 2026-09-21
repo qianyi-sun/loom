@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from loom.db.schema_startup import service_schema_head
 from loom_control_plane.routes.workers import _REQUEUE_TRIAL_RETRY_SQL
 from tests.integration.test_capacity_guard_migrations import _guard_config
 from tests.integration.test_protected_claim_application_migration import _config
@@ -63,7 +64,7 @@ async def test_retained_claim_prevents_lossy_downgrade(
         with pytest.raises(DBAPIError, match="retained legacy claim identities"):
             await asyncio.to_thread(command.downgrade, config, "0146")
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0151"
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == service_schema_head()
             assert await connection.scalar(text(
                 "SELECT legacy_claim_id FROM trials WHERE id=:id"
             ), {"id": trial_id}) == identity
@@ -102,7 +103,7 @@ async def test_refund_history_without_claim_identity_prevents_lossy_downgrade(
         with pytest.raises(DBAPIError, match="retained legacy claim identities"):
             await asyncio.to_thread(command.downgrade, config, "0146")
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0151"
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == service_schema_head()
             assert (await connection.execute(history, {"id": trial_id})).one() == before
     finally:
         await engine.dispose()

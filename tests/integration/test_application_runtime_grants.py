@@ -8,6 +8,7 @@ from alembic import command
 from alembic.config import Config
 
 from loom.application_runtime_grants import application_runtime_grants_ddl
+from loom.db.schema_startup import service_schema_head
 from tests.integration.test_application_migration_authority import (
     application_migration_roles,  # noqa: F401
 )
@@ -79,7 +80,7 @@ def test_runtime_grants_preserve_data_access_and_deny_schema_changes(
         assert admin.execute("SELECT id FROM public.runtime_future").fetchone() == (1,)
         assert admin.execute("SELECT nextval('public.runtime_future_sequence')").fetchone() == (1,)
         assert admin.execute("SELECT version_num FROM public.alembic_version").fetchone() == (
-            "0151",
+            service_schema_head(),
         )
         for forbidden in (
             "UPDATE public.alembic_version SET version_num=version_num",

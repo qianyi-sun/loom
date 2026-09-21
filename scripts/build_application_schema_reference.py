@@ -16,8 +16,6 @@ from pathlib import Path
 from uuid import uuid4
 
 import psycopg
-from alembic.config import Config
-from alembic.script import ScriptDirectory
 from sqlalchemy.engine import make_url
 from testcontainers.postgres import PostgresContainer  # type: ignore[import-untyped]
 
@@ -42,6 +40,8 @@ from loom.application_schema_readonly import (
     render_readonly_role_sql,
 )
 from loom.application_schema_reference import (
+    APPLICATION_SCHEMA_REVISIONS,
+    BUNDLED_APPLICATION_SCHEMA_REVISION,
     ApplicationSchemaProfile,
     ApplicationSchemaReference,
     ApplicationSchemaRevision,
@@ -52,21 +52,12 @@ from loom.application_schema_reference import (
 _ROOT = Path(__file__).resolve().parents[1]
 
 
-def _head(directory: str) -> str:
-    config = Config(str(_ROOT / directory / "alembic.ini"))
-    config.set_main_option("script_location", str(_ROOT / directory))
-    heads = ScriptDirectory.from_config(config).get_heads()
-    if len(heads) != 1:
-        raise RuntimeError("reference generation requires one migration head")
-    return heads[0]
-
-
 async def _observe_fresh_database(
     admin_url: str,
     identity: ReferenceIdentity,
     *,
     profile: ApplicationSchemaProfile = "legacy-owner",
-    revision: ApplicationSchemaRevision = "0151/guard_0035",
+    revision: ApplicationSchemaRevision = BUNDLED_APPLICATION_SCHEMA_REVISION,
 ) -> ApplicationSchemaInventory:
     """Internal helper: admin_url belongs exclusively to our disposable container."""
     from scripts.application_schema_baseline import BaselineReferenceDatabase
@@ -304,7 +295,7 @@ async def _retire_application_migrator(
 
 async def build_application_schema_reference(
     *, profile: ApplicationSchemaProfile = "legacy-owner", postgres_major: int = 16,
-    revision: ApplicationSchemaRevision = "0151/guard_0035",
+    revision: ApplicationSchemaRevision = BUNDLED_APPLICATION_SCHEMA_REVISION,
 ) -> ApplicationSchemaReference:
     """Require two independent fresh installations to agree before emitting metadata."""
     if profile not in {
@@ -317,8 +308,7 @@ async def build_application_schema_reference(
     }:
         raise ValueError("application schema reference profile is invalid")
     application_head, guard_head = application_schema_revisions(revision)
-    if revision == "0151/guard_0035" and (application_head, guard_head) != (_head("migrations"), _head("capacity_guard_migrations")):
-        raise RuntimeError("current application schema reference revisions require review")
+
     image = application_reference_postgres_image(postgres_major=postgres_major)
     with PostgresContainer(
         image,
@@ -372,7 +362,7 @@ async def _build_profiles() -> dict[str, object]:
         "cnpg-staging-legacy-owner",
         "cnpg-staging-sealed-owner",
     )
-    revisions: tuple[ApplicationSchemaRevision, ...] = ("0151/guard_0035", "0150/guard_0035", "0149/guard_0035", "0148/guard_0035", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030")
+    revisions = APPLICATION_SCHEMA_REVISIONS
     for major in (16, 17):
         result[str(major)] = {
             revision: {

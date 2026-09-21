@@ -6,6 +6,7 @@ from alembic import command
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
+from loom.db.schema_startup import service_schema_head
 from tests.integration.test_task_image_registry_credential_migration import _config
 
 
@@ -107,7 +108,7 @@ async def test_terminal_trial_guard_downgrade_fails_fast_on_busy_trials(isolated
         with engine.connect() as connection:
             assert (
                 connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "0151"
+                == service_schema_head()
             )
     finally:
         engine.dispose()

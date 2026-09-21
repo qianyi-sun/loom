@@ -15,6 +15,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import TaskImagePublicationKey, TaskImagePublicationState
+from loom.db.schema_startup import service_schema_head
 from loom_task_image_authority.publication_signing import PublicationState
 from tests.integration.test_task_image_registry_credential_migration import _config
 from tests.unit.test_task_image_publication_keyset import _b64, _sign, fixture
@@ -361,7 +362,7 @@ async def test_published_audit_is_immutable_and_downgrade_refuses(database, isol
     with pytest.raises(DBAPIError, match="keyset audit cannot be discarded"):
         command.downgrade(_config(isolated_migration_postgres_url), "0137")
     async with database[1]() as session:
-        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0151"
+        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == service_schema_head()
         assert await session.scalar(select(TaskImagePublicationState.keyset_version)) == 1
 
 
@@ -402,6 +403,6 @@ def test_migration_refuses_busy_parents_without_waiting(isolated_migration_postg
                 else:
                     command.downgrade(config, "0137")
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == ("0137" if direction == "upgrade" else "0151")
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == ("0137" if direction == "upgrade" else service_schema_head())
     finally:
         engine.dispose()

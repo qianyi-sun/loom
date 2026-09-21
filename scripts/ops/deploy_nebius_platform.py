@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -141,14 +143,30 @@ class Kubectl:
         self.kubeconfig = kubeconfig
 
     def run(self, *args: str, timeout: int = 90) -> str:
-        result = subprocess.run(
-            [
+        command = [
                 "kubectl",
                 "--kubeconfig",
                 str(self.kubeconfig),
                 *([] if args[0] in {"wait", "rollout"} else ["--request-timeout=30s"]),
                 *args,
-            ],
+            ]
+        stdin = None
+        if target := os.environ.get("LOOM_DEPLOY_SSH_TARGET"):
+            if not re.fullmatch(r"[a-zA-Z0-9_.-]+@[a-zA-Z0-9_.-]+", target):
+                raise DeploymentError("invalid deployment SSH target")
+            if args[0] == "apply" and args[1] == "-f":
+                stdin = Path(args[2]).read_text()
+                command[-1] = "-"
+            command = [
+                "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+                "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15",
+                "-o", "ServerAliveCountMax=3", "-o", "IdentitiesOnly=yes",
+                "-o", "UserKnownHostsFile=" + os.environ["LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"],
+                "-i", os.environ["LOOM_DEPLOY_SSH_KEY_FILE"], target, shlex.join(command),
+            ]
+        result = subprocess.run(
+            command,
+            input=stdin,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -324,6 +342,34 @@ def public_smoke(origin: str, environment: str) -> None:
             time.sleep(5)
 
 
+def rollout_guard(kube: Kubectl, namespace: str, action: str, owner: str, candidate: str) -> dict:
+    result = json.loads(kube.run(
+        "exec", "-n", namespace, "deployment/loom-control-plane", "--", "python", "-m",
+        "loom.nebius_rollout_guard", action, "--owner", owner, "--candidate", candidate,
+    ))
+    if result.get("status") not in {"acquired", "released", "skipped_busy", "skipped_locked"}:
+        raise DeploymentError("invalid rollout guard response")
+    return result
+
+
+def verify_deployed_images(kube: Kubectl, files: dict[str, list[dict[str, Any]]]) -> None:
+    """Check live Deployment templates and readiness against the fixed candidate."""
+    for filename in ("40-services.yaml", "60-execution.yaml"):
+        for desired in files[filename]:
+            if desired["kind"] != "Deployment":
+                continue
+            metadata = desired["metadata"]
+            live = kube.get("deployment", metadata["name"], metadata["namespace"])
+            expected = {c["name"]: c["image"] for c in desired["spec"]["template"]["spec"]["containers"]}
+            observed = {c["name"]: c["image"] for c in live.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])}
+            status = live.get("status", {})
+            replicas = desired["spec"].get("replicas", 1)
+            if (observed != expected or status.get("observedGeneration", 0) < live.get("metadata", {}).get("generation", 1)
+                or status.get("updatedReplicas", 0) != replicas or status.get("availableReplicas", 0) != replicas
+                or status.get("replicas", 0) != replicas):
+                raise DeploymentError("candidate workload readback failed: " + metadata["name"])
+
+
 def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str, Any]:
     snapshot = tempfile.TemporaryDirectory(prefix="loom-nebius-deploy-")
     snapshot_root = Path(snapshot.name)
@@ -335,6 +381,10 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
         "status": "running",
         "phases": [],
     }
+
+    guard_owner = "rollout-" + uuid.uuid4().hex
+    guard_acquired = False
+    mutation_started = False
 
     def phase(name: str) -> None:
         evidence["phases"].append({"name": name, "started_at": datetime.now(UTC).isoformat()})
@@ -371,8 +421,31 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
                 "candidate migration previously failed; fix the cause and explicitly retry failed jobs"
             )
         ns = config["namespace"]
+        # Fresh installations have no running services. Every existing platform
+        # upgrade uses the same guard, whether invoked locally or by Actions.
+        if state["database_exists"]:
+            evidence["guard_owner"] = guard_owner
+            phase("check-idle")
+            guard = rollout_guard(kube, ns, "acquire", guard_owner, manifest["candidate_sha"])
+            evidence["guard"] = guard
+            if guard["status"] != "acquired":
+                evidence["status"] = guard["status"]
+                return evidence
+            guard_acquired = True
+            evidence["guard_owner"] = guard_owner
+            phase("idle-reserved")
+            expected_current = getattr(args, "expected_current_candidate", None)
+            if expected_current is not None:
+                current = kube.get("configmap", "loom-platform-config", ns)
+                if json.loads(current["data"]["profile.json"])["candidate_sha"] != expected_current:
+                    rollout_guard(kube, ns, "release", guard_owner, manifest["candidate_sha"])
+                    guard_acquired = False
+                    evidence["status"] = "skipped_superseded"
+                    return evidence
 
         def apply_file(filename: str) -> None:
+            nonlocal mutation_started
+            mutation_started = True
             phase(filename.removesuffix(".yaml"))
             kube.run("apply", "-f", str(snapshot_root / filename))
 
@@ -426,11 +499,8 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
         run_job("50-configure.yaml")
         apply_file("60-execution.yaml")
         for actuator in [
-            "loom-execution-actuator",
-            *[
-                target["target_id"] + "-actuator"
-                for target in config.get("regional_execution_targets", [])
-            ],
+            row["metadata"]["name"] for row in files["60-execution.yaml"]
+            if row["kind"] == "Deployment"
         ]:
             kube.run(
                 "rollout",
@@ -454,9 +524,23 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
         )
         phase("public-https-smoke")
         public_smoke(manifest["public_origin"], config["environment"])
+        phase("candidate-readback")
+        verify_deployed_images(kube, files)
+        if guard_acquired:
+            rollout_guard(kube, ns, "release", guard_owner, manifest["candidate_sha"])
+            guard_acquired = False
         evidence["status"] = "complete"
         return evidence
     except Exception as exc:
+        # Before apply, a failed backup must not leave a healthy platform paused.
+        # After apply (or runner loss), retain the durable pause for recovery.
+        if guard_acquired and not mutation_started:
+            try:
+                rollout_guard(kube, ns, "release", guard_owner, manifest["candidate_sha"])
+                guard_acquired = False
+            except Exception:
+                pass
+        evidence["dispatch_paused"] = guard_acquired
         evidence["status"] = "failed"
         if kube is not None and "config" in locals():
             failures: list[dict[str, Any]] = []

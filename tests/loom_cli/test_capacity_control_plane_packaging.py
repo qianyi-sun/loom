@@ -6,7 +6,6 @@ import shutil
 import subprocess
 import zipfile
 from pathlib import Path
-from uuid import UUID
 
 import pytest
 
@@ -83,9 +82,6 @@ _GUARD_MIGRATION_RESOURCES = {
     "capacity_guard_migrations/versions/guard_0033_refundable_admission_compatibility.py",
     "capacity_guard_migrations/versions/guard_0034_current_bootstrap_observation.py",
 }
-_PROFILE = _REPO_ROOT / "deploy/dev-fleet/capacity-control-plane.toml"
-_MANAGER_IMAGE = "ghcr.io/qianyi-sun/loom-capacity-manager@sha256:" + "a" * 64
-_AUTHORITY = UUID("00000000-0000-4000-8000-000000000901")
 
 
 @pytest.fixture(scope="module")

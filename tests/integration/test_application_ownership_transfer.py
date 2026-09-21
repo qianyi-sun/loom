@@ -85,7 +85,7 @@ async def transfer_database(
     )
     url = url.replace("postgresql+psycopg://", "postgresql://", 1)
     try:
-        command.upgrade(config, "0134" if baseline else "head")
+        command.upgrade(config, "0134" if baseline else application_schema_reference().application_head)
         (
             owner,
             migrator,
@@ -98,7 +98,7 @@ async def transfer_database(
         ) = await provisioner._converge_roles(identity, _new_credentials())
         from scripts.build_application_schema_reference import _migrate_reference_guard
         await _migrate_reference_guard(
-            guard_head="guard_0030" if baseline else "guard_0035",
+            guard_head="guard_0030" if baseline else application_schema_reference().guard_head,
             migrator_url=migrator_url,
             owner=owner,
             agent=agent,

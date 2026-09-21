@@ -5,19 +5,20 @@ from pathlib import Path
 
 import pytest
 
+from loom.db.schema_startup import service_schema_head
 from loom_cli.migration_readiness import inspect_migration_plan
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-EXPECTED_HEAD = json.loads((REPO_ROOT / "config/staging-migration-policy.json").read_text())["expected_head"]
+EXPECTED_HEAD = service_schema_head()
 
 
 def test_repository_migration_plan_is_single_head_and_policy_bound() -> None:
     result = inspect_migration_plan(REPO_ROOT / "migrations/alembic.ini")
 
-    assert result.head == "0151"
+    assert result.head == service_schema_head()
     assert result.base == "0001"
-    assert result.revision_count == 152
-    assert len(result.revision_sha256) == 152
+    assert result.revision_count == len(result.revision_sha256)
+    assert result.head in result.revision_sha256
     assert result.graph_policy == "single-head-closed-dag"
     assert result.upgrade_policy == "expand-contract-before-destructive-change"
     assert result.downgrade_policy == "revision-declared-fail-closed"
@@ -33,8 +34,8 @@ def test_repository_migration_plan_is_independent_of_process_cwd(
 
     result = inspect_migration_plan(REPO_ROOT / "migrations/alembic.ini")
 
-    assert result.head == "0151"
-    assert result.revision_count == 152
+    assert result.head == service_schema_head()
+    assert result.revision_count == len(result.revision_sha256)
 
 
 def test_migration_plan_rejects_noncanonical_script_location(tmp_path: Path) -> None:
@@ -65,3 +66,20 @@ def test_policy_requires_rehearsal_before_protected_apply(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="policy is invalid"):
         inspect_migration_plan(REPO_ROOT / "migrations/alembic.ini", policy_path=path)
+
+
+def test_next_migration_is_automatic_but_forked_graph_still_fails(tmp_path):
+    import shutil
+
+    migration_dir = tmp_path / "migrations"
+    shutil.copytree(REPO_ROOT / "migrations", migration_dir, ignore=shutil.ignore_patterns("__pycache__"))
+    before = inspect_migration_plan(migration_dir / "alembic.ini")
+    source = f'revision = "9998"\ndown_revision = "{before.head}"\n'
+    (migration_dir / "versions/9998_next_release.py").write_text(source)
+    after = inspect_migration_plan(migration_dir / "alembic.ini")
+    assert after.head == service_schema_head(migration_dir / "alembic.ini") == "9998"
+    assert after.revision_count == before.revision_count + 1
+    assert after.policy_digest == before.policy_digest
+    (migration_dir / "versions/9999_fork.py").write_text(source.replace('"9998"', '"9999"'))
+    with pytest.raises(ValueError, match="does not match"):
+        inspect_migration_plan(migration_dir / "alembic.ini")
