@@ -255,16 +255,10 @@ python_type = "Path"
 # no required, no default → `Path | None = None`
 # k8s templates inject a template-local literal after the env_block macro
 
-[service_config.protected_worker_runtime_db_url_file]
-used_by     = ["control-plane"]
-python_type = "Path"
-# no required, no default → `Path | None = None`
-description = "Owner-only file containing the least-privileged PostgreSQL URL used to register and validate protected staging worker sessions. When configured, worker mutation routes require the protected worker credential header."
-
 [service_config.task_image_execution_config_file]
 used_by     = ["control-plane", "worker"]
 python_type = "Path"
-description = "Optional owner-only release configuration for signed task-image execution. Workers load only a public execution root and fixed purpose; the control plane additionally loads a fixed mTLS signer connection. Absent keeps the legacy reader path. Protected-worker composition is unsupported."
+description = "Optional owner-only release configuration for signed task-image execution. Workers load only a public execution root and fixed purpose; the control plane additionally loads a fixed mTLS signer connection. Absent keeps the legacy reader path."
 
 [service_config.log_level]
 used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]
@@ -898,23 +892,24 @@ python_type = "bool"
 default     = false
 description = "Controller-owned non-exclusive Slurm containment marker. When true, worker startup and every worker-created Docker container require the exact allocation-owned cgroup_parent; missing or malformed values fail closed."
 
+
 [service_config.cgroup_parent]
 used_by     = ["worker"]
 python_type = "str"
 default     = ""
-description = "Exact delegated Slurm job cgroup discovered from the batch process. Passed unchanged to Docker HostConfig CgroupParent for the worker, trial, verifier, and sidecar containers. Empty is allowed only when require_cgroup_parent is false."
+description = "Optional local Docker cgroup path or systemd slice for trial, verifier and sidecar containers. Empty uses the Docker default."
 
 [service_config.sandbox_identity]
 used_by     = ["worker"]
 python_type = "str"
 default     = ""
-description = "Developer sandbox/environment identity for Slurm worker, trial, sidecar, Compose-project, and cleanup scoping. Empty is allowed only for legacy non-Slurm workers."
+description = "Optional local sandbox/environment identity for container labels and cleanup scoping."
 
 [service_config.candidate_sha]
 used_by     = ["worker"]
 python_type = "str"
 default     = ""
-description = "Exact lowercase 40-character candidate SHA bound to this Slurm worker job and propagated to every worker-created container label."
+description = "Optional exact lowercase 40-character source revision propagated to worker-created container labels."
 
 [service_config.slurm_job_id]
 used_by     = ["worker"]
@@ -926,7 +921,7 @@ description = "Slurm allocation job ID injected by the batch script. Used with s
 used_by     = ["worker"]
 python_type = "str"
 default     = ""
-description = "Per-job Docker Compose project name derived from sandbox identity, candidate SHA, and Slurm job ID."
+description = "Optional local Docker Compose project identity for container cleanup scoping."
 
 [service_config.fixtures_root]
 used_by     = ["worker"]

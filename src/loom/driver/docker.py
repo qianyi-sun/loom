@@ -48,7 +48,7 @@ from loom.models.types import OS
 logger = logging.getLogger(__name__)
 
 _KEEPALIVE_CMD = ["sh", "-c", "exec sleep infinity"]
-_GUARD_OWNED_SLICE_RE = re.compile(r"^loom-job-[1-9][0-9]*[.]slice$")
+_SYSTEMD_SLICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*[.]slice$")
 _CGROUP_V2_READ_SCRIPT = """
 for f in cpu.stat memory.current memory.peak memory.events pids.current pids.peak io.stat; do
   printf '@@%s\\n' "$f"
@@ -85,7 +85,7 @@ def _tmpfs_specs_to_docker_map(specs: tuple[str, ...]) -> dict[str, str]:
 def _validated_cgroup_parent(value: str) -> str:
     if "\x00" in value or "\n" in value or "\r" in value:
         raise DriverError("Docker cgroup parent is malformed")
-    if _GUARD_OWNED_SLICE_RE.fullmatch(value) is not None:
+    if _SYSTEMD_SLICE_RE.fullmatch(value) is not None:
         return value
     path = PurePosixPath(value)
     if not path.is_absolute() or path == PurePosixPath("/"):

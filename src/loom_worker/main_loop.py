@@ -139,10 +139,7 @@ _SETUP_FAILURE_HEAD_CHARS = 360
 _SETUP_FAILURE_TRUNCATION_MARKER = (
     "\n...[truncated setup diagnostic; preserved trailing output]...\n"
 )
-_SLURM_JOB_ID_RE = re.compile(r"^[1-9][0-9]*(?:_[0-9]+)?$")
-# Docker's systemd cgroup driver takes the guard-owned allocation slice as a
-# unit name rather than a filesystem path.
-_WORKER_SLICE_RE = re.compile(r"^loom-job-([1-9][0-9]*)\.slice$")
+_WORKER_SLICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.slice$")
 _CANDIDATE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 logger = logging.getLogger(__name__)
@@ -178,86 +175,29 @@ def _worker_hostname(configured_hostname: str | None) -> str:
 def _runtime_identity_labels(
     settings: WorkerSettings,
 ) -> tuple[tuple[str, str], ...]:
-    """Return immutable Slurm provenance labels for spawned containers.
-
-    Older in-process integrations and test doubles may still expose the
-    pre-containment WorkerSettings surface.  Treat missing identity fields as
-    the documented legacy, unlabelled worker rather than failing after a trial
-    has already been claimed.
-    """
+    """Return local environment identity labels for spawned containers."""
     values = (
         ("loom.sandbox", getattr(settings, "sandbox_identity", "")),
         ("loom.candidate_sha", getattr(settings, "candidate_sha", "")),
-        ("loom.slurm_job_id", getattr(settings, "slurm_job_id", "")),
         ("loom.compose_project", getattr(settings, "compose_project", "")),
     )
     return tuple((key, value) for key, value in values if value)
 
 
 def _worker_cgroup_parent(settings: WorkerSettings) -> str | None:
-    """Validate the controller-bound Docker parent before worker registration."""
-
-    required = bool(getattr(settings, "require_cgroup_parent", False))
+    """Validate an optional local Docker resource parent before registration."""
     raw_parent = str(getattr(settings, "cgroup_parent", "")).strip()
     if not raw_parent:
-        if required:
-            raise RuntimeError(
-                "non-exclusive Slurm worker requires an allocation cgroup parent",
-            )
         return None
-    if "\x00" in raw_parent or "\n" in raw_parent or "\r" in raw_parent:
+    if any(char in raw_parent for char in ("\x00", "\n", "\r")):
         raise RuntimeError("worker cgroup parent is malformed")
-    slice_match = _WORKER_SLICE_RE.fullmatch(raw_parent)
-    if slice_match is not None:
-        # Docker's systemd driver takes the guard-owned `loom-job-<id>.slice`;
-        # bind it to this job so a worker cannot be pointed at another job's slice.
-        if required:
-            slurm_job_id = str(getattr(settings, "slurm_job_id", "")).strip()
-            if _SLURM_JOB_ID_RE.fullmatch(slurm_job_id) is None:
-                raise RuntimeError(
-                    "required worker cgroup parent needs a valid Slurm job ID",
-                )
-            if slice_match.group(1) != slurm_job_id.split("_", 1)[0]:
-                raise RuntimeError(
-                    "required worker cgroup parent slice does not match the Slurm job ID",
-                )
+    if _WORKER_SLICE_RE.fullmatch(raw_parent):
         return raw_parent
     parent = PurePosixPath(raw_parent)
     if not parent.is_absolute() or parent == PurePosixPath("/"):
         raise RuntimeError("worker cgroup parent must be a non-root absolute path")
     if any(part in {".", ".."} for part in raw_parent.split("/")):
         raise RuntimeError("worker cgroup parent contains traversal")
-    if required:
-        slurm_job_id = str(getattr(settings, "slurm_job_id", "")).strip()
-        if _SLURM_JOB_ID_RE.fullmatch(slurm_job_id) is None:
-            raise RuntimeError(
-                "required worker cgroup parent needs a valid Slurm job ID",
-            )
-        parts = parent.parts[1:]
-        marker_indexes = [
-            index
-            for index, part in enumerate(parts)
-            if part == "slurm" or part == "slurmstepd.scope" or part.endswith("_slurmstepd.scope")
-        ]
-        if not marker_indexes:
-            raise RuntimeError(
-                "required worker cgroup parent has no identifiable Slurm scope",
-            )
-        expected_jobs = {f"job_{slurm_job_id}"}
-        if "_" in slurm_job_id:
-            expected_jobs.add(f"job_{slurm_job_id.split('_', 1)[0]}")
-        for index, part in enumerate(parts):
-            if not any(marker_index < index for marker_index in marker_indexes):
-                continue
-            if part in expected_jobs:
-                return parent.as_posix()
-            if part.startswith("job_"):
-                raise RuntimeError(
-                    "required worker cgroup parent does not match the Slurm job ID",
-                )
-        raise RuntimeError(
-            "required worker cgroup parent has no job scope after the Slurm marker",
-        )
     return parent.as_posix()
 
 
@@ -783,17 +723,6 @@ async def _register_worker_with_retry(
         "max_concurrent": max(1, settings.max_concurrent),
         "pool_name": settings.pool_name,
     }
-    slurm_job_id = str(getattr(settings, "slurm_job_id", "") or "").strip()
-    if slurm_job_id:
-        slurm_provenance = {
-            "sandbox_identity": str(getattr(settings, "sandbox_identity", "") or "").strip(),
-            "candidate_sha": str(getattr(settings, "candidate_sha", "") or "").strip(),
-            "slurm_job_id": slurm_job_id,
-            "compose_project": str(getattr(settings, "compose_project", "") or "").strip(),
-        }
-        if not all(slurm_provenance.values()):
-            raise ValueError("Slurm registration provenance fields must be supplied together")
-        register_kwargs.update(slurm_provenance)
     if settings.executor_worker_credential is not None:
         register_kwargs["executor_worker_credential"] = (
             settings.executor_worker_credential.get_secret_value()
@@ -1396,7 +1325,6 @@ async def _spawn_trial(
                     settings,
                     worker_id,
                 ),
-                require_containment=bool(getattr(settings, "require_cgroup_parent", False)),
                 registry_repo=(getattr(settings, "trial_cache_registry_repo", "") or None),
                 registry_image=(
                     task_image_materialization.registry_images.get("task")

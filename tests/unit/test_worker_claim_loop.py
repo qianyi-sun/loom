@@ -358,61 +358,6 @@ async def test_pipeline_registration_advertises_both_work_kinds(monkeypatch) -> 
     assert recorded["supported_work_kinds"] == ["trial", "execution_attempt"]
 
 
-@pytest.mark.legacy_pool
-async def test_register_worker_with_retry_passes_complete_slurm_provenance() -> None:
-    registered = False
-
-    class _FakeCPClient:
-        async def register(self, **kwargs: object) -> dict[str, object]:
-            nonlocal registered
-            registered = True
-            assert kwargs == {
-                "hostname": "worker-host",
-                "version": "0.0.1",
-                "capabilities": ml._DEFAULT_CAPS,  # type: ignore[attr-defined]
-                "max_concurrent": 3,
-                "pool_name": "worker-pool",
-                "sandbox_identity": "production",
-                "candidate_sha": "a" * 40,
-                "slurm_job_id": "40740",
-                "compose_project": "loom-production-aaaaaaaaaaaa-40740",
-            }
-            return {"worker_id": str(uuid4())}
-
-    await ml._register_worker_with_retry(  # type: ignore[attr-defined]
-        cp_client=_FakeCPClient(),
-        settings=_RegistrationSettings(),
-    )
-
-    assert registered
-
-
-@pytest.mark.legacy_pool
-async def test_register_worker_with_retry_rejects_partial_slurm_provenance() -> None:
-    class _PartialRegistrationSettings:
-        hostname = "worker-host"
-        max_concurrent = 3
-        pool_name = "worker-pool"
-        sandbox_identity = "production"
-        candidate_sha = "a" * 40
-        slurm_job_id = "40740"
-        compose_project = ""
-
-    class _FakeCPClient:
-        async def register(self, **_kwargs: object) -> dict[str, object]:
-            raise AssertionError("registration must not be attempted")
-
-    try:
-        await ml._register_worker_with_retry(  # type: ignore[attr-defined]
-            cp_client=_FakeCPClient(),
-            settings=_PartialRegistrationSettings(),
-        )
-    except ValueError as exc:
-        assert str(exc) == "Slurm registration provenance fields must be supplied together"
-    else:  # pragma: no cover - defensive clarity
-        raise AssertionError("expected ValueError")
-
-
 def test_worker_orphan_cleanup_retries_transient_control_plane_lookup(
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]

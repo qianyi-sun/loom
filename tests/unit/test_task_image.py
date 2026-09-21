@@ -735,7 +735,7 @@ async def test_resolve_task_image_releases_slot_on_build_failure(
     )
 
 
-# ── #1169: base task-image registry pull/push (contained pools) ──────────────
+# ── #1169: base task-image registry pull/push ──────────────
 
 
 class _RegistryFakeImages:
@@ -798,7 +798,7 @@ def test_task_image_tag_rejects_arm_execution_but_any_resolves_to_x86() -> None:
     )
 
 
-async def test_contained_worker_pulls_base_image_from_registry_instead_of_building(
+async def test_worker_pulls_base_image_from_registry_instead_of_building(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     task_dir = tmp_path / "task"
@@ -816,16 +816,15 @@ async def test_contained_worker_pulls_base_image_from_registry_instead_of_buildi
         task_config=cfg,
         task_dir=task_dir,
         task_checksum="abc123",
-        require_containment=True,  # a build would be refused
         registry_repo=registry_repo,
     )
 
     assert image == tag
     assert images.pull_calls == [registry_tag]  # pulled...
-    assert images.build_calls == []  # ...never built (which would have been refused)
+    assert images.build_calls == []  # cache hit avoids a local build
 
 
-async def test_non_contained_builder_pushes_base_image_to_registry_on_miss(
+async def test_local_builder_pushes_base_image_to_registry_on_miss(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     task_dir = tmp_path / "task"
@@ -843,38 +842,12 @@ async def test_non_contained_builder_pushes_base_image_to_registry_on_miss(
         task_config=cfg,
         task_dir=task_dir,
         task_checksum="abc123",
-        require_containment=False,
         registry_repo=registry_repo,
     )
 
     assert image == tag
     assert images.build_calls  # built locally
     assert images.push_calls == [(registry_repo, key)]  # populated registry for pullers
-
-
-async def test_contained_worker_refuses_build_when_registry_misses(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    from loom.driver.build_containment import ImageBuildForbiddenError
-
-    task_dir = tmp_path / "task"
-    dockerfile = task_dir / "environment" / "Dockerfile"
-    dockerfile.parent.mkdir(parents=True)
-    dockerfile.write_text("FROM alpine:3.19\n")
-    cfg = _task_config(dockerfile="environment/Dockerfile")
-    images = _RegistryFakeImages()  # empty registry → miss → containment refuses to build
-    monkeypatch.setattr(task_image.docker, "from_env", lambda *a, **k: _FakeDockerClient(images))
-
-    with pytest.raises(ImageBuildForbiddenError):
-        await resolve_task_image(
-            task_config=cfg,
-            task_dir=task_dir,
-            task_checksum="abc123",
-            require_containment=True,
-            registry_repo="192.168.50.13:5000/loom-task",
-        )
-    assert images.pull_calls  # tried the registry before refusing
-    assert images.build_calls == []
 
 
 async def test_execution_worker_never_builds_when_registry_misses(

@@ -23,10 +23,6 @@ from typing import Any
 import docker
 from docker.errors import APIError, BuildError, ImageNotFound, NotFound
 
-from loom.driver.build_containment import (
-    ImageBuildForbiddenError,
-    forbid_build_when_contained,
-)
 from loom.execution_architecture import execution_cpu_arch
 from loom.models.task import TaskConfig
 
@@ -120,7 +116,6 @@ async def resolve_task_image(
     task_checksum: str,
     docker_api_timeout_sec: int | None = None,
     build_slot_provider: BuildSlotProvider | None = None,
-    require_containment: bool = False,
     registry_repo: str | None = None,
     registry_image: str | None = None,
     registry_pull_timeout_sec: float = 15.0,
@@ -245,7 +240,6 @@ async def resolve_task_image(
                     dockerfile=dockerfile,
                     build_context=build_context,
                     docker_api_timeout_sec=docker_api_timeout_sec,
-                    require_containment=require_containment,
                     registry_repo=registry_repo,
                     cpu_arch=native_cpu_arch,
                 ),
@@ -472,7 +466,6 @@ def _ensure_dockerfile_image(
     dockerfile: Path,
     build_context: Path,
     docker_api_timeout_sec: int | None = None,
-    require_containment: bool = False,
     registry_repo: str | None = None,
     cpu_arch: str,
 ) -> None:
@@ -490,10 +483,6 @@ def _ensure_dockerfile_image(
         except ImageNotFound:
             pass
 
-        # #1146: a build here would run outside the Slurm job cgroup — refuse
-        # on containment-required (non-exclusive) workers; the image must be
-        # pre-built/cached.
-        forbid_build_when_contained(require_containment, tag)
         rel_dockerfile = dockerfile.relative_to(build_context).as_posix()
         _enforce_build_context_limits(build_context)
         client.images.build(
@@ -529,12 +518,6 @@ def _ensure_dockerfile_image(
                     exc,
                 )
     except TaskImageBuildError:
-        raise
-    except ImageBuildForbiddenError:
-        # #1169: a containment refusal is not a build *failure* — let it
-        # propagate uncaught so classify_failure records it as a
-        # self-explaining ENV_START_FAILURE rather than a wrapped
-        # "failed to build" TaskImageBuildError.
         raise
     except BuildError as exc:
         # docker-py's BuildError stringifies to only the failing RUN

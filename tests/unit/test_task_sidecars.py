@@ -621,10 +621,7 @@ async def test_sidecar_runtime_applies_exact_cgroup_parent(
     fake_client = _FakeDockerClient()
     monkeypatch.setattr(task_sidecars.docker, "from_env", lambda: fake_client)
 
-    # #1146: a containment-required worker (container_cgroup_parent set) refuses
-    # to BUILD sidecar images — they must be pre-cached. Mark the built sidecar
-    # image as already present so the RUN path (the cgroup_parent under test)
-    # exercises without a forbidden build. (postgres:15 still pulls.)
+    # Reuse a cached task image; postgres:15 still pulls.
     def _cached_get(image: str) -> object:
         fake_client.images.get_calls.append(image)
         if image == "postgres:15":

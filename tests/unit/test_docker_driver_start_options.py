@@ -312,8 +312,7 @@ async def test_docker_driver_applies_exact_cgroup_parent(
     assert create_kwargs["cgroup_parent"] == ("/loom/tasks/task-123")
 
 
-@pytest.mark.legacy_pool
-async def test_docker_driver_applies_guard_owned_systemd_slice(
+async def test_docker_driver_applies_local_systemd_slice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     create_kwargs: dict[str, Any] = {}
@@ -343,9 +342,9 @@ async def test_docker_driver_applies_guard_owned_systemd_slice(
     monkeypatch.setattr(DockerDriver, "set_network_policy", _noop_policy)
 
     driver = DockerDriver(image="loom-agent-sandbox:dev")
-    await driver.start(options=StartOptions(cgroup_parent="loom-job-123.slice"))
+    await driver.start(options=StartOptions(cgroup_parent="loom-local.slice"))
 
-    assert create_kwargs["cgroup_parent"] == "loom-job-123.slice"
+    assert create_kwargs["cgroup_parent"] == "loom-local.slice"
 
 
 @pytest.mark.parametrize(
@@ -355,11 +354,7 @@ async def test_docker_driver_applies_guard_owned_systemd_slice(
         "/",
         "relative/path",
         "/a/../b",
-        "loom-job-0.slice",
-        "loom-job-01.slice",
-        "loom-job--1.slice",
-        "loom-job-1.service",
-        "other-job-1.slice",
+        "loom-local.service",
     ],
 )
 async def test_docker_driver_rejects_unsafe_cgroup_parent(

@@ -30,129 +30,6 @@ def test_runtime_identity_labels_allow_legacy_settings() -> None:
     assert ml._worker_cgroup_parent(_FakeSettings()) is None  # type: ignore[arg-type]
 
 
-@pytest.mark.legacy_pool
-def test_required_worker_cgroup_parent_fails_closed_when_missing() -> None:
-    settings = _FakeSettings()
-    settings.require_cgroup_parent = True
-    settings.cgroup_parent = ""
-
-    with pytest.raises(RuntimeError, match="requires an allocation cgroup"):
-        ml._worker_cgroup_parent(settings)  # type: ignore[arg-type]
-
-
-@pytest.mark.legacy_pool
-def test_required_worker_cgroup_parent_accepts_slurm_scope() -> None:
-    settings = _FakeSettings()
-    settings.require_cgroup_parent = True
-    settings.cgroup_parent = "/system.slice/slurmstepd.scope/job_123"
-    settings.slurm_job_id = "123"
-
-    assert ml._worker_cgroup_parent(settings) == ("/system.slice/slurmstepd.scope/job_123")  # type: ignore[arg-type]
-
-
-@pytest.mark.legacy_pool
-def test_required_worker_cgroup_parent_accepts_guard_slice() -> None:
-    # Docker's systemd driver takes the guard-owned slice unit, not a path.
-    settings = _FakeSettings()
-    settings.require_cgroup_parent = True
-    settings.cgroup_parent = "loom-job-123.slice"
-    settings.slurm_job_id = "123"
-
-    assert ml._worker_cgroup_parent(settings) == "loom-job-123.slice"  # type: ignore[arg-type]
-
-
-@pytest.mark.legacy_pool
-def test_required_worker_cgroup_parent_accepts_guard_slice_for_array_base() -> None:
-    settings = _FakeSettings()
-    settings.require_cgroup_parent = True
-    settings.cgroup_parent = "loom-job-123.slice"
-    settings.slurm_job_id = "123_7"
-
-    assert ml._worker_cgroup_parent(settings) == "loom-job-123.slice"  # type: ignore[arg-type]
-
-
-@pytest.mark.legacy_pool
-def test_required_worker_cgroup_parent_rejects_mismatched_slice() -> None:
-    settings = _FakeSettings()
-    settings.require_cgroup_parent = True
-    settings.cgroup_parent = "loom-job-456.slice"
-    settings.slurm_job_id = "123"
-
-    with pytest.raises(RuntimeError, match="slice does not match the Slurm job ID"):
-        ml._worker_cgroup_parent(settings)  # type: ignore[arg-type]
-
-
-@pytest.mark.legacy_pool
-def test_required_worker_cgroup_parent_rejects_missing_slurm_job_id() -> None:
-    settings = _FakeSettings()
-    settings.require_cgroup_parent = True
-    settings.cgroup_parent = "/system.slice/slurmstepd.scope/job_123"
-    settings.slurm_job_id = ""
-
-    with pytest.raises(RuntimeError, match="needs a valid Slurm job ID"):
-        ml._worker_cgroup_parent(settings)  # type: ignore[arg-type]
-
-
-@pytest.mark.legacy_pool
-@pytest.mark.parametrize(
-    ("parent", "job_id", "match"),
-    [
-        (
-            "/system.slice/slurmstepd.scope/job_456",
-            "123",
-            "does not match the Slurm job ID",
-        ),
-        (
-            "/evil/job_123",
-            "123",
-            "no identifiable Slurm scope",
-        ),
-        (
-            "/system.slice/slurmstepd.scope/step_batch",
-            "123",
-            "no job scope after the Slurm marker",
-        ),
-        (
-            "/evil/job_123/system.slice/slurmstepd.scope",
-            "123",
-            "no job scope after the Slurm marker",
-        ),
-    ],
-)
-def test_required_worker_cgroup_parent_rejects_unbound_scope(
-    parent: str,
-    job_id: str,
-    match: str,
-) -> None:
-    settings = _FakeSettings()
-    settings.require_cgroup_parent = True
-    settings.cgroup_parent = parent
-    settings.slurm_job_id = job_id
-
-    with pytest.raises(RuntimeError, match=match):
-        ml._worker_cgroup_parent(settings)  # type: ignore[arg-type]
-
-
-@pytest.mark.legacy_pool
-@pytest.mark.parametrize(
-    ("parent", "job_id"),
-    [
-        ("/system.slice/slurmstepd.scope/job_123_4", "123_4"),
-        ("/system.slice/slurmstepd.scope/job_123", "123_4"),
-    ],
-)
-def test_required_worker_cgroup_parent_accepts_array_job_binding(
-    parent: str,
-    job_id: str,
-) -> None:
-    settings = _FakeSettings()
-    settings.require_cgroup_parent = True
-    settings.cgroup_parent = parent
-    settings.slurm_job_id = job_id
-
-    assert ml._worker_cgroup_parent(settings) == parent  # type: ignore[arg-type]
-
-
 def test_setup_failure_classifier_recognizes_task_image_build_timeout() -> None:
     detail = (
         "building Docker image 'loom-task:405adf85aa0c5227b5fdf74f916f6b9c' "
@@ -1403,3 +1280,18 @@ async def test_runtime_bucket_bootstrap_creates_required_runtime_buckets() -> No
 _ = pytest
 
 
+
+
+@pytest.mark.parametrize("parent", ["/local/worker", "loom-local.slice"])
+def test_local_worker_accepts_explicit_resource_parent(parent: str) -> None:
+    settings = _FakeSettings()
+    settings.cgroup_parent = parent
+    assert ml._worker_cgroup_parent(settings) == parent
+
+
+@pytest.mark.parametrize("parent", ["/", "relative", "/local/../other", "local\nslice"])
+def test_local_worker_rejects_invalid_resource_parent(parent: str) -> None:
+    settings = _FakeSettings()
+    settings.cgroup_parent = parent
+    with pytest.raises(RuntimeError):
+        ml._worker_cgroup_parent(settings)

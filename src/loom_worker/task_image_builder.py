@@ -253,7 +253,6 @@ async def materialize_and_publish_task_images(
                 task_dir=task_dir,
                 task_checksum=image_cache_checksum,
                 docker_api_timeout_sec=settings.docker_api_timeout_sec,
-                require_containment=False,
                 cpu_arch=claim.cpu_arch,
                 build_if_missing=True,
             )
