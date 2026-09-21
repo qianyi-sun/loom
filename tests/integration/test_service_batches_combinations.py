@@ -70,6 +70,8 @@ async def setup(
     postgres_url: str,
 ) -> AsyncIterator[tuple[FastAPI, str]]:
     for k, v in {
+        "LOOM_ENV": "development",
+        "LOOM_LOCAL_EXECUTION": "1",
         "LOOM_SVC_DB_URL": postgres_url,
         "LOOM_SVC_MINIO_ENDPOINT": "http://minio:9000",
         "LOOM_SVC_MINIO_ACCESS_KEY": "x",
