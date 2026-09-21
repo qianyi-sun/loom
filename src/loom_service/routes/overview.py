@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import AuthContext
 from loom.db.schema import Batch, Benchmark, ProviderConnection, Team, Trial
+from loom_control_plane.execution_capacity import fetch_execution_capacity_status
 from loom_service.auth_guards import is_admin, require_scope
 from loom_service.dependencies import SessionAndCtx
 from loom_service.routes.benchmarks import (
@@ -252,19 +253,41 @@ async def _run_activity(
     }
 
 
+def _execution_health(capacity: dict[str, Any]) -> dict[str, Any]:
+    """Describe configured Nebius execution without predicting per-task admission.
+
+    Zero running nodes is normal for autoscaling. Configuration permits intake;
+    fresh observations describe runtime conditions, not a second admission gate.
+    """
+    targets = [
+        target for target in capacity["targets"]
+        if target["desired_state"] == "active"
+        and (target.get("policy") or {}).get("enabled")
+    ]
+    if not targets:
+        status = "not_configured"
+    elif any(not (target.get("observation") or {}).get("is_fresh") for target in targets):
+        status = "unknown"
+    elif any(target["blockers"] for target in targets):
+        status = "needs_attention"
+    else:
+        status = "observed"
+    return {"configured_targets": len(targets), "status": status}
+
+
 def _next_actions(
     *,
     capabilities: dict[str, bool],
     provider_health: dict[str, Any],
     benchmark_readiness: dict[str, Any],
-    worker_health: dict[str, Any],
+    execution_health: dict[str, Any],
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     if (
         capabilities["can_submit"]
         and provider_health["ready"] > 0
         and benchmark_readiness["runnable"] > 0
-        and worker_health["active"] > 0
+        and execution_health["configured_targets"] > 0
     ):
         actions.append(
             {
@@ -305,16 +328,21 @@ def _next_actions(
                 "priority": 40,
             }
         )
-    if worker_health["active"] == 0:
+    if execution_health["status"] == "not_configured":
         actions.append(
             {
-                "id": "start_worker",
-                "label": "Start at least one worker",
+                "id": "configure_execution",
+                "label": "Configure Nebius execution",
                 "to": "/monitor",
                 "kind": "operator",
                 "priority": 50,
             }
         )
+    elif execution_health["status"] != "observed":
+        actions.append({
+            "id": "inspect_execution", "label": "Check Nebius capacity in Monitor",
+            "to": "/monitor", "kind": "operator", "priority": 50,
+        })
     return sorted(actions, key=lambda item: item["priority"])
 
 
@@ -324,7 +352,7 @@ def _status(
     capabilities: dict[str, bool],
     provider_health: dict[str, Any],
     benchmark_readiness: dict[str, Any],
-    worker_health: dict[str, Any],
+    execution_health: dict[str, Any],
 ) -> str:
     if team_context["submissions_paused"]:
         return "blocked"
@@ -332,7 +360,7 @@ def _status(
         capabilities["can_submit"]
         and provider_health["ready"] > 0
         and benchmark_readiness["runnable"] > 0
-        and worker_health["active"] > 0
+        and execution_health["configured_targets"] > 0
     ):
         return "ready"
     return "needs_setup"
@@ -340,7 +368,7 @@ def _status(
 
 def _summary(status: str) -> str:
     if status == "ready":
-        return "This team can launch model-backed evaluations."
+        return "This team can submit evaluations. Execution may wait for capacity or node startup."
     if status == "blocked":
         return "Team submissions are currently paused."
     return "Finish the setup items below before launching evaluations."
@@ -348,7 +376,7 @@ def _summary(status: str) -> str:
 
 @router.get("/overview")
 async def get_overview(response: Response, sc: SessionAndCtx) -> dict[str, Any]:
-    # Worker health is heartbeat-derived and can change within seconds. Keep
+    # Execution observations can change within seconds. Keep
     # browsers and intermediary caches from replaying an old readiness result.
     response.headers["Cache-Control"] = "no-store"
     session, ctx = sc
@@ -364,13 +392,14 @@ async def get_overview(response: Response, sc: SessionAndCtx) -> dict[str, Any]:
         "available_backends": active_backends,
         "has_default_backend": "docker" in active_backends,
     }
+    execution_health = _execution_health(await fetch_execution_capacity_status(session))
     run_activity = await _run_activity(session, team_id)
     status = _status(
         team_context=team_context,
         capabilities=capabilities,
         provider_health=provider_health,
         benchmark_readiness=benchmark_readiness,
-        worker_health=worker_health,
+        execution_health=execution_health,
     )
     return {
         "status": status,
@@ -379,12 +408,13 @@ async def get_overview(response: Response, sc: SessionAndCtx) -> dict[str, Any]:
         "capabilities": capabilities,
         "provider_health": provider_health,
         "benchmark_readiness": benchmark_readiness,
-        "worker_health": worker_health,
+        "worker_health": worker_health,  # Legacy API compatibility; not launch readiness.
+        "execution_health": execution_health,
         "run_activity": run_activity,
         "next_actions": _next_actions(
             capabilities=capabilities,
             provider_health=provider_health,
             benchmark_readiness=benchmark_readiness,
-            worker_health=worker_health,
+            execution_health=execution_health,
         ),
     }

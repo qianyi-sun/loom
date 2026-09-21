@@ -68,3 +68,15 @@ final results across the batch and linked reruns; this is not arbitrary checkbox
 selection. Active runs retain individual completed-Trial downloads and explain
 why batch export is deferred. Cross-team shared artifact browsing does not grant
 access to private full-batch delivery. Metadata export remains a separate action.
+
+
+### Home readiness
+
+Home uses the existing Nebius execution-capacity projection. An active target
+with an enabled capacity policy satisfies execution setup, even when autoscaling
+has reduced its node count to zero. Home readiness means ready to submit; it does
+not promise immediate per-task admission. Missing or stale observations remain
+unknown, and current capacity blockers link to Monitor without inventing a
+worker-start prerequisite. Provider, catalog and team checks still apply. The
+legacy `worker_health` response remains for API compatibility but no longer
+controls Home readiness or its execution card.

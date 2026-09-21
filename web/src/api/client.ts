@@ -1198,6 +1198,10 @@ export interface OverviewSummary {
       task_count: number;
     }[];
   };
+  execution_health: {
+    configured_targets: number;
+    status: "observed" | "unknown" | "needs_attention" | "not_configured";
+  };
   worker_health: {
     active: number;
     available_backends: string[];
