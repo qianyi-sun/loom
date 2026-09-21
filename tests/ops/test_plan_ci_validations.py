@@ -573,7 +573,7 @@ def test_dependency_authority_changes_select_every_heavy_gate(path: str) -> None
         "tests/loom_cli/rollout/operator/test_broker.py",
         "tests/loom_cli/rollout/steps/test_env_state_external_prereqs.py",
         "tests/loom_cli/test_rollout_lock.py",
-        "tests/loom_cli/test_rollout_lock_cli.py",
+        "tests/loom_cli/test_cluster_target_boundary.py",
         "tests/ops/test_deploy_environment_release_manifest.py",
         "tests/ops/test_environment_isolation.py",
         "tests/ops/test_release_identity.py",

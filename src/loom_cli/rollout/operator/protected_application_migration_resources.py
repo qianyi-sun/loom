@@ -18,7 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from loom_cli.rollout.application_migration_contract import (
+from loom_cli.application_migration_contract import (
     APPLICATION_OWNER_ROLE,
     application_migration_secret_name,
     require_application_migration_job,

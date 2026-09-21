@@ -23,7 +23,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
-from loom_cli.rollout.shadow_reconcile import (
+from loom_cli.cluster_drift import (
     DriftStatus,
     ResourceDrift,
     ShadowDriftReport,

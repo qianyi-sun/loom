@@ -34,7 +34,6 @@ from loom_cli.cluster_backup_guard import (
     PROTECTED_ENVIRONMENTS,
     BackupTraversalLimits,
     infer_environment,
-    is_protected_environment,
     validate_backup_manifest,
     write_backup_manifest,
 )
@@ -44,6 +43,7 @@ from loom_cli.cluster_config import (
     lifecycle_inventory_buckets,
     load_cluster_config,
 )
+from loom_cli.cluster_drift import compute_drift
 from loom_cli.cluster_release_gate import (
     collect_release_gate_report,
     format_release_gate_json,
@@ -76,6 +76,9 @@ from loom_cli.cluster_workload_trust import (
     workload_contract_from_mapping,
     workload_contract_profile_from_file,
 )
+from loom_cli.file_checks import (
+    require_real_file as _require_real_file,
+)
 from loom_cli.minio_storage_preflight import (
     DEFAULT_BUCKETS,
     DEFAULT_STOP_FREE_PERCENT,
@@ -85,34 +88,6 @@ from loom_cli.minio_storage_preflight import (
     build_minio_storage_preflight,
     render_minio_storage_preflight_json,
     render_minio_storage_preflight_table,
-)
-from loom_cli.rollout.shadow_reconcile import compute_drift
-from loom_cli.rollout_lock import (
-    DEFAULT_ROLLOUT_LOCK_TTL_SECONDS,
-    RolloutAttribution,
-    RolloutLease,
-    RolloutLeaseError,
-    RolloutLeaseManager,
-    default_rollout_lock_dir,
-    rollout_owner_id,
-)
-from loom_cli.rollout_lock_cli import (
-    BROKER_LOCK_OPTIONS as _BROKER_LOCK_OPTIONS,
-)
-from loom_cli.rollout_lock_cli import (
-    EXPLICIT_ROLLOUT_LOCK_OPTIONS_ATTR as _EXPLICIT_ROLLOUT_LOCK_OPTIONS_ATTR,
-)
-from loom_cli.rollout_lock_cli import (
-    add_rollout_lock_args as _add_rollout_lock_args,
-)
-from loom_cli.rollout_lock_cli import (
-    fixed_rollout_lock_evidence_path as _fixed_rollout_lock_evidence_path,
-)
-from loom_cli.rollout_lock_cli import (
-    load_broker_rollout_envelope as _load_broker_rollout_envelope,
-)
-from loom_cli.rollout_lock_cli import (
-    require_real_file as _require_real_file,
 )
 from loom_cli.runtime_resources import load_bundled_schema, read_bundled_text
 from loom_config.doctor import (
@@ -172,15 +147,6 @@ _COMPONENT_DESCRIPTIONS: dict[str, str] = {
 }
 
 
-@dataclass(frozen=True, slots=True)
-class _BrokerRolloutLockBinding:
-    environment: str
-    owner_id: str
-    lock_dir: Path
-    evidence_path: Path
-    attribution: RolloutAttribution
-    operator_config: Any
-    envelope: Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,128 +224,10 @@ def _backup_traversal_limits_from_args(
     )
 
 
-def _validate_broker_cluster_args(
-    args: argparse.Namespace,
-    config: Any,
-    envelope: Any,
-) -> None:
-    if envelope.environment != "staging" or envelope.namespace != "loom-staging":
-        raise ValueError("broker envelope does not target fixed staging")
-    if args.namespace != envelope.namespace:
-        raise ValueError("cluster namespace does not match broker envelope")
-    if args.environment not in (None, envelope.environment):
-        raise ValueError("cluster environment does not match broker envelope")
-    args.environment = envelope.environment
-    if args.context is not None:
-        raise ValueError("cluster context override is forbidden in broker mode")
-    if os.environ.get("KUBECONFIG") != str(config.kubeconfig_path):
-        raise ValueError("candidate KUBECONFIG does not match fixed broker config")
-    _require_real_file(Path(config.kubeconfig_path), label="fixed broker kubeconfig")
-
-    rollout_dir = Path(config.rollout_root) / "rollouts" / str(envelope.rollout_id)
-    expected_config = rollout_dir / "rollout-cluster-config.toml"
-    if args.config is None or Path(args.config) != expected_config:
-        raise ValueError("cluster config path does not match broker rollout")
-    _require_real_file(expected_config, label="broker rollout cluster config")
-    expected_rendered = rollout_dir / "07-render" / "rendered.yaml"
-    if args.rendered_manifest is None or Path(args.rendered_manifest) != expected_rendered:
-        raise ValueError("rendered manifest path does not match broker rollout")
-    _require_real_file(expected_rendered, label="broker rendered manifest")
-
-    if args.backup_manifest is None or Path(args.backup_manifest) != Path(
-        envelope.backup_manifest_path
-    ):
-        raise ValueError("backup manifest path does not match broker envelope")
-    from loom_cli.rollout.operator.backup_limits import (
-        operator_backup_traversal_limits,
-    )
-
-    if _backup_traversal_limits_from_args(args) != operator_backup_traversal_limits(config):
-        raise ValueError("backup traversal limits do not match fixed broker policy")
-    if args.skip_preflight or args.no_wait:
-        raise ValueError("protected rollout gates cannot be skipped in broker mode")
-    if not args.recover_sandbox_deadlines or args.sandbox_deadline_max_pods != 4:
-        raise ValueError("sandbox recovery policy does not match broker rollout")
 
 
-def _validate_broker_cluster_snapshot(
-    binding: _BrokerRolloutLockBinding,
-    snapshot: _ClusterUpConfigSnapshot,
-) -> None:
-    rendered = snapshot.config
-    envelope = binding.envelope
-    try:
-        authority_path = Path(binding.operator_config.cluster_config_path)
-        _require_real_file(authority_path, label="fixed broker cluster config")
-        authority_raw = tomllib.loads(authority_path.read_text(encoding="utf-8"))
-        authority = cluster_config_from_mapping(authority_raw)
-    except (OSError, UnicodeError, tomllib.TOMLDecodeError, ValueError) as exc:
-        raise ValueError("fixed broker cluster config is invalid") from exc
-    expected_root = str(Path(binding.operator_config.rollout_root))
-    configured_root = str(rendered.persistent_storage_host_path_root)
-    if (
-        rendered.namespace != envelope.namespace
-        or rendered.runtime_environment != envelope.environment
-        or rendered.image_tag != envelope.image_tag
-        or authority.namespace != envelope.namespace
-        or authority.runtime_environment != envelope.environment
-        or authority.persistent_storage_backend != "dynamic"
-        or authority.topology.multi_node is not True
-        or authority.topology.storage_backend != "longhorn"
-        or not authority.container_registry
-        or not authority.container_registry_push
-        or rendered.persistent_storage_backend != authority.persistent_storage_backend
-        or rendered.topology != authority.topology
-        or rendered.container_registry != authority.container_registry
-        or rendered.container_registry_push != authority.container_registry_push
-        or rendered.k8s_worker.enabled != authority.k8s_worker.enabled
-        or configured_root != expected_root
-        or str(authority.persistent_storage_host_path_root) != expected_root
-    ):
-        raise ValueError("broker rollout cluster config does not match fixed staging fields")
-    try:
-        if Path(configured_root).resolve(strict=False) != Path(expected_root).resolve(strict=False):
-            raise ValueError("broker rollout cluster config does not match fixed staging root")
-    except (OSError, RuntimeError) as exc:
-        raise ValueError("broker rollout cluster config root could not be resolved safely") from exc
 
 
-def _prepare_broker_rollout_lock(
-    args: argparse.Namespace,
-    *,
-    environment: str,
-) -> _BrokerRolloutLockBinding | None:
-    if environment != "staging":
-        return None
-    envelope_path = getattr(args, "rollout_request_envelope", None)
-    if envelope_path is None:
-        raise ValueError("broker-created request envelope is required for staging cluster up")
-    explicit = set(getattr(args, _EXPLICIT_ROLLOUT_LOCK_OPTIONS_ATTR, ()))
-    if explicit & _BROKER_LOCK_OPTIONS:
-        raise ValueError("manual rollout lock overrides are forbidden in broker mode")
-    config, envelope = _load_broker_rollout_envelope(Path(envelope_path))
-    _validate_broker_cluster_args(args, config, envelope)
-    evidence_path = _fixed_rollout_lock_evidence_path(
-        config,
-        envelope,
-        step_directory="10-cluster-up",
-    )
-    return _BrokerRolloutLockBinding(
-        environment=envelope.environment,
-        owner_id=envelope.rollout_id,
-        lock_dir=Path(config.runtime_root) / "mutation-locks",
-        evidence_path=evidence_path,
-        attribution=RolloutAttribution(
-            request_id=envelope.request_id,
-            initiating_operator=envelope.initiating_operator,
-            initiating_uid=envelope.initiating_uid,
-            attempt_number=envelope.attempt_number,
-            attempt_operator=envelope.attempt_operator,
-            attempt_uid=envelope.attempt_uid,
-        ),
-        operator_config=config,
-        envelope=envelope,
-    )
 
 
 _PROTECTED_CLUSTER_NAMESPACES = {
@@ -446,60 +294,6 @@ def _load_cluster_up_config_snapshot(path: Path | None) -> _ClusterUpConfigSnaps
     )
 
 
-def _acquire_protected_rollout_lock(
-    args: argparse.Namespace,
-    *,
-    command: list[str],
-    broker_binding: _BrokerRolloutLockBinding | None = None,
-) -> RolloutLease | None:
-    if not is_protected_environment(
-        environment=args.environment,
-        namespace=args.namespace,
-    ):
-        return None
-    environment = infer_environment(
-        environment=args.environment,
-        namespace=args.namespace,
-    )
-    manager = RolloutLeaseManager(
-        broker_binding.lock_dir
-        if broker_binding is not None
-        else args.rollout_lock_dir or default_rollout_lock_dir()
-    )
-    try:
-        lease = manager.acquire(
-            environment=environment,
-            owner_id=(
-                broker_binding.owner_id
-                if broker_binding is not None
-                else rollout_owner_id(environment, args.rollout_id)
-            ),
-            ttl_seconds=(
-                DEFAULT_ROLLOUT_LOCK_TTL_SECONDS
-                if broker_binding is not None
-                else args.rollout_lock_ttl_seconds
-            ),
-            command=command,
-            evidence_path=(
-                broker_binding.evidence_path
-                if broker_binding is not None
-                else args.rollout_lock_evidence
-            ),
-            force=False if broker_binding is not None else args.force_rollout_lock,
-            attribution=(broker_binding.attribution if broker_binding is not None else None),
-        )
-    except (RolloutLeaseError, ValueError) as exc:
-        sys.stderr.write(f"error: {exc}\n")
-        diagnostic = getattr(exc, "diagnostic", None)
-        if isinstance(diagnostic, dict):
-            sys.stderr.write(
-                "rollout lock diagnostic: " + json.dumps(diagnostic, sort_keys=True) + "\n",
-            )
-        raise
-    sys.stderr.write(
-        f"Acquired rollout mutation lease for {environment}: {lease.owner_id}\n",
-    )
-    return lease
 
 
 @dataclass
@@ -3638,7 +3432,6 @@ def _doctor_check_storage_lifecycle(
     if config_path is None:
         return None
 
-    import os
 
     from loom.storage_retention_doctor import (
         check_lifecycle_drift,
@@ -4223,13 +4016,8 @@ def _up(args: argparse.Namespace) -> int:
         )
         return 1
     assert environment is not None
-    try:
-        broker_binding = _prepare_broker_rollout_lock(
-            args,
-            environment=environment,
-        )
-    except ValueError as exc:
-        sys.stderr.write(f"error: {exc}\n")
+    if environment in PROTECTED_ENVIRONMENTS:
+        sys.stderr.write("error: hosted environments require the Nebius deployment entrypoint; see docs/ops/nebius-deployment.md.\n")
         return 1
     try:
         cfg_path = Path(args.config).resolve() if args.config else None
@@ -4270,30 +4058,9 @@ def _up(args: argparse.Namespace) -> int:
     except (OSError, ValueError) as exc:
         sys.stderr.write(f"error: preflight config invalid: {exc}\n")
         return 2
-    if snapshot.protected_target == "staging" and broker_binding is None:
-        try:
-            broker_binding = _prepare_broker_rollout_lock(
-                args,
-                environment="staging",
-            )
-        except ValueError as exc:
-            sys.stderr.write(f"error: {exc}\n")
-            return 1
-    if snapshot.protected_target == "production" and explicit_environment not in (
-        None,
-        "production",
-    ):
-        sys.stderr.write(
-            "error: protected cluster config target production conflicts with "
-            f"command target {environment}\n"
-        )
+    if snapshot.protected_target is not None:
+        sys.stderr.write("error: hosted configurations require the Nebius deployment entrypoint; see docs/ops/nebius-deployment.md.\n")
         return 1
-    if broker_binding is not None:
-        try:
-            _validate_broker_cluster_snapshot(broker_binding, snapshot)
-        except ValueError as exc:
-            sys.stderr.write(f"error: {exc}\n")
-            return 1
     try:
         _apply_config_target_fields(
             args,
@@ -4331,39 +4098,7 @@ def _up(args: argparse.Namespace) -> int:
             )
         )
         return 1
-    try:
-        command = [
-            "loom",
-            "cluster",
-            "up",
-            "--environment",
-            args.environment
-            or infer_environment(
-                environment=args.environment,
-                namespace=args.namespace,
-            ),
-            "--namespace",
-            args.namespace,
-        ]
-        if args.config:
-            command.extend(["--config", str(args.config)])
-        if args.rollout_id:
-            command.extend(["--rollout-id", args.rollout_id])
-        lease = _acquire_protected_rollout_lock(
-            args,
-            command=command,
-            broker_binding=broker_binding,
-        )
-    except (RolloutLeaseError, ValueError):
-        return 1
-
-    rc = 1
-    try:
-        rc = _up_impl(args, snapshot)
-        return rc
-    finally:
-        if lease is not None:
-            lease.release(status="released" if rc == 0 else "failed")
+    return _up_impl(args, snapshot)
 
 
 def _run_migration_job(
@@ -5059,7 +4794,6 @@ def _bootstrap_evidence_paths(args: argparse.Namespace) -> int:
     rendering + validation logic. This CLI shim only wires argparse defaults
     and error-code translation.
     """
-    import os
 
     from loom_cli.cluster_bootstrap_evidence_paths import (
         DEFAULT_EVIDENCE_PATHS,
@@ -5151,7 +4885,6 @@ def _bootstrap_storage_lifecycle(args: argparse.Namespace) -> int:
     as JSON so operators can inspect before mutating the live store.
     """
     import json
-    import os
 
     from loom.storage_credentials import (
         UnsupportedAuthKindError,
@@ -5657,13 +5390,6 @@ def dispatch(argv: list[str]) -> int:
             "the bounded recovery retry (default: 4)."
         ),
     )
-    p_up.add_argument(
-        "--rollout-request-envelope",
-        type=Path,
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    _add_rollout_lock_args(p_up)
     p_up.set_defaults(handler=_up)
 
     p_down = sub.add_parser(
@@ -6173,23 +5899,6 @@ def dispatch(argv: list[str]) -> int:
     )
 
     _add_taskset_fence_canary_subparser(sub)
-
-    p_rollout = sub.add_parser(
-        "rollout",
-        help=(
-            "One-command staging rollout driver with state-machine "
-            "resume. Orchestrates 16 steps: resolve-target → "
-            "worktree → build → cluster-target → publish-images → backup → audit "
-            "→ render → preflight → migrate → cluster-up → env-state "
-            "→ gb10-prep → production-defaults → release-gate → smoke, "
-            "plus a summary."
-        ),
-    )
-    from loom_cli.rollout.cli import build_parser as _rollout_build_parser
-    from loom_cli.rollout.cli import handle as _rollout_handle
-
-    _rollout_build_parser(p_rollout)
-    p_rollout.set_defaults(handler=_rollout_handle)
 
     args = parser.parse_args(argv)
     return cast(int, args.handler(args))

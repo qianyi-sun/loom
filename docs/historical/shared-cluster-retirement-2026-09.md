@@ -23,6 +23,10 @@ Nebius hosts platform services, Kubernetes execution, database, object storage,
 registry, backups and monitoring. Native execution uses durable attempts and
 leases, Kubernetes Job identities and fenced output publication. Native image
 build reconciliation lives in `loom_execution_actuator.task_image_controller`.
+Hosted deployment uses `scripts/ops/deploy_nebius_platform.py`, preserving
+its target, backup and migration checks. The old broker entrypoint is retired;
+`loom cluster up` refuses hosted targets. Cluster release evidence no longer
+requires external worker pools, Slurm authority, GB10 status or GB10 mirror probes.
 CI, native AMD64/ARM64 image builds and publication use GitHub-hosted runners.
 Local development, disposable tests and user-selected external inference APIs
 remain supported.

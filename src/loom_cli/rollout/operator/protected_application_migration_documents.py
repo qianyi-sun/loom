@@ -10,7 +10,7 @@ from urllib.parse import quote
 
 import yaml  # type: ignore[import-untyped]
 
-from loom_cli.rollout.application_migration_contract import (
+from loom_cli.application_migration_contract import (
     APPLICATION_MIGRATION_CA_PATH,
     APPLICATION_OWNER_ROLE,
     application_migration_authority,

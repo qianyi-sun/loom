@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from loom_cli.rollout.migration_readiness import inspect_migration_plan
+from loom_cli.migration_readiness import inspect_migration_plan
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_HEAD = json.loads((REPO_ROOT / "config/staging-migration-policy.json").read_text())["expected_head"]
 
 

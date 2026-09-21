@@ -2,8 +2,9 @@
 
 `scripts/ops/deploy_nebius_platform.py` plans or applies the output of
 `render_nebius_platform.py`. Its default is a read-only cluster preflight; cloud
-mutation requires explicit `--apply`. This entry point does not use the legacy
-rollout broker, OLDLAB, GB10, `dev` deployment workflow, or a shared database.
+mutation requires explicit `--apply`. This is the supported hosted deployment entrypoint. `loom cluster up` is
+limited to disposable development targets; the shared-cluster rollout broker
+and its CLI command are retired.
 
 ## Before the first application
 

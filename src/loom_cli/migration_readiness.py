@@ -14,7 +14,7 @@ from alembic.script import ScriptDirectory
 
 _REVISION_RE = re.compile(r"^[0-9]{4}(?:_[a-z0-9_]+)?$")
 DEFAULT_MIGRATION_POLICY = (
-    Path(__file__).resolve().parents[3] / "config/staging-migration-policy.json"
+    Path(__file__).resolve().parents[2] / "config/staging-migration-policy.json"
 )
 
 

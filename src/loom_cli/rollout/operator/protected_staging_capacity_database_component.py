@@ -32,7 +32,7 @@ from loom_capacity_agent.contracts import (
 )
 from loom_capacity_guard.contracts import GuardFenceV1, canonical_bytes
 from loom_capacity_guard.schema_startup import capacity_guard_schema_head
-from loom_cli.rollout.application_migration_contract import APPLICATION_OWNER_ROLE
+from loom_cli.application_migration_contract import APPLICATION_OWNER_ROLE
 
 from .final_gate_plan import FinalGatePlan
 from .postgres_sql import single_line_sql

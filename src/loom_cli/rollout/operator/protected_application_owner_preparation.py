@@ -23,7 +23,7 @@ from loom.application_database_admission import (
 )
 from loom.application_database_connection import ApplicationDatabaseConnection, application_sql
 from loom.staging_mutation_coordination import rollout_guard_application_name
-from loom_cli.rollout.application_migration_contract import (
+from loom_cli.application_migration_contract import (
     APPLICATION_OWNER_ROLE as APPLICATION_OWNER_ROLE,
 )
 

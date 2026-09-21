@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from loom_cli.rollout.shadow_reconcile import (
+from loom_cli.cluster_drift import (
     DriftStatus,
     ResourceDrift,
     ShadowDriftReport,

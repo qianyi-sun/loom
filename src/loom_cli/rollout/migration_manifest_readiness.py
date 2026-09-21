@@ -9,13 +9,13 @@ from dataclasses import dataclass
 
 import yaml  # type: ignore[import-untyped]
 
-from loom_cli.cluster_config import validate_container_registry_prefix
-from loom_cli.cluster_migration import render_migration_manifest
-
-from .application_migration_contract import (
+from loom_cli.application_migration_contract import (
     APPLICATION_OWNER_ROLE,
     require_application_migration_job,
 )
+from loom_cli.cluster_config import validate_container_registry_prefix
+from loom_cli.cluster_migration import render_migration_manifest
+
 from .manifest_readiness import ServerDryRun
 
 _SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")

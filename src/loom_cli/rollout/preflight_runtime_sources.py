@@ -9,7 +9,8 @@ from datetime import datetime
 from pathlib import Path
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
-from loom_cli.rollout.application_migration_contract import APPLICATION_OWNER_ROLE
+from loom_cli.application_migration_contract import APPLICATION_OWNER_ROLE
+from loom_cli.migration_readiness import MigrationPlanEvidence
 from loom_cli.rollout.browser_runtime_readiness import (
     CommandRunner as BrowserCommandRunner,
 )
@@ -42,7 +43,6 @@ from loom_cli.rollout.manifest_readiness import (
     render_checkpoint_guard_field_ownership_payload,
 )
 from loom_cli.rollout.migration_manifest_readiness import MigrationManifestArtifact
-from loom_cli.rollout.migration_readiness import MigrationPlanEvidence
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.operator.backup_rotation import BackupRotationState
 from loom_cli.rollout.operator.candidate import GitRunner

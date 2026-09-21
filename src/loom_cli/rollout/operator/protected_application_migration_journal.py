@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from loom.staging_mutation_coordination import rollout_guard_application_name
-from loom_cli.rollout.application_migration_contract import APPLICATION_OWNER_ROLE
+from loom_cli.application_migration_contract import APPLICATION_OWNER_ROLE
 
 from .final_gate_plan import FinalGatePlan
 from .protected_application_admission_recovery import (

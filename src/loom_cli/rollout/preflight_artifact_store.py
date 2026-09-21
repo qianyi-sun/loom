@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import TypedDict
 from uuid import uuid4
 
+from loom_cli.application_migration_contract import APPLICATION_OWNER_ROLE
 from loom_cli.cluster_config import validate_container_registry_prefix
-from loom_cli.rollout.application_migration_contract import APPLICATION_OWNER_ROLE
 from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.image_readiness import (
     DockerRunner,

@@ -10,13 +10,13 @@ import pytest
 import yaml
 
 import loom_cli.rollout.preflight_runtime_sources as runtime_sources_module
+from loom_cli.migration_readiness import DEFAULT_MIGRATION_POLICY
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
 from loom_cli.rollout.image_readiness import ALL_BUILD_IMAGES, ROLLOUT_IMAGES, image_plan_digest
 from loom_cli.rollout.manifest_readiness import (
     inspect_rendered_manifests,
     render_checkpoint_guard_field_ownership_payload,
 )
-from loom_cli.rollout.migration_readiness import DEFAULT_MIGRATION_POLICY
 from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBinding
 from loom_cli.rollout.preflight_artifact_store import (
     LoadedPreflightArtifacts,
