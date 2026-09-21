@@ -15,7 +15,7 @@ from loom.data_lifecycle_prepare import (
     LifecycleSourceIdentity,
     SqlAlchemyLifecyclePreparer,
 )
-from loom_cli.rollout.migration_readiness import inspect_migration_plan
+from loom_cli.migration_readiness import inspect_migration_plan
 
 _ROOT = Path(__file__).resolve().parents[2]
 

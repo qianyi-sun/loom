@@ -221,8 +221,8 @@ async def test_completion_recovers_each_committed_phase_with_original_guard(tran
             assert outcome.coordination_guard == arguments["coordination_guard"]
             assert guard.info.backend_pid == original_backend
             assert guard.execute("SELECT pg_postmaster_start_time()").fetchone() == original_server
-            from loom_cli.rollout.operator.staging_mutation_guard import _HEALTH_SQL
-            assert guard.execute(_HEALTH_SQL).fetchone() == (original_backend, True)
+            from loom.staging_mutation_coordination import STAGING_MUTATION_HEALTH_SQL
+            assert guard.execute(STAGING_MUTATION_HEALTH_SQL).fetchone() == (original_backend, True)
         with psycopg.connect(url, user=arguments["target"].owner_role,
                              password=arguments["password"], autocommit=True) as runtime:
             assert runtime.execute("SELECT count(*) FROM public.trials").fetchone() == (0,)

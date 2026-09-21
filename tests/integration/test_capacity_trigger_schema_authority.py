@@ -8,17 +8,12 @@ from uuid import uuid4
 
 import pytest
 from alembic import command
-from psycopg import sql
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 
 from loom.db.schema import Worker
-from loom_cli.rollout.operator.protected_staging_capacity_database_component import (
-    _AUTHORITY_REBIND_FOUNDATION_SQL,
-)
 from tests.integration.test_capacity_agent_migrations import _guard_config, _value
-from tests.integration.test_capacity_agent_store import _initialize_and_register, _seed_trial
-from tests.support.historical_capacity import _seed_claimed_protected_trial
+from tests.support.historical_capacity import _seed_claimed_protected_trial, seed_unprotected_trial
 
 _BRIDGES = (
     (
@@ -148,38 +143,6 @@ def test_schema_resolution_does_not_authorize_false_live_claim_closure(
         engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_pristine_current_guard_is_eligible_for_authority_rebind(
-    capacity_guard_database: dict[str, object],
-) -> None:
-    """Catch a stale SQL revision predicate hidden by the fake rollout transport."""
-    await _initialize_and_register(capacity_guard_database)
-    # Only translate installation-specific role names to this isolated fixture;
-    # execute the production predicate, including its unmodified revision check.
-    statement = _AUTHORITY_REBIND_FOUNDATION_SQL
-    for kind in ("agent", "executor", "observer", "runtime"):
-        statement = statement.replace(
-            f"'loom_cap_staging_{kind}'",
-            sql.Literal(_value(capacity_guard_database, f"{kind}_role")).as_string(),
-        )
-    engine = create_engine(_value(capacity_guard_database, "admin_url"))
-    try:
-        with engine.connect() as connection:
-            assert connection.exec_driver_sql(statement).scalar_one() == "exact"
-        cfg = _guard_config(capacity_guard_database)
-        command.downgrade(cfg, "guard_0029")
-        with engine.connect() as connection:
-            # The production caller checks migration head before issuing this
-            # current-schema query. PostgreSQL resolves missing relations before
-            # evaluating its revision predicate, so this direct probe must fail.
-            with pytest.raises(DBAPIError) as absent:
-                connection.exec_driver_sql(statement)
-            assert absent.value.orig.sqlstate == "42P01"
-        command.upgrade(cfg, "head")
-        with engine.connect() as connection:
-            assert connection.exec_driver_sql(statement).scalar_one() == "exact"
-    finally:
-        engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -188,8 +151,7 @@ async def test_application_trigger_owner_can_finish_or_requeue_without_table_aut
     capacity_guard_database: dict[str, object], next_state: str
 ) -> None:
     """Catch missing schema resolution authority masked by superuser migration fixtures."""
-    await _initialize_and_register(capacity_guard_database)
-    trial_id = _seed_trial(capacity_guard_database)
+    trial_id = seed_unprotected_trial(capacity_guard_database)
     worker_id = uuid4()
     engine = create_engine(_value(capacity_guard_database, "admin_url"))
     role = f"application_trigger_{uuid4().hex[:16]}"

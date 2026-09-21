@@ -321,5 +321,3 @@ def test_cluster_up_preserves_relative_host_root_render_diagnostic(
     assert "render failed" in err
     assert "must be an absolute host path" in err
     assert "broker-created request envelope" not in err
-
-

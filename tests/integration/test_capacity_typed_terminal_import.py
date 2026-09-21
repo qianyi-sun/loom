@@ -1,6 +1,7 @@
 """Protected SQL preserves typed application cleanup and refuses build proofs."""
 
 import asyncio
+import hashlib
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -12,8 +13,6 @@ from alembic import command
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 
-from loom_capacity_manager.executable_contracts import canonical_executable_digest
-from loom_capacity_manager.typed_inventory_contracts import parse_terminal_inventory_evidence
 from tests.integration.test_capacity_guard_migrations import _guard_config
 from tests.support.historical_capacity import (
     _import_terminal_inventory_payload,
@@ -49,8 +48,9 @@ def test_typed_terminal_sql_import_preserves_exact_bytes_and_restart_idempotence
         _import_terminal_inventory_payload(capacity_guard_database, seeded, payload)
     )
     assert first == replay
-    evidence = parse_terminal_inventory_evidence(json.dumps(payload))
-    assert first["evidence_digest"] == canonical_executable_digest(evidence)
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=True, allow_nan=False).encode("ascii")
+    assert first["evidence_digest"] == hashlib.sha256(canonical).hexdigest()
     engine = create_engine(_value(capacity_guard_database, "admin_url"))
     try:
         with engine.connect() as connection:
