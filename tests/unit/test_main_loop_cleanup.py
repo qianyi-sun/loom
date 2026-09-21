@@ -1403,6 +1403,3 @@ async def test_runtime_bucket_bootstrap_creates_required_runtime_buckets() -> No
 _ = pytest
 
 
-@pytest.mark.legacy_pool
-def test_slurm_gpu_identity_allows_legacy_settings() -> None:
-    assert ml._slurm_gpu_device_ids(_FakeSettings()) == ()  # type: ignore[arg-type]

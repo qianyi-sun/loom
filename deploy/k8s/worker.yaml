@@ -117,10 +117,6 @@ spec:
           value: '5.0'
         - name: LOOM_WORKER_SETUP_HEALTH_WAIT_TIMEOUT_SEC
           value: '300.0'
-        - name: LOOM_WORKER_SLURM_ALLOCATED_GPUS
-          value: '-1'
-        - name: LOOM_WORKER_SLURM_GPU_DEVICE_IDS
-          value: ''
         - name: LOOM_WORKER_SLURM_JOB_ID
           value: ''
         - name: LOOM_WORKER_STORAGE_AUTH_KIND

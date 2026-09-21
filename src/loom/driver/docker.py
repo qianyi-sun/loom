@@ -403,31 +403,12 @@ class DockerDriver:
                     opts.cgroup_parent,
                 )
             if opts.gpus:
-                if opts.slurm_allocated_gpus >= 0:
-                    if opts.gpus > opts.slurm_allocated_gpus:
-                        raise DriverError(
-                            "trial GPU request exceeds the Slurm allocation: "
-                            f"requested={opts.gpus} allocated={opts.slurm_allocated_gpus}",
-                        )
-                    if len(opts.slurm_gpu_device_ids) < opts.gpus:
-                        raise DriverError(
-                            "Slurm GPU allocation is missing host device IDs: "
-                            f"requested={opts.gpus} "
-                            f"device_ids={len(opts.slurm_gpu_device_ids)}",
-                        )
-                    run_kwargs["device_requests"] = [
-                        docker.types.DeviceRequest(
-                            device_ids=list(opts.slurm_gpu_device_ids[: opts.gpus]),
-                            capabilities=[["gpu"]],
-                        )
-                    ]
-                else:
-                    run_kwargs["device_requests"] = [
-                        docker.types.DeviceRequest(
-                            count=opts.gpus,
-                            capabilities=[["gpu"]],
-                        )
-                    ]
+                run_kwargs["device_requests"] = [
+                    docker.types.DeviceRequest(
+                        count=opts.gpus,
+                        capabilities=[["gpu"]],
+                    )
+                ]
             # docker-py's high-level containers.run() creates before it starts,
             # but it does not return the Container if start() raises. Split the
             # steps so the failure cleanup path can remove Created containers.

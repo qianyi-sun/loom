@@ -928,18 +928,6 @@ python_type = "str"
 default     = ""
 description = "Per-job Docker Compose project name derived from sandbox identity, candidate SHA, and Slurm job ID."
 
-[service_config.slurm_allocated_gpus]
-used_by     = ["worker"]
-python_type = "int"
-default     = -1
-description = "GPU count granted to the Slurm job. -1 means non-Slurm/unmanaged; 0 denies GPU containers; positive values require device IDs from SLURM_JOB_GPUS."
-
-[service_config.slurm_gpu_device_ids]
-used_by     = ["worker"]
-python_type = "str"
-default     = ""
-description = "Comma-separated host GPU device IDs from SLURM_JOB_GPUS. Docker trial requests are restricted to this exact allocation."
-
 [service_config.fixtures_root]
 used_by     = ["worker"]
 python_type = "Path"

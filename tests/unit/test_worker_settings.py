@@ -44,8 +44,6 @@ _LOOM_WORKER_ENVS = [
     "LOOM_WORKER_CANDIDATE_SHA",
     "LOOM_WORKER_SLURM_JOB_ID",
     "LOOM_WORKER_COMPOSE_PROJECT",
-    "LOOM_WORKER_SLURM_ALLOCATED_GPUS",
-    "LOOM_WORKER_SLURM_GPU_DEVICE_IDS",
     "HF_TOKEN",
 ]
 
@@ -213,8 +211,6 @@ def test_slurm_runtime_identity_parses_from_env(
         "LOOM_WORKER_COMPOSE_PROJECT",
         "loom-dev-a-aaaaaaaaaaaa-12345",
     )
-    monkeypatch.setenv("LOOM_WORKER_SLURM_ALLOCATED_GPUS", "2")
-    monkeypatch.setenv("LOOM_WORKER_SLURM_GPU_DEVICE_IDS", "0,1")
 
     settings = WorkerSettings(_env_file=None)
 
@@ -222,8 +218,6 @@ def test_slurm_runtime_identity_parses_from_env(
     assert settings.candidate_sha == "a" * 40
     assert settings.slurm_job_id == "12345"
     assert settings.compose_project == "loom-dev-a-aaaaaaaaaaaa-12345"
-    assert settings.slurm_allocated_gpus == 2
-    assert settings.slurm_gpu_device_ids == "0,1"
 
 
 def test_token_is_secret(monkeypatch: pytest.MonkeyPatch) -> None:

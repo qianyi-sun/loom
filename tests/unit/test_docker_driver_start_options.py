@@ -431,33 +431,7 @@ async def test_docker_driver_omits_container_caps_when_unset(
     assert container.started is True
 
 
-@pytest.mark.legacy_pool
-async def test_docker_driver_rejects_gpu_request_above_slurm_allocation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class _Client:
-        def close(self) -> None:
-            pass
-
-    monkeypatch.setattr(docker_module.docker, "from_env", lambda: _Client())
-    monkeypatch.setattr(DockerDriver, "_ensure_image", lambda self, opts: None)
-    driver = DockerDriver(
-        image="loom-agent-sandbox:dev",
-        workspace=PurePosixPath("/workspace"),
-    )
-
-    with pytest.raises(DriverError, match="exceeds the Slurm allocation"):
-        await driver.start(
-            options=StartOptions(
-                gpus=2,
-                slurm_allocated_gpus=1,
-                slurm_gpu_device_ids=("0",),
-            ),
-        )
-
-
-@pytest.mark.legacy_pool
-async def test_docker_driver_binds_only_slurm_allocated_gpu_devices(
+async def test_docker_driver_requests_local_gpu_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     create_kwargs: dict[str, Any] = {}
@@ -498,14 +472,12 @@ async def test_docker_driver_binds_only_slurm_allocated_gpu_devices(
     await driver.start(
         options=StartOptions(
             gpus=1,
-            slurm_allocated_gpus=2,
-            slurm_gpu_device_ids=("3", "7"),
         ),
     )
 
     assert create_kwargs["device_requests"] == [
         {
-            "device_ids": ["3"],
+            "count": 1,
             "capabilities": [["gpu"]],
         },
     ]

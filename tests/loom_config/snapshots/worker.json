@@ -269,16 +269,6 @@
     "default": "300.0",
     "required": false
   },
-  "slurm_allocated_gpus": {
-    "annotation": "<class 'int'>",
-    "default": "-1",
-    "required": false
-  },
-  "slurm_gpu_device_ids": {
-    "annotation": "<class 'str'>",
-    "default": "''",
-    "required": false
-  },
   "slurm_job_id": {
     "annotation": "<class 'str'>",
     "default": "''",
@@ -314,6 +304,11 @@
     "default": "120",
     "required": false
   },
+  "task_image_execution_config_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
   "task_image_local_ttl_hours": {
     "annotation": "<class 'int'>",
     "default": "168",
@@ -332,11 +327,6 @@
   "task_materialize_timeout_sec": {
     "annotation": "<class 'float'>",
     "default": "300.0",
-    "required": false
-  },
-  "task_image_execution_config_file": {
-    "annotation": "pathlib.Path | None",
-    "default": "None",
     "required": false
   },
   "token": {

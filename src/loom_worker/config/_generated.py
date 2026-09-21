@@ -74,8 +74,6 @@ class WorkerSettings(BaseSettings):
     setup_health_min_swap_free_mb: int = 1024
     setup_health_poll_interval_sec: float = 5.0
     setup_health_wait_timeout_sec: float = 300.0
-    slurm_allocated_gpus: int = -1
-    slurm_gpu_device_ids: str = ""
     slurm_job_id: str = ""
     storage_auth_kind: str = "static_keys"
     storage_backend: str = "minio"

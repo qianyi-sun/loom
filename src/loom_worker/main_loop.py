@@ -194,12 +194,6 @@ def _runtime_identity_labels(
     return tuple((key, value) for key, value in values if value)
 
 
-def _slurm_gpu_device_ids(settings: WorkerSettings) -> tuple[str, ...]:
-    """Normalize Slurm's comma-separated GPU device allocation."""
-    raw_device_ids = getattr(settings, "slurm_gpu_device_ids", "")
-    return tuple(device_id.strip() for device_id in raw_device_ids.split(",") if device_id.strip())
-
-
 def _worker_cgroup_parent(settings: WorkerSettings) -> str | None:
     """Validate the controller-bound Docker parent before worker registration."""
 
@@ -1678,8 +1672,6 @@ async def _spawn_trial(
             container_pids=settings.container_pids,
             container_cgroup_parent=_worker_cgroup_parent(settings),
             runtime_identity_labels=_runtime_identity_labels(settings),
-            slurm_allocated_gpus=getattr(settings, "slurm_allocated_gpus", -1),
-            slurm_gpu_device_ids=_slurm_gpu_device_ids(settings),
             sidecar_runtime_factory=_docker_sidecar_runtime,
             start_authorization=(trusted_execution.authorize if trusted_execution is not None else None),
         )
