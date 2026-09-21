@@ -1578,6 +1578,7 @@ export interface components {
       resource_class: "controller" | "cpu" | "gpu";
       retry_allowed: boolean;
       retry_ineligible_reason:
+        | "hosted_pipeline_execution_unsupported"
         | "run_not_retryable"
         | "stage_not_failed"
         | "recipe_snapshot_unavailable"

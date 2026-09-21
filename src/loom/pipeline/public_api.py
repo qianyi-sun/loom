@@ -260,6 +260,7 @@ class PipelineRunEventsResponseV1(PipelineReadModel):
 PipelineNodeKind = Literal["container", "gate"]
 PipelineResourceClass = Literal["controller", "cpu", "gpu"]
 PipelineRetryIneligibleReason = Literal[
+    "hosted_pipeline_execution_unsupported",
     "run_not_retryable",
     "stage_not_failed",
     "recipe_snapshot_unavailable",

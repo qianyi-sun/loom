@@ -30,7 +30,12 @@ remain supported.
 Retirement does not implement missing workload replacements. The baseline
 compatibility inventory marks desktop/GUI and Behavior GPU service workloads
 unsupported; several pipeline and task classes still require conversion.
-These gaps must remain explicit. Removing a hosted path does not certify native
+Hosted pipeline creation/retry and the shared-cluster Stage 1 smoke endpoints
+are removed. Historical run reads, artifact access and cancellation remain;
+explicit local development keeps the pipeline submission path. The generated
+compatibility report lists only `nebius-cpu`, with 66 conversion-required classes
+and three unsupported classes at retirement.
+These gaps remain explicit. Removing a hosted path does not certify native
 parity, and local/domain functionality and retained results must remain usable.
 
 ## Historical schema and data

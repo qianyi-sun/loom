@@ -56,7 +56,7 @@ scripts/                           # operator + test helpers
 
 Service mode requires Docker CLI with the Compose plugin. On macOS, install and
 start Docker Desktop first; `docker compose version` should succeed before
-running `loom service up --environment local`.
+running `loom service up`.
 
 The tracked workspace lock supports macOS arm64, Linux x86_64, and Linux arm64.
 Intel macOS is not currently represented by that lock; use a supported Linux development environment or coordinate a platform-support change before updating the lock.
@@ -71,7 +71,7 @@ source .venv/bin/activate
 
 # Provider keys + stack bootstrap
 cp .env.example .env       # then edit
-loom service up --environment local  # docker compose + migrations + token
+loom service up  # docker compose + migrations + token
 
 # Front-end iteration (Vite HMR on :5173, proxies /api → :8090)
 cd web && npm install && npm run dev

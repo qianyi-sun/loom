@@ -202,9 +202,6 @@ if TYPE_CHECKING:
         llm_gateway_sandbox: _LlmGatewaySandboxConfig = field(
             default_factory=_LlmGatewaySandboxConfig
         )
-        pipeline_stage1_smoke_authority: _PipelineStage1SmokeAuthorityConfig = field(
-            default_factory=_PipelineStage1SmokeAuthorityConfig
-        )
         nebius_execution: _NebiusExecutionConfig = field(default_factory=_NebiusExecutionConfig)
         nebius_private_entry: _NebiusPrivateEntryConfig = field(
             default_factory=_NebiusPrivateEntryConfig

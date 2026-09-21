@@ -83,6 +83,8 @@ def _context(
 def _app(session: _Session, context: AuthContext) -> FastAPI:
     app = FastAPI()
     app.include_router(pipeline_routes.router, prefix="/api/v1")
+    # Exercise local submission and its authorization independently of hosted mounting.
+    app.include_router(pipeline_routes.local_execution_router, prefix="/api/v1")
 
     async def _session_override() -> tuple[_Session, AuthContext]:
         return session, context
@@ -256,7 +258,10 @@ async def test_submit_request_is_closed_and_requires_idempotency_header(
     create_run.assert_not_awaited()
 
 
-async def test_get_run_projects_stages_artifacts_and_budget_without_internal_fields() -> None:
+@pytest.mark.parametrize("local", [False, True])
+async def test_get_run_projects_stages_artifacts_and_budget_without_internal_fields(monkeypatch, local) -> None:
+    monkeypatch.setenv("LOOM_ENV", "development")
+    monkeypatch.setenv("LOOM_LOCAL_EXECUTION", "1" if local else "0")
     run = _run()
     run.graph_spec_json = {
         "nodes": [{"node_key": "evaluate", "node_kind": "container", "needs": []}]
@@ -322,7 +327,9 @@ async def test_get_run_projects_stages_artifacts_and_budget_without_internal_fie
     assert body["id"] == str(run.id)
     assert body["stages"][0]["id"] == str(stage_id)
     assert body["stages"][0]["retry_allowed"] is False
-    assert body["stages"][0]["retry_ineligible_reason"] == "run_not_retryable"
+    assert body["stages"][0]["retry_ineligible_reason"] == (
+        "run_not_retryable" if local else "hosted_pipeline_execution_unsupported"
+    )
     assert body["artifacts"][0]["download_path"] == (
         f"/api/v1/pipeline-artifacts/{artifact_id}/download"
     )

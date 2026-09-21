@@ -798,7 +798,7 @@ class.
 
 `config/service-execution-compatibility.toml` assigns every repo-known
 benchmark entry point, dynamic service workload class, and pipeline resource
-profile an independent `nebius-cpu`, `oldlab`, and `gb10` disposition, owner,
+profile a `nebius-cpu` disposition, owner,
 reason, and required action. Generate the deterministic report and schemas with:
 
 ```bash
@@ -810,10 +810,11 @@ The generator fails on missing/overlapping rules, missing accepted-pool
 identities, and duplicate workload identities. At this decision point no
 workload is statically supported on Nebius: 66 require conversion and OSWorld
 plus the two GPU/host-specialized Behavior profiles are unsupported there.
-Every catalog row has `runtime_admission_required` for OLDLAB and GB10. That
-disposition preserves both accepted service paths while requiring the exact
-materialized task capability and fresh worker evidence; it is not a claim that
-either pool can currently execute every row.
+OLDLAB, GB10, and Slurm are retired and cannot receive hosted work.
+The unconverted catalog classes are availability gaps, not fallback routes.
+Desktop/GUI and Behavior GPU execution remain local-only. Pipeline submission
+and retry remain local-only until a supported native execution path exists;
+historical runs, artifacts, and cancellation remain accessible.
 
 The report covers the repository's current static catalog. Operator-local,
 remapped, user-supplied, and live database TaskSets are unbounded classes, not

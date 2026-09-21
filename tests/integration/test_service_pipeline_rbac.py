@@ -57,6 +57,8 @@ def _context(
 def _app(session: _Session, context: AuthContext) -> FastAPI:
     app = FastAPI()
     app.include_router(pipeline_routes.router, prefix="/api/v1")
+    # Exercise local submission and its authorization independently of hosted mounting.
+    app.include_router(pipeline_routes.local_execution_router, prefix="/api/v1")
 
     async def _session_override() -> tuple[_Session, AuthContext]:
         return session, context

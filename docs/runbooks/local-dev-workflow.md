@@ -24,7 +24,7 @@ commit it.
 ## Start the local stack
 
 ```bash
-loom service up --environment local
+loom service up
 ```
 
 This command renders the local Compose configuration, starts the services,

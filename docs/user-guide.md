@@ -44,7 +44,7 @@ Pick the path that matches what you have:
 | The same account and want clicks | [Submit from the web app](#quickstart-submit-from-the-web-app) |
 
 The web and CLI paths submit into a running service and persist
-trajectories/ATIF/usage server-side. `loom service up --environment local` runs
+trajectories/ATIF/usage server-side. `loom service up` runs
 that same service stack against local Docker + Postgres + MinIO. `loom run` is a one-shot
 in-process trial that writes `events.jsonl` + `atif.json` to a local directory
 and exits — no DB, no team, no provider registration.
@@ -135,10 +135,10 @@ Install (see [Install](#install) above), then start the service stack:
 ```bash
 cp .env.example .env
 # Edit .env if you want default provider keys for local testing.
-loom service up --environment local
+loom service up
 ```
 
-`loom service up --environment local` starts Postgres, MinIO, a loopback
+`loom service up` starts Postgres, MinIO, a loopback
 task-image registry, LLM Gateway, Control Plane, `loom_service`, a pull-only
 trial Worker, a laptop Docker **task-image-builder** sidecar, and the React SPA.
 It runs migrations, seeds local tokens (including a least-privilege
@@ -175,61 +175,7 @@ environment secrets, and release-promotion evidence. See
 
 Running the local service stack requires Docker CLI with the Compose
 plugin; on macOS, install and start Docker Desktop, then verify
-`docker compose version` before `loom service up --environment local`.
-
-## Quickstart: Deploy a Personal Development Environment
-
-Use this path only when the target Loom service has its personal-development
-controller, restricted builder, storage/database authorities, and independent
-activation agent enabled, plus the global capacity-manager connection and
-candidate-independent capacity-agent runtime. The checked-in service
-configuration leaves this feature disabled by default.
-
-Authenticate to the target server, change to the Git worktree you want to
-deploy, and run:
-
-```bash
-loom auth login --server <server-url>
-loom service up --environment dev-<name>
-```
-
-The command seals tracked and non-ignored untracked source from the current
-worktree, uploads an immutable personal candidate, applies it with the current
-operation epoch and the default `min_slots=0` / `max_slots=2` demand policy,
-then waits for the exact operation and environment binding to become `ready`.
-Use `--source-root` and repeatable `--source-context` options to select a
-different bounded source tree, or `--no-wait` to return after durable
-acceptance.
-
-Reuse one retained, owned candidate that is already ready by its 64-character
-content digest:
-
-```bash
-loom service up --environment dev-<name> --candidate <candidate-sha256>
-```
-
-The `loom dev` compatibility commands provide environment listing, status,
-and manager-first teardown:
-
-```bash
-loom dev list
-loom dev status <name>
-loom dev destroy <name>
-```
-
-`loom dev create` is candidate-less and is rejected by the current enabled
-controller. Destroy accepts only a ready, owner-bound candidate environment
-with complete capacity evidence. It retires the subject from the global
-manager before deleting local resources and waits for `deleted` by default.
-Add `--keep-data` to preserve the dedicated database and buckets while still
-removing runtime access; a later deployment of the same name rotates authority
-before reusing them. Add `--no-wait` to return after durable acceptance.
-
-Application `ready` confirms stable-route activation, capacity-agent
-installation, the shadow-only personal-subject projection, and an initial
-demand publication. It does not imply external worker slots are live. See
-[`Personal development environments`](architecture/multi-dev-environments.md)
-for the identity, source, build, activation, capacity, and limit contracts.
+`docker compose version` before `loom service up`.
 
 ## Quickstart: Submit from the CLI to a Loom Server
 
@@ -1387,7 +1333,7 @@ writing Python:
 The file lives at `<repo>/config/benchmarks.toml` in dev or
 `/etc/loom/benchmarks.toml` in production (override with
 `$LOOM_BENCHMARKS_CONFIG_PATH`). Both shapes flow through
-`loom datasets sync-config` (manual) and `loom service up --environment local`
+`loom datasets sync-config` (manual) and `loom service up`
 (automatic, dev compose only). See
 [`architecture/benchmark-adapter.md`](architecture/benchmark-adapter.md)
 under "Operator-facing TOML registry" for the schema and worked

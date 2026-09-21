@@ -65,3 +65,61 @@ def test_hosted_environment_cannot_enable_local_workers(monkeypatch, environment
     monkeypatch.setenv("LOOM_ENV", environment)
     monkeypatch.setenv("LOOM_LOCAL_EXECUTION", "1")
     assert not local_execution_enabled()
+
+
+@pytest.mark.parametrize("environment,opt_in,expected", [
+    ("development", None, False), ("development", "1", True),
+    ("staging", "1", False), ("production", "1", False),
+])
+def test_worker_registration_and_claim_are_local_only(monkeypatch, environment, opt_in, expected):
+    from loom_control_plane.app import create_app
+    from loom_control_plane.config import ControlPlaneSettings
+
+    monkeypatch.setenv("LOOM_ENV", environment)
+    if opt_in is None:
+        monkeypatch.delenv("LOOM_LOCAL_EXECUTION", raising=False)
+    else:
+        monkeypatch.setenv("LOOM_LOCAL_EXECUTION", opt_in)
+    app = create_app(ControlPlaneSettings(
+        _env_file=None, db_url="postgresql+psycopg://test:test@localhost/test",
+        minio_endpoint="http://localhost", minio_access_key="test", minio_secret_key="test",
+        llm_gateway_url="http://localhost",
+    ))
+    paths = app.openapi()["paths"]
+    assert not any("slurm-worker" in path or "gb10-worker" in path or "worker-pool-autoscaler" in path for path in paths)
+    for path in ("/workers/register", "/trials/claim", "/work/claim"):
+        assert (path in paths) is expected
+
+
+def test_personal_hosted_fleet_routes_are_retired():
+    from loom_service.app import create_app
+    from loom_service.config import LoomServiceSettings
+
+    app = create_app(LoomServiceSettings(
+        _env_file=None, db_url="postgresql+psycopg://test:test@localhost/test",
+        minio_access_key="test", minio_secret_key="test",
+    ))
+    paths = app.openapi()["paths"]
+    assert not any("stage1-smoke" in path for path in paths)
+    assert "/api/v1/dev-instances" not in paths
+    assert "/api/v1/health/personal-dev-acceptance" not in paths
+    assert "/api/v1/health/personal-dev-operational" not in paths
+
+
+@pytest.mark.parametrize("local", [False, True])
+def test_pipeline_submission_is_local_only_and_retained_results_remain(monkeypatch, local):
+    from loom_service.app import create_app
+    from loom_service.config import LoomServiceSettings
+
+    monkeypatch.setenv("LOOM_ENV", "development")
+    monkeypatch.setenv("LOOM_LOCAL_EXECUTION", "1" if local else "0")
+    app = create_app(LoomServiceSettings(
+        _env_file=None, db_url="postgresql+psycopg://test:test@localhost/test",
+        minio_access_key="test", minio_secret_key="test",
+    ))
+    paths = app.openapi()["paths"]
+    assert ("post" in paths["/api/v1/pipeline-runs"]) is local
+    assert ("/api/v1/pipeline-stage-runs/{stage_run_id}/retry" in paths) is local
+    assert "get" in paths["/api/v1/pipeline-runs"]
+    assert "get" in paths["/api/v1/pipeline-runs/{run_id}"]
+    assert "/api/v1/pipeline-runs/{run_id}/cancel" in paths
