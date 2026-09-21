@@ -33,7 +33,10 @@ built or published. Trusted image reconciliation uses a current-run publication
 receipt after verified architecture and manifest publication, without a fleet
 release artifact prerequisite.
 Local development, disposable tests and user-selected external inference APIs
-remain supported.
+remain supported. Resource reporting retains local worker slot and draining
+accounting, but no longer reads historical fleet autoscaler policies or exposes
+their desired capacity, ceilings, decisions or metrics. Nebius capacity and
+autoscaler observations remain a separate current contract.
 
 Retirement does not implement missing workload replacements. The baseline
 compatibility inventory marks desktop/GUI and Behavior GPU service workloads

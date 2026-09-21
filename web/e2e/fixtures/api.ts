@@ -153,11 +153,7 @@ function monitorSummary() {
     },
     resources: {
       aggregate: {
-        desired_slots: 1,
-        pending_slots: 0,
         current_active_slots: 1,
-        max_slots: 1,
-        ceiling_slots: 1,
         active_workers: 1,
         draining_workers: 0,
         total_slots: 1,

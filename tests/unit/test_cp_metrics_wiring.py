@@ -62,8 +62,6 @@ def test_metrics_objects_exposed_to_registry() -> None:
         "loom_worker_pool_occupied_slots",
         "loom_worker_pool_free_slots",
         "loom_worker_pool_workers",
-        "loom_worker_pool_desired_slots",
-        "loom_worker_pool_pending_slots",
         "loom_worker_pool_draining_slots",
         "loom_worker_pool_draining_workers",
         "loom_worker_reclaim",   # counter → exposed as ..._total

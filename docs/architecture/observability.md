@@ -29,13 +29,8 @@ All metrics use the `loom_*` prefix and follow these cardinality rules:
 | Control Plane | `loom_worker_pool_occupied_slots` | Gauge | `pool_name`, `backend`, `cpu_arch` |
 | Control Plane | `loom_worker_pool_free_slots` | Gauge | `pool_name`, `backend`, `cpu_arch` |
 | Control Plane | `loom_worker_pool_workers` | Gauge | `pool_name`, `backend`, `cpu_arch` |
-| Control Plane | `loom_worker_pool_desired_slots` | Gauge | `pool_name`, `backend`, `cpu_arch` |
-| Control Plane | `loom_worker_pool_pending_slots` | Gauge | `pool_name`, `backend`, `cpu_arch` |
 | Control Plane | `loom_worker_pool_draining_slots` | Gauge | `pool_name`, `backend`, `cpu_arch` |
 | Control Plane | `loom_worker_pool_draining_workers` | Gauge | `pool_name`, `backend`, `cpu_arch` |
-| Control Plane | `loom_worker_pool_autoscaler_decision` | Gauge | `pool_name`, `backend`, `cpu_arch`, `action`, `reason` |
-| Control Plane | `loom_worker_pool_autoscaler_error` | Gauge | `pool_name`, `backend`, `cpu_arch` |
-| Control Plane | `loom_worker_pool_autoscaler_idle_seconds` | Gauge | `pool_name`, `backend`, `cpu_arch` |
 | Control Plane | `loom_slurm_worker_desired_slots` | Gauge | `environment`, `pool_name` |
 | Control Plane | `loom_slurm_worker_active_slots` | Gauge | `environment`, `pool_name` |
 | Control Plane | `loom_slurm_worker_pending_slots` | Gauge | `environment`, `pool_name` |
