@@ -117,7 +117,8 @@ selection avoids unrelated backend jobs and schema-reference provisioning. A dai
 Nebius/common regression at 08:23 UTC retains complete selection within that scope
 and coverage reporting. Use CI dispatch `legacy_compatibility=true` to include
 historical platform tests and both integration tiers. Dev PRs
-use the seven-image Nebius set; historical personal-dev publication is manual.
+use the seven-image Nebius set. Retired personal-development fleet images are
+not built or published.
 
 Deployment environments are separated from branch workflow: `development`
 uses `https://yylx.world/dev`, `staging` uses
