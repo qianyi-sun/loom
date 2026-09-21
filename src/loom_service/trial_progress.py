@@ -135,8 +135,14 @@ def _timeline(trial: Trial, lease: ServiceExecutionLease | None) -> list[dict[st
     reserved = lease.created_at if lease else None
     snapshot = trial.scheduling_observation or {}
     ready = _time(snapshot.get("image_ready_at")) if lease and snapshot.get("lease_id") == str(lease.id) else None
-    preparation = [("Preparation and admission (historical timing unavailable)", trial.submitted_at, reserved)]
-    if ready:
+    preparation: list[tuple[str, datetime | None, datetime | None]] = [
+        ("Preparation and admission (historical timing unavailable)", trial.submitted_at, reserved),
+    ]
+    if lease and lease.attempt > 1:
+        # submitted_at predates previous execution(s); it is not this retry's
+        # queue-entry time. Keep unknown instead of counting old runtime as wait.
+        preparation = [("Retry preparation/admission (timing unavailable)", None, None)]
+    elif ready:
         mode = snapshot.get("image_mode")
         preparation = [
             ("Image ready (reused)" if mode == "reused" else "Prebuilt image" if mode == "prebuilt"

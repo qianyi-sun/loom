@@ -36,7 +36,7 @@ def test_terminal_progress_uses_retained_image_timing_not_current_cache():
         },
     )
     lease = SimpleNamespace(
-        id=lease_id, created_at=now - timedelta(seconds=70),
+        id=lease_id, attempt=1, created_at=now - timedelta(seconds=70),
         pod_scheduled_at=now - timedelta(seconds=60), pod_started_at=now - timedelta(seconds=50),
         pod_terminated_at=now - timedelta(seconds=10), materialization_committed_at=now,
         last_reconciled_at=now, node_name="private-node",
@@ -49,6 +49,11 @@ def test_terminal_progress_uses_retained_image_timing_not_current_cache():
     assert result["timeline"][0]["label"] == "Image preparation"
     assert [phase["seconds"] for phase in result["timeline"]] == [20, 10, 10, 10, 40, 10]
     assert "later cache" not in str(result)
+    lease.attempt = 2
+    retried = progress_response(trial, "succeeded", lease, [], admin=False, now=now)
+    assert retried["timeline"][0]["seconds"] is None
+    assert retried["timeline"][0]["started_at"] is None
+    assert retried["timeline"][1]["seconds"] == 10
 
 
 def test_wait_reasons_distinguish_quota_from_provisioning_without_echoing_text():

@@ -25,6 +25,8 @@ successful reservation retains the image-readiness boundary and lease identity
 for the timeline. Historical records without that boundary show combined
 preparation/admission time instead of inventing a build duration. The new
 observation is diagnostic only and never grants capacity or execution authority.
+Retry preparation/admission timing is unknown when its queue-entry boundary was
+not retained; original submission time must not count earlier runtime as wait.
 
 GET /api/v1/monitor/placement?target_id=... reads existing capacity observations
 on demand. Resource and Pod totals cover the shared target; workload links are
