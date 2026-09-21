@@ -36,7 +36,7 @@ export function ProgressSummary({ progress, batchId }: { progress?: Summary; bat
   function stageLink(stage: string): string {
     const params = new URLSearchParams(location.search);
     params.set("view", "trials");
-    params.set("state", `stage:${stage}`);
+    params.set("state", ["succeeded", "failed", "cancelled"].includes(stage) ? stage : `stage:${stage}`);
     params.delete("cursor");
     if (batchId) params.set("batch_id", batchId);
     return `/monitor?${params}`;
