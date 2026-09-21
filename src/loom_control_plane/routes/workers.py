@@ -480,8 +480,6 @@ async def claim_any_work(
                                stage1.preflight_bytes AS stage1_preflight_bytes,
                                w.capability_snapshot_json,
                                w.capability_snapshot_digest,
-                               w.slurm_gpu_allocation_evidence_json,
-                               w.slurm_gpu_allocation_evidence_digest,
                                frozen.snapshot_json AS control_binding_snapshot
                           FROM execution_attempts a
                           JOIN pipeline_stage_runs s ON s.id=a.stage_run_id
@@ -692,10 +690,6 @@ async def claim_any_work(
                     image_runtime_contract_digest=(attempt_row["image_runtime_contract_digest"]),
                     worker_capability_snapshot=attempt_row["capability_snapshot_json"],
                     worker_capability_snapshot_digest=attempt_row["capability_snapshot_digest"],
-                    slurm_gpu_allocation_evidence=attempt_row["slurm_gpu_allocation_evidence_json"],
-                    slurm_gpu_allocation_evidence_digest=attempt_row[
-                        "slurm_gpu_allocation_evidence_digest"
-                    ],
                     input_bindings=attempt_row["resolved_input_bindings_json"],
                     outputs=node["outputs"],
                     checkpoint=node["checkpoint"],

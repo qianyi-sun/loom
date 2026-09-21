@@ -218,8 +218,6 @@ def attempt_claim() -> dict[str, Any]:
         "image_runtime_contract_digest": spec["image_runtime_contract_digest"],
         "worker_capability_snapshot": worker_capability(),
         "worker_capability_snapshot_digest": canonical_digest(worker_capability()),
-        "slurm_gpu_allocation_evidence": None,
-        "slurm_gpu_allocation_evidence_digest": None,
         "input_bindings": [binding()],
         "outputs": spec["container_node"]["outputs"],
         "checkpoint": None,
@@ -698,16 +696,77 @@ def test_input_evidence_and_cleanup_ack_enforce_exact_positive_observations() ->
             "schema_version": "loom.worker-lost-cleanup-ack.v1",
             "observer_kind": "worker_journal",
             "observed_at": NOW,
-            "allocation_id": None,
-            "allocation_terminal": None,
             "resources": cleanup_proof(),
         }
     )
     assert journal.observer_kind == "worker_journal"
-    with pytest.raises(ValidationError, match="terminal allocation identity"):
+    with pytest.raises(ValidationError, match="worker_journal"):
         WorkerLostCleanupAckV1.model_validate(
             {
                 **journal.model_dump(),
                 "observer_kind": "slurm_node_reaper",
             }
         )
+
+
+def test_local_attempt_claim_does_not_require_retired_allocation_fields() -> None:
+    payload = attempt_claim()
+    payload.pop("slurm_gpu_allocation_evidence", None)
+    payload.pop("slurm_gpu_allocation_evidence_digest", None)
+    assert ExecutionAttemptClaimV1.model_validate(payload).execution_attempt_id == ATTEMPT_ID
+
+
+def test_worker_lost_cleanup_rejects_retired_reaper_authority() -> None:
+    with pytest.raises(ValidationError):
+        WorkerLostCleanupAckV1.model_validate({
+            "schema_version": "loom.worker-lost-cleanup-ack.v1",
+            "observer_kind": "slurm_node_reaper",
+            "observed_at": NOW,
+            "allocation_id": "oldlab:123",
+            "allocation_terminal": True,
+            "resources": cleanup_proof(),
+        })
+
+
+@pytest.mark.parametrize("drift", [None, "count", "model", "memory", "driver"])
+def test_local_gpu_claim_preserves_resource_checks_without_cluster_authority(drift) -> None:
+    payload = attempt_claim()
+    profile = payload["resource_profile_snapshot"]
+    variant = profile["execution_variants"][0]
+    variant.update(variant_id="local-gpu", gpu_count_exact=1, gpu_vendor="nvidia",
+                   allowed_gpu_models=["test-gpu"], gpu_memory_kind="dedicated",
+                   gpu_memory_mb_min=8192, same_gpu_model_required=True,
+                   device_roles={"sim_gpu_index": 0, "vla_gpu_index": 0})
+    image = payload["image_runtime_contract_snapshot"]
+    image.update(gpu_vendor="nvidia", cuda_userspace_version="12.0",
+                 min_nvidia_driver_version="550.1")
+    capability = payload["worker_capability_snapshot"]
+    device = dict(allocation_id="local-device-0", device_uuid="GPU-local-0",
+                  vendor="nvidia", model="test-gpu", memory_kind="dedicated",
+                  memory_mb=16384, unified_memory_mb=None,
+                  nvidia_driver_version="550.2", mig_mode="disabled")
+    profile["required_host_runtime_features"] = ["egl", "nvidia-container-runtime"]
+    capability["container_runtime_features"] = ["egl", "nvidia-container-runtime"]
+    profile["required_image_features"] = ["isaac-sim-5.1", "omnigibson-3.8"]
+    image["application_features"] = ["isaac-sim-5.1", "omnigibson-3.8"]
+    capability["gpu_devices"] = [device]
+    if drift == "count":
+        capability["gpu_devices"] = []
+    elif drift == "model":
+        device["model"] = "other-gpu"
+    elif drift == "memory":
+        device["memory_mb"] = 4096
+    elif drift == "driver":
+        device["nvidia_driver_version"] = "549.9"
+    spec = payload["execution_spec_snapshot"]
+    spec["execution_variant_id"] = "local-gpu"
+    spec["gpu_backend_selection_sha256"] = D1
+    for name, value in (("resource_profile", profile), ("image_runtime_contract", image)):
+        payload[f"{name}_digest"] = spec[f"{name}_digest"] = canonical_digest(value)
+    payload["worker_capability_snapshot_digest"] = canonical_digest(capability)
+    payload["execution_spec_digest"] = canonical_digest(spec)
+    if drift is None:
+        assert ExecutionAttemptClaimV1.model_validate(payload).worker_capability_snapshot.gpu_devices
+    else:
+        with pytest.raises(ValidationError):
+            ExecutionAttemptClaimV1.model_validate(payload)

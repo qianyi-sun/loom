@@ -29,7 +29,6 @@ from loom.db.schema import (
     PipelineLivePreviewGeneration,
     PipelineRun,
     PipelineStageRun,
-    SlurmWorkerJob,
     Worker,
 )
 from loom.pipeline.artifact_commit import ArtifactCommitError
@@ -85,7 +84,6 @@ from loom_control_plane.metrics import (
     PIPELINE_ARTIFACT_BYTES_TOTAL,
     PIPELINE_ARTIFACT_COMMIT_FAILURES_TOTAL,
     PIPELINE_CANCEL_LATENCY_SECONDS,
-    PIPELINE_GPU_SECONDS_TOTAL,
     PIPELINE_LIVE_PREVIEW_BYTES_TOTAL,
     PIPELINE_LIVE_PREVIEW_FRAMES_TOTAL,
     PIPELINE_STAGE_DURATION_SECONDS,
@@ -354,16 +352,6 @@ async def _settle_attempt_reservations(
     ledger.version += 1
     ledger.updated_at = observed_at
     return gpu_actual
-
-
-def _gpu_metric_labels(stage: PipelineStageRun) -> tuple[str, str] | None:
-    frozen = stage.resolved_execution_spec_json or {}
-    variant = frozen.get("execution_variant_id")
-    if variant == "gb10-shared-1gpu":
-        return "gb10", "one"
-    if variant == "oldlab-rtx5080-2gpu":
-        return "oldlab", "two"
-    return None
 
 
 async def _require_no_active_uploads(session: AsyncSession, *, attempt_id: UUID) -> None:
@@ -1012,7 +1000,7 @@ async def _terminal_report(
         )
         if ledger is None:
             raise HTTPException(status_code=409, detail="pipeline_budget_unavailable")
-        gpu_seconds = await _settle_attempt_reservations(
+        await _settle_attempt_reservations(
             session,
             stage=stage,
             attempt=attempt,
@@ -1091,11 +1079,6 @@ async def _terminal_report(
         stage_duration = max((observed_at - stage.created_at).total_seconds(), 0)
         resource_class = _stage_resource_class(stage)
         await session.commit()
-        gpu_labels = _gpu_metric_labels(stage)
-        if gpu_seconds and gpu_labels is not None:
-            PIPELINE_GPU_SECONDS_TOTAL.labels(
-                slurm_cluster=gpu_labels[0], gpu_count_class=gpu_labels[1]
-            ).inc(gpu_seconds)
         PIPELINE_STAGE_DURATION_SECONDS.labels(
             resource_class=resource_class,
             result="retry_wait" if decision.retry else "failed",
@@ -1304,7 +1287,7 @@ async def report_attempt_complete(
         run = await session.get(PipelineRun, stage.pipeline_run_id)
         if run is None:
             raise HTTPException(status_code=409, detail="pipeline_run_unavailable")
-        gpu_seconds = await _settle_attempt_reservations(
+        await _settle_attempt_reservations(
             session,
             stage=stage,
             attempt=attempt,
@@ -1358,11 +1341,6 @@ async def report_attempt_complete(
         for artifact_class, byte_count in (committed_bytes or {}).items():
             if byte_count:
                 PIPELINE_ARTIFACT_BYTES_TOTAL.labels(artifact_class=artifact_class).inc(byte_count)
-        gpu_labels = _gpu_metric_labels(stage)
-        if gpu_seconds and gpu_labels is not None:
-            PIPELINE_GPU_SECONDS_TOTAL.labels(
-                slurm_cluster=gpu_labels[0], gpu_count_class=gpu_labels[1]
-            ).inc(gpu_seconds)
         PIPELINE_STAGE_DURATION_SECONDS.labels(
             resource_class=resource_class,
             result="succeeded",
@@ -1455,25 +1433,7 @@ async def report_worker_lost_cleanup(
         worker = await session.get(Worker, attempt.worker_id)
         if worker is None:
             raise HTTPException(status_code=409, detail="cleanup_authority_invalid")
-        allocation = worker.slurm_gpu_allocation_evidence_json
-        if payload.observer_kind == "worker_journal":
-            # verify_attempt_claim already bound this bearer hash to the exact
-            # durable Worker row recorded on the expired claim.
-            pass
-        else:
-            if allocation is None or allocation.get("allocation_id") != payload.allocation_id:
-                raise HTTPException(status_code=409, detail="cleanup_authority_invalid")
-            job = (
-                await session.execute(
-                    select(SlurmWorkerJob).where(
-                        SlurmWorkerJob.worker_id == attempt.worker_id,
-                        SlurmWorkerJob.slurm_cluster_id == allocation.get("slurm_cluster_id"),
-                        SlurmWorkerJob.job_id == allocation.get("job_id"),
-                    )
-                )
-            ).scalar_one_or_none()
-            if job is None or job.state not in {"completed", "failed", "cancelled", "stale"}:
-                raise HTTPException(status_code=409, detail="allocation_not_terminal")
+        # verify_attempt_claim binds the worker journal to this expired claim.
         terminal_cause = (
             await session.execute(
                 select(PipelineBudgetLedger.terminal_cause)

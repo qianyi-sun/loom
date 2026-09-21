@@ -199,11 +199,6 @@ EXECUTION_ATTEMPTS = Gauge(
     "Current Pipeline execution Attempts",
     labelnames=("state", "resource_class"),
 )
-PIPELINE_GPU_SECONDS_TOTAL = Counter(
-    "loom_pipeline_gpu_seconds_total",
-    "Settled Pipeline GPU seconds",
-    labelnames=("slurm_cluster", "gpu_count_class"),
-)
 PIPELINE_ARTIFACT_BYTES_TOTAL = Counter(
     "loom_pipeline_artifact_bytes_total",
     "Newly committed Pipeline Artifact bytes charged to the run budget",

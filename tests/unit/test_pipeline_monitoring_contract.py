@@ -42,7 +42,6 @@ def test_pipeline_collectors_have_closed_labels_and_exact_buckets() -> None:
         metrics.PIPELINE_STAGE_RUNS: ("state", "resource_class"),
         metrics.PIPELINE_STAGE_DURATION_SECONDS: ("resource_class", "result"),
         metrics.EXECUTION_ATTEMPTS: ("state", "resource_class"),
-        metrics.PIPELINE_GPU_SECONDS_TOTAL: ("slurm_cluster", "gpu_count_class"),
         metrics.PIPELINE_ARTIFACT_BYTES_TOTAL: ("artifact_class",),
         metrics.PIPELINE_CANCEL_LATENCY_SECONDS: ("outcome",),
         metrics.PIPELINE_CONTROLLER_RECONCILE_ERRORS_TOTAL: ("reason",),

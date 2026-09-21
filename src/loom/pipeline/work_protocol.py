@@ -18,7 +18,6 @@ from uuid import UUID
 from pydantic import Field, StringConstraints, field_validator, model_validator
 
 from loom.models.worker_capabilities import (
-    SlurmGpuAllocationEvidenceV1,
     WorkerCapabilitySnapshotV1,
 )
 from loom.pipeline.checkpoint import ExecutionCheckpointV1
@@ -509,8 +508,6 @@ class ExecutionAttemptClaimV1(PipelineModel):
     image_runtime_contract_digest: Digest
     worker_capability_snapshot: WorkerCapabilitySnapshotV1
     worker_capability_snapshot_digest: Digest
-    slurm_gpu_allocation_evidence: SlurmGpuAllocationEvidenceV1 | None
-    slurm_gpu_allocation_evidence_digest: Digest | None
     input_bindings: Annotated[list[BindingSetV1], Field(max_length=128)]
     outputs: Annotated[list[OutputDeclV1], Field(max_length=64)]
     checkpoint: CheckpointPolicyV1 | None
@@ -624,15 +621,6 @@ class ExecutionAttemptClaimV1(PipelineModel):
             self.worker_capability_snapshot
         ):
             raise ValueError("worker capability snapshot/digest drift")
-        if (self.slurm_gpu_allocation_evidence is None) != (
-            self.slurm_gpu_allocation_evidence_digest is None
-        ):
-            raise ValueError("Slurm allocation evidence and digest must be present together")
-        if self.slurm_gpu_allocation_evidence is not None and (
-            self.slurm_gpu_allocation_evidence_digest
-            != canonical_digest(self.slurm_gpu_allocation_evidence)
-        ):
-            raise ValueError("Slurm allocation evidence digest drift")
         variants = {
             item.variant_id: item for item in self.resource_profile_snapshot.execution_variants
         }
@@ -666,22 +654,14 @@ class ExecutionAttemptClaimV1(PipelineModel):
         if variant.gpu_count_exact == 0:
             if (
                 capability.gpu_devices
-                or self.slurm_gpu_allocation_evidence is not None
                 or image_contract.gpu_vendor != "none"
                 or spec.gpu_backend_selection_sha256 is not None
             ):
                 raise ValueError("zero-GPU execution cannot carry GPU allocation evidence")
         else:
-            evidence = self.slurm_gpu_allocation_evidence
             devices = capability.gpu_devices
-            if evidence is None or len(devices) != variant.gpu_count_exact:
-                raise ValueError("GPU execution requires its exact Slurm allocation")
-            if evidence.variant_id != variant.variant_id or {
-                item.allocation_id for item in devices
-            } != {evidence.allocation_id}:
-                raise ValueError("GPU variant and Slurm allocation evidence drift")
-            if [item.device_uuid for item in devices] != evidence.device_uuids:
-                raise ValueError("GPU capability UUIDs and allocation evidence drift")
+            if len(devices) != variant.gpu_count_exact:
+                raise ValueError("GPU execution requires the exact selected device count")
             if any(item.model not in variant.allowed_gpu_models for item in devices):
                 raise ValueError("GPU model is not allowed by the selected variant")
             if variant.same_gpu_model_required and len({item.model for item in devices}) != 1:
@@ -706,11 +686,6 @@ class ExecutionAttemptClaimV1(PipelineModel):
                     raise ValueError("unified GPU memory does not satisfy the variant")
             else:
                 raise ValueError("GPU variant has no closed memory accounting kind")
-            expected_cluster = "gb10" if variant.variant_id == "gb10-shared-1gpu" else "oldlab"
-            if evidence.slurm_cluster_id != expected_cluster:
-                raise ValueError("GPU variant and Slurm cluster drift")
-            if spec.gpu_backend_selection_sha256 is None:
-                raise ValueError("GPU execution requires frozen backend selection evidence")
             if image_contract.gpu_vendor != "nvidia":
                 raise ValueError("GPU variant requires an NVIDIA image runtime contract")
             minimum_driver = image_contract.min_nvidia_driver_version
@@ -1246,23 +1221,8 @@ class ExecutionCancelAckV1(PipelineModel):
 
 class WorkerLostCleanupAckV1(PipelineModel):
     schema_version: Literal["loom.worker-lost-cleanup-ack.v1"]
-    observer_kind: Literal["worker_journal", "slurm_node_reaper"]
+    observer_kind: Literal["worker_journal"]
     observed_at: datetime
-    allocation_id: str | None
-    allocation_terminal: Literal[True] | None
     resources: WorkerCleanupProofV1
 
     _observed_is_aware = field_validator("observed_at")(_aware)
-
-    @model_validator(mode="after")
-    def observer_allocation_fields_are_exact(self) -> WorkerLostCleanupAckV1:
-        if self.observer_kind == "worker_journal":
-            if self.allocation_id is not None or self.allocation_terminal is not None:
-                raise ValueError("worker journal cleanup cannot assert allocation state")
-        elif (
-            self.allocation_id is None
-            or not self.allocation_id.strip()
-            or self.allocation_terminal is not True
-        ):
-            raise ValueError("Slurm reaper cleanup requires a terminal allocation identity")
-        return self

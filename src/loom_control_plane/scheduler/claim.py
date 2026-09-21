@@ -595,35 +595,10 @@ WITH candidates AS (
           )
           AND (
             ((variant->>'gpu_count_exact')::integer = 0
-             AND w.slurm_gpu_allocation_evidence_json IS NULL
              AND s.image_runtime_contract_json->>'gpu_vendor' = 'none')
             OR
             ((variant->>'gpu_count_exact')::integer > 0
-             AND w.slurm_gpu_allocation_evidence_json IS NOT NULL
-             AND w.slurm_gpu_allocation_evidence_json->>'variant_id' =
-                 variant->>'variant_id'
              AND s.image_runtime_contract_json->>'gpu_vendor' = 'nvidia')
-          )
-          AND (
-            (variant->>'gpu_count_exact')::integer = 0
-            OR EXISTS (
-              SELECT 1
-                FROM slurm_worker_jobs slurm_job
-               WHERE slurm_job.worker_id = w.id
-                 AND slurm_job.slurm_cluster_id =
-                     w.slurm_gpu_allocation_evidence_json->>'slurm_cluster_id'
-                 AND slurm_job.job_id =
-                     w.slurm_gpu_allocation_evidence_json->>'job_id'
-                 AND slurm_job.pool_name = w.pool_name
-                 AND slurm_job.nodelist =
-                     w.slurm_gpu_allocation_evidence_json->>'node_name'
-                 AND slurm_job.requested_gpu_tres =
-                     w.slurm_gpu_allocation_evidence_json->>'gpu_tres'
-                 AND slurm_job.requested_gpus =
-                     (variant->>'gpu_count_exact')::integer
-                 AND slurm_job.requested_concurrency = 1
-                 AND slurm_job.state = 'running'
-            )
           )
      )
      AND EXISTS (

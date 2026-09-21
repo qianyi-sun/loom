@@ -51,7 +51,6 @@ from loom.pipeline.spec import (
     validate_fanout_manifest,
 )
 from loom.pipeline.state import PipelineStageRunState, RetryClass
-from loom_control_plane.metrics import PIPELINE_GPU_SECONDS_TOTAL
 
 LEASE_SECONDS = 60
 PICKER_BATCH = 50
@@ -3893,7 +3892,6 @@ class PipelineRepository:
     ) -> ReservationRecord:
         if actual_amount < 0:
             raise ValueError("settlement amount cannot be negative")
-        gpu_labels: tuple[str, str] | None = None
         async with self._sessions() as session, session.begin():
             await self._lock_fence(session, lease)
             reservation = await self._lock_reservation(session, lease, reservation_id)
@@ -3904,26 +3902,6 @@ class PipelineRepository:
             if reservation["state"] != "active":
                 raise BudgetReservationConflictError("released reservation cannot settle")
             kind = BudgetKind(reservation["kind"])
-            if kind is BudgetKind.GPU and actual_amount > 0:
-                variant_id = (
-                    await session.execute(
-                        text("""
-                        SELECT selection.variant_id
-                          FROM execution_attempts AS attempt
-                          JOIN pipeline_stage_runs AS stage ON stage.id = attempt.stage_run_id
-                          JOIN pipeline_run_gpu_backend_selections AS selection
-                            ON selection.pipeline_run_id = stage.pipeline_run_id
-                           AND selection.gpu_backend_selection_sha256 =
-                               stage.resolved_execution_spec_json->>'gpu_backend_selection_sha256'
-                         WHERE attempt.id = :attempt_id
-                        """),
-                        {"attempt_id": reservation["execution_attempt_id"]},
-                    )
-                ).scalar_one_or_none()
-                if variant_id == "gb10-shared-1gpu":
-                    gpu_labels = ("gb10", "one")
-                elif variant_id == "oldlab-rtx5080-2gpu":
-                    gpu_labels = ("oldlab", "two")
             limit_col, reserved_col, settled_col, _cause = _COUNTERS[kind]
             ledger = (
                 (
@@ -3978,10 +3956,6 @@ class PipelineRepository:
             updated = dict(reservation)
             updated.update(state="settled", settled_amount=actual_amount)
             result = self._reservation_record(updated)
-        if gpu_labels is not None:
-            PIPELINE_GPU_SECONDS_TOTAL.labels(
-                slurm_cluster=gpu_labels[0], gpu_count_class=gpu_labels[1]
-            ).inc(actual_amount)
         return result
 
     async def release_budget(self, lease: RunLease, *, reservation_id: UUID) -> ReservationRecord:

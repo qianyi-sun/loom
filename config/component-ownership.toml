@@ -45,7 +45,6 @@ compatibility_test_paths = [
   "tests/unit/test_staging_*.py",
   "tests/integration/test_staging_admin_browser_session.py",
   "tests/**/test_*slurm*.py",
-  "tests/integration/test_pipeline_gpu_claim.py",
   # Old rollout database sealing/ownership handoff, not Nebius bootstrap.
   # Keep application_migration_authority, application_runtime_grants and
   # application_schema_inventory: they independently exercise shared SQL.
