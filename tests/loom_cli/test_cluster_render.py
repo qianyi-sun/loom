@@ -1070,7 +1070,7 @@ def test_render_profiles_set_backend_runtime_environment(
     "filename",
     ["staging.cluster.toml", "staging.multinode.cluster.toml"],
 )
-def test_staging_control_plane_projects_protected_worker_runtime_credential(
+def test_staging_control_plane_has_no_retired_worker_runtime_dependency(
     filename: str,
 ) -> None:
     cfg = load_cluster_config(_REPO_ROOT / "tests" / "fixtures" / "cluster-render" / filename)
@@ -1083,16 +1083,10 @@ def test_staging_control_plane_projects_protected_worker_runtime_credential(
     )
     pod = deployment["spec"]["template"]["spec"]
     container = pod["containers"][0]
-    protected_url = next(
-        item
-        for item in container["env"]
-        if item["name"] == "LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE"
-    )
-
-    assert protected_url == {
-        "name": "LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE",
-        "value": "/run/loom/protected-worker-runtime/files/database-url",
-    }
+    assert not pod.get("initContainers")
+    assert not any("PROTECTED_WORKER_RUNTIME" in item["name"] for item in container["env"])
+    assert {item["name"] for item in container["volumeMounts"]} == {"loom-admin-secret"}
+    assert {item["name"] for item in pod["volumes"]} == {"loom-admin-secret"}
     assert pod["automountServiceAccountToken"] is False
     assert pod["securityContext"] == {
         "runAsNonRoot": True,
@@ -1104,56 +1098,6 @@ def test_staging_control_plane_projects_protected_worker_runtime_credential(
     assert container["securityContext"] == {
         "allowPrivilegeEscalation": False,
         "capabilities": {"drop": ["ALL"]},
-    }
-    assert {
-        "name": "protected-worker-runtime",
-        "mountPath": "/run/loom/protected-worker-runtime",
-        "subPath": "private",
-        "readOnly": True,
-    } in container["volumeMounts"]
-
-    init = pod["initContainers"]
-    assert len(init) == 1
-    assert init[0]["name"] == "protected-worker-runtime-init"
-    assert init[0]["securityContext"] == {
-        "allowPrivilegeEscalation": False,
-        "capabilities": {"drop": ["ALL"]},
-        "readOnlyRootFilesystem": True,
-        "runAsNonRoot": True,
-        "runAsUser": 65532,
-    }
-    assert init[0]["command"][:2] == ["/bin/sh", "-euc"]
-    assert (
-        "loom.personal_dev_secret_init --profile staging-protected-worker-runtime"
-        in init[0]["command"][2]
-    )
-    assert init[0]["volumeMounts"] == [
-        {
-            "name": "protected-worker-runtime-projected",
-            "mountPath": "/var/run/loom/protected-worker-runtime-projected",
-            "readOnly": True,
-        },
-        {
-            "name": "protected-worker-runtime",
-            "mountPath": "/run/loom/protected-worker-runtime-volume",
-        },
-    ]
-
-    volumes = {volume["name"]: volume for volume in pod["volumes"]}
-    assert volumes["protected-worker-runtime-projected"] == {
-        "name": "protected-worker-runtime-projected",
-        "secret": {
-            "secretName": "loom-protected-worker-runtime",
-            "defaultMode": 0o440,
-            "items": [
-                {"key": "ca.crt", "path": "ca.crt"},
-                {"key": "database-url", "path": "database-url"},
-            ],
-        },
-    }
-    assert volumes["protected-worker-runtime"] == {
-        "name": "protected-worker-runtime",
-        "emptyDir": {"medium": "Memory", "sizeLimit": "1Mi"},
     }
 
 

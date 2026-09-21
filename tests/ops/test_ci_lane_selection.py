@@ -254,3 +254,26 @@ def test_large_change_list_keeps_full_lanes_without_oversized_job_environment():
     assert select_affected_test_suites(
         manifest, paths, changed_paths=tuple(json.loads(outputs["test_changes"]))
     ) == paths
+
+
+def test_installed_wheel_smoke_imports_only_retained_modules():
+    import ast
+    from importlib.util import find_spec
+    from pathlib import Path
+
+    import yaml
+
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
+    step = next(item for item in workflow["jobs"]["tests-root"]["steps"]
+                if item.get("name") == "Build and exercise non-editable runtime wheel")
+    source = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    imports = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            imports.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports.append(node.module)
+    for module in imports:
+        if module.startswith(("loom.", "loom_")):
+            assert find_spec(module) is not None, module

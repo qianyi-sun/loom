@@ -521,39 +521,7 @@ WITH candidates AS (
               )
           AND jsonb_array_length(w.capability_snapshot_json->'gpu_devices') =
               (variant->>'gpu_count_exact')::integer
-          AND (
-            (variant->>'gpu_count_exact')::integer = 0
-            OR NOT EXISTS (
-              SELECT 1
-                FROM jsonb_array_elements(
-                  w.capability_snapshot_json->'gpu_devices'
-                ) device
-               WHERE NOT ((variant->'allowed_gpu_models') ? (device->>'model'))
-                  OR (
-                    variant->>'gpu_memory_kind' = 'dedicated'
-                    AND (
-                      device->>'memory_kind' <> 'dedicated'
-                      OR (device->>'memory_mb')::integer <
-                         (variant->>'gpu_memory_mb_min')::integer
-                    )
-                  )
-                  OR (
-                    variant->>'gpu_memory_kind' = 'unified'
-                    AND (
-                      device->>'memory_kind' <> 'unified'
-                      OR (device->>'unified_memory_mb')::integer <
-                         (variant->>'gpu_unified_memory_mb_min')::integer
-                    )
-                  )
-            )
-          )
-          AND (
-            ((variant->>'gpu_count_exact')::integer = 0
-             AND s.image_runtime_contract_json->>'gpu_vendor' = 'none')
-            OR
-            ((variant->>'gpu_count_exact')::integer > 0
-             AND s.image_runtime_contract_json->>'gpu_vendor' = 'nvidia')
-          )
+          AND s.image_runtime_contract_json->>'gpu_vendor' = 'none'
      )
      AND EXISTS (
        SELECT 1

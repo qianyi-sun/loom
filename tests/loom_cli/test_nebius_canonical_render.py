@@ -54,6 +54,7 @@ def _env(deployment: dict) -> dict:
 def test_staging_attachment_renders_persistent_spool_and_runtime_secrets(tmp_path: Path) -> None:
     docs = _render(tmp_path, _attachment())
     cp = _deployment(docs, "loom-control-plane")
+    assert not cp["spec"]["template"]["spec"].get("initContainers")
     env = _env(cp)
     assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED"]["value"] == "true"
     assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT"]["value"] == "staging"
