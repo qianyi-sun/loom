@@ -136,6 +136,23 @@ def _public_execution_capacity(
             continue
         target_id = str(row.get("target_id"))
         profile = profile_by_target.get(target_id, {})
+        public_profile = _select_fields(profile, _RESOURCE_PROFILE_FIELDS)
+        # Admission uses conservative zeroes for unavailable forecasts. Those
+        # zeroes are not measurements of the user's executable capacity.
+        observation = row.get("observation") or {}
+        forecast_unavailable = (
+            not (profile.get("binding") or {}).get("enabled")
+            or not (profile.get("calibration") or {}).get("eligible")
+            or not observation.get("is_fresh")
+        )
+        if (
+            public_profile is not None
+            and not profile.get("forecast_is_fresh")
+            and forecast_unavailable
+        ):
+            for field in _RESOURCE_PROFILE_FIELDS:
+                if field not in {"forecast_is_fresh", "blockers"}:
+                    public_profile[field] = None
         public: dict[str, object] = {
             "target_id": row.get("target_id"),
             "provider": "nebius",
@@ -150,7 +167,7 @@ def _public_execution_capacity(
             ),
             "command_backlog": int(row.get("command_backlog") or 0),
             "blockers": list(row.get("blockers") or []),
-            "resource_profile": _select_fields(profile, _RESOURCE_PROFILE_FIELDS),
+            "resource_profile": public_profile,
         }
         out.append(public)
     return out

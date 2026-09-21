@@ -54,6 +54,7 @@ from loom_service.routes.object_downloads import stream_object_response
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 from loom_service.task_config_validation import expected_trial_count
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
+from loom_service.usage_accounting import empty_usage_projection, usage_by_batch_ids
 
 router = APIRouter()
 
@@ -1411,6 +1412,8 @@ async def _serialize_batch(
         "artifact_summary": artifact_summary,
         "artifact_summary_truncated": artifact_summary_truncated,
     }
+    usage = await usage_by_batch_ids(session, [batch.id])
+    out.update(usage.get(batch.id, empty_usage_projection()))
     if include_debug:
         llm_calls = await _llm_calls_for_trials(session, trials)
         debug_evidence = build_batch_debug_evidence(
@@ -1765,6 +1768,7 @@ async def list_run_library_batches(
     serialized: list[dict[str, Any]] = []
     batch_ids = [batch.id for batch, _team in page_rows]
     trial_rollups = await _batch_list_trial_rollups(session, batch_ids)
+    usage = await usage_by_batch_ids(session, batch_ids)
     artifact_summaries, truncated_artifact_summaries = await _batch_list_artifact_summaries(
         session, ctx, batch_ids
     )
@@ -1779,6 +1783,7 @@ async def list_run_library_batches(
             artifact_summaries.get(batch.id, _empty_artifact_summary()),
             batch.id in truncated_artifact_summaries,
         )
+        item.update(usage.get(batch.id, empty_usage_projection()))
         serialized.append(item)
 
     next_cursor: str | None = None

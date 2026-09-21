@@ -12,7 +12,7 @@ from uuid import UUID
 
 from sqlalchemy import case, func, select
 
-from loom.db.schema import LlmCall, ProviderConnection, RateCard
+from loom.db.schema import LlmCall, ProviderConnection, RateCard, Trial
 from loom.models.types import ModelSpec
 from loom_llm_gateway.dialect import USAGE_STATUS_KEY
 from loom_llm_gateway.errors import RateCardNotFoundError
@@ -940,3 +940,133 @@ async def price_snapshots_for_trials(
         )
     ).scalars()
     return await price_snapshots_for_hashes(session, set(hashes))
+
+
+def _priced_call_filter() -> Any:
+    return (
+        ~LlmCall.rate_card_hash.like("facade:tokens-only%")
+        & ~_price_unknown_call_filter()
+        & (LlmCall.rate_card_hash != "failed-upstream")
+    )
+
+
+def _price_unknown_call_filter() -> Any:
+    return LlmCall.rate_card_hash.like("facade:rate-card:missing%") | cost_meta_filter(
+        COST_META_SOURCE_KEY, "unpriced"
+    )
+
+
+def _cost_source_counts(row: Any) -> dict[str, int]:
+    return {
+        "operator-supplied": int(row.cost_source_operator_supplied_count or 0),
+        "rate-card": int(row.cost_source_rate_card_count or 0),
+        "tokens-only": int(row.cost_source_tokens_only_count or 0),
+        "unpriced": int(row.cost_source_unpriced_count or 0),
+    }
+
+
+def _cost_confidence_counts(row: Any) -> dict[str, int]:
+    return {
+        "configured": int(row.cost_confidence_configured_count or 0),
+        "not_applicable": int(row.cost_confidence_not_applicable_count or 0),
+        "unavailable": int(row.cost_confidence_unavailable_count or 0),
+    }
+
+
+async def usage_by_batch_ids(
+    session: Any,
+    batch_ids: Sequence[UUID],
+) -> dict[UUID, dict[str, Any]]:
+    if not batch_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(
+                Trial.batch_id.label("batch_id"),
+                func.coalesce(
+                    func.sum(LlmCall.input_tokens),
+                    0,
+                ).label("total_prompt_tokens"),
+                func.coalesce(
+                    func.sum(LlmCall.output_tokens),
+                    0,
+                ).label("total_completion_tokens"),
+                func.count(LlmCall.id).label("llm_calls_count"),
+                func.coalesce(
+                    func.sum(LlmCall.cost_usd),
+                    0,
+                ).label("total_cost_usd"),
+                func.count(LlmCall.id)
+                .filter(_priced_call_filter())
+                .label("priced_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(LlmCall.rate_card_hash.like("facade:tokens-only%"))
+                .label("token_only_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(_price_unknown_call_filter())
+                .label("price_unknown_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(LlmCall.rate_card_hash == "failed-upstream")
+                .label("failed_upstream_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(cost_meta_filter(COST_META_SOURCE_KEY, "operator-supplied"))
+                .label("cost_source_operator_supplied_count"),
+                func.count(LlmCall.id)
+                .filter(cost_meta_filter(COST_META_SOURCE_KEY, "rate-card"))
+                .label("cost_source_rate_card_count"),
+                func.count(LlmCall.id)
+                .filter(cost_meta_filter(COST_META_SOURCE_KEY, "tokens-only"))
+                .label("cost_source_tokens_only_count"),
+                func.count(LlmCall.id)
+                .filter(cost_meta_filter(COST_META_SOURCE_KEY, "unpriced"))
+                .label("cost_source_unpriced_count"),
+                func.count(LlmCall.id)
+                .filter(cost_meta_filter(COST_META_CONFIDENCE_KEY, "configured"))
+                .label("cost_confidence_configured_count"),
+                func.count(LlmCall.id)
+                .filter(
+                    cost_meta_filter(COST_META_CONFIDENCE_KEY, "not_applicable"),
+                )
+                .label("cost_confidence_not_applicable_count"),
+                func.count(LlmCall.id)
+                .filter(cost_meta_filter(COST_META_CONFIDENCE_KEY, "unavailable"))
+                .label("cost_confidence_unavailable_count"),
+                func.count(LlmCall.id)
+                .filter(usage_status_filter("partial"))
+                .label("partial_usage_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(usage_status_filter("missing"))
+                .label("missing_usage_llm_calls_count"),
+            )
+            .join(LlmCall, LlmCall.trial_id == Trial.id)
+            .where(Trial.batch_id.in_(batch_ids))
+            .group_by(Trial.batch_id),
+        )
+    ).all()
+    return {
+        row.batch_id: summarize_usage_counts(
+            llm_calls_count=int(row.llm_calls_count or 0),
+            total_prompt_tokens=int(row.total_prompt_tokens or 0),
+            total_completion_tokens=int(row.total_completion_tokens or 0),
+            total_cost_usd=row.total_cost_usd,
+            priced_llm_calls_count=int(row.priced_llm_calls_count or 0),
+            token_only_llm_calls_count=int(
+                row.token_only_llm_calls_count or 0,
+            ),
+            price_unknown_llm_calls_count=int(
+                row.price_unknown_llm_calls_count or 0,
+            ),
+            failed_upstream_llm_calls_count=int(
+                row.failed_upstream_llm_calls_count or 0,
+            ),
+            partial_usage_llm_calls_count=int(
+                row.partial_usage_llm_calls_count or 0,
+            ),
+            missing_usage_llm_calls_count=int(
+                row.missing_usage_llm_calls_count or 0,
+            ),
+            cost_source_counts=_cost_source_counts(row),
+            cost_confidence_counts=_cost_confidence_counts(row),
+        )
+        for row in rows
+    }

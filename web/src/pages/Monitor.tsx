@@ -352,18 +352,19 @@ function NebiusExecutionBreakdown({
           Image builds and executions share node capacity. Scale headroom becomes executable capacity only after nodes are ready.
         </p>
       </div>
-      {serviceExecution.targets.map((target) => {
+      {serviceExecution.targets.filter((target) => !["disabled", "retired"].includes(target.desired_state)).map((target) => {
         const observation = target.observation;
         const profile = target.resource_profile;
+        const draining = target.desired_state === "draining";
         const healthy = target.health_status === "healthy" && observation?.is_fresh === true;
         return (
-          <div key={`${target.pool_id}:${target.environment}`} className="rounded-lg border border-sky-200 bg-white p-3">
+          <div key={target.target_id} className="rounded-lg border border-sky-200 bg-white p-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="font-semibold text-slate-900">
                 {target.pool_id} · {target.environment} · {target.region}
               </p>
-              <StatusPill variant={healthy ? "success" : "failed"}>
-                {healthy ? "fresh" : "blocked/stale"}
+              <StatusPill variant={draining ? "neutral" : healthy ? "success" : "failed"}>
+                {draining ? "Draining" : healthy ? "fresh" : "blocked/stale"}
               </StatusPill>
             </div>
             <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-5">
@@ -398,6 +399,17 @@ function NebiusExecutionBreakdown({
           </div>
         );
       })}
+      {serviceExecution.targets.some((target) => ["disabled", "retired"].includes(target.desired_state)) ? (
+        <details className="rounded-lg border border-slate-200 bg-white p-3">
+          <summary className="cursor-pointer text-sm font-medium">Inactive regions</summary>
+          {serviceExecution.targets.filter((target) => ["disabled", "retired"].includes(target.desired_state)).map((target) => (
+            <p key={target.target_id} className="mt-2 text-sm text-slate-600">
+              {target.pool_id} · {target.region} · {target.desired_state === "disabled" ? "Disabled" : target.desired_state}
+            </p>
+          ))}
+          <p className="mt-2 text-xs text-slate-600">Excluded from active capacity. Historical observations do not indicate a current service fault.</p>
+        </details>
+      ) : null}
       {activity ? (
         <div className="space-y-2">
           <div className="grid grid-cols-2 gap-2 md:grid-cols-6">

@@ -668,6 +668,31 @@ describe("Monitor human-readable labels", () => {
     expect(await screen.findByText(/occupied unknown · draining unknown/)).toBeInTheDocument();
   });
 
+  it("separates disabled regions from active capacity and preserves unknown slots", async () => {
+    const target = monitorSummaryPayload.service_execution.targets[0];
+    mockMonitorEndpoints({
+      ...monitorSummaryPayload,
+      service_execution: {
+        ...monitorSummaryPayload.service_execution,
+        targets: [
+          { ...target, target_id: "primary", resource_profile: {
+            immediate_executable_slots: null, configured_scale_headroom_slots: null,
+            configured_total_fit_slots: null, blockers: ["resource_calibration_unavailable"],
+          } },
+          { ...target, target_id: "disabled", desired_state: "disabled", region: "eu-west1", observation: null },
+          { ...target, target_id: "draining", desired_state: "draining", region: "draining-region" },
+        ],
+      },
+    });
+    renderWithProviders(<Monitor />, { route: "/monitor?view=batches" });
+    expect(await screen.findByText("Inactive regions")).toBeInTheDocument();
+    expect(screen.queryByText("blocked/stale")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Unknown")).toHaveLength(3);
+    expect(screen.getByText(/eu-west1 · Disabled/)).toBeInTheDocument();
+    expect(screen.getByText("Draining", { selector: "span" })).toBeInTheDocument();
+    expect(screen.getByText("12 slots")).toBeInTheDocument();
+  });
+
   it("shows stale Nebius capacity, blockers, and empty lifecycle evidence explicitly", async () => {
     mockMonitorEndpoints({
       ...monitorSummaryPayload,
