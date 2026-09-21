@@ -39,7 +39,7 @@ def test_current_release_docs_cover_executable_validation_and_promotion() -> Non
     assert "shared-cluster deployment workflow is retired" in operator
     assert "Automated hosted rollout is" in operator
     assert "does not deploy staging" in staging
-    assert "../ops/nebius-deployment.md" in operator
+    assert "nebius-deployment.md" in operator
     assert "environment=production" in operator
     assert "successful `release_gate_run_id`" in operator
 

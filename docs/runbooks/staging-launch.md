@@ -1,7 +1,7 @@
 # Staging release validation
 
 Use this checklist after deploying an exact merged `dev` candidate to Nebius
-staging using the [Nebius deployment procedure](../ops/nebius-deployment.md).
+staging using the [Nebius deployment procedure](nebius-deployment.md).
 It describes release evidence, not authority to mutate a cluster. The legacy
 shared-cluster rollout authority is retired. The generic deployment workflow
 does not deploy staging.
@@ -16,7 +16,7 @@ Confirm staging and production have separate namespaces, database state,
 object buckets, credentials and execution targets. Expose only the staged SPA
 and service API over TLS; internal services must remain private. Ambiguous
 historical database revisions require the
-[qualified lineage conversion](../ops/nebius-lineage-conversion.md).
+[qualified lineage conversion](nebius-lineage-conversion.md).
 
 ## Public route and authentication checks
 

@@ -45,7 +45,7 @@ def test_repository_path_policy_rejects_tracked_superpowers_documents(
         "Forbidden tracked repository paths:\n"
         "  docs/superpowers/plans/feature-plan.md\n"
         "  docs/superpowers/specs/feature-design.md\n"
-        "Move durable designs to docs/architecture/ and keep execution plans local.\n"
+        "Move durable designs to docs/architecture/ and keep execution plans outside the repository.\n"
     )
 
 
@@ -72,3 +72,30 @@ def test_repository_path_policy_uses_repository_root_from_subdirectory(
 
     assert result.returncode == 1
     assert "docs/superpowers/specs/feature-design.md" in result.stderr
+
+
+def test_repository_path_policy_rejects_plans_anywhere(tmp_path: Path) -> None:
+    paths = (
+        "implementation-plans/task.md",
+        "archive/docs/implementation-plans/task.md",
+        "docs/architecture/feature-implementation-plan.md",
+        "packages/widget/implementation_plan.md",
+        "docs/plans/task.md",
+        ".superpowers/plans/task.md",
+    )
+    result = _run_checker(tmp_path, *paths)
+    assert result.returncode == 1
+    for path in paths:
+        assert path in result.stderr
+
+
+def test_repository_path_policy_preserves_domain_plans(tmp_path: Path) -> None:
+    result = _run_checker(
+        tmp_path,
+        "src/loom/task_image_build_plan.py",
+        "capacity_build_guard_migrations/versions/build_guard_0003_prepare_plan.py",
+        "scripts/plan_ci_validations.py",
+        "docs/architecture/pipeline-orchestrator.md",
+        "docs/runbooks/nebius-deployment.md",
+    )
+    assert result.returncode == 0

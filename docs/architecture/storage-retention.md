@@ -83,8 +83,8 @@ uv run --no-sync loom cluster doctor \
   --storage-lifecycle-endpoint http://127.0.0.1:9000
 ```
 
-Storage lifecycle expiration is separate from Loom's typed
-[staging data lifecycle](staging-data-lifecycle.md), which makes
-application-state-aware, exact-object deletion decisions. See the
+Storage lifecycle expiration is separate from the retired
+[staging data lifecycle](../historical/staging-data-lifecycle.md). Its retained
+exact-object records explain historical data; they are not a current deletion procedure. See the
 [operator runbook](../runbooks/operator-runbook.md#storage-retention)
 for credential and port-forward handling.

@@ -16,180 +16,6 @@
       "reason": "Prevents an old owner-local credential filename from entering Git; does not read or use it."
     },
     {
-      "path": "archive/deploy/README.md",
-      "matching_lines": 2,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/deploy/dev-fleet/README.md",
-      "matching_lines": 1,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/deploy/fleet-state/README.md",
-      "matching_lines": 1,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/deploy/worker-pools/gb10/README.md",
-      "matching_lines": 42,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/deploy/worker-pools/oldlab/README.md",
-      "matching_lines": 39,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/deploy/worker-pools/oldlab/controller.env.example",
-      "matching_lines": 17,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/deploy/worker-pools/oldlab/dry-run-2026-06-24.txt",
-      "matching_lines": 10,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/deploy/worker-pools/oldlab/inventory-2026-06-24.txt",
-      "matching_lines": 23,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/deploy/worker-pools/oldlab/smoke-evidence-2026-06-24.json",
-      "matching_lines": 7,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/deploy/worker-pools/oldlab/worker-plan.csv",
-      "matching_lines": 5,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/docs/architecture/README.md",
-      "matching_lines": 2,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/docs/architecture/adr/independent-staging-rollout-runner.md",
-      "matching_lines": 19,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/docs/architecture/gb10-dynamic-capacity-decision.md",
-      "matching_lines": 6,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/docs/architecture/global-dev-fleet-autoscaler-status.md",
-      "matching_lines": 2,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/docs/architecture/global-fleet-capacity-manager-design.md",
-      "matching_lines": 112,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/docs/architecture/global-fleet-capacity-manager-status.md",
-      "matching_lines": 15,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/docs/architecture/independent-staging-rollout-design.md",
-      "matching_lines": 21,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/docs/architecture/issue45-worker-autoscaler-design.md",
-      "matching_lines": 41,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/docs/architecture/multi-dev-env-design.md",
-      "matching_lines": 4,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/docs/architecture/pr-ci-assessment-2026-08-04.md",
-      "matching_lines": 2,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/docs/architecture/self-service-runtime-registration.md",
-      "matching_lines": 17,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/docs/architecture/v1-release-ready-program.md",
-      "matching_lines": 4,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/docs/evidence/2026-06-30-slb-three-way-codex-qwen36.md",
-      "matching_lines": 2,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/docs/evidence/issue-222/README.md",
-      "matching_lines": 1,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/docs/implementation-plans/2026-08-26-preflight-artifact-retention.md",
-      "matching_lines": 3,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/docs/runbooks/first-prod-release-runbook.md",
-      "matching_lines": 15,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/docs/runbooks/full-max-slot-canary-runbook.md",
-      "matching_lines": 30,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/docs/runbooks/remote-worker-pool.md",
-      "matching_lines": 234,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "archive/docs/score-alignment/layer-3.md",
-      "matching_lines": 1,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
       "path": "capacity_build_guard_migrations/versions/build_guard_0006_demand.py",
       "matching_lines": 1,
       "category": 1,
@@ -395,7 +221,7 @@
     },
     {
       "path": "docs/architecture/nebius-primary-platform.md",
-      "matching_lines": 4,
+      "matching_lines": 1,
       "category": 3,
       "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
     },
@@ -412,6 +238,12 @@
       "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
     },
     {
+      "path": "docs/contributing/ci.md",
+      "matching_lines": 3,
+      "category": 3,
+      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
+    },
+    {
       "path": "docs/evidence/README.md",
       "matching_lines": 1,
       "category": 3,
@@ -419,7 +251,7 @@
     },
     {
       "path": "docs/historical/shared-cluster-reference-audit.json",
-      "matching_lines": 15,
+      "matching_lines": 7,
       "category": 3,
       "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
     },
@@ -432,12 +264,6 @@
     {
       "path": "docs/integrations/provider-onboarding.md",
       "matching_lines": 1,
-      "category": 3,
-      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
-    },
-    {
-      "path": "docs/ops/nebius-ci.md",
-      "matching_lines": 3,
       "category": 3,
       "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
     },

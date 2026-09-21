@@ -657,7 +657,7 @@ resources as part of this rollback.
 The former shared staging profiles have been retired. The generic renderer
 retains this disabled-by-default attachment contract for disposable compatibility
 validation; synthetic inputs live under `tests/fixtures/cluster-render/`.
-Hosted deployments use the [Nebius deployment procedure](../ops/nebius-deployment.md).
+Hosted deployments use the [Nebius deployment procedure](nebius-deployment.md).
 The following table documents the compatibility contract, not a hosted rollout
 input. Its revision and documentation-only addresses are examples:
 

@@ -1,7 +1,7 @@
 # Cluster Deployment
 
 Hosted Loom runs on Nebius. Its current deployment contract is the
-[Nebius deployment procedure](../ops/nebius-deployment.md), driven by the
+[Nebius deployment procedure](../runbooks/nebius-deployment.md), driven by the
 Nebius renderer and deployer. `loom cluster up` is limited to disposable
 local development. `loom service up --environment local` manages Docker
 Compose. Shared remote workers and personal hosted environments are retired.
@@ -115,7 +115,7 @@ deletion flags are supplied.
 
 ## Apply sequence
 
-For hosted targets, follow the [Nebius deployment procedure](../ops/nebius-deployment.md).
+For hosted targets, follow the [Nebius deployment procedure](../runbooks/nebius-deployment.md).
 For disposable local clusters, `loom cluster up` composes preflight, render,
 apply, and readiness waiting. Use an explicit development configuration.
 

@@ -1,14 +1,16 @@
 # Service mode
 
-Service mode runs Loom as a distributed cluster: a FastAPI Control
-Plane owns trial state, Workers poll for work and execute trials,
-an LLM Gateway centralizes provider calls + cost attribution, and a
-REST `loom_service` + React SPA give researchers and admins a UI.
+Service mode provides a team evaluation platform: a FastAPI Control Plane
+owns trial state, native Nebius controllers schedule and reconcile hosted
+execution, an LLM Gateway centralizes provider calls and cost attribution, and
+REST `loom_service` plus the React SPA provide user access. The worker polling
+flow described below applies to explicit local/disposable service execution.
 Team and worker auth still use database-backed bearer tokens, while admin auth
 uses the file-backed singleton secret described in
 [auth-and-teams.md](auth-and-teams.md).
 
-Postgres + MinIO are the only stateful services.
+Postgres and object storage hold durable state; the local Compose stack uses
+MinIO for object storage.
 
 Hosted service execution uses only the Nebius Kubernetes contract in
 [Nebius service execution](nebius-service-execution.md). Worker polling and
@@ -268,8 +270,8 @@ all scale horizontally. Postgres is the durability boundary.
         | <-- result + atif URL ----- (forwarder) -- |              |                          |
 ```
 
-State machine: see [overview.md](overview.md#state-machine) — six
-states only (`queued → claimed → running → succeeded | failed |
+The shared `TrialState` contract in `src/loom/models/result.py` has six
+states (`queued → claimed → running → succeeded | failed |
 cancelled`). Finalize is a side-effect of reaching a terminal state,
 not a state of its own.
 

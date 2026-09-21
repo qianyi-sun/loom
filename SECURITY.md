@@ -131,7 +131,8 @@ For public repository operation:
   [`docs/architecture/sandbox-isolation.md`](docs/architecture/sandbox-isolation.md).
 - Artifact visibility and reuse:
   [`docs/architecture/run-library.md`](docs/architecture/run-library.md).
-- Staging retention and exact-object deletion:
-  [`docs/architecture/staging-data-lifecycle.md`](docs/architecture/staging-data-lifecycle.md).
+- Current storage retention: [storage policy](docs/architecture/storage-retention.md).
+  Historical exact-object deletion records are explained separately in
+  [staging data lineage](docs/historical/staging-data-lifecycle.md); the old tooling is retired.
 - Admin mutations covered by service routes write safe attribution to
   `admin_audit_events`; the SPA exposes the corresponding operator audit view.

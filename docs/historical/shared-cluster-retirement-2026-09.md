@@ -12,7 +12,8 @@ ephemeral OLDLAB GitHub Actions runners. Git history preserves that source;
 retired implementations and tests are deleted, not archived here.
 
 The pre-retirement `dev` snapshot is
-`504600cbcee21e4dfd10619ef34d64f455e21813`. This identifies the source baseline,
+`504600cbcee21e4dfd10619ef34d64f455e21813`, preserved by the annotated
+[tag `archive/shared-cluster-final`](https://github.com/qianyi-sun/loom/tree/archive/shared-cluster-final). This identifies the source baseline,
 not a verified deployment or a guarantee that every legacy capability worked.
 The architectural context is recorded in issues #1536, #1548 and #1553;
 workload parity and live acceptance have separate ownership in #1550 and #1538.
@@ -68,7 +69,7 @@ been dropped as part of the repository retirement.
 The application chain at the source baseline ends at `0150`; the refreshed
 `dev` baseline includes `0151` (batch purpose) and `0152` (Nebius rollout guard).
 Earlier Nebius and `dev` branches used revisions `0133`–`0136` for different changes. Preserve
-the [qualified lineage conversion](../ops/nebius-lineage-conversion.md);
+the [qualified lineage conversion](../runbooks/nebius-lineage-conversion.md);
 revision labels alone cannot identify the correct database history. Preserve
 separate published capacity and guard migration chains and the helpers needed
 to load and validate them.
@@ -108,9 +109,9 @@ category. Migration revisions and migration fixtures preserve published lineage;
 signed publication schemas and result snapshots preserve retained-data identity.
 Retirement/rejection tests prove old inputs do not restore hosted support. The
 vendored simulator GPU tuning and generic local resource logic are independent
-of hosted provider selection. Existing archive records are historical only; no
-retired implementation was moved into the archive. Git history remains the source
-archive. Generated coverage and orphan fleet fixtures were deleted.
+of hosted provider selection. The former duplicate archive tree was removed during documentation cleanup;
+[historical records](README.md) link its exact Git snapshot. Git history remains
+the source archive. Generated coverage and orphan fleet fixtures were deleted.
 
 No cleanup migration drops historical rows. Worker/job evidence, signed image
 provenance and protected grant records remain part of qualified restores; deleting

@@ -10,7 +10,7 @@ On `dev`, changes to publication authority (the candidate publisher, workflow,
 registry authentication and shared Trivy report validator) retain full validation.
 Ordinary Nebius deployment/render/restore files use their specific test consumers;
 runtime changes, explicit CI labels and unknown paths can select additional work.
-See [Nebius CI integration](nebius-ci.md) for the combined platform contract and
+See [Nebius CI integration](../contributing/ci.md) for the combined platform contract and
 optional integration coverage diagnostic.
 
 ## Bootstrap
