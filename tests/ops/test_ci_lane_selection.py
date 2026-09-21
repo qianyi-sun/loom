@@ -232,3 +232,25 @@ def test_mixed_frontend_backend_and_explicit_labels_keep_system_smoke():
     assert p.staging_smoke and p.integration and p.tests_root and p.web_checks
     assert plan("web/src/App.tsx", ["staging-smoke"]).staging_smoke
     assert plan("web/src/App.tsx", ["cluster-smoke"]).cluster_smoke
+
+
+def test_large_change_list_keeps_full_lanes_without_oversized_job_environment():
+    from dataclasses import replace
+    from pathlib import Path
+
+    from scripts.component_ownership import load_manifest, select_affected_test_suites
+
+    baseline = plan("unknown/runtime.bin")
+    changes = tuple(f"tests/unit/test_retired_{index}_{'x' * 96}.py" for index in range(2000))
+    assert len(json.dumps(changes).encode()) > 131072
+    outputs = replace(baseline, test_changes=changes).github_outputs()
+    assert outputs["test_changes"] == "[]"
+    for lane in ("tests_root", "tests_packages", "integration", "integration_docker"):
+        assert outputs[lane] == baseline.github_outputs()[lane] == "true"
+    root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(root / "config/component-ownership.toml")
+    paths = ("tests/integration/test_application_schema_reference.py",
+             "tests/integration/test_application_runtime_login.py")
+    assert select_affected_test_suites(
+        manifest, paths, changed_paths=tuple(json.loads(outputs["test_changes"]))
+    ) == paths

@@ -157,7 +157,11 @@ class ValidationPlan:
             )
         }
         outputs["gate_mode"] = self.gate_mode
-        outputs["test_changes"] = json.dumps(self.test_changes, separators=(",", ":"))
+        test_changes = json.dumps(self.test_changes, separators=(",", ":"))
+        # This optional narrowing hint becomes one job environment variable.
+        # Stay below Linux's per-string exec limit; an empty hint retains the
+        # complete selected lanes, including historical schema reconstruction.
+        outputs["test_changes"] = test_changes if len(test_changes.encode()) <= 65536 else "[]"
         outputs["reasons_json"] = json.dumps(self.reasons, sort_keys=True, separators=(",", ":"))
         return outputs
 

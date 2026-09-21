@@ -18,7 +18,7 @@ COPY src/loom/agent_runtime.py src/loom/request_params.py src/loom/service_execu
     src/loom/task_bundle_registration.py src/loom/task_bundle_source.py \
     src/loom/task_bundle_source_journal.py src/loom/task_bundle_source_storage.py \
     src/loom/task_image_bundle_manifest.py src/loom/terminal_bench_normalize.py ./src/loom/
-COPY src/loom/driver/__init__.py src/loom/driver/build_containment.py src/loom/driver/task_image.py ./src/loom/driver/
+COPY src/loom/driver/__init__.py src/loom/driver/task_image.py ./src/loom/driver/
 COPY src/loom/family_run/__init__.py src/loom/family_run/spec.py ./src/loom/family_run/
 COPY src/loom/trajectory/__init__.py src/loom/trajectory/storage.py ./src/loom/trajectory/
 COPY src/loom/db ./src/loom/db
