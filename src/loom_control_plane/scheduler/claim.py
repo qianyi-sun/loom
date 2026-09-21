@@ -145,12 +145,6 @@ WITH worker_scope AS (
                   AND active_attempt.state IN ('claimed','running'))
             )
           )
-          AND NOT (
-            COALESCE(
-              w.capability_snapshot_json->'container_runtime_features',
-              '[]'::jsonb
-            ) ? 'loom-stage1-smoke-worker-v1'
-          )
           AND (
             COALESCE((t.requires_caps->>'terminus2_model_switch')::boolean, false) IS NOT TRUE
             OR EXISTS (
@@ -354,12 +348,6 @@ WITH candidates AS (
        NULLIF(t.requires_caps->>'worker_pool', '') IS NULL
        OR w.pool_name = t.requires_caps->>'worker_pool'
      )
-     AND NOT (
-       COALESCE(
-         w.capability_snapshot_json->'container_runtime_features',
-         '[]'::jsonb
-       ) ? 'loom-stage1-smoke-worker-v1'
-     )
   UNION ALL
   SELECT 'execution_attempt'::text AS work_kind,
          a.id,
@@ -509,21 +497,7 @@ WITH candidates AS (
          (s.resource_profile_json->>'network_profile')
      AND (s.resource_profile_json->'required_host_runtime_features') <@
          (w.capability_snapshot_json->'container_runtime_features')
-     AND (
-       NOT (w.capability_snapshot_json->'container_runtime_features') ?
-           'loom-stage1-smoke-worker-v1'
-       OR (
-         r.official_submission_kind = 'behavior_stage1_smoke_v1'
-         AND EXISTS (
-           SELECT 1
-             FROM pipeline_stage1_smoke_authorizations stage1_authority
-            WHERE stage1_authority.pipeline_run_id = r.id
-              AND stage1_authority.authorization_id =
-                  r.official_submission_authority_id
-              AND stage1_authority.state IN ('submitted','running')
-         )
-       )
-     )
+     AND r.official_submission_kind IS DISTINCT FROM 'behavior_stage1_smoke_v1'
      AND (s.resource_profile_json->'required_image_features') <@
          (s.image_runtime_contract_json->'application_features')
      AND EXISTS (

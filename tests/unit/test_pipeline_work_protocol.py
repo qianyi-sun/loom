@@ -25,7 +25,6 @@ from loom.pipeline.work_protocol import (
     ExecutionFailedV1,
     ExecutionHeartbeatV1,
     ExecutionStartedV1,
-    Stage1SmokeGrantV1,
     StageRequestGrantV1,
     TerminalGenAuthoringGrantV1,
     TerminalTaskValidationGrantV1,
@@ -443,25 +442,6 @@ def test_stage_request_grant_requires_exact_canonical_bytes_size_and_digest() ->
     )
     with pytest.raises(ValidationError, match="canonical JCS"):
         StageRequestGrantV1.model_validate(noncanonical)
-
-
-def test_stage1_smoke_grant_is_closed_and_binds_the_selected_child() -> None:
-    value = {
-        "authorization_id": UUID(int=30),
-        "pipeline_run_id": RUN_ID,
-        "candidate_sha256": D0,
-        "authorization_sha256": D1,
-        "preflight_sha256": D2,
-        "policy_activation_epoch": 7,
-        "recipe_digest": D3,
-        "platform_child_digest": D0,
-        "image_runtime_contract_digest": D1,
-        "resolved_input_bindings_digest": D2,
-        "renderer_digest": D3,
-    }
-    assert Stage1SmokeGrantV1.model_validate(value).policy_activation_epoch == 7
-    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        Stage1SmokeGrantV1.model_validate({**value, "raw_image_override": IMAGE})
 
 
 def test_terminalgen_authoring_and_validation_grants_are_exact_and_fail_closed() -> None:

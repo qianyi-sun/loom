@@ -136,22 +136,6 @@ class StageRequestGrantV1(PipelineModel):
         return self
 
 
-class Stage1SmokeGrantV1(PipelineModel):
-    """Server-owned proof that this claim consumes the one Stage 1 authority."""
-
-    authorization_id: UUID
-    pipeline_run_id: UUID
-    candidate_sha256: Digest
-    authorization_sha256: Digest
-    preflight_sha256: Digest
-    policy_activation_epoch: PositiveSafeInt
-    recipe_digest: Digest
-    platform_child_digest: Digest
-    image_runtime_contract_digest: Digest
-    resolved_input_bindings_digest: Digest
-    renderer_digest: Digest
-
-
 class TerminalTaskValidationGrantV1(PipelineModel):
     """Worker-owned dynamic-validation authority for one immutable task bundle."""
 
@@ -469,7 +453,6 @@ class ExecutionAttemptClaimV1(PipelineModel):
     fanout_commit: PlatformFanoutCommitV1 | None
     stage_request: StageRequestGrantV1 | None
     control_binding_snapshot: dict[str, object] | None = None
-    stage1_smoke: Stage1SmokeGrantV1 | None = None
     terminalgen_authoring: TerminalGenAuthoringGrantV1 | None = None
     provider_connection_ref: UUID | None
     secret_refs: list[_OpaqueReference]
@@ -658,23 +641,6 @@ class ExecutionAttemptClaimV1(PipelineModel):
         renderer_digest = self.stage_request.renderer_digest if self.stage_request else None
         if renderer_digest != spec.request_renderer_lock_digest:
             raise ValueError("StageRequest renderer lock drift")
-        if self.stage1_smoke is not None:
-            stage1_grant = self.stage1_smoke
-            if (
-                stage1_grant.pipeline_run_id != self.pipeline_run_id
-                or stage1_grant.recipe_digest != self.recipe_digest
-                or stage1_grant.platform_child_digest != spec.resolved_image_manifest_digest
-                or stage1_grant.image_runtime_contract_digest != self.image_runtime_contract_digest
-                or stage1_grant.resolved_input_bindings_digest
-                != spec.resolved_input_bindings_digest
-                or stage1_grant.renderer_digest != renderer_digest
-                or self.node_key != "rollout"
-                or self.shard_key != "singleton"
-                or self.network_profile != "none"
-                or self.provider_connection_ref is not None
-                or self.secret_refs
-            ):
-                raise ValueError("Stage 1 smoke grant drift")
         is_terminalgen_profile = self.resource_profile_snapshot.name.startswith("terminalgen-")
         if is_terminalgen_profile != (self.terminalgen_authoring is not None):
             raise ValueError("TerminalGen ResourceProfiles require their authoring grant")
@@ -691,7 +657,6 @@ class ExecutionAttemptClaimV1(PipelineModel):
                 != self.image_runtime_contract_digest
                 or terminalgen_grant.resolved_input_bindings_digest
                 != spec.resolved_input_bindings_digest
-                or self.stage1_smoke is not None
             ):
                 raise ValueError("TerminalGen authoring grant drift")
             validation = terminalgen_grant.validation

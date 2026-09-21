@@ -156,9 +156,6 @@ class ReadinessCandidate:
     parameters_json: dict[str, Any]
     resolved_inputs_json: list[dict[str, Any]]
     official_submission_kind: str | None
-    authority_candidate_json: dict[str, Any] | None
-    gpu_backend_selection_json: dict[str, Any] | None
-    gpu_backend_selection_digest: str | None
     fanout_item_json: dict[str, Any] | None = None
     fanout_source_manifest_digest: str | None = None
     fanout_item_digest: str | None = None
@@ -779,18 +776,11 @@ class PipelineRepository:
                                run.recipe_digest, run.graph_spec_digest,
                                run.parameters_json, run.resolved_inputs_json,
                                run.control_binding_snapshots_json,
-                               run.official_submission_kind,
-                               stage1.candidate_json AS authority_candidate_json,
-                               gpu.selection_json AS gpu_backend_selection_json,
-                               gpu.gpu_backend_selection_sha256 AS gpu_backend_selection_digest
+                               run.official_submission_kind
                           FROM pipeline_stage_runs stage
                           JOIN pipeline_runs run ON run.id=stage.pipeline_run_id
                           JOIN pipeline_budget_ledgers ledger
                             ON ledger.pipeline_run_id=stage.pipeline_run_id
-                          LEFT JOIN pipeline_stage1_smoke_authorizations stage1
-                            ON stage1.pipeline_run_id=run.id
-                          LEFT JOIN pipeline_run_gpu_backend_selections gpu
-                            ON gpu.pipeline_run_id=run.id AND gpu.scope='all_gpu_nodes'
                           LEFT JOIN pipeline_fanout_expansions expansion
                             ON expansion.id=stage.fanout_expansion_id
                          WHERE stage.pipeline_run_id=:run_id AND stage.node_kind='container'
@@ -897,9 +887,6 @@ class PipelineRepository:
                         parameters_json=row["parameters_json"],
                         resolved_inputs_json=row["resolved_inputs_json"],
                         official_submission_kind=row["official_submission_kind"],
-                        authority_candidate_json=row["authority_candidate_json"],
-                        gpu_backend_selection_json=row["gpu_backend_selection_json"],
-                        gpu_backend_selection_digest=row["gpu_backend_selection_digest"],
                         fanout_item_json=row["fanout_item_json"],
                         fanout_source_manifest_digest=row["fanout_source_manifest_digest"],
                         fanout_item_digest=row["fanout_item_digest"],

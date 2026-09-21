@@ -31,16 +31,9 @@ from loom.models.worker_capabilities import (
     WorkerCapabilitySnapshotV1,
 )
 from loom.pipeline.keys import canonical_digest, canonical_document, digest_bytes
-from loom.pipeline.stage1_smoke import (
-    Stage1SmokeAuthorizationV1,
-    Stage1SmokeCandidateV1,
-    Stage1SmokePreflightV1,
-    validate_stage1_smoke_authorization,
-)
 from loom.pipeline.work_protocol import (
     ArtifactInputDescriptorV1,
     ExecutionAttemptClaimV1,
-    Stage1SmokeGrantV1,
     StageRequestGrantV1,
     TerminalGenAuthoringGrantV1,
     TrialClaimV1,
@@ -459,16 +452,6 @@ async def claim_any_work(
                                s.secret_refs, r.id AS pipeline_run_id, r.team_id,
                                r.recipe_name, r.recipe_version,
                                r.recipe_digest, r.graph_spec_digest,
-                               stage1.authorization_id AS stage1_authorization_id,
-                               stage1.candidate_sha256 AS stage1_candidate_sha256,
-                               stage1.authorization_sha256 AS stage1_authorization_sha256,
-                               stage1.preflight_sha256 AS stage1_preflight_sha256,
-                               stage1.candidate_json AS stage1_candidate_json,
-                               stage1.authorization_json AS stage1_authorization_json,
-                               stage1.preflight_json AS stage1_preflight_json,
-                               stage1.candidate_bytes AS stage1_candidate_bytes,
-                               stage1.authorization_bytes AS stage1_authorization_bytes,
-                               stage1.preflight_bytes AS stage1_preflight_bytes,
                                w.capability_snapshot_json,
                                w.capability_snapshot_digest,
                                frozen.snapshot_json AS control_binding_snapshot
@@ -476,10 +459,6 @@ async def claim_any_work(
                           JOIN pipeline_stage_runs s ON s.id=a.stage_run_id
                           JOIN pipeline_runs r ON r.id=s.pipeline_run_id
                           JOIN workers w ON w.id=a.worker_id
-                          LEFT JOIN pipeline_stage1_smoke_authorizations stage1
-                            ON stage1.pipeline_run_id=r.id
-                           AND stage1.state IN ('submitted','running')
-                           AND r.official_submission_kind='behavior_stage1_smoke_v1'
                           LEFT JOIN pipeline_run_control_bindings frozen
                             ON frozen.pipeline_run_id=r.id
                            AND frozen.node_key=s.node_key
@@ -517,62 +496,6 @@ async def claim_any_work(
                     canonical_jcs_lf=bytes(attempt_row["stage_request_bytes"]).decode("utf-8"),
                     stage_request_sha256=attempt_row["stage_request_digest"],
                     size_bytes=len(attempt_row["stage_request_bytes"]),
-                )
-            stage1_smoke = None
-            if attempt_row["stage1_authorization_id"] is not None:
-                candidate_bytes = bytes(attempt_row["stage1_candidate_bytes"])
-                authorization_bytes = bytes(attempt_row["stage1_authorization_bytes"])
-                preflight_bytes = bytes(attempt_row["stage1_preflight_bytes"])
-                try:
-                    candidate = Stage1SmokeCandidateV1.model_validate_json(candidate_bytes)
-                    stage1_authorization = Stage1SmokeAuthorizationV1.model_validate_json(
-                        authorization_bytes
-                    )
-                    preflight = Stage1SmokePreflightV1.model_validate_json(preflight_bytes)
-                    validate_stage1_smoke_authorization(candidate, stage1_authorization)
-                except (ValidationError, ValueError) as exc:
-                    raise HTTPException(
-                        status_code=409, detail="stage1_smoke_authority_drift"
-                    ) from exc
-                if (
-                    candidate.canonical_bytes != candidate_bytes
-                    or candidate.model_dump(mode="json") != attempt_row["stage1_candidate_json"]
-                    or candidate.candidate_sha256 != attempt_row["stage1_candidate_sha256"]
-                    or canonical_digest(stage1_authorization.model_dump(mode="json"))
-                    != attempt_row["stage1_authorization_sha256"]
-                    or canonical_digest(preflight.model_dump(mode="json"))
-                    != attempt_row["stage1_preflight_sha256"]
-                    or canonical_digest(attempt_row["stage1_authorization_json"])
-                    != attempt_row["stage1_authorization_sha256"]
-                    or canonical_digest(attempt_row["stage1_preflight_json"])
-                    != attempt_row["stage1_preflight_sha256"]
-                    or digest_bytes(authorization_bytes)
-                    != attempt_row["stage1_authorization_sha256"]
-                    or digest_bytes(preflight_bytes) != attempt_row["stage1_preflight_sha256"]
-                    or stage1_authorization.authorization_id
-                    != attempt_row["stage1_authorization_id"]
-                    or preflight.authorization_id != stage1_authorization.authorization_id
-                    or preflight.authorization_sha256 != stage1_authorization.authorization_sha256
-                    or preflight.candidate_sha256 != candidate.candidate_sha256
-                    or preflight.policy_activation_epoch != candidate.policy_activation_epoch
-                    or preflight.platform_child_digest != candidate.platform_child_digest
-                    or preflight.image_runtime_contract_sha256
-                    != candidate.image_runtime_contract_sha256
-                    or preflight.input_descriptor_set_sha256 != canonical_digest(candidate.inputs)
-                ):
-                    raise HTTPException(status_code=409, detail="stage1_smoke_authority_drift")
-                stage1_smoke = Stage1SmokeGrantV1(
-                    authorization_id=attempt_row["stage1_authorization_id"],
-                    pipeline_run_id=attempt_row["pipeline_run_id"],
-                    candidate_sha256=attempt_row["stage1_candidate_sha256"],
-                    authorization_sha256=attempt_row["stage1_authorization_sha256"],
-                    preflight_sha256=attempt_row["stage1_preflight_sha256"],
-                    policy_activation_epoch=candidate.policy_activation_epoch,
-                    recipe_digest=candidate.recipe_digest,
-                    platform_child_digest=candidate.platform_child_digest,
-                    image_runtime_contract_digest=(candidate.image_runtime_contract_sha256),
-                    resolved_input_bindings_digest=(spec["resolved_input_bindings_digest"]),
-                    renderer_digest=renderer["digest"],
                 )
             resume_checkpoint = None
             if attempt_row["resumed_checkpoint_artifact_id"] is not None:
@@ -654,7 +577,6 @@ async def claim_any_work(
                     fanout_commit=node["fanout_commit"],
                     stage_request=stage_request,
                     control_binding_snapshot=attempt_row["control_binding_snapshot"],
-                    stage1_smoke=stage1_smoke,
                     terminalgen_authoring=terminalgen_authoring,
                     provider_connection_ref=attempt_row["provider_connection_ref"],
                     secret_refs=list(attempt_row["secret_refs"]),

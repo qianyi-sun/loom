@@ -250,63 +250,8 @@ async def test_attempt_and_trial_share_one_server_authoritative_slot(
             """),
             {"id": trial_id, "team": team_id, "task": str(task_id)},
         )
-    # A Stage1-only runtime must not consume unrelated Pipeline work from the
-    # same shared work-kind queue.  The scheduler enforces this before claim.
-    async with sessions() as session, session.begin():
-        await session.execute(
-            text("""
-                UPDATE workers
-                   SET capability_snapshot_json = jsonb_set(
-                         capability_snapshot_json,
-                         '{container_runtime_features}',
-                         '["loom-stage1-smoke-worker-v1"]'::jsonb
-                       )
-                 WHERE id=:worker
-            """),
-            {"worker": worker_id},
-        )
-    async with sessions() as session:
-        assert (
-            await claim_work(
-                session,
-                worker_id=worker_id,
-                capability_snapshot_digest=capability_digest,
-                worker_token_hash=token_hash,
-                supported_work_kinds=["trial", "execution_attempt"],
-                free_slots=1,
-                worker_os=["linux"],
-                worker_cpu_arches=["x86_64"],
-                worker_gpu_vendors=["none"],
-                worker_network_policies=["public"],
-            )
-            is None
-        )
-        assert (
-            await claim_one(
-                session,
-                worker_id=worker_id,
-                worker_os=["linux"],
-                worker_cpu_arches=["x86_64"],
-                worker_gpu_vendors=["none"],
-                worker_network_policies=["public"],
-                enforce_shared_slot=True,
-            )
-            is None
-        )
     async with sessions() as session, session.begin():
         await session.execute(text("DELETE FROM trials WHERE id=:id"), {"id": trial_id})
-        await session.execute(
-            text("""
-                UPDATE workers
-                   SET capability_snapshot_json = jsonb_set(
-                         capability_snapshot_json,
-                         '{container_runtime_features}',
-                         '[]'::jsonb
-                       )
-                 WHERE id=:worker
-            """),
-            {"worker": worker_id},
-        )
     async with sessions() as session:
         claimed = await claim_work(
             session,
