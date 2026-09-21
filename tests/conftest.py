@@ -7,15 +7,11 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import pytest
 from testcontainers.postgres import PostgresContainer
-
-if TYPE_CHECKING:
-    from tests.support.executable_capacity_harness import ExecutableCapacityHarness
 
 _TEST_STEP_JWT_SIGNING_KEY = "test-step-jwt-signing-key-do-not-use-in-prod"
 
@@ -56,22 +52,3 @@ def postgres_url() -> Iterator[str]:
         yield url
 
 
-@pytest.fixture
-async def executable_capacity_harness(
-    tmp_path: Path,
-    postgres_url: str,
-    capacity_guard_template_database: dict[str, object],
-) -> AsyncIterator[ExecutableCapacityHarness]:
-    """Create the isolated two-pool executable bridge proof deployment."""
-
-    from tests.support.executable_capacity_harness import ExecutableCapacityHarness
-
-    harness = await ExecutableCapacityHarness.create(
-        tmp_path,
-        postgres_url,
-        capacity_guard_template_database,
-    )
-    try:
-        yield harness
-    finally:
-        await harness.aclose()

@@ -270,7 +270,7 @@ async def test_closed_handoff_and_replay_preserve_the_bound_coordination_guard(t
                             # PostgreSQL can reject the lost guard before the Python
                             # readback does; both paths must roll back the handoff.
                             with pytest.raises((RuntimeError, psycopg.OperationalError),
-                                               match="coordination guard|quiescent legacy authority") as refusal:
+                                               match=r"coordination guard|quiescent legacy authority") as refusal:
                                 transfer_application_ownership(
                                     LoseGuardAfterMutation(), owner_role=owner, role_bindings=bindings,
                                     admission_target=target, coordination_guard=saved_guard,

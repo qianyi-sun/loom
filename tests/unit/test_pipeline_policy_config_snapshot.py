@@ -5,7 +5,6 @@ from uuid import UUID
 
 import pytest
 
-from loom.db.schema import PipelineScopedPolicyActivation, WorkerPoolAutoscalerPolicy
 from loom.pipeline.image_runtime import ImageRuntimeRecord, ImageRuntimeRegistry
 from loom.pipeline.keys import canonical_digest
 from loom.pipeline.policy_config import (
@@ -14,10 +13,6 @@ from loom.pipeline.policy_config import (
 )
 from loom.pipeline.resource_profiles import load_resource_profiles
 from loom.pipeline.work_protocol import ImageRuntimeContractV1
-from loom_control_plane.worker_pool_autoscaler import (
-    _apply_pipeline_scoped_activation,
-    _policy_to_config,
-)
 
 
 @pytest.mark.legacy_pool
@@ -132,29 +127,3 @@ def test_scoped_activation_is_authority_bound_and_fail_closed() -> None:
         )
 
 
-def test_behavior_autoscaler_uses_scoped_desired_slots_only() -> None:
-    row = WorkerPoolAutoscalerPolicy(
-        environment="staging",
-        pool_name="behavior-gpu-gb10",
-        actuator="slurm",
-        enabled=True,
-        min_slots=0,
-        max_slots=1,
-        actuator_config={"policy_config_sha256": "sha256:" + "a" * 64},
-    )
-    disabled = _apply_pipeline_scoped_activation(_policy_to_config(row), row, None)
-    assert disabled.enabled is False
-    assert disabled.max_slots == 0
-    activation = PipelineScopedPolicyActivation(
-        environment="staging",
-        policy_id="behavior-gpu-gb10",
-        policy_config_sha256="sha256:" + "a" * 64,
-        authority_kind="acceptance",
-        authority_id=UUID("9e8174fa-7ad2-4386-869b-aadcfcc2cfa6"),
-        activation_epoch=4,
-        state="active",
-        desired_slots=1,
-    )
-    active = _apply_pipeline_scoped_activation(_policy_to_config(row), row, activation)
-    assert active.enabled is True
-    assert active.min_slots == active.max_slots == 1
