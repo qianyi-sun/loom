@@ -28,11 +28,14 @@ service hostname. Configure access to Nebius Registry and the independent backup
 bucket. A renderer success does not prove these dependencies exist.
 
 Render the published image references, review the Kubernetes output, then deploy
-from an operator checkout. The deployment machine does not need the image source
-commit checked out:
+from an operator checkout. First prepare the
+[locked operator environment](operator-runbook.md#locked-operator-environment).
+Use `--no-sync` for the deployment command so it cannot implicitly modify that
+environment. The deployment machine does not need the image source commit
+checked out:
 
 ```sh
-uv run --frozen python scripts/ops/deploy_nebius_platform.py \
+uv run --no-sync python scripts/ops/deploy_nebius_platform.py \
   --render-dir /secure/nebius-render \
   --kubeconfig /secure/nebius-kubeconfig \
   --expected-cluster-id mk8scluster-EXACT_ID \
