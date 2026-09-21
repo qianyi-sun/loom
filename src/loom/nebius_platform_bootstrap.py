@@ -88,6 +88,7 @@ GATEWAY_TABLES = (
     "artifact_upload_files",
     "artifact_upload_sessions",
     "llm_calls",
+    "gateway_dispatch_receipts",
     "llm_call_intents",
     "model_switch_plans",
     "rate_cards",
@@ -222,6 +223,7 @@ def bootstrap_database(config: dict[str, Any]) -> None:
                         "task_image_publication_evidence",
                         "trial_task_image_materializations",
                         "data_lifecycle_authorities",
+                        "gateway_dispatch_receipts",
                         "provider_connections",
                         "provider_connection_shares",
                         "execution_classes",
@@ -241,6 +243,11 @@ def bootstrap_database(config: dict[str, Any]) -> None:
                         )
                     )
                     if role == "loom_gateway":
+                        # Dispatch admission precedes upstream I/O. The Gateway
+                        # records observations but cannot delete audit receipts.
+                        cursor.execute(
+                            "GRANT INSERT, UPDATE ON gateway_dispatch_receipts TO loom_gateway"
+                        )
                         # Call audit lazily creates trial/event authorities and
                         # verifies existing ones; retention and deletion remain
                         # owned by lifecycle management.

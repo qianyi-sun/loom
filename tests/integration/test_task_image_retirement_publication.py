@@ -28,6 +28,11 @@ from tests.integration.test_task_image_registry_credentials import (
     registry_issuer as registry_issuer,
 )
 from tests.integration.test_task_image_retirement_store import observe
+from tests.integration.test_task_image_retirement_store import (
+    retirement_semantic_budget as retirement_semantic_budget,
+)
+
+pytestmark = pytest.mark.usefixtures("retirement_semantic_budget")
 
 
 @pytest.mark.parametrize("names", [("task", "sidecar:db"), ("sidecar:db",)])

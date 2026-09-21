@@ -44,7 +44,17 @@ async def observe(factory, attempt_id, instant, **kwargs):
     )
 
 
+@pytest.fixture
+def retirement_semantic_budget(monkeypatch):
+    """Check database outcomes once; timing protections have dedicated tests."""
+    module = store()
+    monkeypatch.setattr(module, "_TRANSACTION_SECONDS", 30)
+    monkeypatch.setattr(module, "_STATEMENT_SECONDS", 30)
+    monkeypatch.setattr(module, "_IDLE_TRANSACTION_SECONDS", 30)
+
+
 @pytest.mark.parametrize("issued", [False, True])
+@pytest.mark.usefixtures("retirement_semantic_budget")
 async def test_abandoned_observation_grace_retirement_and_permanent_replay(
     registry_authority_session,
     registry_issuer,
@@ -72,6 +82,7 @@ async def test_abandoned_observation_grace_retirement_and_permanent_replay(
             await _issue_first(session, **options)
 
 
+@pytest.mark.usefixtures("retirement_semantic_budget")
 async def test_live_build_pin_resets_observed_grace(registry_authority_session, registry_issuer):
     factory = registry_authority_session
     row, attempt, _ = await _setup(factory, registry_issuer)
@@ -138,6 +149,7 @@ async def test_idle_timeout_releases_fence_without_observation_and_fresh_retry_s
     assert recovered.unreferenced_since is None and recovered.retired_at is None
 
 
+@pytest.mark.usefixtures("retirement_semantic_budget")
 async def test_job_total_deadline_pins_after_builder_lease_expires(
     registry_authority_session,
     registry_issuer,
@@ -153,6 +165,7 @@ async def test_job_total_deadline_pins_after_builder_lease_expires(
 
 
 @pytest.mark.parametrize("catalog_checksum", [None, "matching", "prefixed", "different"])
+@pytest.mark.usefixtures("retirement_semantic_budget")
 async def test_completed_grace_catalog_pin_and_atomic_ready_clear(
     registry_authority_session,
     registry_issuer,

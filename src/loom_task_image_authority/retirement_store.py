@@ -55,6 +55,8 @@ _CANDIDATE_FIELDS = tuple(TaskImagePublicationCandidate.__table__.columns.keys()
 # execution grant. Check complete exact envelope identities and recording time.
 _ENVELOPE_FIELDS = ("candidate_id", "component", "recorded_at")
 _TRANSACTION_SECONDS = 5
+_STATEMENT_SECONDS = 1
+_IDLE_TRANSACTION_SECONDS = 1
 
 
 @dataclass(frozen=True)
@@ -419,8 +421,10 @@ async def observe_or_retire_attempt(
                 AsyncSession(connection, expire_on_commit=False, autoflush=False) as session,
                 session.begin(),
             ):
-                await session.execute(text("SET LOCAL statement_timeout = '1s'"))
-                await session.execute(text("SET LOCAL idle_in_transaction_session_timeout = '1s'"))
+                await session.execute(text(f"SET LOCAL statement_timeout = '{_STATEMENT_SECONDS}s'"))
+                await session.execute(
+                    text(f"SET LOCAL idle_in_transaction_session_timeout = '{_IDLE_TRANSACTION_SECONDS}s'")
+                )
                 await session.execute(text("LOCK TABLE public.tasks IN SHARE MODE NOWAIT"))
                 row = await session.scalar(
                     select(TaskImageMaterialization)
