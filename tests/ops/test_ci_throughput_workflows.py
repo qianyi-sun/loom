@@ -460,7 +460,7 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
         "trivy-binary",
     }
     assert build["strategy"]["matrix"]["include"] == (
-        "${{ fromJSON(needs.plan.outputs.native_builds) }}"
+        "${{ fromJSON(needs.plan.outputs.ordinary_builds) }}"
     )
     plan_script = "\n".join(step.get("run", "") for step in jobs["plan"]["steps"] if "run" in step)
     assert "scripts/component_ownership.py" in plan_script

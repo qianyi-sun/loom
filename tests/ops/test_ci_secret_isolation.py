@@ -66,7 +66,7 @@ def _run_validation_step(
 
 @pytest.mark.parametrize(
     ("job_name", "matrix_output"),
-    [("build", "native_builds")],
+    [("build", "ordinary_builds")],
 )
 def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache(
     job_name: str, matrix_output: str

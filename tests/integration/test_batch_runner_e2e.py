@@ -369,7 +369,7 @@ async def test_runner_rejects_required_pool_coverage_when_tasks_mismatch_pool_ar
     postgres_url: str,
 ) -> None:
     session_factory, http_client, team_id, task_ids, captured = runner_setup
-    _insert_pool_worker(postgres_url, pool_name="gb10", cpu_arch="arm64")
+    _insert_pool_worker(postgres_url, pool_name="local_arm", cpu_arch="arm64")
     async with session_factory() as s:
         c = Batch(
             team_id=team_id,

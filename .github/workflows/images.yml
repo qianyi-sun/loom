@@ -379,7 +379,7 @@ jobs:
       needs.plan.outputs.trusted_publish != 'true' &&
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true' &&
-      needs.plan.outputs.native_builds != '[]'
+      needs.plan.outputs.ordinary_builds != '[]'
     runs-on: ${{ matrix.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 45
     permissions:
@@ -387,7 +387,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.plan.outputs.native_builds) }}
+        include: ${{ fromJSON(needs.plan.outputs.ordinary_builds) }}
     steps: &native-image-build-steps
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -1474,6 +1474,11 @@ jobs:
                 [[ "$MANIFEST_RESULT" == "success" ]] || exit 1
               fi
             else
+              if [[ "$ordinary_selected" == "true" ]]; then
+                [[ "$BUILD_RESULT" == "success" ]] || exit 1
+              else
+                [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
+              fi
               if [[ "$HARBOR_REQUIRED" == "true" ]]; then
                 [[ "$HARNESS_BUILD_RESULT" == "success" ]] || exit 1
               else

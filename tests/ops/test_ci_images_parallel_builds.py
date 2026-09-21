@@ -36,7 +36,7 @@ def _jobs() -> dict[str, Any]:
 def test_native_builds_use_the_complete_supported_matrix() -> None:
     jobs = _jobs()
     assert jobs["build"]["needs"] == ["plan", "trivy-binary"]
-    assert jobs["build"]["strategy"]["matrix"]["include"] == "${{ fromJSON(needs.plan.outputs.native_builds) }}"
+    assert jobs["build"]["strategy"]["matrix"]["include"] == "${{ fromJSON(needs.plan.outputs.ordinary_builds) }}"
 
 
 @pytest.mark.parametrize("event", ["pull_request", "merge_group", "push", "workflow_dispatch"])
@@ -216,7 +216,7 @@ def test_untrusted_builds_do_not_run_after_required_dependency_failure(
             "needs.plan.outputs.trusted_publish": "false",
             "needs.plan.outputs.gate_mode": "full",
             "needs.plan.outputs.required": "true",
-            "needs.plan.outputs.native_builds": '[{"image":"service"}]',
+            "needs.plan.outputs.ordinary_builds": '[{"image":"service"}]',
         }
     )
     dependency = failed_dependency
