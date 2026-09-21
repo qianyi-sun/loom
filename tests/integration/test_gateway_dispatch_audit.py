@@ -156,24 +156,40 @@ async def test_platform_route_does_not_infer_actual_connection_from_jwt(audit_se
 async def test_interrupted_io_preserves_observation(audit_setup: tuple, kind: str) -> None:
     audit, _ = audit_setup
     started = asyncio.Event()
+    clock = [0.0]
+    deadline = GatewayAttemptDeadline(1.0, clock=lambda: clock[0])
 
     async def operation() -> None:
         started.set()
+        if kind == "deadline":
+            # Cross the deadline during provider I/O, independently of how
+            # long the real database admission transaction takes.
+            clock[0] = 2.0
+            raise TimeoutError("synthetic provider timeout")
         if kind == "transport_error":
             raise httpx.ConnectError("synthetic-private-url-must-not-be-persisted")
         await asyncio.Event().wait()
 
-    task = asyncio.create_task(audit.send(operation, deadline=_deadline(0.1)))
-    await started.wait()
-    if kind == "cancelled":
-        task.cancel()
     exception = {
         "deadline": AttemptDeadlineReachedError,
         "cancelled": asyncio.CancelledError,
         "transport_error": httpx.ConnectError,
     }[kind]
-    with pytest.raises(exception):
-        await task
+    task = asyncio.create_task(audit.send(operation, deadline=deadline))
+    waiter = asyncio.create_task(started.wait())
+    try:
+        # Surface an admission failure instead of waiting forever for an
+        # operation that was never entered.
+        await asyncio.wait((task, waiter), return_when=asyncio.FIRST_COMPLETED)
+        if kind == "cancelled" and started.is_set():
+            task.cancel()
+        with pytest.raises(exception):
+            await task
+    finally:
+        for pending in (task, waiter):
+            if not pending.done():
+                pending.cancel()
+        await asyncio.gather(task, waiter, return_exceptions=True)
     rows = await _rows(audit)
     assert len(rows) == 1
     assert rows[0].provider_outcome == kind
