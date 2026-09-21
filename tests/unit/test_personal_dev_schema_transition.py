@@ -388,6 +388,7 @@ def test_transition_preparation_binds_backup_graph_and_exact_migration_job(
         "0149",
         "0150",
         "0151",
+        "0152",
     ]
     assert (
         hashlib.sha256(prepared.migration_job_json).hexdigest() == plan["migration"]["job_sha256"]

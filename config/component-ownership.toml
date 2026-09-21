@@ -589,6 +589,7 @@ source_paths = [
   "src/loom_control_plane/task_image_materializations.py",
   "src/loom_control_plane/task_image_capacity.py",
   "src/loom/nebius_kubernetes.py",
+  "src/loom/nebius_rollout_guard.py",
   "src/loom_control_plane/execution_finance.py",
   "src/loom_control_plane/metrics.py",
   "src/loom_control_plane/service_execution.py",

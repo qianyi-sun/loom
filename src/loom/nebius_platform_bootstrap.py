@@ -56,6 +56,7 @@ ACTUATOR_TASK_IMAGE_WRITES = {
     "task_image_publication_evidence": ("INSERT",),
 }
 ACTUATOR_TABLES = (
+    "nebius_rollout_guard",
     "trial_resource_usage",
     *COMMON_EXECUTION_TABLES,
     "batches",
@@ -210,6 +211,7 @@ def bootstrap_database(config: dict[str, Any]) -> None:
                     tables = sql.SQL(", ").join(sql.Identifier(table) for table in inventory)
                     cursor.execute(sql.SQL("GRANT SELECT ON {} TO {}").format(tables, identifier))
                     read_only = {
+                        "nebius_rollout_guard",
                         "trial_resource_usage",
                         "alembic_version",
                         "users",

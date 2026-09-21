@@ -325,6 +325,12 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
             connection.rollback()
             for table in ("task_image_materializations", "trial_task_image_materializations"):
                 connection.execute("SELECT 1 FROM " + table + " LIMIT 0")
+            assert connection.execute(
+                "SELECT has_table_privilege(current_user, 'nebius_rollout_guard', 'SELECT')",
+            ).fetchone() == (role == "actuator",)
+            assert connection.execute(
+                "SELECT has_table_privilege(current_user, 'nebius_rollout_guard', 'INSERT,UPDATE,DELETE')",
+            ).fetchone() == (False,)
             if role == "actuator":
                 for privilege in ("SELECT", "INSERT", "UPDATE"):
                     assert connection.execute(

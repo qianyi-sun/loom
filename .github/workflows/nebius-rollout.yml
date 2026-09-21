@@ -1,0 +1,110 @@
+name: nebius-rollout
+
+on:
+  workflow_run:
+    workflows: [nebius-candidate]
+    types: [completed]
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  deployments: write
+
+# Publication and PR CI never wait for this environment's deployment.
+concurrency:
+  group: nebius-integration-rollout
+  cancel-in-progress: false
+
+jobs:
+  rollout:
+    if: >-
+      github.repository == 'qianyi-sun/loom' &&
+      vars.NEBIUS_AUTO_ROLLOUT_ENABLED == 'true' &&
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/dev' ||
+       github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment:
+      name: nebius-integration
+      deployment: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: dev
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          enable-cache: true
+      - name: Install deployment tooling
+        run: uv sync --locked --no-dev --extra cluster
+      - name: Select successful platform publication
+        id: publication
+        env:
+          PUBLICATION_RUN_ID: ${{ github.event.workflow_run.id }}
+        shell: bash
+        run: |
+          args=()
+          if [[ -n "$PUBLICATION_RUN_ID" ]]; then args+=(--run-id "$PUBLICATION_RUN_ID"); fi
+          uv run --no-sync python scripts/ops/nebius_idle_rollout.py select "${args[@]}"
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        if: steps.publication.outputs.status == 'ready'
+        with:
+          ref: ${{ steps.publication.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install selected candidate tooling
+        if: steps.publication.outputs.status == 'ready'
+        run: uv sync --locked --no-dev --extra cluster
+      - name: Download selected candidate
+        if: steps.publication.outputs.status == 'ready'
+        env:
+          PUBLICATION_RUN_ID: ${{ steps.publication.outputs.run_id }}
+          ARTIFACT_NAME: ${{ steps.publication.outputs.artifact }}
+        run: >-
+          gh run download "$PUBLICATION_RUN_ID" --repo "$GITHUB_REPOSITORY"
+          --name "$ARTIFACT_NAME" --dir "$RUNNER_TEMP/publication"
+      - name: Deploy once if idle
+        if: steps.publication.outputs.status == 'ready'
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.NEBIUS_DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.NEBIUS_DEPLOY_SSH_KNOWN_HOSTS }}
+          LOOM_DEPLOY_SSH_TARGET: ${{ vars.NEBIUS_DEPLOY_SSH_TARGET }}
+          REMOTE_KUBECONFIG: ${{ vars.NEBIUS_DEPLOY_KUBECONFIG_PATH }}
+          CLUSTER_ID: ${{ vars.NEBIUS_DEPLOY_CLUSTER_ID }}
+          CANDIDATE_SHA: ${{ steps.publication.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          export LOOM_DEPLOY_SSH_KEY_FILE="$RUNNER_TEMP/nebius-deploy-key"
+          export LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE="$RUNNER_TEMP/nebius-deploy-known-hosts"
+          trap 'rm -f -- "$LOOM_DEPLOY_SSH_KEY_FILE" "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"' EXIT
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          test -n "$LOOM_DEPLOY_SSH_TARGET"
+          test -n "$REMOTE_KUBECONFIG"
+          test -n "$CLUSTER_ID"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$LOOM_DEPLOY_SSH_KEY_FILE"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"
+          unset DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS
+          uv run --no-sync python scripts/ops/nebius_idle_rollout.py run \
+            --publication-dir "$RUNNER_TEMP/publication" \
+            --candidate "$CANDIDATE_SHA" --kubeconfig "$REMOTE_KUBECONFIG" \
+            --expected-cluster-id "$CLUSTER_ID" \
+            --evidence-dir "$RUNNER_TEMP/nebius-rollout" --github
+      - name: Preserve sanitized deployment evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nebius-rollout-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nebius-rollout/deployment-*.json
+          if-no-files-found: ignore
+          retention-days: 30

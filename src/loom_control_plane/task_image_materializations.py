@@ -315,6 +315,10 @@ async def claim_task_image_materialization(
     nebius_pool_id: str | None = None,
 ) -> TaskImageMaterialization | None:
     """Atomically claim queued work or recover one expired lease."""
+    from loom.nebius_rollout_guard import admission_open
+
+    if not await admission_open(session):
+        return None
     cpu_arch = execution_cpu_arch(cpu_arch)
     _assert_no_pending_task_image_writes(session)
     # Queue maintenance writes precede candidate selection. Establish retained
