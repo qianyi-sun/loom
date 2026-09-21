@@ -108,7 +108,8 @@ const overview = {
   },
   provider_health: { total: 0, ready: 0, needs_attention: 0, untested: 0, latest: [] },
   benchmark_readiness: { total: 0, runnable: 0, needs_attention: 0, blocked: [] },
-  worker_health: { active: 1, available_backends: ["docker"], has_default_backend: true },
+  execution_health: { configured_targets: 1, status: "observed" },
+  worker_health: { active: 0, available_backends: [], has_default_backend: false },
   run_activity: {
     batches: { submitted: 0, running: 0, finished: 0, cancelled: 0 },
     trials: { queued: 0, claimed: 0, running: 0, succeeded: 0, failed: 0, cancelled: 0 },
