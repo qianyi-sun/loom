@@ -61,7 +61,8 @@ empty inventory or permission to acknowledge a task's deletion.
 Local operators can use their existing Nebius CLI authentication:
 
 ```sh
-uv run --extra cluster python scripts/ops/nebius_image_retention.py \
+uv sync --locked --extra cluster
+uv run --no-sync python scripts/ops/nebius_image_retention.py \
   --kubeconfig "$KUBECONFIG" --expected-cluster-id "$LOOM_CLUSTER_ID" \
   --registry-prefix "$LOOM_REGISTRY_PREFIX" --output image-retention.json
 ```
