@@ -36,7 +36,12 @@ Local development, disposable tests and user-selected external inference APIs
 remain supported. Resource reporting retains local worker slot and draining
 accounting, but no longer reads historical fleet autoscaler policies or exposes
 their desired capacity, ceilings, decisions or metrics. Nebius capacity and
-autoscaler observations remain a separate current contract.
+autoscaler observations remain a separate current contract. Local Trial/Attempt
+claims retain fairness, capability checks, draining fences, shared slots and
+admission limits, but do not require fleet policy rows or CPU Slurm jobs. Old
+autoscaler pool assignments remain available for historical usage calibration;
+they no longer route local claims. Worker credentials can be issued only for
+explicit local development.
 
 Retirement does not implement missing workload replacements. The baseline
 compatibility inventory marks desktop/GUI and Behavior GPU service workloads

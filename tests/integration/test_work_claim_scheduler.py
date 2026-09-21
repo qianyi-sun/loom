@@ -107,16 +107,13 @@ async def test_attempt_and_trial_share_one_server_authoritative_slot(
     (
         team_id,
         worker_id,
-        policy_id,
-        activation_id,
         authority_id,
-        job_row_id,
         run_id,
         stage_id,
         attempt_id,
         task_id,
         trial_id,
-    ) = (uuid4() for _ in range(11))
+    ) = (uuid4() for _ in range(8))
     token_hash = b"w" * 32
     capability_digest = "sha256:" + "c" * 64
     spec, profile, runtime_list = _contracts()
@@ -169,53 +166,6 @@ async def test_attempt_and_trial_share_one_server_authoritative_slot(
                 ),
                 "token": token_hash,
             },
-        )
-        await session.execute(
-            text("""
-                INSERT INTO worker_pool_autoscaler_policies (
-                    id,environment,pool_name,actuator,enabled,min_slots,max_slots,
-                    actuator_config
-                ) VALUES (
-                    :id,'test','behavior-cpu-data','slurm',true,0,1,
-                    jsonb_build_object(
-                        'policy_id', 'behavior-cpu-data',
-                        'policy_config_sha256', CAST(:digest AS text),
-                        'slurm_cluster_config_sha256', CAST(:digest AS text),
-                        'slurm_cluster_id', 'oldlab',
-                        'allowed_nodes', jsonb_build_array('worker')
-                    )
-                )
-            """),
-            {"id": policy_id, "digest": "sha256:" + "d" * 64},
-        )
-        await session.execute(
-            text("""
-                INSERT INTO pipeline_scoped_policy_activations (
-                    id,environment,policy_id,policy_config_sha256,authority_kind,
-                    authority_id,activation_epoch,state,desired_slots
-                ) VALUES (
-                    :id,'test','behavior-cpu-data',:digest,'profile_calibration',
-                    :authority,1,'active',1
-                )
-            """),
-            {
-                "id": activation_id,
-                "digest": "sha256:" + "d" * 64,
-                "authority": authority_id,
-            },
-        )
-        await session.execute(
-            text("""
-                INSERT INTO slurm_worker_jobs (
-                    id,slurm_cluster_id,environment,pool_name,nodelist,
-                    requested_gpus,requested_concurrency,job_id,slurm_state,state,
-                    worker_id,redacted_env
-                ) VALUES (
-                    :id,'oldlab','test','behavior-cpu-data','worker',0,1,
-                    :job_id,'RUNNING','running',:worker,'{}'::jsonb
-                )
-            """),
-            {"id": job_row_id, "job_id": str(job_row_id.int), "worker": worker_id},
         )
         await session.execute(
             text("""
@@ -390,18 +340,7 @@ async def test_attempt_and_trial_share_one_server_authoritative_slot(
     async with engine.begin() as connection:
         await connection.execute(text("DELETE FROM pipeline_runs WHERE id=:id"), {"id": run_id})
         await connection.execute(text("DELETE FROM tasks WHERE id=:id"), {"id": str(task_id)})
-        await connection.execute(
-            text("DELETE FROM slurm_worker_jobs WHERE id=:id"), {"id": job_row_id}
-        )
         await connection.execute(text("DELETE FROM workers WHERE id=:id"), {"id": worker_id})
-        await connection.execute(
-            text("DELETE FROM pipeline_scoped_policy_activations WHERE id=:id"),
-            {"id": activation_id},
-        )
-        await connection.execute(
-            text("DELETE FROM worker_pool_autoscaler_policies WHERE id=:id"),
-            {"id": policy_id},
-        )
         await connection.execute(text("DELETE FROM team_quotas WHERE team_id=:id"), {"id": team_id})
         await connection.execute(text("DELETE FROM teams WHERE id=:id"), {"id": team_id})
     await engine.dispose()
