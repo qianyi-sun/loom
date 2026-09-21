@@ -1091,6 +1091,12 @@ A future collector must retry from preparation and observe skipped passes and
 backlog age; catalog-wide locking does not guarantee progress under sustained
 registration writes.
 
+Integration tests separate retirement results from timeout enforcement. Result
+tests use an explicit disposable-test budget of 30 seconds and execute each
+observation once, without retry helpers. Dedicated timeout, rollback, cancellation
+and contention tests retain the runtime defaults above. Test scheduling delays
+must not decide whether a pin or publication result is correct.
+
 Pins include the exact live builder lease, queued/running publication before its
 total deadline regardless of worker-lease expiry, the current ready owner with
 a matching catalog checksum, and every completed attempt needed by a nonterminal

@@ -27,7 +27,12 @@ from tests.integration.test_task_image_registry_credentials import NOW
 from tests.integration.test_task_image_registry_credentials import (
     registry_issuer as registry_issuer,
 )
-from tests.integration.test_task_image_retirement_store import observe_positive_semantics
+from tests.integration.test_task_image_retirement_store import observe
+from tests.integration.test_task_image_retirement_store import (
+    retirement_semantic_budget as retirement_semantic_budget,
+)
+
+pytestmark = pytest.mark.usefixtures("retirement_semantic_budget")
 
 
 @pytest.mark.parametrize("names", [("task", "sidecar:db"), ("sidecar:db",)])
@@ -44,8 +49,8 @@ async def test_retirement_clears_complete_multicomponent_map(
         await session.commit()
     attempt_id = UUID(receipt.attempt_id)
     instant = NOW + timedelta(hours=1)
-    assert (await observe_positive_semantics(factory, attempt_id, instant)).status == "observing"
-    assert (await observe_positive_semantics(factory, attempt_id, instant + timedelta(days=7))).status == "retired"
+    assert (await observe(factory, attempt_id, instant)).status == "observing"
+    assert (await observe(factory, attempt_id, instant + timedelta(days=7))).status == "retired"
     async with factory() as session:
         row = await session.get(TaskImageMaterialization, UUID(receipt.materialization_id))
         assert row.state == "retired" and not row.registry_images
@@ -71,7 +76,7 @@ async def test_retiring_old_attempt_preserves_actual_newer_rootless_ready_owner(
         await session.commit()
     attempt_id, row_id = UUID(first.attempt_id), UUID(first.materialization_id)
     instant = NOW + timedelta(hours=1)
-    await observe_positive_semantics(factory, attempt_id, instant)
+    await observe(factory, attempt_id, instant)
 
     async def existing_authority(session):
         return tuple(
@@ -123,7 +128,7 @@ async def test_retiring_old_attempt_preserves_actual_newer_rootless_ready_owner(
             row.registry_image_history,
         )
     assert second.attempt_id != first.attempt_id
-    assert (await observe_positive_semantics(factory, attempt_id, instant + timedelta(days=7))).status == "retired"
+    assert (await observe(factory, attempt_id, instant + timedelta(days=7))).status == "retired"
     async with factory() as session:
         row = await session.get(TaskImageMaterialization, row_id)
         assert (
@@ -152,7 +157,7 @@ async def test_running_job_pins_after_worker_lease_until_total_deadline(
         await session.commit()
     attempt_id = UUID(job.snapshot.attempt_id)
     assert job.lease.expires_at < job.deadline - timedelta(seconds=1)
-    assert (await observe_positive_semantics(factory, attempt_id, job.deadline - timedelta(seconds=1))).pins == (
+    assert (await observe(factory, attempt_id, job.deadline - timedelta(seconds=1))).pins == (
         "publication_job",
     )
-    assert (await observe_positive_semantics(factory, attempt_id, job.deadline)).status == "observing"
+    assert (await observe(factory, attempt_id, job.deadline)).status == "observing"
