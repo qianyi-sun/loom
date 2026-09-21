@@ -5941,6 +5941,17 @@ class Trial(Base):
     )
 
 
+class NebiusRolloutGuard(Base):
+    """Durable deployment pause in the independent platform database."""
+
+    __tablename__ = "nebius_rollout_guard"
+    __table_args__ = (CheckConstraint("id = 1", name="nebius_rollout_guard_singleton_check"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner: Mapped[str] = mapped_column(Text, nullable=False)
+    candidate_sha: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
 class ServiceExecutionClass(Base):
     """Immutable provider-neutral service execution capability snapshot."""
 

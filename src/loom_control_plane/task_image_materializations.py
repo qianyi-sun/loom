@@ -315,6 +315,8 @@ async def claim_task_image_materialization(
     nebius_pool_id: str | None = None,
 ) -> TaskImageMaterialization | None:
     """Atomically claim queued work or recover one expired lease."""
+    from loom.nebius_rollout_guard import admission_open
+
     cpu_arch = execution_cpu_arch(cpu_arch)
     _assert_no_pending_task_image_writes(session)
     # Queue maintenance writes precede candidate selection. Establish retained
@@ -328,6 +330,8 @@ async def claim_task_image_materialization(
         if not nebius_pool_id.strip():
             raise ValueError("nebius_pool_id must not be empty")
         scope = (_nebius_demand_exists(TaskImageMaterialization, pool_id=nebius_pool_id),)
+    if not await admission_open(session):
+        return None
     now = datetime.now(UTC)
     await session.execute(
         update(TaskImageMaterialization)

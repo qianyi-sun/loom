@@ -28,6 +28,7 @@ from loom.application_ownership_transfer import require_application_role_scope
 from loom.application_password import application_scram_verifier, matches_application_scram
 from loom.application_schema_inventory import read_application_schema_inventory
 from loom.application_schema_reference import (
+    BUNDLED_APPLICATION_SCHEMA_REVISION,
     ApplicationSchemaAclProfile,
     ApplicationSchemaRevision,
     application_schema_profile,
@@ -55,7 +56,7 @@ def observe_application_runtime_login(
     password: str,
     target: ApplicationDatabaseAdmissionTarget,
     schema_acl_profile: ApplicationSchemaAclProfile = "application-only",
-    schema_revision: ApplicationSchemaRevision = "0151/guard_0035",
+    schema_revision: ApplicationSchemaRevision = BUNDLED_APPLICATION_SCHEMA_REVISION,
     coordination_guard: ApplicationDatabaseCoordinationGuard | None = None,
 ) -> ApplicationRuntimeLoginState:
     """Classify a saved restoration without changing login, password or grants.
@@ -80,7 +81,7 @@ def restore_application_runtime_login(
     password: str,
     target: ApplicationDatabaseAdmissionTarget,
     schema_acl_profile: ApplicationSchemaAclProfile = "application-only",
-    schema_revision: ApplicationSchemaRevision = "0151/guard_0035",
+    schema_revision: ApplicationSchemaRevision = BUNDLED_APPLICATION_SCHEMA_REVISION,
     coordination_guard: ApplicationDatabaseCoordinationGuard | None = None,
 ) -> None:
     """Commit login for the former owner only after exact sealed-profile admission.

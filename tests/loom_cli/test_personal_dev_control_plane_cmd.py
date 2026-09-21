@@ -18,6 +18,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from loom.db.schema_startup import service_schema_head
 from loom.personal_dev_acceptance_evidence import (
     build_personal_dev_scanner_finding_policy,
     build_personal_dev_trusted_launcher_profile,
@@ -54,9 +55,7 @@ from tests.unit.test_personal_dev_acceptance_evidence import (
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
-_CURRENT_SCHEMA_HEAD = json.loads(
-    (_ROOT / "config/staging-migration-policy.json").read_text(encoding="utf-8")
-)["expected_head"]
+_CURRENT_SCHEMA_HEAD = service_schema_head()
 _NOW = datetime(2026, 8, 17, 21, 0, 0, tzinfo=UTC)
 
 

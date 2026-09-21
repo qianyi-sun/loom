@@ -11,6 +11,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from loom.db.schema import Task, TaskImageMaterialization
+from loom.db.schema_startup import service_schema_head
 from loom.task_image_materialization import ensure_task_image_materializations
 from tests.integration.test_task_image_materialization_store import _task_values
 from tests.integration.test_task_image_registry_credential_migration import _config
@@ -101,7 +102,7 @@ def test_manifest_identity_preserves_legacy_and_versions_uniqueness(
         with pytest.raises(DBAPIError, match="manifest-qualified materializations"):
             command.downgrade(config, "0135")
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0151"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == service_schema_head()
             assert connection.scalar(text(f"SELECT count(*) FROM {TABLE}")) == 3
     finally:
         engine.dispose()
@@ -264,7 +265,7 @@ def test_manifest_identity_downgrade_refuses_one_strong_row_without_collision(
                 row_id,
                 "b" * 64,
             )
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0151"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == service_schema_head()
     finally:
         engine.dispose()
 

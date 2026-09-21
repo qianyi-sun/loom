@@ -569,6 +569,12 @@ async def reserve_trial_execution(
             raise ServiceExecutionConflict("reservation request_id changed immutable identity")
         return existing
 
+    from loom.nebius_rollout_guard import admission_open
+    from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
+
+    if not await admission_open(session):
+        raise ExecutionProvisioningBlockedError("platform_deploying", retry_after_seconds=15)
+
     trial = (
         await session.execute(
             select(Trial)

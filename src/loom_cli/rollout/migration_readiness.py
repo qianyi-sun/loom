@@ -92,7 +92,7 @@ def inspect_migration_plan(
         len(heads) != 1
         or len(bases) != 1
         or not scripts
-        or heads[0] != policy["expected_head"]
+        or policy["expected_head"] not in ("head", heads[0])
         or any(_REVISION_RE.fullmatch(script.revision) is None for script in scripts)
     ):
         raise ValueError("Alembic migration graph does not match staging policy")

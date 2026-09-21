@@ -13,6 +13,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+from loom.db.schema_startup import service_schema_head
 from loom_capacity_agent.executable_admission import (
     ExecutableAdmissionError,
     ExecutableAdmissionStore,
@@ -277,7 +278,7 @@ def test_observation_upgrade_and_rollback_preserve_refundable_claim_authority(
             else:
                 command.upgrade(config, target)
             with engine.connect() as connection:
-                assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0151"
+                assert connection.scalar(text("SELECT version_num FROM alembic_version")) == service_schema_head()
                 assert connection.scalar(text(
                     "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                 )) == target

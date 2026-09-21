@@ -31,7 +31,9 @@ jobs:
       github.ref == 'refs/heads/dev' &&
       vars.NEBIUS_RELEASE_ENABLED == 'true'
     runs-on: ubuntu-24.04
-    environment: nebius-integration
+    environment:
+      name: nebius-integration
+      deployment: false
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5

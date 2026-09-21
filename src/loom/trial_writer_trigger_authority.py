@@ -14,6 +14,7 @@ from loom.application_database_admission import (
     coordination_guard_handoff_predicate,
 )
 from loom.application_schema_reference import (
+    BUNDLED_APPLICATION_SCHEMA_REVISION,
     ApplicationSchemaRevision,
     application_schema_revisions,
 )
@@ -74,7 +75,7 @@ def application_public_definer_references() -> tuple[tuple[str, str, str], ...]:
 def application_trigger_owner_handoff_ddl(
     *, previous_owner: str, application_owner: str, guard_owner: str,
     coordination_guard: ApplicationDatabaseCoordinationGuard | None = None,
-    schema_revision: ApplicationSchemaRevision = "0151/guard_0035",
+    schema_revision: ApplicationSchemaRevision = BUNDLED_APPLICATION_SCHEMA_REVISION,
 ) -> sql.Composed:
     """Move the revision-bound canonical definers in a protected ownership transaction.
 

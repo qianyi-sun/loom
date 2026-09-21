@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import DBAPIError
 
 from loom.db import schema
+from loom.db.schema_startup import service_schema_head
 from tests.integration.test_task_image_registry_credential_migration import (
     ATTEMPT_ID,
     CANDIDATE_ID,
@@ -175,7 +176,7 @@ def test_0135_downgrade_refuses_used_publication_authority(
             )
             assert (
                 connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "0151"
+                == service_schema_head()
             )
     finally:
         engine.dispose()

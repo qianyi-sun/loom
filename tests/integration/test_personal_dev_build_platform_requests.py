@@ -11,6 +11,7 @@ from alembic import command
 from sqlalchemy import create_engine, inspect, select, text, update
 from sqlalchemy.exc import DBAPIError
 
+from loom.db.schema_startup import service_schema_head
 from loom.personal_dev_build_runtime_installation import resolve_personal_build_runtime_installation
 from tests.integration.test_personal_dev_native_builder_migration import _config
 from tests.integration.test_personal_dev_native_builder_store import (
@@ -268,7 +269,7 @@ async def test_0142_rollback_refuses_any_retained_request(sessions, tmp_path, is
     with pytest.raises(DBAPIError, match="cannot downgrade 0142"):
         await asyncio.to_thread(command.downgrade, _config(isolated_migration_postgres_url), "0141")
     async with sessions() as session:
-        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0151"
+        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == service_schema_head()
         assert await session.scalar(text("SELECT count(*) FROM personal_dev_build_platform_requests")) == 1
 
 
