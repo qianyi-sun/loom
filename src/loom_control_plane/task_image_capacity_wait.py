@@ -152,7 +152,7 @@ async def read_capacity_waits(
 
 async def remember_capacity_wait(
     session: AsyncSession, *, target_id: str, materialization_id: UUID, lease_epoch: int,
-    pool_id: str, resources: ResourceTotals, now: datetime,
+    pool_id: str, resources: ResourceTotals, now: datetime, reason: str | None = None,
 ) -> None:
     """Persist only after the rejected claim savepoint has rolled back."""
     from loom_control_plane.execution_capacity import _CAPACITY_ADMISSION_LOCK
@@ -165,7 +165,7 @@ async def remember_capacity_wait(
     candidate = TaskImageCapacityWait(
         target_id=target_id, materialization_id=materialization_id, lease_epoch=lease_epoch,
         pool_id=pool_id, cpu_millis=resources.cpu_millis, memory_mib=resources.memory_mib,
-        storage_mib=resources.storage_mib, first_waited_at=now, renewed_at=now,
+        storage_mib=resources.storage_mib, first_waited_at=now, renewed_at=now, reason=reason,
         expires_at=now + timedelta(seconds=WAIT_LEASE_SECONDS),
     )
     if not await _eligible(session, candidate, now):
@@ -174,6 +174,7 @@ async def remember_capacity_wait(
         if (existing.materialization_id == materialization_id and existing.lease_epoch == lease_epoch
                 and existing.pool_id == pool_id and wait_resources(existing) == resources):
             existing.renewed_at, existing.expires_at = candidate.renewed_at, candidate.expires_at
+            existing.reason = reason
             await session.flush()
             return
         if existing.materialization_id != materialization_id and await _eligible(session, existing, now):

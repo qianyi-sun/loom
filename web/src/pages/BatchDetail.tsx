@@ -1,3 +1,4 @@
+import { ProgressSummary } from "../components/TrialProgress";
 /**
  * Batch detail — one batch's aggregate stats + per-state trial
  * counts + the original filter/config that submitted it. Live-polls
@@ -737,6 +738,8 @@ export default function BatchDetail(): JSX.Element {
         </Card>
       ) : null}
 
+      {c.progress ? <Card><Card.Body><ProgressSummary progress={c.progress} batchId={c.id} /></Card.Body></Card> : null}
+
       {c.backend === "nebius" && c.service_execution_summary ? (
         <Card>
           <Card.Header
@@ -745,10 +748,10 @@ export default function BatchDetail(): JSX.Element {
           />
           <Card.Body className="space-y-3">
             <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-              <StatCard label="Execution leases" value={c.service_execution_summary.lease_count} />
+              <StatCard label="Latest execution attempts" value={c.service_execution_summary.lease_count} />
               <StatCard label="Canonical bundles ready" value={c.service_execution_summary.canonical_ready_count} />
               <StatCard label="Output committed" value={c.service_execution_summary.output_commit_states.committed ?? 0} />
-              <StatCard label="Materializing" value={c.service_execution_summary.lifecycle_stages.materializing ?? 0} />
+              <StatCard label="Archiving output" value={c.service_execution_summary.lifecycle_stages.materializing ?? 0} />
             </div>
             <div className="flex flex-wrap gap-2">
               {Object.entries(c.service_execution_summary.lifecycle_stages)

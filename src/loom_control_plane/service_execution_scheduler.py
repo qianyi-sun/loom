@@ -45,6 +45,7 @@ class ServiceExecutionConfigurationError(ValueError):
 
 _NEXT_SERVICE_TRIAL = text("""
 SELECT t.id,
+       t.submitted_at,
        t.task_id,
        t.attempt_count,
        task_definition.checksum AS task_checksum,
@@ -197,7 +198,10 @@ async def reserve_next_service_execution(
             await session.execute(
                 update(Trial)
                 .where(Trial.id == row["id"], Trial.state == "queued")
-                .values(next_attempt_at=current_time + timedelta(seconds=delay))
+                .values(
+                    next_attempt_at=current_time + timedelta(seconds=delay),
+                    scheduling_observation={"reason": exc.reason, "observed_at": current_time.isoformat()},
+                )
             )
             _LOG.info("service_execution_capacity_wait", extra={"reason": exc.reason})
     return None
@@ -295,7 +299,7 @@ async def _reserve_service_candidate(
         target_id = target.id
         try:
             async with session.begin_nested():
-                return await reserve_trial_execution(
+                lease = await reserve_trial_execution(
                     session,
                     request_id=canonical_uuid5(
                         _RESERVATION_REQUEST_NAMESPACE,
@@ -320,6 +324,18 @@ async def _reserve_service_candidate(
                     deadline_at=deadline_at,
                     now=current_time,
                 )
+                ready_times = [image.ready_at for image in prerequisites if image.ready_at]
+                image_ready = max(ready_times) if ready_times else row["submitted_at"]
+                await session.execute(update(Trial).where(Trial.id == row["id"]).values(
+                    scheduling_observation={
+                        "observed_at": current_time.isoformat(), "lease_id": str(lease.id),
+                        "image_ready_at": (max(row["submitted_at"], image_ready).isoformat()
+                                           if ready_times or not prerequisites else None),
+                        "image_mode": ("reused" if ready_times and image_ready <= row["submitted_at"]
+                                       else "built" if ready_times else "unknown" if prerequisites else "prebuilt"),
+                    },
+                ))
+                return lease
         except ExecutionProvisioningBlockedError as exc:
             blocked = exc
     if blocked is not None:

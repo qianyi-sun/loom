@@ -289,6 +289,11 @@ def build_observation(observation: dict[str, Any]) -> dict[str, Any]:
         pod = pods[0]
         result.update(pod_uid=pod["metadata"]["uid"], node_name=pod.get("spec", {}).get("nodeName"))
         result["pod_status"] = _status_diagnostic(pod.get("status", {}))
+        result["scheduling"] = next((
+            {**_status_diagnostic(c), "transition_at": c.get("lastTransitionTime")}
+            for c in pod.get("status", {}).get("conditions", [])
+            if c.get("type") == "PodScheduled"
+        ), None)
         phases = []
         for row in (*pod.get("status", {}).get("initContainerStatuses", []), *pod.get("status", {}).get("containerStatuses", [])):
             if row.get("name") not in {"prepare", "build", "publish"}:
@@ -400,14 +405,14 @@ class NativeTaskImageController:
                     if wait is not None and wait.materialization_id == attempt.materialization_id:
                         await session.delete(wait)
                     return attempt_id
-            except ExecutionProvisioningBlockedError:
+            except ExecutionProvisioningBlockedError as exc:
                 if waiting is None:
                     raise
                 materialization_id, lease_epoch, native = waiting
                 await remember_capacity_wait(
                     session, target_id=self.target.target_id, materialization_id=materialization_id,
                     lease_epoch=lease_epoch, pool_id=self.settings.pool_id,
-                    resources=native_build_resources(native), now=datetime.now(UTC),
+                    resources=native_build_resources(native), now=datetime.now(UTC), reason=exc.reason,
                 )
                 return None
 
@@ -446,6 +451,7 @@ class NativeTaskImageController:
             "resources": {"vcpu_millis": self.settings.cpu_millis, "memory_mib": self.settings.memory_mib,
                           "storage_mib": self.settings.ephemeral_storage_mib},
             "max_processes": self.settings.max_processes, "reserved_at": now.isoformat(),
+            "concurrency_limit": self.settings.max_concurrent,
             "deadline_at": (now + timedelta(seconds=job["spec"]["activeDeadlineSeconds"])).isoformat(),
             "configmap": cm, "job": job,
         }
