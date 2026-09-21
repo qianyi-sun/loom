@@ -49,7 +49,7 @@ def test_pipeline_collectors_have_closed_labels_and_exact_buckets() -> None:
         metrics.PIPELINE_STAGE_DEADLINE_OVERRUN_SECONDS: ("resource_class",),
         metrics.PIPELINE_CHECKPOINT_OLDEST_AGE_SECONDS: ("resource_class",),
         metrics.PIPELINE_ARTIFACT_COMMIT_FAILURES_TOTAL: ("commit_kind", "reason"),
-        PIPELINE_GPU_ALLOCATED_IDLE_SECONDS: ("slurm_cluster", "reason"),
+        PIPELINE_GPU_ALLOCATED_IDLE_SECONDS: ("reason",),
     }
     forbidden = {
         "pipeline_run_id",

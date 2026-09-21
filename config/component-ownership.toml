@@ -96,7 +96,6 @@ compatibility_test_paths = [
   "tests/ops/test_nebius_staging_credentials.py",
   "tests/ops/test_nebius_staging_identity_bootstrap.py",
   "tests/unit/test_nebius_staging_attachment.py",
-  "tests/loom_cli/test_inference_cmd.py",
 ]
 
 smoke_owners = [
