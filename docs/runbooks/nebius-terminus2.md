@@ -197,7 +197,15 @@ Arbitrary Dockerfile output, source locations, registry references and frozen
 build configuration are not exposed. Operators retain the bounded build log
 for deeper diagnosis. Cancelling the last waiting Trial can leave preparation
 queued with `build_cancelled` and no active demand; it does not mean another
-build is running. A pre-execution failure or cancellation has no execution
+build is running. A no-demand cancellation refunds that build's retry charge;
+real build failures, deadlines and expired leases retain their bounded budget.
+Attempt history and lease epochs remain unchanged, and resources remain reserved
+until the old Job's deletion is acknowledged. New demand resumes the queued
+image using a new epoch. When new demand references a legacy cancelled image,
+the platform refunds recorded, previously charged cancellations from its current
+retry budget; it preserves real failures and does not reset other failed images.
+Already failed Trials retain their results and need a new submission after repair.
+A pre-execution failure or cancellation has no execution
 bundle, so `/bundle/download` continues returning HTTP 409 rather than creating
 a synthetic successful trajectory.
 
