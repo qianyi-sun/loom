@@ -916,6 +916,17 @@ Skopeo's native digest handling. Registry and storage credentials are absent fro
 the Dockerfile container. Supported task and sidecar components use the same
 path, including declared build arguments and multi-stage targets.
 
+`environment.build_timeout_sec` starts when each BuildKit build command starts;
+it does not include node provisioning, input preparation, scratch cleanup or
+registry publication. `active_deadline_seconds` remains the separate bounded
+whole-Job allowance (1800 seconds by default), including those infrastructure
+phases. A build command that exhausts its task budget reports
+`build_deadline_exceeded`; OOM and storage failures retain their own reasons.
+Build output streams to the container log, with build/cleanup boundary markers.
+The actuator retains a bounded, redacted tail before timeout/cancellation
+cleanup; ordinary polling does not repeatedly fetch logs. A valid completed
+publication is still accepted if its first reconciliation is after the deadline.
+
 The dedicated build namespace permits the rootless user-namespace helper's
 SETUID/SETGID and unconfined seccomp/AppArmor profiles. This exception does not
 change the restricted execution namespace. Build Pods remain nonprivileged,

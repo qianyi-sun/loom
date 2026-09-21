@@ -44,6 +44,7 @@ class FakeKube:
         self.delete_calls = []
         self.allow_delete = True
         self.lose_create_response = False
+        self.builder_logs = {}
 
     async def inventory(self, namespace):
         return [copy.deepcopy(job) for job in self.jobs.values() if not job.get("job_missing")]
@@ -57,8 +58,11 @@ class FakeKube:
             raise TimeoutError("create response lost")
         return copy.deepcopy(self.jobs[name])
 
-    async def observe(self, namespace, name):
-        return copy.deepcopy(self.jobs.get(name))
+    async def observe(self, namespace, name, *, capture_logs=False):
+        job = copy.deepcopy(self.jobs.get(name))
+        if job is not None and capture_logs and name in self.builder_logs:
+            job["builder_log"] = self.builder_logs[name]
+        return job
 
     async def delete(self, namespace, name, uid, *, configmap):
         self.delete_calls.append((name, uid))
@@ -453,6 +457,7 @@ async def test_expired_lease_is_not_renewed_and_cleanup_retains_capacity_until_g
     ("storage", "build_storage_exceeded", False),
     ("oom", "build_oom_killed", False),
     ("deadline", "build_deadline_exceeded", True),
+    ("build_timeout", "build_deadline_exceeded", True),
     ("exit137", "build_build_failed", False),
 ])
 async def test_native_failure_preserves_reason_before_cleanup(controller_setup, cause, expected, retryable):
@@ -464,6 +469,8 @@ async def test_native_failure_preserves_reason_before_cleanup(controller_setup, 
     pod_status = job["pods"][0]["status"]
     terminated = pod_status["initContainerStatuses"][0]["state"]["terminated"]
     terminated.update(exitCode=137, reason="OOMKilled" if cause == "oom" else "Error")
+    if cause == "build_timeout":
+        terminated["exitCode"] = 124
     if cause == "storage":
         pod_status.update(phase="Failed", reason="Evicted",
                           message='Usage of EmptyDir volume "builder-tmp" exceeds the limit "7Gi". token=eviction-secret')
@@ -505,3 +512,48 @@ async def test_expired_attempt_saves_last_pod_observation_before_deleting(contro
     assert native["capacity_released_at"]
     assert native["pod_status"]["reason"] == "Evicted"
     assert native["failure_reason"] == "build_deadline_exceeded"
+
+
+async def test_expired_running_build_captures_log_before_cleanup(controller_setup):
+    controller, sessions, team_id, kube = controller_setup
+    image_id, _ = await seed_image(sessions, team_id)
+    await controller.run_once()
+    job = next(iter(kube.jobs.values()))
+    job["status"] = {"active": 1}
+    job["pods"] = [{
+        "metadata": {"name": "pod", "uid": "pod-uid", "ownerReferences": [
+            {"kind": "Job", "uid": job["metadata"]["uid"]},
+        ]},
+        "status": {"initContainerStatuses": [{"name": "build", "state": {
+            "running": {"startedAt": datetime.now(UTC).isoformat()},
+        }}]},
+    }]
+    kube.builder_logs[job["metadata"]["name"]] = "build exported; cleanup started token=private-build-token"
+    _, attempts = await rows(sessions, image_id)
+    async with sessions() as session, session.begin():
+        attempt = await session.get(TaskImageMaterializationAttempt, attempts[0].id)
+        attempt.native_build = {**attempt.native_build, "deadline_at": (datetime.now(UTC) - timedelta(seconds=1)).isoformat()}
+    await controller.run_once()
+    row, attempts = await rows(sessions, image_id)
+    native = attempts[0].native_build
+    assert row.failure_reason == "build_deadline_exceeded"
+    assert native["builder_log"].startswith("build exported; cleanup started")
+    assert "private-build-token" not in native["builder_log"]
+    assert native["capacity_released_at"] and not kube.jobs
+
+
+async def test_completed_build_is_accepted_when_reconciled_after_deadline(controller_setup):
+    controller, sessions, team_id, kube = controller_setup
+    image_id, _ = await seed_image(sessions, team_id)
+    await controller.run_once()
+    kube.finish()
+    _, attempts = await rows(sessions, image_id)
+    async with sessions() as session, session.begin():
+        attempt = await session.get(TaskImageMaterializationAttempt, attempts[0].id)
+        attempt.native_build = {**attempt.native_build, "deadline_at": (datetime.now(UTC) - timedelta(seconds=1)).isoformat()}
+    await controller.run_once()
+    row, _ = await rows(sessions, image_id)
+    assert row.state == "ready" and "task" in row.registry_images
+    assert row.failure_reason is None
+    await controller.run_once()
+    assert (await rows(sessions, image_id))[1][0].native_build["capacity_released_at"]
