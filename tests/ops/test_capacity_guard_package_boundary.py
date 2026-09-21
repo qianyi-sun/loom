@@ -4,37 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-GUARD_ROOT = Path("src/loom_capacity_guard")
-AGENT_ROOT = Path("src/loom_capacity_agent")
-FORBIDDEN_IMPORTS = {
-    "subprocess",
-    "loom.worker_token",
-    "loom_control_plane.elastic_slurm_worker_controller",
-    "loom_control_plane.scheduler.claim",
-    "loom_control_plane.slurm_job_cgroup",
-    "loom_control_plane.slurm_worker_jobs",
-    "loom_capacity_manager.api",
-    "loom_capacity_manager.execution_store",
-}
-FORBIDDEN_TOKENS = {
-    "claim_trial",
-    "grant_capacity",
-    "issue_worker_token",
-    "launch_permit",
-    "mint_worker_token",
-    "sbatch",
-    "scancel",
-}
-ROUTE_DECORATORS = {"delete", "get", "head", "options", "patch", "post", "put"}
-
-
-
-
-
-
-
-
-
 
 def test_capacity_guard_migrations_have_no_candidate_database_fallback() -> None:
     source = Path("capacity_guard_migrations/env.py").read_text(encoding="utf-8")

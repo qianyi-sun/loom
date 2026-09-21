@@ -96,47 +96,7 @@ def test_crash_detector_imports_worker_reclaim_total() -> None:
     assert hasattr(cd_module, "WORKER_RECLAIM_TOTAL")
 
 
-@pytest.mark.legacy_pool
-def test_metrics_refresher_imports_slurm_worker_metrics() -> None:
-    import loom_control_plane.metrics_refresher as refresher_module
-
-    assert hasattr(refresher_module, "SLURM_WORKER_DESIRED_SLOTS")
-    assert hasattr(refresher_module, "SLURM_WORKER_ACTIVE_SLOTS")
-    assert hasattr(refresher_module, "SLURM_WORKER_PENDING_SLOTS")
-    assert hasattr(refresher_module, "SLURM_WORKER_STALE_SLOTS")
-    assert hasattr(refresher_module, "SLURM_WORKER_STALE_JOBS")
-    assert hasattr(refresher_module, "WORKER_POOL_TOTAL_SLOTS")
-    assert hasattr(refresher_module, "WORKER_POOL_OCCUPIED_SLOTS")
-    assert hasattr(refresher_module, "WORKER_POOL_DESIRED_SLOTS")
-    assert hasattr(refresher_module, "WORKER_POOL_DRAINING_SLOTS")
-    assert hasattr(refresher_module, "WORKER_POOL_AUTOSCALER_DECISION")
-    assert hasattr(refresher_module, "WORKER_POOL_AUTOSCALER_IDLE_SECONDS")
-    assert hasattr(refresher_module, "WORKER_TOKENS_STALE_COUNT")
-
-
-
-
-@pytest.mark.legacy_pool
-def test_legacy_pool_metrics_objects_exposed_to_registry() -> None:
+def test_retired_scheduler_metrics_are_not_published() -> None:
     from loom_control_plane import metrics  # noqa: F401
 
-    names = {metric.name for metric in REGISTRY.collect()}
-    expected = {
-        "loom_slurm_worker_desired_slots",
-        "loom_slurm_worker_active_slots",
-        "loom_slurm_worker_pending_slots",
-        "loom_slurm_worker_stale_slots",
-        "loom_slurm_worker_running_jobs",
-        "loom_slurm_worker_pending_jobs",
-        "loom_slurm_worker_stale_jobs",
-        "loom_slurm_worker_failed_submissions",
-        "loom_slurm_worker_cancelled_pending_jobs",
-        "loom_slurm_worker_idle_exits",
-        "loom_worker_pool_autoscaler_decision",
-        "loom_worker_pool_autoscaler_error",
-        "loom_worker_pool_autoscaler_idle_seconds",
-    }
-    for stem in expected:
-        assert stem in names or f"{stem}_total" in names or any(
-            name.startswith(stem) for name in names
-        ), f"metric stem {stem!r} not in registered names"
+    assert not any(metric.name.startswith("loom_slurm_") for metric in REGISTRY.collect())

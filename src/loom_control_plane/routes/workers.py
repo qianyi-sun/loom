@@ -20,7 +20,6 @@ from loom.auth import verify_bearer_token
 from loom.db.schema import TaskImageMaterialization, TrialTaskImageMaterialization, Worker
 from loom.execution_architecture import execution_cpu_arch
 from loom.integrations.terminalgen.authority import (
-    TERMINALGEN_POOL_POLICIES,
     TerminalGenAuthorityError,
     build_terminal_task_validation_grant,
     build_terminalgen_authoring_grant,
@@ -29,7 +28,6 @@ from loom.model_switch_store import load_model_switch_plan, plan_snapshot_from_r
 from loom.models.capabilities import Capabilities
 from loom.models.result import FailureReason
 from loom.models.worker_capabilities import (
-    SlurmGpuAllocationEvidenceV1,
     WorkerCapabilitySnapshotV1,
 )
 from loom.pipeline.keys import canonical_digest, canonical_document, digest_bytes
@@ -61,11 +59,6 @@ from loom_control_plane.scheduler.claim import (
     WorkClaimConflictError,
     claim_one,
     claim_work,
-)
-from loom_control_plane.slurm_worker_jobs import (
-    SlurmWorkerRegistrationError,
-    lock_slurm_worker_job_for_registration,
-    parse_slurm_worker_registration_provenance,
 )
 from loom_control_plane.task_image_execution import TaskImageExecutionService
 from loom_task_image_authority.execution_delivery import SignedTrialClaim, SignedWorkClaim
@@ -900,14 +893,6 @@ async def register_worker(
         raise HTTPException(status_code=401, detail="not authorized to register")
 
 
-    try:
-        slurm_provenance = parse_slurm_worker_registration_provenance(payload)
-    except SlurmWorkerRegistrationError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail="invalid Slurm registration provenance",
-        ) from exc
-
     # Bug 5 fix: validate each capabilities entry against the Capabilities
     # Pydantic model so garbage (typo'd OS, unknown gpu_vendor, etc.) is
     # rejected at the boundary rather than silently mis-matching DRF claim
@@ -1002,9 +987,7 @@ async def register_worker(
             input_cache_ready_bytes=ready_bytes,
         )
     capability_snapshot: WorkerCapabilitySnapshotV1 | None = None
-    allocation_evidence: SlurmGpuAllocationEvidenceV1 | None = None
     raw_snapshot = payload.get("capability_snapshot")
-    raw_allocation_evidence = payload.get("slurm_gpu_allocation_evidence")
     if raw_snapshot is not None:
         try:
             capability_snapshot = WorkerCapabilitySnapshotV1.model_validate(raw_snapshot)
@@ -1055,42 +1038,7 @@ async def register_worker(
             max_concurrent != 1
         ):
             raise HTTPException(status_code=409, detail="pipeline_worker_concurrency_drift")
-        if capability_snapshot.gpu_devices:
-            if raw_allocation_evidence is None:
-                raise HTTPException(status_code=400, detail="slurm_gpu_allocation_required")
-            try:
-                allocation_evidence = SlurmGpuAllocationEvidenceV1.model_validate(
-                    raw_allocation_evidence
-                )
-            except ValidationError as exc:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"invalid Slurm GPU allocation evidence: {exc.errors()}",
-                ) from exc
-            snapshot_allocation_ids = {
-                item.allocation_id for item in capability_snapshot.gpu_devices
-            }
-            snapshot_uuids = sorted(
-                (item.device_uuid for item in capability_snapshot.gpu_devices), key=str.encode
-            )
-            if snapshot_allocation_ids != {allocation_evidence.allocation_id} or (
-                snapshot_uuids != allocation_evidence.device_uuids
-            ):
-                raise HTTPException(status_code=409, detail="slurm_gpu_allocation_drift")
-            expected_pool = (
-                "behavior-gpu-gb10"
-                if allocation_evidence.slurm_cluster_id == "gb10"
-                else "behavior-gpu-oldlab"
-            )
-            if pool_name != expected_pool:
-                raise HTTPException(status_code=409, detail="gpu_worker_pool_contract_drift")
-        elif raw_allocation_evidence is not None:
-            raise HTTPException(status_code=400, detail="cpu_worker_has_gpu_allocation")
-        elif not trial_image_reader and pool_name not in {"behavior-cpu-data", *TERMINALGEN_POOL_POLICIES}:
-            raise HTTPException(status_code=409, detail="cpu_worker_pool_contract_drift")
         capability_identity = capability_snapshot.model_dump(mode="json")
-    elif raw_allocation_evidence is not None:
-        raise HTTPException(status_code=400, detail="allocation_requires_capability_snapshot")
     capability_snapshot_digest = canonical_digest(capability_identity)
     supplied_digest = payload.get("capability_snapshot_digest")
     if supplied_digest is not None and supplied_digest != capability_snapshot_digest:
@@ -1099,22 +1047,6 @@ async def register_worker(
 
     worker_id = uuid4()
     async with request.app.state.session_factory() as session:
-        if slurm_provenance is not None:
-            try:
-                slurm_job = await lock_slurm_worker_job_for_registration(
-                    session,
-                    provenance=slurm_provenance,
-                    hostname=str(payload.get("hostname", "unknown")),
-                    pool_name=pool_name,
-                    max_concurrent=max_concurrent,
-                )
-            except SlurmWorkerRegistrationError as exc:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Slurm worker registration conflict",
-                ) from exc
-        else:
-            slurm_job = None
         session.add(
             Worker(
                 id=worker_id,
@@ -1128,16 +1060,6 @@ async def register_worker(
                     if capability_snapshot is not None
                     else null()
                 ),
-                slurm_gpu_allocation_evidence_json=(
-                    allocation_evidence.model_dump(mode="json")
-                    if allocation_evidence is not None
-                    else null()
-                ),
-                slurm_gpu_allocation_evidence_digest=(
-                    canonical_digest(allocation_evidence)
-                    if allocation_evidence is not None
-                    else None
-                ),
                 auth_token_hash=ctx.token_hash,
                 max_concurrent=max_concurrent,
                 pool_name=pool_name,
@@ -1150,8 +1072,6 @@ async def register_worker(
             )
         )
         await session.flush()
-        if slurm_job is not None:
-            slurm_job.worker_id = worker_id
         await session.commit()
 
     return {
@@ -1161,9 +1081,6 @@ async def register_worker(
         "input_cache_capacity_bytes": capacity_bytes,
         "input_cache_reserved_bytes": reserved_bytes,
         "input_cache_ready_bytes": ready_bytes,
-        "slurm_gpu_allocation_evidence_digest": (
-            canonical_digest(allocation_evidence) if allocation_evidence is not None else None
-        ),
         "heartbeat_interval_sec": 5,
         "claim_poll_interval_sec": 1.0,
         "drain_timeout_sec": 600,
