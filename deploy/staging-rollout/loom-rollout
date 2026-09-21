@@ -1,4 +1,0 @@
-#!/bin/sh
-set -eu
-
-exec sudo -n -u loom-rollout -- /usr/local/libexec/loom-rollout-broker "$@"

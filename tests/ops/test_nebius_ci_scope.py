@@ -41,7 +41,7 @@ def _tracked() -> tuple[str, ...]:
         ),
         (
             "cluster-smoke",
-            "tests/cluster/test_staging_k3s_render_contract.py",
+            "tests/integration/test_nebius_platform_k3s.py",
             "tests/integration/test_execution_actuator_k3s.py",
         ),
         (

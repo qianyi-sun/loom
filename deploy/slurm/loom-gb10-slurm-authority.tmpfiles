@@ -1,3 +1,0 @@
-d /run/loom-gb10-slurm-authority 0700 root root -
-d /run/loom-gb10-slurm-authority/jobs 0700 root root -
-f /run/loom-gb10-slurm-authority/acceptance.lock 0600 root root -
