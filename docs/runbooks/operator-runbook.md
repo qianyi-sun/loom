@@ -354,7 +354,7 @@ recent rollouts, queue/worker inventory, and dependency metrics.
 | Control Plane | `LoomStatePatchTimeouts`, `LoomControlPlaneDown` | `/healthz`, pod logs, Postgres/PgBouncer, rollout state |
 | Gateway | `LoomLLMGatewayDown`, `LoomGatewayProviderErrorRate`, `LoomGatewayCostSpike` | Gateway health, provider connection status, upstream errors and usage attribution |
 | service/API | `LoomServiceDown`, `LoomServiceHighErrorRate`, `LoomServiceAuthFailureSpike`, `LoomServiceSubmissionRejectSpike` | `/api/v1/health`, ingress, auth audit events, rejection reasons |
-| workers | `LoomWorkerProcessDown`, `LoomWorkerHeartbeatFailing`, `LoomWorkerTrialFailureRateHigh`, `LoomWorkerTokenStaleness` | Host/process health, heartbeat age, Docker/Slurm capacity, token generation |
+| workers | `LoomWorkerProcessDown`, `LoomWorkerHeartbeatFailing`, `LoomWorkerTrialFailureRateHigh`, `LoomWorkerTokenStaleness` | Host/process health, heartbeat age, local Docker capacity, token generation |
 | pooling/listen | `LoomPgbouncerClientWaiting`, `LoomPgbouncerScrapeDown`, `LoomListenWatcherPollFallback` | Pool saturation, exporter health, database reachability and LISTEN fallback |
 | object storage | `LoomMinioPVCUsageHigh`, `LoomMinioPVCUsageCritical`, `LoomMinioWriteLatencyHigh`, `LoomMinioRequestErrorRateHigh`, `LoomMinioNodeOffline` | PVC and bucket usage, node/quorum state, write latency, lifecycle rules |
 | Pipelines | `LoomPipelineStageQueueStuck`, `LoomPipelineStageDeadlineOverrun`, `LoomPipelineControllerReconcileErrors`, `LoomPipelineForcedCancellation`, `LoomPipelineCheckpointStale`, `LoomPipelineArtifactCommitFailures`, `LoomPipelineGpuAllocatedIdle` | Pipeline list/show/watch, Pipeline panels, scoped controller/worker logs, authority boundary |
@@ -413,7 +413,7 @@ been verified.
 
 ### Pipeline GPU allocated idle
 
-`loom_pipeline_gpu_allocated_idle_seconds` measures a leased local GPU Attempt whose expected process group is absent or cleanup is pending; low utilization is intentionally excluded. More than 300 seconds for 10 minutes is critical. Inspect the closed cluster/reason series, `loom pipeline list/show/watch`, and scoped worker/Slurm logs. Drain or cancel only under worker/cluster authority; do not kill an unidentified process from metric labels.
+`loom_pipeline_gpu_allocated_idle_seconds` measures a leased local GPU Attempt whose expected process group is absent or cleanup is pending; low utilization is intentionally excluded. More than 300 seconds for 10 minutes is critical. Inspect the reason series, `loom pipeline list/show/watch`, and local worker logs. Drain or cancel only under appropriate operational authority; do not kill an unidentified process from metric labels.
 
 ## Incident handoff
 

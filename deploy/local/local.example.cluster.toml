@@ -8,12 +8,11 @@
 # `deploy/local/local.cluster.toml` is for pre-push testing on your own
 # laptop. Local is NOT a formal Loom environment: it is not in the env
 # identity contract, it is not routed on yylx.world, and nothing here is
-# deployed by the operator rollout. Shared `dev`/`staging`/`production`
-# live under deploy/environments/ and are the only real deploy targets.
+# deployed by the operator rollout. Hosted environments use Nebius platform
+# inputs under deploy/nebius/.
 #
-# See docs/runbooks/local-dev-workflow.md for the full walkthrough (the default
-# Docker Compose path and the advanced-optional
-# external-Slurm path). The whole stack runs IN the cluster — do not also start
+# See docs/runbooks/local-dev-workflow.md for the Docker Compose walkthrough.
+# This optional cluster example runs the whole stack IN the cluster — do not also start
 # the control plane/service as local processes.
 #
 # Every value below with a <PLACEHOLDER> or a "CHANGE ME" note is

@@ -14,7 +14,7 @@ from loom_cli.cluster_cmd import render_manifests
 from loom_cli.cluster_config import load_cluster_config
 
 _ROOT = Path(__file__).resolve().parents[2]
-_PROFILE = _ROOT / "deploy/environments/staging.multinode.cluster.toml"
+_PROFILE = _ROOT / "tests/fixtures/cluster-render/staging.multinode.cluster.toml"
 _NAME = "loom-nebius-private-entry"
 _ADDRESS = "10.253.71.2"
 _PEER = "10.253.71.1"

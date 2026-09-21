@@ -301,7 +301,7 @@ default     = 30
 used_by     = ["control-plane"]
 python_type = "int"
 default     = 3600
-description = "Seconds before the crash detector reclaims a trial stuck in claimed with no started_at while the owning worker is still fresh. The crash detector measures from pre_start_heartbeat_at when upgraded workers report setup/cache progress, falling back to claimed_at for older workers. Default is sized for GB10/source-useful cold setup while preserving abandoned-claim recovery."
+description = "Seconds before the crash detector reclaims a trial stuck in claimed with no started_at while the owning worker is still fresh. The crash detector measures from pre_start_heartbeat_at when upgraded workers report setup/cache progress, falling back to claimed_at for older workers. Default is sized for cold source setup while preserving abandoned-claim recovery."
 
 [service_config.stale_running_trial_reclaim_enabled]
 used_by     = ["control-plane", "loom-service"]
@@ -749,7 +749,7 @@ description = "Optional worker hostname override used for registration and fleet
 used_by     = ["worker"]
 python_type = "str"
 default     = "default"
-description = "Resource-pool label advertised at worker registration for slot capacity summaries. Set to values like k8s-worker, gb10, or oldlab."
+description = "Resource-pool label advertised at worker registration for slot capacity summaries. Use a local development pool label."
 
 [service_config.blocking_io_max_workers]
 used_by     = ["worker"]
@@ -814,7 +814,7 @@ default     = 1.0
 used_by     = ["worker"]
 python_type = "float"
 # no default -> `float | None = None`; fixed workers stay long-running unless
-# elastic Slurm launchers opt in through LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS.
+# disposable local workers opt in through LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS.
 description = "Optional idle window after which a worker exits successfully when no trials are in flight and repeated claims find no work."
 
 [service_config.heartbeat_interval_sec]
@@ -848,19 +848,19 @@ description = "Docker SDK API timeout in seconds for worker-created clients. Kee
 used_by     = ["worker"]
 python_type = "float"
 default     = 0.0
-description = "Per-container hard CPU cap in cores for trial and setup-sidecar containers. Maps to Docker nano_cpus. Non-exclusive Slurm policies require a positive ceiling and stay disabled when containment is incomplete."
+description = "Per-container hard CPU cap in cores for trial and setup-sidecar containers. Maps to Docker nano_cpus."
 
 [service_config.container_memory_mib]
 used_by     = ["worker"]
 python_type = "int"
 default     = 0
-description = "Per-container hard memory cap in MiB for trial and setup-sidecar containers. Maps to Docker mem_limit. Non-exclusive Slurm policies require a positive ceiling and stay disabled when containment is incomplete."
+description = "Per-container hard memory cap in MiB for trial and setup-sidecar containers. Maps to Docker mem_limit."
 
 [service_config.container_pids]
 used_by     = ["worker"]
 python_type = "int"
 default     = 0
-description = "Per-container hard PID cap for trial and setup-sidecar containers. Maps to Docker pids_limit. Non-exclusive Slurm policies require a positive ceiling and stay disabled when containment is incomplete."
+description = "Per-container hard PID cap for trial and setup-sidecar containers. Maps to Docker pids_limit."
 
 [service_config.pipeline_terminal_task_validator_path]
 used_by     = ["worker"]
@@ -1017,7 +1017,7 @@ description = "Grace period before an unreferenced task-image materialization be
 used_by     = ["worker"]
 python_type = "int"
 default     = 120
-description = "Idle duration after which an exclusive task-image builder exits so its Slurm allocation can scale to zero."
+description = "Idle duration after which an exclusive task-image builder exits to release local resources."
 
 [service_config.task_image_builder_lease_seconds]
 used_by     = ["control-plane"]
@@ -1035,7 +1035,7 @@ description = "TTL on the builder slot in active_trial_cache_builds (30-min defa
 used_by     = ["worker"]
 python_type = "int"
 default     = 1
-description = "Maximum concurrent layered trial-cache image builds allowed for the same worker daemon group. Workers coordinate daemon-wide synthetic slots through active_trial_cache_builds using pool_name, hostname, and docker_socket as the daemon fingerprint. Keep 1 for shared OLDLAB/k8s Docker daemons; raise only for isolated daemon hosts."
+description = "Maximum concurrent layered trial-cache image builds allowed for the same worker daemon group. Workers coordinate daemon-wide synthetic slots through active_trial_cache_builds using pool_name, hostname, and docker_socket as the daemon fingerprint. Keep 1 for shared local Docker daemons; raise only for isolated daemon hosts."
 
 [service_config.setup_health_guard_enabled]
 used_by     = ["worker"]
@@ -1053,7 +1053,7 @@ description = "Maximum Linux /proc/pressure/io full avg10 value allowed before a
 used_by     = ["worker"]
 python_type = "int"
 default     = 2048
-description = "Minimum Linux MemAvailable in MiB required before a worker claims new trials or admits Docker setup/build work. This protects no-swap GB10 hosts where swap-only admission cannot detect near-total unified-memory exhaustion."
+description = "Minimum Linux MemAvailable in MiB required before a worker claims new trials or admits Docker setup/build work. This protects local hosts where swap-only admission cannot detect physical-memory exhaustion."
 
 [service_config.setup_health_min_swap_free_mb]
 used_by     = ["worker"]
@@ -1267,14 +1267,9 @@ fields      = { service = 2, control_plane = 2, gateway = 2, web = 0, worker = 3
 
 [render_config.k8s_worker]
 python_type = "table"
-# enabled=false is the safe default for profiles that share host Docker
-# capacity with Slurm. The project-local example enables it for a laptop
-# cluster. Shared development, staging, and production keep it disabled and
-# rely on Slurm-managed pools for trial execution. Setting this to false omits
-# the loom-worker Deployment YAML entirely from the
-# rendered manifest and causes `POST /api/v1/batches` to reject
-# submissions whose `required_worker_pools` list contains
-# `k8s-worker`.
+# The Docker-backed worker is optional for disposable local development.
+# Hosted workloads use native Nebius execution. Disabled omits the local worker
+# Deployment and rejects submissions requiring its k8s-worker pool.
 fields      = { enabled = false }
 
 [render_config.trial_cache_registry_repo]

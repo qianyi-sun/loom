@@ -42,7 +42,6 @@ _FORBIDDEN_USER_RESOURCE_KEYS = frozenset(
         "required_host_runtime_features",
         "required_image_features",
         "resource_profile",
-        "slurm_cluster_id",
         "variant_id",
         "worker_pool",
     }

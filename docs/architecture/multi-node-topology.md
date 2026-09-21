@@ -19,10 +19,10 @@ min_available = 1
 anti_affinity = "required"
 ```
 
-`deploy/environments/staging.multinode.cluster.toml` is the checked-in
-multi-node staging profile. The current development, staging single-node, and
-production profiles set `multi_node = false`; select the profile that matches
-the cluster and its installed storage/operator dependencies.
+The shipped local example sets `multi_node = false`. Multi-node rendering is
+covered by synthetic test inputs under `tests/fixtures/cluster-render/`; these
+are not hosted deployment profiles. Disposable experiments need matching
+storage/operator dependencies.
 
 ## Rendered shapes
 

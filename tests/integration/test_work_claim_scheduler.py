@@ -8,7 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.pipeline.keys import canonical_digest, canonical_document
-from loom_control_plane.scheduler.claim import WorkClaimConflictError, claim_one, claim_work
+from loom_control_plane.scheduler.claim import WorkClaimConflictError, claim_work
 
 
 def _contracts() -> tuple[dict[str, object], dict[str, object], list[dict[str, object]]]:

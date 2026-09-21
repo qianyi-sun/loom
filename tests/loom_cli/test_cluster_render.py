@@ -41,8 +41,6 @@ _GOLDEN_FILES = (
     "web.yaml",
     "ingress.yaml",
     "gateway-router.yaml",
-    "worker-router.yaml",
-    "minio-router.yaml",
     # Phase C (#190) — egress proxy chain. Default replicas=0 so
     # the resources exist in the manifest but no pods until
     # operators scale up.
@@ -68,11 +66,10 @@ def _deployment_env_value(docs: list[dict], deployment: str, env_name: str) -> s
     return item.get("value") if item else None
 
 
-# Schema default flipped k8s_worker.enabled to false (#383): profiles
-# that share OLDLAB hosts with Slurm must not double-schedule the host.
+# Local in-cluster workers require explicit opt-in.
 # Render tests that exercise the worker Deployment / worker
 # NetworkPolicy must opt in explicitly. `_DEFAULT_CFG` mirrors the
-# development.cluster.toml profile (worker enabled) so the canonical
+# local worker configuration so the canonical
 # `deploy/k8s/*.yaml` golden files still apply.
 def _default_cfg(**kwargs: object) -> ClusterConfig:
     k8s_worker_cls = type(ClusterConfig().k8s_worker)
@@ -316,8 +313,8 @@ def test_load_config_gateway_local_providers_from_toml(tmp_path: Path) -> None:
 
 def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     """Smoke: every document parses, the set covers the 9 Deployments
-    + 3 DaemonSets + 10 Services + 3 StatefulSets + 1 Ingress
-    + 1 PodDisruptionBudget + 14 NetworkPolicies + 2 ConfigMaps
+    + 1 DaemonSet + 10 Services + 3 StatefulSets + 1 Ingress
+    + 1 PodDisruptionBudget + 13 NetworkPolicies + 2 ConfigMaps
     (Grafana dashboards + egress-proxy bootstrap) expected by
     cluster-deploy.md §Component map + sandbox-isolation.md."""
     text = render_manifests(_DEFAULT_CFG)
@@ -331,8 +328,8 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     # cp, service, gateway, web + egress-xds + egress-proxy +
     # pgbouncer + family-orchestrator (#672) + disabled pipeline orchestrator.
     assert kinds.count("Deployment") == 9
-    # gateway-router + worker-router + minio-router
-    assert kinds.count("DaemonSet") == 3
+    # gateway-router
+    assert kinds.count("DaemonSet") == 1
     # postgres + pgbouncer + minio + cp + gateway + service + web
     # + ingress + egress + worker (headless, StatefulSet peer DNS) = 10
     assert kinds.count("Service") == 10
@@ -343,9 +340,9 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     # pgbouncer PodDisruptionBudget.
     assert kinds.count("PodDisruptionBudget") == 1
     # NetworkPolicies: postgres + minio + cp + gateway + worker + svc
-    # + web + gateway-router + worker-router + minio-router + egress-xds
-    # + egress-proxy + pgbouncer + both orchestrators = 15.
-    assert kinds.count("NetworkPolicy") == 15
+    # + web + gateway-router + egress-xds
+    # + egress-proxy + pgbouncer + both orchestrators = 13.
+    assert kinds.count("NetworkPolicy") == 13
     assert kinds.count("CronJob") == 0
     # Grafana dashboards ConfigMap + egress-proxy bootstrap ConfigMap.
     assert kinds.count("ConfigMap") == 2
@@ -836,7 +833,7 @@ def test_render_profile_ingress_routes_api_and_spa_under_frontend_prefix(
     filename: str,
     route_path: str,
 ) -> None:
-    cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / filename)
+    cfg = load_cluster_config(_REPO_ROOT / "tests" / "fixtures" / "cluster-render" / filename)
     docs = _load_docs(render_manifests(cfg))
     ingresses = {d["metadata"]["name"]: d for d in docs if d["kind"] == "Ingress"}
     assert set(ingresses) == {"loom-ingress", "loom-frontend-prefix-redirect"}
@@ -1061,7 +1058,7 @@ def test_render_profiles_set_backend_runtime_environment(
     filename: str,
     runtime_environment: str,
 ) -> None:
-    cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / filename)
+    cfg = load_cluster_config(_REPO_ROOT / "tests" / "fixtures" / "cluster-render" / filename)
     docs = _load_docs(render_manifests(cfg))
 
     for deployment in ("loom-control-plane", "loom-service", "loom-llm-gateway"):
@@ -1076,7 +1073,7 @@ def test_render_profiles_set_backend_runtime_environment(
 def test_staging_control_plane_projects_protected_worker_runtime_credential(
     filename: str,
 ) -> None:
-    cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / filename)
+    cfg = load_cluster_config(_REPO_ROOT / "tests" / "fixtures" / "cluster-render" / filename)
     docs = _load_docs(render_manifests(cfg))
     deployment = next(
         document
@@ -1170,7 +1167,7 @@ def test_protected_profiles_declare_static_host_path_storage(
     filename: str,
     host_root: str,
 ) -> None:
-    cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / filename)
+    cfg = load_cluster_config(_REPO_ROOT / "tests" / "fixtures" / "cluster-render" / filename)
 
     assert cfg.persistent_storage_backend == "static-host-path"
     assert cfg.persistent_storage_host_path_root == host_root
@@ -1178,11 +1175,12 @@ def test_protected_profiles_declare_static_host_path_storage(
 
 def test_staging_minio_render_pins_reachable_source_without_changing_storage_topology() -> None:
     cfg = load_cluster_config(
-        _REPO_ROOT / "deploy" / "environments" / "staging.multinode.cluster.toml"
+        _REPO_ROOT / "tests" / "fixtures" / "cluster-render" / "staging.multinode.cluster.toml"
     )
     docs = _load_docs(render_manifests(cfg))
     minio = next(
-        doc for doc in docs
+        doc
+        for doc in docs
         if doc["kind"] == "StatefulSet" and doc["metadata"]["name"] == "loom-minio"
     )
     assert minio["spec"]["template"]["spec"]["containers"][0]["image"] == (
@@ -1195,7 +1193,8 @@ def test_staging_minio_render_pins_reachable_source_without_changing_storage_top
     assert claim["metadata"]["name"] == "data"
     assert claim["spec"]["storageClassName"] == "longhorn"
     pdb = next(
-        doc for doc in docs
+        doc
+        for doc in docs
         if doc["kind"] == "PodDisruptionBudget" and doc["metadata"]["name"] == "loom-minio"
     )
     assert pdb["spec"]["minAvailable"] == 3
@@ -1562,8 +1561,7 @@ def test_cluster_commands_reject_explicit_config_target_conflicts_before_cluster
 
 
 def test_default_config_disables_k8s_worker() -> None:
-    """Schema default flipped to false so profiles that share OLDLAB
-    hosts with Slurm force intentional opt-in. See #383."""
+    """Local cluster workers require an explicit opt-in."""
     cfg = ClusterConfig()
     assert cfg.k8s_worker.enabled is False
 
@@ -1586,7 +1584,7 @@ def test_render_omits_worker_deployment_when_disabled() -> None:
 
 
 def test_render_includes_worker_when_enabled_via_profile() -> None:
-    """development.cluster.toml opts back in for local cluster workers.
+    """The local render config opts into in-cluster workers.
 
     Dynamic-storage profiles render loom-worker as a StatefulSet with
     per-pod PVCs from volumeClaimTemplates so RWO Longhorn volumes on
@@ -1604,16 +1602,14 @@ def test_render_includes_worker_when_enabled_via_profile() -> None:
     assert ("PersistentVolumeClaim", "loom-worker-trajectories") not in kinds_names
 
 
-def test_load_shipped_profile_files_have_explicit_k8s_worker_setting() -> None:
-    """Every profile that ships in `deploy/environments/` must
+def test_synthetic_profiles_have_explicit_k8s_worker_setting() -> None:
+    """Every synthetic renderer profile in `tests/fixtures/cluster-render/` must
     declare k8s_worker.enabled explicitly — no silent inheritance
     of the schema default. See #383 rationale."""
-    envs_dir = _REPO_ROOT / "deploy" / "environments"
+    envs_dir = _REPO_ROOT / "tests" / "fixtures" / "cluster-render"
     expected = {
-        # Shared dev runs trial execution on external Slurm (#857/#873), same
-        # as staging/prod, so its in-cluster loom-worker Deployment is disabled.
-        # Per-developer LOCAL dev uses deploy/local/local.example.cluster.toml,
-        # which can opt into k8s_worker for offline / no-Slurm use.
+        # Hosted identity fixtures omit local workers; the shipped local
+        # example explicitly opts into its in-cluster worker.
         "development.cluster.toml": False,
         "staging.cluster.toml": False,
         "staging.multinode.cluster.toml": False,
@@ -1655,7 +1651,9 @@ def test_loom_service_env_carries_v1_workload_trust_contract_from_profile() -> N
         "staging.multinode.cluster.toml",
         "production.cluster.toml",
     ):
-        cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / profile_name)
+        cfg = load_cluster_config(
+            _REPO_ROOT / "tests" / "fixtures" / "cluster-render" / profile_name
+        )
         assert (
             cfg.workload_contract.workload_trust_mode,
             cfg.workload_contract.taskset_transforms_enabled,
@@ -1961,8 +1959,8 @@ def test_local_example_template_renders() -> None:
 def _multi_node_cfg(**kwargs: object) -> ClusterConfig:
     """Build a 4-pod distributed-MinIO render config (#893).
 
-    Mirrors the checked-in live values in
-    `deploy/environments/staging.multinode.cluster.toml`. The topology
+    Uses the synthetic topology values in
+    `tests/fixtures/cluster-render/staging.multinode.cluster.toml`. The topology
     sub-dataclass is materialized from the schema at import time, so we
     reach it the same way the single-node tests reach `k8s_worker`
     (`type(ClusterConfig().<field>)`) rather than hand-rolling a config
@@ -2078,3 +2076,14 @@ def test_single_node_minio_pins_ifnotpresent_pull_policy() -> None:
 
     text = (resources.files("loom_cli.templates.k8s") / "minio.yaml.j2").read_text()
     assert "imagePullPolicy: IfNotPresent" in text
+
+
+def test_local_render_omits_retired_external_worker_transports() -> None:
+    docs = _load_docs(render_manifests(_DEFAULT_CFG))
+    names = {doc["metadata"]["name"] for doc in docs}
+    assert not {"loom-worker-router", "loom-minio-router"} & names
+    # Local Docker sandboxes still need their Gateway transport.
+    assert "loom-gateway-router" in names
+    policies = [doc for doc in docs if doc["kind"] == "NetworkPolicy"]
+    assert "loom-worker-router" not in str(policies)
+    assert "loom-minio-router" not in str(policies)

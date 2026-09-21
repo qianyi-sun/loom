@@ -711,7 +711,7 @@ def _worker_pool_coverage_result(
             "Batch debug evidence did not include trials.worker_pools.terminal.",
             (
                 "Return terminal trial counts by worker pool so release gates "
-                "can assert OLDLAB/GB10/k8s coverage without direct DB joins."
+                "can assert native execution coverage without direct DB joins."
             ),
         )
     missing = [pool for pool in required if terminal_counts.get(pool, 0) <= 0]

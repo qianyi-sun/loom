@@ -97,23 +97,16 @@ NEBIUS_PLATFORM_EXACT = {
 NEBIUS_PLATFORM_PREFIXES = ("deploy/nebius/",)
 
 PROTECTED_DEPLOYMENT_EXACT = {
-    ".github/workflows/deploy-environment.yml",
     ".github/workflows/release-promotion-gate.yml",
-    "deploy/environments/staging.cluster.toml",
-    "deploy/environment-state/staging.toml",
-    "scripts/ops/deploy_environment.sh",
     "scripts/ops/release_gate.py",
     "scripts/ops/release_identity.py",
     "scripts/ops/verify_production_release_gate.sh",
-    "scripts/validate_environment_isolation.py",
     "tests/loom_cli/test_cluster_target_boundary.py",
     "tests/loom_cli/test_cluster_hosted_retirement.py",
     "src/loom_cli/application_migration_contract.py",
     "src/loom_cli/migration_readiness.py",
     "tests/loom_cli/test_migration_readiness.py",
     "tests/loom_cli/test_cluster_render.py",
-    "tests/ops/test_deploy_environment_release_manifest.py",
-    "tests/ops/test_environment_isolation.py",
     "tests/ops/test_release_identity.py",
     "tests/ops/test_release_promotion_gate.py",
 }
@@ -343,7 +336,6 @@ def plan_validations(
         "scripts/ops/deploy_nebius_platform.py",
         "tests/unit/test_nebius_platform_render.py",
         ".github/workflows/release-promotion-gate.yml",
-        "scripts/ops/deploy_staging_k3s.sh",
         "src/loom_cli/cluster_cmd.py",
         "src/loom_cli/cluster_config.py",
         "web/src/__tests__/AuthContext.test.tsx",
@@ -354,8 +346,6 @@ def plan_validations(
         "deploy/nebius/",
         "src/loom_cli/templates/k8s/",
         "deploy/k8s/",
-        "deploy/environments/",
-        "deploy/staging-k3s/",
     )
     staging_exact = {
         ".github/workflows/staging-smoke.yml",
@@ -369,7 +359,6 @@ def plan_validations(
         "deploy/web-runtime-config.sh",
         "scripts/ops/frontend_security_headers.py",
         "scripts/ops/frontend_route_smoke.py",
-        "scripts/ops/deploy_staging_k3s.sh",
         "src/loom_cli/templates/k8s/ingress.yaml.j2",
         "tests/ops/test_frontend_security_headers.py",
         "web/package-lock.json",
@@ -382,8 +371,6 @@ def plan_validations(
     }
     staging_prefixes = (
         "deploy/Dockerfile.",
-        "deploy/environments/",
-        "deploy/staging-k3s/",
         "src/loom_service/",
         "src/loom_control_plane/",
         "src/loom_llm_gateway/",

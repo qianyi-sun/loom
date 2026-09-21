@@ -334,12 +334,10 @@ def test_nebius_iac_change_uses_owned_validation_route(path: str, independent_te
 @pytest.mark.parametrize(
     "path",
     [
-        "deploy/environments/staging.multinode.cluster.toml",
-        "scripts/ops/deploy_staging_k3s.sh",
         ".github/workflows/release-promotion-gate.yml",
     ],
 )
-def test_k3s_staging_contract_selects_cluster_and_staging(path: str) -> None:
+def test_release_contract_selects_cluster_and_staging(path: str) -> None:
     plan = plan_validations(
         changed_paths=[path],
         labels=set(),
@@ -541,18 +539,11 @@ def test_dependency_authority_changes_select_every_heavy_gate(path: str) -> None
 @pytest.mark.parametrize(
     "path",
     [
-        "deploy/environments/staging.cluster.toml",
-        "deploy/environment-state/staging.toml",
-        "scripts/ops/deploy_environment.sh",
         "scripts/ops/release_gate.py",
         "scripts/ops/release_identity.py",
         "scripts/ops/verify_production_release_gate.sh",
-        "scripts/validate_environment_isolation.py",
-        ".github/workflows/deploy-environment.yml",
         ".github/workflows/release-promotion-gate.yml",
         "tests/loom_cli/test_cluster_target_boundary.py",
-        "tests/ops/test_deploy_environment_release_manifest.py",
-        "tests/ops/test_environment_isolation.py",
         "tests/ops/test_release_identity.py",
         "tests/ops/test_release_promotion_gate.py",
         "tests/loom_cli/test_cluster_render.py",

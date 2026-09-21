@@ -12,7 +12,7 @@ from loom_cli.cluster_cmd import render_manifests
 from loom_cli.cluster_config import load_cluster_config
 
 _ROOT = Path(__file__).resolve().parents[2]
-_PROFILE = _ROOT / "deploy/environments/staging.multinode.cluster.toml"
+_PROFILE = _ROOT / "tests/fixtures/cluster-render/staging.multinode.cluster.toml"
 
 
 def _render(tmp_path: Path, extra: str = "") -> list[dict]:

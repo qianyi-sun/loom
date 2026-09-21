@@ -6,7 +6,6 @@ implementation.  It is the shared typed boundary used by those adapters.
 
 from __future__ import annotations
 
-import re
 import unicodedata
 from datetime import datetime
 from enum import StrEnum
@@ -106,11 +105,6 @@ RecipeRef = Annotated[
 ]
 DisplayName = Annotated[str, StringConstraints(min_length=1)]
 CancelReason = Annotated[str, StringConstraints(min_length=1)]
-OfficialSubmissionKind = Annotated[
-    str,
-    StringConstraints(pattern=r"^[a-z][a-z0-9_.-]{0,63}$"),
-]
-
 
 class PipelineReadModel(BaseModel):
     """Closed response model that accepts adapter serialization primitives."""
@@ -551,219 +545,8 @@ class PipelineRecipeBindingResolver(Protocol):
     ) -> None: ...
 
 
-class AcceptanceRecipeSubmissionV1(PipelineModel):
-    schema_version: Literal["loom.acceptance-recipe-submission.v1"]
-    authorization_id: UUID
-    candidate_sha256: Digest
-    recipe: Literal["behavior-recovery-acceptance-preflight@1"]
-
-
-class AcceptanceRecipeInputDescriptorV1(PipelineModel):
-    logical_name: Literal["task_set", "task_instances", "dataset", "policy", "mop_bank"]
-    artifact_id: UUID
-    artifact_type: Annotated[
-        str, StringConstraints(pattern=r"^[a-z][a-z0-9_.-]{0,126}\.v[1-9][0-9]*$")
-    ]
-    manifest_sha256: Digest
-
-
-class AcceptanceRecipeSubmissionGrantV1(PipelineModel):
-    team_id: UUID
-    authorization_id: UUID
-    candidate_sha256: Digest
-    action: Literal["matrix"]
-    preflight_input_set_id: Literal["S02"]
-    inputs: Annotated[list[AcceptanceRecipeInputDescriptorV1], Field(min_length=5, max_length=5)]
-    input_descriptor_set_digest: Digest
-    authorization_policy_requirements: dict[str, Any]
-    candidate_policy_requirements: dict[str, Any]
-    request_identity_digest: Digest
-    controller_actor_user_id: UUID
-
-    @model_validator(mode="after")
-    def inputs_are_in_exact_graph_order(self) -> AcceptanceRecipeSubmissionGrantV1:
-        if [item.logical_name for item in self.inputs] != [
-            "task_set",
-            "task_instances",
-            "dataset",
-            "policy",
-            "mop_bank",
-        ]:
-            raise ValueError("acceptance preflight inputs must use the exact graph order")
-        return self
-
-
-class AcceptanceRecipeAuthorityV1(Protocol):
-    async def load_and_lock(
-        self, request: AcceptanceRecipeSubmissionV1
-    ) -> AcceptanceRecipeSubmissionGrantV1: ...
-
-
-class PipelineAcceptanceRecipeSubmitter(Protocol):
-    async def submit(
-        self,
-        request: AcceptanceRecipeSubmissionV1,
-        authority: AcceptanceRecipeAuthorityV1,
-    ) -> PipelineMutationResultV1: ...
-
-
-class OfficialRecipeSubmissionRequestV1(PipelineModel):
-    schema_version: Literal["loom.official-recipe-submission.v1"]
-    official_submission_kind: OfficialSubmissionKind
-    authority_id: UUID
-    request_identity_digest: Digest
-
-    @field_validator("official_submission_kind")
-    @classmethod
-    def normalize_kind(cls, value: str) -> str:
-        normalized = unicodedata.normalize("NFC", value)
-        if len(normalized.encode("utf-8")) > 64:
-            raise ValueError("official_submission_kind exceeds 64 UTF-8 bytes")
-        return normalized
-
-
-class OfficialGpuBackendSelectionV1(PipelineModel):
-    scope: Literal["all_gpu_nodes", "oldlab_preflight", "gb10_preflight"]
-    variant_id: Literal["gb10-shared-1gpu", "oldlab-rtx5080-2gpu"]
-    policy_id: Literal["behavior-gpu-gb10", "behavior-gpu-oldlab"]
-
-    @model_validator(mode="after")
-    def variant_and_policy_match(self) -> OfficialGpuBackendSelectionV1:
-        expected = {
-            "gb10-shared-1gpu": "behavior-gpu-gb10",
-            "oldlab-rtx5080-2gpu": "behavior-gpu-oldlab",
-        }[self.variant_id]
-        if self.policy_id != expected:
-            raise ValueError("GPU variant and policy drift")
-        return self
-
-
-class OfficialRecipeSubmissionGrantV1(PipelineModel):
-    team_id: UUID
-    official_submission_kind: OfficialSubmissionKind
-    authority_id: UUID
-    authority_snapshot_digest: Digest
-    request_identity_digest: Digest
-    controller_actor_user_id: UUID
-    recipe: RecipeIdentityV1
-    inputs: dict[BindingName, UUID]
-    parameters: dict[str, Any]
-    budget: RunBudgetV1
-    images: list[dict[str, Any]]
-    request_renderers: list[dict[str, Any]]
-    resource_profiles: list[dict[str, Any]]
-    control_binding_snapshots: list[ResolvedRecipeControlBindingV1]
-    gpu_backend_selections: Annotated[list[OfficialGpuBackendSelectionV1], Field(max_length=2)]
-
-    @model_validator(mode="after")
-    def backend_scopes_are_closed(self) -> OfficialRecipeSubmissionGrantV1:
-        scopes = [item.scope for item in self.gpu_backend_selections]
-        if len(scopes) != len(set(scopes)):
-            raise ValueError("official GPU backend scopes must be unique")
-        if len(scopes) == 1 and scopes != ["all_gpu_nodes"]:
-            raise ValueError("a one-row official GPU selection must use all_gpu_nodes")
-        if len(scopes) == 2 and scopes != ["oldlab_preflight", "gb10_preflight"]:
-            raise ValueError("a two-row GPU selection must use the preflight scope order")
-        return self
-
-
-class OfficialRecipeSubmissionAuthorityV1(Protocol):
-    async def load_and_lock(
-        self, request: OfficialRecipeSubmissionRequestV1
-    ) -> OfficialRecipeSubmissionGrantV1: ...
-
-    async def complete_locked(
-        self, pipeline_run_id: UUID, official_submission_identity_digest: Digest
-    ) -> None: ...
-
-
-class PipelineOfficialRecipeSubmitter(Protocol):
-    async def submit(
-        self,
-        request: OfficialRecipeSubmissionRequestV1,
-        authority: OfficialRecipeSubmissionAuthorityV1,
-    ) -> PipelineMutationResultV1: ...
-
-
-class FailClosedAcceptanceRecipeAuthorityV1:
-    """Deterministic test/default authority: denial is the only behavior."""
-
-    async def load_and_lock(
-        self, request: AcceptanceRecipeSubmissionV1
-    ) -> AcceptanceRecipeSubmissionGrantV1:
-        del request
-        raise PermissionError("acceptance Recipe authority is not configured")
-
-
-class FailClosedOfficialRecipeSubmissionAuthorityV1:
-    """Deterministic official seam fake with no grant or completion path."""
-
-    async def load_and_lock(
-        self, request: OfficialRecipeSubmissionRequestV1
-    ) -> OfficialRecipeSubmissionGrantV1:
-        del request
-        raise PermissionError("official Recipe authority is not configured")
-
-    async def complete_locked(
-        self, pipeline_run_id: UUID, official_submission_identity_digest: Digest
-    ) -> None:
-        del pipeline_run_id, official_submission_identity_digest
-        raise PermissionError("official Recipe authority is not configured")
-
-
-class FailClosedPipelineAcceptanceRecipeSubmitter:
-    async def submit(
-        self,
-        request: AcceptanceRecipeSubmissionV1,
-        authority: AcceptanceRecipeAuthorityV1,
-    ) -> PipelineMutationResultV1:
-        del request, authority
-        raise PermissionError("acceptance Recipe submitter is not configured")
-
-
-class FailClosedPipelineOfficialRecipeSubmitter:
-    async def submit(
-        self,
-        request: OfficialRecipeSubmissionRequestV1,
-        authority: OfficialRecipeSubmissionAuthorityV1,
-    ) -> PipelineMutationResultV1:
-        del request, authority
-        raise PermissionError("official Recipe submitter is not configured")
-
-
-def official_submission_registry(
-    adapters: dict[str, OfficialRecipeSubmissionAuthorityV1],
-) -> dict[str, OfficialRecipeSubmissionAuthorityV1]:
-    """Validate the startup registry; wildcard/default and empty registries fail closed."""
-
-    if not adapters:
-        raise ValueError("official Recipe authority registry must be nonempty")
-    result: dict[str, OfficialRecipeSubmissionAuthorityV1] = {}
-    for raw_kind, adapter in adapters.items():
-        kind = unicodedata.normalize("NFC", raw_kind)
-        if kind in {"*", "default"} or re.fullmatch(r"[a-z][a-z0-9_.-]{0,63}", kind) is None:
-            raise ValueError("official Recipe authority kinds must be explicit registry tokens")
-        if kind in result:
-            raise ValueError("duplicate official Recipe authority kind")
-        result[kind] = adapter
-    return result
-
-
 __all__ = [
-    "AcceptanceRecipeAuthorityV1",
-    "AcceptanceRecipeInputDescriptorV1",
-    "AcceptanceRecipeSubmissionGrantV1",
-    "AcceptanceRecipeSubmissionV1",
-    "FailClosedAcceptanceRecipeAuthorityV1",
-    "FailClosedOfficialRecipeSubmissionAuthorityV1",
-    "FailClosedPipelineAcceptanceRecipeSubmitter",
-    "FailClosedPipelineOfficialRecipeSubmitter",
     "IdempotencyKey",
-    "OfficialGpuBackendSelectionV1",
-    "OfficialRecipeSubmissionAuthorityV1",
-    "OfficialRecipeSubmissionGrantV1",
-    "OfficialRecipeSubmissionRequestV1",
-    "PipelineAcceptanceRecipeSubmitter",
     "PipelineArtifactListQueryV1",
     "PipelineArtifactListResponseV1",
     "PipelineCancelResultV1",
@@ -773,7 +556,6 @@ __all__ = [
     "PipelineMutationResultV1",
     "PipelineNodeProgressV1",
     "PipelineNodeTopologyV1",
-    "PipelineOfficialRecipeSubmitter",
     "PipelineRecipeBindingResolver",
     "PipelineRunCancelRequestV1",
     "PipelineRunDetailV1",
@@ -794,7 +576,6 @@ __all__ = [
     "ResolvedRecipeControlBindingsV1",
     "canonical_pipeline_request_digest",
     "compute_pipeline_request_digest",
-    "official_submission_registry",
     "pipeline_request_digest",
     "validate_idempotency_key",
 ]

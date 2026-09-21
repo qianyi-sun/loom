@@ -9,11 +9,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from loom.pipeline.keys import canonical_document
 from loom.pipeline.public_api import (
-    AcceptanceRecipeSubmissionV1,
-    FailClosedAcceptanceRecipeAuthorityV1,
-    FailClosedOfficialRecipeSubmissionAuthorityV1,
     IdempotencyKey,
-    OfficialRecipeSubmissionRequestV1,
     PipelineIdempotencyEndpoint,
     PipelineRunCancelRequestV1,
     PipelineRunEventsQueryV1,
@@ -174,54 +170,3 @@ def test_public_dto_limits_and_nfc_normalization() -> None:
             created_after=datetime(2026, 1, 2, tzinfo=UTC),
             created_before=datetime(2026, 1, 1, tzinfo=UTC),
         )
-
-
-def test_internal_submission_requests_are_exact_and_strict() -> None:
-    acceptance = AcceptanceRecipeSubmissionV1(
-        schema_version="loom.acceptance-recipe-submission.v1",
-        authorization_id=AUTHORITY_ID,
-        candidate_sha256=DIGEST,
-        recipe="behavior-recovery-acceptance-preflight@1",
-    )
-    official = OfficialRecipeSubmissionRequestV1(
-        schema_version="loom.official-recipe-submission.v1",
-        official_submission_kind="profile_calibration",
-        authority_id=AUTHORITY_ID,
-        request_identity_digest=DIGEST,
-    )
-
-    assert set(acceptance.model_dump()) == {
-        "schema_version",
-        "authorization_id",
-        "candidate_sha256",
-        "recipe",
-    }
-    assert set(official.model_dump()) == {
-        "schema_version",
-        "official_submission_kind",
-        "authority_id",
-        "request_identity_digest",
-    }
-    with pytest.raises(ValidationError):
-        AcceptanceRecipeSubmissionV1.model_validate({**acceptance.model_dump(), "team_id": TEAM_ID})
-
-
-@pytest.mark.asyncio
-async def test_internal_authority_fakes_fail_closed() -> None:
-    acceptance = AcceptanceRecipeSubmissionV1(
-        schema_version="loom.acceptance-recipe-submission.v1",
-        authorization_id=AUTHORITY_ID,
-        candidate_sha256=DIGEST,
-        recipe="behavior-recovery-acceptance-preflight@1",
-    )
-    official = OfficialRecipeSubmissionRequestV1(
-        schema_version="loom.official-recipe-submission.v1",
-        official_submission_kind="profile_calibration",
-        authority_id=AUTHORITY_ID,
-        request_identity_digest=DIGEST,
-    )
-
-    with pytest.raises(PermissionError, match="not configured"):
-        await FailClosedAcceptanceRecipeAuthorityV1().load_and_lock(acceptance)
-    with pytest.raises(PermissionError, match="not configured"):
-        await FailClosedOfficialRecipeSubmissionAuthorityV1().load_and_lock(official)

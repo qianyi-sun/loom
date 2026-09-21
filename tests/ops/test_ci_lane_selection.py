@@ -36,20 +36,6 @@ def test_explicit_coverage_restores_python_lanes_for_frontend_change():
     assert outputs["tests_root"] == outputs["tests_packages"] == "true"
 
 
-def test_owned_go_flow_test_does_not_select_docker_or_generic_integration(tmp_path, monkeypatch):
-    import scripts.plan_ci_validations as planner
-
-    path = "tests/integration/test_task_image_builder_guard_local_flow.py"
-    module = tmp_path / path
-    module.parent.mkdir(parents=True)
-    module.write_text("def test_independent(): pass\n")
-    monkeypatch.setattr(planner, "REPO_ROOT", tmp_path)
-    monkeypatch.setattr(planner, "_tracked_paths", lambda _: (path, "README.md"))
-    outputs = plan(path).github_outputs()
-    assert outputs["go_checks"] == "true"
-    assert outputs["integration_docker"] == outputs["integration"] == "false"
-
-
 @pytest.mark.parametrize("selected,result,accepted", [
     ("false", "skipped", True), ("true", "success", True),
     ("true", "skipped", False), ("true", "failure", False),
@@ -207,7 +193,7 @@ def test_missing_plan_output_is_not_silently_treated_as_unselected(workflow_name
 def test_retired_ignored_inputs_do_not_restart_backend_jobs(extra):
     from scripts.plan_ci_validations import BASELINE_CHECKS
 
-    p = plan_validations(changed_paths=("src/loom/pipeline/stage1_smoke.py", *extra),
+    p = plan_validations(changed_paths=("src/loom/integrations/behavior/stages/rollout.py", *extra),
                          labels=(), event_name="pull_request")
     assert not any(getattr(p, lane) for lane in BASELINE_CHECKS)
     assert not p.integration and not p.integration_docker

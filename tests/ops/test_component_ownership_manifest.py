@@ -1258,7 +1258,7 @@ def test_runtime_payload_lane_paths_are_exactly_policy_owned() -> None:
         lane="runtime-payload",
     )
 
-    assert len(lane_paths) == 12
+    assert len(lane_paths) == 10
     policy_paths = {
         path
         for policy in manifest.execution_policies
@@ -1268,7 +1268,7 @@ def test_runtime_payload_lane_paths_are_exactly_policy_owned() -> None:
             policy=policy.id,
         )
     }
-    assert len(policy_paths) == 12
+    assert len(policy_paths) == 10
     assert policy_paths == set(lane_paths)
     assert all(
         manifest.test_owner_for_path(path).execution_policy is not None for path in policy_paths

@@ -65,7 +65,8 @@ can remain in schema models, migration fixtures and retained records without
 authorizing new execution on those backends. No tables or retained data have
 been dropped as part of the repository retirement.
 
-The application chain at the source baseline ends at `0150`. Earlier Nebius
+The application chain at the source baseline ends at `0150`; the refreshed
+`dev` baseline includes `0151` (batch purpose). Earlier Nebius
 and `dev` branches used revisions `0133`–`0136` for different changes. Preserve
 the [qualified lineage conversion](../ops/nebius-lineage-conversion.md);
 revision labels alone cannot identify the correct database history. Preserve

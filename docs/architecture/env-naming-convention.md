@@ -10,6 +10,8 @@ execution; an environment name alone does not enable a worker backend.
 | `staging` | `/staging` |
 | `production` | `/prod` |
 
+Public routes follow `https://yylx.world/<short_name>` using the route suffixes above.
+
 Release evidence uses the full environment identity and records the exact public
 route and API base. A route abbreviation is not a cluster identity or deployment
 authorization.

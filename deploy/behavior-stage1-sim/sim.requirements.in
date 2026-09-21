@@ -1,4 +1,4 @@
-# Exact dependency surface observed in the accepted OLDLAB Isaac Sim 5.1 /
+# Exact dependency surface observed in the pinned local Isaac Sim 5.1 /
 # OmniGibson 3.8 environment. Isaac Sim, PyTorch, OmniGibson, BDDL, cuRobo,
 # and Loom are installed from separately attested image/source inputs.
 aenum==3.1.16

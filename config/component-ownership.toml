@@ -21,13 +21,10 @@ ci_ignored_paths = [
   "src/loom/pipeline/behavior_*.py",
   "src/loom/pipeline/renderers/behavior_*.py",
   "src/loom/pipeline/renderers/schemas/behavior.*.json",
-  "src/loom/pipeline/stage1_smoke.py",
-  "src/loom_pipeline_orchestrator/stage1_runtime.py",
   "src/loom_service/behavior_pipeline_adapter.py",
   "tests/integration/test_behavior_pipeline_inputs.py",
   "tests/integrations/behavior/**",
   "tests/unit/pipeline/test_behavior_input_import.py",
-  "tests/unit/test_pipeline_stage1_*.py",
   "third_party/behavior-stage1/**",
   "web/e2e/behavior-rollout-*.test.ts",
   "web/src/__tests__/components/artifacts/BehaviorRollout*.test.tsx",
@@ -41,7 +38,6 @@ compatibility_test_paths = [
   "tests/loom_cli/test_cluster_*.py",
   "tests/loom_cli/test_staging_*.py",
   "tests/ops/test_staging_*.py",
-  "tests/ops/test_bootstrap_staging_*.py",
   "tests/unit/test_staging_*.py",
   "tests/integration/test_staging_admin_browser_session.py",
   "tests/**/test_*slurm*.py",
@@ -80,7 +76,6 @@ compatibility_test_paths = [
   "tests/ops/test_task_image_signer_package_boundary.py",
   # Standalone authority contracts and cleanup inventory; mixed current
   # materialization/lease/registration tests stay in the normal scope.
-  "deploy/catalog/gb10-smoke/**",
   "tests/unit/test_task_image_base_resolution_contracts.py",
   "tests/unit/test_task_image_execution_config.py",
   "tests/unit/test_task_image_execution_signing_request.py",
@@ -103,7 +98,6 @@ smoke_owners = [
   "egress-conformance",
   "family-orchestrator-conformance",
   "frontend-smoke",
-  "gb10-catalog-smoke",
   "sandbox-network-conformance",
   "staging-smoke",
   "task-fixture-conformance",
@@ -169,16 +163,6 @@ fixture_files = [{ path = "best_move.txt", content = "e4\n" }]
 path = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-task-hello-world/tests/test_outputs.py"
 policy = "virtual-app-v1"
 fixture_files = [{ path = "hello.txt", content = "Hello, world!\n" }]
-
-[[execution_cases]]
-path = "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/tests/test_result.py"
-policy = "virtual-workspace-v1"
-fixture_files = [{ path = "result.txt", content = "hello\n" }]
-
-[[execution_cases]]
-path = "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/tests/test_answer.py"
-policy = "virtual-workspace-v1"
-fixture_files = [{ path = "answer.txt", content = "hello\n" }]
 
 [[execution_cases]]
 path = "tests/fixtures/tasks/healthcheck-flaky/tests/test_ok.py"
@@ -433,7 +417,6 @@ source_paths = [
   "deploy/behavior-stage1-sim/**",
   "src/loom/integrations/behavior/**",
   "src/loom/pipeline/behavior_*.py",
-  "src/loom/pipeline/stage1_smoke.py",
   "src/loom/pipeline/**",
   "third_party/behavior-stage1/**",
 ]
@@ -599,28 +582,6 @@ attestation_owner = "release-provenance"
 release_digest = "loom-worker"
 runtime_policy = "start"
 rollout_role = "primary"
-
-[[components]]
-id = "gb10-smoke-task"
-kind = "runtime-payload-image"
-dockerfile = "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/environment/Dockerfile"
-build_context = "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world"
-source_paths = ["deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/**"]
-smoke_owner = "gb10-catalog-smoke"
-scan_owner = "runtime-payload-scan"
-attestation_owner = "runtime-payload-provenance"
-runtime_policy = "runtime-payload"
-
-[[components]]
-id = "gb10-direct-completion-smoke-task"
-kind = "runtime-payload-image"
-dockerfile = "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/environment/Dockerfile"
-build_context = "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world"
-source_paths = ["deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/**"]
-smoke_owner = "gb10-catalog-smoke"
-scan_owner = "runtime-payload-scan"
-attestation_owner = "runtime-payload-provenance"
-runtime_policy = "runtime-payload"
 
 [[components]]
 id = "nebius-terminal-bench"
@@ -839,7 +800,6 @@ include_paths = [
 exclude_paths = [
   "tests/unit/test_nebius_runtime_render.py",
   "tests/unit/pipeline/test_behavior_input_import.py",
-  "tests/unit/test_pipeline_stage1_*.py",
 ]
 
 [[test_suites]]
@@ -899,7 +859,6 @@ include_paths = [
   "tests/integration/test_behavior_pipeline_inputs.py",
   "tests/integrations/behavior/**/*.py",
   "tests/unit/pipeline/test_behavior_input_import.py",
-  "tests/unit/test_pipeline_stage1_*.py",
 ]
 
 [[test_suites]]

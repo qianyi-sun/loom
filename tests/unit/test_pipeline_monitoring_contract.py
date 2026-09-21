@@ -105,13 +105,12 @@ def test_pipeline_dashboard_contract_and_packaged_copy() -> None:
     assert dashboard["schemaVersion"] == 39
     assert dashboard["templating"]["list"] == []
     assert dashboard["refresh"] == "30s"
-    assert [panel["id"] for panel in dashboard["panels"]] == list(range(1, 20))
+    assert [panel["id"] for panel in dashboard["panels"]] == [i for i in range(1, 20) if i != 13]
     expected_titles = [
         "PipelineRuns by state/result",
         "StageRuns by state/resource",
         "Attempts by state/resource",
         "Stage duration p50/p95",
-        "Settled GPU seconds rate",
         "Pipeline Artifact byte rate",
         "Cancellation p95 / forced",
         "Reconcile and commit failures",

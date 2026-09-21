@@ -33,7 +33,7 @@ def test_image_gate_requires_each_selected_supported_result(event, failed):
     if failed:
         results[failed] = 'failure'
     env = dict(os.environ, EVENT_NAME=event, TRUSTED_PUBLISH=str(event == 'workflow_dispatch').lower(),
-               PLAN_RESULT='success', GATE_MODE='full', REQUIRED='true',
+               PLAN_RESULT='success', GATE_MODE='full', REQUIRED='true', HARBOR_REQUIRED='false',
                BUILD_RESULT=results['build'], HARNESS_BUILD_RESULT=results['harness'],
                PUBLISH_RESULT=results['publish'], MANIFEST_RESULT=results['manifest'],
                STANDARD_IMAGES=json.dumps([{'image': 'service'}]))

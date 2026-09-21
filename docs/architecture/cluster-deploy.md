@@ -34,8 +34,8 @@ Ingress exposes only the web application and `loom-service`:
 - `/api/v1` under the matching API prefix.
 
 The Control Plane, LLM Gateway, Postgres, PgBouncer, object store, and egress
-components have no public Ingress backend. Router hostPorts are internal
-worker/fleet transport surfaces and are validated against the render contract.
+components have no public Ingress backend. Gateway router hostPorts are local
+sandbox transport surfaces and are validated against the render contract.
 
 `loom cluster audit` rejects public Services, unexpected Ingress backends,
 missing TLS, unsafe paths, unsupported hostPorts, missing selecting
@@ -57,10 +57,11 @@ connections to their resolved upstream identities. See
 
 ## Configuration and secrets
 
-Durable environment profiles live under `deploy/environments/`. Profiles set
-namespace, runtime and frontend identity, route prefixes, image sources,
-storage, replica counts, worker shape and local test
-policy.
+Hosted platform inputs use the examples in `deploy/nebius/` and the Nebius
+deployment procedure. Disposable local clusters can start from
+`deploy/local/local.example.cluster.toml`. Local profiles set namespace,
+runtime and frontend identity, route prefixes, image sources, storage,
+replica counts, worker shape and test policy.
 
 Runtime secrets are projected from Kubernetes Secrets according to
 `config/loom-schema.toml`. The singleton operator secret is mounted as a file;

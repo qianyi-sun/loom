@@ -1867,7 +1867,7 @@ def test_protected_workflows_share_one_per_pr_admission_slot() -> None:
         assert "background" not in group
 
 
-def test_staging_active_rendered_images_are_covered_by_manifest_matrix() -> None:
+def test_generic_rendered_images_are_covered_by_manifest_matrix() -> None:
     result = subprocess.run(
         [
             sys.executable,
@@ -1876,7 +1876,7 @@ def test_staging_active_rendered_images_are_covered_by_manifest_matrix() -> None
             "cluster",
             "render",
             "--config",
-            "deploy/environments/staging.multinode.cluster.toml",
+            "tests/fixtures/cluster-render/staging.multinode.cluster.toml",
         ],
         cwd=REPO_ROOT,
         text=True,

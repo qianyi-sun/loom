@@ -144,8 +144,8 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         "cluster_render_audit": {
             "status": "pass",
             "url": "https://github.com/qianyi-sun/loom/actions/runs/1003",
-            "staging_config": "deploy/environments/staging.multinode.cluster.toml",
-            "production_config": "deploy/environments/production.cluster.toml",
+            "staging_config": "/tmp/release-evidence/staging.platform.json",
+            "production_config": "/tmp/release-evidence/production.platform.json",
         },
         "migration_dry_run": {
             "status": "pass",
