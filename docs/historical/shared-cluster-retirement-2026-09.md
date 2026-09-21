@@ -28,6 +28,10 @@ its target, backup and migration checks. The old broker entrypoint is retired;
 `loom cluster up` refuses hosted targets. Cluster release evidence no longer
 requires external worker pools, Slurm authority, GB10 status or GB10 mirror probes.
 CI, native AMD64/ARM64 image builds and publication use GitHub-hosted runners.
+The retired manager, executor and personal-development images are no longer
+built or published. Trusted image reconciliation uses a current-run publication
+receipt after verified architecture and manifest publication, without a fleet
+release artifact prerequisite.
 Local development, disposable tests and user-selected external inference APIs
 remain supported.
 

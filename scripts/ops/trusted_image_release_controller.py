@@ -169,7 +169,7 @@ class GitHubReleaseClient:
         run_attempt = _require_positive_int(run.get("run_attempt"), "workflow run attempt")
         head_sha = _require_sha(run.get("head_sha"), "workflow run head")
         artifact_name = (
-            f"personal-dev-trusted-release-run-{run_id}-attempt-{run_attempt}"
+            f"trusted-image-release-run-{run_id}-attempt-{run_attempt}"
         )
         query = urlencode({"name": artifact_name, "per_page": "100"})
         payload = self._json(

@@ -460,7 +460,7 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
         "trivy-binary",
     }
     assert build["strategy"]["matrix"]["include"] == (
-        "${{ fromJSON(needs.plan.outputs.ordinary_builds) }}"
+        "${{ fromJSON(needs.plan.outputs.native_builds) }}"
     )
     plan_script = "\n".join(step.get("run", "") for step in jobs["plan"]["steps"] if "run" in step)
     assert "scripts/component_ownership.py" in plan_script
@@ -674,7 +674,6 @@ def test_trusted_publisher_rebuilds_without_candidate_resolution() -> None:
     assert publish["needs"] == [
         "plan",
         "trivy-binary",
-        "personal-dev-scanner-cache-assets",
     ]
     assert publish["strategy"]["matrix"]["include"] == (
         "${{ fromJSON(needs.plan.outputs.native_builds) }}"
@@ -722,7 +721,6 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
     assert publish["needs"] == [
         "plan",
         "trivy-binary",
-        "personal-dev-scanner-cache-assets",
     ]
 
     build_step_names = [step.get("name") for step in build["steps"]]
@@ -1008,7 +1006,7 @@ def test_release_record_helper_rejects_incomplete_workflow_handoff(tmp_path: Pat
     records = tmp_path / "records"
     records.mkdir()
     (records / "amd64").mkdir()
-    (records / "amd64" / "capacity-manager-amd64.json").write_text("{}\n", encoding="utf-8")
+    (records / "amd64" / "service-amd64.json").write_text("{}\n", encoding="utf-8")
     result = subprocess.run(
         [
             sys.executable,
@@ -1035,11 +1033,11 @@ def test_release_record_helper_rejects_incomplete_workflow_handoff(tmp_path: Pat
             "--runner-environment",
             "github-hosted",
             "--image",
-            "capacity-manager",
+            "service",
             "--image-name",
-            "loom-capacity-manager",
+            "loom-service",
             "--dockerfile",
-            "deploy/Dockerfile.capacity-manager",
+            "deploy/Dockerfile.service",
             "--build-context",
             ".",
             "--records-dir",
@@ -1175,8 +1173,8 @@ def test_manual_and_filtered_contexts_have_distinct_event_specific_names() -> No
                 "EVENT_NAME": "pull_request",
                 "BUILD_RESULT": "skipped",
                 "HARBOR_REQUIRED": "true",
-        "HARNESS_BUILD_RESULT": "skipped",
-                "SCANNER_BUILD_RESULT": "skipped",
+            "HARNESS_BUILD_RESULT": "skipped",
+                "STANDARD_IMAGES": '[{"image":"service"}]',
                 "PUBLISH_RESULT": "skipped",
             },
         ),
@@ -1295,8 +1293,8 @@ def test_images_gate_separates_untrusted_build_from_trusted_publish(
             "REQUIRED": required,
             "BUILD_RESULT": build_result,
             "HARBOR_REQUIRED": "true",
-        "HARNESS_BUILD_RESULT": build_result,
-            "SCANNER_BUILD_RESULT": "skipped",
+            "HARNESS_BUILD_RESULT": build_result,
+            "STANDARD_IMAGES": '[{"image":"service"}]',
             "PUBLISH_RESULT": publish_result,
             "MANIFEST_RESULT": manifest_result,
         },
@@ -1306,60 +1304,6 @@ def test_images_gate_separates_untrusted_build_from_trusted_publish(
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize(
-    ("event_name", "required", "release_result", "expected_returncode"),
-    [
-        ("push", "true", "success", 0),
-        ("push", "true", "skipped", 1),
-        ("push", "false", "skipped", 0),
-        ("pull_request", "true", "skipped", 0),
-    ],
-)
-def test_images_gate_requires_personal_release_only_for_protected_selected_publish(
-    event_name: str,
-    required: str,
-    release_result: str,
-    expected_returncode: int,
-) -> None:
-    selected = json.dumps(
-        [
-            {"image": "service"},
-            {"image": "web"},
-            {"image": "personal-dev-builder"},
-            {"image": "personal-dev-activation-agent"},
-            {"image": "personal-dev-native-builder-agent"},
-            {"image": "personal-dev-scanner-cache"},
-        ],
-        separators=(",", ":"),
-    )
-    protected_publish = event_name == "push" and required == "true"
-    result = subprocess.run(
-        ["bash"],
-        input=_gate_script(".github/workflows/images.yml", "images-gate"),
-        text=True,
-        capture_output=True,
-        env={
-            "PATH": os.environ["PATH"],
-            "EVENT_NAME": event_name,
-            "TRUSTED_PUBLISH": "false",
-            "PLAN_RESULT": "success",
-            "GATE_MODE": "full",
-            "REQUIRED": required,
-            "BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
-            "HARBOR_REQUIRED": "true",
-        "HARNESS_BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
-            "SCANNER_BUILD_RESULT": "skipped"
-            if protected_publish or required == "false"
-            else "success",
-            "PUBLISH_RESULT": "success" if protected_publish else "skipped",
-            "MANIFEST_RESULT": "success" if protected_publish else "skipped",
-            "PERSONAL_DEV_RELEASE_RESULT": release_result,
-            "STANDARD_IMAGES": selected,
-        },
-        check=False,
-    )
-
-    assert result.returncode == expected_returncode, result.stderr
 
 
 @pytest.mark.parametrize(
@@ -1390,8 +1334,8 @@ def test_images_gate_rejects_cross_lane_or_ambiguous_results(
             "REQUIRED": required,
             "BUILD_RESULT": build_result,
             "HARBOR_REQUIRED": "true",
-        "HARNESS_BUILD_RESULT": build_result,
-            "SCANNER_BUILD_RESULT": "skipped",
+            "HARNESS_BUILD_RESULT": build_result,
+            "STANDARD_IMAGES": '[{"image":"service"}]',
             "PUBLISH_RESULT": publish_result,
         },
         check=False,
@@ -1587,10 +1531,8 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
             {
                 "build": "BUILD_RESULT",
                 "nebius-harness-build": "HARNESS_BUILD_RESULT",
-                "scanner-cache-build": "SCANNER_BUILD_RESULT",
                 "publish": "PUBLISH_RESULT",
                 "publish-manifest": "MANIFEST_RESULT",
-                "personal-dev-trusted-release": "PERSONAL_DEV_RELEASE_RESULT",
             },
         ),
         ".github/workflows/cluster-smoke.yml": (

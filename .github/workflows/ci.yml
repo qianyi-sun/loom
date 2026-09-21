@@ -349,25 +349,6 @@ jobs:
       - name: Mypy (strict)
         run: uv run --no-sync mypy
 
-      - name: Global capacity Package 3 no-scheduler-mutation audit
-        if: env.CI_TEST_SCOPE == 'all'
-        shell: bash
-        run: |
-          set -euo pipefail
-          if matches=$(rg -n \
-            -e 'SharedCapacityBroker|capacity_grants_from_report' \
-            -e 'worker:claim|\b(sbatch|scancel|scontrol|srun)\b' \
-            -e '(^|[[:space:]])(import|from)[[:space:]]+(docker|pyslurm|slurm|subprocess)([[:space:].]|$)' \
-            src/loom_capacity_manager \
-            src/loom_capacity_executor/dry_run.py \
-            src/loom_capacity_executor/remote.py \
-            src/loom_capacity_executor/client.py \
-            src/loom_capacity_executor/journal.py \
-            scripts/ops/global_fleet_capacity_shadow_once.py); then
-            echo "$matches" >&2
-            exit 1
-          fi
-
       - name: Verify codegen up-to-date
         run: uv run --no-sync loom config codegen --check
 
