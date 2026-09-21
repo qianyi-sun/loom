@@ -254,7 +254,6 @@ export interface paths {
             name?: string;
             name_suffix?: string;
             description?: string;
-            backend?: string;
             task_filter: Record<string, unknown>;
             trial_config: Record<string, unknown>;
             n_per_task?: number;

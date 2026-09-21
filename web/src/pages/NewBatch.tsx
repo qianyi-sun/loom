@@ -2,7 +2,7 @@
  * Create a new batch — Plan 28 PR-4 redesign.
  *
  * Two-column layout (Harbor-style) on xl screens:
- *   - LEFT: identity + backend + which tasks (benchmark dropdown +
+ *   - LEFT: identity + which tasks (benchmark dropdown +
  *     subset radio: all / first_n / last_n / random_n / explicit).
  *     For explicit, a paste textarea drives the smart parser and
  *     materialises ids into task_filter.task_ids at submit.
@@ -84,6 +84,8 @@ const FAN_OUT_CONFIRM_THRESHOLD = 200;
 const MAX_COMBINATIONS = 16;
 const TASK_SET_ID_PREFIX = "ts/";
 const DEFAULT_AGENT_NAME = "direct-completion";
+// Fixed hosted backend; the server resolves it, so it is display-only here.
+const NEBIUS_BACKEND = "nebius";
 
 function isTaskSetId(id: string): boolean {
   return id.startsWith(TASK_SET_ID_PREFIX);
@@ -879,7 +881,6 @@ function buildIdentityPreview(args: {
   subsetSeed: string;
   explicitCount: number;
   rows: ComboRow[];
-  backend: string;
   suffix: string;
 }): { name: string; description: string } {
   const task = identityTaskPart(args);
@@ -898,7 +899,7 @@ function buildIdentityPreview(args: {
     name: truncateText(name, 160),
     description: (
       taskDescription +
-      `Combinations: ${combos.description}. Backend: ${args.backend || "selected backend"}.`
+      `Combinations: ${combos.description}. Backend: ${NEBIUS_BACKEND}.`
     ),
   };
 }
@@ -906,7 +907,6 @@ function buildIdentityPreview(args: {
 export default function NewBatch(): JSX.Element {
   const { currentTeamId } = useAuth();
   const [nameSuffix, setNameSuffix] = useState("");
-  const [backend, setBackend] = useState("");
   const [batchPurpose, setBatchPurpose] = useState<BatchPurpose>("evaluation");
   const [selectedBenchmarks, setSelectedBenchmarks] = useState<Set<string>>(
     () => new Set(),
@@ -979,18 +979,6 @@ export default function NewBatch(): JSX.Element {
       prev.skipVerifier ? { ...prev, skipVerifier: false } : prev,
     );
   }, [batchPurpose]);
-
-  // Default-pick the backend once the catalog loads: Nebius if
-  // advertised, else the first `available` backend, else the first
-  // entry. Skips when the user has already picked one.
-  useEffect(() => {
-    if (backend || !backends.data) return;
-    const items = backends.data.items;
-    const nebius = items.find((b) => b.name === "nebius");
-    const firstLive = items.find((b) => b.available);
-    const pick = nebius ?? firstLive ?? items[0];
-    if (pick) setBackend(pick.name);
-  }, [backend, backends.data]);
 
   // Parse the explicit textarea continuously so we can show the
   // "Parsed N ids" preview as the user types.
@@ -1228,7 +1216,7 @@ export default function NewBatch(): JSX.Element {
         };
       }
       if (r.picker.agentVersion && (
-        backend !== "nebius" || selectedAgent.name !== "terminus-2" ||
+        selectedAgent.name !== "terminus-2" ||
         !selectedAgent.versions?.some((v) => v.agent_version === r.picker.agentVersion)
       )) {
         return { ok: false, error: `Combination ${i + 1}: choose an available agent version for Nebius Terminus-2, or use Deployment default.` };
@@ -1313,10 +1301,6 @@ export default function NewBatch(): JSX.Element {
     setLocalError(null);
     if (!currentTeamId) {
       setLocalError("Select an active team before submitting a batch.");
-      return;
-    }
-    if (!backend) {
-      setLocalError("Pick a backend.");
       return;
     }
     if (subsetKind === "explicit") {
@@ -1472,7 +1456,6 @@ export default function NewBatch(): JSX.Element {
     const payload: CreateBatchBody = {
       team_id: currentTeamId,
       purpose: batchPurpose,
-      backend,
       task_filter,
       trial_config,
       combinations: combos.value,
@@ -1525,7 +1508,7 @@ export default function NewBatch(): JSX.Element {
     countSummary = `${matchedTaskCount} task${matchedTaskCount === 1 ? "" : "s"} match across ${sourceN} ${sourceLabel}${sourceN === 1 ? "" : "s"}.`;
   }
 
-  const selectedBackend = backends.data?.items.find((b) => b.name === backend);
+  const nebiusStatus = backends.data?.items.find((b) => b.name === NEBIUS_BACKEND);
   const firstProviderConnectionId = rows.find(
     (r) => r.picker.providerConnectionId,
   )?.picker.providerConnectionId;
@@ -1560,15 +1543,14 @@ export default function NewBatch(): JSX.Element {
     totalTrials === undefined
       ? "Trial count is still being calculated."
       : `${totalTrials} trials planned.`;
-  const releaseBackendText = backend
-    ? selectedBackend?.available === false
-      ? selectedBackend.cold_start_available
-        ? `Backend ${backend} can scale from zero via ${selectedBackend.cold_start_pools.join(", ")}.`
-        : `Backend ${backend} has no live worker or scale-from-zero authority.`
-      : selectedBackend?.available === true
-        ? `Backend ${backend} has a live worker.`
-        : `Backend ${backend} availability is not loaded yet.`
-    : "Pick a backend before submitting.";
+  const releaseBackendText =
+    nebiusStatus === undefined
+      ? "Runs on Nebius (availability is not loaded yet)."
+      : nebiusStatus.available
+        ? "Runs on Nebius, which has a live worker."
+        : nebiusStatus.cold_start_available
+          ? `Runs on Nebius, which can scale from zero via ${nebiusStatus.cold_start_pools.join(", ")}.`
+          : "Runs on Nebius, which has no healthy execution target right now.";
   const releaseProviderText = releaseNeedsProvider
     ? selectedProviderConnection
       ? `${selectedProviderConnection.name} provider status is ${selectedProviderConnection.status}.`
@@ -1591,7 +1573,6 @@ export default function NewBatch(): JSX.Element {
     subsetSeed,
     explicitCount: parsed.ids.length,
     rows,
-    backend,
     suffix: nameSuffix,
   });
 
@@ -1671,52 +1652,6 @@ export default function NewBatch(): JSX.Element {
                   })}
                 </div>
               </fieldset>
-              <label className="block max-w-sm">
-                <FieldLabel hint="required">Backend</FieldLabel>
-                <select
-                  className="block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
-                  value={backend}
-                  onChange={(e) => setBackend(e.target.value)}
-                  disabled={backends.isPending}
-                  aria-label="Backend"
-                >
-                  {(backends.data?.items ?? []).map((b) => (
-                    <option key={b.name} value={b.name}>
-                      {b.name}
-                      {b.available
-                        ? ""
-                        : b.cold_start_available
-                          ? " (scales from zero)"
-                          : " (unavailable)"}
-                    </option>
-                  ))}
-                </select>
-                {backend ? (
-                  <Help>
-                    {backends.data?.items.find((b) => b.name === backend)
-                      ?.description ?? null}
-                    {selectedBackend?.available === false &&
-                    selectedBackend.cold_start_available ? (
-                      <span className="mt-0.5 block text-sky-700">
-                        No live worker is required at submission. This backend
-                        has fresh scale-from-zero authority through{" "}
-                        {selectedBackend.cold_start_pools.join(", ")}.
-                      </span>
-                    ) : selectedBackend?.available === false ? (
-                      <span className="mt-0.5 block text-amber-700">
-                        No live worker or scale-from-zero authority is available
-                        for this backend right now.
-                      </span>
-                    ) : null}
-                  </Help>
-                ) : (
-                  <Help>
-                    Hosted trials run on Nebius Kubernetes. Local development
-                    can use explicitly configured local workers. Unsupported
-                    workloads must be converted before hosted submission.
-                  </Help>
-                )}
-              </label>
               <fieldset
                 className="block min-w-0 space-y-5"
                 disabled={subsetKind === "explicit"}
@@ -2448,7 +2383,7 @@ export default function NewBatch(): JSX.Element {
                     specificAgentToggle
                     defaultAgentName={DEFAULT_AGENT_NAME}
                     teamId={currentTeamId}
-                    backend={backend}
+                    allowAgentVersion
                   />
                   <div className="grid grid-cols-2 gap-3">
                     <label className="block">

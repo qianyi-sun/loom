@@ -29,6 +29,7 @@ from loom.db.schema import (
     Trial,
 )
 from loom.security.redaction import redact_mapping, redact_text
+from loom.service_execution_backend import NEBIUS_BACKEND, local_execution_enabled
 from loom_service.auth_guards import (
     is_admin,
     require_scope,
@@ -159,6 +160,26 @@ def _trial_is_org_visible(
         and trial.state in _ORG_VISIBLE_TRIAL_STATES
     )
     return trial_shared
+
+
+def _require_nebius_source_backend(backend: str | None, *, action: str) -> None:
+    """Refuse to derive a new submission from a batch on a retired backend.
+
+    Nebius is the only supported hosted backend. Historical batches keep their
+    original backend for display, but a new batch cannot inherit it, and it
+    cannot be silently relabelled as Nebius: that would skip the Nebius
+    admission and runtime-profile freeze that ordinary submission performs.
+    Disposable local execution (LOOM_LOCAL_EXECUTION=1) keeps worker backends.
+    """
+    if backend != NEBIUS_BACKEND and not local_execution_enabled():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"source batch used backend {backend!r}, which is no longer "
+                f"supported; Loom hosted execution is Nebius-only. Submit a "
+                f"new batch instead of {action}."
+            ),
+        )
 
 
 def _can_read_batch(ctx: Any, batch: Batch) -> bool:
@@ -2128,6 +2149,7 @@ async def clone_run_library_batch_config(
     source, _team = await _load_batch_with_team(session, batch_id)
     if not _can_read_batch(ctx, source):
         raise HTTPException(status_code=403, detail="batch is not shared")
+    _require_nebius_source_backend(source.backend, action="cloning its config")
     if source.provider_connection_id is not None and payload.provider_connection_id is None:
         raise HTTPException(
             status_code=400,
@@ -2305,6 +2327,10 @@ async def reuse_run_library_artifact(
     trial, batch = await _load_trial_with_batch(session, trial_id)
     if not _can_read_trial(ctx, trial, batch):
         raise HTTPException(status_code=403, detail="trial is not shared")
+    _require_nebius_source_backend(
+        batch.backend if batch is not None else None,
+        action="reusing its artifact",
+    )
     typed_artifact = await _typed_artifact_for_trial_key(
         session,
         trial.id,

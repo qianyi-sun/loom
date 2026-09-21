@@ -585,13 +585,16 @@ function MonitorHealthSummary({
             </p>
           </div>
           <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-            <p className="text-xs font-medium uppercase tracking-wider text-slate-600">
-              Backends
+            <p
+              className="text-xs font-medium uppercase tracking-wider text-slate-600"
+              title="Adapters advertised by live legacy workers. Submissions always run on Nebius."
+            >
+              Worker adapters
             </p>
             <p className="mt-1 text-slate-700">
               {data.queue.available_backends.length > 0
                 ? data.queue.available_backends.join(", ")
-                : "No active backend"}
+                : "No active worker adapter"}
             </p>
           </div>
         </div>

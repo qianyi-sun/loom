@@ -205,7 +205,17 @@ function defaultApiResponse(
   if (path === "/v1/tokens") return jsonResponse({ items: [] });
   if (path === "/v1/invites") return jsonResponse({ items: [] });
   if (path === "/v1/usage") return jsonResponse({ degraded: false, buckets: [] });
-  if (path === "/v1/backends") return jsonResponse({ items: [{ name: "docker", description: "Docker", available: true }] });
+  if (path === "/v1/backends") {
+    return jsonResponse({
+      items: [{
+        name: "nebius",
+        description: "Nebius Kubernetes execution pool; scales from zero.",
+        available: false,
+        cold_start_available: true,
+        cold_start_pools: ["nebius-cpu"],
+      }],
+    });
+  }
   if (path === "/v1/agents") return jsonResponse({ items: [] });
   if (path.startsWith("/v1/benchmarks")) return jsonResponse({ items: [], next_cursor: null });
   if (path.startsWith("/v1/models")) return jsonResponse({ items: [] });

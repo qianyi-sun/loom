@@ -223,7 +223,15 @@ team or a platform admin can update, rotate, test, refresh, hide, unhide, or
 delete it. During a run, the LLM Gateway uses the owner-side stored secret but
 records calls and cost against the consuming team/user for the submitted trial.
 
-Submit, monitor, inspect usage, and download through public `/api/v1` routes:
+Submit, monitor, inspect usage, and download through public `/api/v1` routes.
+Hosted batches always run on Nebius, so submission has no backend option in the
+web form, the CLI, or `POST /api/v1/batches`: omit `backend`. A legacy explicit
+`"backend": "nebius"` (or the hidden, deprecated `--backend nebius`) is accepted
+as compatibility input; any other value is rejected with a 400 before
+execution. Batches submitted earlier on a retired backend stay readable, but
+rerun, clone-config and artifact reuse are refused for them, so submit a new
+batch instead.
+(`loom run --backend` is unrelated: it picks a local driver.)
 
 ```bash
 loom eval batch create \
