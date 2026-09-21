@@ -76,7 +76,8 @@ export interface AgentModelPickerProps {
   defaultAgentName?: string;
   /** Team whose owned/shared provider connections are valid for submission. */
   teamId?: string | null;
-  backend?: string;
+  /** Show the Terminus-2 agent-version picker (batch submission only). */
+  allowAgentVersion?: boolean;
 }
 
 interface AgentEntry extends AgentReadinessLike {
@@ -149,9 +150,9 @@ export function AgentModelPicker({
   specificAgentToggle = false,
   defaultAgentName = "direct-completion",
   teamId,
-  backend,
+  allowAgentVersion = false,
 }: AgentModelPickerProps): JSX.Element {
-  const supportsAgentVersion = backend === "nebius" && value.agentName === "terminus-2";
+  const supportsAgentVersion = allowAgentVersion && value.agentName === "terminus-2";
   useEffect(() => {
     if (value.agentVersion && !supportsAgentVersion) {
       onChange({ ...value, agentVersion: undefined });

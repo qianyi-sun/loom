@@ -11,7 +11,11 @@ Gateway, no Postgres, no MinIO required.
 
 `loom run --backend` remains local driver selection. Docker, Modal, and fake
 are not service scheduling identities and do not participate in the
-Nebius execution-class/target topology. See
+Nebius execution-class/target topology. Hosted submission
+(`loom eval batch create`, `loom admin batches submit-on-behalf`) has no backend
+choice: it always runs on Nebius. The legacy `--backend` flag on those commands
+is hidden and deprecated; it warns and forwards its value, and the service
+rejects anything other than `nebius` in a hosted environment. See
 [Nebius service execution](nebius-service-execution.md) for the service-only
 deprecation boundary.
 
