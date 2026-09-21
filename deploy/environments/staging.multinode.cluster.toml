@@ -30,7 +30,6 @@ artifacts_bucket = "loom-staging-artifacts"
 # buckets. Lifecycle maintenance inventories them until their objects and
 # registry references are retired through a separate migration.
 lifecycle_legacy_buckets = ["artifacts", "trajectories"]
-env_state_profile = "../environment-state/staging.toml"
 # Dynamic (Longhorn) provisioning for the multi-node distributed backends.
 persistent_storage_backend = "dynamic"
 persistent_storage_host_path_root = "/data/loom-staging"
@@ -69,30 +68,6 @@ untrusted_workload_isolation = false
 # Bounded inventory for protected checks that keep direct per-node worker-agent
 # units stopped. It carries only host and unit identity; current GB10 Slurm
 # capacity comes from deploy/environment-state/staging.toml.
-[gb10_pool]
-ssh_config = "../worker-pools/gb10/ssh_config"
-ssh_identity_file = "/var/lib/loom-staging-rollout/gb10-deploy-ed25519"
-hosts = [
-  { ssh_target = "trt-gb10-1", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-2", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-3", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-4", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-5", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-6", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-7", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-8", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-9", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-10", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-11", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-12", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-13", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-14", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-15", node_agent_service = "loom-gb10-node-agent.service" },
-]
-
-# Multi-node distributed backends on the 5-node OLDLAB k3s cluster: 4-pod
-# distributed MinIO (Longhorn PVCs, required hostname anti-affinity, PDB
-# min_available=3) + CNPG 3-replica Postgres.
 [topology]
 multi_node = true
 storage_backend = "longhorn"

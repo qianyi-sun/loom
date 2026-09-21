@@ -13,7 +13,6 @@ artifacts_bucket = "loom-staging-artifacts"
 # Keep rehearsal lifecycle coverage equal to shared staging while legacy
 # worker objects remain in the logical-name buckets.
 lifecycle_legacy_buckets = ["artifacts", "trajectories"]
-env_state_profile = "../environment-state/staging.toml"
 persistent_storage_backend = "static-host-path"
 persistent_storage_host_path_root = "/data/loom-staging"
 
@@ -38,29 +37,6 @@ taskset_transforms_enabled = false
 taskset_transform_network_isolated = false
 untrusted_workload_isolation = false
 
-[gb10_pool]
-ssh_config = "../worker-pools/gb10/ssh_config"
-ssh_identity_file = "/var/lib/loom-staging-rollout/gb10-deploy-ed25519"
-hosts = [
-  { ssh_target = "trt-gb10-1", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-2", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-3", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-4", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-5", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-6", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-7", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-8", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-9", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-10", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-11", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-12", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-13", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-14", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-15", node_agent_service = "loom-gb10-node-agent.service" },
-]
-
-# Single-node staging profile used by local and rehearsal renders. Shared
-# staging uses `staging.multinode.cluster.toml`.
 [topology]
 multi_node = false
 storage_backend = "host_path"

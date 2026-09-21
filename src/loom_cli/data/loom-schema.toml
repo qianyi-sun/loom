@@ -1276,11 +1276,6 @@ python_type = "str_list"
 default     = []
 description = "Additional exact legacy object-store buckets that staging lifecycle maintenance must inventory alongside the configured trajectories and artifacts write buckets."
 
-[render_config.env_state_profile]
-python_type = "str"
-default     = ""
-description = "Optional environment-state TOML profile used by protected rollout steps. Relative paths resolve from the cluster-config file directory."
-
 [render_config.worker_trajectory_storage_gi]
 python_type = "int"
 default     = 100
@@ -1317,11 +1312,6 @@ python_type = "table"
 # submissions whose `required_worker_pools` list contains
 # `k8s-worker`.
 fields      = { enabled = false }
-
-[render_config.gb10_pool]
-python_type = "table"
-description = "GB10 hosts whose direct worker and node-agent units are checked and held disabled by protected rollout. ssh_config optionally points at the operator SSH configuration used for every host; ssh_identity_file and ssh_certificate_file point at deployment authentication material for detached rollout runners. Each host entry contains only ssh_target and node_agent_service. External Slurm policy owns on-demand capacity."
-fields      = { ssh_config = "", ssh_identity_file = "", ssh_certificate_file = "", hosts = [] }
 
 [render_config.trial_cache_registry_repo]
 python_type = "str"
