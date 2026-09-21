@@ -89,6 +89,7 @@ def _build_script(
     platform: str,
     max_processes: int,
     cache_enabled: bool,
+    build_timeout_seconds: int,
     build_args: dict[str, str] | None = None,
     build_target: str | None = None,
 ) -> str:
@@ -97,7 +98,7 @@ def _build_script(
         # Set both limits in the original namespace, before daemonless.sh starts
         # rootlesskit. Activation requires the native process-bound proof.
         f"ulimit -u {max_processes}",
-        "mkdir -p /scratch/tmp /scratch/runtime /scratch/docker-config /scratch/state /loom/build/oci /loom/build/cache-out /loom/build/log",
+        "mkdir -p /scratch/tmp /scratch/runtime /scratch/docker-config /scratch/state /loom/build/oci /loom/build/cache-out",
     ]
     for index, component in enumerate(components):
         dockerfile = PurePosixPath(component.dockerfile_path)
@@ -106,8 +107,11 @@ def _build_script(
         cache_in = f"{_BUILD}/cache-in/{index}"
         cache_out = f"{_BUILD}/cache-out/{index}"
         output = f"{_BUILD}/{component.oci_output_path}"
-        logfile = f"{_BUILD}/log/{index:04d}.log"
         argv = [
+            "timeout", "-s", "TERM", "-k", "10", str(build_timeout_seconds),
+            # BusyBox passes through child signal exits; the waiting shell marks
+            # only the timer signal as timeout, not a build exiting 137/143.
+            "sh", "-c", 'trap "exit 124" TERM; "$@" & wait "$!"', "loom-build",
             "buildctl-daemonless.sh",
             "build",
             "--progress",
@@ -138,8 +142,9 @@ def _build_script(
             )
         lines.extend(
             [
-                f'if {shlex.join(argv)} "$@" >{shlex.quote(logfile)} 2>&1; then',
-                f"  cat {shlex.quote(logfile)}",
+                f'echo "[loom-build] component={index} build started (budget={build_timeout_seconds}s)"',
+                f'if {shlex.join(argv)} "$@"; then',
+                f'  echo "[loom-build] component={index} build complete; scratch cleanup started"',
                 # The daemonless process has exited. Use the same user mapping to
                 # remove snapshots containing private directories owned by subuids;
                 # outer UID1000 alone cannot necessarily traverse them. The cleanup
@@ -148,8 +153,11 @@ def _build_script(
                 f"  TMPDIR=/scratch/cleanup rootlesskit rm -rf -- {_SCRATCH_DIRECTORIES}",
                 "  rm -rf -- /scratch/cleanup",
                 f"  mkdir -p {_SCRATCH_DIRECTORIES}",
+                f'  echo "[loom-build] component={index} scratch cleanup complete"',
                 "else",
-                f"  cat {shlex.quote(logfile)}; exit 1",
+                "  result=$?",
+                f'  echo "[loom-build] component={index} build failed (exit=$result)"',
+                "  case $result in 124) exit 124 ;; *) exit 1 ;; esac",
                 "fi",
             ]
         )
@@ -281,6 +289,10 @@ def render_task_image_job(
                 platform="linux/amd64" if architecture == "x86_64" else "linux/arm64",
                 max_processes=config.max_processes,
                 cache_enabled=config.cache_secret_name is not None,
+                build_timeout_seconds=(
+                    math.ceil(environment.build_timeout_sec)
+                    if environment else config.active_deadline_seconds
+                ),
                 build_args=environment.docker_build_args if environment else None,
                 build_target=environment.docker_build_target if environment else None,
             ),
@@ -406,11 +418,7 @@ def render_task_image_job(
             "backoffLimit": 0,
             "parallelism": 1,
             "completions": 1,
-            "activeDeadlineSeconds": min(
-                config.active_deadline_seconds, math.ceil(environment.build_timeout_sec)
-            )
-            if environment
-            else config.active_deadline_seconds,
+            "activeDeadlineSeconds": config.active_deadline_seconds,
             "template": {"metadata": {"labels": copy.deepcopy(labels)}, "spec": pod},
         },
     }

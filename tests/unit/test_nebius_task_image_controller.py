@@ -180,6 +180,27 @@ def fake_api():
     return api, clients
 
 
+async def test_running_build_log_is_read_only_when_explicitly_captured(monkeypatch):
+    api, clients = fake_api()
+    clients.job["status"] = {"active": 1}
+    calls = []
+
+    def read_log(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "cleanup started token=private-token " + "x" * 20000
+
+    monkeypatch.setattr(clients, "read_namespaced_pod_log", read_log, raising=False)
+    assert "builder_log" not in await api.observe("builds", "build")
+    assert not calls
+    observed = await api.observe("builds", "build", capture_logs=True)
+    assert len(calls) == 1
+    assert calls[0][1] == {
+        "container": "build", "tail_lines": 100, "limit_bytes": 16384, "_request_timeout": 20,
+    }
+    assert "private-token" not in observed["builder_log"]
+    assert len(observed["builder_log"]) <= 16384
+
+
 async def test_cleanup_waits_for_exact_job_and_orphan_pods_and_configmap_absence():
     api, clients = fake_api()
     cm = copy.deepcopy(clients.cm)
