@@ -468,6 +468,26 @@ class NativeTaskImageController:
             # The shared materialization clears its failure on the next claim.
             # Retain this attempt's own result through retries and cleanup.
             attempt.native_build = {**attempt.native_build, "failure_reason": reason, "failure_message": safe_message}
+            if reason == "build_cancelled":
+                # Evidence above uses the immutable attempt number. Only the
+                # charged retry budget is refundable; the epoch never goes back.
+                row.attempt_count -= 1
+                row.state = "queued"
+                row.next_attempt_at = None
+                row.finished_at = None
+                attempt.native_build = {**attempt.native_build, "retry_budget_refunded": True}
+
+    async def _lock_build(
+        self, session: AsyncSession, attempt_id: UUID,
+    ) -> tuple[TaskImageMaterialization | None, TaskImageMaterializationAttempt | None]:
+        # New catalog references hold the materialization before refunding old
+        # attempts. Use the same order during reconciliation and result capture.
+        row = await session.scalar(select(TaskImageMaterialization).join(
+            TaskImageMaterializationAttempt,
+            TaskImageMaterializationAttempt.materialization_id == TaskImageMaterialization.id,
+        ).where(TaskImageMaterializationAttempt.id == attempt_id).with_for_update(of=TaskImageMaterialization))
+        attempt = await session.get(TaskImageMaterializationAttempt, attempt_id, with_for_update=True)
+        return row, attempt
 
     async def _reconcile(self, attempt_id: UUID) -> None:
         # Serialize one attempt across actuator replicas without holding the
@@ -481,11 +501,10 @@ class NativeTaskImageController:
     async def _reconcile_locked(self, attempt_id: UUID) -> None:
         async with self.sessions() as session, session.begin():
             await session.execute(_CAPACITY_ADMISSION_LOCK)
-            attempt = await session.get(TaskImageMaterializationAttempt, attempt_id, with_for_update=True)
+            row, attempt = await self._lock_build(session, attempt_id)
             if attempt is None or not attempt.native_build or attempt.native_build.get("capacity_released_at"):
                 return
             native = dict(attempt.native_build)
-            row = await session.get(TaskImageMaterialization, attempt.materialization_id, with_for_update=True)
             owned = self._owned(row, attempt)
             demand = owned and await has_nebius_task_image_demand(session, materialization_id=attempt.materialization_id,
                                                                  pool_id=self.settings.pool_id)
@@ -568,9 +587,8 @@ class NativeTaskImageController:
     async def _finish_failure(self, attempt_id: UUID, reason: str, *, retryable: bool) -> None:
         async with self.sessions() as session, session.begin():
             await session.execute(_CAPACITY_ADMISSION_LOCK)
-            attempt = await session.get(TaskImageMaterializationAttempt, attempt_id, with_for_update=True)
+            row, attempt = await self._lock_build(session, attempt_id)
             assert attempt is not None
-            row = await session.get(TaskImageMaterialization, attempt.materialization_id, with_for_update=True)
             if self._owned(row, attempt):
                 assert row is not None
                 await self._fail(session, row, reason, retryable=retryable)
@@ -585,9 +603,8 @@ class NativeTaskImageController:
         terminal = bool(status.get("succeeded") or status.get("failed"))
         async with self.sessions() as session, session.begin():
             await session.execute(_CAPACITY_ADMISSION_LOCK)
-            attempt = await session.get(TaskImageMaterializationAttempt, attempt_id, with_for_update=True)
+            row, attempt = await self._lock_build(session, attempt_id)
             assert attempt is not None and attempt.native_build is not None
-            row = await session.get(TaskImageMaterialization, attempt.materialization_id, with_for_update=True)
             if not self._owned(row, attempt):
                 return  # Next DB scan cleans the old epoch without touching its successor.
             assert row is not None

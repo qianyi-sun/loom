@@ -18,6 +18,7 @@ from loom.db.schema import (
     Trial,
     TrialTaskImageMaterialization,
 )
+from loom.task_image_materialization import _reference_task_image_materializations
 from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
 from loom_control_plane.service_execution import (
     persist_execution_catalog,
@@ -250,6 +251,7 @@ async def test_cancel_only_last_consumer_and_hold_capacity_until_cleanup(control
     controller, sessions, team_id, kube = controller_setup
     image_id, first_id = await seed_image(sessions, team_id)
     async with sessions() as session, session.begin():
+        (await session.get(TaskImageMaterialization, image_id)).max_attempts = 1
         first = await session.get(Trial, first_id)
         second = Trial(id=uuid4(), team_id=team_id, task_id=first.task_id, batch_id=first.batch_id,
                        config={}, requires_caps={"worker_pool": "nebius-cpu"}, state="queued")
@@ -268,9 +270,63 @@ async def test_cancel_only_last_consumer_and_hold_capacity_until_cleanup(control
     await controller.run_once()
     row, attempts = await rows(sessions, image_id)
     assert row.failure_reason == "build_cancelled" and not attempts[0].native_build.get("capacity_released_at")
+    assert (row.state, row.attempt_count) == ("queued", 0)
+    await controller.run_once()
+    assert (await rows(sessions, image_id))[0].attempt_count == 0
     kube.allow_delete = True
     await controller.run_once()
     assert (await rows(sessions, image_id))[1][0].native_build["capacity_released_at"]
+    async with sessions() as session, session.begin():
+        first = await session.get(Trial, first_id)
+        successor = Trial(id=uuid4(), team_id=team_id, task_id=first.task_id, batch_id=first.batch_id,
+                          config={}, requires_caps={"worker_pool": "nebius-cpu"}, state="queued")
+        session.add(successor)
+        await session.flush()
+        session.add(TrialTaskImageMaterialization(trial_id=successor.id, materialization_id=image_id))
+        row = await session.get(TaskImageMaterialization, image_id, with_for_update=True)
+        await _reference_task_image_materializations(session, rows=[row])
+    await controller.run_once()
+    row, attempts = await rows(sessions, image_id)
+    assert (row.state, row.attempt_count, row.lease_epoch) == ("running", 1, 2)
+    assert [(a.attempt_number, a.lease_epoch) for a in attempts] == [(1, 1), (1, 2)]
+    kube.finish()
+    await controller.run_once()
+    assert (await rows(sessions, image_id))[0].state == "ready"
+
+
+@pytest.mark.parametrize("last_reason,already_refunded", [
+    ("build_cancelled", False), ("build_cancelled", True), ("build_deadline_exceeded", False),
+])
+async def test_new_reference_recovers_legacy_cancellations_without_resetting_failures(controller_setup, last_reason, already_refunded):
+    controller, sessions, team_id, kube = controller_setup
+    image_id, _ = await seed_image(sessions, team_id)
+    async with sessions() as session, session.begin():
+        row = await session.get(TaskImageMaterialization, image_id, with_for_update=True)
+        row.state, row.attempt_count, row.lease_epoch = ("queued" if already_refunded else "failed"), 3 - int(already_refunded), 5
+        row.failure_reason, row.finished_at = last_reason, datetime.now(UTC)
+        # Two cancellations belong to an older admin-reset budget. They must
+        # not erase the real timeout in the current three-attempt budget.
+        for epoch, number, reason in [(1, 1, "build_cancelled"), (2, 2, "build_cancelled"),
+                                      (3, 1, "build_deadline_exceeded"), (4, 2, "build_cancelled"),
+                                      (5, 3, last_reason)]:
+            session.add(TaskImageMaterializationAttempt(
+                materialization_id=image_id, attempt_number=number, lease_epoch=epoch,
+                builder_id=controller.builder_id, claimed_at=datetime.now(UTC),
+                native_build={"failure_reason": reason, "capacity_released_at": datetime.now(UTC).isoformat(),
+                              **({"retry_budget_refunded": True} if epoch == 5 and already_refunded else {})},
+            ))
+        await session.flush()
+        await _reference_task_image_materializations(session, rows=[row])
+        await _reference_task_image_materializations(session, rows=[row])
+        assert (row.state, row.attempt_count) == (("queued", 1) if last_reason == "build_cancelled" else ("failed", 3))
+    if last_reason == "build_cancelled":
+        await controller.run_once()
+        row, attempts = await rows(sessions, image_id)
+        assert (row.state, row.attempt_count, row.lease_epoch) == ("running", 2, 6)
+        assert [(a.attempt_number, a.lease_epoch) for a in attempts[:5]] == [(1, 1), (2, 2), (1, 3), (2, 4), (3, 5)]
+        kube.finish()
+        await controller.run_once()
+        assert (await rows(sessions, image_id))[0].state == "ready"
 
 
 async def test_stale_epoch_cleanup_does_not_mutate_successor(controller_setup):
