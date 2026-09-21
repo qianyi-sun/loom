@@ -38,7 +38,11 @@ from loom.application_runtime_login import (
     observe_application_runtime_login,
     restore_application_runtime_login,
 )
-from loom.application_schema_reference import ApplicationSchemaAclProfile, ApplicationSchemaRevision
+from loom.application_schema_reference import (
+    BUNDLED_APPLICATION_SCHEMA_REVISION,
+    ApplicationSchemaAclProfile,
+    ApplicationSchemaRevision,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,7 +107,7 @@ def complete_application_handoff_database(
     role_bindings: Mapping[str, str],
     password: str,
     schema_acl_profile: ApplicationSchemaAclProfile,
-    schema_revision: ApplicationSchemaRevision = "0151/guard_0035",
+    schema_revision: ApplicationSchemaRevision = BUNDLED_APPLICATION_SCHEMA_REVISION,
 ) -> ApplicationHandoffDatabaseOutcome:
     """Finish or reconcile transfer/reopen/login without creating another guard.
 

@@ -2,7 +2,7 @@
 
 The adapter owns request validation, mounted-input identity, process topology,
 bounded artifact extraction, and the final closed rollout document.  It never
-submits Slurm work, performs fan-out, fetches source/data, or uploads outputs.
+submits cluster work, performs fan-out, fetches source/data, or uploads outputs.
 """
 
 from __future__ import annotations
@@ -112,7 +112,7 @@ def _nfc(value: str, *, label: str, max_bytes: int = 512) -> str:
 
 class RolloutGpuV1(PipelineModel):
     logical_index: Annotated[int, Field(strict=True, ge=0, le=1)]
-    model: Literal["RTX 5080", "GB10"]
+    model: Annotated[str, Field(min_length=1)]
     roles: Annotated[list[Literal["sim", "vla"]], Field(min_length=1, max_length=2)]
 
     @field_validator("roles")
@@ -124,22 +124,17 @@ class RolloutGpuV1(PipelineModel):
 
 
 class RolloutRuntimeContractV1(PipelineModel):
-    platform: Literal["oldlab", "gb10"]
     devices: Annotated[list[RolloutGpuV1], Field(min_length=1, max_length=2)]
     system_env: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_topology(self) -> RolloutRuntimeContractV1:
-        expected = (
-            [
-                RolloutGpuV1(logical_index=0, model="RTX 5080", roles=["sim"]),
-                RolloutGpuV1(logical_index=1, model="RTX 5080", roles=["vla"]),
-            ]
-            if self.platform == "oldlab"
-            else [RolloutGpuV1(logical_index=0, model="GB10", roles=["sim", "vla"])]
-        )
-        if self.devices != expected:
-            raise ValueError("GPU count/model/roles disagree with the selected platform")
+        indexes = [device.logical_index for device in self.devices]
+        roles = [role for device in self.devices for role in device.roles]
+        if indexes != list(range(len(self.devices))) or sorted(roles) != ["sim", "vla"]:
+            raise ValueError("GPU indexes must be contiguous and roles assigned exactly once")
+        if "sim" not in self.devices[0].roles:
+            raise ValueError("simulator role must use logical GPU zero")
         if set(self.system_env) - _BASE_SYSTEM_ENV_KEYS:
             raise ValueError("runtime contract contains an unapproved system environment key")
         for key, value in self.system_env.items():
@@ -149,11 +144,11 @@ class RolloutRuntimeContractV1(PipelineModel):
 
     @property
     def vla_visible_devices(self) -> str:
-        return "1" if self.platform == "oldlab" else "0"
+        return str(next(device.logical_index for device in self.devices if "vla" in device.roles))
 
     @property
     def simulator_visible_devices(self) -> str:
-        return "0,1" if self.platform == "oldlab" else "0"
+        return ",".join(str(device.logical_index) for device in self.devices)
 
 
 @dataclass(frozen=True)

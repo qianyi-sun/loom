@@ -1,34 +1,18 @@
 {
   "accepted_pool_ids": [
-    "gb10",
-    "nebius-cpu",
-    "oldlab"
+    "nebius-cpu"
   ],
   "execution_class_id": "linux-amd64-cpu-pod-v1",
   "schema_version": "loom.service-workload-compatibility-report.v2",
-  "source_sha256": "5e8b212559964c85888dae9dd92a93046ad91c505e465349e216c672cdae3aac",
+  "source_sha256": "5a8cd7ab9673eba57eeab894ac3ec183f833f388f7355a525e92562b79185e73",
   "summary": {
     "pools": {
-      "gb10": {
-        "conversion_required": 0,
-        "runtime_admission_required": 69,
-        "supported": 0,
-        "total": 69,
-        "unsupported": 0
-      },
       "nebius-cpu": {
         "conversion_required": 66,
         "runtime_admission_required": 0,
         "supported": 0,
         "total": 69,
         "unsupported": 3
-      },
-      "oldlab": {
-        "conversion_required": 0,
-        "runtime_admission_required": 69,
-        "supported": 0,
-        "total": 69,
-        "unsupported": 0
       }
     },
     "total_workloads": 69
@@ -42,16 +26,6 @@
       "policy_pattern": "aime-*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -59,16 +33,6 @@
           "required_actions": [
             "materialize a digest-pinned image",
             "declare CPU, RAM, storage, and gateway/no-network policy"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -82,16 +46,6 @@
       "policy_pattern": "aime-*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -99,16 +53,6 @@
           "required_actions": [
             "materialize a digest-pinned image",
             "declare CPU, RAM, storage, and gateway/no-network policy"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -122,16 +66,6 @@
       "policy_pattern": "aime-*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -139,16 +73,6 @@
           "required_actions": [
             "materialize a digest-pinned image",
             "declare CPU, RAM, storage, and gateway/no-network policy"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -162,16 +86,6 @@
       "policy_pattern": "aime-*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -179,16 +93,6 @@
           "required_actions": [
             "materialize a digest-pinned image",
             "declare CPU, RAM, storage, and gateway/no-network policy"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -202,16 +106,6 @@
       "policy_pattern": "bfcl",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -219,16 +113,6 @@
           "required_actions": [
             "materialize a digest-pinned image",
             "declare CPU, RAM, storage, and gateway-only policy"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -242,16 +126,6 @@
       "policy_pattern": "browsecomp",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -260,16 +134,6 @@
             "define per-task egress policy",
             "pin the attempt image by digest",
             "declare bounded resources"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -283,16 +147,6 @@
       "policy_pattern": "gaia",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -301,16 +155,6 @@
             "map input files to immutable object artifacts",
             "define approved egress",
             "declare bounded resources"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -324,16 +168,6 @@
       "policy_pattern": "gpqa*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -341,16 +175,6 @@
           "required_actions": [
             "materialize a digest-pinned image",
             "declare CPU, RAM, storage, and gateway/no-network policy"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -364,16 +188,6 @@
       "policy_pattern": "gpqa*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -381,16 +195,6 @@
           "required_actions": [
             "materialize a digest-pinned image",
             "declare CPU, RAM, storage, and gateway/no-network policy"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -404,16 +208,6 @@
       "policy_pattern": "hendrycks-math",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -421,16 +215,6 @@
           "required_actions": [
             "materialize a digest-pinned image",
             "declare CPU, RAM, storage, and gateway/no-network policy"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -444,16 +228,6 @@
       "policy_pattern": "humaneval",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -461,16 +235,6 @@
           "required_actions": [
             "materialize a digest-pinned image",
             "declare CPU, RAM, storage, and no-network policy"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -484,16 +248,6 @@
       "policy_pattern": "livecodebench",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -501,16 +255,6 @@
           "required_actions": [
             "materialize a digest-pinned image",
             "declare CPU, RAM, storage, and no-network policy"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -524,16 +268,6 @@
       "policy_pattern": "math-500",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -541,16 +275,6 @@
           "required_actions": [
             "materialize a digest-pinned image",
             "declare CPU, RAM, storage, and gateway/no-network policy"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -564,16 +288,6 @@
       "policy_pattern": "mbpp",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -581,16 +295,6 @@
           "required_actions": [
             "materialize a digest-pinned image",
             "declare CPU, RAM, storage, and no-network policy"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -604,16 +308,6 @@
       "policy_pattern": "mmlu-pro",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -621,16 +315,6 @@
           "required_actions": [
             "materialize a digest-pinned image",
             "declare CPU, RAM, storage, and gateway/no-network policy"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -644,32 +328,12 @@
       "policy_pattern": "osworld",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "unsupported",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
           "reason": "Desktop/GUI host-specialized execution is outside the final CPU Pod service contract.",
           "required_actions": [
             "move to a separately accepted desktop execution product or remove from service support"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -683,16 +347,6 @@
       "policy_pattern": "skillflow*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -701,16 +355,6 @@
             "generate immutable per-task images",
             "scan every task requirement",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -724,16 +368,6 @@
       "policy_pattern": "skillflow*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -742,16 +376,6 @@
             "generate immutable per-task images",
             "scan every task requirement",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -765,16 +389,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -783,16 +397,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -806,16 +410,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -824,16 +418,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -847,16 +431,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -865,16 +439,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -888,16 +452,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -906,16 +460,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -929,16 +473,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -947,16 +481,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -970,16 +494,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -988,16 +502,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1011,16 +515,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1029,16 +523,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1052,16 +536,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1070,16 +544,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1093,16 +557,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1111,16 +565,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1134,16 +578,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1152,16 +586,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1175,16 +599,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1193,16 +607,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1216,16 +620,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1234,16 +628,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1257,16 +641,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1275,16 +649,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1298,16 +662,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1316,16 +670,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1339,16 +683,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1357,16 +691,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1380,16 +704,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1398,16 +712,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1421,16 +725,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1439,16 +733,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1462,16 +746,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1480,16 +754,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1503,16 +767,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1521,16 +775,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1544,16 +788,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1562,16 +796,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1585,16 +809,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1603,16 +817,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1626,16 +830,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1644,16 +838,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1667,16 +851,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1685,16 +859,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1708,16 +872,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1726,16 +880,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1749,16 +893,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1767,16 +901,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1790,16 +914,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1808,16 +922,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1831,16 +935,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1849,16 +943,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1872,16 +956,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1890,16 +964,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1913,16 +977,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1931,16 +985,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1954,16 +998,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -1972,16 +1006,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -1995,16 +1019,6 @@
       "policy_pattern": "skilllearnbench*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -2013,16 +1027,6 @@
             "generate immutable per-task images",
             "map verifier execution",
             "declare bounded resources and egress"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -2036,16 +1040,6 @@
       "policy_pattern": "swe-bench",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -2054,16 +1048,6 @@
             "replace mutable instance images",
             "remove Docker-dependent setup",
             "map verifier to an execution unit"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -2077,16 +1061,6 @@
       "policy_pattern": "swe-bench-multimodal",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -2095,16 +1069,6 @@
             "pin images and assets",
             "remove Docker-dependent setup",
             "map verifier to an execution unit"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -2118,16 +1082,6 @@
       "policy_pattern": "swe-bench-verified",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -2136,16 +1090,6 @@
             "replace mutable instance images",
             "remove Docker-dependent setup",
             "map verifier to an execution unit"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -2159,16 +1103,6 @@
       "policy_pattern": "tau2-bench",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -2177,16 +1111,6 @@
             "map services to sidecars",
             "define readiness and egress",
             "pin all images by digest"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -2200,16 +1124,6 @@
       "policy_pattern": "terminal-bench-2",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -2218,16 +1132,6 @@
             "materialize digest-pinned task images",
             "map native verifier to a separate execution where required",
             "scan every task requirement"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -2241,16 +1145,6 @@
       "policy_pattern": "webarena",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -2259,16 +1153,6 @@
             "map services to sidecars",
             "define readiness and egress",
             "pin all images by digest"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -2279,16 +1163,6 @@
       "kind": "dynamic_service_workload",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "operator",
@@ -2296,16 +1170,6 @@
           "required_actions": [
             "run strict workload admission for every task",
             "assign an owner for each rejected class"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -2315,16 +1179,6 @@
       "kind": "dynamic_service_workload",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "operator",
@@ -2333,16 +1187,6 @@
             "inherit the adapter policy",
             "re-run task/image compatibility and provenance checks"
           ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
         }
       ],
       "workload_id": "operator-adapter-remap"
@@ -2350,16 +1194,6 @@
     {
       "kind": "dynamic_service_workload",
       "pool_dispositions": [
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
         {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
@@ -2370,34 +1204,44 @@
             "reject unsupported capabilities before fan-out",
             "record per-task disposition"
           ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
         }
       ],
       "workload_id": "user-taskset-bundle"
     },
     {
+      "kind": "dynamic_service_workload",
+      "pool_dispositions": [
+        {
+          "disposition": "unsupported",
+          "logical_pool_id": "nebius-cpu",
+          "owner": "qianyi-sun",
+          "reason": "The shared-cluster GPU execution profile is retired; retained results remain readable.",
+          "required_actions": [
+            "use direct local Behavior execution; no hosted GPU replacement is supported"
+          ]
+        }
+      ],
+      "workload_id": "pipeline:behavior-sim-local-gateway@1"
+    },
+    {
+      "kind": "dynamic_service_workload",
+      "pool_dispositions": [
+        {
+          "disposition": "unsupported",
+          "logical_pool_id": "nebius-cpu",
+          "owner": "qianyi-sun",
+          "reason": "The shared-cluster GPU execution profile is retired; retained results remain readable.",
+          "required_actions": [
+            "use direct local Behavior execution; no hosted GPU replacement is supported"
+          ]
+        }
+      ],
+      "workload_id": "pipeline:behavior-sim-local-none@1"
+    },
+    {
       "kind": "pipeline_resource_profile",
       "policy_pattern": "behavior-export-io",
       "pool_dispositions": [
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
         {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
@@ -2407,16 +1251,6 @@
             "map the profile to WorkloadRequirementsV1",
             "materialize an immutable Pod image",
             "remove physical pool binding"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -2428,16 +1262,6 @@
       "policy_pattern": "behavior-offline-*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -2446,16 +1270,6 @@
             "map the profile to WorkloadRequirementsV1",
             "materialize an immutable Pod image",
             "remove physical pool binding"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -2467,16 +1281,6 @@
       "policy_pattern": "behavior-offline-*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -2486,16 +1290,6 @@
             "materialize an immutable Pod image",
             "remove physical pool binding"
           ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
         }
       ],
       "source": "config/resource-profiles.toml",
@@ -2503,92 +1297,8 @@
     },
     {
       "kind": "pipeline_resource_profile",
-      "policy_pattern": "behavior-sim-local-*",
-      "pool_dispositions": [
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
-          "disposition": "unsupported",
-          "logical_pool_id": "nebius-cpu",
-          "owner": "qianyi-sun",
-          "reason": "Behavior simulation profiles require NVIDIA GPUs and host runtime features outside the CPU-only service contract.",
-          "required_actions": [
-            "retain in a separately accepted GPU product or remove from service scheduling"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        }
-      ],
-      "source": "config/resource-profiles.toml",
-      "workload_id": "pipeline:behavior-sim-local-gateway@1"
-    },
-    {
-      "kind": "pipeline_resource_profile",
-      "policy_pattern": "behavior-sim-local-*",
-      "pool_dispositions": [
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
-          "disposition": "unsupported",
-          "logical_pool_id": "nebius-cpu",
-          "owner": "qianyi-sun",
-          "reason": "Behavior simulation profiles require NVIDIA GPUs and host runtime features outside the CPU-only service contract.",
-          "required_actions": [
-            "retain in a separately accepted GPU product or remove from service scheduling"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        }
-      ],
-      "source": "config/resource-profiles.toml",
-      "workload_id": "pipeline:behavior-sim-local-none@1"
-    },
-    {
-      "kind": "pipeline_resource_profile",
       "policy_pattern": "pipeline-test-cpu-*",
       "pool_dispositions": [
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
         {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
@@ -2598,16 +1308,6 @@
             "map the profile to WorkloadRequirementsV1",
             "bind an immutable image runtime contract",
             "remove physical pool binding"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -2619,16 +1319,6 @@
       "policy_pattern": "pipeline-test-cpu-*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -2637,16 +1327,6 @@
             "map the profile to WorkloadRequirementsV1",
             "bind an immutable image runtime contract",
             "remove physical pool binding"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -2658,16 +1338,6 @@
       "policy_pattern": "terminalgen-*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -2676,16 +1346,6 @@
             "map the profile to WorkloadRequirementsV1",
             "replace host features with Pod-native execution",
             "remove physical pool binding"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -2697,16 +1357,6 @@
       "policy_pattern": "terminalgen-*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -2715,16 +1365,6 @@
             "map the profile to WorkloadRequirementsV1",
             "replace host features with Pod-native execution",
             "remove physical pool binding"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -2736,16 +1376,6 @@
       "policy_pattern": "terminalgen-*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -2754,16 +1384,6 @@
             "map the profile to WorkloadRequirementsV1",
             "replace host features with Pod-native execution",
             "remove physical pool binding"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],
@@ -2775,16 +1395,6 @@
       "policy_pattern": "terminalgen-*",
       "pool_dispositions": [
         {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "gb10",
-          "owner": "qianyi-sun",
-          "reason": "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
-          ]
-        },
-        {
           "disposition": "conversion_required",
           "logical_pool_id": "nebius-cpu",
           "owner": "qianyi-sun",
@@ -2793,16 +1403,6 @@
             "map the profile to WorkloadRequirementsV1",
             "replace host features with Pod-native execution",
             "remove physical pool binding"
-          ]
-        },
-        {
-          "disposition": "runtime_admission_required",
-          "logical_pool_id": "oldlab",
-          "owner": "qianyi-sun",
-          "reason": "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task.",
-          "required_actions": [
-            "project the exact TaskConfig into legacy claim requirements",
-            "require matching fresh executable worker evidence before claim"
           ]
         }
       ],

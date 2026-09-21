@@ -7,8 +7,11 @@ import pytest
 import scripts.build_application_schema_reference as builder
 
 from loom.application_schema_inventory import ApplicationSchemaInventory, ApplicationSchemaObject
-from loom.application_schema_reference import application_schema_reference
-from loom.dev_instance import derive_identity
+from loom.application_schema_provisioning import derive_identity
+from loom.application_schema_reference import (
+    APPLICATION_SCHEMA_REVISIONS,
+    application_schema_reference,
+)
 
 
 @pytest.mark.asyncio
@@ -76,11 +79,11 @@ async def test_builder_emits_all_fixed_major_profile_pairs(monkeypatch) -> None:
     monkeypatch.setattr(builder, "build_application_schema_reference", build)
     result = await builder._build_profiles()
     assert set(result) == {"16", "17"}
-    assert build.await_count == 84
+    assert build.await_count == 2 * 6 * len(APPLICATION_SCHEMA_REVISIONS)
     for major in (16, 17):
         profiles = {"legacy-owner", "sealed-owner", "staging-readonly-legacy-owner", "staging-readonly-sealed-owner", "cnpg-staging-legacy-owner", "cnpg-staging-sealed-owner"}
-        assert set(result[str(major)]) == {"0151/guard_0035", "0150/guard_0035", "0149/guard_0035", "0148/guard_0035", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"}
-        for revision in ("0151/guard_0035", "0150/guard_0035", "0149/guard_0035", "0148/guard_0035", "0147/guard_0035", "0142/guard_0035", "0134/guard_0030"):
+        assert set(result[str(major)]) == set(APPLICATION_SCHEMA_REVISIONS)
+        for revision in APPLICATION_SCHEMA_REVISIONS:
             assert set(result[str(major)][revision]) == profiles
             for profile in profiles:
                 build.assert_any_await(postgres_major=major, profile=profile, revision=revision)
@@ -98,7 +101,7 @@ async def test_reference_cancellation_reaps_real_migration_child_before_database
     database._converge_roles = AsyncMock()
     database.destroy = AsyncMock()
     monkeypatch.setattr(builder, "PsycopgSharedFixtureSqlExecutor", lambda _url: bootstrap)
-    monkeypatch.setattr(builder, "PsycopgPersonalDevCapacityDatabase", lambda _url: database)
+    monkeypatch.setattr(builder, "ReferenceDatabase", lambda _url: database)
     create_process = asyncio.create_subprocess_exec
     child = None
     ready = asyncio.Event()

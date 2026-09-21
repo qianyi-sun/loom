@@ -399,7 +399,7 @@ def _amd64_asset_issues(
             hint=(
                 "Select an arm64 artifact based on target architecture, use a "
                 "multi-arch package manager source, or mark the task x86_64-only "
-                "instead of scheduling it on GB10/ARM64 workers."
+                "instead of treating it as an ARM64-compatible bundle."
             ),
             evidence={"target_arch": "arm64", "asset": asset},
         )

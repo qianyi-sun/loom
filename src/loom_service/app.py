@@ -12,14 +12,8 @@ import asyncio
 import contextlib
 import os
 import re
-import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any
-from urllib.parse import urlsplit
-from uuid import UUID
 
 import httpx
 from fastapi import FastAPI, Request
@@ -38,15 +32,8 @@ from loom.admin_secret import (
 )
 from loom.data_lifecycle_capacity import StagingAdmissionError
 from loom.db.schema_startup import assert_schema_at_head
-from loom.personal_dev_activation import load_personal_dev_activation_verifier
-from loom.personal_dev_candidate import PersonalDevCandidateLimits
-from loom.personal_dev_environment import PersonalDevLifecycleLimits
-from loom.personal_dev_native_builder_protocol import (
-    NATIVE_BUILDER_MAX_CONCURRENCY,
-    NATIVE_BUILDER_PROTOCOL_VERSION,
-    load_personal_dev_native_builder_verifier,
-)
 from loom.security.secret_store import assert_existing_secrets_decryptable
+from loom.service_execution_backend import local_execution_enabled
 from loom.service_execution_materialization import load_service_execution_runtime_profile
 from loom.startup_retry import retry_startup_dependency
 from loom.system_identities import assert_pipeline_controller_identity
@@ -55,33 +42,11 @@ from loom.workload_trust import WorkloadTrustContract
 from loom_service.batch_runner import run_loop as batch_run_loop
 from loom_service.behavior_pipeline_adapter import install_behavior_pipeline_public_adapter
 from loom_service.config import LoomServiceSettings
-from loom_service.dev_instance_runtime import build_personal_dev_preparation_runtime
 from loom_service.metrics import (
     HTTP_REQUEST_LATENCY_SEC,
     HTTP_REQUESTS_TOTAL,
 )
-from loom_service.personal_dev_build_admission import build_personal_build_admission_runtime
-from loom_service.personal_dev_build_management import build_personal_build_management_runtime
-from loom_service.personal_dev_builder import (
-    build_personal_dev_builder_runtime,
-    personal_dev_builder_run_loop,
-)
-from loom_service.personal_dev_candidate_gc import (
-    build_personal_dev_artifact_collector,
-    personal_dev_artifact_gc_run_loop,
-)
-from loom_service.personal_dev_lifecycle import (
-    build_personal_dev_capacity_runtime,
-    personal_dev_reconcile_run_loop,
-)
-from loom_service.personal_dev_membership import build_personal_dev_membership_runtime
 from loom_service.pipeline_control_bindings import SqlPipelineRecipeBindingResolver
-from loom_service.pipeline_stage1_smoke_authority import (
-    build_stage1_candidate_authority_from_environment,
-)
-from loom_service.pipeline_stage1_smoke_service import (
-    load_stage1_smoke_signature_verifier,
-)
 from loom_service.routes import (
     admin_audit,
     agents,
@@ -91,19 +56,13 @@ from loom_service.routes import (
     batches,
     benchmarks,
     delivery_exports,
-    dev_instances,
     health,
     invites,
     local_servers,
     models,
     monitor,
     overview,
-    personal_dev_build_admission,
-    personal_dev_candidates,
-    personal_dev_native_builder,
     pipeline,
-    pipeline_stage1_smoke,
-    pipeline_stage1_smoke_prepare,
     provider_connections,
     rate_cards,
     run_library,
@@ -122,10 +81,7 @@ from loom_service.session_auth import (
     is_staging_admin_browser_session,
     staging_admin_browser_request_allowed,
 )
-from loom_service.storage import (
-    configure_personal_dev_native_builder_storage,
-    create_minio_client,
-)
+from loom_service.storage import create_minio_client
 from loom_service.taskset_gc import run_loop as taskset_gc_run_loop
 from loom_service.taskset_materializer import run_loop as taskset_materializer_run_loop
 
@@ -161,126 +117,8 @@ _NATIVE_BUILDER_IMAGE = re.compile(
 )
 
 
-def validate_personal_dev_native_builder_settings(
-    settings: LoomServiceSettings,
-) -> None:
-    """Reject incomplete or relaxed native-provider startup authority."""
-
-    if not settings.personal_dev_native_builder_enabled:
-        return
-    if not settings.dev_instances_enabled or not settings.personal_dev_builder_enabled:
-        raise RuntimeError(
-            "personal-dev native builder requires personal development and its builder"
-        )
-    configured_origin = settings.minio_public_endpoint
-    value = str(configured_origin) if configured_origin is not None else ""
-    try:
-        parsed = urlsplit(value)
-        port = parsed.port
-    except ValueError:
-        parsed = None
-        port = None
-    if (
-        parsed is None
-        or parsed.scheme != "https"
-        or parsed.hostname is None
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path not in {"", "/"}
-        or parsed.query
-        or parsed.fragment
-        or (port is not None and not 1 <= port <= 65535)
-    ):
-        raise RuntimeError(
-            "personal-dev native builder public object-store origin is invalid"
-        )
-    if settings.personal_dev_native_builder_public_key_file is None:
-        raise RuntimeError("personal-dev native builder public key file is required")
-    if (
-        _NATIVE_BUILDER_DIGEST.fullmatch(
-            settings.personal_dev_native_builder_public_key_sha256
-        )
-        is None
-        or settings.personal_dev_native_builder_public_key_sha256 == "0" * 64
-    ):
-        raise RuntimeError("personal-dev native builder public key digest is invalid")
-    try:
-        instance_id = UUID(settings.personal_dev_native_builder_agent_instance_id)
-    except (AttributeError, TypeError, ValueError):
-        raise RuntimeError("personal-dev native builder agent instance is invalid") from None
-    if (
-        instance_id.int == 0
-        or str(instance_id) != settings.personal_dev_native_builder_agent_instance_id
-    ):
-        raise RuntimeError("personal-dev native builder agent instance is invalid")
-    if (
-        _NATIVE_BUILDER_KEY_ID.fullmatch(
-            settings.personal_dev_native_builder_agent_key_id
-        )
-        is None
-    ):
-        raise RuntimeError("personal-dev native builder agent key is invalid")
-    image_bindings = (
-        (
-            settings.personal_dev_native_builder_agent_image,
-            "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:",
-            "agent",
-        ),
-        (
-            settings.personal_dev_builder_image,
-            "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:",
-            "builder",
-        ),
-    )
-    for image, prefix, label in image_bindings:
-        if _NATIVE_BUILDER_IMAGE.fullmatch(image) is None or not image.startswith(prefix):
-            raise RuntimeError(
-                f"personal-dev native builder {label} image is invalid"
-            )
-    if (
-        _NATIVE_BUILDER_DIGEST.fullmatch(
-            settings.personal_dev_native_builder_runtime_profile_sha256
-        )
-        is None
-        or settings.personal_dev_native_builder_runtime_profile_sha256 == "0" * 64
-    ):
-        raise RuntimeError("personal-dev native builder runtime profile is invalid")
-    if (
-        settings.personal_dev_native_builder_protocol_version
-        != NATIVE_BUILDER_PROTOCOL_VERSION
-    ):
-        raise RuntimeError("personal-dev native builder protocol is invalid")
-    if not 15 <= settings.personal_dev_native_builder_freshness_sec <= 300:
-        raise RuntimeError("personal-dev native builder freshness is invalid")
-    if (
-        settings.personal_dev_native_builder_max_concurrency
-        != NATIVE_BUILDER_MAX_CONCURRENCY
-    ):
-        raise RuntimeError("personal-dev native builder concurrency is invalid")
-    if not 0.1 <= settings.personal_dev_native_builder_poll_interval_sec <= 30:
-        raise RuntimeError("personal-dev native builder poll interval is invalid")
-    if settings.personal_dev_builder_lease_sec <= 3600 + 60:
-        raise RuntimeError("personal-dev builder lease must outlive the sandbox deadline")
 
 
-def configure_personal_dev_native_builder_verifier(
-    app_state: Any,
-    settings: LoomServiceSettings,
-) -> None:
-    """Install only the release-bound public verification authority."""
-
-    if not settings.personal_dev_native_builder_enabled:
-        return
-    key_file = settings.personal_dev_native_builder_public_key_file
-    if key_file is None:  # pragma: no cover - validated before lifespan entry
-        raise RuntimeError("personal-dev native builder public key file is required")
-    verifier = load_personal_dev_native_builder_verifier(
-        key_file,
-        key_id=settings.personal_dev_native_builder_agent_key_id,
-        expected_sha256=settings.personal_dev_native_builder_public_key_sha256,
-        max_age_seconds=settings.personal_dev_native_builder_freshness_sec,
-    )
-    app_state.personal_dev_native_builder_verifier = verifier
 
 
 async def _assert_secret_store_startup(
@@ -301,41 +139,6 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     # Fail deployment health immediately rather than discovering a malformed
     # automatic-execution profile on the first user Batch.
     load_service_execution_runtime_profile(settings.service_execution_runtime_profile_json)
-    validate_personal_dev_native_builder_settings(settings)
-    if settings.pipeline_stage1_smoke_signature_max_age_sec <= 0:
-        raise RuntimeError("Pipeline Stage 1 smoke signature max age must be positive")
-    personal_dev_limits: PersonalDevLifecycleLimits | None = None
-    personal_dev_candidate_limits: PersonalDevCandidateLimits | None = None
-    if settings.dev_instances_enabled:
-        personal_dev_candidate_limits = PersonalDevCandidateLimits(
-            per_owner_retained_candidates=(settings.personal_dev_candidate_retained_count_limit),
-            per_owner_retained_archive_bytes=(settings.personal_dev_candidate_retained_bytes_limit),
-            global_active_builds=settings.personal_dev_builder_global_concurrency,
-            per_owner_active_builds=(settings.personal_dev_builder_per_owner_concurrency),
-        )
-        personal_dev_limits = PersonalDevLifecycleLimits(
-            global_live_instances=settings.personal_dev_global_live_instance_limit,
-            per_owner_live_instances=settings.personal_dev_per_owner_live_instance_limit,
-            per_owner_aggregate_min_slots=(settings.personal_dev_per_owner_aggregate_min_slots),
-            per_owner_aggregate_max_slots=(settings.personal_dev_per_owner_aggregate_max_slots),
-        )
-        if settings.personal_dev_reconciler_lease_sec <= 0:
-            raise RuntimeError("personal-dev reconciler lease must be positive")
-        if settings.personal_dev_reconciler_poll_interval_sec <= 0:
-            raise RuntimeError("personal-dev reconciler poll interval must be positive")
-        if settings.personal_dev_activation_ack_max_age_sec <= 0:
-            raise RuntimeError("personal-dev activation acknowledgement max age must be positive")
-        if not 300 <= settings.personal_dev_builder_lease_sec <= 7200:
-            raise RuntimeError("personal-dev builder lease must be between 300 and 7200 seconds")
-        if settings.personal_dev_builder_poll_interval_sec <= 0:
-            raise RuntimeError("personal-dev builder poll interval must be positive")
-        if settings.personal_dev_candidate_gc_retention_sec < 0:
-            raise RuntimeError("personal-dev artifact GC retention must be non-negative")
-        if not 60 <= settings.personal_dev_candidate_gc_lease_sec <= 7200:
-            raise RuntimeError("personal-dev artifact GC lease must be between 60 and 7200 seconds")
-        if settings.personal_dev_candidate_gc_poll_interval_sec <= 0:
-            raise RuntimeError("personal-dev artifact GC poll interval must be positive")
-
     @asynccontextmanager
     async def _service_lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Validate deterministic URL shape before opening database, mTLS, or
@@ -358,116 +161,12 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             lambda: _assert_secret_store_startup(session_factory),
             operation_name="service secret-store startup validation",
         )
-        build_admission = await build_personal_build_admission_runtime(settings)
-        app.state._owned_personal_dev_build_admission = build_admission
-        build_management = await build_personal_build_management_runtime(settings, admission=build_admission)
-        app.state._owned_personal_dev_build_management = build_management
-        if build_admission is not None:
-            app.state.personal_dev_build_admission_sessions = build_admission.sessions
-            app.state.personal_dev_build_admission_verifier = build_admission.verifier
-            app.state.personal_dev_build_admission_mode = build_admission.mode
         admin_secret_verifier = _load_admin_secret_verifier(settings)
-        if settings.pipeline_stage1_smoke_public_key_file is not None:
-            app.state.pipeline_stage1_smoke_verifier = load_stage1_smoke_signature_verifier(
-                settings.pipeline_stage1_smoke_public_key_file,
-                key_id=settings.pipeline_stage1_smoke_key_id,
-                max_age_seconds=(settings.pipeline_stage1_smoke_signature_max_age_sec),
-            )
-
         minio_client = create_minio_client(
             settings,
             endpoint_url=settings.minio_endpoint,
         )
         app.state._owned_service_minio_client = minio_client
-        if build_admission is not None and build_admission.mode in {"native-source", "native-artifacts"}:
-            from loom_capacity_build_guard.source_reader import BuildSourceReader
-
-            app.state.personal_dev_build_source_reader = BuildSourceReader(
-                session_factory=build_admission.sessions, object_store=minio_client)
-            app.state._owned_personal_dev_build_source_reader = app.state.personal_dev_build_source_reader
-        if build_admission is not None and build_admission.mode == "native-artifacts":
-            from loom_capacity_build_guard.artifact_writer import BuildArtifactWriter
-
-            app.state.personal_dev_build_artifact_writer = BuildArtifactWriter(
-                session_factory=build_admission.sessions, object_store=minio_client,
-                max_artifact_bytes=settings.personal_dev_builder_max_artifact_bytes)
-            app.state._owned_personal_dev_build_artifact_writer = app.state.personal_dev_build_artifact_writer
-        personal_dev_task: asyncio.Task[None] | None = None
-        personal_dev_builder_task: asyncio.Task[None] | None = None
-        personal_dev_artifact_gc_task: asyncio.Task[None] | None = None
-        personal_dev_runtime = None
-        personal_dev_builder_runtime = None
-        personal_dev_artifact_collector = None
-        personal_dev_capacity_runtime = None
-        if personal_dev_limits is not None:
-            personal_dev_capacity_runtime = (
-                await build_personal_dev_membership_runtime(settings)
-                if settings.personal_dev_runtime_mode == "membership-v1"
-                else build_personal_dev_capacity_runtime(settings)
-            )
-            if personal_dev_capacity_runtime is None:  # pragma: no cover - guarded by limits
-                raise RuntimeError("personal-dev capacity runtime is unavailable")
-            app.state._owned_personal_dev_capacity_projector = (
-                personal_dev_capacity_runtime.projector
-            )
-            app.state._owned_personal_dev_membership_clients = getattr(
-                personal_dev_capacity_runtime, "owned_membership_clients", ()
-            )
-            membership = getattr(personal_dev_capacity_runtime, "membership", None)
-            if membership is not None:
-                # Do not assert admission at startup: historical recovery and
-                # authenticated release must survive an expired admission window.
-                app.state.personal_dev_membership_admission = membership.admission
-            if settings.personal_dev_activation_public_key_file is None:
-                raise RuntimeError(
-                    "LOOM_SVC_PERSONAL_DEV_ACTIVATION_PUBLIC_KEY_FILE is required "
-                    "when dev instances are enabled",
-                )
-            app.state.personal_dev_activation_verifier = load_personal_dev_activation_verifier(
-                settings.personal_dev_activation_public_key_file,
-                key_id=settings.personal_dev_activation_key_id,
-                max_age_seconds=settings.personal_dev_activation_ack_max_age_sec,
-                expected_sha256=(
-                    settings.personal_dev_activation_public_key_sha256
-                    if settings.personal_dev_builder_enabled
-                    else None
-                ),
-            )
-            personal_dev_runtime = build_personal_dev_preparation_runtime(
-                settings,
-                minio_client=minio_client,
-            )
-            if personal_dev_runtime is None:  # pragma: no cover - guarded by limits
-                raise RuntimeError("personal-dev preparation runtime is unavailable")
-            personal_dev_builder_runtime = build_personal_dev_builder_runtime(
-                settings,
-                minio_client=minio_client,
-                session_factory=session_factory,
-            )
-            personal_dev_artifact_collector = build_personal_dev_artifact_collector(
-                settings,
-                minio_client=minio_client,
-            )
-            acceptance_interlock = getattr(
-                personal_dev_capacity_runtime,
-                "acceptance_interlock",
-                None,
-            )
-            if acceptance_interlock is not None:
-                await acceptance_interlock.assert_ready(
-                    now=datetime.now(UTC)
-                )
-                app.state.personal_dev_acceptance_interlock = acceptance_interlock
-            operational_interlock = getattr(
-                personal_dev_capacity_runtime,
-                "operational_interlock",
-                None,
-            )
-            if operational_interlock is not None:
-                await operational_interlock.assert_ready(
-                    now=datetime.now(UTC)
-                )
-                app.state.personal_dev_operational_interlock = operational_interlock
         http_client = httpx.AsyncClient(
             base_url=str(settings.control_plane_url),
             timeout=10.0,
@@ -495,71 +194,10 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         app.state.pipeline_judge_profile_reader = pipeline_binding_resolver
         app.state.admin_secret_verifier = admin_secret_verifier
         app.state.minio_client = minio_client
-        configure_personal_dev_native_builder_verifier(app.state, settings)
-        configure_personal_dev_native_builder_storage(app.state, settings)
         app.state.http_client = http_client
         app.state.gateway_client = gateway_client
-        app.state.personal_dev_candidate_limits = personal_dev_candidate_limits
-        app.state.personal_dev_builder_available = personal_dev_builder_runtime is not None
-        install_behavior_pipeline_public_adapter(app=app, settings=settings)
-        if build_management is not None:
-            build_management.start()
-        if personal_dev_capacity_runtime is not None:
-            app.state.personal_dev_capacity_status_reader = (
-                personal_dev_capacity_runtime.status_reader
-            )
-        if personal_dev_builder_runtime is not None and personal_dev_candidate_limits is not None:
-            personal_dev_builder_task = asyncio.create_task(
-                personal_dev_builder_run_loop(
-                    session_factory=session_factory,
-                    source=personal_dev_builder_runtime.source,
-                    executor=personal_dev_builder_runtime.executor,
-                    limits=personal_dev_candidate_limits,
-                    builder_id=f"loom-service:{socket.gethostname()}:{os.getpid()}",
-                    lease_seconds=settings.personal_dev_builder_lease_sec,
-                    registry_prefix=settings.personal_dev_builder_registry_prefix,
-                    poll_interval_seconds=settings.personal_dev_builder_poll_interval_sec,
-                ),
-                name="loom-svc-personal-dev-builder",
-            )
-            app.state.personal_dev_builder_task = personal_dev_builder_task
-        if (
-            personal_dev_artifact_collector is not None
-            and personal_dev_candidate_limits is not None
-        ):
-            personal_dev_artifact_gc_task = asyncio.create_task(
-                personal_dev_artifact_gc_run_loop(
-                    session_factory=session_factory,
-                    collector=personal_dev_artifact_collector,
-                    limits=personal_dev_candidate_limits,
-                    collector_id=f"loom-service:{socket.gethostname()}:{os.getpid()}",
-                    retention_seconds=settings.personal_dev_candidate_gc_retention_sec,
-                    lease_seconds=settings.personal_dev_candidate_gc_lease_sec,
-                    poll_interval_seconds=(settings.personal_dev_candidate_gc_poll_interval_sec),
-                ),
-                name="loom-svc-personal-dev-artifact-gc",
-            )
-            app.state.personal_dev_artifact_gc_task = personal_dev_artifact_gc_task
-        if (
-            personal_dev_runtime is not None
-            and personal_dev_capacity_runtime is not None
-            and personal_dev_limits is not None
-        ):
-            personal_dev_task = asyncio.create_task(
-                personal_dev_reconcile_run_loop(
-                    session_factory=session_factory,
-                    executor=personal_dev_runtime,
-                    capacity_installer=personal_dev_capacity_runtime.installer,
-                    capacity_projector=personal_dev_capacity_runtime.projector,
-                    limits=personal_dev_limits,
-                    reconciler_id=f"loom-service:{socket.gethostname()}:{os.getpid()}",
-                    lease_seconds=settings.personal_dev_reconciler_lease_sec,
-                    poll_interval_seconds=(settings.personal_dev_reconciler_poll_interval_sec),
-                    membership=getattr(personal_dev_capacity_runtime, "membership", None),
-                ),
-                name="loom-svc-personal-dev-reconciler",
-            )
-            app.state.personal_dev_reconciler_task = personal_dev_task
+        if local_execution_enabled():
+            install_behavior_pipeline_public_adapter(app=app, settings=settings)
 
         # Plan 19: batch runner background task. Picks up
         # submitted/running batches on each poll, fans out trial
@@ -629,27 +267,12 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             runner_task.cancel()
             materializer_task.cancel()
             gc_task.cancel()
-            if personal_dev_task is not None:
-                personal_dev_task.cancel()
-            if personal_dev_builder_task is not None:
-                personal_dev_builder_task.cancel()
-            if personal_dev_artifact_gc_task is not None:
-                personal_dev_artifact_gc_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await runner_task
             with contextlib.suppress(asyncio.CancelledError):
                 await materializer_task
             with contextlib.suppress(asyncio.CancelledError):
                 await gc_task
-            if personal_dev_task is not None:
-                with contextlib.suppress(asyncio.CancelledError):
-                    await personal_dev_task
-            if personal_dev_builder_task is not None:
-                with contextlib.suppress(asyncio.CancelledError):
-                    await personal_dev_builder_task
-            if personal_dev_artifact_gc_task is not None:
-                with contextlib.suppress(asyncio.CancelledError):
-                    await personal_dev_artifact_gc_task
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -661,19 +284,9 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         finally:
             # SQLAlchemy engines can reconnect after dispose. Remove admission
             # access before closing its resources, including failed startup.
-            app.state.personal_dev_build_admission_sessions = None
-            app.state.personal_dev_build_admission_verifier = None
-            app.state.personal_dev_build_admission_mode = None
-            app.state.personal_dev_build_source_reader = None
-            app.state.personal_dev_build_artifact_writer = None
             for attribute in (
-                "_owned_personal_dev_build_artifact_writer",
-                "_owned_personal_dev_build_source_reader",
-                "_owned_personal_dev_build_management",
-                "_owned_personal_dev_build_admission",
                 "_owned_service_gateway_client",
                 "_owned_service_http_client",
-                "_owned_personal_dev_capacity_projector",
             ):
                 client = getattr(app.state, attribute, None)
                 close = getattr(client, "aclose", None)
@@ -681,22 +294,10 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                     with contextlib.suppress(Exception):
                         await close()
             minio = getattr(app.state, "_owned_service_minio_client", None)
-            for client in getattr(app.state, "_owned_personal_dev_membership_clients", ()):
-                with contextlib.suppress(Exception):
-                    await client.aclose()
             close_minio = getattr(minio, "close", None)
             if callable(close_minio):
                 with contextlib.suppress(Exception):
                     close_minio()
-            native_presign = getattr(
-                app.state,
-                "_owned_personal_dev_native_builder_presign_client",
-                None,
-            )
-            close_native_presign = getattr(native_presign, "close", None)
-            if callable(close_native_presign):
-                with contextlib.suppress(Exception):
-                    close_native_presign()
             owned_engine = getattr(app.state, "_owned_service_engine", None)
             dispose = getattr(owned_engine, "dispose", None)
             if callable(dispose):
@@ -704,24 +305,6 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                     await dispose()
 
     app = FastAPI(title="Loom Service", version="0.0.1", lifespan=lifespan)
-    app.state.personal_dev_builder_available = False
-    app.state.personal_dev_runtime_mode = settings.personal_dev_runtime_mode
-    app.state.personal_dev_acceptance_required = (
-        settings.dev_instances_enabled
-        and settings.personal_dev_builder_enabled
-        and settings.personal_dev_runtime_mode == "acceptance"
-    )
-    app.state.personal_dev_enablement_required = (
-        settings.dev_instances_enabled
-        and settings.personal_dev_builder_enabled
-        and settings.personal_dev_runtime_mode in {"acceptance", "operational", "membership-v1"}
-    )
-    stage1_candidate_authority = build_stage1_candidate_authority_from_environment(
-        repo_root=Path(__file__).resolve().parents[2]
-    )
-    if stage1_candidate_authority is not None:
-        app.state.pipeline_stage1_candidate_authority = stage1_candidate_authority
-
     @app.exception_handler(StagingAdmissionError)
     async def _staging_admission_error(
         _request: Request,
@@ -773,11 +356,6 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(terminalgen_corpora.router, prefix="/api/v1")
     app.include_router(batches.router, prefix="/api/v1")
     app.include_router(delivery_exports.router, prefix="/api/v1")
-    app.include_router(dev_instances.router, prefix="/api/v1")
-    app.include_router(dev_instances.internal_router, prefix="/api/v1/internal")
-    app.include_router(personal_dev_candidates.router, prefix="/api/v1")
-    app.include_router(personal_dev_native_builder.router, prefix="/api/v1/internal")
-    app.include_router(personal_dev_build_admission.router, prefix="/api/v1/internal")
     app.include_router(run_library.router, prefix="/api/v1")
     app.include_router(rate_cards.router, prefix="/api/v1")
     app.include_router(admin_audit.router, prefix="/api/v1")
@@ -789,8 +367,8 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(monitor.router, prefix="/api/v1")
     app.include_router(overview.router, prefix="/api/v1")
     app.include_router(pipeline.router, prefix="/api/v1")
-    app.include_router(pipeline_stage1_smoke.router, prefix="/api/v1/internal")
-    app.include_router(pipeline_stage1_smoke_prepare.router, prefix="/api/v1/internal")
+    if local_execution_enabled():
+        app.include_router(pipeline.local_execution_router, prefix="/api/v1")
     app.include_router(backends.router, prefix="/api/v1")
     app.include_router(local_servers.router, prefix="/api/v1")
     app.include_router(provider_connections.router, prefix="/api/v1")

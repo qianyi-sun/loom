@@ -21,16 +21,10 @@ ci_ignored_paths = [
   "src/loom/pipeline/behavior_*.py",
   "src/loom/pipeline/renderers/behavior_*.py",
   "src/loom/pipeline/renderers/schemas/behavior.*.json",
-  "src/loom/pipeline/stage1_smoke.py",
-  "src/loom_pipeline_orchestrator/stage1_runtime.py",
   "src/loom_service/behavior_pipeline_adapter.py",
-  "src/loom_service/pipeline_stage1_smoke_*.py",
-  "src/loom_service/routes/pipeline_stage1_smoke*.py",
   "tests/integration/test_behavior_pipeline_inputs.py",
-  "tests/integration/test_pipeline_stage1_smoke_authority.py",
   "tests/integrations/behavior/**",
   "tests/unit/pipeline/test_behavior_input_import.py",
-  "tests/unit/test_pipeline_stage1_*.py",
   "third_party/behavior-stage1/**",
   "web/e2e/behavior-rollout-*.test.ts",
   "web/src/__tests__/components/artifacts/BehaviorRollout*.test.tsx",
@@ -41,196 +35,61 @@ ci_ignored_paths = [
 # Nebius uses deploy_nebius_platform, not the historical rollout/operator chain.
 compatibility_test_paths = [
   # Historical host/rollout deployment, not deploy_nebius_platform.
-  "tests/loom_cli/rollout/**/*.py",
   "tests/loom_cli/test_cluster_*.py",
-  "tests/loom_cli/test_environment_state.py",
-  "tests/loom_cli/test_rollout_lock*.py",
   "tests/loom_cli/test_staging_*.py",
-  "tests/cluster/test_staging_k3s_render_contract.py",
   "tests/ops/test_staging_*.py",
-  "tests/ops/test_bootstrap_staging_*.py",
   "tests/unit/test_staging_*.py",
   "tests/integration/test_staging_admin_browser_session.py",
-  "tests/**/test_*gb10*.py",
-  "tests/**/test_*oldlab*.py",
   "tests/**/test_*slurm*.py",
-  "tests/integration/test_pipeline_gpu_container_preflight.py",
-  "tests/integration/test_pipeline_gpu_claim.py",
-  "tests/integration/test_pipeline_autoscaler_demand.py",
-  "tests/integration/test_application_capacity_bootstrap_runtime.py",
-  "tests/integration/test_application_workload_recovery.py",
-  "tests/integration/test_application_generation_resources_k3s.py",
-  "tests/integration/test_cnpg_*.py",
   # Old rollout database sealing/ownership handoff, not Nebius bootstrap.
   # Keep application_migration_authority, application_runtime_grants and
   # application_schema_inventory: they independently exercise shared SQL.
   "tests/integration/test_application_capacity_runtime_credentials.py",
   "tests/integration/test_application_client_retirement.py",
   "tests/integration/test_application_completed_authority.py",
-  "tests/integration/test_application_credential_recovery.py",
   "tests/integration/test_application_database_admission.py",
   "tests/integration/test_application_guard_migrator_*.py",
   "tests/integration/test_application_handoff_*.py",
   "tests/integration/test_application_login_sealing.py",
   "tests/integration/test_application_migrator_*.py",
-  "tests/integration/test_application_owner_preparation.py",
   "tests/integration/test_application_ownership_transfer.py",
   "tests/integration/test_application_runtime_login*.py",
   "tests/integration/test_application_schema_reference.py",
   "tests/integration/test_application_trigger_owner_handoff.py",
-  "tests/integration/test_protected_application_completion_recovery.py",
-  "tests/integration/test_protected_peer_database_connection.py",
-  "tests/integration/test_retained_application_guard_probe.py",
   # Nebius does not deploy capacity-manager/agent/guard/executor services or
   # enable dev_instances/native personal-dev builders. Their stores are not the
   # current execution_capacity/service_execution stores, which remain daily.
   "tests/**/test_capacity_*.py",
   "tests/**/test_personal_dev_*.py",
-  "tests/**/test_service_personal_dev*.py",
-  "tests/**/test_dev_instance*.py",
-  "tests/unit/test_service_dev_instance_runtime.py",
-  "tests/unit/test_service_build_admission_lifespan.py",
-  "tests/unit/test_service_membership_*.py",
-  "tests/unit/test_worker_native_entrypoint.py",
-  "tests/**/test_global_*.py",
-  "tests/**/test_native_recovery_*.py",
-  "tests/unit/test_native_bootstrap_*.py",
-  "tests/unit/test_native_build_artifact_writer.py",
-  "tests/unit/test_native_build_context.py",
-  "tests/unit/test_native_build_session.py",
-  "tests/unit/test_native_build_source.py",
-  "tests/integration/test_native_build_artifact_minio.py",
-  "tests/unit/test_native_allocated_io.py",
-  "tests/unit/test_native_allocated_worker.py",
-  "tests/unit/test_native_application_admission.py",
-  "tests/unit/test_native_artifact_stream.py",
-  "tests/unit/test_native_authority_bridge.py",
-  "tests/unit/test_native_execution_deadline.py",
-  "tests/unit/test_native_execution_permit.py",
-  "tests/unit/test_native_installed_worker.py",
-  "tests/unit/test_native_material_launch.py",
-  "tests/unit/test_native_oci_material.py",
-  "tests/unit/test_native_outer_build.py",
-  "tests/unit/test_native_parent_death.py",
-  "tests/unit/test_native_platform_observation_retry.py",
-  "tests/unit/test_native_rootless_runtime.py",
-  "tests/unit/test_native_runsc.py",
-  "tests/unit/test_native_runtime_broker.py",
-  "tests/unit/test_native_runtime_cleanup.py",
-  "tests/unit/test_native_runtime_input.py",
-  "tests/unit/test_native_supervisor.py",
-  "tests/unit/test_native_worker_bootstrap.py",
-  "tests/unit/test_native_worker_cgroup.py",
-  "tests/unit/test_native_worker_container.py",
-  "tests/unit/test_native_worker_handoff.py",
-  "tests/unit/test_native_worker_launch.py",
-  "tests/unit/test_native_artifact_transfer.py",
-  "tests/unit/test_native_identity_mapping.py",
-  "tests/unit/test_native_installed_release.py",
-  "tests/unit/test_native_kvm_fixture_cleanup.py",
-  "tests/unit/test_native_mapped_scratch.py",
-  "tests/unit/test_native_mapper_capabilities.py",
-  "tests/unit/test_native_oci_bundles.py",
-  "tests/unit/test_native_rootfs_archive.py",
-  "tests/unit/test_native_rootless_parent.py",
-  "tests/unit/test_native_sandbox_consumer.py",
-  "tests/integration/test_native_oci_kvm.py",
-  "tests/unit/test_shared_capacity_broker.py",
-  "tests/unit/test_protected_worker_session.py",
-  "tests/unit/test_protected_peer_database_connection.py",
-  "tests/integration/test_executable_global_capacity_bridge.py",
-  "tests/integration/test_protected_global_autoscaling_frozen.py",
-  "tests/integration/test_protected_delegated_preparation_transport.py",
-  "tests/integration/test_protected_runtime_init_mount.py",
   "tests/integration/test_protected_claim_application_migration.py",
-  "tests/ops/test_install_capacity_executor.py",
-  "tests/ops/test_*personal_dev*builder*.py",
-  "tests/ops/test_prepare_personal_dev_scanner_cache_assets.py",
-  # Keep worker_pool_autoscaler_api: it also validates current Nebius finance.
-  "tests/integration/test_worker_pool_autoscaler_reconcile.py",
-  "tests/unit/test_worker_pool_autoscaler.py",
-  "tests/unit/test_worker_pool_inventory_script.py",
-  "tests/ops/test_worker_pool_autoscaler_*.py",
-  "tests/integration/test_resource_pool_autoscaler_summary.py",
   # Standalone task-image authority, guard, signer and publication services are
   # not deployed. Nebius builds via NativeTaskImageController instead. Keep
   # build_plan, materialization, registration, pins, migrations and mixed tests.
   "tests/**/test_task_image_authority*.py",
-  "tests/**/test_task_image_builder_guard*.py",
-  "tests/**/test_task_image_builder_autoscaler*.py",
-  "tests/ops/test_task_image_builder_*.py",
-  "tests/ops/test_install_task_image_builder_guard.py",
   "tests/integration/test_task_image_builder_phase*.py",
-  "tests/integration/test_task_image_build_grant_store.py",
-  "tests/integration/test_task_image_build_submission_coordinator.py",
-  "tests/integration/test_task_image_projection_store.py",
-  "tests/integration/test_task_image_bundle_*.py",
-  "tests/integration/test_task_image_candidate_v2.py",
-  "tests/integration/test_task_image_claim_replay_lock_order.py",
-  "tests/integration/test_task_image_current_session.py",
-  "tests/integration/test_task_image_distribution_auth.py",
   "tests/integration/test_task_image_execution_*.py",
-  "tests/integration/test_task_image_keyset_renewal.py",
-  "tests/integration/test_task_image_native_plan_versions.py",
-  "tests/integration/test_task_image_native_source_*.py",
-  "tests/integration/test_task_image_protected_reader_fence.py",
   "tests/integration/test_task_image_publication_*.py",
-  "tests/integration/test_task_image_registry_credentials.py",
-  "tests/integration/test_task_image_registry_http_isolation.py",
-  "tests/integration/test_task_image_signer_*.py",
   "tests/unit/test_task_image_execution_grant.py",
   "tests/unit/test_task_image_publication_*.py",
   "tests/unit/test_task_image_signer_*.py",
   "tests/ops/test_task_image_signer_package_boundary.py",
-  "cmd/loom-task-image-builder-supervisor/**/*_test.go",
   # Standalone authority contracts and cleanup inventory; mixed current
   # materialization/lease/registration tests stay in the normal scope.
-  "deploy/catalog/gb10-smoke/**",
-  "tests/ops/test_task_image_rootless_provider_policy.py",
   "tests/unit/test_task_image_base_resolution_contracts.py",
-  "tests/unit/test_task_image_build_environment.py",
-  "tests/unit/test_task_image_build_grants.py",
-  "tests/unit/test_task_image_bundle_async_capability.py",
-  "tests/unit/test_task_image_bundle_capability.py",
-  "tests/unit/test_task_image_bundle_capability_v2.py",
-  "tests/unit/test_task_image_bundle_runtime.py",
-  "tests/unit/test_task_image_bundle_s3_backend.py",
-  "tests/unit/test_task_image_bundle_s3_listing.py",
-  "tests/unit/test_task_image_bundle_s3_signing.py",
-  "tests/unit/test_task_image_bundle_s3_transport.py",
-  "tests/unit/test_task_image_bundle_signing_clock.py",
-  "tests/unit/test_task_image_claim_provenance.py",
   "tests/unit/test_task_image_execution_config.py",
   "tests/unit/test_task_image_execution_signing_request.py",
   "tests/unit/test_task_image_keyset_renewal.py",
-  "tests/unit/test_task_image_keyset_signing_request.py",
-  "tests/unit/test_task_image_oci_verification.py",
-  "tests/unit/test_task_image_projection_contracts.py",
   "tests/unit/test_task_image_registry_contracts.py",
-  "tests/unit/test_task_image_registry_reader.py",
   "tests/unit/test_task_image_registry_token.py",
   "tests/unit/test_task_image_retention_inventory.py",
-  "tests/unit/test_task_image_session_architecture.py",
-  "tests/integration/test_task_image_audit_durability.py",
-  "tests/integration/test_task_image_retention_inventory.py",
-  "tests/integration/test_task_image_retired_admission.py",
-  "tests/integration/test_task_image_retired_credential_ingress.py",
   "tests/integration/test_task_image_retired_credential_privileges.py",
-  "tests/integration/test_task_image_retirement_admission_isolation.py",
-  "tests/integration/test_task_image_retirement_ingress_guard.py",
   "tests/integration/test_task_image_retirement_record.py",
-  "tests/integration/test_task_image_retirement_snapshot.py",
-  "tests/integration/test_task_image_retirement_store.py",
   # Old Nebius attachment to canonical staging/CNPG and standalone host tools.
   "tests/loom_cli/test_nebius_canonical_render.py",
   "tests/loom_cli/test_nebius_staging_database_roles.py",
   "tests/ops/test_nebius_staging_credentials.py",
   "tests/ops/test_nebius_staging_identity_bootstrap.py",
   "tests/unit/test_nebius_staging_attachment.py",
-  "tests/ops/test_guard_install_script.py",
-  "tests/ops/test_dev_fleet_deploy_contract.py",
-  "tests/loom_cli/test_inference_cmd.py",
-  "tests/unit/test_remote_worker_compose.py",
 ]
 
 smoke_owners = [
@@ -238,7 +97,6 @@ smoke_owners = [
   "egress-conformance",
   "family-orchestrator-conformance",
   "frontend-smoke",
-  "gb10-catalog-smoke",
   "sandbox-network-conformance",
   "staging-smoke",
   "task-fixture-conformance",
@@ -304,16 +162,6 @@ fixture_files = [{ path = "best_move.txt", content = "e4\n" }]
 path = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-task-hello-world/tests/test_outputs.py"
 policy = "virtual-app-v1"
 fixture_files = [{ path = "hello.txt", content = "Hello, world!\n" }]
-
-[[execution_cases]]
-path = "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/tests/test_result.py"
-policy = "virtual-workspace-v1"
-fixture_files = [{ path = "result.txt", content = "hello\n" }]
-
-[[execution_cases]]
-path = "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/tests/test_answer.py"
-policy = "virtual-workspace-v1"
-fixture_files = [{ path = "answer.txt", content = "hello\n" }]
 
 [[execution_cases]]
 path = "tests/fixtures/tasks/healthcheck-flaky/tests/test_ok.py"
@@ -402,156 +250,11 @@ release_digest = "loom-control-plane"
 runtime_policy = "start"
 rollout_role = "primary"
 
-[[components]]
-id = "capacity-manager"
-kind = "release-image"
-dockerfile = "deploy/Dockerfile.capacity-manager"
-build_context = "."
-source_paths = [
-  ".dockerignore",
-  "README.md",
-  "deploy/Dockerfile.capacity-manager",
-  "capacity_migrations/**",
-  "packages/loom-bundle-checksum/**",
-  "pyproject.toml",
-  "src/loom_capacity_manager/**",
-]
-smoke_owner = "staging-smoke"
-scan_owner = "images"
-attestation_owner = "release-provenance"
-release_digest = "loom-capacity-manager"
-runtime_policy = "start"
-rollout_role = "primary"
 
-[[components]]
-id = "capacity-executor"
-kind = "release-image"
-dockerfile = "deploy/Dockerfile.capacity-executor"
-build_context = "."
-source_paths = [
-  ".dockerignore",
-  "README.md",
-  "deploy/Dockerfile.capacity-executor",
-  "deploy/dev-fleet/loom-capacity-executor.tmpfiles",
-  "deploy/dev-fleet/loom-capacity-pool-executor.service",
-  "deploy/dev-fleet/loom-capacity-pool-executor-prepared.service",
-  "deploy/dev-fleet/loom-capacity-pool-executor-prepared.timer",
-  "deploy/dev-fleet/loom-capacity-pool-executor-active.service",
-  "deploy/dev-fleet/loom-capacity-pool-executor-active.timer",
-  "packages/loom-bundle-checksum/**",
-  "pyproject.toml",
-  "scripts/ops/capacity_executor_release.py",
-  "scripts/ops/global_fleet_pool_executor_once.py",
-  "scripts/ops/install_capacity_executor.py",
-  "src/loom_control_plane/__init__.py",
-  "src/loom_control_plane/slurm_job_cgroup.py",
-  "src/loom/**",
-  "src/loom_capacity_agent/**",
-  "src/loom_capacity_executor/**",
-  "src/loom_capacity_guard/**",
-  "src/loom_capacity_manager/**",
-  "src/loom_capacity_pool_controller/**",
-  "src/loom_capacity_pool_executor/**",
-  "src/loom_cli/**",
-  "src/loom_config/**",
-  "src/loom_llm_gateway/**",
-  "src/loom_task_image_authority/**",
-  "tests/integration/test_capacity_executor_image_runtime.py",
-  "uv.lock",
-]
-smoke_owner = "staging-smoke"
-scan_owner = "images"
-attestation_owner = "release-provenance"
-release_digest = "loom-capacity-executor"
-runtime_policy = "start"
-rollout_role = "primary"
 
-[[components]]
-id = "personal-dev-scanner-cache"
-kind = "release-image"
-dockerfile = "deploy/Dockerfile.personal-dev-scanner-cache"
-build_context = "."
-source_paths = [
-  ".dockerignore",
-  "deploy/Dockerfile.personal-dev-scanner-cache",
-  "deploy/dev-fleet/personal-dev-scanner-cache-lock.json",
-  "scripts/prepare_personal_dev_scanner_cache_assets.py",
-  "src/loom/__init__.py",
-  "src/loom/personal_dev_scanner_cache.py",
-  "src/loom/personal_dev_scanner_cache_init.py",
-]
-smoke_owner = "sandbox-network-conformance"
-scan_owner = "images"
-attestation_owner = "release-provenance"
-release_digest = "loom-personal-dev-scanner-cache"
-runtime_policy = "conformance"
-rollout_role = "none"
 
-[[components]]
-id = "personal-dev-builder"
-kind = "release-image"
-dockerfile = "deploy/Dockerfile.personal-dev-builder"
-build_context = "."
-source_paths = [
-  ".dockerignore",
-  "deploy/Dockerfile.personal-dev-builder",
-  "deploy/personal-dev-builder/loom-personal-dev-buildkitd",
-  "src/loom/__init__.py",
-  "src/loom/personal_dev_builder_artifact.py",
-  "src/loom/personal_dev_candidate.py",
-  "src/loom/personal_dev_sandbox_builder.py",
-  "src/loom/personal_dev_source.py",
-  "deploy/personal-dev-builder/client-seccomp-v1.json",
-  "tests/integration/test_native_oci_kvm.py",
-  "tests/support/native_kvm/**",
-]
-smoke_owner = "sandbox-network-conformance"
-scan_owner = "images"
-attestation_owner = "release-provenance"
-release_digest = "loom-personal-dev-builder"
-runtime_policy = "conformance"
-rollout_role = "none"
 
-[[components]]
-id = "personal-dev-activation-agent"
-kind = "release-image"
-dockerfile = "deploy/Dockerfile.personal-dev-activation-agent"
-build_context = "."
-source_paths = [
-  ".dockerignore",
-  "README.md",
-  "deploy/Dockerfile.personal-dev-activation-agent",
-  "packages/**",
-  "pyproject.toml",
-  "src/**",
-]
-smoke_owner = "sandbox-network-conformance"
-scan_owner = "images"
-attestation_owner = "release-provenance"
-release_digest = "loom-personal-dev-activation-agent"
-runtime_policy = "conformance"
-rollout_role = "none"
 
-[[components]]
-id = "personal-dev-native-builder-agent"
-kind = "release-image"
-dockerfile = "deploy/Dockerfile.personal-dev-native-builder-agent"
-build_context = "."
-source_paths = [
-  ".dockerignore",
-  "deploy/Dockerfile.personal-dev-native-builder-agent",
-  "deploy/personal-dev-native-builder-agent-requirements.txt",
-  "src/loom/__init__.py",
-  "src/loom/personal_dev_native_builder_agent.py",
-  "src/loom/personal_dev_native_builder_protocol.py",
-  "src/loom_personal_dev_native_builder_agent/**",
-]
-smoke_owner = "sandbox-network-conformance"
-scan_owner = "images"
-attestation_owner = "release-provenance"
-release_digest = "loom-personal-dev-native-builder-agent"
-runtime_policy = "conformance"
-rollout_role = "none"
 
 [[components]]
 id = "execution-actuator"
@@ -589,6 +292,7 @@ source_paths = [
   "src/loom_control_plane/task_image_materializations.py",
   "src/loom_control_plane/task_image_capacity.py",
   "src/loom/nebius_kubernetes.py",
+  "src/loom/nebius_rollout_guard.py",
   "src/loom_control_plane/execution_finance.py",
   "src/loom_control_plane/metrics.py",
   "src/loom_control_plane/service_execution.py",
@@ -713,7 +417,6 @@ source_paths = [
   "deploy/behavior-stage1-sim/**",
   "src/loom/integrations/behavior/**",
   "src/loom/pipeline/behavior_*.py",
-  "src/loom/pipeline/stage1_smoke.py",
   "src/loom/pipeline/**",
   "third_party/behavior-stage1/**",
 ]
@@ -881,39 +584,6 @@ runtime_policy = "start"
 rollout_role = "primary"
 
 [[components]]
-id = "task-image-builder-rootless-runtime-v2"
-kind = "runtime-payload-image"
-dockerfile = "deploy/task-image-builder/Dockerfile.rootless-runtime-v2"
-build_context = "deploy/task-image-builder"
-source_paths = ["deploy/task-image-builder/Dockerfile.rootless-runtime-v2"]
-smoke_owner = "sandbox-network-conformance"
-scan_owner = "runtime-payload-scan"
-attestation_owner = "runtime-payload-provenance"
-runtime_policy = "runtime-payload"
-
-[[components]]
-id = "gb10-smoke-task"
-kind = "runtime-payload-image"
-dockerfile = "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/environment/Dockerfile"
-build_context = "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world"
-source_paths = ["deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/**"]
-smoke_owner = "gb10-catalog-smoke"
-scan_owner = "runtime-payload-scan"
-attestation_owner = "runtime-payload-provenance"
-runtime_policy = "runtime-payload"
-
-[[components]]
-id = "gb10-direct-completion-smoke-task"
-kind = "runtime-payload-image"
-dockerfile = "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/environment/Dockerfile"
-build_context = "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world"
-source_paths = ["deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/**"]
-smoke_owner = "gb10-catalog-smoke"
-scan_owner = "runtime-payload-scan"
-attestation_owner = "runtime-payload-provenance"
-runtime_policy = "runtime-payload"
-
-[[components]]
 id = "nebius-terminal-bench"
 kind = "runtime-payload-image"
 dockerfile = "deploy/catalog/nebius-terminal-bench/file-archive-manifest/Dockerfile"
@@ -930,17 +600,6 @@ kind = "runtime-payload-image"
 dockerfile = "deploy/catalog/nebius-terminal-bench/file-archive-manifest/original/environment/Dockerfile"
 build_context = "deploy/catalog/nebius-terminal-bench/file-archive-manifest/original"
 source_paths = ["deploy/catalog/nebius-terminal-bench/file-archive-manifest/original/**"]
-smoke_owner = "task-fixture-conformance"
-scan_owner = "runtime-payload-scan"
-attestation_owner = "runtime-payload-provenance"
-runtime_policy = "runtime-payload"
-
-[[components]]
-id = "native-rootless-build-fixture"
-kind = "runtime-payload-image"
-dockerfile = "tests/support/native_kvm/Dockerfile.rootless"
-build_context = "tests/support/native_kvm"
-source_paths = ["tests/support/native_kvm/**"]
 smoke_owner = "task-fixture-conformance"
 scan_owner = "runtime-payload-scan"
 attestation_owner = "runtime-payload-provenance"
@@ -1130,7 +789,6 @@ include_paths = [
 exclude_paths = [
   "tests/unit/test_nebius_runtime_render.py",
   "tests/unit/pipeline/test_behavior_input_import.py",
-  "tests/unit/test_pipeline_stage1_*.py",
 ]
 
 [[test_suites]]
@@ -1143,19 +801,9 @@ include_paths = [
 ]
 exclude_paths = [
   "tests/integration/test_application_schema_reference.py",
-  "tests/integration/test_task_image_builder_guard_local_flow.py",
-  "tests/integration/test_task_image_publication_full_flow.py",
   "tests/integration/test_execution_actuator_k3s.py",
   "tests/integration/test_nebius_platform_k3s.py",
   "tests/integration/test_behavior_pipeline_inputs.py",
-  "tests/integration/test_cnpg_observer_controller_permissions.py",
-  "tests/integration/test_application_generation_resources_k3s.py",
-  "tests/integration/test_capacity_executor_image_runtime.py",
-  "tests/integration/test_oldlab_controller_stdin.py",
-  "tests/integration/test_task_image_builder_phase2c_flow.py",
-  "tests/integration/test_cnpg_input_fence.py",
-  "tests/integration/test_application_workload_recovery.py",
-  "tests/integration/test_cnpg_manager_retirement.py",
   "tests/integration/test_docker_driver_exec.py",
   "tests/integration/test_docker_driver_exec_streaming.py",
   "tests/integration/test_docker_driver_healthcheck.py",
@@ -1168,27 +816,15 @@ exclude_paths = [
   "tests/integration/test_nebius_public_tls.py",
   "tests/integration/test_nebius_restore.py",
   "tests/integration/test_pipeline_multipart_minio.py",
-  "tests/integration/test_native_build_artifact_minio.py",
-  "tests/integration/test_native_oci_kvm.py",
   "tests/integration/test_pipeline_core_fixture_image.py",
-  "tests/integration/test_personal_dev_scanner_cache_image.py",
-  "tests/integration/test_personal_dev_storage_running_pods.py",
-  "tests/integration/test_protected_runtime_init_mount.py",
   "tests/integration/test_sandbox_network_docker.py",
-  "tests/integration/test_slurm_worker_exit_status_docker.py",
   "tests/integration/test_subprocess_agent_e2e.py",
-  "tests/integration/test_task_image_distribution_auth.py",
-  "tests/integration/test_task_image_builder_phase2c_flow.py",
-  "tests/integration/test_task_image_bundle_minio_signing.py",
-  "tests/integration/test_task_image_native_source_http.py",
   "tests/integration/test_task_bundle_source_storage.py",
   "tests/integration/test_task_bundle_source_publisher.py",
-  "tests/integration/test_task_image_bundle_runtime.py",
   "tests/integration/test_trial_e2e_docker.py",
   "tests/integration/test_trial_inprocess_e2e.py",
   "tests/integration/test_verify_cmd_humaneval.py",
   "tests/integration/test_workspace_snapshot_docker.py",
-  "tests/integration/test_pipeline_stage1_smoke_authority.py",
   "tests/integrations/behavior/**/*.py",
 ]
 
@@ -1209,10 +845,8 @@ lane = "tests-root"
 ci_enabled = false
 include_paths = [
   "tests/integration/test_behavior_pipeline_inputs.py",
-  "tests/integration/test_pipeline_stage1_smoke_authority.py",
   "tests/integrations/behavior/**/*.py",
   "tests/unit/pipeline/test_behavior_input_import.py",
-  "tests/unit/test_pipeline_stage1_*.py",
 ]
 
 [[test_suites]]
@@ -1220,14 +854,6 @@ id = "python-integration-docker"
 language = "python"
 lane = "integration-docker"
 include_paths = [
-  "tests/integration/test_cnpg_observer_controller_permissions.py",
-  "tests/integration/test_application_generation_resources_k3s.py",
-  "tests/integration/test_capacity_executor_image_runtime.py",
-  "tests/integration/test_oldlab_controller_stdin.py",
-  "tests/integration/test_task_image_builder_phase2c_flow.py",
-  "tests/integration/test_cnpg_input_fence.py",
-  "tests/integration/test_application_workload_recovery.py",
-  "tests/integration/test_cnpg_manager_retirement.py",
   "tests/integration/test_docker_driver_exec.py",
   "tests/integration/test_docker_driver_exec_streaming.py",
   "tests/integration/test_docker_driver_healthcheck.py",
@@ -1240,22 +866,11 @@ include_paths = [
   "tests/integration/test_nebius_public_tls.py",
   "tests/integration/test_nebius_restore.py",
   "tests/integration/test_pipeline_multipart_minio.py",
-  "tests/integration/test_native_build_artifact_minio.py",
-  "tests/integration/test_native_oci_kvm.py",
   "tests/integration/test_pipeline_core_fixture_image.py",
-  "tests/integration/test_personal_dev_scanner_cache_image.py",
-  "tests/integration/test_personal_dev_storage_running_pods.py",
-  "tests/integration/test_protected_runtime_init_mount.py",
   "tests/integration/test_sandbox_network_docker.py",
-  "tests/integration/test_slurm_worker_exit_status_docker.py",
   "tests/integration/test_subprocess_agent_e2e.py",
-  "tests/integration/test_task_image_distribution_auth.py",
-  "tests/integration/test_task_image_builder_phase2c_flow.py",
-  "tests/integration/test_task_image_bundle_minio_signing.py",
-  "tests/integration/test_task_image_native_source_http.py",
   "tests/integration/test_task_bundle_source_storage.py",
   "tests/integration/test_task_bundle_source_publisher.py",
-  "tests/integration/test_task_image_bundle_runtime.py",
   "tests/integration/test_trial_e2e_docker.py",
   "tests/integration/test_trial_inprocess_e2e.py",
   "tests/integration/test_verify_cmd_humaneval.py",
@@ -1329,13 +944,4 @@ ci_enabled = false
 include_paths = [
   "web/e2e/behavior-rollout-*.test.ts",
   "web/src/__tests__/components/artifacts/BehaviorRollout*.test.tsx",
-]
-
-[[test_suites]]
-id = "python-go-interop"
-language = "python"
-lane = "go-checks"
-include_paths = [
-  "tests/integration/test_task_image_builder_guard_local_flow.py",
-  "tests/integration/test_task_image_publication_full_flow.py",
 ]

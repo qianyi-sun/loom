@@ -1,75 +1,40 @@
 # Runbooks
 
-Current procedures for Loom operators and developers. Start with the master
-operator runbook; use the narrower runbooks for the named environment or
-capacity workflow.
+Repeatable procedures for the supported Nebius platform and local development.
+Begin with the [operator runbook](operator-runbook.md). Use the architecture
+[platform contract](../architecture/nebius-primary-platform.md) for behavior and
+[CI documentation](../contributing/ci.md) for repository validation.
 
-## Cluster and release operations
+## Platform and delivery
 
-- **[Operator runbook](operator-runbook.md)** — deployment, upgrades,
-  rollback, credentials, storage, capacity, monitoring, and incident response.
-- **[Staging release validation](staging-launch.md)** — candidate-bound checks
-  required before production promotion.
-- **[Multi-node staging on k3s](deploy-staging-k3s.md)** — topology,
-  prerequisites, authorized host helper, verification, and recovery.
-- **[Task-image builder Phase 1 site convergence](task-image-builder-phase1-site-convergence.md)**
-  — inert, check/plan-first prerequisite staging, controller and one-node
-  convergence order, receipts, evidence, and the closed Phase 2 boundary.
-- **[Task-image builder Phase 2C supervisor](task-image-builder-phase2c-supervisor.md)**
-  — content-addressed provider release assembly, stage-only installer,
-  conformance, rollback, and the still-closed production boundary.
-- **[Task-image builder Phase 2D1 registry publication](task-image-builder-phase2d1-publication.md)**
-  — merged-but-inactive registry credential and publication candidate
-  invariants, future JWKS ceremony boundaries, and remaining activation gates.
+- [Infrastructure](nebius-infrastructure.md): Terraform, identities, networking and resource convergence.
+- [Platform operations](nebius-platform.md): service rendering, capacity and deployment diagnostics.
+- [Candidate publication](nebius-candidate.md): immutable images and candidate records.
+- [Deployment](nebius-deployment.md): target binding, backup, migrations and readiness.
+- [Staging credentials](nebius-staging-credentials.md): scoped identities and PostgreSQL trust.
+- [Staging release validation](staging-launch.md): candidate-bound promotion evidence.
 
-## Capacity and development environments
+## Recovery and execution
 
-- **[Remote worker pool](remote-worker-pool.md)** — external Docker workers,
-  Slurm-backed capacity, tunnels, and recovery.
-- **[Developer sandboxes](developer-sandboxes.md)** — candidate-bound shared
-  development sandboxes.
-- **[Shared sandbox capacity](shared-sandbox-capacity-broker.md)** — disabled
-  compatibility ledger, offline request/lease checks, and recovery evidence.
-- **[Personal-development management-plane shadow](personal-dev-management-plane-shadow.md)**
-  — exact render, deploy, readiness, rollback, and stop conditions for the
-  inert shared management foundation in `loom-dev`.
-- **[Personal-development builder runtime](personal-dev-builder-runtime.md)**
-  — measured gVisor installation, sequential OLDLAB agent rollout,
-  RuntimeClass proof, cross-platform BuildKit conformance, and exact rollback.
-- **[Personal-development native builder runtime](personal-dev-native-builder-runtime.md)**
-  — protected GB10 dedicated-daemon/gVisor staging, exact image convergence,
-  agent activation, zero-capacity evidence, and byte-scoped rollback.
-- **[Personal-development native builder acceptance](personal-dev-native-builder-acceptance.md)**
-  — simultaneous native GB10 arm64 grants and OLDLAB amd64 Jobs for two owners,
-  immutable multi-platform publication, isolation, cleanup, and operational
-  restoration at executable ceiling zero.
-- **[Personal-development zero-capacity acceptance](personal-dev-zero-capacity-acceptance.md)**
-  — the approved #1280 sole-owner/two-environment lifecycle acceptance, exact
-  zero-ceiling observation, manager-first teardown, and byte-reviewed rollback.
-- **[Personal-development durable zero-capacity launch](personal-dev-durable-launch.md)**
-  — the corresponding #1280 sole-owner durable application-plane launch and
-  byte-reviewed rollback at executable ceiling zero.
-- **[Personal-development concurrent-owner zero-capacity acceptance](personal-dev-concurrent-owner-zero-capacity-acceptance.md)**
-  — the separate schema-v2 two-owner concurrency, cross-owner isolation,
-  retained-name lifecycle, cleanup, and inert-rollback certification.
-- **[Personal-development multi-owner durable zero-capacity launch](personal-dev-multi-owner-durable-launch.md)**
-  — the second-owner launch gate that verifies the exact schema-v2 result
-  before any operational render or apply.
-- **[Personal-development backup and isolated restore evidence](personal-dev-backup-restore-evidence.md)**
-  — owner-only Postgres and MinIO backup, isolated exact-image restore, semantic
-  state comparison, cleanup proof, and canonical plan-bound evidence.
-- **[Personal-development incompatible-schema transition](personal-dev-schema-transition.md)**
-  — exact predecessor backup binding, isolated forward/restore rehearsal,
-  writer quiescence, target migration, and mandatory full-restore recovery.
-- **[Executable global-capacity bridge rehearsal](executable-global-capacity-bridge-rehearsal.md)**
-  — separately gated zero-ceiling manager and two-pool preparation evidence.
-- **[Global fleet pool-executor dry run](global-fleet-pool-executor-dry-run.md)**
-  — non-executable reservation, permit, inventory, journaling, fencing, and
-  protected-release rehearsal for physical pool controllers.
-- **[Local development](local-dev-workflow.md)** — local Docker Compose stack and
-  pre-push checks.
+- [Restore verification](nebius-restore.md): isolated backup restoration.
+- [Historical lineage conversion](nebius-lineage-conversion.md): qualified conversion of divergent Nebius revisions.
+- [Accounting repair](nebius-accounting-repair.md): recover a previously committed Terminus export.
+- [Cold-start diagnosis](nebius-cold-start.md): capacity and scale-from-zero evidence.
+- [Execution security](nebius-execution-security.md): bounded isolation validation.
+- [Trial resource accounting](trial-resource-accounting.md): usage durability and capacity calibration.
+- [Deadline canary](isolated-deadline-canary.md): isolated timeout fixture and its acceptance boundary.
 
-Create a separate runbook only for a repeatable procedure with distinct safety,
-rollback, or coordination requirements. Put component behavior in architecture
-docs and one-off migration records in the
-[runbook archive](../../archive/docs/runbooks/).
+## Workload preparation
+
+- [Terminus-2](nebius-terminus2.md): prepare and validate native Terminal-Bench execution.
+- [Harbor runtime versions](harbor-runtime-versions.md): select and register a published runtime.
+- [Harbor90 x86 sources](nebius-harbor90-migration.md): preserve benchmark identity while publishing x86 inputs.
+- [TerminalGen corpus publication](terminalgen-corpus-publication.md): publication and read contracts.
+
+## Local development
+
+- [Local workflow](local-dev-workflow.md): disposable Compose stack, checks and reset.
+
+Create a runbook for a repeatable procedure with distinct safety or recovery
+requirements. Keep implementation plans outside the repository. Retain only
+necessary schema/decision context in [history](../historical/README.md).

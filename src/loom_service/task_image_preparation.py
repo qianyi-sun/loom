@@ -25,6 +25,8 @@ _REASONS = {
     "build_publish_failed": "Task image publication failed. Contact the platform operator to check registry availability.",
     "build_cancelled": "Task image preparation stopped because no active trial requires this build.",
     "build_deadline_exceeded": "Task image preparation exceeded its deadline.",
+    "build_oom_killed": "The image build exceeded its memory limit.",
+    "build_storage_exceeded": "The image build exceeded its temporary storage limit.",
     "build_job_missing": "The task image build job disappeared before completion.",
     "build_pod_identity_changed": "The task image build stopped after an unexpected container replacement.",
 }
@@ -93,6 +95,14 @@ def preparation_response(
         code = next((phase.get("exit_code") for phase in phases if phase["name"] == "build"), None)
         if code is not None:
             message = f"Task image build failed (exit code {code}). Check the task Dockerfile and its build inputs."
+    if reason == "build_deadline_exceeded":
+        # Job expiry takes precedence: terminating a running wrapper can also
+        # yield 124. Never infer a per-command budget from elapsed Pod time.
+        if any(c.get("status") == "True" and c.get("reason") == "DeadlineExceeded"
+               for c in native.get("job_conditions", [])):
+            message = "Image preparation exceeded the platform Job lifecycle deadline (including setup and publication)."
+        elif any(p["name"] == "build" and p.get("exit_code") == 124 for p in phases):
+            message = "An image build command exceeded the task's build-time budget."
     return {
         "observation_scope": "current_materialization",
         "cpu_arch": row.cpu_arch,

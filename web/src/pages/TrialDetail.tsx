@@ -1,3 +1,4 @@
+import { TrialProgressPill, TrialProgressTimeline } from "../components/TrialProgress";
 /**
  * Per-trial detail: header card with summary stats, trajectory
  * viewer with action-type-pill rows + JSON expansion, download buttons
@@ -31,7 +32,6 @@ import { modelLabel } from "../lib/modelLabel";
 import { ownershipLabel } from "../lib/ownership";
 import { provenanceLabel } from "../lib/provenanceLabel";
 import { trialDownloadCommands } from "../lib/quickstartSnippets";
-import { trialStateVariant } from "../lib/statusVariant";
 import { formatTokenUsage } from "../lib/tokenUsage";
 import {
   formatUsageCost,
@@ -173,7 +173,7 @@ function MaterializationCard({
           <StatCard label="Compute result" value={materialization.compute_state ?? "pending"} />
           <StatCard label="Output commit" value={materialization.output_commit_state} />
           <StatCard
-            label="Queue to schedule"
+            label="Submitted to scheduled (includes preparation)"
             value={elapsedSeconds(materialization.submitted_at, materialization.pod_scheduled_at)}
           />
           <StatCard
@@ -185,7 +185,7 @@ function MaterializationCard({
             value={elapsedSeconds(materialization.pod_started_at, materialization.pod_terminated_at)}
           />
           <StatCard
-            label="Output verification"
+            label="Output commit"
             value={elapsedSeconds(materialization.pod_terminated_at, materialization.output_committed_at)}
           />
           <StatCard
@@ -293,9 +293,7 @@ function TrialHeader({
               </code>
             </p>
           </div>
-          <StatusPill variant={trialStateVariant(trial.state)}>
-            {trial.state}
-          </StatusPill>
+          <TrialProgressPill progress={trial.progress} state={trial.state} />
         </div>
 
         <div className="rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3">
@@ -486,7 +484,7 @@ function TrialHeader({
                         Download artifact {label}
                       </span>
                       <span className="shrink-0 font-mono text-xs text-slate-600">
-                        {formatBytes(artifact.size)}
+                        {artifact.size == null ? "Size unknown" : formatBytes(artifact.size)}
                       </span>
                     </button>
                     <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
@@ -647,6 +645,7 @@ export default function TrialDetail(): JSX.Element {
         </Link>
       </div>
       <TrialHeader trial={trial.data} />
+      <TrialProgressTimeline progress={trial.data.progress} />
       <TaskImagePreparationCard preparations={trial.data.task_environment_preparation} />
       <MaterializationCard trial={trial.data} />
       <DiagnosisCard diagnosis={trial.data.diagnosis} />

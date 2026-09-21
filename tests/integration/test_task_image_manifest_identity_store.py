@@ -1,5 +1,3 @@
-from datetime import UTC, datetime
-from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -11,7 +9,6 @@ from loom.task_bundle_registration import prepare_task_bundle_registration
 from loom.task_bundle_source import TaskBundleSourceSpecV1
 from loom.task_image_materialization import ensure_task_image_materializations
 from loom_control_plane.task_image_materializations import _durable_reference_exists
-from loom_task_image_authority.retirement_store import _pins
 from tests.integration.test_task_bundle_source_journal import _publish, _receipts, _upload
 from tests.unit.test_task_bundle_registration import _bundle
 
@@ -93,15 +90,6 @@ async def test_ensure_versions_strong_rows_and_preserves_exact_historical_trial_
                         bool(await session.scalar(select(_durable_reference_exists(row))))
                         is expected
                     )
-                    pins = await _pins(
-                        session,
-                        row,
-                        SimpleNamespace(),
-                        None,
-                        current_ready=True,
-                        now=datetime.now(UTC),
-                    )
-                    assert ("current_task" in pins) is expected
             team = Team(id=uuid4(), name="manifest-reference")
             session.add(team)
             await session.flush()

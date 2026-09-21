@@ -11,12 +11,13 @@ from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from loom.db import schema
+from loom.db.schema_startup import service_schema_head
 from loom_task_image_authority.retention_inventory import derive_attempt_repository_inventory
-from tests.integration.test_task_image_publication_jobs import (
+from tests.integration.test_task_image_registry_credential_migration import _config
+from tests.support.historical_task_images import NOW, historical_attempt
+from tests.support.historical_task_images import (
     registry_authority_session as registry_authority_session,
 )
-from tests.integration.test_task_image_registry_credential_migration import _config
-from tests.integration.test_task_image_registry_credentials import NOW, _claimed_attempt
 
 
 def _model():
@@ -27,7 +28,7 @@ def _model():
 
 async def _observation(session):
     model = _model()
-    _, _, _, _, _, materialization, attempt = await _claimed_attempt(session)
+    materialization, attempt = await historical_attempt(session)
     inventory = derive_attempt_repository_inventory(
         materialization=materialization,
         attempt=attempt,
@@ -157,7 +158,7 @@ async def test_retired_attempt_blocks_inactive_downgrade(
     with pytest.raises(DBAPIError, match="retirement authority cannot be discarded"):
         command.downgrade(_config(isolated_migration_postgres_url), "0134")
     async with registry_authority_session() as session:
-        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0151"
+        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == service_schema_head()
         assert await session.scalar(select(_model().retired_at)) is not None
 
 
@@ -194,7 +195,7 @@ async def test_retirement_downgrade_fails_fast_on_parent_and_record_writers(
         with engine.connect() as connection:
             assert (
                 connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "0151"
+                == service_schema_head()
             )
     finally:
         engine.dispose()

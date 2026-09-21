@@ -1,5 +1,0 @@
-"""Module entry point for controller-local zero-ceiling executor validation."""
-
-from loom_capacity_pool_controller.runtime import main
-
-raise SystemExit(main())

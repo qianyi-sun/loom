@@ -128,23 +128,23 @@ function mockPickerEndpoints(
     });
 }
 
-function Harness({ initial = INITIAL_VALUE, initialBackend = "docker" }: { initial?: AgentModelValue; initialBackend?: string }): JSX.Element {
+function Harness({ initial = INITIAL_VALUE, initialAllow = false }: { initial?: AgentModelValue; initialAllow?: boolean }): JSX.Element {
   const [value, setValue] = useState<AgentModelValue>(initial);
-  const [backend, setBackend] = useState(initialBackend);
+  const [allow, setAllow] = useState(initialAllow);
   return <>
-    <button onClick={() => setBackend("docker")}>Switch to Docker</button>
+    <button onClick={() => setAllow(false)}>Disable agent versions</button>
     <button onClick={() => setValue(JSON.parse(JSON.stringify(value)) as AgentModelValue)}>Copy picker state</button>
-    <AgentModelPicker value={value} onChange={setValue} backend={backend} />
+    <AgentModelPicker value={value} onChange={setValue} allowAgentVersion={allow} />
     <output data-testid="picker-state">{JSON.stringify(value)}</output>
   </>;
 }
 
-function renderPicker(initial?: AgentModelValue, initialBackend?: string): void {
+function renderPicker(initial?: AgentModelValue, initialAllow?: boolean): void {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={qc}>
       <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-        <Harness initial={initial} initialBackend={initialBackend} />
+        <Harness initial={initial} initialAllow={initialAllow} />
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -261,7 +261,7 @@ describe("Harbor agent versions", () => {
 
   it("defaults to deployment version, preserves exact selection when copying, and clears on agent change", async () => {
     const user = userEvent.setup();
-    renderPicker({ ...INITIAL_VALUE, agentName: "terminus-2" }, "nebius");
+    renderPicker({ ...INITIAL_VALUE, agentName: "terminus-2" }, true);
     const picker = await screen.findByLabelText("Agent version");
     await screen.findByRole("option", { name: /harbor-v1 · Harbor 0.1.0 · bridge 1/ });
     expect(picker).toHaveValue("");
@@ -274,30 +274,30 @@ describe("Harbor agent versions", () => {
     expect(JSON.parse(screen.getByTestId("picker-state").textContent!)).not.toHaveProperty("agentVersion");
   });
 
-  it("preserves a restored catalog selection and clears it when leaving Nebius", async () => {
+  it("preserves a restored catalog selection and clears it when agent versions are disabled", async () => {
     const user = userEvent.setup();
-    renderPicker({ ...INITIAL_VALUE, agentName: "terminus-2", agentVersion: "harbor-v1" }, "nebius");
+    renderPicker({ ...INITIAL_VALUE, agentName: "terminus-2", agentVersion: "harbor-v1" }, true);
     await screen.findByRole("option", { name: /harbor-v1 · Harbor/ });
     expect(screen.getByLabelText("Agent version")).toHaveValue("harbor-v1");
     await user.selectOptions(screen.getByLabelText("Agent version"), "");
     expect(JSON.parse(screen.getByTestId("picker-state").textContent!)).not.toHaveProperty("agentVersion");
     await user.selectOptions(screen.getByLabelText("Agent version"), "harbor-v2");
-    await user.click(screen.getByText("Switch to Docker"));
+    await user.click(screen.getByText("Disable agent versions"));
     expect(screen.queryByLabelText("Agent version")).not.toBeInTheDocument();
     expect(JSON.parse(screen.getByTestId("picker-state").textContent!)).not.toHaveProperty("agentVersion");
   });
 
   it.each([
-    ["docker", "terminus-2"], ["nebius", "direct-completion"],
-  ])("clears restored versions unsupported by %s / %s", async (backend, agentName) => {
-    renderPicker({ ...INITIAL_VALUE, agentName, agentVersion: "harbor-v1" }, backend);
+    [false, "terminus-2"], [true, "direct-completion"],
+  ])("clears restored versions unsupported when allowAgentVersion=%s and agent=%s", async (allow, agentName) => {
+    renderPicker({ ...INITIAL_VALUE, agentName, agentVersion: "harbor-v1" }, allow);
     await screen.findByRole("option", { name: "terminus-2" });
     expect(screen.queryByLabelText("Agent version")).not.toBeInTheDocument();
     expect(JSON.parse(screen.getByTestId("picker-state").textContent!)).not.toHaveProperty("agentVersion");
   });
 
   it("does not silently replace an unavailable restored exact version with deployment default", async () => {
-    renderPicker({ ...INITIAL_VALUE, agentName: "terminus-2", agentVersion: "removed-version" }, "nebius");
+    renderPicker({ ...INITIAL_VALUE, agentName: "terminus-2", agentVersion: "removed-version" }, true);
     expect(await screen.findByRole("option", { name: "removed-version (unavailable)" })).toBeDisabled();
     expect(screen.getByLabelText("Agent version")).toHaveValue("removed-version");
   });

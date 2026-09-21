@@ -42,7 +42,6 @@ def test_pipeline_collectors_have_closed_labels_and_exact_buckets() -> None:
         metrics.PIPELINE_STAGE_RUNS: ("state", "resource_class"),
         metrics.PIPELINE_STAGE_DURATION_SECONDS: ("resource_class", "result"),
         metrics.EXECUTION_ATTEMPTS: ("state", "resource_class"),
-        metrics.PIPELINE_GPU_SECONDS_TOTAL: ("slurm_cluster", "gpu_count_class"),
         metrics.PIPELINE_ARTIFACT_BYTES_TOTAL: ("artifact_class",),
         metrics.PIPELINE_CANCEL_LATENCY_SECONDS: ("outcome",),
         metrics.PIPELINE_CONTROLLER_RECONCILE_ERRORS_TOTAL: ("reason",),
@@ -50,7 +49,7 @@ def test_pipeline_collectors_have_closed_labels_and_exact_buckets() -> None:
         metrics.PIPELINE_STAGE_DEADLINE_OVERRUN_SECONDS: ("resource_class",),
         metrics.PIPELINE_CHECKPOINT_OLDEST_AGE_SECONDS: ("resource_class",),
         metrics.PIPELINE_ARTIFACT_COMMIT_FAILURES_TOTAL: ("commit_kind", "reason"),
-        PIPELINE_GPU_ALLOCATED_IDLE_SECONDS: ("slurm_cluster", "reason"),
+        PIPELINE_GPU_ALLOCATED_IDLE_SECONDS: ("reason",),
     }
     forbidden = {
         "pipeline_run_id",
@@ -106,13 +105,12 @@ def test_pipeline_dashboard_contract_and_packaged_copy() -> None:
     assert dashboard["schemaVersion"] == 39
     assert dashboard["templating"]["list"] == []
     assert dashboard["refresh"] == "30s"
-    assert [panel["id"] for panel in dashboard["panels"]] == list(range(1, 20))
+    assert [panel["id"] for panel in dashboard["panels"]] == [i for i in range(1, 20) if i != 13]
     expected_titles = [
         "PipelineRuns by state/result",
         "StageRuns by state/resource",
         "Attempts by state/resource",
         "Stage duration p50/p95",
-        "Settled GPU seconds rate",
         "Pipeline Artifact byte rate",
         "Cancellation p95 / forced",
         "Reconcile and commit failures",

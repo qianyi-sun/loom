@@ -315,6 +315,8 @@ async def claim_task_image_materialization(
     nebius_pool_id: str | None = None,
 ) -> TaskImageMaterialization | None:
     """Atomically claim queued work or recover one expired lease."""
+    from loom.nebius_rollout_guard import admission_open
+
     cpu_arch = execution_cpu_arch(cpu_arch)
     _assert_no_pending_task_image_writes(session)
     # Queue maintenance writes precede candidate selection. Establish retained
@@ -328,6 +330,8 @@ async def claim_task_image_materialization(
         if not nebius_pool_id.strip():
             raise ValueError("nebius_pool_id must not be empty")
         scope = (_nebius_demand_exists(TaskImageMaterialization, pool_id=nebius_pool_id),)
+    if not await admission_open(session):
+        return None
     now = datetime.now(UTC)
     await session.execute(
         update(TaskImageMaterialization)
@@ -657,8 +661,14 @@ async def claim_task_image_registry_gc(
     gc_id: str,
     grace_hours: int,
     lease_seconds: float = DEFAULT_TASK_IMAGE_LEASE_SECONDS,
+    materialization_ids: list[UUID] | None = None,
 ) -> TaskImageMaterialization | None:
-    """Fence one legacy image set; rootless current maps have separate retention."""
+    """Fence one image set without a signed publication owner.
+
+    Native maintenance supplies an explicit inventory so it cannot observe or
+    retire another registry's historical rows. Signed publication maps retain
+    their separate ownership contract.
+    """
     if grace_hours < 0:
         raise ValueError("grace_hours must be non-negative")
     # The locked refresh must not discard or implicitly flush caller-owned edits.
@@ -672,7 +682,9 @@ async def claim_task_image_registry_gc(
     await require_task_bundle_transaction(session)
     now = datetime.now(UTC)
     cutoff = now - timedelta(hours=grace_hours)
-    legacy_owned = TaskImageMaterialization.ready_publication_operation_id.is_(None)
+    legacy_owned: ColumnElement[bool] = TaskImageMaterialization.ready_publication_operation_id.is_(None)
+    if materialization_ids is not None:
+        legacy_owned = and_(legacy_owned, TaskImageMaterialization.id.in_(materialization_ids))
     await session.execute(
         update(TaskImageMaterialization)
         .where(

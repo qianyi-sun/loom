@@ -1,33 +1,10 @@
-import pytest
 
-from loom_capacity_manager.metrics import CapacityMetrics
 from loom_control_plane.metrics import (
     CLAIM_LATENCY_SEC,
     QUEUE_DEPTH,
-    SLURM_WORKER_ACTIVE_SLOTS,
-    SLURM_WORKER_CANCELLED_PENDING_JOBS,
-    SLURM_WORKER_DESIRED_SLOTS,
-    SLURM_WORKER_FAILED_SUBMISSIONS,
-    SLURM_WORKER_IDLE_EXITS,
-    SLURM_WORKER_PENDING_JOBS,
-    SLURM_WORKER_PENDING_SLOTS,
-    SLURM_WORKER_RUNNING_JOBS,
-    SLURM_WORKER_STALE_JOBS,
-    SLURM_WORKER_STALE_SLOTS,
     STATE_PATCH_TOTAL,
     TRIALS_INFLIGHT,
     TRIALS_STATE_TOTAL,
-    WORKER_POOL_AUTOSCALER_DECISION,
-    WORKER_POOL_AUTOSCALER_ERROR,
-    WORKER_POOL_AUTOSCALER_IDLE_SECONDS,
-    WORKER_POOL_DESIRED_SLOTS,
-    WORKER_POOL_DRAINING_SLOTS,
-    WORKER_POOL_DRAINING_WORKERS,
-    WORKER_POOL_FREE_SLOTS,
-    WORKER_POOL_OCCUPIED_SLOTS,
-    WORKER_POOL_PENDING_SLOTS,
-    WORKER_POOL_TOTAL_SLOTS,
-    WORKER_POOL_WORKERS,
     WORKER_RECLAIM_TOTAL,
     WORKERS_ACTIVE,
 )
@@ -47,64 +24,9 @@ def test_metrics_exist_unlabeled():
     assert WORKER_RECLAIM_TOTAL._labelnames == ()
 
 
-@pytest.mark.legacy_pool
-def test_slurm_worker_capacity_metrics_are_bounded_by_pool():
-    expected = ("environment", "pool_name")
-    assert SLURM_WORKER_DESIRED_SLOTS._labelnames == expected
-    assert SLURM_WORKER_ACTIVE_SLOTS._labelnames == expected
-    assert SLURM_WORKER_PENDING_SLOTS._labelnames == expected
-    assert SLURM_WORKER_STALE_SLOTS._labelnames == expected
-    assert SLURM_WORKER_RUNNING_JOBS._labelnames == expected
-    assert SLURM_WORKER_PENDING_JOBS._labelnames == expected
-    assert SLURM_WORKER_STALE_JOBS._labelnames == expected
-    assert SLURM_WORKER_FAILED_SUBMISSIONS._labelnames == expected
-    assert SLURM_WORKER_CANCELLED_PENDING_JOBS._labelnames == expected
-    assert SLURM_WORKER_IDLE_EXITS._labelnames == expected
 
 
-def test_worker_pool_slot_metrics_are_bounded_by_pool_backend_and_arch():
-    expected = ("pool_name", "backend", "cpu_arch")
-    assert WORKER_POOL_TOTAL_SLOTS._labelnames == expected
-    assert WORKER_POOL_OCCUPIED_SLOTS._labelnames == expected
-    assert WORKER_POOL_FREE_SLOTS._labelnames == expected
-    assert WORKER_POOL_WORKERS._labelnames == expected
-    assert WORKER_POOL_DESIRED_SLOTS._labelnames == expected
-    assert WORKER_POOL_PENDING_SLOTS._labelnames == expected
-    assert WORKER_POOL_DRAINING_SLOTS._labelnames == expected
-    assert WORKER_POOL_DRAINING_WORKERS._labelnames == expected
 
 
-@pytest.mark.legacy_pool
-def test_worker_pool_autoscaler_metrics_have_bounded_labels():
-    expected = ("pool_name", "backend", "cpu_arch", "action", "reason")
-    assert WORKER_POOL_AUTOSCALER_DECISION._labelnames == expected
-    assert WORKER_POOL_AUTOSCALER_ERROR._labelnames == (
-        "pool_name",
-        "backend",
-        "cpu_arch",
-    )
-    assert WORKER_POOL_AUTOSCALER_IDLE_SECONDS._labelnames == (
-        "pool_name",
-        "backend",
-        "cpu_arch",
-    )
 
 
-@pytest.mark.legacy_pool
-def test_capacity_manager_metrics_never_label_subject_or_environment_identity():
-    metrics = CapacityMetrics()
-    assert metrics.ready._labelnames == ()
-    assert metrics.executable_new_capacity_ceiling._labelnames == ()
-    assert metrics.increase_freeze._labelnames == ()
-    assert metrics.report_freshness._labelnames == ("report_kind", "state")
-    assert metrics.pool_slots._labelnames == ("pool_id", "state")
-    assert metrics.shadow_runs._labelnames == ("result", "reason")
-    assert all(
-        "subject" not in label and "environment" not in label
-        for collector in (
-            metrics.report_freshness,
-            metrics.pool_slots,
-            metrics.shadow_runs,
-        )
-        for label in getattr(collector, "_labelnames", ())
-    )

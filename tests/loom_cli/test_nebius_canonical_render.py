@@ -12,7 +12,7 @@ from loom_cli.cluster_cmd import render_manifests
 from loom_cli.cluster_config import load_cluster_config
 
 _ROOT = Path(__file__).resolve().parents[2]
-_PROFILE = _ROOT / "deploy/environments/staging.multinode.cluster.toml"
+_PROFILE = _ROOT / "tests/fixtures/cluster-render/staging.multinode.cluster.toml"
 
 
 def _render(tmp_path: Path, extra: str = "") -> list[dict]:
@@ -54,6 +54,7 @@ def _env(deployment: dict) -> dict:
 def test_staging_attachment_renders_persistent_spool_and_runtime_secrets(tmp_path: Path) -> None:
     docs = _render(tmp_path, _attachment())
     cp = _deployment(docs, "loom-control-plane")
+    assert not cp["spec"]["template"]["spec"].get("initContainers")
     env = _env(cp)
     assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED"]["value"] == "true"
     assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT"]["value"] == "staging"

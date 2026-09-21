@@ -42,7 +42,6 @@ from loom.db.schema import (
     Task,
     Trial,
     Worker,
-    WorkerPoolAutoscalerPolicy,
 )
 from loom_service.task_config_validation import (
     expected_trial_count,
@@ -262,14 +261,6 @@ def _worker_capability_cpu_arch(capability: object) -> str:
     return arch or "x86_64"
 
 
-def _policy_cpu_arch(policy: WorkerPoolAutoscalerPolicy) -> str:
-    actuator_config = policy.actuator_config or {}
-    raw = actuator_config.get("cpu_arch") if isinstance(actuator_config, Mapping) else None
-    if isinstance(raw, str) and raw.strip():
-        return raw.strip()
-    return "arm64" if policy.actuator == "gb10" else "x86_64"
-
-
 async def _known_pool_cpu_arches(
     session: AsyncSession,
     pool_names: list[str],
@@ -293,18 +284,6 @@ async def _known_pool_cpu_arches(
             continue
         for capability in capabilities:
             arches_by_pool[pool_name].add(_worker_capability_cpu_arch(capability))
-
-    policy_rows = (
-        await session.execute(
-            select(WorkerPoolAutoscalerPolicy).where(
-                WorkerPoolAutoscalerPolicy.enabled.is_(True),
-                WorkerPoolAutoscalerPolicy.pool_name.in_(pool_names),
-            ),
-        )
-    ).scalars().all()
-    for policy in policy_rows:
-        if policy.pool_name in arches_by_pool:
-            arches_by_pool[policy.pool_name].add(_policy_cpu_arch(policy))
 
     return {
         pool: tuple(sorted(arches))

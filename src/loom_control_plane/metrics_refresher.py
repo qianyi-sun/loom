@@ -34,34 +34,15 @@ from loom_control_plane.metrics import (
     PIPELINE_STAGE_QUEUE_AGE_SECONDS,
     PIPELINE_STAGE_RUNS,
     QUEUE_DEPTH,
-    SLURM_WORKER_ACTIVE_SLOTS,
-    SLURM_WORKER_CANCELLED_PENDING_JOBS,
-    SLURM_WORKER_DESIRED_SLOTS,
-    SLURM_WORKER_FAILED_SUBMISSIONS,
-    SLURM_WORKER_IDLE_EXITS,
-    SLURM_WORKER_PENDING_JOBS,
-    SLURM_WORKER_PENDING_SLOTS,
-    SLURM_WORKER_RUNNING_JOBS,
-    SLURM_WORKER_STALE_JOBS,
-    SLURM_WORKER_STALE_SLOTS,
     TRIALS_INFLIGHT,
-    WORKER_POOL_AUTOSCALER_DECISION,
-    WORKER_POOL_AUTOSCALER_ERROR,
-    WORKER_POOL_AUTOSCALER_IDLE_SECONDS,
-    WORKER_POOL_DESIRED_SLOTS,
     WORKER_POOL_DRAINING_SLOTS,
     WORKER_POOL_DRAINING_WORKERS,
     WORKER_POOL_FREE_SLOTS,
     WORKER_POOL_OCCUPIED_SLOTS,
-    WORKER_POOL_PENDING_SLOTS,
     WORKER_POOL_TOTAL_SLOTS,
     WORKER_POOL_WORKERS,
     WORKER_TOKENS_STALE_COUNT,
     WORKERS_ACTIVE,
-)
-from loom_control_plane.slurm_worker_jobs import (
-    fetch_slurm_worker_metric_rows,
-    summarize_jobs,
 )
 
 logger = logging.getLogger(__name__)
@@ -207,31 +188,13 @@ SELECT count(*) AS active_generations,
    AND expires_at > NOW()
 """)
 
-_SLURM_WORKER_GAUGES = (
-    SLURM_WORKER_DESIRED_SLOTS,
-    SLURM_WORKER_ACTIVE_SLOTS,
-    SLURM_WORKER_PENDING_SLOTS,
-    SLURM_WORKER_STALE_SLOTS,
-    SLURM_WORKER_RUNNING_JOBS,
-    SLURM_WORKER_PENDING_JOBS,
-    SLURM_WORKER_STALE_JOBS,
-    SLURM_WORKER_FAILED_SUBMISSIONS,
-    SLURM_WORKER_CANCELLED_PENDING_JOBS,
-    SLURM_WORKER_IDLE_EXITS,
-)
-
 _WORKER_POOL_GAUGES = (
     WORKER_POOL_TOTAL_SLOTS,
     WORKER_POOL_OCCUPIED_SLOTS,
     WORKER_POOL_FREE_SLOTS,
     WORKER_POOL_WORKERS,
-    WORKER_POOL_DESIRED_SLOTS,
-    WORKER_POOL_PENDING_SLOTS,
     WORKER_POOL_DRAINING_SLOTS,
     WORKER_POOL_DRAINING_WORKERS,
-    WORKER_POOL_AUTOSCALER_DECISION,
-    WORKER_POOL_AUTOSCALER_ERROR,
-    WORKER_POOL_AUTOSCALER_IDLE_SECONDS,
 )
 
 
@@ -332,30 +295,11 @@ async def refresh_once(session: Any, *, expiry_sec: int) -> None:
         )
         WORKER_POOL_FREE_SLOTS.labels(**labels).set(int(pool["free_slots"]))
         WORKER_POOL_WORKERS.labels(**labels).set(int(pool["active_workers"]))
-        WORKER_POOL_DESIRED_SLOTS.labels(**labels).set(
-            int(pool["desired_slots"]),
-        )
-        WORKER_POOL_PENDING_SLOTS.labels(**labels).set(
-            int(pool["pending_slots"]),
-        )
         WORKER_POOL_DRAINING_SLOTS.labels(**labels).set(
             int(pool["draining_slots"]),
         )
         WORKER_POOL_DRAINING_WORKERS.labels(**labels).set(
             int(pool["draining_workers"]),
-        )
-        decision = pool.get("last_autoscaler_decision")
-        if decision:
-            WORKER_POOL_AUTOSCALER_DECISION.labels(
-                **labels,
-                action=str(decision),
-                reason=str(pool.get("last_autoscaler_reason") or ""),
-            ).set(1)
-        WORKER_POOL_AUTOSCALER_ERROR.labels(**labels).set(
-            1 if pool.get("last_autoscaler_error") else 0,
-        )
-        WORKER_POOL_AUTOSCALER_IDLE_SECONDS.labels(**labels).set(
-            int(pool.get("autoscaler_idle_seconds") or 0),
         )
 
     # Worker-token staleness audit. Re-publishes the gauge each tick;
@@ -367,29 +311,6 @@ async def refresh_once(session: Any, *, expiry_sec: int) -> None:
     WORKER_TOKENS_STALE_COUNT.labels(reason="aged_90d").set(
         int(staleness_row.aged_90d),
     )
-
-    slurm_summary = summarize_jobs(await fetch_slurm_worker_metric_rows(session))
-    for gauge in _SLURM_WORKER_GAUGES:
-        gauge.clear()
-    for capacity in slurm_summary.by_pool.values():
-        labels = {
-            "environment": capacity.environment,
-            "pool_name": capacity.pool_name,
-        }
-        SLURM_WORKER_DESIRED_SLOTS.labels(**labels).set(capacity.desired_slots)
-        SLURM_WORKER_ACTIVE_SLOTS.labels(**labels).set(capacity.active_slots)
-        SLURM_WORKER_PENDING_SLOTS.labels(**labels).set(capacity.pending_slots)
-        SLURM_WORKER_STALE_SLOTS.labels(**labels).set(capacity.stale_slots)
-        SLURM_WORKER_RUNNING_JOBS.labels(**labels).set(capacity.running_jobs)
-        SLURM_WORKER_PENDING_JOBS.labels(**labels).set(capacity.pending_jobs)
-        SLURM_WORKER_STALE_JOBS.labels(**labels).set(capacity.stale_jobs)
-        SLURM_WORKER_FAILED_SUBMISSIONS.labels(**labels).set(
-            capacity.failed_submissions,
-        )
-        SLURM_WORKER_CANCELLED_PENDING_JOBS.labels(**labels).set(
-            capacity.cancelled_pending_jobs,
-        )
-        SLURM_WORKER_IDLE_EXITS.labels(**labels).set(capacity.idle_exits)
 
     await refresh_pipeline_gauges(session)
 

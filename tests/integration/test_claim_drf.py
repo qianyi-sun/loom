@@ -66,7 +66,7 @@ async def _cleanup_db(postgres_url: str):  # type: ignore[no-untyped-def]
     await engine.dispose()
 
 
-async def test_claim_honors_internal_pool_assignment_for_neutral_trial(
+async def test_claim_ignores_retired_autoscaler_assignment_for_neutral_trial(
     postgres_url: str,
 ) -> None:
     engine = create_async_engine(postgres_url)
@@ -74,7 +74,7 @@ async def test_claim_honors_internal_pool_assignment_for_neutral_trial(
     now = datetime.now(UTC)
     team_id = uuid4()
     trial_id = uuid4()
-    worker_ids = {"gb10": uuid4(), "oldlab": uuid4()}
+    worker_ids = {"local-arm": uuid4(), "local-x86": uuid4()}
     async with session_factory() as session:
         await session.execute(insert(Team).values(id=team_id, name=f"neutral-{team_id}"))
         await session.execute(insert(TeamQuota).values(team_id=team_id, fair_share_weight=1.0))
@@ -97,12 +97,12 @@ async def test_claim_honors_internal_pool_assignment_for_neutral_trial(
                     "gpu_vendor": "none",
                     "network_policies": ["public"],
                 },
-                autoscaler_pool_name="oldlab",
+                autoscaler_pool_name="local-x86",
                 autoscaler_pool_assigned_at=now,
                 state="queued",
             ),
         )
-        for pool_name, cpu_arch in (("gb10", "arm64"), ("oldlab", "x86_64")):
+        for pool_name, cpu_arch in (("local-arm", "arm64"), ("local-x86", "x86_64")):
             await session.execute(
                 insert(Worker).values(
                     id=worker_ids[pool_name],
@@ -125,9 +125,9 @@ async def test_claim_honors_internal_pool_assignment_for_neutral_trial(
         await session.commit()
 
     async with session_factory() as session:
-        wrong_pool_claim = await claim_one(
+        local_claim = await claim_one(
             session,
-            worker_id=worker_ids["gb10"],
+            worker_id=worker_ids["local-arm"],
             worker_os=["linux"],
             worker_cpu_arches=["arm64"],
             worker_gpu_vendors=["none"],
@@ -135,12 +135,13 @@ async def test_claim_honors_internal_pool_assignment_for_neutral_trial(
         )
         await session.commit()
 
-    assert wrong_pool_claim is None
+    assert local_claim is not None
+    assert local_claim["id"] == trial_id
 
     async with session_factory() as session:
-        assigned_pool_claim = await claim_one(
+        duplicate_claim = await claim_one(
             session,
-            worker_id=worker_ids["oldlab"],
+            worker_id=worker_ids["local-x86"],
             worker_os=["linux"],
             worker_cpu_arches=["x86_64"],
             worker_gpu_vendors=["none"],
@@ -148,8 +149,7 @@ async def test_claim_honors_internal_pool_assignment_for_neutral_trial(
         )
         await session.commit()
 
-    assert assigned_pool_claim is not None
-    assert assigned_pool_claim["id"] == trial_id
+    assert duplicate_claim is None
     await engine.dispose()
 
 
@@ -215,7 +215,7 @@ async def test_claim_filters_by_cpu_architecture(postgres_url: str):
         arm64_worker = uuid4()
         await s.execute(insert(Worker).values(
             id=arm64_worker,
-            hostname="gb10",
+            hostname="local-arm",
             version="v",
             capabilities=[{
                 "os": "linux",
@@ -318,14 +318,14 @@ async def test_claim_filters_by_required_worker_pool(postgres_url: str):
         await s.execute(insert(Task).values(
             id="pool-task", checksum="0" * 64, config={"schema_version": "1"},
         ))
-        gb10_trial = uuid4()
-        oldlab_trial = uuid4()
-        oldlab_worker = uuid4()
+        local_arm_trial = uuid4()
+        local_x86_trial = uuid4()
+        local_x86_worker = uuid4()
         await s.execute(insert(Worker).values(
-            id=oldlab_worker,
-            hostname="oldlab-1",
+            id=local_x86_worker,
+            hostname="local-x86-1",
             version="v",
-            pool_name="oldlab",
+            pool_name="local-x86",
             capabilities=[{
                 "os": "linux",
                 "cpu_arch": "x86_64",
@@ -340,8 +340,8 @@ async def test_claim_filters_by_required_worker_pool(postgres_url: str):
             status="active",
         ))
         for trial_id, required_pool in (
-            (gb10_trial, "gb10"),
-            (oldlab_trial, "oldlab"),
+            (local_arm_trial, "local-arm"),
+            (local_x86_trial, "local-x86"),
         ):
             await s.execute(insert(Trial).values(
                 id=trial_id,
@@ -362,7 +362,7 @@ async def test_claim_filters_by_required_worker_pool(postgres_url: str):
     async with session_factory() as session:
         row = await claim_one(
             session,
-            worker_id=oldlab_worker,
+            worker_id=local_x86_worker,
             worker_os=["linux"],
             worker_gpu_vendors=["none"],
             worker_network_policies=["public"],
@@ -371,12 +371,12 @@ async def test_claim_filters_by_required_worker_pool(postgres_url: str):
         await session.commit()
 
     assert row is not None
-    assert row["id"] == oldlab_trial
+    assert row["id"] == local_x86_trial
 
     async with session_factory() as session:
         row = await claim_one(
             session,
-            worker_id=oldlab_worker,
+            worker_id=local_x86_worker,
             worker_os=["linux"],
             worker_gpu_vendors=["none"],
             worker_network_policies=["public"],

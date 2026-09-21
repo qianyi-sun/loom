@@ -66,7 +66,7 @@ def _run_validation_step(
 
 @pytest.mark.parametrize(
     ("job_name", "matrix_output"),
-    [("build", "ordinary_builds"), ("scanner-cache-build", "scanner_cache_builds")],
+    [("build", "ordinary_builds")],
 )
 def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache(
     job_name: str, matrix_output: str
@@ -138,9 +138,6 @@ def test_images_publish_authority_is_protected_push_or_reconciler_only() -> None
         "!cancelled() && "
         "needs.plan.result == 'success' && "
         "needs.trivy-binary.result == 'success' && "
-        "(needs.personal-dev-scanner-cache-assets.result == 'success' || "
-        "(needs.personal-dev-scanner-cache-assets.result == 'skipped' && "
-        '!contains(needs.plan.outputs.images, \'"image":"personal-dev-scanner-cache"\'))) && '
         + trusted_event
         + "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
         "needs.plan.outputs.gate_mode == 'full' && "
@@ -190,7 +187,7 @@ def test_images_publish_authority_is_protected_push_or_reconciler_only() -> None
     assert "LOOM_CI_IMAGE_RUNS_ON" not in str(manifest)
 
 
-@pytest.mark.parametrize("job_name", ["build", "scanner-cache-build"])
+@pytest.mark.parametrize("job_name", ["build"])
 def test_images_manual_dispatch_is_build_only(job_name: str) -> None:
     workflow = _workflow(".github/workflows/images.yml")
     on_config = _workflow_on(workflow)
@@ -285,13 +282,10 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
     assert set(jobs) == {
         "plan",
         "trivy-binary",
-        "personal-dev-scanner-cache-assets",
         "build",
         "nebius-harness-build",
-        "scanner-cache-build",
         "publish",
         "publish-manifest",
-        "personal-dev-trusted-release",
         "images-gate",
     }
     for job_name in (
@@ -299,7 +293,6 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         "trivy-binary",
         "build",
         "nebius-harness-build",
-        "scanner-cache-build",
         "images-gate",
     ):
         effective = jobs[job_name].get("permissions", workflow["permissions"])
@@ -307,15 +300,6 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         assert "environment" not in jobs[job_name]
         assert "id-token" not in effective
         assert all(value != "write" for value in effective.values())
-
-    scanner_cache_assets = jobs["personal-dev-scanner-cache-assets"]
-    assert scanner_cache_assets["permissions"] == {
-        "actions": "read",
-        "contents": "read",
-    }
-    assert "environment" not in scanner_cache_assets
-    assert "id-token" not in scanner_cache_assets["permissions"]
-    assert all(value != "write" for value in scanner_cache_assets["permissions"].values())
 
     assert jobs["publish"]["permissions"] == {
         "attestations": "write",
@@ -330,15 +314,8 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         "id-token": "write",
         "packages": "write",
     }
-    assert jobs["personal-dev-trusted-release"]["permissions"] == {
-        "actions": "read",
-        "attestations": "read",
-        "contents": "read",
-        "packages": "read",
-    }
     assert "environment" not in jobs["publish"]
     assert "environment" not in jobs["publish-manifest"]
-    assert "environment" not in jobs["personal-dev-trusted-release"]
 
 
 def test_images_secret_and_cache_authority_is_exact() -> None:
@@ -352,7 +329,6 @@ def test_images_secret_and_cache_authority_is_exact() -> None:
     ]
 
     assert secret_references == [
-        "${{ secrets.GITHUB_TOKEN }}",
         "${{ secrets.GITHUB_TOKEN }}",
         "${{ secrets.GITHUB_TOKEN }}",
     ]
@@ -518,7 +494,7 @@ def test_image_input_validation_rejects_shell_metacharacters_and_ambiguous_value
     assert error_marker in result.stderr
 
 
-@pytest.mark.parametrize("job_name", ["build", "scanner-cache-build"])
+@pytest.mark.parametrize("job_name", ["build"])
 def test_image_input_validation_never_evaluates_command_substitution(
     tmp_path: Path, job_name: str
 ) -> None:

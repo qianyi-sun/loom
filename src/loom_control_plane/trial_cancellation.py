@@ -8,7 +8,6 @@ from uuid import UUID
 
 from sqlalchemy import text
 
-from loom_control_plane.protected_worker_session import ProtectedWorkerSessionStore
 from loom_control_plane.service_execution import request_trial_execution_cancellation
 
 _REQUEST_CANCEL_SQL = text("""
@@ -39,47 +38,22 @@ SELECT id, state
 async def cancel_trial_under_authority(
     *,
     session_factory: Any,
-    protected_store: ProtectedWorkerSessionStore | None,
     trial_id: UUID,
     team_id: UUID | None,
 ) -> Mapping[str, Any] | None:
-    """Cancel one trial through protected authority with ordinary fallback."""
-
-    row: Mapping[str, Any] | None = None
-    if protected_store is not None:
-        protected_cancellation = await protected_store.cancel_pending_trial(
-            trial_id=trial_id,
-            team_id=team_id,
-        )
-        if protected_cancellation is not None:
-            row = {
-                "id": protected_cancellation["trial_id"],
-                "state": protected_cancellation["state"],
-            }
-
+    """Request cancellation and fence native execution in one transaction."""
     async with session_factory() as session:
+        row: Mapping[str, Any] | None = (
+            (await session.execute(
+                _REQUEST_CANCEL_SQL, {"trial_id": trial_id, "team_id": team_id},
+            )).mappings().one_or_none()
+        )
         if row is None:
             row = (
-                (
-                    await session.execute(
-                        _REQUEST_CANCEL_SQL,
-                        {"trial_id": trial_id, "team_id": team_id},
-                    )
-                )
-                .mappings()
-                .one_or_none()
+                (await session.execute(
+                    _READ_CANCEL_REPLAY_SQL, {"trial_id": trial_id, "team_id": team_id},
+                )).mappings().one_or_none()
             )
-            if row is None:
-                row = (
-                    (
-                        await session.execute(
-                            _READ_CANCEL_REPLAY_SQL,
-                            {"trial_id": trial_id, "team_id": team_id},
-                        )
-                    )
-                    .mappings()
-                    .one_or_none()
-                )
         if row is not None:
             await request_trial_execution_cancellation(session, trial_id=trial_id)
         await session.commit()

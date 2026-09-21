@@ -174,8 +174,10 @@ def test_staging_lifecycle_rejects_ambiguous_bucket_inventory(
         render_manifests(config)
 
 
-def test_live_staging_profile_inventories_legacy_and_canonical_buckets() -> None:
-    config = load_cluster_config(Path("deploy/environments/staging.multinode.cluster.toml"))
+def test_synthetic_staging_profile_inventories_legacy_and_canonical_buckets() -> None:
+    config = load_cluster_config(
+        Path("tests/fixtures/cluster-render/staging.multinode.cluster.toml")
+    )
 
     document = _resource(config, "CronJob", "loom-staging-data-lifecycle")
     assert document is not None

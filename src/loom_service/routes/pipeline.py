@@ -53,6 +53,7 @@ from loom.pipeline.public_api import (
 )
 from loom.pipeline.recipes import OfficialRecipeRegistry
 from loom.pipeline.spec import ArtifactType, Digest, PipelineModel
+from loom.service_execution_backend import local_execution_enabled
 from loom_service.auth_guards import is_admin, require_scope, require_submitting_user
 from loom_service.dependencies import SessionAndCtx
 from loom_service.metrics import PIPELINE_LIVE_PREVIEW_READS_TOTAL
@@ -82,6 +83,7 @@ from loom_service.pipeline_control_bindings import (
 from loom_service.routes.object_downloads import stream_object_response
 
 router = APIRouter(tags=["pipeline"])
+local_execution_router = APIRouter(tags=["pipeline"])
 
 _ARTIFACT_FILE_RESPONSE_HEADERS = {
     "Accept-Ranges": {"schema": {"type": "string"}},
@@ -349,7 +351,7 @@ async def put_admin_provider_binding(
     return value
 
 
-@router.post("/pipeline-runs")
+@local_execution_router.post("/pipeline-runs")
 async def submit_pipeline_run(
     request: Request,
     response: Response,
@@ -1078,7 +1080,7 @@ async def head_pipeline_live_preview_frame(
     )
 
 
-@router.post("/pipeline-stage-runs/{stage_run_id}/retry")
+@local_execution_router.post("/pipeline-stage-runs/{stage_run_id}/retry")
 async def retry_pipeline_stage(
     request: Request,
     response: Response,
@@ -1670,9 +1672,13 @@ def _stage_summary_projection(
 ) -> dict[str, Any]:
     level, upstream = topology.get(item.node_key, (0, []))
     resource_name, resource_class = _resource_projection(item)
-    retry_allowed = item.state == "failed" and run_state == "finished"
+    retry_allowed = (
+        local_execution_enabled() and item.state == "failed" and run_state == "finished"
+    )
     ineligible = None
-    if not retry_allowed:
+    if not local_execution_enabled():
+        ineligible = "hosted_pipeline_execution_unsupported"
+    elif not retry_allowed:
         ineligible = "run_not_retryable" if item.state == "failed" else "stage_not_failed"
     return {
         "id": str(item.id),

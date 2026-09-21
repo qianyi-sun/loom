@@ -11,7 +11,8 @@ from loom_cli.cluster_cmd import render_manifests
 from loom_cli.cluster_config import load_cluster_config
 
 _PROFILE = (
-    Path(__file__).resolve().parents[2] / "deploy/environments/staging.multinode.cluster.toml"
+    Path(__file__).resolve().parents[2]
+    / "tests/fixtures/cluster-render/staging.multinode.cluster.toml"
 )
 
 

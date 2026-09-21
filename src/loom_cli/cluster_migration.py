@@ -37,7 +37,7 @@ from __future__ import annotations
 import re
 from importlib import resources
 
-from loom_cli.rollout.application_migration_contract import (
+from loom_cli.application_migration_contract import (
     APPLICATION_OWNER_ROLE,
     application_migration_authority,
 )

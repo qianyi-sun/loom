@@ -217,6 +217,8 @@ class FakeKubectl(deploy.Kubectl):
 
     def run(self, *args: str, timeout: int = 90) -> str:
         self.commands.append(args)
+        if args[0] == "exec":
+            return json.dumps({"status": "released" if "release" in args else "acquired"})
         if args[:2] == ("config", "view"):
             return json.dumps(
                 {
@@ -254,6 +256,11 @@ class FakeKubectl(deploy.Kubectl):
         if args[0] == "apply":
             for obj in yaml.safe_load_all(Path(args[2]).read_text()):
                 self.objects[obj["kind"].lower(), obj["metadata"]["name"]] = obj
+                if obj["kind"] == "Deployment":
+                    replicas = obj["spec"].get("replicas", 1)
+                    obj["metadata"]["generation"] = 1
+                    obj["status"] = {"observedGeneration": 1, "updatedReplicas": replicas,
+                                     "availableReplicas": replicas, "replicas": replicas}
                 if obj["kind"] == "Job":
                     obj["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
         if args[:2] == ("create", "job"):
@@ -462,3 +469,72 @@ def test_regional_deploy_waits_for_each_primary_actuator_and_checks_secret_keys(
             "credentials.json",
         }
     assert not any(target_id + "-collector-nebius" in name for _, name in kube.secrets)
+
+
+@pytest.mark.parametrize("status", ["skipped_busy", "skipped_locked"])
+def test_busy_upgrade_exits_without_backup_apply_or_resume(rendered, monkeypatch, status):
+    args, config, _, files = rendered
+    args.apply = True
+    kube = FakeKubectl(config, files, database=True)
+    calls = []
+
+    def guard(_kube, _ns, action, _owner, _candidate):
+        calls.append(action)
+        return {"status": status}
+
+    monkeypatch.setattr(deploy, "rollout_guard", guard)
+    assert deploy.deploy(args, kube=kube)["status"] == status
+    assert calls == ["acquire"]
+    assert not any(command[0] in {"apply", "create", "delete"} for command in kube.commands)
+
+
+def test_failed_health_retains_pause_and_success_resumes_after_readback(rendered, monkeypatch):
+    args, config, _, files = rendered
+    args.apply = True
+    calls = []
+
+    def guard(_kube, _ns, action, _owner, _candidate):
+        calls.append(action)
+        return {"status": "acquired" if action == "acquire" else "released"}
+
+    def health(*_):
+        raise deploy.DeploymentError("unhealthy")
+
+    monkeypatch.setattr(deploy, "rollout_guard", guard)
+    monkeypatch.setattr(deploy, "public_smoke", health)
+    with pytest.raises(deploy.DeploymentError, match="unhealthy"):
+        deploy.deploy(args, kube=FakeKubectl(config, files, database=True))
+    assert calls == ["acquire"]
+    evidence = json.loads(next(args.evidence_dir.glob("*.json")).read_text())
+    assert evidence["dispatch_paused"] is True
+    calls.clear()
+    monkeypatch.setattr(deploy, "public_smoke", lambda *_: calls.append("health"))
+    original = deploy.verify_deployed_images
+
+    def readback(*args):
+        original(*args)
+        calls.append("readback")
+
+    monkeypatch.setattr(deploy, "verify_deployed_images", readback)
+    assert deploy.deploy(args, kube=FakeKubectl(config, files, database=True))["status"] == "complete"
+    assert calls == ["acquire", "health", "readback", "release"]
+
+
+def test_remote_apply_streams_manifest_and_keeps_ssh_host_verification(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_TARGET", "deploy@gateway.example")
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_KEY_FILE", "/private/key")
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE", "/private/known_hosts")
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text("kind: ConfigMap\n")
+    calls = []
+
+    def command(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout="applied", stderr="")
+
+    monkeypatch.setattr(deploy.subprocess, "run", command)
+    assert deploy.Kubectl(Path("/remote/kubeconfig")).run("apply", "-f", str(manifest)) == "applied"
+    argv, kwargs = calls[0]
+    assert "StrictHostKeyChecking=yes" in argv
+    assert argv[-1].endswith("apply -f -")
+    assert kwargs["input"] == manifest.read_text()

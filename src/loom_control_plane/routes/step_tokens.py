@@ -7,7 +7,6 @@ presents at the Gateway. The Gateway verifies the JWT and extracts
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from uuid import UUID, uuid4
@@ -35,13 +34,6 @@ from loom.db.schema import (
 from loom_control_plane.execution_attempt_fencing import (
     AttemptFenceError,
     verify_attempt_claim,
-)
-from loom_control_plane.protected_worker_session import (
-    EXECUTOR_WORKER_CREDENTIAL_HEADER,
-    ProtectedWorkerSession,
-    bind_protected_worker_auth,
-    protected_attempt_worker_session,
-    protected_trial_worker_session,
 )
 
 router = APIRouter(prefix="/admin")
@@ -135,57 +127,8 @@ async def _step_token_principal(
 StepTokenPrincipal = Annotated[AuthContext | None, Depends(_step_token_principal)]
 
 
-async def _protected_step_token_worker_session(
-    request: Request,
-    principal: StepTokenPrincipal,
-    worker_credential: str | None = Header(
-        default=None,
-        alias=EXECUTOR_WORKER_CREDENTIAL_HEADER,
-    ),
-) -> AsyncIterator[ProtectedWorkerSession | None]:
-    if principal is None or principal.type != "worker":
-        yield None
-        return
-
-    store = getattr(request.app.state, "protected_worker_session_store", None)
-    if store is None and worker_credential is None:
-        yield None
-        return
-    if store is None:
-        raise HTTPException(status_code=503, detail="protected worker runtime unavailable")
-    if worker_credential is None:
-        raise HTTPException(status_code=401, detail="protected worker session rejected")
-
-    try:
-        body = await request.json()
-        trial_id = UUID(str(body["trial_id"])) if body.get("trial_id") is not None else None
-        attempt_id = (
-            UUID(str(body["execution_attempt_id"]))
-            if body.get("execution_attempt_id") is not None
-            else None
-        )
-    except (AttributeError, KeyError, TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail="step-token worker subject required") from exc
-    if (trial_id is None) == (attempt_id is None):
-        raise HTTPException(status_code=400, detail="step-token worker subject required")
-
-    dependency = (
-        protected_trial_worker_session if trial_id is not None else protected_attempt_worker_session
-    )
-    identity = trial_id if trial_id is not None else attempt_id
-    assert identity is not None
-    async for protected_session in dependency(
-        identity,
-        request,
-        worker_credential,
-    ):
-        yield protected_session
 
 
-ProtectedStepTokenWorkerSession = Annotated[
-    ProtectedWorkerSession | None,
-    Depends(_protected_step_token_worker_session),
-]
 
 
 @router.post("/step-tokens", status_code=201)
@@ -193,7 +136,6 @@ async def issue_step_token(
     request: Request,
     payload: _IssueStepTokenRequest,
     principal: StepTokenPrincipal,
-    protected_worker_session: ProtectedStepTokenWorkerSession,
     claim_id: OptionalClaimIdHeader = None,
     lease_epoch: OptionalLeaseEpochHeader = None,
     lease_token: OptionalLeaseTokenHeader = None,
@@ -215,8 +157,6 @@ async def issue_step_token(
         if expires_at < required_expiry:
             raise HTTPException(status_code=409, detail="attempt_deadline_not_covered")
     ctx = principal
-    if ctx is not None:
-        ctx = bind_protected_worker_auth(ctx, protected_worker_session)
     explicit_provider = "provider_connection_id" in payload.model_fields_set
     family_evolver_request = payload.step_id == "family_evolver"
     if ctx is None:

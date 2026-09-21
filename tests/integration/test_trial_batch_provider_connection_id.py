@@ -74,6 +74,8 @@ async def app_setup(
     team_a / team_b / conn_a / conn_b / conn_a_deleted (the
     soft-deleted one used by the rejection test) / task UUIDs."""
     for k, v in {
+        "LOOM_ENV": "development",
+        "LOOM_LOCAL_EXECUTION": "1",
         "LOOM_SVC_DB_URL": postgres_url,
         "LOOM_SVC_MINIO_ENDPOINT": "http://minio:9000",
         "LOOM_SVC_MINIO_ACCESS_KEY": "x",

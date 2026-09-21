@@ -147,6 +147,8 @@ async def test_pool_admission_ceiling_is_race_safe_and_releases_on_terminal_tria
             )
             assert len(reservations) == 1
             assert reservations[0].state == "active"
+            assert reservations[0].environment == "development"
+            assert reservations[0].region is None
             await session.execute(
                 update(Trial)
                 .where(Trial.id == winners[0]["id"])

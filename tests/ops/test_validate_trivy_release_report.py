@@ -24,23 +24,17 @@ _POSTGRES_PERL_PACKAGES = (
     "perl-modules-5.36",
 )
 _REMEDIATED_COMPONENTS = (
-    "capacity-executor",
-    "capacity-manager",
     "control-plane",
     "egress-xds",
     "execution-actuator",
     "family-orchestrator",
     "llm-gateway",
-    "personal-dev-activation-agent",
-    "personal-dev-native-builder-agent",
-    "personal-dev-scanner-cache",
     "pipeline-orchestrator",
     "worker",
 )
 _EMPTY_COMPONENTS = (
     "execution-runtime",
     "llm-gateway-sandbox",
-    "personal-dev-builder",
     "service",
     "staging-admin-browser-smoke",
     "web",
@@ -241,13 +235,10 @@ def test_validator_accepts_each_exact_component_inventory(
 @pytest.mark.parametrize(
     "component",
     (
-        "capacity-manager",
         "control-plane",
         "egress-xds",
         "family-orchestrator",
         "llm-gateway",
-        "personal-dev-activation-agent",
-        "personal-dev-native-builder-agent",
         "pipeline-orchestrator",
     ),
 )
@@ -256,7 +247,7 @@ def test_validator_accepts_repaired_python_slim_without_exceptions(
     component: str,
 ) -> None:
     ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
-    payload = _report("capacity-executor", ignore_file)
+    payload = _report(component, ignore_file)
     payload["ArtifactName"] = f"/tmp/{component}-amd64.docker.tar"
 
     result = _run_validator(tmp_path, payload, component=component)

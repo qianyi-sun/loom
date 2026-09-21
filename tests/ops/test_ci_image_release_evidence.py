@@ -119,9 +119,9 @@ def _common() -> _Common:
         "repository_id": "123456789",
         "repository_owner_id": "987654321",
         "runner_environment": "github-hosted",
-        "image": "capacity-manager",
-        "image_name": "loom-capacity-manager",
-        "dockerfile": "deploy/Dockerfile.capacity-manager",
+        "image": "execution-actuator",
+        "image_name": "loom-execution-actuator",
+        "dockerfile": "deploy/Dockerfile.execution-actuator",
         "build_context": ".",
     }
 
@@ -138,7 +138,7 @@ def _verification(
                     "_type": "https://in-toto.io/Statement/v1",
                     "subject": [
                         {
-                            "name": "ghcr.io/qianyi-sun/loom-capacity-manager",
+                            "name": "ghcr.io/qianyi-sun/loom-execution-actuator",
                             "digest": {"sha256": digest},
                         }
                     ],
@@ -174,9 +174,9 @@ def test_architecture_predicate_binds_source_build_scan_and_invocation() -> None
         "tree": _TREE,
     }
     assert external["image"] == {
-        "component": "capacity-manager",
-        "repository": "loom-capacity-manager",
-        "dockerfile": "deploy/Dockerfile.capacity-manager",
+        "component": "execution-actuator",
+        "repository": "loom-execution-actuator",
+        "dockerfile": "deploy/Dockerfile.execution-actuator",
         "context": ".",
         "platform": "linux/amd64",
         "architecture": "amd64",
@@ -230,7 +230,7 @@ def test_architecture_predicate_binds_trusted_reconciliation_event() -> None:
             **common,
             platform="linux/amd64",
             architecture="amd64",
-            subject_name="ghcr.io/qianyi-sun/loom-capacity-manager",
+            subject_name="ghcr.io/qianyi-sun/loom-execution-actuator",
             subject_digest=f"sha256:{_DIGEST}",
             build_mode="trusted-rebuild",
         )
@@ -302,7 +302,7 @@ def test_architecture_verification_is_exact_and_returns_the_scan_digest() -> Non
             **_common(),
             platform="linux/amd64",
             architecture="amd64",
-            subject_name="ghcr.io/qianyi-sun/loom-capacity-manager",
+            subject_name="ghcr.io/qianyi-sun/loom-execution-actuator",
             subject_digest=f"sha256:{_DIGEST}",
             build_mode="trusted-rebuild",
         )
@@ -320,7 +320,7 @@ def test_architecture_verification_is_exact_and_returns_the_scan_digest() -> Non
             **_common(),
             platform="linux/amd64",
             architecture="amd64",
-            subject_name="ghcr.io/qianyi-sun/loom-capacity-manager",
+            subject_name="ghcr.io/qianyi-sun/loom-execution-actuator",
             subject_digest=f"sha256:{_DIGEST}",
             build_mode="trusted-rebuild",
         )
@@ -336,7 +336,7 @@ def test_architecture_verification_rejects_a_different_registry_subject() -> Non
     )
     verification = _verification(predicate)
     statement: Any = verification[0]["verificationResult"]
-    statement["statement"]["subject"][0]["name"] = "ghcr.io/different-owner/loom-capacity-manager"
+    statement["statement"]["subject"][0]["name"] = "ghcr.io/different-owner/loom-execution-actuator"
 
     with pytest.raises(EvidenceError, match="expected release image"):
         verify_architecture_attestation(
@@ -344,7 +344,7 @@ def test_architecture_verification_rejects_a_different_registry_subject() -> Non
             **_common(),
             platform="linux/amd64",
             architecture="amd64",
-            subject_name="ghcr.io/different-owner/loom-capacity-manager",
+            subject_name="ghcr.io/different-owner/loom-execution-actuator",
             subject_digest=f"sha256:{_DIGEST}",
             build_mode="trusted-rebuild",
         )
@@ -398,7 +398,7 @@ def test_architecture_verification_rejects_scan_tool_or_policy_drift(
             **_common(),
             platform="linux/amd64",
             architecture="amd64",
-            subject_name="ghcr.io/qianyi-sun/loom-capacity-manager",
+            subject_name="ghcr.io/qianyi-sun/loom-execution-actuator",
             subject_digest=f"sha256:{_DIGEST}",
             build_mode="trusted-rebuild",
         )
@@ -424,7 +424,7 @@ def test_architecture_verification_rejects_boolean_for_integer_policy_field() ->
             **_common(),
             platform="linux/amd64",
             architecture="amd64",
-            subject_name="ghcr.io/qianyi-sun/loom-capacity-manager",
+            subject_name="ghcr.io/qianyi-sun/loom-execution-actuator",
             subject_digest=f"sha256:{_DIGEST}",
             build_mode="trusted-rebuild",
         )
@@ -473,7 +473,7 @@ def test_manifest_attestation_binds_both_verified_architecture_subjects() -> Non
     verify_manifest_attestation(
         verification,
         **_common(),
-        subject_name="ghcr.io/qianyi-sun/loom-capacity-manager",
+        subject_name="ghcr.io/qianyi-sun/loom-execution-actuator",
         subject_digest=f"sha256:{_DIGEST}",
         architecture_digests={
             "linux/amd64": f"sha256:{_AMD64_DIGEST}",
@@ -491,7 +491,7 @@ def test_manifest_attestation_binds_both_verified_architecture_subjects() -> Non
         verify_manifest_attestation(
             duplicated,
             **_common(),
-            subject_name="ghcr.io/qianyi-sun/loom-capacity-manager",
+            subject_name="ghcr.io/qianyi-sun/loom-execution-actuator",
             subject_digest=f"sha256:{_DIGEST}",
             architecture_digests={
                 "linux/amd64": f"sha256:{_AMD64_DIGEST}",
@@ -548,7 +548,7 @@ def test_manifest_verification_rejects_scan_tool_or_policy_drift(
         verify_manifest_attestation(
             tampered,
             **_common(),
-            subject_name="ghcr.io/qianyi-sun/loom-capacity-manager",
+            subject_name="ghcr.io/qianyi-sun/loom-execution-actuator",
             subject_digest=f"sha256:{_DIGEST}",
             architecture_digests=architecture_digests,
             scan_report_digests=scan_report_digests,
@@ -582,7 +582,7 @@ def test_manifest_verification_rejects_float_for_integer_run_id() -> None:
         verify_manifest_attestation(
             tampered,
             **_common(),
-            subject_name="ghcr.io/qianyi-sun/loom-capacity-manager",
+            subject_name="ghcr.io/qianyi-sun/loom-execution-actuator",
             subject_digest=f"sha256:{_DIGEST}",
             architecture_digests=architecture_digests,
             scan_report_digests=scan_report_digests,
@@ -647,7 +647,7 @@ def _verify_architecture_cli(
         "--verification",
         str(verification),
         "--subject-name",
-        "ghcr.io/qianyi-sun/loom-capacity-manager",
+        "ghcr.io/qianyi-sun/loom-execution-actuator",
         "--subject-digest",
         f"sha256:{_DIGEST}",
         "--scan-report-sha256",
@@ -674,7 +674,7 @@ def _write_record(
         "--architecture",
         architecture,
         "--subject-name",
-        "ghcr.io/qianyi-sun/loom-capacity-manager",
+        "ghcr.io/qianyi-sun/loom-execution-actuator",
         "--subject-digest",
         f"sha256:{subject_digest}",
         "--scan-report-sha256",
@@ -689,7 +689,7 @@ def _write_record(
 def _artifact_record_path(records: Path, architecture: str) -> Path:
     directory = records / architecture
     directory.mkdir(exist_ok=True)
-    return directory / f"capacity-manager-{architecture}.json"
+    return directory / f"execution-actuator-{architecture}.json"
 
 
 def _manifest_fixture() -> dict[str, object]:
@@ -824,12 +824,12 @@ def test_cli_validates_exact_canonical_architecture_record_set(tmp_path: Path) -
                 "subject_digest": f"sha256:{_ARM64_DIGEST}",
             },
         },
-        "subject_name": "ghcr.io/qianyi-sun/loom-capacity-manager",
+        "subject_name": "ghcr.io/qianyi-sun/loom-execution-actuator",
     }
 
 
 def test_cli_validates_one_canonical_architecture_record(tmp_path: Path) -> None:
-    record = tmp_path / "capacity-manager-amd64.json"
+    record = tmp_path / "execution-actuator-amd64.json"
     assert (
         _write_record(
             record,
@@ -862,7 +862,7 @@ def test_cli_record_validation_is_type_strict(
     path: tuple[str, ...],
     replacement: object,
 ) -> None:
-    record = tmp_path / "capacity-manager-amd64.json"
+    record = tmp_path / "execution-actuator-amd64.json"
     assert (
         _write_record(
             record,
@@ -909,7 +909,7 @@ def test_cli_rejects_extra_or_tampered_architecture_records(tmp_path: Path) -> N
         )
         assert result.returncode == 0, result.stderr
 
-    duplicate_path = records / "amd64" / "capacity-manager-arm64.json"
+    duplicate_path = records / "amd64" / "execution-actuator-arm64.json"
     duplicate_path.write_text("{}\n", encoding="utf-8")
     result = _run_cli(
         "validate-architecture-records",
@@ -922,10 +922,10 @@ def test_cli_rejects_extra_or_tampered_architecture_records(tmp_path: Path) -> N
     duplicate_path.unlink()
 
     record = json.loads(
-        (records / "amd64" / "capacity-manager-amd64.json").read_text(encoding="utf-8")
+        (records / "amd64" / "execution-actuator-amd64.json").read_text(encoding="utf-8")
     )
     record["release"]["tree"] = "0" * 40
-    (records / "amd64" / "capacity-manager-amd64.json").write_text(
+    (records / "amd64" / "execution-actuator-amd64.json").write_text(
         json.dumps(record),
         encoding="utf-8",
     )
@@ -948,7 +948,7 @@ def test_cli_rejects_record_for_a_different_registry_subject(tmp_path: Path) -> 
         "--architecture",
         "amd64",
         "--subject-name",
-        "ghcr.io/different-owner/loom-capacity-manager",
+        "ghcr.io/different-owner/loom-execution-actuator",
         "--subject-digest",
         f"sha256:{_AMD64_DIGEST}",
         "--scan-report-sha256",
@@ -1039,7 +1039,7 @@ def test_cli_rejects_nonfinite_value_in_manifest_verification(tmp_path: Path) ->
         "--verification",
         str(verification),
         "--subject-name",
-        "ghcr.io/qianyi-sun/loom-capacity-manager",
+        "ghcr.io/qianyi-sun/loom-execution-actuator",
         "--subject-digest",
         f"sha256:{_DIGEST}",
         "--architecture-digest",
@@ -1166,7 +1166,7 @@ def test_cli_rejects_duplicate_key_in_manifest_json(tmp_path: Path) -> None:
 
 
 def test_cli_rejects_nonfinite_architecture_record_value(tmp_path: Path) -> None:
-    record = tmp_path / "capacity-manager-amd64.json"
+    record = tmp_path / "execution-actuator-amd64.json"
     assert (
         _write_record(
             record,
@@ -1199,7 +1199,7 @@ def test_cli_rejects_nonfinite_architecture_record_value(tmp_path: Path) -> None
 
 
 def test_cli_rejects_exponent_overflow_in_architecture_record(tmp_path: Path) -> None:
-    record = tmp_path / "capacity-manager-amd64.json"
+    record = tmp_path / "execution-actuator-amd64.json"
     assert (
         _write_record(
             record,

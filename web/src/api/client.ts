@@ -7,7 +7,7 @@
  */
 
 import { getApiBase } from "../lib/frontendConfig";
-import type { paths } from "./schema";
+import type { components, paths } from "./schema";
 
 export type ApiError = { status: number; detail: string };
 
@@ -494,14 +494,13 @@ export function retryPipelineStageRun(
   );
 }
 
-/** Backend catalog entry returned by GET /api/v1/backends. */
+/** Backend status returned by GET /api/v1/backends. Nebius is the only
+ * hosted backend, so this is a read-only status view: submissions never
+ * select a backend. */
 export interface Backend {
   name: string;
   description: string;
-  /** True when at least one live worker advertises this backend. The
-   * SPA renders unavailable backends as greyed-out so users see the
-   * full set of drivers Loom ships while understanding which can run
-   * a batch right now. */
+  /** True when at least one live worker advertises this backend. */
   available: boolean;
   /** True when a fresh, healthy autoscaler policy or service-execution target
    * can start compatible capacity. This is planning headroom, not immediately
@@ -588,7 +587,6 @@ export interface CreateBatchBody {
   description?: string;
   /** evaluation = native benchmarks + verification; trajectory_generation = TaskSets/benchmarks, verifier optional */
   purpose: "evaluation" | "trajectory_generation";
-  backend: string;
   task_filter: TaskFilter;
   trial_config: Record<string, unknown>;
   combinations?: Combination[];
@@ -1200,6 +1198,10 @@ export interface OverviewSummary {
       task_count: number;
     }[];
   };
+  execution_health: {
+    configured_targets: number;
+    status: "observed" | "unknown" | "needs_attention" | "not_configured";
+  };
   worker_health: {
     active: number;
     available_backends: string[];
@@ -1307,6 +1309,8 @@ export const api = {
   retryPipelineStageRun,
   getOverview: () =>
     apiFetch<OverviewSummary>("/api/v1/overview", { cache: "no-store" }),
+  getMonitorPlacement: (q: Record<string, string | undefined>) =>
+    apiFetch<components["schemas"]["MonitorPlacement"]>(`/api/v1/monitor/placement${qs(q)}`, { cache: "no-store" }),
   getMonitorSummary: (
     q: Record<string, string | undefined> = {},
   ) =>

@@ -139,17 +139,13 @@ class LocalTrialRunner:
     # Trial.run → TrajectoryWriter to mirror events through.
     cp_event_sink: CpEventSink | None = None
     model_switch_plan: dict[str, Any] | None = None
-    # #896: per-container hard resource caps for the trial + setup-sidecar
-    # containers this runner creates. Loom Slurm admission requires positive
-    # values; 0 remains available only to non-Slurm callers. main_loop populates
-    # these from WorkerSettings.container_* (env LOOM_WORKER_CONTAINER_*).
+    # Per-container resource caps for trial and setup-sidecar containers.
+    # main_loop populates these from WorkerSettings.container_*; 0 is unset.
     container_cpus: float = 0.0
     container_memory_mib: int = 0
     container_pids: int = 0
     container_cgroup_parent: str | None = None
     runtime_identity_labels: tuple[tuple[str, str], ...] = ()
-    slurm_allocated_gpus: int = -1
-    slurm_gpu_device_ids: tuple[str, ...] = ()
     # Trusted image consumers supply an online, bounded, one-use authority call.
     # None preserves the existing non-V2 runner. It is not an offline grant.
     start_authorization: Callable[[], Awaitable[bool]] | None = None
@@ -341,8 +337,6 @@ class LocalTrialRunner:
             container_pids=self.container_pids,
             container_cgroup_parent=self.container_cgroup_parent,
             runtime_identity_labels=self.runtime_identity_labels,
-            slurm_allocated_gpus=self.slurm_allocated_gpus,
-            slurm_gpu_device_ids=self.slurm_gpu_device_ids,
         )
 
         deferred_terminal_patch: tuple[str, str | None, str | None] | None = None

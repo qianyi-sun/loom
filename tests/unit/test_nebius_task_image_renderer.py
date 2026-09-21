@@ -136,12 +136,14 @@ def test_native_build_preserves_arguments_target_and_task_deadline(inputs) -> No
     _, job = render_task_image_job(**inputs)
     script = job["spec"]["template"]["spec"]["initContainers"][1]["command"][2]
     builds = [
-        shlex.split(line)[1:] for line in script.splitlines() if line.startswith("if buildctl")
+        shlex.split(line)[1:] for line in script.splitlines() if "buildctl-daemonless.sh build" in line
     ]
     assert "build-arg:VALUE=a b; $(touch /tmp/never)" in builds[0]
     assert "target=selected" in builds[0]
     assert not any(value.startswith(("build-arg:", "target=")) for value in builds[1])
-    assert job["spec"]["activeDeadlineSeconds"] == 73
+    assert job["spec"]["activeDeadlineSeconds"] == inputs["config"].active_deadline_seconds
+    assert builds[0][:6] == ["timeout", "-s", "TERM", "-k", "10", "73"]
+    assert builds[0][6:10] == ["sh", "-c", 'trap "exit 124" TERM; "$@" & wait "$!"', "loom-build"]
 
 
 def test_job_bounds_resources_and_only_builder_has_rootless_exceptions(inputs) -> None:
@@ -251,7 +253,7 @@ def test_dockerfile_paths_cannot_inject_shell_commands(inputs) -> None:
     )
     _, job = render_task_image_job(**inputs)
     script = job["spec"]["template"]["spec"]["initContainers"][1]["command"][-1]
-    command_line = next(line for line in script.splitlines() if line.startswith("if buildctl"))
+    command_line = next(line for line in script.splitlines() if line.startswith("if timeout"))
     assert "dockerfile=/loom/build/context/nested/space ' ;$(touch BAD)" in shlex.split(
         command_line
     )
@@ -338,7 +340,7 @@ def test_each_component_cleans_only_private_daemon_data_before_next_phase(inputs
     script = job["spec"]["template"]["spec"]["initContainers"][1]["command"][-1]
     cleanup = "TMPDIR=/scratch/cleanup rootlesskit rm -rf -- /scratch/state /scratch/tmp /scratch/runtime /scratch/docker-config"
     assert script.count(cleanup) == len(inputs["components"])
-    for segment in script.split("if buildctl-daemonless.sh")[1:]:
+    for segment in script.split("if timeout")[1:]:
         success, failure = segment.split("else", 1)
         assert "then" in success and cleanup in success
         assert "rootlesskit rm" not in failure
@@ -346,7 +348,7 @@ def test_each_component_cleans_only_private_daemon_data_before_next_phase(inputs
         if "rm -rf" in line:
             assert "/loom/build" not in line
             assert "*" not in line
-    assert script.index(cleanup) < script.rindex("if buildctl-daemonless.sh")
+    assert script.index(cleanup) < script.rindex("if timeout")
 
 
 def test_optional_cache_does_not_consume_builder_output_space(inputs) -> None:

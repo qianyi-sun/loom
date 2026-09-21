@@ -17,6 +17,10 @@ publish or deploy new candidates from it. Use the successful `nebius-candidate`
 run for the exact merged `dev` commit, with its matching candidate and runtime
 profile. Candidate publication does not itself deploy the environment.
 
+Published platform and task images have a separate
+[image-retention maintenance workflow](nebius-image-retention.md). Its initial
+daily mode is preview; rollout skip decisions do not delete registry images.
+
 For the batch-purpose release, the existing dev database advances from `0150`
 to `0151` through the normal migration Job after backup. Do not deploy the old
 integration branch's `0137_batch_purpose` migration against a dev-lineage database,
@@ -374,6 +378,14 @@ by database bootstrap, including repeat runs. A Gateway 500 during call recordin
 can occur **after the upstream model returned successfully**; an empty
 `llm_calls` result then means missing persisted usage, not proof of zero upstream
 calls. Inspect the Gateway exception before retrying a metered request.
+
+Gateway dispatch admission also requires `SELECT`, `INSERT` and `UPDATE` on
+`gateway_dispatch_receipts`, without `DELETE`. Bootstrap reapplies these grants
+on every rollout. If the Gateway returns `503 dispatch_audit_unavailable`, check
+its fixed-category error log and the runtime role's table privileges: admission
+must commit before the provider request is sent. A `database` error with missing
+receipt privileges is a platform bootstrap defect; provider retries cannot fix
+it. Verify this path with the restricted `loom_gateway` role, not a superuser.
 
 Canonical artifacts/trajectories, transient execution source, and backup storage
 use distinct buckets and identities. Canonical outputs remain durable after
@@ -908,6 +920,17 @@ Skopeo's native digest handling. Registry and storage credentials are absent fro
 the Dockerfile container. Supported task and sidecar components use the same
 path, including declared build arguments and multi-stage targets.
 
+`environment.build_timeout_sec` starts when each BuildKit build command starts;
+it does not include node provisioning, input preparation, scratch cleanup or
+registry publication. `active_deadline_seconds` remains the separate bounded
+whole-Job allowance (1800 seconds by default), including those infrastructure
+phases. A build command that exhausts its task budget reports
+`build_deadline_exceeded`; OOM and storage failures retain their own reasons.
+Build output streams to the container log, with build/cleanup boundary markers.
+The actuator retains a bounded, redacted tail before timeout/cancellation
+cleanup; ordinary polling does not repeatedly fetch logs. A valid completed
+publication is still accepted if its first reconciliation is after the deadline.
+
 The dedicated build namespace permits the rootless user-namespace helper's
 SETUID/SETGID and unconfined seccomp/AppArmor profiles. This exception does not
 change the restricted execution namespace. Build Pods remain nonprivileged,
@@ -1021,3 +1044,95 @@ secret-safe warning. Usage writes use a savepoint so telemetry failure cannot
 roll back primary lifecycle observations or prevent cleanup. A persistence
 failure can therefore leave missing/unfinalized usage; operators must not treat
 absence of usage as zero consumption or evidence sufficient to reduce requests.
+
+## Automatic rollout when idle
+
+After successful full `dev` publication, `nebius-rollout.yml` tries deployment
+once. Active task reservations, running trials, output processing, cleanup, or
+native image builds cause **skipped_busy**; no backup/apply, wait, timer, or retry
+follows. Queued tasks do not block deployment. A later successful publication
+tries again; manual dispatch of the same workflow selects the latest successful
+push publication. Harness-only publications do not roll out the platform.
+
+CI and publication remain on GitHub-hosted runners, with independent concurrency
+from rollout. The runner invokes `kubectl` over the existing Nebius SSH gateway;
+no Nebius runner, new gateway, public Kubernetes API exposure, or old environment
+integration is needed. A pinned SSH host key is required; do not use live
+`ssh-keyscan` output as trust. Kubernetes credentials stay on the gateway.
+
+One database advisory lock coordinates new execution/build claims with the idle
+check. On success a single durable guard row pauses **new dispatch only** while
+submissions continue queuing. Existing target health/desire flags and operator
+submission pauses are not modified. The guard covers all activity in this
+independent platform database. The deployment reuses the existing backup,
+migration, configuration and rollout stages, verifies public HTTPS and live
+workload images/readiness, then deletes its own guard. It preserves live task
+resource requests and builder concurrency. Older workflow reruns cannot replace
+a newer deployed commit. There is no extra PR admission gate or paid batch test.
+
+Migration readiness resolves `expected_head: "head"` from the selected candidate's
+Alembic graph. Adding a migration does not require updating a numeric head or
+revision count in rollout configuration or upgrade-to-head tests. The graph must
+still have one head and a closed migration lineage; the live database does not
+define the expected version. Historical ownership/restore inventories retain
+their explicit revisions and are generated/tested at those revisions, independent
+of the latest deployment target.
+
+Enable once, after installing the guard-aware release:
+
+1. Keep repository variable `NEBIUS_AUTO_ROLLOUT_ENABLED` unset/false during the
+   initial installation. An old control plane cannot honor a new dispatch guard.
+   Install this release (including migration `0152` and the updated execution
+   actuator) through the existing operator procedure in a controlled idle
+   maintenance window. The new deployer intentionally fails closed when the
+   installed control plane has no guard support; it provides no bypass flag.
+2. In GitHub Environment `nebius-integration`, provision secret
+   `NEBIUS_DEPLOY_SSH_KEY` for the existing deployment gateway account, plus
+   variables `NEBIUS_DEPLOY_SSH_TARGET` (`user@host`),
+   `NEBIUS_DEPLOY_SSH_KNOWN_HOSTS` (reviewed OpenSSH known_hosts entry),
+   `NEBIUS_DEPLOY_KUBECONFIG_PATH` (absolute gateway path), and
+   `NEBIUS_DEPLOY_CLUSTER_ID`. The gateway account needs the existing deployment
+   Kubernetes rights, including exec into the control-plane Pod. These are
+   deployment credentials, not ordinary user or CI test credentials.
+3. Set repository variable `NEBIUS_AUTO_ROLLOUT_ENABLED=true`. Use manual workflow
+   dispatch for the first guarded rollout and inspect Actions plus Deployments.
+   Busy is a successful decision to skip, not a successful deployment. Only
+   verified rollouts get Deployment status `success`; skipped records are
+   `inactive`. Publication retains environment secrets without creating a
+   Deployment record. Actual Deployment records bind the selected candidate SHA.
+
+The same local entrypoint uses an accessible kubeconfig (without SSH variables),
+or the same gateway transport when `LOOM_DEPLOY_SSH_TARGET`,
+`LOOM_DEPLOY_SSH_KEY_FILE`, and `LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE` are set:
+
+```sh
+uv sync --locked --no-dev --extra cluster
+uv run --no-sync python scripts/ops/nebius_idle_rollout.py run \
+  --publication-dir /protected/downloaded-candidate \
+  --candidate <published-dev-sha> \
+  --kubeconfig /protected/kubeconfig \
+  --expected-cluster-id <cluster-id> \
+  --evidence-dir /protected/rollout-evidence
+```
+
+Use the selected candidate's checkout and complete Git history. Local and CI
+rollout share the same guard. Phase logs and sanitized `deployment-*.json`
+identify the result and guard owner. No manifests or credentials are uploaded
+as Actions artifacts. Backup failures before manifest application release the
+pause. Once apply starts, failure or runner loss retains the pause; there is no
+expiry that could restart work on a partially updated platform. New automation
+then reports `skipped_locked`, leaving the failed deployment for recovery.
+
+For recovery, inspect the recorded phase, migration and workload state first.
+Repair forward or restore compatible application images; do not automatically
+downgrade the database. After confirming the platform is healthy and the previous
+runner is no longer applying changes, explicitly release the recorded owner:
+
+```sh
+kubectl --kubeconfig /protected/kubeconfig -n loom-nebius-platform \
+  exec deployment/loom-control-plane -- python -m loom.nebius_rollout_guard \
+  release --owner <guard_owner-from-deployment-evidence>
+```
+
+Then manually dispatch the workflow if another rollout is needed. Never delete
+another owner's pause or rerun the former unguarded operator for routine updates.

@@ -85,12 +85,8 @@ spec:
           value: /usr/local/bin/loom-terminal-task-validator
         - name: LOOM_WORKER_PIPELINE_TERMINAL_TASK_VALIDATOR_SHA256
           value: ''
-        - name: LOOM_WORKER_PIPELINE_TERMINALGEN_AUTHORING_ENABLED
-          value: 'False'
         - name: LOOM_WORKER_PRE_START_HEARTBEAT_INTERVAL_SEC
           value: '60.0'
-        - name: LOOM_WORKER_REQUIRE_CGROUP_PARENT
-          value: 'False'
         - name: LOOM_WORKER_SANDBOX_IDENTITY
           value: ''
         - name: LOOM_WORKER_SANDBOX_ISOLATION
@@ -117,12 +113,6 @@ spec:
           value: '5.0'
         - name: LOOM_WORKER_SETUP_HEALTH_WAIT_TIMEOUT_SEC
           value: '300.0'
-        - name: LOOM_WORKER_SLURM_ALLOCATED_GPUS
-          value: '-1'
-        - name: LOOM_WORKER_SLURM_GPU_DEVICE_IDS
-          value: ''
-        - name: LOOM_WORKER_SLURM_JOB_ID
-          value: ''
         - name: LOOM_WORKER_STORAGE_AUTH_KIND
           value: static_keys
         - name: LOOM_WORKER_STORAGE_BACKEND

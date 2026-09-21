@@ -111,27 +111,11 @@ jobs:
           Path("release-gate-input.json").write_bytes(base64.b64decode(raw, validate=True))
           PY
 
-      - name: Validate environment isolation policy
+      - name: Validate native Nebius render and deployment boundaries
         run: |
-          uv run --no-sync python scripts/validate_environment_isolation.py \
-            --profiles-dir deploy/environments \
-            --workflow .github/workflows/deploy-environment.yml
-
-      - name: Render and audit staging manifests
-        run: |
-          uv run --no-sync loom cluster render \
-            --config deploy/environments/staging.multinode.cluster.toml \
-            > staging-rendered.yaml
-          uv run --no-sync loom cluster audit \
-            --config deploy/environments/staging.multinode.cluster.toml
-
-      - name: Render and audit production manifests
-        run: |
-          uv run --no-sync loom cluster render \
-            --config deploy/environments/production.cluster.toml \
-            > production-rendered.yaml
-          uv run --no-sync loom cluster audit \
-            --config deploy/environments/production.cluster.toml
+          uv run --no-sync pytest --no-cov \
+            tests/unit/test_nebius_platform_render.py \
+            tests/ops/test_deploy_nebius_platform.py
 
       - name: Validate release gate evidence
         run: |
@@ -158,6 +142,4 @@ jobs:
             release-gate-evidence.json
             release-gate-evidence.md
             release-gate-input.json
-            staging-rendered.yaml
-            production-rendered.yaml
           if-no-files-found: error

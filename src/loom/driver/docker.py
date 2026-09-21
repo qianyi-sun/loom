@@ -48,7 +48,7 @@ from loom.models.types import OS
 logger = logging.getLogger(__name__)
 
 _KEEPALIVE_CMD = ["sh", "-c", "exec sleep infinity"]
-_GUARD_OWNED_SLICE_RE = re.compile(r"^loom-job-[1-9][0-9]*[.]slice$")
+_SYSTEMD_SLICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*[.]slice$")
 _CGROUP_V2_READ_SCRIPT = """
 for f in cpu.stat memory.current memory.peak memory.events pids.current pids.peak io.stat; do
   printf '@@%s\\n' "$f"
@@ -85,7 +85,7 @@ def _tmpfs_specs_to_docker_map(specs: tuple[str, ...]) -> dict[str, str]:
 def _validated_cgroup_parent(value: str) -> str:
     if "\x00" in value or "\n" in value or "\r" in value:
         raise DriverError("Docker cgroup parent is malformed")
-    if _GUARD_OWNED_SLICE_RE.fullmatch(value) is not None:
+    if _SYSTEMD_SLICE_RE.fullmatch(value) is not None:
         return value
     path = PurePosixPath(value)
     if not path.is_absolute() or path == PurePosixPath("/"):
@@ -403,31 +403,12 @@ class DockerDriver:
                     opts.cgroup_parent,
                 )
             if opts.gpus:
-                if opts.slurm_allocated_gpus >= 0:
-                    if opts.gpus > opts.slurm_allocated_gpus:
-                        raise DriverError(
-                            "trial GPU request exceeds the Slurm allocation: "
-                            f"requested={opts.gpus} allocated={opts.slurm_allocated_gpus}",
-                        )
-                    if len(opts.slurm_gpu_device_ids) < opts.gpus:
-                        raise DriverError(
-                            "Slurm GPU allocation is missing host device IDs: "
-                            f"requested={opts.gpus} "
-                            f"device_ids={len(opts.slurm_gpu_device_ids)}",
-                        )
-                    run_kwargs["device_requests"] = [
-                        docker.types.DeviceRequest(
-                            device_ids=list(opts.slurm_gpu_device_ids[: opts.gpus]),
-                            capabilities=[["gpu"]],
-                        )
-                    ]
-                else:
-                    run_kwargs["device_requests"] = [
-                        docker.types.DeviceRequest(
-                            count=opts.gpus,
-                            capabilities=[["gpu"]],
-                        )
-                    ]
+                run_kwargs["device_requests"] = [
+                    docker.types.DeviceRequest(
+                        count=opts.gpus,
+                        capabilities=[["gpu"]],
+                    )
+                ]
             # docker-py's high-level containers.run() creates before it starts,
             # but it does not return the Container if start() raises. Split the
             # steps so the failure cleanup path can remove Created containers.

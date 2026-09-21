@@ -273,38 +273,11 @@ resolves to x86_64. The former GB10 ARM substitute-image build and importer
 promotion have been removed; ARM task declarations must be migrated explicitly.
 Historical ARM records remain readable, and ARM clients may submit remotely.
 
-## Staging acceptance (Gate 3)
+## Hosted acceptance
 
-Minimal smoke after a staging rollout that includes the Harbor-embedded worker
-image and gateway-ledger bridge:
-
-```bash
-loom auth login --server https://yylx.world/dev ...
-# User batch creation does not select a required worker pool. Operators collect
-# pool-specific coverage with `loom admin batches submit-on-behalf` separately.
-loom eval batch create \
-  --name-suffix terminus2-gate3-smoke \
-  --agent terminus-2 \
-  --provider <team-provider> \
-  --model <preflight-passing-model> \
-  --benchmark loom-smoke \
-  --task-filter '{"task_ids":["loom-smoke/gb10-oracle-hello-world"]}' \
-  --n-per-task 1
-```
-
-Evidence checklist:
-
-- `llm_evidence_status: calls_observed` on the batch/trial
-- `terminus2_runtime_provenance` with `harbor_compat_sha` matching the pin
-- for a TB2.1 canary, physical profile `terminal-bench-2@tb2.1-r6`, Hub
-  metadata/package digest, Loom bundle checksum, verifier identity, and runtime
-  provenance are all present as separate fields
-- At least one `terminus2_command` + `terminus2_terminal_observation` pair
-- LLM rows joined to real `gateway_request_id` / `llm_calls.id` (not synthetic
-  `harbor-step-N` ids)
-- Harbor artifacts present: `.loom/agent/trajectory.json`, `.loom/agent/recording.cast`
-- verifier reward is finite and numeric; `0` is valid, while a missing reward
-  is a platform/verifier failure
+Use the [Nebius Terminus 2 runbook](../runbooks/nebius-terminus2.md) for
+native execution acceptance and retained reward, artifact and provenance
+checks. The retired worker-pool smoke is not hosted release evidence.
 
 ## Ten-second production-equivalent deadline canary (#1748)
 
@@ -652,9 +625,9 @@ Related: `src/loom_control_plane/terminus_recovery.py`,
 Nebius native execution requires Linux x86_64. ARM clients may submit work to
 Nebius remotely. This restriction belongs to Nebius admission and image-builder
 claims; shared task validation, catalog publication and worker registration
-continue to support ARM execution on other platforms. Tasks declaring `any`
+continue to support local ARM execution. Tasks declaring `any`
 retain both AMD64 and ARM64 image prerequisites outside Nebius, including the
-Terminus runtime fallback builds. GB10 retains its ARM capability.
+local Terminus runtime fallback builds.
 
 The [Harbor90 migration runbook](../runbooks/nebius-harbor90-migration.md)
 prepares an x86 revision of that specific Nebius catalog. It does not retire ARM

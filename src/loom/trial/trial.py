@@ -120,18 +120,13 @@ class TrialContext:
     # MinIO remains authoritative until Slice 3c flips the SSE reader
     # to Postgres; sink failures are logged + swallowed here.
     cp_event_sink: CpEventSink | None = None
-    # #896: per-container hard resource caps for the trial container on
-    # non-exclusive (packed) workers. 0 = unbounded (default), which
-    # is rejected for Loom Slurm workers. Forwarded into
-    # StartOptions so DockerDriver applies nano_cpus / mem_limit /
-    # pids_limit at container create.
+    # Per-container resource caps; 0 leaves the corresponding Docker limit unset.
+    # Forwarded through StartOptions when creating trial containers.
     container_cpus: float = 0.0
     container_memory_mib: int = 0
     container_pids: int = 0
     container_cgroup_parent: str | None = None
     runtime_identity_labels: tuple[tuple[str, str], ...] = ()
-    slurm_allocated_gpus: int = -1
-    slurm_gpu_device_ids: tuple[str, ...] = ()
 
     @property
     def task_id(self) -> str:
@@ -258,8 +253,6 @@ class Trial:
                             container_memory_mib=self.ctx.container_memory_mib,
                             container_pids=self.ctx.container_pids,
                             cgroup_parent=self.ctx.container_cgroup_parent,
-                            slurm_allocated_gpus=self.ctx.slurm_allocated_gpus,
-                            slurm_gpu_device_ids=self.ctx.slurm_gpu_device_ids,
                         )
                     )
                     driver_started = True

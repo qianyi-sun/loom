@@ -29,6 +29,7 @@ from loom.db.schema import (
     Trial,
 )
 from loom.security.redaction import redact_mapping, redact_text
+from loom.service_execution_backend import NEBIUS_BACKEND, local_execution_enabled
 from loom_service.auth_guards import (
     is_admin,
     require_scope,
@@ -53,6 +54,7 @@ from loom_service.routes.object_downloads import stream_object_response
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 from loom_service.task_config_validation import expected_trial_count
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
+from loom_service.usage_accounting import empty_usage_projection, usage_by_batch_ids
 
 router = APIRouter()
 
@@ -159,6 +161,26 @@ def _trial_is_org_visible(
         and trial.state in _ORG_VISIBLE_TRIAL_STATES
     )
     return trial_shared
+
+
+def _require_nebius_source_backend(backend: str | None, *, action: str) -> None:
+    """Refuse to derive a new submission from a batch on a retired backend.
+
+    Nebius is the only supported hosted backend. Historical batches keep their
+    original backend for display, but a new batch cannot inherit it, and it
+    cannot be silently relabelled as Nebius: that would skip the Nebius
+    admission and runtime-profile freeze that ordinary submission performs.
+    Disposable local execution (LOOM_LOCAL_EXECUTION=1) keeps worker backends.
+    """
+    if backend != NEBIUS_BACKEND and not local_execution_enabled():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"source batch used backend {backend!r}, which is no longer "
+                f"supported; Loom hosted execution is Nebius-only. Submit a "
+                f"new batch instead of {action}."
+            ),
+        )
 
 
 def _can_read_batch(ctx: Any, batch: Batch) -> bool:
@@ -1390,6 +1412,8 @@ async def _serialize_batch(
         "artifact_summary": artifact_summary,
         "artifact_summary_truncated": artifact_summary_truncated,
     }
+    usage = await usage_by_batch_ids(session, [batch.id])
+    out.update(usage.get(batch.id, empty_usage_projection()))
     if include_debug:
         llm_calls = await _llm_calls_for_trials(session, trials)
         debug_evidence = build_batch_debug_evidence(
@@ -1744,6 +1768,7 @@ async def list_run_library_batches(
     serialized: list[dict[str, Any]] = []
     batch_ids = [batch.id for batch, _team in page_rows]
     trial_rollups = await _batch_list_trial_rollups(session, batch_ids)
+    usage = await usage_by_batch_ids(session, batch_ids)
     artifact_summaries, truncated_artifact_summaries = await _batch_list_artifact_summaries(
         session, ctx, batch_ids
     )
@@ -1758,6 +1783,7 @@ async def list_run_library_batches(
             artifact_summaries.get(batch.id, _empty_artifact_summary()),
             batch.id in truncated_artifact_summaries,
         )
+        item.update(usage.get(batch.id, empty_usage_projection()))
         serialized.append(item)
 
     next_cursor: str | None = None
@@ -2128,6 +2154,7 @@ async def clone_run_library_batch_config(
     source, _team = await _load_batch_with_team(session, batch_id)
     if not _can_read_batch(ctx, source):
         raise HTTPException(status_code=403, detail="batch is not shared")
+    _require_nebius_source_backend(source.backend, action="cloning its config")
     if source.provider_connection_id is not None and payload.provider_connection_id is None:
         raise HTTPException(
             status_code=400,
@@ -2305,6 +2332,10 @@ async def reuse_run_library_artifact(
     trial, batch = await _load_trial_with_batch(session, trial_id)
     if not _can_read_trial(ctx, trial, batch):
         raise HTTPException(status_code=403, detail="trial is not shared")
+    _require_nebius_source_backend(
+        batch.backend if batch is not None else None,
+        action="reusing its artifact",
+    )
     typed_artifact = await _typed_artifact_for_trial_key(
         session,
         trial.id,

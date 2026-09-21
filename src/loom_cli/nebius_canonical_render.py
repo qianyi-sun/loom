@@ -21,7 +21,6 @@ def nebius_canonical_context(config: ClusterConfig) -> dict[str, Any]:
     """Validate non-secret attachment inputs before generating any resources."""
     binding = config.nebius_execution
     overrides: dict[str, Any] = {
-        "slurm_worker_controller_environment": config.runtime_environment,
         "artifacts_bucket": config.artifacts_bucket,
         "trajectories_bucket": config.trajectories_bucket,
     }

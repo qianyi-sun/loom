@@ -29,6 +29,72 @@ from loom import nebius_platform_bootstrap as bootstrap
 from tests.unit.test_nebius_platform_render import platform_inputs, regional_inputs  # noqa: F401
 
 
+async def _exercise_gateway_dispatch_role(database: str) -> None:
+    """The deployed Gateway role must admit and observe an upstream dispatch."""
+    import httpx
+    from sqlalchemy import insert, select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from loom.auth import AuthContext
+    from loom.db.schema import GatewayDispatchReceipt, Team
+    from loom_llm_gateway.dispatch_audit import DispatchAudit, _RequestAudit
+    from tests.integration.gateway_db import delete_gateway_trial, insert_gateway_trial
+
+    owner_engine = create_async_engine(make_url(database).set(drivername="postgresql+psycopg"))
+    gateway_engine = create_async_engine(make_url(database).set(
+        drivername="postgresql+psycopg", username="loom_gateway",
+        password=os.environ["LOOM_DB_GATEWAY_PASSWORD"],
+    ))
+    team_id, trial_id = uuid4(), uuid4()
+    task_id = None
+    try:
+        async with owner_engine.begin() as connection:
+            await connection.execute(insert(Team).values(id=team_id, name=f"dispatch-role-{team_id}"))
+            task_id = await connection.run_sync(
+                lambda conn: insert_gateway_trial(conn, team_id=team_id, trial_id=trial_id),
+            )
+        factory = async_sessionmaker(gateway_engine, expire_on_commit=False)
+        audit = DispatchAudit(
+            _RequestAudit(session_factory=factory),
+            AuthContext(token_hash=b"", type="step", scopes=["llm:call"],
+                        team_id=team_id, expires_at=None, trial_id=trial_id,
+                        step_id="agent", step_jwt_id=uuid4()),
+            "facade_openai", None, "model_call",
+        )
+        upstream_called = False
+
+        async def upstream() -> httpx.Response:
+            nonlocal upstream_called
+            # Admission must already be durable before transport is allowed.
+            async with factory() as session:
+                receipt = await session.scalar(select(GatewayDispatchReceipt).where(
+                    GatewayDispatchReceipt.trial_id == trial_id,
+                ))
+                assert receipt is not None and receipt.provider_outcome == "admitted"
+            upstream_called = True
+            return httpx.Response(200)
+
+        response = await audit.send(upstream, deadline=None)
+        assert upstream_called and response.status_code == 200
+        async with factory() as session:
+            receipt = await session.scalar(select(GatewayDispatchReceipt).where(
+                GatewayDispatchReceipt.trial_id == trial_id,
+            ))
+            assert receipt is not None
+            assert receipt.provider_outcome == "response_received"
+            assert receipt.provider_http_status == 200
+            assert receipt.provider_observed_at is not None
+    finally:
+        if task_id is not None:
+            async with owner_engine.begin() as connection:
+                await connection.run_sync(
+                    lambda conn: delete_gateway_trial(conn, trial_id=trial_id, task_id=task_id),
+                )
+                await connection.execute(Team.__table__.delete().where(Team.id == team_id))
+        await gateway_engine.dispose()
+        await owner_engine.dispose()
+
+
 async def _exercise_native_builder_role(database: str) -> None:
     """Run the native queue/capacity/publication path as the deployed DB role."""
     from sqlalchemy import select
@@ -259,6 +325,12 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
             connection.rollback()
             for table in ("task_image_materializations", "trial_task_image_materializations"):
                 connection.execute("SELECT 1 FROM " + table + " LIMIT 0")
+            assert connection.execute(
+                "SELECT has_table_privilege(current_user, 'nebius_rollout_guard', 'SELECT')",
+            ).fetchone() == (role == "actuator",)
+            assert connection.execute(
+                "SELECT has_table_privilege(current_user, 'nebius_rollout_guard', 'INSERT,UPDATE,DELETE')",
+            ).fetchone() == (False,)
             if role == "actuator":
                 for privilege in ("SELECT", "INSERT", "UPDATE"):
                     assert connection.execute(
@@ -268,6 +340,9 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
                 "SELECT has_table_privilege(current_user, 'trial_resource_usage', 'DELETE')",
             ).fetchone() == (False,)
             if role == "gateway":
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    connection.execute("DELETE FROM gateway_dispatch_receipts")
+                connection.rollback()
                 for table in ("batches", "task_image_materialization_attempts", "task_image_publication_evidence"):
                     with pytest.raises(psycopg.errors.InsufficientPrivilege):
                         connection.execute("SELECT 1 FROM " + table + " LIMIT 0")
@@ -286,10 +361,12 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
                     ("task_image_materialization_attempts", "DELETE"),
                     ("task_image_publication_evidence", "UPDATE,DELETE"),
                     ("tasks", "SELECT,INSERT,UPDATE,DELETE"),
+                    ("gateway_dispatch_receipts", "SELECT,INSERT,UPDATE,DELETE"),
                 ):
                     assert connection.execute(
                         "SELECT has_table_privilege(current_user, %s, %s)", (table, denied),
                     ).fetchone() == (False,)
+    asyncio.run(_exercise_gateway_dispatch_role(platform_database))
     # Exercise actual CP HTTP handlers and actual database policy writes. Only
     # the transport is adapted from in-cluster HTTP to an in-process ASGI app.
     from fastapi import FastAPI

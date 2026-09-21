@@ -27,10 +27,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import verify_bearer_token
-from loom_control_plane.protected_worker_session import (
-    ProtectedBodyWorkerSession,
-    ProtectedQueryWorkerSession,
-)
 
 router = APIRouter(prefix="/api/v1/internal/trial-cache")
 
@@ -162,7 +158,6 @@ def _parse_float(payload: dict[str, Any], key: str, *, min_val: float = 0.0) -> 
 async def claim_route(
     request: Request,
     payload: dict[str, Any],
-    protected_worker_session: ProtectedBodyWorkerSession,
     authorization: str | None = Header(default=None),
 ) -> dict[str, bool]:
     """Atomic claim of a builder slot. Body: `cache_key`, `worker_id`,
@@ -202,7 +197,6 @@ async def release_route(
     request: Request,
     cache_key: str,
     worker_id: UUID,
-    protected_worker_session: ProtectedQueryWorkerSession,
     authorization: str | None = Header(default=None),
 ) -> None:
     """Delete the slot if we still own it.
@@ -225,7 +219,6 @@ async def refresh_route(
     request: Request,
     cache_key: str,
     payload: dict[str, Any],
-    protected_worker_session: ProtectedBodyWorkerSession,
     authorization: str | None = Header(default=None),
 ) -> dict[str, bool]:
     """Heartbeat: extend our slot's TTL. Returns `{refreshed: False}`

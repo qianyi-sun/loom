@@ -210,7 +210,7 @@ async def run_library_setup(
                     created_by_token_prefix="test:web",
                     expected_trial_count=1,
                     n_per_task=1,
-                    backend="docker",
+                    backend="nebius",
                     combinations=[],
                     provider_connection_id=conn_a if team_id == team_a else conn_b,
                     provider_model_id="gpt-4o-mini",
@@ -233,7 +233,7 @@ async def run_library_setup(
                 created_by_token_prefix="test:web",
                 expected_trial_count=1,
                 n_per_task=1,
-                backend="docker",
+                backend="nebius",
                 combinations=[],
                 provider_connection_id=conn_a,
                 provider_model_id="gpt-4o-mini",
@@ -520,7 +520,7 @@ def _seed_cursor_batches(
                 "created_by_token_prefix": "test:774",
                 "expected_trial_count": 1,
                 "n_per_task": 1,
-                "backend": "docker",
+                "backend": "nebius",
                 "combinations": [],
                 "provider_connection_id": provider_connection_id,
                 "provider_model_id": "gpt-4o-mini",
@@ -602,7 +602,7 @@ def _seed_cursor_batches(
             "created_by_token_prefix": "test:774",
             "expected_trial_count": 1,
             "n_per_task": 1,
-            "backend": "docker",
+            "backend": "nebius",
             "combinations": [],
             "provider_connection_id": provider_connection_id,
             "provider_model_id": "gpt-4o-mini",
@@ -1175,7 +1175,7 @@ async def test_run_library_filters_by_structured_batch_fields(
                     "finished_at": now,
                     "created_by_token_prefix": "test:web",
                     "expected_trial_count": 1,
-                    "backend": "docker",
+                    "backend": "nebius",
                     "combinations": [
                         {
                             "agent_name": "codex",
@@ -1209,7 +1209,7 @@ async def test_run_library_filters_by_structured_batch_fields(
                     "finished_at": now,
                     "created_by_token_prefix": "test:web",
                     "expected_trial_count": 1,
-                    "backend": "docker",
+                    "backend": "nebius",
                     "combinations": [
                         {
                             "agent_name": "codex",
@@ -1521,7 +1521,7 @@ async def test_run_library_batch_detail_includes_combination_summary(
                 finished_at=now,
                 created_by_token_prefix="test:web",
                 expected_trial_count=1,
-                backend="docker",
+                backend="nebius",
                 combinations=combinations,
                 visibility="org",
                 share_status="shared",
@@ -1807,7 +1807,7 @@ async def test_artifact_filter_is_applied_before_batch_limit(
                     finished_at=created,
                     created_by_token_prefix="test:web",
                     expected_trial_count=1,
-                    backend="docker",
+                    backend="nebius",
                     combinations=[],
                     provider_connection_id=conn_a,
                     provider_model_id="gpt-4o-mini",
@@ -2173,6 +2173,54 @@ async def test_clone_config_uses_destination_provider_and_records_provenance(
     sync_engine.dispose()
 
 
+async def test_clone_and_reuse_reject_batch_on_retired_backend(
+    run_library_setup: dict[str, object],
+) -> None:
+    """A historical batch stays readable but cannot seed a new hosted
+    submission: it would inherit the retired backend or be silently relabelled
+    as Nebius."""
+    app = run_library_setup["app"]
+    raw_b = run_library_setup["raw_b"]
+    batch_shared = run_library_setup["batch_shared"]
+    trial_shared = run_library_setup["trial_shared"]
+    conn_b = run_library_setup["conn_b"]
+    safe_key = run_library_setup["safe_key"]
+    postgres_url = run_library_setup["postgres_url"]
+
+    sync_engine = create_engine(str(postgres_url))
+    with sync_engine.begin() as conn:
+        conn.execute(update(Batch).where(Batch.id == batch_shared).values(backend="docker"))
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        headers = {"Authorization": f"Bearer {raw_b}"}
+        cloned = await ac.post(
+            f"/api/v1/run-library/batches/{batch_shared}/clone-config",
+            json={"name": "clone of historical", "provider_connection_id": str(conn_b)},
+            headers=headers,
+        )
+        reused = await ac.post(
+            f"/api/v1/run-library/trials/{trial_shared}/artifacts/reuse",
+            json={"key": safe_key, "name": "reuse of historical"},
+            headers=headers,
+        )
+        detail = await ac.get(f"/api/v1/run-library/batches/{batch_shared}", headers=headers)
+
+    with sync_engine.connect() as conn:
+        derived = conn.execute(
+            select(Batch.id).where(Batch.name.in_(["clone of historical", "reuse of historical"]))
+        ).all()
+    sync_engine.dispose()
+
+    for response in (cloned, reused):
+        assert response.status_code == 400, response.text
+        assert "'docker'" in response.json()["detail"]
+        assert "Nebius-only" in response.json()["detail"]
+    assert derived == []
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["backend"] == "docker"
+
+
 async def test_clone_config_rejects_task_that_became_agent_incompatible(
     run_library_setup: dict[str, object],
 ) -> None:
@@ -2453,3 +2501,30 @@ async def test_reuse_shared_artifact_creates_provenance_and_blocks_raw(
         assert row.required_worker_pools == []
         assert row.expected_trial_count == 1
     sync_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_library_costs_match_batch_accounting_without_inventing_zero(run_library_setup):
+    setup = run_library_setup
+    engine = create_engine(str(setup["postgres_url"]))
+    with engine.begin() as conn:
+        conn.execute(insert(LlmCall).values(
+            id=uuid4(), team_id=setup["team_a"], trial_id=setup["trial_shared"],
+            step_id="main", model="openai/test", dialect="openai",
+            input_tokens=10, output_tokens=5, provider_extras={},
+            cost_usd=Decimal("0"), rate_card_hash="facade:tokens-only:test",
+        ))
+    engine.dispose()
+    headers = {"Authorization": f"Bearer {setup['raw_a']}"}
+    batch_id = str(setup["batch_shared"])
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=setup["app"]), base_url="http://svc") as client:
+        listing = await client.get("/api/v1/run-library/batches?scope=my", headers=headers)
+        detail = await client.get(f"/api/v1/run-library/batches/{batch_id}", headers=headers)
+        batch = await client.get(f"/api/v1/batches/{batch_id}", headers=headers)
+    assert listing.status_code == detail.status_code == batch.status_code == 200
+    item = next(row for row in listing.json()["items"] if row["id"] == batch_id)
+    for row in (item, detail.json(), batch.json()):
+        assert row["estimated_cost_usd"] is None
+        assert row["cost_status"] == "not_applicable"
+        assert row["cost_estimate_source"] == "tokens-only"
+        assert row["llm_calls_count"] == 1

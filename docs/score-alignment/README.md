@@ -17,5 +17,5 @@ uv run --no-sync python scripts/benchmark_score_alignment_gate.py manifest \
 ```
 
 Live-run comparisons and dated adapter reports are evidence, not current
-product behavior; preserved reports live in
-[`../../archive/docs/score-alignment/`](../../archive/docs/score-alignment/).
+product behavior. Store new run reports externally; older reports remain in
+[Git history](../historical/README.md).

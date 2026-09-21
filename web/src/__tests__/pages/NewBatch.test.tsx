@@ -1,7 +1,8 @@
 /**
  * NewBatch tests — Plan 28 PR-4 redesign.
  *
- * The submit body now always includes `backend` + `combinations`
+ * The submit body always includes `combinations` and never a `backend`
+ * (Nebius is the only backend and the server resolves it)
  * (a 1-element list for single-combo batches), and `task_filter`
  * carries a `subset_kind` discriminator. The agent / model /
  * n_per_task fields moved OUT of trial_config and into each
@@ -275,25 +276,11 @@ const BENCHMARK_TAGS_RESPONSES: Record<string, { items: { key: string; values: s
 const BACKENDS_RESPONSE = {
   items: [
     {
-      name: "docker",
-      description: "Docker execution on the configured worker pools.",
-      available: true,
-      cold_start_available: false,
-      cold_start_pools: [],
-    },
-    {
       name: "nebius",
       description: "Nebius Kubernetes execution pool; scales from zero.",
       available: false,
       cold_start_available: true,
       cold_start_pools: ["nebius-cpu"],
-    },
-    {
-      name: "fake",
-      description: "In-memory driver.",
-      available: true,
-      cold_start_available: false,
-      cold_start_pools: [],
     },
   ],
 };
@@ -590,11 +577,6 @@ function manualModelCall(
   };
 }
 
-async function pickBackend(): Promise<void> {
-  const user = userEvent.setup();
-  await user.selectOptions(screen.getByLabelText(/^Backend$/i), "docker");
-}
-
 async function pickBenchmark(id: string = "humaneval"): Promise<void> {
   const user = userEvent.setup();
   // The picker is a series-grouped checkbox list now — locate the row
@@ -699,30 +681,16 @@ describe("NewBatch", () => {
     expect(screen.queryByLabelText(/^Agent$/i)).not.toBeInTheDocument();
   });
 
-  it("defaults backend to docker once the catalog loads", async () => {
-    mockEndpoints({ matchingTasks: 12 });
-    renderWithProviders(<NewBatch />);
-    await waitForNewBatchReady();
-    const dropdown = (await screen.findByLabelText(
-      "Backend",
-    )) as HTMLSelectElement;
-    expect(dropdown.value).toBe("docker");
-  });
-
-  it("offers Nebius as an explicit scale-from-zero backend", async () => {
-    const user = userEvent.setup();
+  it("has no backend selector and shows Nebius as the fixed backend", async () => {
     mockEndpoints({ matchingTasks: 12 });
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
 
-    const dropdown = await screen.findByLabelText("Backend");
+    expect(screen.queryByLabelText(/^Backend$/i)).not.toBeInTheDocument();
     expect(
-      screen.getByRole("option", { name: "nebius (scales from zero)" }),
-    ).toBeInTheDocument();
-
-    await user.selectOptions(dropdown, "nebius");
-    expect(
-      screen.getByText(/fresh scale-from-zero authority through nebius-cpu/i),
+      await screen.findByText(
+        /Runs on Nebius, which can scale from zero via nebius-cpu/i,
+      ),
     ).toBeInTheDocument();
   });
 
@@ -781,7 +749,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     expect(
       await screen.findByText(/Pick at least one native benchmark\./i),
@@ -804,7 +771,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
 
@@ -815,7 +781,9 @@ describe("NewBatch", () => {
       screen.getByText(/Full benchmark run: 12 tasks selected/i),
     ).toBeInTheDocument();
     expect(screen.getByText(/12 trials planned/i)).toBeInTheDocument();
-    expect(screen.getByText(/docker.*live worker/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Runs on Nebius.*scale from zero via nebius-cpu/i),
+    ).toBeInTheDocument();
     expect(screen.getByText(/Lab vLLM.*valid/i)).toBeInTheDocument();
     expect(screen.getByText(/deepseek-chat.*not preflighted/i)).toBeInTheDocument();
   });
@@ -825,7 +793,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark();
     await pickOracleAgent(user);
 
@@ -890,7 +857,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
@@ -900,7 +866,7 @@ describe("NewBatch", () => {
     expect(call.body.name).toBeUndefined();
     expect(call.body.description).toBeUndefined();
     expect(call.body.name_suffix).toBeUndefined();
-    expect(call.body.backend).toBe("docker");
+    expect(call.body).not.toHaveProperty("backend");
     expect(call.body.task_filter).toEqual({
       subset_kind: "all",
       benchmark_ids: ["humaneval"],
@@ -928,7 +894,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
@@ -953,7 +918,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
@@ -974,7 +938,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark();
     await pickOracleAgent(user);
 
@@ -1019,7 +982,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
     await screen.findByText(/250 tasks match across 1 benchmark/i);
@@ -1056,7 +1018,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
@@ -1089,7 +1050,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await user.click(
       screen.getByRole("radio", { name: /Trajectory generation/i }),
     );
@@ -1116,7 +1076,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
@@ -1134,7 +1093,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
@@ -1152,7 +1110,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickDefaultModel(user);
     await user.click(screen.getByRole("radio", { name: /Explicit task ids/i }));
     const textarea = screen.getByPlaceholderText(/HumanEval\/0/i);
@@ -1171,7 +1128,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
@@ -1190,7 +1146,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
@@ -1209,7 +1164,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
@@ -1237,7 +1191,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickDefaultModel(user);
     await user.click(
       await screen.findByRole("checkbox", {
@@ -1259,7 +1212,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickTaskSet();
     await pickDefaultModel(user);
     await screen.findByText(/2 tasks match across 1 source/i);
@@ -1317,7 +1269,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark("aime-22");
     await pickDefaultModel(user);
     await user.click(
@@ -1347,7 +1298,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark("aime-22");
     await user.click(
       await screen.findByRole("button", { name: "2024", pressed: false }),
@@ -1368,7 +1318,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark("aime-22");
     await pickDefaultModel(user);
     await user.click(
@@ -1395,7 +1344,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark();
     await user.selectOptions(
       await screen.findByLabelText(/^Provider connection$/i),
@@ -1441,7 +1389,6 @@ describe("NewBatch", () => {
     await vi.waitFor(() =>
       expect(providerListRequest(spy)).toContain(`team_id=${ACTIVE_TEAM_ID}`),
     );
-    await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
@@ -1462,7 +1409,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<TeamSwitchHarness />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark();
     await user.selectOptions(
       await screen.findByLabelText(/^Provider connection$/i),
@@ -1504,7 +1450,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<ProviderRefreshHarness />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark();
     await user.selectOptions(
       await screen.findByLabelText(/^Provider connection$/i),
@@ -1544,7 +1489,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark();
 
     await user.selectOptions(
@@ -1592,7 +1536,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await pickBackend();
     await pickBenchmark();
     await user.selectOptions(
       await screen.findByLabelText(/^Provider connection$/i),
@@ -1640,7 +1583,6 @@ describe("NewBatch Harbor version serialization", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await user.selectOptions(screen.getByLabelText(/^Backend$/i), "nebius");
     await pickBenchmark();
     await pickDefaultModel(user);
     await user.click(screen.getByRole("checkbox", { name: /Use a specific agent/i }));
@@ -1660,7 +1602,6 @@ describe("NewBatch Harbor version serialization", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await user.selectOptions(screen.getByLabelText(/^Backend$/i), "nebius");
     await pickBenchmark();
     await pickDefaultModel(user);
     await user.click(screen.getByRole("checkbox", { name: /Use a specific agent/i }));

@@ -57,22 +57,6 @@ def test_driver_error_empty_message_stays_none():
     assert msg is None
 
 
-def test_image_build_forbidden_is_env_start_with_message():
-    # #1169: a containment-required worker's build refusal must be
-    # self-explaining (it aborts driver.start()).
-    from loom.driver.build_containment import ImageBuildForbiddenError
-
-    exc = ImageBuildForbiddenError(
-        "refusing to build image 'task:abc' on a containment-required "
-        "(non-exclusive Slurm) worker: pre-build and cache the image."
-    )
-    reason, msg = classify_failure(exc)
-    assert reason == FailureReason.ENV_START_FAILURE
-    assert msg is not None
-    assert "refusing to build image" in msg
-    assert "\n" not in msg  # redacted to a single line
-
-
 def test_verifier_error():
     reason, msg = classify_failure(VerifierError("x"))
     assert reason == FailureReason.VERIFIER_ERROR

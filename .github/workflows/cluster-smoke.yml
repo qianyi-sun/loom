@@ -232,24 +232,6 @@ jobs:
           )
           [[ ${#test_paths[@]} -gt 0 ]]
           uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" "${test_paths[@]}"
-          if [[ "${CI_TEST_SCOPE:-all}" == "all" ]]; then
-            uv run --no-sync python scripts/validate_environment_isolation.py \
-              --profiles-dir deploy/environments \
-              --workflow .github/workflows/deploy-environment.yml
-            candidate_render_dir="$(mktemp -d)"
-            trap 'rm -rf "${candidate_render_dir}"' EXIT
-            for config in \
-              deploy/environments/staging.multinode.cluster.toml \
-              deploy/environments/production.cluster.toml
-            do
-              rendered="${candidate_render_dir}/$(basename "${config}" .toml).yaml"
-              uv run --no-sync loom cluster render \
-                --config "${config}" > "${rendered}"
-              test -s "${rendered}"
-              uv run --no-sync loom cluster audit \
-                --config "${config}"
-            done
-          fi
 
   cluster-smoke-gate:
     name: >-

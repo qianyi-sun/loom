@@ -15,8 +15,6 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Connection, make_url
 
-from loom_capacity_manager.models import Base
-
 UPSTREAM_ALLOCATION_ROUTINES = (
     "capacity_allocation_binding_guard",
     "capacity_allocation_epoch_binding_guard",
@@ -138,7 +136,6 @@ class CapacitySchemaSurface:
     constraints: dict[tuple[str, str], str]
     grants: set[tuple[str, str, str]]
     database_columns: dict[str, dict[str, tuple[str, bool]]]
-    orm_columns: dict[str, dict[str, tuple[str, bool]]]
 
 
 def _capacity_config(url: str) -> AlembicConfig:
@@ -358,22 +355,6 @@ def _database_columns(connection: Connection) -> dict[str, dict[str, tuple[str, 
     }
 
 
-def _project_orm_columns(
-    database_columns: dict[str, dict[str, tuple[str, bool]]],
-) -> dict[str, dict[str, tuple[str, bool]]]:
-    projected: dict[str, dict[str, tuple[str, bool]]] = {}
-    for table_name, columns in database_columns.items():
-        table = Base.metadata.tables.get(table_name)
-        assert table is not None, f"missing ORM table metadata for {table_name}"
-        projected[table_name] = {
-            column_name: _column_signature(
-                table.columns[column_name].type, table.columns[column_name].nullable
-            )
-            for column_name in columns
-        }
-    return projected
-
-
 def _schema_surface(connection: Connection) -> CapacitySchemaSurface:
     database_columns = _database_columns(connection)
     return CapacitySchemaSurface(
@@ -382,7 +363,6 @@ def _schema_surface(connection: Connection) -> CapacitySchemaSurface:
         constraints=_all_capacity_constraint_definitions(connection),
         grants=_all_capacity_routine_grants(connection),
         database_columns=database_columns,
-        orm_columns=_project_orm_columns(database_columns),
     )
 
 
@@ -586,19 +566,17 @@ def test_reintegrated_capacity_round_trip_restores_exact_upstream_capacity_0005_
         command.upgrade(cfg, "capacity_0005")
         with engine.connect() as connection:
             surface_0005 = _schema_surface(connection)
-            assert surface_0005.database_columns == surface_0005.orm_columns
 
         command.upgrade(cfg, "capacity_0006")
         with engine.connect() as connection:
             surface_0006 = _schema_surface(connection)
             assert surface_0006 != surface_0005
-            assert surface_0006.database_columns == surface_0006.orm_columns
             assert (
                 "input_valid_until" in surface_0006.database_columns["capacity_allocation_epochs"]
             )
             assert (
                 surface_0006.database_columns["capacity_allocation_epochs"]["input_valid_until"]
-                == surface_0006.orm_columns["capacity_allocation_epochs"]["input_valid_until"]
+                == ("TIMESTAMP", True)
             )
             assert "capacity_execution_epoch_transition_guard()" in surface_0006.routines
             assert "capacity_prepared_retirement_evidence_guard()" not in surface_0006.routines
@@ -615,7 +593,6 @@ def test_reintegrated_capacity_round_trip_restores_exact_upstream_capacity_0005_
         with engine.connect() as connection:
             surface_0007 = _schema_surface(connection)
             assert surface_0007 != surface_0006
-            assert surface_0007.database_columns == surface_0007.orm_columns
             assert "capacity_executable_bootstrap_proposals" in surface_0007.database_columns
             assert "capacity_executable_bootstrap_acknowledgements" in surface_0007.database_columns
             assert (
@@ -635,7 +612,6 @@ def test_reintegrated_capacity_round_trip_restores_exact_upstream_capacity_0005_
         with engine.connect() as connection:
             surface_0008 = _schema_surface(connection)
             assert surface_0008 != surface_0007
-            assert surface_0008.database_columns == surface_0008.orm_columns
             assert (
                 "retirement_safe"
                 in surface_0008.database_columns["capacity_executable_executor_states"]
@@ -657,7 +633,6 @@ def test_reintegrated_capacity_round_trip_restores_exact_upstream_capacity_0005_
         with engine.connect() as connection:
             surface_0012 = _schema_surface(connection)
             assert surface_0012 != surface_0008
-            assert surface_0012.database_columns == surface_0012.orm_columns
             assert "capacity_prepared_retirement_evidence_guard()" in surface_0012.routines
             assert (
                 "inventory_confirmation_journal_digest"
@@ -688,7 +663,6 @@ def test_reintegrated_capacity_round_trip_restores_exact_upstream_capacity_0005_
         with engine.connect() as connection:
             roundtrip_0012 = _schema_surface(connection)
             assert roundtrip_0012 == surface_0012
-            assert roundtrip_0012.database_columns == roundtrip_0012.orm_columns
             version = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()

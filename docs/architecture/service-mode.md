@@ -1,41 +1,33 @@
 # Service mode
 
-Service mode runs Loom as a distributed cluster: a FastAPI Control
-Plane owns trial state, Workers poll for work and execute trials,
-an LLM Gateway centralizes provider calls + cost attribution, and a
-REST `loom_service` + React SPA give researchers and admins a UI.
+Service mode provides a team evaluation platform: a FastAPI Control Plane
+owns trial state, native Nebius controllers schedule and reconcile hosted
+execution, an LLM Gateway centralizes provider calls and cost attribution, and
+REST `loom_service` plus the React SPA provide user access. The worker polling
+flow described below applies to explicit local/disposable service execution.
 Team and worker auth still use database-backed bearer tokens, while admin auth
 uses the file-backed singleton secret described in
 [auth-and-teams.md](auth-and-teams.md).
 
-Postgres + MinIO are the only stateful services.
+Postgres and object storage hold durable state; the local Compose stack uses
+MinIO for object storage.
 
-The accepted terminal service-execution topology is the Nebius Kubernetes
-contract in [Nebius service execution](nebius-service-execution.md). The
-worker/backend/pool flow described on this page remains current behavior during
-the bounded migration; it is not the terminal architecture and must not be
-extended as a second long-lived service path. Local CLI driver selection is
-outside that migration.
+Hosted service execution uses only the Nebius Kubernetes contract in
+[Nebius service execution](nebius-service-execution.md). Worker polling and
+Docker execution are local-development facilities. Compose explicitly enables
+`LOOM_LOCAL_EXECUTION=1` in the `development` environment; hosted services do
+not expose worker registration or claim routes.
 
 Local service-mode development uses `docker compose`, so operators need Docker
 CLI with the Compose plugin before running
-`loom service up --environment local`, `down`, or `status`. On macOS, install
+`loom service up`, `down`, or `status`. On macOS, install
 and start Docker Desktop first and confirm
 `docker compose version` succeeds.
 
-`loom service up` always requires `--environment`. The `local` target is the
-Compose path above. A `dev-<name>` target authenticates to the configured Loom
-server, seals or reuses a personal candidate, and applies it through the
-candidate-aware environment API; it does not invoke local Compose or direct
-`kubectl`. Server-side readiness requires stable-route acknowledgement, a
-candidate-independent capacity-agent installation, and an initial
-non-executable demand publication to the global capacity manager; it does not
-promise live worker slots. The `staging` and `production` targets require a
-full Git candidate but deliberately refuse direct deployment and point to
-`loom cluster rollout`, which owns their approval and evidence workflow.
-`loom service down` and `status` remain local Compose commands.
-`loom dev destroy <name>` is the authenticated manager-first teardown client
-for a ready personal environment; it is not a local Compose operation.
+`loom service up`, `down`, and `status` manage local Compose only. Personal
+shared-fleet environments and their deployment API have been retired.
+Hosted platform deployments use the Nebius deployment configuration and
+existing release controls.
 
 ## Service-prefix convention
 
@@ -278,8 +270,8 @@ all scale horizontally. Postgres is the durability boundary.
         | <-- result + atif URL ----- (forwarder) -- |              |                          |
 ```
 
-State machine: see [overview.md](overview.md#state-machine) — six
-states only (`queued → claimed → running → succeeded | failed |
+The shared `TrialState` contract in `src/loom/models/result.py` has six
+states (`queued → claimed → running → succeeded | failed |
 cancelled`). Finalize is a side-effect of reaching a terminal state,
 not a state of its own.
 
@@ -307,7 +299,7 @@ watchdog hard-deadline cancellation, or the Control Plane stale-running reclaim
 for a still-heartbeating but silent worker, writes a terminal `failed` trial
 with `failure_reason=agent_timeout` and a diagnostic message containing the
 runtime, configured timeout, last event/LLM activity, and worker heartbeat
-freshness. This keeps GB10/opencode hangs distinct from user cancellation.
+freshness. This keeps local runtime hangs distinct from user cancellation.
 
 After a successful trial finalizes, the Worker sends a fenced
 `PATCH /trials/{id}/trajectory_index` before reporting terminal
@@ -566,7 +558,7 @@ state before propagating:
 
 Migrations live in `migrations/versions/` and are applied with
 `alembic -c migrations/alembic.ini upgrade head`.
-`loom service up --environment local` runs this automatically after Postgres is
+`loom service up` runs this automatically after Postgres is
 healthy. Direct service startup does
 not auto-migrate: `loom-service`, the Control Plane, and the LLM Gateway refuse
 to start when the database Alembic revision is behind repository code, so

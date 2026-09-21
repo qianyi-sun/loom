@@ -157,7 +157,7 @@ spec:
               reason="unused_30d": last_seen_at (or issued_at, for
                 tokens that were never presented) is older than 30 days.
                 Most common cause: a worker pool was decommissioned but
-                its token was never revoked. Slurm pools that batch
+                its token was never revoked. Local workers that run
                 infrequently can also trip this — silence the alert via
                 alertmanager once you've confirmed the pool is intended.
 
@@ -178,7 +178,7 @@ spec:
                      ORDER BY COALESCE(last_seen_at, issued_at) ASC;
                 - If a pool is genuinely retired: `loom admin tokens
                   worker revoke <prefix>`.
-                - If a pool is alive but long-cycle (Slurm batch): add
+                - If a pool is alive but used infrequently: add
                   an alertmanager silence keyed by that prefix.
                 - If overdue for rotation: see the rotation section in
                   the operator runbook.
@@ -742,7 +742,7 @@ spec:
             description: "A closed commit kind returned a redacted terminal failure."
             runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/runbooks/operator-runbook.md#pipeline-artifact-commit-failures"
         - alert: LoomPipelineGpuAllocatedIdle
-          expr: max by (slurm_cluster,reason) (loom_pipeline_gpu_allocated_idle_seconds{reason=~"process_absent|cleanup_pending"}) > 300
+          expr: max by (reason) (loom_pipeline_gpu_allocated_idle_seconds{reason=~"process_absent|cleanup_pending"}) > 300
           for: 10m
           labels: { severity: critical, component: worker }
           annotations:

@@ -27,18 +27,11 @@ from loom_task_image_authority.execution_signing_request import (
     decode_execution_signing_request,
 )
 from loom_task_image_authority.keyset_signing_request import decode_keyset_signing_request
-from loom_task_image_authority.publication_contracts import (
-    MAX_PUBLICATION_BYTES,
-    MAX_SIGNER_REPLY_BYTES,
-    decode_unsigned_input,
-)
 from loom_task_image_authority.publication_keyset import MAX_KEYSET_BYTES, MAX_KEYSET_ENVELOPE_BYTES
 
 
 class Operations(Protocol):
     async def sign_keyset(self, canonical_request: bytes) -> bytes: ...
-
-    async def sign_publication(self, canonical_unsigned_input: bytes) -> bytes: ...
 
     async def sign_execution(self, canonical_request: bytes) -> bytes: ...
 
@@ -117,7 +110,7 @@ class SignerServer:
         limits.__post_init__()
         if not 1 <= len(peer_operations) <= 128 or any(
             type(pin) is not str or not re.fullmatch(r"[0-9a-f]{64}", pin)
-            or type(allowed) is not frozenset or not allowed or not allowed <= {"keyset", "publication", "execution"}
+            or type(allowed) is not frozenset or not allowed or not allowed <= {"keyset", "execution"}
             for pin, allowed in peer_operations.items()
         ):
             raise ValueError("explicit peer certificate operation pins required")
@@ -269,7 +262,7 @@ class SignerServer:
         if not isinstance(event, h11.Request) or event.method != b"POST" or event.http_version != b"1.1":
             raise ValueError("unsupported method or framing")
         operation = {
-            b"/v1/keysets/sign": "keyset", b"/v1/publications/sign": "publication",
+            b"/v1/keysets/sign": "keyset",
             b"/v1/executions/sign": "execution",
         }.get(event.target)
         if operation is None:
@@ -277,7 +270,7 @@ class SignerServer:
         if operation not in allowed:
             raise PermissionError
         length = int(headers[b"content-length"])
-        maximum = {"keyset": MAX_KEYSET_BYTES, "publication": MAX_PUBLICATION_BYTES,
+        maximum = {"keyset": MAX_KEYSET_BYTES,
                    "execution": MAX_EXECUTION_SIGNING_REQUEST_BYTES}[operation]
         if not 0 < length <= maximum:
             raise ValueError("request body ceiling")
@@ -297,18 +290,14 @@ class SignerServer:
                 raise ValueError("incomplete request")
         if operation == "keyset":
             decode_keyset_signing_request(body)
-        elif operation == "publication":
-            decode_unsigned_input(body)
         else:
             decode_execution_signing_request(body)
         async with self._policy_slots:
             if operation == "keyset":
                 reply = await self._operations.sign_keyset(body)
-            elif operation == "publication":
-                reply = await self._operations.sign_publication(body)
             else:
                 reply = await self._operations.sign_execution(body)
-        reply_limit = {"keyset": MAX_KEYSET_ENVELOPE_BYTES, "publication": MAX_SIGNER_REPLY_BYTES,
+        reply_limit = {"keyset": MAX_KEYSET_ENVELOPE_BYTES,
                        "execution": MAX_EXECUTION_GRANT_ENVELOPE_BYTES}[operation]
         if type(reply) is not bytes or not 0 < len(reply) <= reply_limit:
             raise ValueError("signer reply ceiling")

@@ -11,22 +11,22 @@ def test_gpu_lifecycle_uses_process_presence_and_clears_disappeared_tuples() -> 
     tracker = PipelineGpuLifecycleTracker(clock=lambda: now[0])
     attempt = uuid4()
 
-    tracker.mark(attempt, cluster="oldlab", reason="pre_start")
+    tracker.mark(attempt, reason="pre_start")
     now[0] = 17.0
     tracker.refresh()
     assert (
         PIPELINE_GPU_ALLOCATED_IDLE_SECONDS.labels(
-            slurm_cluster="oldlab", reason="pre_start"
+            reason="pre_start"
         )._value.get()
         == 7
     )
 
-    tracker.mark(attempt, cluster="oldlab", reason="process_absent")
+    tracker.mark(attempt, reason="process_absent")
     now[0] = 20.0
     tracker.refresh()
     assert (
         PIPELINE_GPU_ALLOCATED_IDLE_SECONDS.labels(
-            slurm_cluster="oldlab", reason="process_absent"
+            reason="process_absent"
         )._value.get()
         == 3
     )
@@ -38,12 +38,12 @@ def test_gpu_lifecycle_uses_process_presence_and_clears_disappeared_tuples() -> 
 def test_cleanup_pending_age_is_worker_lifecycle_not_gpu_utilization() -> None:
     now = [100.0]
     tracker = PipelineGpuLifecycleTracker(clock=lambda: now[0])
-    tracker.mark(uuid4(), cluster="gb10", reason="cleanup_pending")
+    tracker.mark(uuid4(), reason="cleanup_pending")
     now[0] = 106.5
     tracker.refresh()
     assert (
         PIPELINE_GPU_ALLOCATED_IDLE_SECONDS.labels(
-            slurm_cluster="gb10", reason="cleanup_pending"
+            reason="cleanup_pending"
         )._value.get()
         == 6.5
     )

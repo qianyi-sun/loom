@@ -20,6 +20,8 @@ from sqlalchemy import MetaData, Table, create_engine, text
 from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.exc import DBAPIError
 
+from loom.db.schema_startup import service_schema_head
+
 
 def _scripts() -> ScriptDirectory:
     return ScriptDirectory.from_config(Config("migrations/alembic.ini"))
@@ -212,13 +214,16 @@ def test_conversion_preserves_history_and_reaches_dev(
             after = _snapshot(connection)
             for row in before["trials"]:
                 row["legacy_claim_id"] = None
+                # 0153 adds nullable diagnostics; historical rows retain their
+                # original data and must not acquire invented observations.
+                row["scheduling_observation"] = None
             if revision not in {"0135", "0136"}:
                 for row in before["task_image_materialization_attempts"]:
                     row["native_build"] = None
             assert after == before
             assert (
                 connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-                == "0151"
+                == service_schema_head()
             )
             assert connection.exec_driver_sql(
                 "SELECT to_regclass('gateway_dispatch_receipts')"

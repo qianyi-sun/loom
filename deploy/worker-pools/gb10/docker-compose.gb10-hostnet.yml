@@ -1,3 +1,0 @@
-services:
-  worker:
-    network_mode: host

@@ -16,6 +16,7 @@ from loom.db.schema import (
     TaskImageCapacityWait,
     TaskImageMaterialization,
 )
+from loom.db.schema_startup import service_schema_head
 from loom.pipeline.keys import canonical_digest
 from tests.integration.test_protected_claim_application_migration import _config
 from tests.integration.test_service_execution_leases import NEBIUS_CPU_EXECUTION_CLASS_V1, _target
@@ -68,7 +69,7 @@ def test_live_wait_refuses_downgrade_then_expiry_allows_roundtrip(wait_migration
     with pytest.raises(DBAPIError, match="native builder capacity waits must expire"):
         command.downgrade(config, "0148")
     with engine.begin() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0151"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == service_schema_head()
         assert connection.scalar(text("SELECT count(*) FROM task_image_capacity_waits")) == 1
         connection.execute(text("UPDATE task_image_capacity_waits SET "
                                 "first_waited_at = now() - interval '121 seconds', "
@@ -143,7 +144,7 @@ def test_wait_upgrade_refuses_busy_parent_without_partial_schema(wait_migration,
 
 
 @pytest.mark.parametrize("busy_table", [
-    "task_image_capacity_waits", "execution_targets", "task_image_materializations",
+    "task_image_capacity_waits", "execution_targets", "task_image_materializations", "trials",
 ])
 @pytest.mark.timeout(10, func_only=True)
 def test_wait_downgrade_refuses_busy_table_without_partial_schema(wait_migration, busy_table):
@@ -155,7 +156,7 @@ def test_wait_downgrade_refuses_busy_table_without_partial_schema(wait_migration
         with pytest.raises(DBAPIError, match="could not obtain lock"):
             command.downgrade(config, "0148")
         with engine.connect() as check:
-            assert check.scalar(text("SELECT version_num FROM alembic_version")) == "0151"
+            assert check.scalar(text("SELECT version_num FROM alembic_version")) == service_schema_head()
             assert check.scalar(text("SELECT to_regclass('task_image_capacity_waits')")) is not None
     command.downgrade(config, "0148")
     command.upgrade(config, "0149")

@@ -174,57 +174,15 @@ def test_native_image_publish_jobs_stay_on_architecture_matched_github_hosts() -
     assert jobs["publish-manifest"]["runs-on"] == "ubuntu-24.04"
 
 
-def test_ci_checks_nebius_go_packages_and_keeps_manual_supervisor() -> None:
-    steps = {
-        step.get("name"): str(step.get("run", ""))
-        for step in _workflow(".github/workflows/ci.yml")["jobs"]["go-checks"]["steps"]
-    }
-
-    assert "gofmt -l ./cmd/" in steps["gofmt"]
-    assert 'go vet "${packages[@]}"' in steps["go vet"]
-    assert 'go test -race "${packages[@]}"' in steps["go test"]
-    assert not any(name.endswith(" supervisor") for name in steps if name)
 
 
-def test_go_checks_executes_required_python_go_v2_handoff() -> None:
-    steps = _workflow(".github/workflows/ci.yml")["jobs"]["go-checks"]["steps"]
-    step_by_name = {step.get("name"): step for step in steps}
-
-    setup_uv = step_by_name["Install uv"]
-    assert setup_uv["uses"] == ("astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39")
-    assert setup_uv["with"] == {
-        "version": "0.11.26",
-        "checksum": "6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0",
-        "enable-cache": True,
-        "save-cache": (
-            "${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}"
-        ),
-        "cache-dependency-glob": "uv.lock",
-    }
-    assert step_by_name["Set up Python 3.11"]["run"] == "uv python install 3.11"
-    assert step_by_name["Sync locked workspace"]["run"] == (
-        "uv sync --locked --all-packages --extra dev --python 3.11"
-    )
-    assert step_by_name["Build Go V2 handoff test binary"]["run"] == (
-        'go test -race -c -o "${RUNNER_TEMP}/loom-task-image-builder-supervisor.test" '
-        "./cmd/loom-task-image-builder-supervisor"
-    )
-    for name in ("Install uv", "Set up Python 3.11", "Sync locked workspace",
-                 "Build Go V2 handoff test binary", "Python-Go V2 handoff"):
-        assert step_by_name[name]["if"] == "env.CI_TEST_SCOPE == 'all'"
-    handoff = step_by_name["Python-Go V2 handoff"]
-    assert handoff["env"] == {
-        "LOOM_GO_V2_TEST_BINARY": ("${{ runner.temp }}/loom-task-image-builder-supervisor.test"),
-        "LOOM_GO_V2_TEST_REQUIRED": "1",
-    }
-    assert handoff["run"] == (
-        'uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" '
-        "tests/integration/test_task_image_builder_guard_local_flow.py "
-        "tests/integration/test_task_image_publication_full_flow.py"
-    )
 
 
-def test_coverage_artifacts_map_hosted_and_oldlab_checkout_roots() -> None:
+
+
+
+
+def test_coverage_artifacts_map_hosted_checkout_roots() -> None:
     config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     paths = config["tool"]["coverage"]["paths"]
 
@@ -232,7 +190,6 @@ def test_coverage_artifacts_map_hosted_and_oldlab_checkout_roots() -> None:
         assert paths[path_group] == [
             source_root,
             f"/home/runner/work/*/*/{source_root}",
-            f"/opt/actions-runner/_work/*/*/{source_root}",
         ]
 
 
@@ -476,15 +433,8 @@ def test_cluster_smoke_consumes_manifest_owned_lane_paths() -> None:
     assert any(line.strip().startswith("uv run --no-sync pytest ")
                and '"${test_paths[@]}"' in line for line in scripts.splitlines())
     assert "CI_PYTEST_MARKERS" in scripts
-    assert "scripts/validate_environment_isolation.py" in scripts
-    normalized_scripts = " ".join(scripts.replace("\\\n", " ").split())
-    for config in (
-        "deploy/environments/staging.multinode.cluster.toml",
-        "deploy/environments/production.cluster.toml",
-    ):
-        assert config in normalized_scripts
-    assert 'loom cluster render --config "${config}"' in normalized_scripts
-    assert 'loom cluster audit --config "${config}"' in normalized_scripts
+    assert "validate_environment_isolation.py" not in scripts
+    assert "loom cluster render" not in scripts
     assert contract["timeout-minutes"] <= 15
 
 
@@ -717,7 +667,6 @@ def test_trusted_publisher_rebuilds_without_candidate_resolution() -> None:
     assert publish["needs"] == [
         "plan",
         "trivy-binary",
-        "personal-dev-scanner-cache-assets",
     ]
     assert publish["strategy"]["matrix"]["include"] == (
         "${{ fromJSON(needs.plan.outputs.native_builds) }}"
@@ -765,7 +714,6 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
     assert publish["needs"] == [
         "plan",
         "trivy-binary",
-        "personal-dev-scanner-cache-assets",
     ]
 
     build_step_names = [step.get("name") for step in build["steps"]]
@@ -1051,7 +999,7 @@ def test_release_record_helper_rejects_incomplete_workflow_handoff(tmp_path: Pat
     records = tmp_path / "records"
     records.mkdir()
     (records / "amd64").mkdir()
-    (records / "amd64" / "capacity-manager-amd64.json").write_text("{}\n", encoding="utf-8")
+    (records / "amd64" / "service-amd64.json").write_text("{}\n", encoding="utf-8")
     result = subprocess.run(
         [
             sys.executable,
@@ -1078,11 +1026,11 @@ def test_release_record_helper_rejects_incomplete_workflow_handoff(tmp_path: Pat
             "--runner-environment",
             "github-hosted",
             "--image",
-            "capacity-manager",
+            "service",
             "--image-name",
-            "loom-capacity-manager",
+            "loom-service",
             "--dockerfile",
-            "deploy/Dockerfile.capacity-manager",
+            "deploy/Dockerfile.service",
             "--build-context",
             ".",
             "--records-dir",
@@ -1218,8 +1166,8 @@ def test_manual_and_filtered_contexts_have_distinct_event_specific_names() -> No
                 "EVENT_NAME": "pull_request",
                 "BUILD_RESULT": "skipped",
                 "HARBOR_REQUIRED": "true",
-        "HARNESS_BUILD_RESULT": "skipped",
-                "SCANNER_BUILD_RESULT": "skipped",
+            "HARNESS_BUILD_RESULT": "skipped",
+                "STANDARD_IMAGES": '[{"image":"service"}]',
                 "PUBLISH_RESULT": "skipped",
             },
         ),
@@ -1338,8 +1286,8 @@ def test_images_gate_separates_untrusted_build_from_trusted_publish(
             "REQUIRED": required,
             "BUILD_RESULT": build_result,
             "HARBOR_REQUIRED": "true",
-        "HARNESS_BUILD_RESULT": build_result,
-            "SCANNER_BUILD_RESULT": "skipped",
+            "HARNESS_BUILD_RESULT": build_result,
+            "STANDARD_IMAGES": '[{"image":"service"}]',
             "PUBLISH_RESULT": publish_result,
             "MANIFEST_RESULT": manifest_result,
         },
@@ -1349,60 +1297,6 @@ def test_images_gate_separates_untrusted_build_from_trusted_publish(
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize(
-    ("event_name", "required", "release_result", "expected_returncode"),
-    [
-        ("push", "true", "success", 0),
-        ("push", "true", "skipped", 1),
-        ("push", "false", "skipped", 0),
-        ("pull_request", "true", "skipped", 0),
-    ],
-)
-def test_images_gate_requires_personal_release_only_for_protected_selected_publish(
-    event_name: str,
-    required: str,
-    release_result: str,
-    expected_returncode: int,
-) -> None:
-    selected = json.dumps(
-        [
-            {"image": "service"},
-            {"image": "web"},
-            {"image": "personal-dev-builder"},
-            {"image": "personal-dev-activation-agent"},
-            {"image": "personal-dev-native-builder-agent"},
-            {"image": "personal-dev-scanner-cache"},
-        ],
-        separators=(",", ":"),
-    )
-    protected_publish = event_name == "push" and required == "true"
-    result = subprocess.run(
-        ["bash"],
-        input=_gate_script(".github/workflows/images.yml", "images-gate"),
-        text=True,
-        capture_output=True,
-        env={
-            "PATH": os.environ["PATH"],
-            "EVENT_NAME": event_name,
-            "TRUSTED_PUBLISH": "false",
-            "PLAN_RESULT": "success",
-            "GATE_MODE": "full",
-            "REQUIRED": required,
-            "BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
-            "HARBOR_REQUIRED": "true",
-        "HARNESS_BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
-            "SCANNER_BUILD_RESULT": "skipped"
-            if protected_publish or required == "false"
-            else "success",
-            "PUBLISH_RESULT": "success" if protected_publish else "skipped",
-            "MANIFEST_RESULT": "success" if protected_publish else "skipped",
-            "PERSONAL_DEV_RELEASE_RESULT": release_result,
-            "STANDARD_IMAGES": selected,
-        },
-        check=False,
-    )
-
-    assert result.returncode == expected_returncode, result.stderr
 
 
 @pytest.mark.parametrize(
@@ -1433,8 +1327,8 @@ def test_images_gate_rejects_cross_lane_or_ambiguous_results(
             "REQUIRED": required,
             "BUILD_RESULT": build_result,
             "HARBOR_REQUIRED": "true",
-        "HARNESS_BUILD_RESULT": build_result,
-            "SCANNER_BUILD_RESULT": "skipped",
+            "HARNESS_BUILD_RESULT": build_result,
+            "STANDARD_IMAGES": '[{"image":"service"}]',
             "PUBLISH_RESULT": publish_result,
         },
         check=False,
@@ -1630,10 +1524,8 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
             {
                 "build": "BUILD_RESULT",
                 "nebius-harness-build": "HARNESS_BUILD_RESULT",
-                "scanner-cache-build": "SCANNER_BUILD_RESULT",
                 "publish": "PUBLISH_RESULT",
                 "publish-manifest": "MANIFEST_RESULT",
-                "personal-dev-trusted-release": "PERSONAL_DEV_RELEASE_RESULT",
             },
         ),
         ".github/workflows/cluster-smoke.yml": (
@@ -1975,7 +1867,7 @@ def test_protected_workflows_share_one_per_pr_admission_slot() -> None:
         assert "background" not in group
 
 
-def test_staging_active_rendered_images_are_covered_by_manifest_matrix() -> None:
+def test_generic_rendered_images_are_covered_by_manifest_matrix() -> None:
     result = subprocess.run(
         [
             sys.executable,
@@ -1984,7 +1876,7 @@ def test_staging_active_rendered_images_are_covered_by_manifest_matrix() -> None
             "cluster",
             "render",
             "--config",
-            "deploy/environments/staging.multinode.cluster.toml",
+            "tests/fixtures/cluster-render/staging.multinode.cluster.toml",
         ],
         cwd=REPO_ROOT,
         text=True,

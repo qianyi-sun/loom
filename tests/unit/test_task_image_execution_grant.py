@@ -51,7 +51,7 @@ def fixture(
     publication_change=None,
 ):
     m = module()
-    c, s, private, key, state, distribution, original, _ = setup_signing()
+    c, _s, private, key, state, _distribution, original, _ = setup_signing()
     task = _task_config(
         cpu_arch=arch,
         dockerfile="Dockerfile",
@@ -154,13 +154,13 @@ def fixture(
             )
         if publication_change is not None:
             publication_change(unsigned)
-        statement = s.prepare_publication_statement(
-            c.decode_unsigned_input(rfc8785.dumps(unsigned)),
-            key=key,
-            state=state,
-            distribution=distribution,
-            signer_now=NOW,
-        )
+        statement = c.PublicationStatement.model_validate({
+            **unsigned,
+            "issued_at": NOW.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "signing_key_id": key.key_id,
+            "distributed_keyset_version": state.keyset_version,
+            "revocation_epoch": state.revocation_epoch,
+        })
         canonical = c.canonical_publication_bytes(statement)
         wire = rfc8785.dumps(
             dict(

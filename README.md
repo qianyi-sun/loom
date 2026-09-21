@@ -1,10 +1,12 @@
 # Loom
 
-> **Nebius support:** `dev` includes native Nebius platform and workload support
-> under [#1536](https://github.com/qianyi-sun/loom/issues/1536). All development
-> PRs target `dev`; `main` remains reserved for validated release promotion.
-> See the [platform and migration contract](docs/architecture/nebius-primary-platform.md)
-> for deployment requirements and remaining workload qualification.
+> **Hosted architecture:** Nebius is Loom's only supported hosted backend.
+> Local development and user-selected external inference APIs remain supported.
+> Desktop/GUI and Behavior GPU hosted workloads are unsupported; other workload
+> classes still require conversion. See the
+> [platform contract](docs/architecture/nebius-primary-platform.md) and
+> [retirement record](docs/historical/shared-cluster-retirement-2026-09.md).
+> Development PRs target `dev`; `main` is reserved for release promotion.
 
 Loom is a team platform for running model and agent evaluations. It lets
 researchers submit batches, monitor trials, inspect failures, download
@@ -45,7 +47,7 @@ Canonical hosted routes:
 - Production: [https://yylx.world/prod](https://yylx.world/prod)
 
 Each route has its own namespace, database, object storage, credentials,
-provider connections, and desired worker state.
+provider connections, and native execution targets.
 
 ## Supported task sources
 
@@ -70,8 +72,9 @@ Every service-mode run follows the same shape:
    CLI. The task source can be a native benchmark or an evaluation-ready
    TaskSet.
 2. Loom creates a batch and expands it into trials.
-3. Workers claim trials, materialize task bundles, run agents in sandboxes, and
-   route model calls through the LLM Gateway.
+3. The control plane admits compatible trials to Nebius execution leases.
+   Kubernetes Jobs run prepared task images and agent/verifier phases, with
+   model calls routed through the LLM Gateway.
 4. Loom records event-sourced trajectories, ATIF metric documents, verifier
    outcomes, token usage, gateway diagnostics, and artifacts.
 5. Users inspect results in Monitor, trial/batch detail views, Run Library, the
@@ -90,7 +93,7 @@ flowchart LR
     Service --> Provider["Provider connections\nowned or shared by teams"]
     Service --> TaskSource["Native benchmarks\nand user TaskSets"]
     Service --> CP["Control Plane\nbatches, trials, scheduling"]
-    CP --> Worker["Worker pool\nDocker, k8s, or Slurm-backed"]
+    CP --> Worker["Nebius Kubernetes\nlease-bound execution Jobs"]
     Worker --> Sandbox["Trial sandbox\nagent + task bundle + verifier"]
     Sandbox --> Gateway["LLM Gateway\nprovider facade + usage/cost audit"]
     Gateway --> Hosted["Hosted provider APIs\nOpenAI / Anthropic / Google / YibuAPI / ..."]
@@ -101,10 +104,9 @@ flowchart LR
     Service --> MinIO
 ```
 
-The service, control plane, gateway, SPA, and workers are stateless from a data
-ownership perspective. Postgres and MinIO/S3 are the durable stores. The same
-trial orchestration contract powers local CLI runs and service-mode worker
-runs, so trajectory and ATIF shapes stay consistent across modes.
+The service, control plane, gateway and SPA use Nebius database and object
+storage for durable state. Native execution and local CLI runs preserve the
+same trajectory, ATIF, verifier and usage contracts.
 
 Deeper reading: [`docs/architecture/overview.md`](docs/architecture/overview.md).
 
@@ -203,7 +205,6 @@ Start with the user guide rather than copying commands from this README:
 | Install the CLI or run a local throwaway trial | [`docs/user-guide.md`](docs/user-guide.md) |
 | Submit from CLI to shared staging | [`docs/user-guide.md#quickstart-submit-from-the-cli-to-a-loom-server`](docs/user-guide.md#quickstart-submit-from-the-cli-to-a-loom-server) |
 | Use the web app | [`docs/user-guide.md#quickstart-submit-from-the-web-app`](docs/user-guide.md#quickstart-submit-from-the-web-app) |
-| Deploy a personal development environment | [`docs/user-guide.md#quickstart-deploy-a-personal-development-environment`](docs/user-guide.md#quickstart-deploy-a-personal-development-environment) |
 | Register or test a provider | [`docs/integrations/provider-onboarding.md`](docs/integrations/provider-onboarding.md) |
 | Upload and run user TaskSets | [`docs/architecture/user-brought-tasksets.md`](docs/architecture/user-brought-tasksets.md) |
 | Inspect usage and cost | [`docs/architecture/cost-and-rate-cards.md`](docs/architecture/cost-and-rate-cards.md) |
@@ -224,11 +225,8 @@ current `dev` candidate that has passed protected staging release evidence;
 production deployment re-verifies the candidate tree and artifact identity.
 
 Operationally, staging and production are separate environments with distinct
-routes, API bases, durable state, object storage, secrets, and desired worker
-state. Shared physical worker capacity is prod-first: production keeps maximum
-available capacity, staging borrows only the minimum needed for validation, and
-staging should stop accepting new work and drain when production needs the
-capacity.
+routes, API bases, durable state, object storage, secrets, and Nebius execution
+targets. Shared-cluster worker capacity and its autoscalers are retired.
 
 Primary runbooks:
 
@@ -236,12 +234,14 @@ Primary runbooks:
   [`docs/runbooks/operator-runbook.md`](docs/runbooks/operator-runbook.md)
 - Staging release validation:
   [`docs/runbooks/staging-launch.md`](docs/runbooks/staging-launch.md)
-- Remote worker capacity:
-  [`docs/runbooks/remote-worker-pool.md`](docs/runbooks/remote-worker-pool.md)
+- Hosted deployment:
+  [`docs/runbooks/nebius-deployment.md`](docs/runbooks/nebius-deployment.md)
 
 ## Where to Read More
 
 - [`docs/index.md`](docs/index.md) - documentation map.
+- [Repository layout](docs/contributing/repository-layout.md) - source, packages,
+  deployment, migrations and documentation ownership.
 - [`docs/user-guide.md`](docs/user-guide.md) - install, quickstarts, CLI and
   web workflows, providers, usage, downloads, and troubleshooting.
 - [`docs/architecture/overview.md`](docs/architecture/overview.md) - component

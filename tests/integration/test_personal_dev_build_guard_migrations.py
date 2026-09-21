@@ -1,5 +1,6 @@
 """The management build ledger has no application-runtime write authority."""
 
+import json
 from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
@@ -11,7 +12,12 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
-from tests.integration.test_personal_dev_native_builder_store import sessions as sessions
+from tests.support.historical_task_images import (
+    registry_authority_session as registry_authority_session,
+)
+from tests.support.historical_task_images import (
+    restore_rows,
+)
 
 
 @pytest.fixture
@@ -179,19 +185,14 @@ def test_retained_installation_is_immutable_and_blocks_downgrade(build_guard_dat
         assert connection.scalar(text("SELECT count(*) FROM loom_capacity_build_guard.installations")) == 1
 
 
-async def test_only_one_exact_assignment_can_hold_a_platform_request(build_guard_database, sessions, tmp_path):
-    from loom.personal_dev_build_platform_requests import stage_platform_requests
-    from tests.integration.test_personal_dev_build_platform_requests import build_service
-    from tests.integration.test_personal_dev_native_builder_store import _NOW, _seed_running_attempt
-
+async def test_only_one_exact_assignment_can_hold_a_platform_request(build_guard_database, registry_authority_session):
     config, engine, owner, _agent, agent_url = build_guard_database
     command.upgrade(config, "head")
-    registration = await _seed_running_attempt(sessions, now=_NOW)
-    member, runtime = build_service(tmp_path, registration)
-    async with sessions.begin() as session:
-        requests = await stage_platform_requests(session, registration, member=member, runtime=runtime,
-            platforms=("linux/arm64",), now=_NOW)
-    request = requests[0]
+    async with registry_authority_session.begin() as session:
+        await restore_rows(session, "personal_build_request")
+    fixture = json.loads((Path(__file__).parents[1] / "fixtures" / "historical" /
+                          "personal_build_request.json").read_text())
+    request = fixture["personal_dev_build_platform_requests"][0]
     installation_id, first, second = uuid4(), uuid4(), uuid4()
     wire = {"wire": b"{}", "digest": sha256(b"{}").hexdigest()}
     with engine.begin() as connection:
@@ -200,8 +201,8 @@ async def test_only_one_exact_assignment_can_hold_a_platform_request(build_guard
             (id, owner_user_id, subject_id, subject_incarnation, deployment_generation,
              reporter_incarnation, payload, wire_payload, payload_sha256)
             VALUES (:id, :owner, :subject, :incarnation, 1, :reporter, '{}'::jsonb, :wire, :digest)
-        """), {**wire, "id": installation_id, "owner": member.owner_id, "subject": request.subject_id,
-            "incarnation": request.subject_incarnation, "reporter": member.configuration.demand_reporter_incarnation})
+        """), {**wire, "id": installation_id, "owner": request["owner_user_id"], "subject": request["subject_id"],
+            "incarnation": request["subject_incarnation"], "reporter": uuid4()})
         for identity in (first, second):
             connection.execute(text("""INSERT INTO loom_capacity_build_guard.plans
                 (id, installation_id, expires_at, payload, wire_payload, payload_sha256)
@@ -211,12 +212,12 @@ async def test_only_one_exact_assignment_can_hold_a_platform_request(build_guard
                 (id, plan_id, request_id, submission_intent_id, shape_instance_id, shape_slot_index,
                  payload, wire_payload, payload_sha256)
                 VALUES (:id, :id, :request, :id, 'native-shape', 0, '{}'::jsonb, :wire, :digest)
-            """), {**wire, "id": identity, "request": request.id})
+            """), {**wire, "id": identity, "request": request["id"]})
         insert = text("INSERT INTO loom_capacity_build_guard.request_holds VALUES (:request, :assignment)")
-        connection.execute(insert, {"request": request.id, "assignment": first})
+        connection.execute(insert, {"request": request["id"], "assignment": first})
         with pytest.raises(DBAPIError, match="duplicate key"):
             with connection.begin_nested():
-                connection.execute(insert, {"request": request.id, "assignment": second})
+                connection.execute(insert, {"request": request["id"], "assignment": second})
         with pytest.raises(DBAPIError, match="foreign key"):
             with connection.begin_nested():
                 connection.execute(insert, {"request": uuid4(), "assignment": second})

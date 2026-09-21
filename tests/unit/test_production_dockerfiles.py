@@ -5,11 +5,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 _EDITABLE_ROOT_IMAGES = (
-    "Dockerfile.capacity-manager",
     "Dockerfile.control-plane",
     "Dockerfile.family-orchestrator",
     "Dockerfile.gateway",
-    "Dockerfile.personal-dev-activation-agent",
     "Dockerfile.pipeline-orchestrator",
     "Dockerfile.service",
     "Dockerfile.worker",

@@ -8,8 +8,8 @@ from alembic.config import Config as AlembicConfig
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
-from tests.integration.test_capacity_agent_store import _value
 from tests.integration.test_capacity_trial_writer_fence import _control_session, _initialize
+from tests.support.historical_capacity import _value
 
 
 def _downgrade(database: dict[str, object], monkeypatch: pytest.MonkeyPatch) -> None:

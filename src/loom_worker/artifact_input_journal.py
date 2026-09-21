@@ -1,8 +1,7 @@
-"""Durable worker-local CAS metadata, leases, GC, and acceptance eviction."""
+"""Durable worker-local CAS metadata, leases and garbage collection."""
 
 from __future__ import annotations
 
-import json
 import os
 import sqlite3
 import stat
@@ -10,15 +9,7 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
 from uuid import UUID
-
-from loom.pipeline.keys import canonical_document, digest_bytes
-from loom.pipeline.work_protocol import (
-    AcceptanceEvictionEntryV1,
-    AcceptanceEvictionGrantV1,
-    AcceptanceEvictionResultV1,
-)
 
 HIGH_WATERMARK_NUMERATOR = 85
 LOW_WATERMARK_NUMERATOR = 70
@@ -32,17 +23,6 @@ class ArtifactInputJournalError(RuntimeError):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
-
-
-class AcceptanceEvictionAuthorityV1(Protocol):
-    async def authorize(
-        self,
-        *,
-        authorization_id: UUID,
-        candidate_sha256: str,
-        worker_id: UUID,
-        ordered_manifest_sha256s: tuple[str, str, str, str, str],
-    ) -> AcceptanceEvictionGrantV1: ...
 
 
 @dataclass(frozen=True)
@@ -109,6 +89,7 @@ class ArtifactInputJournal:
         self._lock = threading.RLock()
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self.cas_root.mkdir(parents=True, exist_ok=True)
+        # Preserve the historical tombstone path to recover interrupted local GC.
         (self.cas_root / ".acceptance-eviction").mkdir(exist_ok=True)
         (self.cas_root / ".partial").mkdir(exist_ok=True)
         (self.cas_root / ".quarantine").mkdir(exist_ok=True)
@@ -150,29 +131,6 @@ class ArtifactInputJournal:
                 );
                 CREATE INDEX IF NOT EXISTS artifact_input_cache_lru_idx
                     ON artifact_input_cache_entries(state,refcount,last_accessed_at,manifest_sha256);
-                CREATE TABLE IF NOT EXISTS acceptance_eviction_operations (
-                    authorization_id TEXT NOT NULL,
-                    candidate_sha256 TEXT NOT NULL,
-                    worker_id TEXT NOT NULL,
-                    command_id TEXT NOT NULL UNIQUE,
-                    ordered_manifest_sha256s_json BLOB NOT NULL,
-                    entries_json BLOB NOT NULL,
-                    state TEXT NOT NULL CHECK(state IN ('deleting','complete')),
-                    result_json BLOB,
-                    result_sha256 TEXT,
-                    created_at TEXT NOT NULL,
-                    finished_at TEXT,
-                    PRIMARY KEY(authorization_id,candidate_sha256,worker_id),
-                    CHECK((state='complete') = (result_json IS NOT NULL AND result_sha256 IS NOT NULL))
-                );
-                CREATE TABLE IF NOT EXISTS acceptance_eviction_audit (
-                    authorization_id TEXT NOT NULL,
-                    candidate_sha256 TEXT NOT NULL,
-                    worker_id TEXT NOT NULL,
-                    result_sha256 TEXT NOT NULL,
-                    finished_at TEXT NOT NULL,
-                    PRIMARY KEY(authorization_id,candidate_sha256,worker_id)
-                );
                 """
             )
 
@@ -475,12 +433,6 @@ class ArtifactInputJournal:
                     "DELETE FROM artifact_input_cache_entries WHERE manifest_sha256=? AND state='deleting'",
                     (digest,),
                 )
-        with self._connect() as db:
-            operations = db.execute(
-                "SELECT * FROM acceptance_eviction_operations WHERE state='deleting'"
-            ).fetchall()
-        for operation in operations:
-            self._finish_eviction_operation(operation)
         sha_root = self.cas_root / "sha256"
         if sha_root.exists():
             for candidate in sha_root.glob("[0-9a-f][0-9a-f]/*"):
@@ -506,191 +458,12 @@ class ArtifactInputJournal:
             if info.st_mtime < cutoff:
                 _remove_tree_no_links(candidate)
 
-    def _execute_acceptance_eviction(
-        self, grant: AcceptanceEvictionGrantV1
-    ) -> AcceptanceEvictionResultV1:
-        key = (str(grant.authorization_id), grant.candidate_sha256, str(grant.worker_id))
-        with self._lock, self._connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            replay = db.execute(
-                "SELECT * FROM acceptance_eviction_operations WHERE authorization_id=? AND candidate_sha256=? AND worker_id=?",
-                key,
-            ).fetchone()
-            request_bytes = canonical_document(grant.ordered_manifest_sha256s)
-            if replay is not None:
-                if bytes(replay["ordered_manifest_sha256s_json"]) != request_bytes:
-                    db.rollback()
-                    raise ArtifactInputJournalError("idempotency_conflict")
-                if replay["state"] != "complete":
-                    db.commit()
-                    return self._finish_eviction_operation(replay)
-                result = AcceptanceEvictionResultV1.model_validate_json(replay["result_json"])
-                db.commit()
-                return result
-            entries: list[AcceptanceEvictionEntryV1] = []
-            ready_entries: list[CacheEntry] = []
-            for manifest in grant.ordered_manifest_sha256s:
-                row = db.execute(
-                    "SELECT * FROM artifact_input_cache_entries WHERE manifest_sha256=?",
-                    (manifest,),
-                ).fetchone()
-                if row is None:
-                    entries.append(
-                        AcceptanceEvictionEntryV1(
-                            manifest_sha256=manifest, pre_state="absent", freed_bytes=0
-                        )
-                    )
-                    continue
-                entry = self._entry(row)
-                if entry.state != "ready" or entry.refcount != 0 or entry.ready_path is None:
-                    db.rollback()
-                    raise ArtifactInputJournalError("acceptance_eviction_precondition")
-                ready_entries.append(entry)
-                entries.append(
-                    AcceptanceEvictionEntryV1(
-                        manifest_sha256=manifest,
-                        pre_state="ready",
-                        freed_bytes=entry.unpacked_size_bytes,
-                    )
-                )
-            entries.sort(key=lambda item: item.manifest_sha256.encode())
-            now = self._now()
-            db.execute(
-                """INSERT INTO acceptance_eviction_operations
-                   (authorization_id,candidate_sha256,worker_id,command_id,
-                    ordered_manifest_sha256s_json,entries_json,state,created_at)
-                   VALUES(?,?,?,?,?,?,?,?)""",
-                (*key, str(grant.command_id), request_bytes, canonical_document(entries), "deleting", now),
-            )
-            for entry in ready_entries:
-                db.execute(
-                    "UPDATE artifact_input_cache_entries SET state='deleting',ready_path=NULL,ready_sha256=NULL,updated_at=? "
-                    "WHERE manifest_sha256=? AND state='ready' AND refcount=0",
-                    (now, entry.manifest_sha256),
-                )
-            db.commit()
-        for entry in ready_entries:
-            assert entry.ready_path is not None
-            tombstone = self.cas_root / ".acceptance-eviction" / entry.manifest_sha256.removeprefix("sha256:")
-            os.replace(entry.ready_path, tombstone)
-            _fsync_dir(entry.ready_path.parent)
-            _fsync_dir(tombstone.parent)
-        with self._connect() as db:
-            operation = db.execute(
-                "SELECT * FROM acceptance_eviction_operations WHERE authorization_id=? AND candidate_sha256=? AND worker_id=?",
-                key,
-            ).fetchone()
-        assert operation is not None
-        return self._finish_eviction_operation(operation)
-
-    def _finish_eviction_operation(
-        self, operation: sqlite3.Row
-    ) -> AcceptanceEvictionResultV1:
-        ordered = tuple(json.loads(bytes(operation["ordered_manifest_sha256s_json"])))
-        entries = [
-            AcceptanceEvictionEntryV1.model_validate(value)
-            for value in json.loads(bytes(operation["entries_json"]))
-        ]
-        for entry in entries:
-            if entry.pre_state != "ready":
-                continue
-            ready = self.ready_path(entry.manifest_sha256)
-            tombstone = self.cas_root / ".acceptance-eviction" / entry.manifest_sha256.removeprefix("sha256:")
-            if ready.exists() and not tombstone.exists():
-                os.replace(ready, tombstone)
-                _fsync_dir(ready.parent)
-                _fsync_dir(tombstone.parent)
-            elif ready.exists() and tombstone.exists():
-                raise ArtifactInputJournalError("input_cache_duplicate_deleting_tree")
-            if tombstone.exists():
-                _remove_tree_no_links(tombstone)
-        finished_at = datetime.now(UTC)
-        evicted_count = sum(entry.pre_state == "ready" for entry in entries)
-        result = AcceptanceEvictionResultV1(
-            schema_version="loom.acceptance-eviction-result.v1",
-            authorization_id=UUID(str(operation["authorization_id"])),
-            candidate_sha256=str(operation["candidate_sha256"]),
-            worker_id=UUID(str(operation["worker_id"])),
-            ordered_manifest_sha256s=list(ordered),
-            entries=entries,
-            evicted_count=evicted_count,
-            status="already_absent" if evicted_count == 0 else "evicted",
-            absence_verified=True,
-            finished_at=finished_at,
-        )
-        result_bytes = canonical_document(result.model_dump(mode="json"))
-        result_sha256 = digest_bytes(result_bytes)
-        with self._lock, self._connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            for manifest in ordered:
-                db.execute(
-                    "DELETE FROM artifact_input_cache_entries WHERE manifest_sha256=? AND state='deleting'",
-                    (manifest,),
-                )
-                if self.ready_path(manifest).exists():
-                    db.rollback()
-                    raise ArtifactInputJournalError("acceptance_eviction_absence_drift")
-            db.execute(
-                """UPDATE acceptance_eviction_operations SET state='complete',result_json=?,
-                   result_sha256=?,finished_at=? WHERE authorization_id=? AND candidate_sha256=? AND worker_id=?""",
-                (
-                    result_bytes,
-                    result_sha256,
-                    finished_at.isoformat(),
-                    operation["authorization_id"],
-                    operation["candidate_sha256"],
-                    operation["worker_id"],
-                ),
-            )
-            db.execute(
-                "INSERT OR IGNORE INTO acceptance_eviction_audit VALUES(?,?,?,?,?)",
-                (
-                    operation["authorization_id"],
-                    operation["candidate_sha256"],
-                    operation["worker_id"],
-                    result_sha256,
-                    finished_at.isoformat(),
-                ),
-            )
-            db.commit()
-        return result
 
     def ready_path(self, manifest_sha256: str) -> Path:
         digest = manifest_sha256.removeprefix("sha256:")
         if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
             raise ArtifactInputJournalError("invalid_manifest_digest")
         return self.cas_root / "sha256" / digest[:2] / digest
-
-
-@dataclass(frozen=True)
-class AcceptanceEvictionCommandHandler:
-    """The sole private fixed-candidate worker eviction command surface."""
-
-    journal: ArtifactInputJournal
-    authority: AcceptanceEvictionAuthorityV1
-
-    async def evict_acceptance_entries(
-        self,
-        *,
-        authorization_id: UUID,
-        candidate_sha256: str,
-        worker_id: UUID,
-        ordered_manifest_sha256s: tuple[str, str, str, str, str],
-    ) -> AcceptanceEvictionResultV1:
-        grant = await self.authority.authorize(
-            authorization_id=authorization_id,
-            candidate_sha256=candidate_sha256,
-            worker_id=worker_id,
-            ordered_manifest_sha256s=ordered_manifest_sha256s,
-        )
-        if (
-            grant.authorization_id != authorization_id
-            or grant.candidate_sha256 != candidate_sha256
-            or grant.worker_id != worker_id
-            or tuple(grant.ordered_manifest_sha256s) != ordered_manifest_sha256s
-        ):
-            raise ArtifactInputJournalError("acceptance_eviction_grant_drift")
-        return self.journal._execute_acceptance_eviction(grant)
 
 
 def _fsync_dir(path: Path) -> None:
@@ -725,8 +498,6 @@ def _remove_tree_no_links(path: Path) -> None:
 
 
 __all__ = [
-    "AcceptanceEvictionAuthorityV1",
-    "AcceptanceEvictionCommandHandler",
     "ArtifactInputJournal",
     "ArtifactInputJournalError",
     "CacheCapacitySnapshot",

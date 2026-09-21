@@ -70,6 +70,8 @@ async def setup(
     postgres_url: str,
 ) -> AsyncIterator[tuple[FastAPI, str]]:
     for k, v in {
+        "LOOM_ENV": "development",
+        "LOOM_LOCAL_EXECUTION": "1",
         "LOOM_SVC_DB_URL": postgres_url,
         "LOOM_SVC_MINIO_ENDPOINT": "http://minio:9000",
         "LOOM_SVC_MINIO_ACCESS_KEY": "x",
@@ -386,7 +388,12 @@ async def test_combinations_preserve_per_combo_provider_routing(
     conn_a = uuid4()
     conn_b = uuid4()
     with sl() as s:
-        team_id = s.execute(select(Token.team_id).where(Token.type == "team")).scalar_one()
+        team_id = s.execute(
+            select(Token.team_id).where(
+                Token.token_hash == hashlib.sha256(raw.encode()).digest(),
+                Token.type == "team",
+            )
+        ).scalar_one()
         for conn_id, display_name, model_id in (
             (conn_a, "Combo provider A", "glm-5.1-thinking"),
             (conn_b, "Combo provider B", "qwen3.6-35b-a3b"),
@@ -473,7 +480,12 @@ async def test_combinations_reject_provider_model_cache_per_combo(
     sl = sessionmaker(sync_engine)
     conn_id = uuid4()
     with sl() as s:
-        team_id = s.execute(select(Token.team_id).where(Token.type == "team")).scalar_one()
+        team_id = s.execute(
+            select(Token.team_id).where(
+                Token.token_hash == hashlib.sha256(raw.encode()).digest(),
+                Token.type == "team",
+            )
+        ).scalar_one()
         s.execute(
             insert(ProviderConnection).values(
                 id=conn_id,

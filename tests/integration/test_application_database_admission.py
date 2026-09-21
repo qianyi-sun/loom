@@ -369,18 +369,14 @@ def test_recovery_drain_preserves_exact_guard_and_refuses_other_clients(login_da
             maintenance.execute("DROP ROLE loom_rollout_readonly")
 
 
-def test_drain_preserves_the_exact_rollout_coordination_guard(login_database, tmp_path):  # noqa: F811
+def test_drain_preserves_the_exact_rollout_coordination_guard(login_database):  # noqa: F811
     from loom.application_database_admission import capture_application_coordination_guard
     from loom.staging_mutation_coordination import (
+        STAGING_MUTATION_HEALTH_SQL,
         STAGING_MUTATION_TRY_LOCK_SQL,
         rollout_guard_application_name,
         rollout_guard_bind_sql,
     )
-    from loom_cli.rollout.operator.protected_apply_journal import ProtectedApplyJournal
-    from loom_cli.rollout.operator.staging_mutation_guard import _HEALTH_SQL
-    from tests.loom_cli.rollout.operator.test_application_admission_recovery import _component
-    from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
-    from tests.loom_cli.rollout.operator.test_protected_apply_journal import _journal
 
     admin, database, role, successor, _, provisioner = login_database
     guard_role = "loom_rollout_readonly"
@@ -400,23 +396,7 @@ def test_drain_preserves_the_exact_rollout_coordination_guard(login_database, tm
                 maintenance, target=target, provisioner_role=provisioner,
                 backend_pid=guard.info.backend_pid, **request,
             )
-            plan, journal = _plan(tmp_path), _journal(tmp_path)
-            def persist(_):
-                journal.record_application_admission_recovery(
-                    target=target, handoff_backend=handoff, coordination_guard=captured,
-                )
-                raise RuntimeError("stop after durable guard capture")
-            with pytest.raises(RuntimeError, match="durable guard capture"):
-                journal.execute(plan, [_component(persist)])
-            recovered = ProtectedApplyJournal(tmp_path / "state", request_id=plan.request_id, attempt_number=plan.attempt_number)
-            records = []
-            def recover(_):
-                records.append(recovered.read_application_admission_recovery())
-                raise RuntimeError("stop after exact guard recovery")
-            with pytest.raises(RuntimeError, match="exact guard recovery"):
-                recovered.execute(plan, [_component(recover)])
-            saved = records[0].coordination_guard
-            assert saved == captured
+            saved = captured
             extra = psycopg.connect(admin.info.dsn, user=guard_role, password="test-only-guard", autocommit=True)
             close_application_database_admission(maintenance, target=target, provisioner_role=provisioner)
             try:
@@ -455,7 +435,7 @@ def test_drain_preserves_the_exact_rollout_coordination_guard(login_database, tm
                 with admin.transaction():
                     admin.execute("LOCK TABLE public.coordination_lock_test IN ACCESS EXCLUSIVE MODE")
                     guard.execute("SET statement_timeout='1s'")
-                    assert guard.execute(_HEALTH_SQL).fetchone() == (saved.backend.pid, True)
+                    assert guard.execute(STAGING_MUTATION_HEALTH_SQL).fetchone() == (saved.backend.pid, True)
                 guard.execute("SELECT pg_advisory_unlock(5498691230183247727)")
                 with pytest.raises(RuntimeError, match="coordination guard"):
                     require_application_database_drained(
@@ -760,99 +740,3 @@ def test_handoff_identity_compares_instants_across_session_timezones(login_datab
             reopen_application_database_admission(
                 maintenance, target=target, provisioner_role=provisioner
             )
-
-
-@pytest.mark.parametrize("publication_fails", [False, True])
-def test_journal_recovers_closed_database_without_recapturing(
-    login_database,  # noqa: F811
-    tmp_path,
-    monkeypatch,
-    publication_fails,
-):
-    from loom_cli.rollout.operator.protected_apply_journal import (
-        ComponentObservation,
-        ComponentState,
-        ProtectedApplyComponent,
-        ProtectedApplyJournal,
-    )
-    from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
-    from tests.loom_cli.rollout.operator.test_protected_apply_journal import _journal
-
-    admin, database, role, successor, _, provisioner = login_database
-    plan, journal = _plan(tmp_path), _journal(tmp_path)
-    completed = False
-    captures = 0
-    original_publish = journal._publish_or_match
-
-    def fail_publication(path, value):
-        if path.name == "application-admission.json":
-            raise OSError("injected recovery publication failure")
-        original_publish(path, value)
-
-    if publication_fails:
-        monkeypatch.setattr(journal, "_publish_or_match", fail_publication)
-
-    def apply(_):
-        nonlocal completed, captures
-        with _maintenance(admin) as maintenance:
-            saved = journal.read_application_admission_recovery()
-            if saved is None:
-                captures += 1
-                target = _target(admin, maintenance, database, role, successor, provisioner)
-                journal.record_application_admission_recovery(
-                    target=target, handoff_backend=_handoff(admin)
-                )
-
-                class LostAcknowledgement:
-                    @property
-                    def info(self):
-                        return maintenance.info
-
-                    def execute(self, query):
-                        return maintenance.execute(query)
-
-                    @contextmanager
-                    def transaction(self):
-                        with maintenance.transaction():
-                            yield
-                        raise RuntimeError("lost close acknowledgement")
-
-                close_application_database_admission(
-                    LostAcknowledgement(), target=target, provisioner_role=provisioner
-                )
-            else:
-                assert captures == 1
-                assert maintenance.execute(
-                    "SELECT datallowconn FROM pg_database WHERE datname=%s", (database,)
-                ).fetchone() == (False,)
-                reopen_application_database_admission(
-                    maintenance, target=saved.target, provisioner_role=provisioner
-                )
-                completed = True
-
-    component = ProtectedApplyComponent(
-        component_id="application-ownership-handoff",
-        implementation_digest="1" * 64,
-        input_fingerprint="2" * 64,
-        classify=lambda _: ComponentObservation(
-            ComponentState.EXACT if completed else ComponentState.READY, "3" * 64, 7
-        ),
-        apply=apply,
-    )
-    with pytest.raises((RuntimeError, OSError), match=r"publication failure|lost close"):
-        journal.execute(plan, [component])
-    assert admin.execute(
-        "SELECT datallowconn FROM pg_database WHERE datname=%s", (database,)
-    ).fetchone() == (publication_fails,)
-    if publication_fails:
-        return
-    journal = ProtectedApplyJournal(
-        tmp_path / "state", request_id=plan.request_id, attempt_number=plan.attempt_number
-    )
-    terminals = journal.execute(plan, [component])
-    assert terminals[component.component_id].applied is True
-    assert completed and captures == 1
-    # Reopened final state, not transient closure, determines terminal replay.
-    assert journal.execute(plan, [component]) == terminals
-    with psycopg.connect(admin.info.dsn, password=admin.info.password) as fresh:
-        assert fresh.execute("SELECT 42").fetchone() == (42,)

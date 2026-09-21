@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and verify the closed OLDLAB Stage 1 simulator image contract."""
+"""Build and verify the pinned local simulator image contract."""
 
 from __future__ import annotations
 
@@ -226,7 +226,7 @@ def _gpu_observation(minimum_driver: str) -> tuple[list[dict[str, object]], str]
         if index != expected_index or _GPU_UUID.fullmatch(uuid) is None:
             raise ImageContractError("NVIDIA device order or UUID is invalid")
         if name != "NVIDIA GeForce RTX 5080" or memory_mib < 16000:
-            raise ImageContractError("NVIDIA device does not satisfy the OLDLAB contract")
+            raise ImageContractError("NVIDIA device does not satisfy the local image GPU contract")
         if driver is not None and driver != observed_driver:
             raise ImageContractError("NVIDIA driver version differs across devices")
         driver = observed_driver
@@ -240,7 +240,7 @@ def _gpu_observation(minimum_driver: str) -> tuple[list[dict[str, object]], str]
             }
         )
     if len(devices) != 2 or driver is None:
-        raise ImageContractError("OLDLAB Stage 1 requires exactly two GPUs")
+        raise ImageContractError("This local image requires exactly two GPUs")
     if _version_tuple(driver) < _version_tuple(minimum_driver):
         raise ImageContractError("NVIDIA driver is older than the image contract")
     return devices, driver

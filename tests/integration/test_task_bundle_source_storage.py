@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 import pytest
@@ -17,7 +18,7 @@ from loom.task_bundle_source_storage import (
     write_task_bundle_source_object,
 )
 from loom.trajectory.storage import MinioObjectStore
-from tests.integration.test_task_image_bundle_minio_signing import minio_tls  # noqa: F401
+from tests.support.minio_tls import minio_tls  # noqa: F401
 
 pytestmark = [pytest.mark.docker, pytest.mark.timeout(120)]
 
@@ -104,13 +105,22 @@ async def test_late_retry_version_is_recovered_after_empty_scan_without_deleting
     admin.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
     old, new = _intent(bucket, "bundle/task.toml"), _intent(bucket, "bundle/task.toml")
     started, release, completed = threading.Event(), threading.Event(), threading.Event()
+    executor = ThreadPoolExecutor(max_workers=1)
+    late_write = None
 
     class DelayedClient:
         def get_bucket_versioning(self, **kwargs):
             return admin.get_bucket_versioning(**kwargs)
 
         def put_object(self, **kwargs):
+            nonlocal late_write
+            late_write = executor.submit(self.finish_put, kwargs)
             started.set()
+            # The caller times out while the server-side write remains pending.
+            # Inject that outcome without imposing a 100 ms deadline on real S3 I/O.
+            raise TimeoutError("injected timeout before delayed PUT completes")
+
+        def finish_put(self, kwargs):
             try:
                 assert release.wait(30), "fixture did not release delayed PUT"
                 return admin.put_object(**kwargs)
@@ -124,7 +134,6 @@ async def test_late_retry_version_is_recovered_after_empty_scan_without_deleting
 
     store._client = DelayedClient()
     store._build_client = lambda: admin
-    store._operation_timeout = 0.1
     inventory, deleter = S3TaskBundleVersionInventory(admin), S3ExactObjectDeleter(admin)
     try:
         known = await write_task_bundle_source_object(store, old, b"abc")
@@ -154,8 +163,11 @@ async def test_late_retry_version_is_recovered_after_empty_scan_without_deleting
         )
     finally:
         release.set()
-        if started.is_set():
-            assert await asyncio.to_thread(completed.wait, 10)
+        try:
+            if late_write is not None:
+                await asyncio.to_thread(late_write.result, 10)
+        finally:
+            executor.shutdown(wait=True)
 
 
 async def test_real_minio_resumes_bounded_inventory_across_foreign_versions_and_delete_marker(

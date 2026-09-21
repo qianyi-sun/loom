@@ -269,30 +269,27 @@ function OverviewContent({ data }: { data: OverviewSummary }): JSX.Element {
         </HealthCard>
 
         <HealthCard
-          title="Workers and activity"
-          description="Current execution capacity and recent team activity."
+          title="Execution and activity"
+          description="Shared Nebius execution and recent team activity."
         >
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
-            <CountLine
-              value={data.worker_health.active}
-              label="active"
-              title="Workers with fresh heartbeats."
-            />
+            <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+              <p className="text-sm font-semibold text-slate-900">
+                {data.execution_health.status === "observed" ? "Capacity observations current"
+                  : data.execution_health.status === "unknown" ? "Capacity unknown"
+                  : data.execution_health.status === "needs_attention" ? "Capacity needs attention"
+                  : "Nebius execution not configured"}
+              </p>
+              <p className="mt-1 text-sm text-slate-500">
+                Tasks may queue while capacity becomes available or nodes start.
+              </p>
+              <Link to="/monitor" className="text-sm text-accent">View nodes and scheduling</Link>
+            </div>
             <CountLine
               value={data.run_activity.trials.running ?? 0}
               label="running trials"
               title="Trials currently running for this team."
             />
-          </div>
-          <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
-            <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">
-              Backends
-            </p>
-            <p className="mt-1 text-slate-700">
-              {data.worker_health.available_backends.length > 0
-                ? data.worker_health.available_backends.join(", ")
-                : "No active backend"}
-            </p>
           </div>
           <LatestBatch data={data} />
         </HealthCard>
@@ -305,8 +302,7 @@ export default function Home(): JSX.Element {
   const query = useQuery({
     queryKey: ["overview"],
     queryFn: () => api.getOverview(),
-    // Worker heartbeat freshness is 30 seconds. Refresh frequently enough for
-    // the readiness card to stop advertising a dead pool within that window.
+    // Keep shared execution observations and team activity current.
     refetchInterval: 10_000,
   });
 

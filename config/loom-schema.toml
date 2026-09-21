@@ -255,16 +255,10 @@ python_type = "Path"
 # no required, no default → `Path | None = None`
 # k8s templates inject a template-local literal after the env_block macro
 
-[service_config.protected_worker_runtime_db_url_file]
-used_by     = ["control-plane"]
-python_type = "Path"
-# no required, no default → `Path | None = None`
-description = "Owner-only file containing the least-privileged PostgreSQL URL used to register and validate protected staging worker sessions. When configured, worker mutation routes require the protected worker credential header."
-
 [service_config.task_image_execution_config_file]
 used_by     = ["control-plane", "worker"]
 python_type = "Path"
-description = "Optional owner-only release configuration for signed task-image execution. Workers load only a public execution root and fixed purpose; the control plane additionally loads a fixed mTLS signer connection. Absent keeps the legacy reader path. Protected-worker composition is unsupported."
+description = "Optional owner-only release configuration for signed task-image execution. Workers load only a public execution root and fixed purpose; the control plane additionally loads a fixed mTLS signer connection. Absent keeps the legacy reader path."
 
 [service_config.log_level]
 used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]
@@ -275,618 +269,6 @@ default     = "info"
 used_by     = ["control-plane", "llm-gateway", "loom-service"]
 python_type = "bool"
 default     = false
-
-# Shared-fleet dev-instance controller. Disabled in ordinary/base deployments;
-# the operator enables it only on the management loom-service after provisioning
-# its fixture-admin credential, candidate images, Kubernetes RBAC, global
-# capacity-manager projection authority, and trusted personal capacity agent.
-[service_config.dev_instances_enabled]
-used_by     = ["loom-service"]
-python_type = "bool"
-default     = false
-
-[service_config.personal_dev_acceptance_binding_json]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "{}"
-description = "Canonical secret-free runtime binding for the exact zero-capacity personal-development acceptance window."
-
-[service_config.personal_dev_acceptance_plan_sha256]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Independent SHA-256 binding for the reviewed personal-development acceptance plan."
-
-[service_config.personal_dev_runtime_mode]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "shadow"
-description = "Explicit personal-development runtime mode: shadow, acceptance, operational, or separately bound membership-v1."
-
-[service_config.personal_dev_membership_binding_json]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "{}"
-description = "Canonical active-membership acceptance binding, including complete V3 preparation; never a legacy zero-capacity certificate."
-
-[service_config.personal_dev_membership_plan_sha256]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Independent digest of the reviewed active-membership acceptance plan."
-
-[service_config.personal_dev_membership_observer_principal_id]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Exact current unbound capacity:read observer, distinct from the immutable membership delegate."
-
-[service_config.personal_dev_membership_successor_plan_file]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Optional owner-only canonical successor-plan file; empty disables reviewed cross-authority continuation. Never supplied by personal source."
-
-[service_config.personal_dev_membership_successor_plan_sha256]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Independent canonical SHA-256 of the protected multi-predecessor successor plan, paired with its file."
-
-[service_config.personal_dev_operational_binding_json]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "{}"
-description = "Canonical secret-free runtime binding for durable zero-capacity personal development."
-
-[service_config.personal_dev_operational_plan_sha256]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Independent SHA-256 binding for the accepted durable personal-development plan."
-
-[service_config.personal_dev_activation_public_key_sha256]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Expected SHA-256 of the exact activation-agent public verification key."
-
-[service_config.dev_instance_database_admin_url]
-used_by     = ["loom-service"]
-python_type = "PostgresDsn"
-required    = false
-default     = ""
-secret      = { key = "dev-instance-database-admin-url" }
-description = "Maintenance-database credential allowed to create/drop only derived dev databases and roles on the shared dev fixture."
-
-[service_config.dev_instance_candidate_sha]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-
-[service_config.dev_instance_deployment_generation]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 1
-
-[service_config.dev_instance_image_tag]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-
-[service_config.dev_instance_container_registry]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-
-[service_config.dev_instance_ingress_class_name]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "nginx"
-
-[service_config.dev_instance_ingress_cert_manager_cluster_issuer]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "letsencrypt-prod"
-
-[service_config.dev_instance_kubectl_path]
-used_by     = ["loom-service"]
-python_type = "Path"
-default     = "/usr/local/bin/kubectl"
-
-[service_config.dev_instance_kube_context]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-
-[service_config.dev_instance_control_plane_url_template]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "http://loom-control-plane.{namespace}.svc.cluster.local:8080"
-
-[service_config.dev_instance_slurm_actuator_config_json]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "{}"
-description = "Non-secret JSON Slurm actuator configuration. Secret worker material remains referenced by protected env-file paths."
-
-[service_config.dev_instance_policy_drain_timeout_sec]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 900
-
-[service_config.personal_dev_source_max_archive_bytes]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 402653184
-description = "Maximum personal-dev source tar accepted by the management service. The default bounds the canonical 256 MiB source payload plus manifest and tar overhead."
-
-[service_config.personal_dev_candidate_retained_count_limit]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 8
-description = "Maximum retained content-addressed personal candidates for one immutable owner before garbage collection must free space."
-
-[service_config.personal_dev_candidate_retained_bytes_limit]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 3221225472
-description = "Maximum aggregate retained source-archive bytes for one immutable owner."
-
-[service_config.personal_dev_candidate_gc_retention_sec]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 86400
-description = "Grace period after a personal candidate is first observed unreferenced before its exact source, build, evidence, and attempt-isolated registry artifacts may be collected."
-
-[service_config.personal_dev_candidate_gc_lease_sec]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 900
-description = "Lease duration for one heartbeat-fenced personal candidate artifact collection pass."
-
-[service_config.personal_dev_candidate_gc_poll_interval_sec]
-used_by     = ["loom-service"]
-python_type = "float"
-default     = 30.0
-description = "Idle poll interval for the bounded personal candidate artifact collector."
-
-[service_config.personal_dev_builder_global_concurrency]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 4
-description = "Maximum live lease-fenced personal candidate builds across all owners."
-
-[service_config.personal_dev_builder_per_owner_concurrency]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 1
-description = "Maximum live lease-fenced personal candidate builds for one immutable owner."
-
-[service_config.personal_dev_builder_poll_interval_sec]
-used_by     = ["loom-service"]
-python_type = "float"
-default     = 2.0
-description = "Idle poll interval for the lease-fenced personal candidate builder coordinator."
-
-[service_config.personal_dev_builder_lease_sec]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 4200
-description = "Lease and scoped-capability duration for one bounded native multi-architecture personal candidate build."
-
-[service_config.personal_dev_build_admission_config_file]
-used_by     = ["loom-service"]
-python_type = "Path"
-description = "Optional owner-only pinned private build-admission configuration. Absence leaves its internal API unavailable; this does not enable build intake."
-
-[service_config.personal_dev_build_admission_config_sha256]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Exact SHA-256 of the canonical private prepare/bind-only management admission configuration."
-
-[service_config.personal_dev_builder_enabled]
-used_by     = ["loom-service"]
-python_type = "bool"
-default     = false
-description = "Enable the restricted personal candidate builder only after its immutable image, runtime class, scanner evidence, and registry publisher are installed."
-
-[service_config.personal_dev_build_management_config_file]
-used_by     = ["loom-service"]
-python_type = "Path"
-description = "Optional owner-only pinned installed native build recovery scopes. Does not enable native build intake or readiness."
-
-[service_config.personal_dev_build_management_config_sha256]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Exact SHA-256 of the canonical native build management recovery configuration."
-
-[service_config.personal_dev_native_builder_enabled]
-used_by     = ["loom-service"]
-python_type = "bool"
-default     = false
-description = "Enable the release-bound GB10 native arm64 provider. Disabled is inert and retains the legacy all-Kubernetes builder only for rollback and local tests."
-
-[service_config.personal_dev_native_builder_agent_instance_id]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Canonical nonzero UUID of the one approved durable GB10 native-builder agent instance."
-
-[service_config.personal_dev_native_builder_agent_key_id]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Stable identifier of the Ed25519 key authorized to sign native-builder poll, heartbeat, and completion requests."
-
-[service_config.personal_dev_native_builder_public_key_file]
-used_by     = ["loom-service"]
-python_type = "Path"
-description = "Optional read-only raw Ed25519 public key for the native-builder agent. Absence keeps native mode fail-closed."
-
-[service_config.personal_dev_native_builder_public_key_sha256]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Release-plan binding for the exact 32-byte native-builder agent public key."
-
-[service_config.personal_dev_native_builder_agent_image]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Immutable trusted-release reference for the authority-minimal native-builder agent image."
-
-[service_config.personal_dev_native_builder_runtime_profile_sha256]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "SHA-256 of the exact reviewed GB10 dedicated Docker, KVM gVisor, network, and resource profile."
-
-[service_config.personal_dev_native_builder_protocol_version]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 1
-description = "Exact signed native-builder protocol version accepted by management."
-
-[service_config.personal_dev_native_builder_freshness_sec]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 60
-description = "Maximum age in seconds of the last exact signed agent inventory accepted by operational readiness."
-
-[service_config.personal_dev_native_builder_max_concurrency]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 2
-description = "Approved native GB10 grant concurrency; must match the protocol and host resource profile."
-
-[service_config.personal_dev_native_builder_poll_interval_sec]
-used_by     = ["loom-service"]
-python_type = "float"
-default     = 1.0
-description = "Bounded coordinator interval for observing one durable native platform grant."
-
-[service_config.personal_dev_builder_image]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Immutable OCI reference for the trusted personal-dev rootless BuildKit wrapper."
-
-[service_config.personal_dev_builder_registry_prefix]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Registry repository prefix used only by the trusted personal-dev exporter."
-
-[service_config.personal_dev_builder_registry_auth_file]
-used_by     = ["loom-service"]
-python_type = "Path"
-default     = "/var/run/loom-personal-dev-registry/config.json"
-description = "Protected Docker-compatible registry authentication file used only by the trusted exporter."
-
-[service_config.personal_dev_builder_max_artifact_bytes]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 6442450944
-description = "Maximum object size accepted for one native platform's complete personal-dev build bundle."
-
-[service_config.personal_dev_builder_max_image_archive_bytes]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 2147483648
-description = "Maximum size of one verified native OCI image archive within a personal-dev build bundle."
-
-[service_config.personal_dev_builder_runtime_class_name]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "loom-personal-dev-builder"
-description = "Operator-installed RuntimeClass whose measured KVM gVisor profile supplies the kernel boundary and bounded PID/isolation contract for untrusted builds."
-
-[service_config.personal_dev_builder_scanner_path]
-used_by     = ["loom-service"]
-python_type = "Path"
-default     = "/usr/local/bin/trivy"
-
-[service_config.personal_dev_builder_scanner_cache_dir]
-used_by     = ["loom-service"]
-python_type = "Path"
-default     = "/var/lib/loom-personal-dev-scanner"
-
-[service_config.personal_dev_builder_scanner_cache_identity_sha256]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Release-bound SHA-256 identity of the exact personal-dev scanner-cache generation mounted into management."
-
-[service_config.personal_dev_builder_scanner_identity]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Immutable scanner binary and vulnerability-database identity written into personal-dev safety evidence."
-
-[service_config.personal_dev_builder_scanner_database_metadata_sha256]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Release-bound SHA-256 of the personal-dev Trivy database metadata."
-
-[service_config.personal_dev_builder_scanner_java_database_metadata_sha256]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Release-bound SHA-256 of the personal-dev Trivy Java database metadata."
-
-[service_config.personal_dev_builder_scanner_policy_sha256]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "SHA-256 of the operator-owned personal-dev image finding policy."
-
-[service_config.personal_dev_builder_skopeo_path]
-used_by     = ["loom-service"]
-python_type = "Path"
-default     = "/usr/bin/skopeo"
-
-[service_config.personal_dev_builder_docker_path]
-used_by     = ["loom-service"]
-python_type = "Path"
-default     = "/usr/bin/docker"
-
-[service_config.personal_dev_builder_publisher_identity]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-
-[service_config.personal_dev_trusted_launcher_profile_sha256]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Exact approved non-exclusive worker containment profile digest bound into the personal-dev-only publication."
-
-[service_config.personal_dev_protocol_versions_json]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "{}"
-description = "Operator-owned canonical JSON map of trusted personal-dev protocol compatibility versions."
-
-[service_config.personal_dev_global_live_instance_limit]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 16
-description = "Finite global count of non-deleted personal environments admitted to shared Kubernetes, PostgreSQL, MinIO, DNS, and lifecycle capacity."
-
-[service_config.personal_dev_per_owner_live_instance_limit]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 2
-description = "Finite count of non-deleted personal environments admitted for one immutable owner."
-
-[service_config.personal_dev_per_owner_aggregate_min_slots]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 8
-description = "Maximum sum of requested min_slots across one owner's non-deleted personal environments."
-
-[service_config.personal_dev_per_owner_aggregate_max_slots]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 16
-description = "Maximum sum of max_slots demand ceilings across one owner's non-deleted personal environments; this is not reserved physical capacity."
-
-[service_config.personal_dev_reconciler_poll_interval_sec]
-used_by     = ["loom-service"]
-python_type = "float"
-default     = 2.0
-description = "Idle poll interval for the lease-fenced personal environment reconciler."
-
-[service_config.personal_dev_reconciler_lease_sec]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 1800
-description = "Lease duration for one bounded personal environment preparation or activation-finalization attempt."
-
-[service_config.personal_dev_activation_public_key_file]
-used_by     = ["loom-service"]
-python_type = "Path"
-description = "Read-only file containing the Ed25519 public key used to verify trusted personal-dev activation acknowledgements; the service never receives signing authority."
-
-[service_config.personal_dev_activation_key_id]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "personal-dev-agent-v1"
-
-[service_config.personal_dev_activation_ack_max_age_sec]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 300
-
-[service_config.pipeline_stage1_smoke_public_key_file]
-used_by     = ["loom-service"]
-python_type = "Path"
-description = "Optional read-only Ed25519 public key for the hidden, separately authorized Stage 1 live-smoke route; absence keeps the mutation fail-closed."
-
-[service_config.pipeline_stage1_smoke_key_id]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "pipeline-stage1-operator-v1"
-
-[service_config.pipeline_stage1_smoke_signature_max_age_sec]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 300
-
-[service_config.personal_dev_capacity_manager_origin]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "https://loom-capacity-manager.loom-dev.svc.cluster.local:8443"
-description = "Exact HTTPS origin of the one global capacity manager used by lifecycle projection and independently installed personal demand agents."
-
-[service_config.personal_dev_capacity_lifecycle_bearer_token_file]
-used_by     = ["loom-service"]
-python_type = "Path"
-default     = "/var/run/loom-personal-dev-capacity/lifecycle-token"
-description = "Owner-only lifecycle projection bearer credential file; the credential is never copied into a personal namespace."
-
-[service_config.personal_dev_capacity_lifecycle_ca_file]
-used_by     = ["loom-service"]
-python_type = "Path"
-default     = "/var/run/loom-personal-dev-capacity/lifecycle-ca.pem"
-description = "Owner-only CA for the privileged lifecycle projection client; this file is never copied into a personal namespace."
-
-[service_config.personal_dev_capacity_lifecycle_certificate_file]
-used_by     = ["loom-service"]
-python_type = "Path"
-default     = "/var/run/loom-personal-dev-capacity/lifecycle-certificate.pem"
-description = "Owner-only certificate for the privileged lifecycle projection client; this file is never copied into a personal namespace."
-
-[service_config.personal_dev_capacity_lifecycle_private_key_file]
-used_by     = ["loom-service"]
-python_type = "Path"
-default     = "/var/run/loom-personal-dev-capacity/lifecycle-private-key.pem"
-description = "Owner-only private key for the privileged lifecycle projection client; this file is never copied into a personal namespace."
-
-[service_config.personal_dev_capacity_ca_file]
-used_by     = ["loom-service"]
-python_type = "Path"
-default     = "/var/run/loom-personal-dev-capacity/ca.pem"
-description = "Owner-only CA copied only into trusted reporter-agent Secrets, never candidate workloads."
-
-[service_config.personal_dev_capacity_observer_bearer_token_file]
-used_by     = ["loom-service"]
-python_type = "Path"
-default     = "/var/run/loom-personal-dev-capacity/observer-token"
-description = "Independent current read-only observer credential; never copied into personal namespaces or used for membership mutation."
-
-[service_config.personal_dev_capacity_observer_ca_file]
-used_by     = ["loom-service"]
-python_type = "Path"
-default     = "/var/run/loom-personal-dev-capacity/observer-ca.pem"
-
-[service_config.personal_dev_capacity_observer_certificate_file]
-used_by     = ["loom-service"]
-python_type = "Path"
-default     = "/var/run/loom-personal-dev-capacity/observer-certificate.pem"
-
-[service_config.personal_dev_capacity_observer_private_key_file]
-used_by     = ["loom-service"]
-python_type = "Path"
-default     = "/var/run/loom-personal-dev-capacity/observer-private-key.pem"
-
-[service_config.personal_dev_capacity_certificate_file]
-used_by     = ["loom-service"]
-python_type = "Path"
-default     = "/var/run/loom-personal-dev-capacity/certificate.pem"
-description = "Owner-only reporter-agent certificate distinct from lifecycle projection authority."
-
-[service_config.personal_dev_capacity_private_key_file]
-used_by     = ["loom-service"]
-python_type = "Path"
-default     = "/var/run/loom-personal-dev-capacity/private-key.pem"
-description = "Owner-only reporter-agent private key distinct from lifecycle projection authority."
-
-[service_config.personal_dev_capacity_agent_image]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = ""
-description = "Immutable digest-qualified trusted fleet image used for the candidate-independent personal capacity agent."
-
-[service_config.personal_dev_capacity_pool_capabilities_json]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = '[{"capability_id":"oldlab-x86-none","pool_id":"oldlab","operating_system":"linux","cpu_architecture":"x86_64","gpu_vendor":"none","network_policies":["public"]}]'
-description = "Operator-owned physical pool capability offers for arch-specific and arch-neutral task matching. This contract contains no pool weights."
-
-[service_config.personal_dev_capacity_agent_poll_interval_sec]
-used_by     = ["loom-service"]
-python_type = "float"
-default     = 5.0
-
-[service_config.personal_dev_capacity_agent_max_attempts]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 10000
-
-[service_config.personal_dev_capacity_manager_namespace]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "loom-dev"
-
-[service_config.personal_dev_capacity_manager_pod_label]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "loom-capacity-manager"
-
-[service_config.personal_dev_capacity_manager_pod_label_key]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "app.kubernetes.io/name"
-
-[service_config.personal_dev_capacity_manager_port]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 8443
-
-[service_config.personal_dev_capacity_database_namespace]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "loom-dev"
-
-[service_config.personal_dev_capacity_database_pod_label_key]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "app"
-
-[service_config.personal_dev_capacity_database_pod_label]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "loom-dev-postgres"
-
-[service_config.personal_dev_capacity_database_port]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 5432
-
-[service_config.personal_dev_capacity_dns_namespace]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "kube-system"
-
-[service_config.personal_dev_capacity_dns_pod_label_key]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "k8s-app"
-
-[service_config.personal_dev_capacity_dns_pod_label]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "kube-dns"
-
-[service_config.personal_dev_capacity_dns_port]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 53
 
 [service_config.bind_host]
 used_by     = ["control-plane", "llm-gateway", "loom-service"]
@@ -919,7 +301,7 @@ default     = 30
 used_by     = ["control-plane"]
 python_type = "int"
 default     = 3600
-description = "Seconds before the crash detector reclaims a trial stuck in claimed with no started_at while the owning worker is still fresh. The crash detector measures from pre_start_heartbeat_at when upgraded workers report setup/cache progress, falling back to claimed_at for older workers. Default is sized for GB10/source-useful cold setup while preserving abandoned-claim recovery."
+description = "Seconds before the crash detector reclaims a trial stuck in claimed with no started_at while the owning worker is still fresh. The crash detector measures from pre_start_heartbeat_at when upgraded workers report setup/cache progress, falling back to claimed_at for older workers. Default is sized for cold source setup while preserving abandoned-claim recovery."
 
 [service_config.stale_running_trial_reclaim_enabled]
 used_by     = ["control-plane", "loom-service"]
@@ -949,128 +331,6 @@ description = "Required silence window for stale-running reclaim. A running tria
 used_by     = ["control-plane", "loom-service"]
 python_type = "int"
 default     = 3600
-
-[service_config.slurm_worker_controller_enabled]
-used_by     = ["control-plane"]
-python_type = "bool"
-default     = false
-description = "Enable the Control Plane elastic Slurm worker controller loop."
-
-[service_config.slurm_worker_controller_environment]
-used_by     = ["control-plane"]
-python_type = "str"
-default     = "development"
-description = "Environment label written to slurm_worker_jobs for elastic worker jobs."
-
-[service_config.slurm_worker_controller_pool_name]
-used_by     = ["control-plane"]
-python_type = "str"
-default     = "oldlab"
-description = "Slurm worker pool label written to slurm_worker_jobs."
-
-[service_config.slurm_worker_controller_allowed_nodes]
-used_by     = ["control-plane"]
-python_type = "str"
-default     = ""
-description = "Comma-separated Slurm nodes the controller may target."
-
-[service_config.slurm_worker_controller_env_file]
-used_by     = ["control-plane"]
-python_type = "str"
-default     = ""
-description = "Remote-worker env file path exported into elastic Slurm jobs."
-
-[service_config.slurm_worker_controller_repo_dir]
-used_by     = ["control-plane"]
-python_type = "str"
-default     = ""
-description = "Repository directory path used by elastic Slurm worker jobs."
-
-[service_config.slurm_worker_controller_partition]
-used_by     = ["control-plane"]
-python_type = "str"
-default     = ""
-description = "Optional Slurm partition for elastic worker jobs."
-
-[service_config.slurm_worker_controller_time_limit]
-used_by     = ["control-plane"]
-python_type = "str"
-default     = "7-00:00:00"
-description = "Slurm --time value for elastic worker jobs."
-
-[service_config.slurm_worker_controller_requested_cpus]
-used_by     = ["control-plane"]
-python_type = "int"
-default     = 12
-description = "CPU count requested per elastic Slurm worker job."
-
-[service_config.slurm_worker_controller_requested_memory_mib]
-used_by     = ["control-plane"]
-python_type = "int"
-default     = 58000
-description = "Memory requested per elastic Slurm worker job, in MiB."
-
-[service_config.slurm_worker_controller_requested_concurrency]
-used_by     = ["control-plane"]
-python_type = "int"
-default     = 6
-description = "LOOM_WORKER_MAX_CONCURRENT value requested per elastic worker job."
-
-[service_config.slurm_worker_controller_max_jobs]
-used_by     = ["control-plane"]
-python_type = "int"
-default     = 0
-description = "Maximum running plus pending elastic Slurm worker jobs."
-
-[service_config.slurm_worker_controller_pending_job_cap]
-used_by     = ["control-plane"]
-python_type = "int"
-default     = 1
-description = "Maximum pending elastic Slurm worker jobs allowed at once."
-
-[service_config.slurm_worker_controller_min_queued_trials]
-used_by     = ["control-plane"]
-python_type = "int"
-default     = 1
-description = "Queued trial threshold before the elastic Slurm controller submits jobs."
-
-[service_config.slurm_worker_controller_stale_after_seconds]
-used_by     = ["control-plane"]
-python_type = "int"
-default     = 300
-description = "Seconds before an unobserved active Slurm worker job is marked stale."
-
-[service_config.slurm_worker_controller_sbatch_path]
-used_by     = ["control-plane"]
-python_type = "str"
-default     = "sbatch"
-description = "Path to sbatch for the elastic Slurm controller."
-
-[service_config.slurm_worker_controller_squeue_path]
-used_by     = ["control-plane"]
-python_type = "str"
-default     = "squeue"
-description = "Path to squeue for the elastic Slurm controller."
-
-[service_config.slurm_worker_controller_sacct_path]
-used_by     = ["control-plane"]
-python_type = "str"
-default     = "sacct"
-description = "Path to sacct for the elastic Slurm controller."
-
-[service_config.slurm_worker_controller_scancel_path]
-used_by     = ["control-plane"]
-python_type = "str"
-default     = "scancel"
-description = "Path to scancel for the elastic Slurm controller."
-
-[service_config.slurm_worker_controller_command_timeout_seconds]
-used_by     = ["control-plane"]
-python_type = "float"
-default     = 20.0
-description = "Timeout for each Slurm command invoked by the elastic controller."
-
-# ─── llm-gateway only ───
 
 [service_config.anthropic_api_key]
 used_by     = ["llm-gateway"]
@@ -1489,7 +749,7 @@ description = "Optional worker hostname override used for registration and fleet
 used_by     = ["worker"]
 python_type = "str"
 default     = "default"
-description = "Resource-pool label advertised at worker registration for slot capacity summaries. Set to values like k8s-worker, gb10, or oldlab."
+description = "Resource-pool label advertised at worker registration for slot capacity summaries. Use a local development pool label."
 
 [service_config.blocking_io_max_workers]
 used_by     = ["worker"]
@@ -1554,7 +814,7 @@ default     = 1.0
 used_by     = ["worker"]
 python_type = "float"
 # no default -> `float | None = None`; fixed workers stay long-running unless
-# elastic Slurm launchers opt in through LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS.
+# disposable local workers opt in through LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS.
 description = "Optional idle window after which a worker exits successfully when no trials are in flight and repeated claims find no work."
 
 [service_config.heartbeat_interval_sec]
@@ -1588,25 +848,19 @@ description = "Docker SDK API timeout in seconds for worker-created clients. Kee
 used_by     = ["worker"]
 python_type = "float"
 default     = 0.0
-description = "Per-container hard CPU cap in cores for trial and setup-sidecar containers. Maps to Docker nano_cpus. Non-exclusive Slurm policies require a positive ceiling and stay disabled when containment is incomplete."
+description = "Per-container hard CPU cap in cores for trial and setup-sidecar containers. Maps to Docker nano_cpus."
 
 [service_config.container_memory_mib]
 used_by     = ["worker"]
 python_type = "int"
 default     = 0
-description = "Per-container hard memory cap in MiB for trial and setup-sidecar containers. Maps to Docker mem_limit. Non-exclusive Slurm policies require a positive ceiling and stay disabled when containment is incomplete."
+description = "Per-container hard memory cap in MiB for trial and setup-sidecar containers. Maps to Docker mem_limit."
 
 [service_config.container_pids]
 used_by     = ["worker"]
 python_type = "int"
 default     = 0
-description = "Per-container hard PID cap for trial and setup-sidecar containers. Maps to Docker pids_limit. Non-exclusive Slurm policies require a positive ceiling and stay disabled when containment is incomplete."
-
-[service_config.pipeline_terminalgen_authoring_enabled]
-used_by     = ["worker"]
-python_type = "bool"
-default     = false
-description = "Disabled-by-default worker admission for the code-owned terminalgen-authoring@1 runtime. Enabling this flag alone grants no work: pool containment, immutable attempt grants, image contracts, provider bindings, and validation backend capabilities remain mandatory."
+description = "Per-container hard PID cap for trial and setup-sidecar containers. Maps to Docker pids_limit."
 
 [service_config.pipeline_terminal_task_validator_path]
 used_by     = ["worker"]
@@ -1626,53 +880,29 @@ python_type = "Path"
 default     = "/dev/shm"
 description = "Operator-provisioned tmpfs root for attempt-private Pipeline step-JWT directories. Gateway workers fail before registration unless this path is a writable, real directory backed by tmpfs."
 
-[service_config.require_cgroup_parent]
-used_by     = ["worker"]
-python_type = "bool"
-default     = false
-description = "Controller-owned non-exclusive Slurm containment marker. When true, worker startup and every worker-created Docker container require the exact allocation-owned cgroup_parent; missing or malformed values fail closed."
-
 [service_config.cgroup_parent]
 used_by     = ["worker"]
 python_type = "str"
 default     = ""
-description = "Exact delegated Slurm job cgroup discovered from the batch process. Passed unchanged to Docker HostConfig CgroupParent for the worker, trial, verifier, and sidecar containers. Empty is allowed only when require_cgroup_parent is false."
+description = "Optional local Docker cgroup path or systemd slice for trial, verifier and sidecar containers. Empty uses the Docker default."
 
 [service_config.sandbox_identity]
 used_by     = ["worker"]
 python_type = "str"
 default     = ""
-description = "Developer sandbox/environment identity for Slurm worker, trial, sidecar, Compose-project, and cleanup scoping. Empty is allowed only for legacy non-Slurm workers."
+description = "Optional local sandbox/environment identity for container labels and cleanup scoping."
 
 [service_config.candidate_sha]
 used_by     = ["worker"]
 python_type = "str"
 default     = ""
-description = "Exact lowercase 40-character candidate SHA bound to this Slurm worker job and propagated to every worker-created container label."
-
-[service_config.slurm_job_id]
-used_by     = ["worker"]
-python_type = "str"
-default     = ""
-description = "Slurm allocation job ID injected by the batch script. Used with sandbox_identity and candidate_sha to scope Compose and Docker cleanup."
+description = "Optional exact lowercase 40-character source revision propagated to worker-created container labels."
 
 [service_config.compose_project]
 used_by     = ["worker"]
 python_type = "str"
 default     = ""
-description = "Per-job Docker Compose project name derived from sandbox identity, candidate SHA, and Slurm job ID."
-
-[service_config.slurm_allocated_gpus]
-used_by     = ["worker"]
-python_type = "int"
-default     = -1
-description = "GPU count granted to the Slurm job. -1 means non-Slurm/unmanaged; 0 denies GPU containers; positive values require device IDs from SLURM_JOB_GPUS."
-
-[service_config.slurm_gpu_device_ids]
-used_by     = ["worker"]
-python_type = "str"
-default     = ""
-description = "Comma-separated host GPU device IDs from SLURM_JOB_GPUS. Docker trial requests are restricted to this exact allocation."
+description = "Optional local Docker Compose project identity for container cleanup scoping."
 
 [service_config.fixtures_root]
 used_by     = ["worker"]
@@ -1787,7 +1017,7 @@ description = "Grace period before an unreferenced task-image materialization be
 used_by     = ["worker"]
 python_type = "int"
 default     = 120
-description = "Idle duration after which an exclusive task-image builder exits so its Slurm allocation can scale to zero."
+description = "Idle duration after which an exclusive task-image builder exits to release local resources."
 
 [service_config.task_image_builder_lease_seconds]
 used_by     = ["control-plane"]
@@ -1805,7 +1035,7 @@ description = "TTL on the builder slot in active_trial_cache_builds (30-min defa
 used_by     = ["worker"]
 python_type = "int"
 default     = 1
-description = "Maximum concurrent layered trial-cache image builds allowed for the same worker daemon group. Workers coordinate daemon-wide synthetic slots through active_trial_cache_builds using pool_name, hostname, and docker_socket as the daemon fingerprint. Keep 1 for shared OLDLAB/k8s Docker daemons; raise only for isolated daemon hosts."
+description = "Maximum concurrent layered trial-cache image builds allowed for the same worker daemon group. Workers coordinate daemon-wide synthetic slots through active_trial_cache_builds using pool_name, hostname, and docker_socket as the daemon fingerprint. Keep 1 for shared local Docker daemons; raise only for isolated daemon hosts."
 
 [service_config.setup_health_guard_enabled]
 used_by     = ["worker"]
@@ -1823,7 +1053,7 @@ description = "Maximum Linux /proc/pressure/io full avg10 value allowed before a
 used_by     = ["worker"]
 python_type = "int"
 default     = 2048
-description = "Minimum Linux MemAvailable in MiB required before a worker claims new trials or admits Docker setup/build work. This protects no-swap GB10 hosts where swap-only admission cannot detect near-total unified-memory exhaustion."
+description = "Minimum Linux MemAvailable in MiB required before a worker claims new trials or admits Docker setup/build work. This protects local hosts where swap-only admission cannot detect physical-memory exhaustion."
 
 [service_config.setup_health_min_swap_free_mb]
 used_by     = ["worker"]
@@ -2010,11 +1240,6 @@ python_type = "str_list"
 default     = []
 description = "Additional exact legacy object-store buckets that staging lifecycle maintenance must inventory alongside the configured trajectories and artifacts write buckets."
 
-[render_config.env_state_profile]
-python_type = "str"
-default     = ""
-description = "Optional environment-state TOML profile used by protected rollout steps. Relative paths resolve from the cluster-config file directory."
-
 [render_config.worker_trajectory_storage_gi]
 python_type = "int"
 default     = 100
@@ -2042,20 +1267,10 @@ fields      = { service = 2, control_plane = 2, gateway = 2, web = 0, worker = 3
 
 [render_config.k8s_worker]
 python_type = "table"
-# enabled=false is the safe default for profiles that share host Docker
-# capacity with Slurm. The project-local example enables it for a laptop
-# cluster. Shared development, staging, and production keep it disabled and
-# rely on Slurm-managed pools for trial execution. Setting this to false omits
-# the loom-worker Deployment YAML entirely from the
-# rendered manifest and causes `POST /api/v1/batches` to reject
-# submissions whose `required_worker_pools` list contains
-# `k8s-worker`.
+# The Docker-backed worker is optional for disposable local development.
+# Hosted workloads use native Nebius execution. Disabled omits the local worker
+# Deployment and rejects submissions requiring its k8s-worker pool.
 fields      = { enabled = false }
-
-[render_config.gb10_pool]
-python_type = "table"
-description = "GB10 hosts whose direct worker and node-agent units are checked and held disabled by protected rollout. ssh_config optionally points at the operator SSH configuration used for every host; ssh_identity_file and ssh_certificate_file point at deployment authentication material for detached rollout runners. Each host entry contains only ssh_target and node_agent_service. External Slurm policy owns on-demand capacity."
-fields      = { ssh_config = "", ssh_identity_file = "", ssh_certificate_file = "", hosts = [] }
 
 [render_config.trial_cache_registry_repo]
 python_type = "str"
@@ -2086,11 +1301,6 @@ python_type = "table"
 # This provides per-node edge authentication rather than destination-only
 # routing.
 fields      = { enabled = false }
-
-[render_config.pipeline_stage1_smoke_authority]
-python_type = "table"
-description = "Explicitly mount the protected Stage 1 operator public key into loom-service. Disabled profiles keep every live-smoke mutation fail-closed."
-fields      = { enabled = false, public_key_secret_name = "loom-stage1-smoke-authority" }
 
 [render_config.nebius_execution]
 python_type = "table"

@@ -17,21 +17,21 @@ import psycopg
 from psycopg import sql
 from sqlalchemy.engine import make_url
 
-from loom.dev_instance import DevInstanceIdentity
-from loom.dev_instance_runtime import fixture_database_url
-from loom.personal_dev_capacity_identity import capacity_role_names as _role_names
-from loom.personal_dev_capacity_runtime import (
+from loom.application_schema_provisioning import (
     CapacityDatabaseCredentials,
     PersonalDevCapacityInstallationError,
-    PsycopgPersonalDevCapacityDatabase,
+    ReferenceDatabase,
+    ReferenceIdentity,
     _retarget_database_url,
+    _role_names,
+    fixture_database_url,
 )
 
 
-class BaselineReferenceDatabase(PsycopgPersonalDevCapacityDatabase):
+class BaselineReferenceDatabase(ReferenceDatabase):
     async def _converge_roles(
         self,
-        identity: DevInstanceIdentity,
+        identity: ReferenceIdentity,
         credentials: CapacityDatabaseCredentials,
     ) -> tuple[str, str, str, str, str, str, str, str]:
         owner, migrator, agent, executor, observer, runtime = _role_names(identity)

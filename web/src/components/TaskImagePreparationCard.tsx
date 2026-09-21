@@ -21,7 +21,7 @@ export function TaskImagePreparationCard({ preparations }: { preparations: Prepa
               <ul className="mt-2 space-y-1">
                 {item.phases.map((phase) => (
                   <li key={phase.name}>
-                    {phase.name}: {phase.state}
+                    {phase.name === "build" ? "Build / scratch cleanup" : phase.name}: {phase.state}
                     {phase.exit_code != null ? ` · exit code ${phase.exit_code}` : ""}
                   </li>
                 ))}

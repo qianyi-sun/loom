@@ -90,7 +90,6 @@ def claim(
     binding: BindingSetV1,
     *,
     attempt_id: UUID | None = None,
-    acceptance_preflight: object | None = None,
 ) -> ExecutionAttemptClaimV1:
     return ExecutionAttemptClaimV1.model_construct(
         execution_attempt_id=attempt_id or uuid4(),
@@ -100,5 +99,4 @@ def claim(
         input_bindings=[binding],
         stage_request=None,
         resume_checkpoint=None,
-        acceptance_preflight=acceptance_preflight,
     )

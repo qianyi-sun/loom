@@ -39,6 +39,16 @@ export interface paths {
       };
     };
   };
+  "/api/v1/monitor/placement": {
+    get: {
+      parameters: { query: {
+        target_id: string; team_id?: string; batch_id?: string; q?: string;
+        benchmark_id?: string; agent_name?: string; model_provider?: string;
+        model_name?: string; provider_connection_id?: string; provider_model_id?: string;
+      } };
+      responses: { 200: { content: { "application/json": components["schemas"]["MonitorPlacement"] } } };
+    };
+  };
   "/api/v1/trials": {
     get: {
       parameters: {
@@ -244,7 +254,6 @@ export interface paths {
             name?: string;
             name_suffix?: string;
             description?: string;
-            backend?: string;
             task_filter: Record<string, unknown>;
             trial_config: Record<string, unknown>;
             n_per_task?: number;
@@ -704,7 +713,57 @@ export interface paths {
 
 export interface components {
   schemas: {
+    TrialProgress: {
+      stage: string;
+      label: string;
+      detail: string | null;
+      wait_message: string | null;
+      observed_at: string | null;
+      observation_stale: boolean;
+      node_name: string | null;
+      timeline: { label: string; started_at: string | null; finished_at: string | null; seconds: number | null }[];
+    };
+    ProgressSummary: {
+      oldest_wait_since_submission_seconds?: Record<string, number>;
+      stages: Record<string, number>;
+      trial_count: number;
+      images: { states: Record<string, number>; image_count: number; waiting_trials: number };
+    };
+    PlacementResources: { cpu_millis: number; memory_mib: number; storage_mib: number };
+    PlacementWorkload: {
+      kind: "build" | "execution";
+      trial_id: string;
+      label: string;
+      state: string;
+      wait_message: string | null;
+      requests: components["schemas"]["PlacementResources"];
+    };
+    MonitorPlacement: {
+      available: boolean;
+      is_fresh: boolean;
+      observed_at?: string;
+      capacity_scope?: "shared_target";
+      workload_scope?: "authorized_filtered_trials";
+      build_concurrency_limit?: number | null;
+      pending_builds?: number;
+      pending_executions?: number;
+      pending: components["schemas"]["PlacementWorkload"][];
+      nodes: {
+        id: string;
+        label: string;
+        ready: boolean;
+        draining: boolean | null;
+        deleting: boolean;
+        unschedulable: boolean;
+        allocatable: components["schemas"]["PlacementResources"];
+        requested: components["schemas"]["PlacementResources"];
+        build_pods: number;
+        execution_pods: number;
+        workloads: components["schemas"]["PlacementWorkload"][];
+      }[];
+    };
     MonitorSummary: {
+      progress?: components["schemas"]["ProgressSummary"];
       scope: {
         view: "batches" | "trials";
         team_id: string | null;
@@ -810,12 +869,12 @@ export interface components {
           blockers: string[];
           resource_profile: {
             forecast_is_fresh: boolean;
-            observed_fit_slots: number;
-            immediate_executable_slots: number;
-            configured_additional_nodes: number;
-            configured_slots_per_node: number;
-            configured_scale_headroom_slots: number;
-            configured_total_fit_slots: number;
+            observed_fit_slots: number | null;
+            immediate_executable_slots: number | null;
+            configured_additional_nodes: number | null;
+            configured_slots_per_node: number | null;
+            configured_scale_headroom_slots: number | null;
+            configured_total_fit_slots: number | null;
             blockers: string[];
           } | null;
         }[];
@@ -843,11 +902,7 @@ export interface components {
       pools: components["schemas"]["ResourcePool"][];
     };
     ResourceAggregate: {
-      desired_slots: number;
-      pending_slots: number;
       current_active_slots: number;
-      max_slots: number;
-      ceiling_slots: number;
       active_workers: number;
       draining_workers: number;
       total_slots: number;
@@ -862,16 +917,7 @@ export interface components {
       pool_name: string;
       backend: string;
       cpu_arch: string;
-      autoscaler_environment: string | null;
-      autoscaler_actuator: string | null;
-      autoscaler_enabled: boolean;
-      autoscaler_idle_since_at: string | null;
-      autoscaler_idle_seconds: number | null;
-      desired_slots: number;
-      pending_slots: number;
       current_active_slots: number;
-      max_slots: number;
-      ceiling_slots: number;
       active_workers: number;
       draining_workers: number;
       total_slots: number;
@@ -881,12 +927,6 @@ export interface components {
       running_tasks: number;
       starting_tasks: number;
       queued_tasks: number;
-      last_autoscaler_decision: string | null;
-      last_autoscaler_reason: string | null;
-      decision_reason: string | null;
-      last_autoscaler_blocked_reason: string | null;
-      blocked_reason: string | null;
-      last_autoscaler_error: string | null;
     };
     UsageCostStatus:
       | "no_usage"
@@ -927,6 +967,7 @@ export interface components {
       group_ratio: number | null;
     };
     Trial: {
+      progress?: components["schemas"]["TrialProgress"];
       id: string;
       task_id: string;
       team_id: string;
@@ -1011,7 +1052,7 @@ export interface components {
       artifacts: {
         step_name?: string;
         key: string;
-        size: number;
+        size: number | null;
         sha256?: string | null;
         media_type?: string | null;
         download_url: string;
@@ -1387,6 +1428,7 @@ export interface components {
     BatchDetail: components["schemas"]["Batch"] & {
       task_resource_requests?: Record<string, components["schemas"]["TaskResourceRequests"]>;
       trial_summary: Record<string, number>;
+      progress?: components["schemas"]["ProgressSummary"];
       service_execution_summary?: {
         lease_count: number;
         lifecycle_stages: Record<string, number>;
@@ -1578,6 +1620,7 @@ export interface components {
       resource_class: "controller" | "cpu" | "gpu";
       retry_allowed: boolean;
       retry_ineligible_reason:
+        | "hosted_pipeline_execution_unsupported"
         | "run_not_retryable"
         | "stage_not_failed"
         | "recipe_snapshot_unavailable"

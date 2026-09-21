@@ -38,20 +38,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loom.models.worker_capabilities import WorkerCapabilitySnapshotV1
 from loom.pipeline.keys import canonical_digest, canonical_document
 
+# This is the explicit local-development worker path. Hosted Nebius admission
+# uses service-execution leases and never derives authority from fleet policies.
 # The family predicate uses ``task_sequence[current_index + 1]`` because
 # Postgres arrays are 1-indexed while ``current_index`` counts from 0.
 _CLAIM_SQL = text("""
 WITH worker_scope AS (
-  SELECT w.id, w.pool_name, policy.environment,
-         policy.actuator_config->>'routing_region' AS region
+  SELECT w.id, w.pool_name, 'development'::text AS environment,
+         NULL::text AS region
     FROM workers w
-    LEFT JOIN LATERAL (
-      SELECT p.environment, p.actuator_config
-        FROM worker_pool_autoscaler_policies p
-       WHERE p.pool_name = w.pool_name
-       ORDER BY p.enabled DESC, p.updated_at DESC, p.id
-       LIMIT 1
-    ) policy ON true
    WHERE w.id = (:worker_id)::uuid
 ), next AS (
   SELECT t.id, t.family_key, t.batch_id, t.team_id,
@@ -135,28 +130,8 @@ WITH worker_scope AS (
           AND w.status = 'active'
           AND w.drain_state = 'active'
           AND (
-            (
-              NULLIF(t.requires_caps->>'worker_pool', '') IS NOT NULL
-              AND w.pool_name = t.requires_caps->>'worker_pool'
-            )
-            OR (
-              NULLIF(t.requires_caps->>'worker_pool', '') IS NULL
-              AND (
-                t.autoscaler_pool_name IS NULL
-                OR w.pool_name = t.autoscaler_pool_name
-              )
-            )
-          )
-          -- #892: fence claims on a Slurm pool under active prod-pressure
-          -- drain. GB10 pools are already fenced via w.drain_state; Slurm
-          -- pools keep a single writer (the external actor), so the claim
-          -- path reads the intent directly to stop new claims immediately.
-          AND NOT EXISTS (
-            SELECT 1
-              FROM worker_pool_autoscaler_policies p
-             WHERE p.pool_name = w.pool_name
-               AND p.actuator = 'slurm'
-               AND p.prod_pressure_state->>'state' = 'draining'
+            NULLIF(t.requires_caps->>'worker_pool', '') IS NULL
+            OR w.pool_name = t.requires_caps->>'worker_pool'
           )
           AND (
             NOT :enforce_shared_slot
@@ -169,18 +144,6 @@ WITH worker_scope AS (
                 WHERE active_attempt.worker_id = w.id
                   AND active_attempt.state IN ('claimed','running'))
             )
-          )
-          AND NOT EXISTS (
-            SELECT 1
-              FROM pipeline_acceptance_preflight_prerequisites fence
-             WHERE fence.worker_id = w.id
-               AND fence.fence_state = 'active'
-          )
-          AND NOT (
-            COALESCE(
-              w.capability_snapshot_json->'container_runtime_features',
-              '[]'::jsonb
-            ) ? 'loom-stage1-smoke-worker-v1'
           )
           AND (
             COALESCE((t.requires_caps->>'terminus2_model_switch')::boolean, false) IS NOT TRUE
@@ -376,49 +339,14 @@ WITH candidates AS (
      AND loom_execution_admission_available(
            t.team_id,
            t.batch_id,
-           (
-             SELECT policy.environment
-               FROM worker_pool_autoscaler_policies policy
-              WHERE policy.pool_name = w.pool_name
-              ORDER BY policy.enabled DESC, policy.updated_at DESC, policy.id
-              LIMIT 1
-           ),
-           (
-             SELECT policy.actuator_config->>'routing_region'
-               FROM worker_pool_autoscaler_policies policy
-              WHERE policy.pool_name = w.pool_name
-              ORDER BY policy.enabled DESC, policy.updated_at DESC, policy.id
-              LIMIT 1
-           ),
+           'development',
+           NULL,
            t.execution_route_json->>'selected_execution_class_id',
            w.pool_name
          )
      AND (
-       (
-         NULLIF(t.requires_caps->>'worker_pool', '') IS NOT NULL
-         AND w.pool_name = t.requires_caps->>'worker_pool'
-       )
-       OR (
-         NULLIF(t.requires_caps->>'worker_pool', '') IS NULL
-         AND (t.autoscaler_pool_name IS NULL OR w.pool_name = t.autoscaler_pool_name)
-       )
-     )
-     AND NOT EXISTS (
-       SELECT 1
-         FROM worker_pool_autoscaler_policies p
-        WHERE p.pool_name = w.pool_name
-          AND p.actuator = 'slurm'
-          AND p.prod_pressure_state->>'state' = 'draining'
-     )
-     AND NOT EXISTS (
-       SELECT 1 FROM pipeline_acceptance_preflight_prerequisites fence
-        WHERE fence.worker_id = w.id AND fence.fence_state = 'active'
-     )
-     AND NOT (
-       COALESCE(
-         w.capability_snapshot_json->'container_runtime_features',
-         '[]'::jsonb
-       ) ? 'loom-stage1-smoke-worker-v1'
+       NULLIF(t.requires_caps->>'worker_pool', '') IS NULL
+       OR w.pool_name = t.requires_caps->>'worker_pool'
      )
   UNION ALL
   SELECT 'execution_attempt'::text AS work_kind,
@@ -569,98 +497,9 @@ WITH candidates AS (
          (s.resource_profile_json->>'network_profile')
      AND (s.resource_profile_json->'required_host_runtime_features') <@
          (w.capability_snapshot_json->'container_runtime_features')
-     AND (
-       NOT (w.capability_snapshot_json->'container_runtime_features') ?
-           'loom-stage1-smoke-worker-v1'
-       OR (
-         r.official_submission_kind = 'behavior_stage1_smoke_v1'
-         AND EXISTS (
-           SELECT 1
-             FROM pipeline_stage1_smoke_authorizations stage1_authority
-            WHERE stage1_authority.pipeline_run_id = r.id
-              AND stage1_authority.authorization_id =
-                  r.official_submission_authority_id
-              AND stage1_authority.state IN ('submitted','running')
-         )
-       )
-     )
+     AND r.official_submission_kind IS DISTINCT FROM 'behavior_stage1_smoke_v1'
      AND (s.resource_profile_json->'required_image_features') <@
          (s.image_runtime_contract_json->'application_features')
-     AND (
-       w.pool_name NOT LIKE 'behavior-%'
-       OR EXISTS (
-         SELECT 1
-           FROM worker_pool_autoscaler_policies pipeline_policy
-           JOIN pipeline_scoped_policy_activations activation
-             ON activation.environment = pipeline_policy.environment
-            AND activation.policy_id = pipeline_policy.pool_name
-            AND activation.policy_config_sha256 =
-                pipeline_policy.actuator_config->>'policy_config_sha256'
-            AND activation.state = 'active'
-            AND activation.desired_slots > 0
-          WHERE pipeline_policy.pool_name = w.pool_name
-            AND pipeline_policy.actuator = 'slurm'
-            AND pipeline_policy.min_slots = 0
-            AND pipeline_policy.actuator_config->>'policy_id' = w.pool_name
-            AND COALESCE(
-                  pipeline_policy.actuator_config->>'policy_config_sha256', ''
-                ) ~ '^sha256:[0-9a-f]{64}$'
-            AND COALESCE(
-                  pipeline_policy.actuator_config->>'slurm_cluster_config_sha256', ''
-                ) ~ '^sha256:[0-9a-f]{64}$'
-            AND pipeline_policy.actuator_config->>'slurm_cluster_id' =
-                CASE
-                  WHEN w.pool_name = 'behavior-gpu-gb10' THEN 'gb10'
-                  ELSE 'oldlab'
-                END
-            AND (pipeline_policy.actuator_config->'allowed_nodes') ? w.hostname
-            AND EXISTS (
-              SELECT 1
-                FROM slurm_worker_jobs policy_job
-               WHERE policy_job.worker_id = w.id
-                 AND policy_job.environment = pipeline_policy.environment
-                 AND policy_job.pool_name = w.pool_name
-                 AND policy_job.state = 'running'
-            )
-            AND (
-              (r.acceptance_authorization_id IS NOT NULL
-               AND activation.authority_kind = 'acceptance'
-               AND activation.authority_id = r.acceptance_authorization_id)
-              OR
-              (r.official_submission_kind IN (
-                 'behavior_acceptance_scenario_v1',
-                 'behavior_stage1_smoke_v1'
-               )
-               AND activation.authority_kind = 'acceptance'
-               AND activation.authority_id = r.official_submission_authority_id)
-              OR
-              (r.official_submission_kind = 'behavior_profile_calibration_run_v1'
-               AND activation.authority_kind = 'profile_calibration'
-               AND activation.authority_id = r.official_submission_authority_id)
-            )
-       )
-     )
-     AND (
-       w.pool_name NOT IN (
-         'behavior-cpu-data',
-         'terminalgen-generate-gateway',
-         'terminalgen-package-none',
-         'terminalgen-plan-none',
-         'terminalgen-validate-none'
-       )
-       OR EXISTS (
-         SELECT 1
-           FROM slurm_worker_jobs cpu_slurm_job
-          WHERE cpu_slurm_job.worker_id = w.id
-            AND cpu_slurm_job.slurm_cluster_id = 'oldlab'
-            AND cpu_slurm_job.pool_name = 'behavior-cpu-data'
-            AND cpu_slurm_job.nodelist = w.hostname
-            AND cpu_slurm_job.requested_gpu_tres IS NULL
-            AND cpu_slurm_job.requested_gpus = 0
-            AND cpu_slurm_job.requested_concurrency = 1
-            AND cpu_slurm_job.state = 'running'
-       )
-     )
      AND EXISTS (
        SELECT 1
          FROM jsonb_array_elements(
@@ -673,18 +512,8 @@ WITH candidates AS (
           AND variant->>'cpu_arch' = w.capability_snapshot_json->>'cpu_arch'
           AND variant->>'cpu_arch' = s.image_runtime_contract_json->>'cpu_arch'
           AND w.pool_name = variant->>'pool_class'
-          AND (
-            (variant->>'gpu_count_exact')::integer = 0
-            OR EXISTS (
-              SELECT 1
-                FROM pipeline_run_gpu_backend_selections backend_selection
-               WHERE backend_selection.pipeline_run_id = r.id
-                 AND backend_selection.variant_id = variant->>'variant_id'
-                 AND backend_selection.policy_id = w.pool_name
-                 AND backend_selection.gpu_backend_selection_sha256 =
-                     s.resolved_execution_spec_json->>'gpu_backend_selection_sha256'
-            )
-          )
+          -- GPU Pipeline execution is retired; retained snapshots cannot be claimed.
+          AND (variant->>'gpu_count_exact')::integer = 0
           AND (w.capability_snapshot_json->>'memory_bytes')::bigint >=
               COALESCE(
                 (variant->>'container_memory_bytes_override')::bigint,
@@ -692,64 +521,7 @@ WITH candidates AS (
               )
           AND jsonb_array_length(w.capability_snapshot_json->'gpu_devices') =
               (variant->>'gpu_count_exact')::integer
-          AND (
-            (variant->>'gpu_count_exact')::integer = 0
-            OR NOT EXISTS (
-              SELECT 1
-                FROM jsonb_array_elements(
-                  w.capability_snapshot_json->'gpu_devices'
-                ) device
-               WHERE NOT ((variant->'allowed_gpu_models') ? (device->>'model'))
-                  OR (
-                    variant->>'gpu_memory_kind' = 'dedicated'
-                    AND (
-                      device->>'memory_kind' <> 'dedicated'
-                      OR (device->>'memory_mb')::integer <
-                         (variant->>'gpu_memory_mb_min')::integer
-                    )
-                  )
-                  OR (
-                    variant->>'gpu_memory_kind' = 'unified'
-                    AND (
-                      device->>'memory_kind' <> 'unified'
-                      OR (device->>'unified_memory_mb')::integer <
-                         (variant->>'gpu_unified_memory_mb_min')::integer
-                    )
-                  )
-            )
-          )
-          AND (
-            ((variant->>'gpu_count_exact')::integer = 0
-             AND w.slurm_gpu_allocation_evidence_json IS NULL
-             AND s.image_runtime_contract_json->>'gpu_vendor' = 'none')
-            OR
-            ((variant->>'gpu_count_exact')::integer > 0
-             AND w.slurm_gpu_allocation_evidence_json IS NOT NULL
-             AND w.slurm_gpu_allocation_evidence_json->>'variant_id' =
-                 variant->>'variant_id'
-             AND s.image_runtime_contract_json->>'gpu_vendor' = 'nvidia')
-          )
-          AND (
-            (variant->>'gpu_count_exact')::integer = 0
-            OR EXISTS (
-              SELECT 1
-                FROM slurm_worker_jobs slurm_job
-               WHERE slurm_job.worker_id = w.id
-                 AND slurm_job.slurm_cluster_id =
-                     w.slurm_gpu_allocation_evidence_json->>'slurm_cluster_id'
-                 AND slurm_job.job_id =
-                     w.slurm_gpu_allocation_evidence_json->>'job_id'
-                 AND slurm_job.pool_name = w.pool_name
-                 AND slurm_job.nodelist =
-                     w.slurm_gpu_allocation_evidence_json->>'node_name'
-                 AND slurm_job.requested_gpu_tres =
-                     w.slurm_gpu_allocation_evidence_json->>'gpu_tres'
-                 AND slurm_job.requested_gpus =
-                     (variant->>'gpu_count_exact')::integer
-                 AND slurm_job.requested_concurrency = 1
-                 AND slurm_job.state = 'running'
-            )
-          )
+          AND s.image_runtime_contract_json->>'gpu_vendor' = 'none'
      )
      AND EXISTS (
        SELECT 1
@@ -770,45 +542,7 @@ WITH candidates AS (
      AND r.state IN ('submitted','running')
      AND ledger.terminal_cause IS NULL
      AND ledger.wall_deadline_at > NOW()
-     AND (
-       (r.acceptance_authorization_id IS NULL AND NOT EXISTS (
-         SELECT 1 FROM pipeline_acceptance_preflight_prerequisites any_fence
-          WHERE any_fence.worker_id = w.id AND any_fence.fence_state = 'active'
-       ))
-       OR (r.acceptance_authorization_id IS NOT NULL AND EXISTS (
-         SELECT 1 FROM pipeline_acceptance_preflight_prerequisites fence
-          WHERE fence.worker_id = w.id
-            AND fence.fence_state = 'active'
-            AND fence.pipeline_run_id = r.id
-            AND fence.worker_capability_snapshot_digest = w.capability_snapshot_digest
-            AND fence.worker_lease_epoch = w.lease_epoch
-            AND EXISTS (
-              SELECT 1
-                FROM pipeline_scoped_policy_activations activation
-               WHERE activation.environment = (
-                       SELECT job.environment
-                         FROM slurm_worker_jobs job
-                        WHERE job.worker_id = w.id AND job.state = 'running'
-                        ORDER BY job.updated_at DESC, job.id
-                        LIMIT 1
-                     )
-                 AND activation.policy_id = fence.policy_id
-                 AND activation.policy_config_sha256 = fence.policy_config_sha256
-                 AND activation.authority_kind = 'acceptance'
-                 AND activation.authority_id = fence.authorization_id
-                 AND activation.activation_epoch = fence.policy_activation_epoch
-                 AND activation.state = 'active'
-                 AND activation.desired_slots > 0
-            )
-            AND (
-              (s.node_key LIKE '%acceptance_preflight_cold'
-               AND fence.state = 'satisfied')
-              OR
-              (s.node_key LIKE '%acceptance_preflight_warm'
-               AND fence.state = 'consumed')
-            )
-       ))
-     )
+     AND r.acceptance_authorization_id IS NULL
 ), picked AS (
   SELECT work_kind, id, family_key, batch_id
     FROM candidates
@@ -834,20 +568,8 @@ WITH candidates AS (
            'attempt',
            admission_trial.team_id,
            admission_trial.batch_id,
-           (
-             SELECT policy.environment
-               FROM worker_pool_autoscaler_policies policy
-              WHERE policy.pool_name = admission_worker.pool_name
-              ORDER BY policy.enabled DESC, policy.updated_at DESC, policy.id
-              LIMIT 1
-           ),
-           (
-             SELECT policy.actuator_config->>'routing_region'
-               FROM worker_pool_autoscaler_policies policy
-              WHERE policy.pool_name = admission_worker.pool_name
-              ORDER BY policy.enabled DESC, policy.updated_at DESC, policy.id
-              LIMIT 1
-           ),
+           'development',
+           NULL,
            admission_trial.execution_route_json->>'selected_execution_class_id',
            admission_worker.pool_name,
            'legacy_worker_claim',
@@ -905,31 +627,11 @@ WITH candidates AS (
             a.attempt_number, NULL::uuid AS provider_connection_id,
             NULL::text AS family_key, NULL::uuid AS batch_id,
             NULL::text AS task_image_reader_arch, NULL::bigint AS worker_lease_epoch
-), acceptance_consume AS (
-  UPDATE pipeline_acceptance_preflight_prerequisites fence
-     SET state = 'consumed',
-         consumed_attempt_id = a.id,
-         consumed_at = NOW(),
-         version = fence.version + 1
-    FROM claimed_attempt a, pipeline_stage_runs s
-   WHERE s.id = a.stage_run_id
-     AND s.node_key LIKE '%acceptance_preflight_cold'
-     AND fence.pipeline_run_id = a.pipeline_run_id
-     AND fence.fence_state = 'active'
-     AND fence.state = 'satisfied'
-  RETURNING a.id AS execution_attempt_id
 ), stage_claim AS (
   UPDATE pipeline_stage_runs s
      SET state = 'claimed', claimed_at = NOW(), version = s.version + 1
    FROM claimed_attempt a
    WHERE s.id = a.stage_run_id AND s.state = 'queued'
-     AND (
-       s.node_key NOT LIKE '%acceptance_preflight_cold'
-       OR EXISTS (
-         SELECT 1 FROM acceptance_consume consumed
-          WHERE consumed.execution_attempt_id = a.id
-       )
-     )
   RETURNING s.id
 )
 SELECT * FROM claimed_trial

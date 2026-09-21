@@ -8,6 +8,7 @@ import pytest
 from psycopg import sql
 
 from loom.application_handoff_completion import complete_application_handoff_database
+from loom.db.schema_startup import service_schema_head
 from tests.integration.test_application_handoff_completion import _closed
 from tests.integration.test_application_ownership_transfer import (
     transfer_database,  # noqa: F401
@@ -136,7 +137,7 @@ async def test_migrator_creation_never_adopts_ambient_role_or_outlives_failed_jo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transfer_database", ["baseline"], indirect=True)
-@pytest.mark.parametrize("target_revision", ["0142", "0146", "0147", "0148", "0149", "0150", "0151"])
+@pytest.mark.parametrize("target_revision", ["0142", "0146", "0147", "0148", "0149", "0150", "0151", service_schema_head()])
 async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(transfer_database, monkeypatch, target_revision):  # noqa: F811
     from pathlib import Path
 
@@ -169,7 +170,7 @@ async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(tra
         target = args["target"]
         authority = dict(target=target, coordination_guard=args["coordination_guard"],
             provisioner_role=next(n for n, a in args["role_bindings"].items() if a == "provisioner"))
-        if target_revision in {"0147", "0148", "0149", "0150", "0151"}:
+        if target_revision in {"0147", "0148", "0149", "0150", "0151", service_schema_head()}:
             from loom.application_guard_claim_compatibility import ensure_guard_claim_compatibility
             guard_owner = next(name for name, binding in args["role_bindings"].items() if binding == "guard-owner")
             metadata_query = """SELECT p.oid,p.proowner,p.proacl,p.prosecdef,p.proconfig,
@@ -200,7 +201,7 @@ async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(tra
             command.upgrade(config, target_revision)
             assert peer.execute("SELECT version_num FROM public.alembic_version").fetchone() == (target_revision,)
             assert peer.execute("SELECT result->>'aggregate_reward' FROM trials WHERE id=%s", (trial,)).fetchone() == (
-                "1.0" if target_revision in {"0146", "0147", "0148", "0149", "0150", "0151"} else None,)
+                "1.0" if target_revision in {"0146", "0147", "0148", "0149", "0150", "0151", service_schema_head()} else None,)
             observe_completed_application_authority(peer, target=target, runtime_password=args["password"], successor=identity)
         finally:
             seal_application_migrator(maintenance, **authority, identity=identity)
@@ -241,56 +242,6 @@ async def test_migration_recovery_waits_for_exact_prior_peer_and_never_adopts_un
         assert not observe_application_migrator_role(maintenance, **authority, migrator_role=name, migrator_oid=identity.role_oid)
 
 
-@pytest.mark.asyncio
-async def test_protected_migration_runtime_connects_actual_sql_lifecycle(transfer_database, tmp_path):  # noqa: F811
-    from loom_cli.rollout.operator.protected_application_migration_journal import (
-        ApplicationMigrationEvent,
-    )
-    from loom_cli.rollout.operator.protected_application_migration_runtime import (
-        ProtectedApplicationMigrationRuntime,
-    )
-    from tests.integration.test_application_database_admission import _maintenance
-    from tests.loom_cli.rollout.operator.test_application_migration_documents import _inputs
-
-    plan, template, evidence, _ = _inputs(tmp_path)
-    request = dict(request_id=evidence.request_id, candidate_sha=evidence.candidate_sha,
-        candidate_tree=evidence.candidate_tree, generation=evidence.generation)
-    with _closed(transfer_database, request=request) as (peer, maintenance, _guard, args):
-        complete_application_handoff_database(peer, maintenance=maintenance, **args)
-        class Runner:
-            @property
-            def environment(self):
-                return {"KUBECONFIG": "/disposable-only"}
-            def open_staging_peer_database(self):
-                return psycopg.connect(transfer_database[0], autocommit=True)
-            def open_staging_peer_maintenance_database(self):
-                return _maintenance(peer)
-        fields = {key: value for key, value in evidence.to_dict().items() if key not in {"schema_version", "evidence_digest"}}
-        evidence = type(evidence).build(**{**fields, "database_backend_pid": args["coordination_guard"].backend.pid})
-        observed = []
-        with ProtectedApplicationMigrationRuntime(plan=plan, guard=evidence, target=args["target"],
-                coordination_guard=args["coordination_guard"], runner=Runner(), template=template,
-                ca_certificate=b"public-ca-fixture" * 8, runtime_password=args["password"],
-                container_registry="registry.example", assert_guard=lambda: evidence,
-                assert_inputs=lambda: observed.append("inputs"), intent_digest="1" * 64,
-                provisioner_role=next(n for n, a in args["role_bindings"].items() if a == "provisioner")) as runtime:
-            generation = ApplicationMigrationEvent.build(sequence=1, phase="generation",
-                payload=runtime.prepare_generation(1), intent_digest="1" * 64,
-                guard_digest=evidence.evidence_digest, previous_digest="2" * 64)
-            recorded = []
-            runtime.create(generation, recorded.append)
-            oid = recorded[0]
-            runtime.arm(generation, oid)
-            runtime.release_creator()
-            runtime.begin_retirement(generation, [])
-            assert runtime.role_exists(generation, oid)
-            runtime.seal(generation, oid)
-            runtime.close(generation, oid)
-            runtime.retire(generation, oid)
-            runtime.reopen(generation, oid)
-            assert not runtime.role_exists(generation, oid)
-        assert len(observed) >= 10
-        assert peer.execute("SELECT datallowconn FROM pg_database WHERE oid=%s", (args["target"].database_oid,)).fetchone() == (True,)
 
 
 @pytest.mark.asyncio

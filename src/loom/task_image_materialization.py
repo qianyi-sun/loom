@@ -24,6 +24,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from loom.db.schema import (
     Task,
     TaskImageMaterialization,
+    TaskImageMaterializationAttempt,
     Trial,
     TrialTaskImageMaterialization,
 )
@@ -354,6 +355,7 @@ async def _reference_task_image_materializations(
         row.last_referenced_at = now
         row.unreferenced_at = None
         row.updated_at = now
+        await _refund_cancelled_image_builds(session, row)
         if row.state == "retired":
             row.state = "queued"
             row.attempt_count = 0
@@ -368,6 +370,39 @@ async def _reference_task_image_materializations(
             row.ready_at = None
             row.finished_at = None
     await session.flush()
+
+
+async def _refund_cancelled_image_builds(session: AsyncSession, row: TaskImageMaterialization) -> None:
+    """Recover pre-refund native cancellations under the caller's row lock.
+
+    Walk only the current budget: admin retry/cache retirement can reset its
+    counter, while immutable attempt identities and epochs span all budgets.
+    Missing history remains charged rather than inventing retry authority.
+    """
+    if row.state not in {"queued", "failed"} or row.failure_reason != "build_cancelled" or not row.attempt_count:
+        return
+    attempts = await session.scalars(select(TaskImageMaterializationAttempt).where(
+        TaskImageMaterializationAttempt.materialization_id == row.id,
+        TaskImageMaterializationAttempt.lease_epoch <= row.lease_epoch,
+    ).order_by(TaskImageMaterializationAttempt.lease_epoch.desc()).with_for_update())
+    expected, refunded = row.attempt_count, 0
+    for attempt in attempts:
+        native = attempt.native_build or {}
+        if native.get("retry_budget_refunded"):
+            continue
+        if attempt.attempt_number != expected:
+            break
+        if native.get("failure_reason") == "build_cancelled":
+            attempt.native_build = {**native, "retry_budget_refunded": True}
+            refunded += 1
+        expected -= 1
+        if expected == 0:
+            break
+    if refunded:
+        row.attempt_count -= refunded
+        row.state = "queued"
+        row.next_attempt_at = None
+        row.finished_at = None
 
 
 async def admit_task_image_source(

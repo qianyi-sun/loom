@@ -1,10 +1,10 @@
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PROTECTED_PROFILES = (
-    "deploy/environments/staging.cluster.toml",
-    "deploy/environments/staging.multinode.cluster.toml",
-    "deploy/environments/production.cluster.toml",
+RENDER_FIXTURES = (
+    "tests/fixtures/cluster-render/staging.cluster.toml",
+    "tests/fixtures/cluster-render/staging.multinode.cluster.toml",
+    "tests/fixtures/cluster-render/production.cluster.toml",
 )
 
 
@@ -27,7 +27,7 @@ def test_current_workload_trust_docs_record_the_supported_tuple() -> None:
         "untrusted_workload_isolation = false",
     ):
         assert fragment in normalized
-        for profile in PROTECTED_PROFILES:
+        for profile in RENDER_FIXTURES:
             assert fragment in _read(profile)
 
 

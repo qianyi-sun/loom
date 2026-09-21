@@ -54,7 +54,11 @@ from loom.pipeline.keys import canonical_digest
 from loom.request_params import sanitize_request_extras
 from loom.resource_usage_store import resource_usage_response
 from loom.security.redaction import redact_mapping, redact_text
-from loom.service_execution_backend import NEBIUS_BACKEND, NEBIUS_LOGICAL_POOL_ID
+from loom.service_execution_backend import (
+    NEBIUS_BACKEND,
+    NEBIUS_LOGICAL_POOL_ID,
+    local_execution_enabled,
+)
 from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
     TaskExecutionResourceRequestsV1,
@@ -128,9 +132,14 @@ from loom_service.task_config_validation import (
     split_valid_task_configs,
 )
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
+from loom_service.trial_progress import latest_execution_id, progress_summary
 from loom_service.trial_timing import trial_started_at
 from loom_service.usage_accounting import (
     PreRunBudgetEstimate,
+    _cost_confidence_counts,
+    _cost_source_counts,
+    _price_unknown_call_filter,
+    _priced_call_filter,
     empty_usage_projection,
     estimate_pre_run_batch_budget,
     price_snapshots_for_trials,
@@ -142,10 +151,11 @@ from loom_service.usage_accounting import (
 from loom_service.usage_accounting import (
     cost_meta_filter as _cost_meta_filter,
 )
+from loom_service.usage_accounting import (
+    usage_by_batch_ids as _usage_by_batch_ids,
+)
 from loom_service.worker_backends import (
-    compatible_cold_start_pool_names,
     get_active_backends,
-    get_cold_start_pools,
     get_service_execution_backend_pools,
     runtime_environment,
 )
@@ -237,10 +247,20 @@ class _CreateBatch(BaseModel):
     # when `combinations` is non-empty (each Combination carries
     # its own n_per_task).
     n_per_task: int = Field(default=1, ge=1, le=100)
-    # Plan 28 PR-3: backend selection at the batch level. Optional;
-    # defaults to "docker" so single-backend deployments don't have
-    # to send it.
-    backend: str = "docker"
+    # Hosted submissions default to Nebius, so callers should omit this. An
+    # explicit "nebius" is compatibility input; any other hosted value is
+    # rejected by _reject_unsupported_hosted_backend before any work.
+    # Disposable local stacks (LOOM_LOCAL_EXECUTION=1) default to Docker.
+    backend: str = Field(
+        default_factory=lambda: "docker" if local_execution_enabled() else NEBIUS_BACKEND,
+        # Not `deprecated=True`: pydantic warns on every attribute read.
+        json_schema_extra={"deprecated": True},
+        description=(
+            "Deprecated. Hosted execution is Nebius-only: omit this field. "
+            "An explicit 'nebius' is accepted for compatibility; other hosted "
+            "values are rejected."
+        ),
+    )
     # Plan 28 PR-3: multi-(agent, model) combinations. Empty list
     # ⇒ single-combination behavior (agent + model come from
     # trial_config).
@@ -421,6 +441,26 @@ def _reject_submission(
     raise HTTPException(status_code=status_code, detail=detail)
 
 
+def _reject_unsupported_hosted_backend(backend: str) -> None:
+    """Reject any explicit non-Nebius backend outside disposable local execution.
+
+    Never reinterprets the request as Nebius: the caller is told to omit it.
+    """
+    if backend != NEBIUS_BACKEND and not local_execution_enabled():
+        _reject_submission(
+            reason="unsupported_hosted_backend",
+            status_code=400,
+            detail={
+                "reason": "unsupported_hosted_backend",
+                "backend": backend,
+                "message": (
+                    "Hosted execution supports Nebius only. "
+                    "Omit `backend` and resubmit."
+                ),
+            },
+        )
+
+
 async def _freeze_task_resource_requests(
     session: Any,
     *,
@@ -505,12 +545,8 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
     resolve_versions: bool = True,
     automatic_only: bool = False,
 ) -> ServiceExecutionRuntimeProfileV1 | None:
-    """Require fresh execution capacity or a compatible cold-start policy.
-
-    A healthy autoscaler policy only authorizes persisting queued demand.  It
-    remains distinct from a fresh worker and therefore never changes the
-    backend catalog's ``available`` truth value.
-    """
+    """Require a native target, or a worker in explicit local development."""
+    _reject_unsupported_hosted_backend(backend)
     selection_configs = [
         combo.model_dump(mode="json") if isinstance(combo, Combination) else combo
         for combo in combinations
@@ -530,9 +566,6 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
         str(task_id): (TaskConfig.model_validate(config), dict(source_provenance or {}))
         for task_id, config, source_provenance in task_rows
     }
-    task_configs = tuple(
-        configs_by_id[task_id][0] for task_id in task_ids if task_id in configs_by_id
-    )
     if backend == NEBIUS_BACKEND:
         parsed_trials: tuple[TrialConfig, ...] | None = None
         parsed_trial_error = False
@@ -649,28 +682,11 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
     active_backends = await get_active_backends(session)
     if backend in active_backends:
         return None
-    cold_start_pools = await get_cold_start_pools(session)
-    compatible_pools = compatible_cold_start_pool_names(
-        cold_start_pools,
-        backend=backend,
-        task_configs=task_configs,
-    )
-    if len(task_configs) == len(task_ids) and compatible_pools:
-        return None
-
-    available_str = (
-        ", ".join(sorted(active_backends)) if active_backends else "(none — no active workers)"
-    )
-    environment = runtime_environment()
+    available_str = ", ".join(sorted(active_backends)) or "(none — no active workers)"
     _reject_submission(
-        reason="no_workers",
-        status_code=400,
-        detail=(
-            f"no active worker advertises backend {backend!r}. "
-            f"Currently available: {available_str}; no healthy autoscaled "
-            f"pool in environment {environment!r} can cold-start all selected "
-            "tasks for that backend. See `GET /api/v1/backends`."
-        ),
+        reason="no_workers", status_code=400,
+        detail=(f"no active worker advertises backend {backend!r}. "
+                f"Currently available: {available_str}. Start a local worker."),
     )
 
 
@@ -1071,6 +1087,7 @@ async def _create_batch_record(
     usage_attributed_user_id: UUID | None,
     usage_attributed_actor: str | None,
 ) -> dict[str, Any]:
+    _reject_unsupported_hosted_backend(payload.backend)
     submission_team_id = await _resolve_submission_team_id(
         s,
         ctx,
@@ -1884,37 +1901,6 @@ def _empty_usage_projection() -> dict[str, Any]:
     return empty_usage_projection()
 
 
-def _priced_call_filter() -> Any:
-    return (
-        ~LlmCall.rate_card_hash.like("facade:tokens-only%")
-        & ~_price_unknown_call_filter()
-        & (LlmCall.rate_card_hash != "failed-upstream")
-    )
-
-
-def _price_unknown_call_filter() -> Any:
-    return LlmCall.rate_card_hash.like("facade:rate-card:missing%") | _cost_meta_filter(
-        COST_META_SOURCE_KEY, "unpriced"
-    )
-
-
-def _cost_source_counts(row: Any) -> dict[str, int]:
-    return {
-        "operator-supplied": int(row.cost_source_operator_supplied_count or 0),
-        "rate-card": int(row.cost_source_rate_card_count or 0),
-        "tokens-only": int(row.cost_source_tokens_only_count or 0),
-        "unpriced": int(row.cost_source_unpriced_count or 0),
-    }
-
-
-def _cost_confidence_counts(row: Any) -> dict[str, int]:
-    return {
-        "configured": int(row.cost_confidence_configured_count or 0),
-        "not_applicable": int(row.cost_confidence_not_applicable_count or 0),
-        "unavailable": int(row.cost_confidence_unavailable_count or 0),
-    }
-
-
 async def _usage_totals_for_trials(
     session: Any,
     trials: Sequence[Any],
@@ -2121,104 +2107,6 @@ async def _trial_projections_for_batch(
     return await _trial_projections_for_batch_ids(session, [batch_id])
 
 
-async def _usage_by_batch_ids(
-    session: Any,
-    batch_ids: Sequence[UUID],
-) -> dict[UUID, dict[str, Any]]:
-    if not batch_ids:
-        return {}
-    rows = (
-        await session.execute(
-            select(
-                Trial.batch_id.label("batch_id"),
-                func.coalesce(
-                    func.sum(LlmCall.input_tokens),
-                    0,
-                ).label("total_prompt_tokens"),
-                func.coalesce(
-                    func.sum(LlmCall.output_tokens),
-                    0,
-                ).label("total_completion_tokens"),
-                func.count(LlmCall.id).label("llm_calls_count"),
-                func.coalesce(
-                    func.sum(LlmCall.cost_usd),
-                    0,
-                ).label("total_cost_usd"),
-                func.count(LlmCall.id)
-                .filter(_priced_call_filter())
-                .label("priced_llm_calls_count"),
-                func.count(LlmCall.id)
-                .filter(LlmCall.rate_card_hash.like("facade:tokens-only%"))
-                .label("token_only_llm_calls_count"),
-                func.count(LlmCall.id)
-                .filter(_price_unknown_call_filter())
-                .label("price_unknown_llm_calls_count"),
-                func.count(LlmCall.id)
-                .filter(LlmCall.rate_card_hash == "failed-upstream")
-                .label("failed_upstream_llm_calls_count"),
-                func.count(LlmCall.id)
-                .filter(_cost_meta_filter(COST_META_SOURCE_KEY, "operator-supplied"))
-                .label("cost_source_operator_supplied_count"),
-                func.count(LlmCall.id)
-                .filter(_cost_meta_filter(COST_META_SOURCE_KEY, "rate-card"))
-                .label("cost_source_rate_card_count"),
-                func.count(LlmCall.id)
-                .filter(_cost_meta_filter(COST_META_SOURCE_KEY, "tokens-only"))
-                .label("cost_source_tokens_only_count"),
-                func.count(LlmCall.id)
-                .filter(_cost_meta_filter(COST_META_SOURCE_KEY, "unpriced"))
-                .label("cost_source_unpriced_count"),
-                func.count(LlmCall.id)
-                .filter(_cost_meta_filter(COST_META_CONFIDENCE_KEY, "configured"))
-                .label("cost_confidence_configured_count"),
-                func.count(LlmCall.id)
-                .filter(
-                    _cost_meta_filter(COST_META_CONFIDENCE_KEY, "not_applicable"),
-                )
-                .label("cost_confidence_not_applicable_count"),
-                func.count(LlmCall.id)
-                .filter(_cost_meta_filter(COST_META_CONFIDENCE_KEY, "unavailable"))
-                .label("cost_confidence_unavailable_count"),
-                func.count(LlmCall.id)
-                .filter(usage_status_filter("partial"))
-                .label("partial_usage_llm_calls_count"),
-                func.count(LlmCall.id)
-                .filter(usage_status_filter("missing"))
-                .label("missing_usage_llm_calls_count"),
-            )
-            .join(LlmCall, LlmCall.trial_id == Trial.id)
-            .where(Trial.batch_id.in_(batch_ids))
-            .group_by(Trial.batch_id),
-        )
-    ).all()
-    return {
-        row.batch_id: summarize_usage_counts(
-            llm_calls_count=int(row.llm_calls_count or 0),
-            total_prompt_tokens=int(row.total_prompt_tokens or 0),
-            total_completion_tokens=int(row.total_completion_tokens or 0),
-            total_cost_usd=row.total_cost_usd,
-            priced_llm_calls_count=int(row.priced_llm_calls_count or 0),
-            token_only_llm_calls_count=int(
-                row.token_only_llm_calls_count or 0,
-            ),
-            price_unknown_llm_calls_count=int(
-                row.price_unknown_llm_calls_count or 0,
-            ),
-            failed_upstream_llm_calls_count=int(
-                row.failed_upstream_llm_calls_count or 0,
-            ),
-            partial_usage_llm_calls_count=int(
-                row.partial_usage_llm_calls_count or 0,
-            ),
-            missing_usage_llm_calls_count=int(
-                row.missing_usage_llm_calls_count or 0,
-            ),
-            cost_source_counts=_cost_source_counts(row),
-            cost_confidence_counts=_cost_confidence_counts(row),
-        )
-        for row in rows
-    }
-
 
 def _empty_trial_summary() -> dict[str, int]:
     return {
@@ -2256,6 +2144,7 @@ async def _batch_service_execution_summary(
             .where(
                 ServiceExecutionLease.trial_id.in_(trial_ids),
                 ServiceExecutionLease.execution_role == "attempt",
+                ServiceExecutionLease.id == latest_execution_id(),
             )
             .group_by(
                 lifecycle_expr,
@@ -2549,6 +2438,7 @@ async def get_batch(
     rerunnable_failed_count = sum(1 for trial in original_trials if _is_rerunnable_failure(trial))
     extra = {
         "service_execution_summary": service_execution_summary,
+        "progress": await progress_summary(s, select(Trial.id).where(Trial.batch_id == b.id)),
         "rerun_batches": [
             {
                 "id": str(child.id),
@@ -2833,6 +2723,21 @@ async def rerun_failed_batch(
             detail="batch not found",
         )
     require_team_or_admin(ctx, b.team_id)
+    if b.backend != NEBIUS_BACKEND and not local_execution_enabled():
+        # Historical batch: readable, but a rerun would inherit its backend.
+        _reject_submission(
+            reason="unsupported_hosted_backend",
+            status_code=400,
+            detail={
+                "reason": "unsupported_hosted_backend",
+                "backend": b.backend,
+                "message": (
+                    f"Batch {batch_id} ran on backend {b.backend!r}, which hosted "
+                    "execution no longer supports. Submit a new batch instead of "
+                    "rerunning failed cases."
+                ),
+            },
+        )
     await _reject_if_team_paused(s, b.team_id)
     _reject_if_k8s_worker_unavailable(request, b.required_worker_pools or [])
 

@@ -65,6 +65,8 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.control-plane
     environment:
+      LOOM_ENV: development
+      LOOM_LOCAL_EXECUTION: "1"
       LOOM_CP_DB_URL: postgresql+psycopg://loom:loom@postgres/loom
       LOOM_CP_MINIO_ENDPOINT: http://minio:9000
       LOOM_CP_MINIO_ACCESS_KEY: loomtest
@@ -86,6 +88,8 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.worker
     environment:
+      LOOM_ENV: development
+      LOOM_LOCAL_EXECUTION: "1"
       LOOM_WORKER_CONTROL_PLANE_URL: http://control-plane:8080
       LOOM_WORKER_GATEWAY_URL: http://llm-gateway:9100
       # MUST be set in the caller's environment before docker compose up.
@@ -126,6 +130,8 @@ services:
       dockerfile: deploy/Dockerfile.worker
     command: ["python", "-m", "loom_worker.task_image_builder"]
     environment:
+      LOOM_ENV: development
+      LOOM_LOCAL_EXECUTION: "1"
       LOOM_WORKER_CONTROL_PLANE_URL: http://control-plane:8080
       LOOM_WORKER_TOKEN: "${LOOM_TASK_IMAGE_BUILDER_TOKEN:?LOOM_TASK_IMAGE_BUILDER_TOKEN must be set before builder compose-up}"
       LOOM_WORKER_MINIO_ENDPOINT: http://minio:9000

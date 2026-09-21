@@ -36,6 +36,7 @@ from typing import Any, cast
 import httpx
 
 from loom.security.redaction import redact_mapping
+from loom_cli.backend_flag import add_legacy_backend_flag, warn_legacy_backend_flag
 from loom_cli.minio_storage_preflight import validate_minio_storage_preflight_artifact
 from loom_cli.nebius_acceptance import configure_parser as configure_nebius_acceptance_parser
 from loom_cli.providers_cmd import (
@@ -461,7 +462,7 @@ def _print_batch_summary(item: dict[str, Any]) -> None:
     print(f"state:                 {item.get('state', '(unknown)')}")
     print(f"expected_trial_count:  {item.get('expected_trial_count', '?')}")
     print(f"n_per_task:            {item.get('n_per_task', 1)}")
-    print(f"backend:               {item.get('backend', 'docker')}")
+    print(f"backend:               {item.get('backend') or '(unknown)'}")
     required_worker_pools = item.get("required_worker_pools") or []
     if required_worker_pools:
         print(f"required_worker_pools: {', '.join(required_worker_pools)}")
@@ -516,6 +517,7 @@ def _print_batch_summary(item: dict[str, Any]) -> None:
 
 def _batch_create(args: argparse.Namespace) -> int:
     def _body() -> int:
+        warn_legacy_backend_flag(args.backend)
         if args.storage_preflight_evidence is not None:
             validation = validate_minio_storage_preflight_artifact(
                 Path(args.storage_preflight_evidence).resolve(),
@@ -1652,7 +1654,7 @@ def dispatch(argv: list[str]) -> int:
         default=None,
         help="Number of trials per task (1–100).",
     )
-    p_bc.add_argument("--backend", default=None, help="Worker backend (default: server default).")
+    add_legacy_backend_flag(p_bc)
     p_bc.add_argument(
         "--task-resource-requests",
         type=_load_task_resource_requests,

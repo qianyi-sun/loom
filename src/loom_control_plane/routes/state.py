@@ -29,10 +29,6 @@ from loom.family_run.spec import AdvanceDecision, ResolvedFamilyRunSpec
 from loom.models.result import FailureReason, TrialState
 from loom.terminal_result_semantics import terminal_result_conflicts
 from loom_control_plane.metrics import STATE_PATCH_TOTAL
-from loom_control_plane.protected_worker_session import (
-    ProtectedBodyWorkerStateSession,
-    ProtectedTrialCancellationError,
-)
 from loom_control_plane.routes.execution_fence import (
     OptionalExecutionGenerationHeader,
     OptionalExecutionLeaseIdHeader,
@@ -290,7 +286,6 @@ async def patch_state(
     trial_id: UUID,
     request: Request,
     payload: dict[str, Any],
-    protected_worker_session: ProtectedBodyWorkerStateSession,
     authorization: str | None = Header(default=None),
     execution_lease_id: OptionalExecutionLeaseIdHeader = None,
     execution_generation: OptionalExecutionGenerationHeader = None,
@@ -440,24 +435,12 @@ async def patch_state(
         await session.commit()
 
     if family_cancellation is not None:
-        protected_store = getattr(
-            request.app.state,
-            "protected_worker_session_store",
-            None,
-        )
-        try:
-            for family_trial_id in family_cancellation.trial_ids:
-                await cancel_trial_under_authority(
-                    session_factory=request.app.state.session_factory,
-                    protected_store=protected_store,
-                    trial_id=family_trial_id,
-                    team_id=family_cancellation.team_id,
-                )
-        except ProtectedTrialCancellationError as exc:
-            raise HTTPException(
-                status_code=503,
-                detail="protected family trial cancellation unavailable",
-            ) from exc
+        for family_trial_id in family_cancellation.trial_ids:
+            await cancel_trial_under_authority(
+                session_factory=request.app.state.session_factory,
+                trial_id=family_trial_id,
+                team_id=family_cancellation.team_id,
+            )
         async with request.app.state.session_factory() as session:
             await session.execute(
                 _FAMILY_COMPLETE_CANCELLATION_SQL,

@@ -3,9 +3,7 @@
 Sibling to `orphan_cleanup.py` (which handles trajectory JSONLs). Docker
 containers spawned via the Docker socket outlive their spawner: if a
 worker crashes, its host reboots, or cluster connectivity drops, the sandbox
-containers keep running until someone reaps them. Observed 2026-07-07:
-GB10-2 and GB10-15 each had 10 sleep-infinity trial-cache containers
-still up 3 days after the worker died.
+containers keep running until someone reaps them. Orphaned trial-cache containers can otherwise remain indefinitely.
 
 Predicate mirrors `cleanup_orphan_trajectories`:
 
@@ -15,11 +13,11 @@ Predicate mirrors `cleanup_orphan_trajectories`:
 - Non-terminal, container fresh → preserve (a live worker somewhere may
   own it; wait for the terminal transition or the fallback window)
 
-Every Slurm-launched worker stamps containers with the immutable sandbox
-identity from its admission policy. Cleanup lists and removes containers
+A local worker with a configured sandbox identity stamps that identity
+on its containers. Cleanup lists and removes containers
 only for that same identity. An unknown trial from another sandbox is
 therefore preserved even when multiple sandboxes share one Docker daemon.
-Legacy workers retain cleanup for unlabelled legacy containers while
+Workers without an identity clean up unlabelled containers while
 preserving every container that carries a sandbox identity.
 """
 

@@ -78,7 +78,7 @@ def test_pipeline_alert_contract_is_exact() -> None:
             "#pipeline-artifact-commit-failures",
         ),
         "LoomPipelineGpuAllocatedIdle": (
-            'max by (slurm_cluster,reason) (loom_pipeline_gpu_allocated_idle_seconds{reason=~"process_absent|cleanup_pending"}) > 300',
+            'max by (reason) (loom_pipeline_gpu_allocated_idle_seconds{reason=~"process_absent|cleanup_pending"}) > 300',
             "10m",
             "critical",
             "worker",

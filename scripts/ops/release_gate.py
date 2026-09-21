@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -54,7 +55,7 @@ REQUIRED_CHECKS: dict[str, tuple[str, ...]] = {
         "upstream_locator",
         "upstream_revision",
     ),
-    "worker_capacity_smoke": ("url", "batch_id", "k8s_workers", "oldlab_workers"),
+    "execution_capacity_smoke": ("url", "batch_id", "provider"),
     "prod_staging_isolation": (
         "url",
         "state_profile_evidence",
@@ -264,10 +265,6 @@ def _validate_checks(manifest: dict[str, Any]) -> list[str]:
             errors.append(f"{check_name}.status must be 'pass'")
         for field in required_fields:
             value = check.get(field)
-            if field in {"k8s_workers", "oldlab_workers"}:
-                if not isinstance(value, int) or value < 0:
-                    errors.append(f"{check_name}.{field} must be a non-negative integer")
-                continue
             if field == "benchmarks":
                 if (
                     not isinstance(value, list)
@@ -279,8 +276,8 @@ def _validate_checks(manifest: dict[str, Any]) -> list[str]:
             if not _is_non_empty_string(value):
                 errors.append(f"{check_name}.{field} must be a non-empty string")
 
-        if check_name == "worker_capacity_smoke":
-            errors.extend(_validate_worker_capacity_smoke(check))
+        if check_name == "execution_capacity_smoke":
+            errors.extend(_validate_execution_capacity_smoke(check))
         if check_name == "score_positive_canary":
             errors.extend(_validate_score_positive_canary(check))
         if check_name == "frontend_route_evidence":
@@ -373,46 +370,44 @@ def _validate_score_positive_canary(check: dict[str, Any]) -> list[str]:
     return errors
 
 
-def _validate_worker_capacity_smoke(check: dict[str, Any]) -> list[str]:
+def _validate_execution_capacity_smoke(check: dict[str, Any]) -> list[str]:
+    """Require native workload evidence, distinct from configured pool capacity."""
     errors: list[str] = []
+    prefix = "execution_capacity_smoke"
+    if check.get("provider") != "nebius":
+        errors.append(f"{prefix}.provider must be 'nebius'")
     runtime_seconds = check.get("runtime_seconds")
-    if not isinstance(runtime_seconds, int | float) or runtime_seconds < 0:
-        errors.append("worker_capacity_smoke.runtime_seconds must be a non-negative number")
+    if (
+        isinstance(runtime_seconds, bool)
+        or not isinstance(runtime_seconds, int | float)
+        or not math.isfinite(runtime_seconds)
+        or runtime_seconds < 0
+    ):
+        errors.append(f"{prefix}.runtime_seconds must be a finite non-negative number")
     failures = check.get("failures")
-    if not isinstance(failures, int) or failures < 0:
-        errors.append("worker_capacity_smoke.failures must be a non-negative integer")
-
-    oldlab_workers = check.get("oldlab_workers")
-    if not isinstance(oldlab_workers, int) or oldlab_workers <= 0:
+    if type(failures) is not int or failures != 0:
+        errors.append(f"{prefix}.failures must be zero")
+    records = check.get("execution_records")
+    if not isinstance(records, list) or not records:
+        errors.append(f"{prefix}.execution_records must contain native execution evidence")
         return errors
-
-    records = check.get("oldlab_worker_records")
-    if not isinstance(records, list) or len(records) < oldlab_workers:
-        errors.append(
-            "worker_capacity_smoke.oldlab_worker_records must include one record per OLDLAB worker",
-        )
-        return errors
-
-    required_text_fields = ("node_name", "slurm_job_id", "worker_id")
-    required_int_fields = ("concurrency", "trials_claimed")
+    required_fields = (
+        "trial_id", "attempt_id", "target_id", "project_id", "cluster_id",
+        "namespace", "job_uid", "node_name",
+    )
+    seen: set[tuple[str, str]] = set()
     for index, record in enumerate(records):
+        path = f"{prefix}.execution_records[{index}]"
         if not isinstance(record, dict):
-            errors.append(f"worker_capacity_smoke.oldlab_worker_records[{index}] must be an object")
+            errors.append(f"{path} must be an object")
             continue
-        for field in required_text_fields:
+        for field in required_fields:
             if not _is_non_empty_string(record.get(field)):
-                errors.append(
-                    f"worker_capacity_smoke.oldlab_worker_records[{index}].{field} "
-                    "must be a non-empty string",
-                )
-        for field in required_int_fields:
-            value = record.get(field)
-            minimum = 1 if field == "concurrency" else 0
-            if not isinstance(value, int) or value < minimum:
-                errors.append(
-                    f"worker_capacity_smoke.oldlab_worker_records[{index}].{field} "
-                    f"must be an integer >= {minimum}",
-                )
+                errors.append(f"{path}.{field} must be a non-empty string")
+        identity = (str(record.get("trial_id", "")), str(record.get("attempt_id", "")))
+        if identity in seen:
+            errors.append(f"{path} repeats an execution attempt")
+        seen.add(identity)
     return errors
 
 

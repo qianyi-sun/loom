@@ -8,15 +8,9 @@ from urllib.parse import urlsplit
 
 from loom_config.loader import Schema, ServiceConfigEntry
 
-# TCP-proxy DaemonSets (`loom cluster` gateway/worker/minio routers) forward a
-# node hostPort into an in-cluster Service so off-cluster workers can reach it.
-# Their pod names share a prefix with a schema service (`loom-worker-router`
-# vs `loom-worker`) but they run only a socat container — never classify them
-# as that service. See `_service_from_workload_name`.
+# The local sandbox Gateway proxy carries no application service settings.
 _AUXILIARY_PROXY_WORKLOADS: frozenset[str] = frozenset({
     "loom-gateway-router",
-    "loom-worker-router",
-    "loom-minio-router",
 })
 
 _K8S_TEMPLATE_ENV_ENTRIES: Mapping[str, frozenset[str]] = {
@@ -289,12 +283,7 @@ def _service_from_pod_name(name: str | None, prefix: Mapping[str, str]) -> str |
 
 
 def _service_from_workload_name(name: str, prefix: Mapping[str, str]) -> str | None:
-    # Auxiliary socat proxy workloads share a name prefix with a schema
-    # service — `loom-worker-router` starts with `loom-worker-`, `loom-minio-
-    # router` with `loom-minio-` — but they are NOT that service: their pods
-    # carry a bare socat container with none of the service env. Classifying
-    # them as the service makes doctor false-flag every declared env var as
-    # missing on the proxy pod. Exclude them before the prefix match.
+    # Auxiliary transport workloads do not consume service environment variables.
     for aux in _AUXILIARY_PROXY_WORKLOADS:
         if name == aux or name.startswith(f"{aux}-"):
             return None

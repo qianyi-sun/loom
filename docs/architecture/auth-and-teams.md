@@ -102,7 +102,7 @@ The operator credential is a TOML file containing an `[admin]` table and a
 high-entropy `loom_admin_...` token. Production services read it from the
 component-specific admin-secret file settings and fail closed when it is
 missing, malformed, low-entropy, or unsafe. POSIX deployments require mode
-`0600`. Local `loom service up --environment local` manages a development copy
+`0600`. Local `loom service up` manages a development copy
 under `.loom/admin/secrets.toml`.
 
 Manage the local secret without printing it by default:
@@ -116,6 +116,11 @@ loom service rotate-admin
 `reveal-admin` is the explicit secret-display operation. Protect its terminal
 and logs accordingly. Rotation replaces the singleton credential used by the
 service, Control Plane, and LLM Gateway.
+
+The operator bearer grants `admin:tokens`, `admin:rate_cards`, and
+`admin:worker_pools`. Hosted worker-token rotation targets the Nebius
+in-cluster workers: install the replacement token, restart workers, verify
+registration, then revoke the previous token by its hash prefix.
 
 Administrative mutations write durable attribution records to
 `admin_audit_events`; mutations that share the service database with their

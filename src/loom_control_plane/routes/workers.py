@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -21,7 +20,6 @@ from loom.auth import verify_bearer_token
 from loom.db.schema import TaskImageMaterialization, TrialTaskImageMaterialization, Worker
 from loom.execution_architecture import execution_cpu_arch
 from loom.integrations.terminalgen.authority import (
-    TERMINALGEN_POOL_POLICIES,
     TerminalGenAuthorityError,
     build_terminal_task_validation_grant,
     build_terminalgen_authoring_grant,
@@ -30,21 +28,12 @@ from loom.model_switch_store import load_model_switch_plan, plan_snapshot_from_r
 from loom.models.capabilities import Capabilities
 from loom.models.result import FailureReason
 from loom.models.worker_capabilities import (
-    SlurmGpuAllocationEvidenceV1,
     WorkerCapabilitySnapshotV1,
 )
 from loom.pipeline.keys import canonical_digest, canonical_document, digest_bytes
-from loom.pipeline.stage1_smoke import (
-    Stage1SmokeAuthorizationV1,
-    Stage1SmokeCandidateV1,
-    Stage1SmokePreflightV1,
-    validate_stage1_smoke_authorization,
-)
 from loom.pipeline.work_protocol import (
-    AcceptancePreflightGrantV1,
     ArtifactInputDescriptorV1,
     ExecutionAttemptClaimV1,
-    Stage1SmokeGrantV1,
     StageRequestGrantV1,
     TerminalGenAuthoringGrantV1,
     TrialClaimV1,
@@ -53,15 +42,6 @@ from loom.pipeline.work_protocol import (
 )
 from loom.task_image_materialization import get_trial_task_image_execution_grant
 from loom_control_plane.metrics import CLAIM_LATENCY_SEC
-from loom_control_plane.protected_worker_session import (
-    EXECUTOR_WORKER_CREDENTIAL_HEADER,
-    ProtectedBodyWorkerClaim,
-    ProtectedBodyWorkerSession,
-    ProtectedPathWorkerSession,
-    ProtectedWorkerSessionAuthenticationRejected,
-    ProtectedWorkerSessionRejected,
-    ProtectedWorkerSessionStore,
-)
 from loom_control_plane.routes.execution_fence import (
     OptionalExecutionGenerationHeader,
     OptionalExecutionLeaseIdHeader,
@@ -71,11 +51,6 @@ from loom_control_plane.scheduler.claim import (
     WorkClaimConflictError,
     claim_one,
     claim_work,
-)
-from loom_control_plane.slurm_worker_jobs import (
-    SlurmWorkerRegistrationError,
-    lock_slurm_worker_job_for_registration,
-    parse_slurm_worker_registration_provenance,
 )
 from loom_control_plane.task_image_execution import TaskImageExecutionService
 from loom_task_image_authority.execution_delivery import SignedTrialClaim, SignedWorkClaim
@@ -241,7 +216,6 @@ UPDATE trials
 async def claim_trial(
     request: Request,
     payload: dict[str, Any],
-    protected_worker_claim: ProtectedBodyWorkerClaim,
     authorization: str | None = Header(default=None),
 ) -> Response:
     async with request.app.state.session_factory() as session:
@@ -259,39 +233,6 @@ async def claim_trial(
         ) from exc
 
     _require_supported_worker_architectures(caps)
-
-    if protected_worker_claim is not None:
-        try:
-            protected_claim = await protected_worker_claim.store.claim_assigned_trial(
-                worker_id=worker_id,
-                worker_credential=protected_worker_claim.worker_credential,
-                claim_request={
-                    "schema_version": 1,
-                    "protocol": "trial",
-                    "worker_id": str(worker_id),
-                    "capabilities": caps,
-                },
-            )
-        except ProtectedWorkerSessionAuthenticationRejected as exc:
-            raise HTTPException(
-                status_code=401,
-                detail="protected worker session rejected",
-            ) from exc
-        except ProtectedWorkerSessionRejected as exc:
-            raise HTTPException(status_code=409, detail="protected_worker_claim_rejected") from exc
-        if protected_claim is None:
-            return Response(status_code=204)
-        try:
-            claim_payload = TrialClaimV1.model_validate_json(
-                json.dumps(
-                    dict(protected_claim),
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-            )
-        except ValidationError as exc:
-            raise HTTPException(status_code=503, detail="protected_worker_claim_invalid") from exc
-        return JSONResponse(claim_payload.model_dump(mode="json", exclude_none=False))
 
     worker_os = sorted({c["os"] for c in caps})
     worker_cpu_arches = sorted({c.get("cpu_arch", "x86_64") for c in caps})
@@ -372,7 +313,6 @@ async def claim_trial(
 async def claim_any_work(
     request: Request,
     payload: dict[str, Any],
-    protected_worker_claim: ProtectedBodyWorkerClaim,
     authorization: str | None = Header(default=None),
 ) -> Response:
     execution_service = getattr(request.app.state, "task_image_execution", None)
@@ -385,55 +325,6 @@ async def claim_any_work(
         ctx = await verify_bearer_token(session, authorization)
         if ctx is None or "worker:claim" not in ctx.scopes:
             raise HTTPException(status_code=401, detail="not authorized to claim")
-        if protected_worker_claim is not None:
-            try:
-                protected_claim = await protected_worker_claim.store.claim_assigned_trial(
-                    worker_id=claim_request.worker_id,
-                    worker_credential=protected_worker_claim.worker_credential,
-                    claim_request={
-                        "schema_version": 1,
-                        "protocol": "work",
-                        "worker_id": str(claim_request.worker_id),
-                        "capability_snapshot_digest": (
-                            claim_request.capability_snapshot_digest
-                        ),
-                        "supported_work_kinds": list(
-                            claim_request.supported_work_kinds
-                        ),
-                        "free_slots": claim_request.free_slots,
-                    },
-                )
-            except ProtectedWorkerSessionAuthenticationRejected as exc:
-                raise HTTPException(
-                    status_code=401,
-                    detail="protected worker session rejected",
-                ) from exc
-            except ProtectedWorkerSessionRejected as exc:
-                raise HTTPException(
-                    status_code=409,
-                    detail="protected_worker_claim_rejected",
-                ) from exc
-            if protected_claim is None:
-                return Response(status_code=204)
-            try:
-                protected_payload = TrialClaimV1.model_validate_json(
-                    json.dumps(
-                        dict(protected_claim),
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                )
-            except ValidationError as exc:
-                raise HTTPException(
-                    status_code=503,
-                    detail="protected_worker_claim_invalid",
-                ) from exc
-            envelope = WorkClaimV1(
-                schema_version="loom.work-claim.v1",
-                work_kind="trial",
-                payload=protected_payload,
-            )
-            return JSONResponse(envelope.model_dump(mode="json", exclude_none=False))
         worker = (
             (
                 await session.execute(
@@ -561,39 +452,13 @@ async def claim_any_work(
                                s.secret_refs, r.id AS pipeline_run_id, r.team_id,
                                r.recipe_name, r.recipe_version,
                                r.recipe_digest, r.graph_spec_digest,
-                               p.authorization_id,
-                               p.authorization_snapshot_sha256,
-                               p.candidate_sha256, p.preflight_input_set_id,
-                               p.sealed_input_descriptor_set_sha256,
-                               p.exclusive_fence_id, p.policy_id,
-                               p.policy_config_sha256, p.policy_activation_epoch,
-                               p.slurm_cluster_id, p.slurm_cluster_config_sha256,
-                               p.slurm_allocation_id,
-                               stage1.authorization_id AS stage1_authorization_id,
-                               stage1.candidate_sha256 AS stage1_candidate_sha256,
-                               stage1.authorization_sha256 AS stage1_authorization_sha256,
-                               stage1.preflight_sha256 AS stage1_preflight_sha256,
-                               stage1.candidate_json AS stage1_candidate_json,
-                               stage1.authorization_json AS stage1_authorization_json,
-                               stage1.preflight_json AS stage1_preflight_json,
-                               stage1.candidate_bytes AS stage1_candidate_bytes,
-                               stage1.authorization_bytes AS stage1_authorization_bytes,
-                               stage1.preflight_bytes AS stage1_preflight_bytes,
                                w.capability_snapshot_json,
                                w.capability_snapshot_digest,
-                               w.slurm_gpu_allocation_evidence_json,
-                               w.slurm_gpu_allocation_evidence_digest,
                                frozen.snapshot_json AS control_binding_snapshot
                           FROM execution_attempts a
                           JOIN pipeline_stage_runs s ON s.id=a.stage_run_id
                           JOIN pipeline_runs r ON r.id=s.pipeline_run_id
                           JOIN workers w ON w.id=a.worker_id
-                          LEFT JOIN pipeline_acceptance_preflight_prerequisites p
-                            ON p.pipeline_run_id=r.id AND p.fence_state='active'
-                          LEFT JOIN pipeline_stage1_smoke_authorizations stage1
-                            ON stage1.pipeline_run_id=r.id
-                           AND stage1.state IN ('submitted','running')
-                           AND r.official_submission_kind='behavior_stage1_smoke_v1'
                           LEFT JOIN pipeline_run_control_bindings frozen
                             ON frozen.pipeline_run_id=r.id
                            AND frozen.node_key=s.node_key
@@ -631,93 +496,6 @@ async def claim_any_work(
                     canonical_jcs_lf=bytes(attempt_row["stage_request_bytes"]).decode("utf-8"),
                     stage_request_sha256=attempt_row["stage_request_digest"],
                     size_bytes=len(attempt_row["stage_request_bytes"]),
-                )
-            acceptance = None
-            if attempt_row["exclusive_fence_id"] is not None:
-                phase = "cold" if node["node_key"].endswith("_cold") else "warm"
-                variant = node["node_key"].removesuffix(f"_acceptance_preflight_{phase}")
-                acceptance = AcceptancePreflightGrantV1(
-                    authorization_id=attempt_row["authorization_id"],
-                    authorization_snapshot_sha256=(attempt_row["authorization_snapshot_sha256"]),
-                    action="matrix",
-                    candidate_sha256=attempt_row["candidate_sha256"],
-                    preflight_input_set_id=attempt_row["preflight_input_set_id"],
-                    prerequisite_pipeline_run_id=attempt_row["pipeline_run_id"],
-                    exclusive_fence_id=attempt_row["exclusive_fence_id"],
-                    node_key=node["node_key"],
-                    backend_variant_id=variant,
-                    cache_expectation=(
-                        "cold_after_eviction" if phase == "cold" else "warm_reuse_only"
-                    ),
-                    sealed_input_descriptor_set_sha256=(
-                        attempt_row["sealed_input_descriptor_set_sha256"]
-                    ),
-                    policy_id=attempt_row["policy_id"],
-                    policy_config_sha256=attempt_row["policy_config_sha256"],
-                    policy_activation_epoch=attempt_row["policy_activation_epoch"],
-                    slurm_cluster_id=attempt_row["slurm_cluster_id"],
-                    slurm_cluster_config_sha256=(attempt_row["slurm_cluster_config_sha256"]),
-                    slurm_allocation_id=attempt_row["slurm_allocation_id"],
-                    image_runtime_contract_digest=(attempt_row["image_runtime_contract_digest"]),
-                    resource_profile_digest=attempt_row["resource_profile_digest"],
-                    network_profile="none",
-                    renderer_digest=renderer["digest"],
-                )
-            stage1_smoke = None
-            if attempt_row["stage1_authorization_id"] is not None:
-                candidate_bytes = bytes(attempt_row["stage1_candidate_bytes"])
-                authorization_bytes = bytes(attempt_row["stage1_authorization_bytes"])
-                preflight_bytes = bytes(attempt_row["stage1_preflight_bytes"])
-                try:
-                    candidate = Stage1SmokeCandidateV1.model_validate_json(candidate_bytes)
-                    stage1_authorization = Stage1SmokeAuthorizationV1.model_validate_json(
-                        authorization_bytes
-                    )
-                    preflight = Stage1SmokePreflightV1.model_validate_json(preflight_bytes)
-                    validate_stage1_smoke_authorization(candidate, stage1_authorization)
-                except (ValidationError, ValueError) as exc:
-                    raise HTTPException(
-                        status_code=409, detail="stage1_smoke_authority_drift"
-                    ) from exc
-                if (
-                    candidate.canonical_bytes != candidate_bytes
-                    or candidate.model_dump(mode="json") != attempt_row["stage1_candidate_json"]
-                    or candidate.candidate_sha256 != attempt_row["stage1_candidate_sha256"]
-                    or canonical_digest(stage1_authorization.model_dump(mode="json"))
-                    != attempt_row["stage1_authorization_sha256"]
-                    or canonical_digest(preflight.model_dump(mode="json"))
-                    != attempt_row["stage1_preflight_sha256"]
-                    or canonical_digest(attempt_row["stage1_authorization_json"])
-                    != attempt_row["stage1_authorization_sha256"]
-                    or canonical_digest(attempt_row["stage1_preflight_json"])
-                    != attempt_row["stage1_preflight_sha256"]
-                    or digest_bytes(authorization_bytes)
-                    != attempt_row["stage1_authorization_sha256"]
-                    or digest_bytes(preflight_bytes) != attempt_row["stage1_preflight_sha256"]
-                    or stage1_authorization.authorization_id
-                    != attempt_row["stage1_authorization_id"]
-                    or preflight.authorization_id != stage1_authorization.authorization_id
-                    or preflight.authorization_sha256 != stage1_authorization.authorization_sha256
-                    or preflight.candidate_sha256 != candidate.candidate_sha256
-                    or preflight.policy_activation_epoch != candidate.policy_activation_epoch
-                    or preflight.platform_child_digest != candidate.platform_child_digest
-                    or preflight.image_runtime_contract_sha256
-                    != candidate.image_runtime_contract_sha256
-                    or preflight.input_descriptor_set_sha256 != canonical_digest(candidate.inputs)
-                ):
-                    raise HTTPException(status_code=409, detail="stage1_smoke_authority_drift")
-                stage1_smoke = Stage1SmokeGrantV1(
-                    authorization_id=attempt_row["stage1_authorization_id"],
-                    pipeline_run_id=attempt_row["pipeline_run_id"],
-                    candidate_sha256=attempt_row["stage1_candidate_sha256"],
-                    authorization_sha256=attempt_row["stage1_authorization_sha256"],
-                    preflight_sha256=attempt_row["stage1_preflight_sha256"],
-                    policy_activation_epoch=candidate.policy_activation_epoch,
-                    recipe_digest=candidate.recipe_digest,
-                    platform_child_digest=candidate.platform_child_digest,
-                    image_runtime_contract_digest=(candidate.image_runtime_contract_sha256),
-                    resolved_input_bindings_digest=(spec["resolved_input_bindings_digest"]),
-                    renderer_digest=renderer["digest"],
                 )
             resume_checkpoint = None
             if attempt_row["resumed_checkpoint_artifact_id"] is not None:
@@ -793,18 +571,12 @@ async def claim_any_work(
                     image_runtime_contract_digest=(attempt_row["image_runtime_contract_digest"]),
                     worker_capability_snapshot=attempt_row["capability_snapshot_json"],
                     worker_capability_snapshot_digest=attempt_row["capability_snapshot_digest"],
-                    slurm_gpu_allocation_evidence=attempt_row["slurm_gpu_allocation_evidence_json"],
-                    slurm_gpu_allocation_evidence_digest=attempt_row[
-                        "slurm_gpu_allocation_evidence_digest"
-                    ],
                     input_bindings=attempt_row["resolved_input_bindings_json"],
                     outputs=node["outputs"],
                     checkpoint=node["checkpoint"],
                     fanout_commit=node["fanout_commit"],
                     stage_request=stage_request,
                     control_binding_snapshot=attempt_row["control_binding_snapshot"],
-                    acceptance_preflight=acceptance,
-                    stage1_smoke=stage1_smoke,
                     terminalgen_authoring=terminalgen_authoring,
                     provider_connection_ref=attempt_row["provider_connection_ref"],
                     secret_refs=list(attempt_row["secret_refs"]),
@@ -851,7 +623,6 @@ async def requeue_trial_retry(
     trial_id: UUID,
     request: Request,
     payload: dict[str, Any],
-    protected_worker_claim: ProtectedBodyWorkerClaim,
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     async with request.app.state.session_factory() as session:
@@ -901,47 +672,6 @@ async def requeue_trial_retry(
             detail="retry_after_sec must be >= 0",
         )
 
-    if protected_worker_claim is not None:
-        try:
-            protected_retry = await protected_worker_claim.store.retry_claimed_trial(
-                worker_id=worker_id,
-                worker_credential=protected_worker_claim.worker_credential,
-                retry_request={
-                    "schema_version": 1,
-                    "trial_id": str(trial_id),
-                    "worker_id": str(worker_id),
-                    "failure_reason": failure_reason.value,
-                    "failure_message": failure_message,
-                    "retry_after_sec": retry_after_sec,
-                },
-            )
-        except ProtectedWorkerSessionAuthenticationRejected as exc:
-            raise HTTPException(
-                status_code=401,
-                detail="protected worker session rejected",
-            ) from exc
-        except ProtectedWorkerSessionRejected as exc:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "worker lost claim, trial has started, or retry transition "
-                    "is not allowed"
-                ),
-            ) from exc
-        if protected_retry is None:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "worker lost claim, trial has started, or retry transition "
-                    "is not allowed"
-                ),
-            )
-        if (
-            protected_retry.get("trial_id") != str(trial_id)
-            or protected_retry.get("state") != "protected-pending"
-        ):
-            raise HTTPException(status_code=503, detail="protected_worker_retry_invalid")
-        return {"trial_id": str(trial_id), "state": "protected-pending"}
 
     async with request.app.state.session_factory() as session:
         row = (
@@ -975,7 +705,6 @@ async def pre_start_heartbeat(
     trial_id: UUID,
     request: Request,
     payload: dict[str, Any],
-    protected_worker_session: ProtectedBodyWorkerSession,
     authorization: str | None = Header(default=None),
     execution_lease_id: OptionalExecutionLeaseIdHeader = None,
     execution_generation: OptionalExecutionGenerationHeader = None,
@@ -1030,39 +759,12 @@ async def register_worker(
     request: Request,
     payload: dict[str, Any],
     authorization: str | None = Header(default=None),
-    executor_worker_credential: str | None = Header(
-        default=None,
-        alias=EXECUTOR_WORKER_CREDENTIAL_HEADER,
-    ),
 ) -> dict[str, Any]:
     async with request.app.state.session_factory() as session:
         ctx = await verify_bearer_token(session, authorization)
     if ctx is None or "worker:report" not in ctx.scopes:
         raise HTTPException(status_code=401, detail="not authorized to register")
 
-    protected_store: ProtectedWorkerSessionStore | None = getattr(
-        request.app.state,
-        "protected_worker_session_store",
-        None,
-    )
-    if protected_store is None and executor_worker_credential is not None:
-        raise HTTPException(
-            status_code=503,
-            detail="protected worker runtime unavailable",
-        )
-    if protected_store is not None and executor_worker_credential is None:
-        raise HTTPException(
-            status_code=401,
-            detail="protected worker session rejected",
-        )
-
-    try:
-        slurm_provenance = parse_slurm_worker_registration_provenance(payload)
-    except SlurmWorkerRegistrationError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail="invalid Slurm registration provenance",
-        ) from exc
 
     # Bug 5 fix: validate each capabilities entry against the Capabilities
     # Pydantic model so garbage (typo'd OS, unknown gpu_vendor, etc.) is
@@ -1158,9 +860,7 @@ async def register_worker(
             input_cache_ready_bytes=ready_bytes,
         )
     capability_snapshot: WorkerCapabilitySnapshotV1 | None = None
-    allocation_evidence: SlurmGpuAllocationEvidenceV1 | None = None
     raw_snapshot = payload.get("capability_snapshot")
-    raw_allocation_evidence = payload.get("slurm_gpu_allocation_evidence")
     if raw_snapshot is not None:
         try:
             capability_snapshot = WorkerCapabilitySnapshotV1.model_validate(raw_snapshot)
@@ -1211,128 +911,15 @@ async def register_worker(
             max_concurrent != 1
         ):
             raise HTTPException(status_code=409, detail="pipeline_worker_concurrency_drift")
-        if capability_snapshot.gpu_devices:
-            if raw_allocation_evidence is None:
-                raise HTTPException(status_code=400, detail="slurm_gpu_allocation_required")
-            try:
-                allocation_evidence = SlurmGpuAllocationEvidenceV1.model_validate(
-                    raw_allocation_evidence
-                )
-            except ValidationError as exc:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"invalid Slurm GPU allocation evidence: {exc.errors()}",
-                ) from exc
-            snapshot_allocation_ids = {
-                item.allocation_id for item in capability_snapshot.gpu_devices
-            }
-            snapshot_uuids = sorted(
-                (item.device_uuid for item in capability_snapshot.gpu_devices), key=str.encode
-            )
-            if snapshot_allocation_ids != {allocation_evidence.allocation_id} or (
-                snapshot_uuids != allocation_evidence.device_uuids
-            ):
-                raise HTTPException(status_code=409, detail="slurm_gpu_allocation_drift")
-            expected_pool = (
-                "behavior-gpu-gb10"
-                if allocation_evidence.slurm_cluster_id == "gb10"
-                else "behavior-gpu-oldlab"
-            )
-            if pool_name != expected_pool:
-                raise HTTPException(status_code=409, detail="gpu_worker_pool_contract_drift")
-        elif raw_allocation_evidence is not None:
-            raise HTTPException(status_code=400, detail="cpu_worker_has_gpu_allocation")
-        elif not trial_image_reader and pool_name not in {"behavior-cpu-data", *TERMINALGEN_POOL_POLICIES}:
-            raise HTTPException(status_code=409, detail="cpu_worker_pool_contract_drift")
         capability_identity = capability_snapshot.model_dump(mode="json")
-    elif raw_allocation_evidence is not None:
-        raise HTTPException(status_code=400, detail="allocation_requires_capability_snapshot")
     capability_snapshot_digest = canonical_digest(capability_identity)
     supplied_digest = payload.get("capability_snapshot_digest")
     if supplied_digest is not None and supplied_digest != capability_snapshot_digest:
         raise HTTPException(status_code=409, detail="capability_snapshot_mismatch")
 
-    if protected_store is not None:
-        if slurm_provenance is None:
-            raise HTTPException(
-                status_code=401,
-                detail="protected worker session rejected",
-            )
-        assert executor_worker_credential is not None
-        allocation_evidence_digest = (
-            canonical_digest(allocation_evidence)
-            if allocation_evidence is not None
-            else None
-        )
-        try:
-            registered = await protected_store.register(
-                worker_credential=executor_worker_credential,
-                projection={
-                    "hostname": str(payload.get("hostname", "unknown")),
-                    "version": str(payload.get("version", "unknown")),
-                    "capabilities": validated_caps,
-                    "supported_work_kinds": supported_work_kinds,
-                    "capability_snapshot_digest": capability_snapshot_digest,
-                    "capability_snapshot_json": (
-                        capability_snapshot.model_dump(mode="json")
-                        if capability_snapshot is not None
-                        else None
-                    ),
-                    "slurm_gpu_allocation_evidence_json": (
-                        allocation_evidence.model_dump(mode="json")
-                        if allocation_evidence is not None
-                        else None
-                    ),
-                    "slurm_gpu_allocation_evidence_digest": allocation_evidence_digest,
-                    "max_concurrent": max_concurrent,
-                    "pool_name": pool_name,
-                    "input_cache_capacity_bytes": capacity_bytes,
-                    "input_cache_reserved_bytes": reserved_bytes,
-                    "input_cache_ready_bytes": ready_bytes,
-                    "sandbox_identity": slurm_provenance.sandbox_identity,
-                    "candidate_sha": slurm_provenance.candidate_sha,
-                    "slurm_job_id": slurm_provenance.slurm_job_id,
-                    "compose_project": slurm_provenance.compose_project,
-                },
-            )
-        except ProtectedWorkerSessionRejected as exc:
-            raise HTTPException(
-                status_code=401,
-                detail="protected worker session rejected",
-            ) from exc
-        return {
-            "worker_id": str(registered.worker_id),
-            "capability_snapshot_digest": registered.capability_snapshot_digest,
-            "supported_work_kinds": list(registered.supported_work_kinds),
-            "input_cache_capacity_bytes": registered.input_cache_capacity_bytes,
-            "input_cache_reserved_bytes": registered.input_cache_reserved_bytes,
-            "input_cache_ready_bytes": registered.input_cache_ready_bytes,
-            "slurm_gpu_allocation_evidence_digest": (
-                registered.slurm_gpu_allocation_evidence_digest
-            ),
-            "heartbeat_interval_sec": registered.heartbeat_interval_sec,
-            "claim_poll_interval_sec": registered.claim_poll_interval_sec,
-            "drain_timeout_sec": registered.drain_timeout_sec,
-        }
 
     worker_id = uuid4()
     async with request.app.state.session_factory() as session:
-        if slurm_provenance is not None:
-            try:
-                slurm_job = await lock_slurm_worker_job_for_registration(
-                    session,
-                    provenance=slurm_provenance,
-                    hostname=str(payload.get("hostname", "unknown")),
-                    pool_name=pool_name,
-                    max_concurrent=max_concurrent,
-                )
-            except SlurmWorkerRegistrationError as exc:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Slurm worker registration conflict",
-                ) from exc
-        else:
-            slurm_job = None
         session.add(
             Worker(
                 id=worker_id,
@@ -1346,16 +933,6 @@ async def register_worker(
                     if capability_snapshot is not None
                     else null()
                 ),
-                slurm_gpu_allocation_evidence_json=(
-                    allocation_evidence.model_dump(mode="json")
-                    if allocation_evidence is not None
-                    else null()
-                ),
-                slurm_gpu_allocation_evidence_digest=(
-                    canonical_digest(allocation_evidence)
-                    if allocation_evidence is not None
-                    else None
-                ),
                 auth_token_hash=ctx.token_hash,
                 max_concurrent=max_concurrent,
                 pool_name=pool_name,
@@ -1368,8 +945,6 @@ async def register_worker(
             )
         )
         await session.flush()
-        if slurm_job is not None:
-            slurm_job.worker_id = worker_id
         await session.commit()
 
     return {
@@ -1379,9 +954,6 @@ async def register_worker(
         "input_cache_capacity_bytes": capacity_bytes,
         "input_cache_reserved_bytes": reserved_bytes,
         "input_cache_ready_bytes": ready_bytes,
-        "slurm_gpu_allocation_evidence_digest": (
-            canonical_digest(allocation_evidence) if allocation_evidence is not None else None
-        ),
         "heartbeat_interval_sec": 5,
         "claim_poll_interval_sec": 1.0,
         "drain_timeout_sec": 600,
@@ -1392,7 +964,6 @@ async def register_worker(
 async def heartbeat(
     worker_id: UUID,
     request: Request,
-    protected_worker_session: ProtectedPathWorkerSession,
     payload: dict[str, Any] | None = None,
     authorization: str | None = Header(default=None),
 ) -> dict[str, str]:

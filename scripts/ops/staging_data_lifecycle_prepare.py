@@ -21,7 +21,7 @@ from loom.data_lifecycle_runtime import (
     build_lifecycle_engine,
     load_lifecycle_database_runtime,
 )
-from loom_cli.rollout.migration_readiness import inspect_migration_plan
+from loom_cli.migration_readiness import inspect_migration_plan
 
 _REQUEST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{7,79}$")
 
