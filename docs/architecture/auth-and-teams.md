@@ -117,6 +117,11 @@ loom service rotate-admin
 and logs accordingly. Rotation replaces the singleton credential used by the
 service, Control Plane, and LLM Gateway.
 
+The operator bearer grants `admin:tokens`, `admin:rate_cards`, and
+`admin:worker_pools`. Hosted worker-token rotation targets the Nebius
+in-cluster workers: install the replacement token, restart workers, verify
+registration, then revoke the previous token by its hash prefix.
+
 Administrative mutations write durable attribution records to
 `admin_audit_events`; mutations that share the service database with their
 audit record fail if that record cannot be written.

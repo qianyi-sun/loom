@@ -58,8 +58,7 @@ def test_load_admin_secret_verifier_requires_file_in_production(
         _load_admin_secret_verifier(_settings(admin_secret_file=None))
 
 
-@pytest.mark.legacy_pool
-async def test_file_backed_admin_secret_grants_gb10_worker_scope() -> None:
+async def test_file_backed_admin_secret_grants_current_admin_scopes() -> None:
     verifier = AdminSecretVerifier.from_token(RAW_ADMIN_TOKEN)
 
     ctx = await verify_bearer_token(
@@ -69,5 +68,4 @@ async def test_file_backed_admin_secret_grants_gb10_worker_scope() -> None:
     )
 
     assert ctx is not None
-    assert "admin:gb10_workers" in ctx.scopes
-    assert "admin:worker_pools" in ctx.scopes
+    assert set(ctx.scopes) == {"admin:tokens", "admin:rate_cards", "admin:worker_pools"}

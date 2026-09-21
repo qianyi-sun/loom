@@ -562,6 +562,10 @@ def test_rotate_mints_then_prints_checklist(
     # Default text mode must NOT print the raw token (same as mint).
     assert "loom_w_new" not in out
     assert "Rotation checklist" in out
+    assert "GB10" not in out
+    assert "OLDLAB" not in out
+    assert "remote-worker" not in out
+    assert "environment-state" not in out
     assert "rollout restart" in out
     assert "loom admin tokens worker revoke" in out
     # Without --show-secret the checklist must point at the safe

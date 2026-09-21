@@ -599,8 +599,6 @@ async def validate_bearer_token(
                 scopes=[
                     "admin:tokens",
                     "admin:rate_cards",
-                    "admin:slurm_workers",
-                    "admin:gb10_workers",
                     "admin:worker_pools",
                 ],
                 team_id=None,

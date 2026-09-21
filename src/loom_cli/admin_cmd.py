@@ -331,13 +331,10 @@ def _rotate_worker_token(args: argparse.Namespace) -> int:
         sys.stdout.write(
             "\nRotation checklist:\n"
             + install_step
-            + "  2. Distribute the same token to attached remote-worker env files\n"
-            + "     (GB10/OLDLAB) without printing it, then restart those pools.\n"
-            + "  3. Restart in-cluster workers:\n"
+            + "  2. Restart in-cluster workers:\n"
             + "       kubectl rollout restart deploy/loom-worker\n"
-            + "  4. Verify in-cluster and remote workers re-register (no 401s),\n"
-            + "     then run environment-state check with --worker-token.\n"
-            + "  5. Revoke the OLD token by its hash prefix:\n"
+            + "  3. Verify workers re-register (no 401s) before revoking the old token.\n"
+            + "  4. Revoke the OLD token by its hash prefix:\n"
             + "       loom admin tokens worker revoke <OLD_PREFIX>\n",
         )
     return 0

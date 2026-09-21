@@ -585,6 +585,9 @@ class ReferenceDatabase:
                             "GRANT SELECT (id, trial_id, combination_idx, mix_mode, k1, k2, teacher_episodes, beta, seed, prng_version, student_model_snapshot, teacher_model_snapshot, provider_connection_id, pricing_snapshot, capability_snapshot, inherited_from_plan_id, created_at) ON TABLE public.model_switch_plans TO {}"
                         ).format(sql.Identifier(owner))
                     )
+                    # Published guard_0023 routines and the guard migration preflight
+                    # require these worker/job grants in disposable references. They
+                    # reconstruct historical permissions, not hosted runtime writers.
                     await connection.execute(
                         sql.SQL(
                             "GRANT SELECT (id, hostname, version, capabilities, supported_work_kinds, capability_snapshot_digest, capability_snapshot_json, slurm_gpu_allocation_evidence_json, slurm_gpu_allocation_evidence_digest, auth_token_hash, max_concurrent, pool_name, input_cache_capacity_bytes, input_cache_reserved_bytes, input_cache_ready_bytes, status, drain_state) ON TABLE public.workers TO {}"
