@@ -375,6 +375,14 @@ can occur **after the upstream model returned successfully**; an empty
 `llm_calls` result then means missing persisted usage, not proof of zero upstream
 calls. Inspect the Gateway exception before retrying a metered request.
 
+Gateway dispatch admission also requires `SELECT`, `INSERT` and `UPDATE` on
+`gateway_dispatch_receipts`, without `DELETE`. Bootstrap reapplies these grants
+on every rollout. If the Gateway returns `503 dispatch_audit_unavailable`, check
+its fixed-category error log and the runtime role's table privileges: admission
+must commit before the provider request is sent. A `database` error with missing
+receipt privileges is a platform bootstrap defect; provider retries cannot fix
+it. Verify this path with the restricted `loom_gateway` role, not a superuser.
+
 Canonical artifacts/trajectories, transient execution source, and backup storage
 use distinct buckets and identities. Canonical outputs remain durable after
 execution source cleanup; source retention remains 86,400 seconds. Neither
