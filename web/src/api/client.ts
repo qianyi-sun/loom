@@ -7,7 +7,7 @@
  */
 
 import { getApiBase } from "../lib/frontendConfig";
-import type { paths } from "./schema";
+import type { components, paths } from "./schema";
 
 export type ApiError = { status: number; detail: string };
 
@@ -1307,6 +1307,8 @@ export const api = {
   retryPipelineStageRun,
   getOverview: () =>
     apiFetch<OverviewSummary>("/api/v1/overview", { cache: "no-store" }),
+  getMonitorPlacement: (q: Record<string, string | undefined>) =>
+    apiFetch<components["schemas"]["MonitorPlacement"]>(`/api/v1/monitor/placement${qs(q)}`, { cache: "no-store" }),
   getMonitorSummary: (
     q: Record<string, string | undefined> = {},
   ) =>

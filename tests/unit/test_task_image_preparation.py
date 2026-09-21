@@ -102,3 +102,18 @@ def test_only_known_phase_shape_and_timestamps_are_returned():
     assert result["message"] is None
     assert [phase["name"] for phase in result["phases"]] == ["prepare", "build"]
     assert "secret" not in str(result)
+
+
+def test_build_budget_and_job_deadline_use_structured_evidence_only():
+    row = materialization(failure_reason="build_deadline_exceeded")
+    native = {"phases": [{"name": "build", "state": {"terminated": {"exitCode": 124}}}],
+              "builder_log": "private; build complete; scratch cleanup started"}
+    attempt = SimpleNamespace(materialization_id=row.id, lease_epoch=3, native_build=native)
+    result = preparation_response(row, attempt)
+    assert "task's build-time budget" in result["message"]
+    native["job_conditions"] = [{"status": "True", "reason": "DeadlineExceeded"}]
+    result = preparation_response(row, attempt)
+    assert "platform Job lifecycle deadline" in result["message"]
+    assert "private" not in str(result)
+    native.clear()
+    assert preparation_response(row, attempt)["message"] == "Task image preparation exceeded its deadline."

@@ -144,7 +144,7 @@ def test_wait_upgrade_refuses_busy_parent_without_partial_schema(wait_migration,
 
 
 @pytest.mark.parametrize("busy_table", [
-    "task_image_capacity_waits", "execution_targets", "task_image_materializations",
+    "task_image_capacity_waits", "execution_targets", "task_image_materializations", "trials",
 ])
 @pytest.mark.timeout(10, func_only=True)
 def test_wait_downgrade_refuses_busy_table_without_partial_schema(wait_migration, busy_table):

@@ -84,6 +84,13 @@ async def test_cancelled_output_unavailable_agrees_across_public_projections(
             monitor = await client.get(
                 "/api/v1/monitor/summary", params={"view": "trials", "batch_id": str(batch_id)},
             )
+            placement = await client.get("/api/v1/monitor/placement", params={"target_id": target.target_id})
+            forbidden = await client.get("/api/v1/monitor/placement", params={
+                "target_id": target.target_id, "team_id": str(uuid4()),
+            })
+        assert placement.status_code == 200, placement.text
+        assert placement.json()["available"] is True
+        assert forbidden.status_code == 403
         for response in (detail, batch, monitor):
             assert response.status_code == 200, response.text
         materialization = detail.json()["materialization"]

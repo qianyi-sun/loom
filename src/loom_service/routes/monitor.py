@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Response
 from sqlalchemy import case, func, select
 
 from loom.db.schema import ArtifactUploadSession, Batch, ServiceExecutionLease, Trial
@@ -26,10 +26,12 @@ from loom_service.monitor_filters import (
     apply_trial_monitor_filters,
     resolve_monitor_team_filter,
 )
+from loom_service.monitor_placement import load_placement
 from loom_service.service_execution_status import (
     SERVICE_EXECUTION_LIFECYCLE_STAGES,
     service_execution_lifecycle_case,
 )
+from loom_service.trial_progress import latest_execution_id, progress_summary
 from loom_service.worker_backends import (
     _HEARTBEAT_FRESHNESS_SEC,
     get_active_backends,
@@ -160,11 +162,14 @@ async def _service_execution_activity(
     target_team: UUID | None,
     filters: dict[str, Any],
 ) -> dict[str, object]:
-    def scoped(stmt: Any) -> Any:
+    def scoped(stmt: Any, *, latest: bool = True) -> Any:
+        stmt = stmt.join(Trial, Trial.id == ServiceExecutionLease.trial_id).where(
+            ServiceExecutionLease.execution_role == "attempt"
+        )
+        if latest:
+            stmt = stmt.where(ServiceExecutionLease.id == latest_execution_id())
         return apply_trial_monitor_filters(
-            stmt.join(Trial, Trial.id == ServiceExecutionLease.trial_id).where(
-                ServiceExecutionLease.execution_role == "attempt"
-            ),
+            stmt,
             target_team=target_team,
             **filters,
         )
@@ -198,7 +203,7 @@ async def _service_execution_activity(
         await session.execute(
             scoped(
                 select(ServiceExecutionLease.source_cleanup_state, func.count())
-                .select_from(ServiceExecutionLease)
+                .select_from(ServiceExecutionLease), latest=False,
             ).group_by(ServiceExecutionLease.source_cleanup_state)
         )
     ).all()
@@ -265,7 +270,7 @@ async def _service_execution_activity(
                     ArtifactUploadSession,
                     ArtifactUploadSession.id
                     == ServiceExecutionLease.output_upload_session_id,
-                )
+                ), latest=False,
             )
         )
     ).one()
@@ -343,9 +348,10 @@ def _queue_status(
     claimed: int,
     running: int,
     active_workers: int,
+    native_work: bool = False,
 ) -> str:
     waiting = queued + claimed
-    if active_workers <= 0 and (waiting > 0 or running > 0):
+    if not native_work and active_workers <= 0 and (waiting > 0 or running > 0):
         return "blocked"
     if waiting > 0:
         return "waiting"
@@ -442,7 +448,7 @@ async def get_monitor_summary(
         provider_model_id=provider_model_id,
         state=None,
     )
-    service_filters: dict[str, object] = {
+    service_filters: dict[str, Any] = {
         "q": q_value,
         "batch_id": batch_id,
         "benchmark_id": benchmark_id,
@@ -487,6 +493,9 @@ async def get_monitor_summary(
             filters=service_filters,
         ),
     }
+    progress = await progress_summary(session, apply_trial_monitor_filters(
+        select(Trial.id), target_team=target_team, **service_filters,
+    ))
     queued = trial_counts["queued"]
     protected_pending = trial_counts["protected-pending"]
     claimed = trial_counts["claimed"]
@@ -507,6 +516,7 @@ async def get_monitor_summary(
             "batch_id": str(batch_id) if batch_id else None,
             "state": state,
         },
+        "progress": progress,
         "state_counts": {
             "batches": batch_counts,
             "trials": trial_counts,
@@ -525,8 +535,42 @@ async def get_monitor_summary(
                 claimed=claimed,
                 running=running,
                 active_workers=active_workers,
+                native_work=progress["native_active_trials"] > 0,
             ),
         },
         "resources": resources,
         "service_execution": service_execution,
+    }
+
+
+@router.get("/monitor/placement")
+async def get_monitor_placement(
+    response: Response, sc: SessionAndCtx, target_id: str,
+    team_id: UUID | None = None, batch_id: UUID | None = None,
+    q: str | None = None, benchmark_id: str | None = None,
+    agent_name: str | None = None, model_provider: str | None = None,
+    model_name: str | None = None, provider_connection_id: UUID | None = None,
+    provider_model_id: str | None = None,
+) -> dict[str, Any]:
+    session, ctx = sc
+    require_scope(ctx, "read:own")
+    response.headers["Cache-Control"] = "no-store"
+    ids = apply_trial_monitor_filters(
+        select(Trial.id), target_team=resolve_monitor_team_filter(ctx, team_id),
+        batch_id=batch_id, q=q, benchmark_id=benchmark_id, agent_name=agent_name,
+        model_provider=model_provider, model_name=model_name,
+        provider_connection_id=provider_connection_id, provider_model_id=provider_model_id,
+    )
+    capacity = await fetch_execution_capacity_status(session)
+    rows = capacity.get("targets")
+    target = next((row for row in rows if isinstance(row, dict) and row["target_id"] == target_id), None) if isinstance(rows, list) else None
+    if target is None:
+        raise HTTPException(status_code=404, detail="execution target not found")
+    observation = target.get("observation")
+    if observation is None:
+        return {"available": False, "nodes": [], "pending": [], "is_fresh": False}
+    return {
+        **await load_placement(session, observation_id=observation["id"], scoped_ids=ids,
+                               admin=is_admin(ctx)),
+        "observed_at": observation["observed_at"], "is_fresh": observation["is_fresh"],
     }

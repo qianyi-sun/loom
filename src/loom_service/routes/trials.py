@@ -80,6 +80,7 @@ from loom_service.service_execution_status import service_execution_lifecycle_st
 from loom_service.stale_running_debug import trial_stale_running_debug_context
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 from loom_service.task_image_preparation import task_image_preparation_for_trial
+from loom_service.trial_progress import load_trial_progress
 from loom_service.trial_timing import trial_started_at
 from loom_service.usage_accounting import (
     cost_meta_filter as _cost_meta_filter,
@@ -452,22 +453,23 @@ async def list_trials(
                 .all()
             )
             users_by_id = {user.id: user for user in user_rows}
-    return {
-        "items": [
-            _trial_row(
-                r,
-                usage=usage_by_trial.get(r.id),
-                owner_team=teams_by_id.get(r.team_id),
-                submitted_by_user=(
-                    users_by_id.get(r.submitted_by_user_id)
-                    if r.submitted_by_user_id is not None
-                    else None
-                ),
-            )
-            for r in rows
-        ],
-        "next_cursor": next_c,
-    }
+    progress = await load_trial_progress(s, rows, admin=is_admin(ctx))
+    items = [
+        _trial_row(
+            r,
+            usage=usage_by_trial.get(r.id),
+            owner_team=teams_by_id.get(r.team_id),
+            submitted_by_user=(
+                users_by_id.get(r.submitted_by_user_id)
+                if r.submitted_by_user_id is not None
+                else None
+            ),
+        )
+        for r in rows
+    ]
+    for item, row in zip(items, rows, strict=True):
+        item["progress"] = progress[row.id]
+    return {"items": items, "next_cursor": next_c}
 
 
 def _artifact_bucket(item: dict[str, Any], default_bucket: str) -> str:
@@ -683,6 +685,7 @@ async def get_trial(
         owner_team=owner_team,
         submitted_by_user=submitted_by_user,
     )
+    base["progress"] = (await load_trial_progress(s, [trial], admin=is_admin(ctx)))[trial.id]
     base["result"] = trial.result
     base["task_environment_preparation"] = await task_image_preparation_for_trial(s, trial)
     base["price_snapshots"] = await price_snapshots_for_trials(s, [trial.id])

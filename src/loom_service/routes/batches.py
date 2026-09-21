@@ -132,6 +132,7 @@ from loom_service.task_config_validation import (
     split_valid_task_configs,
 )
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
+from loom_service.trial_progress import latest_execution_id, progress_summary
 from loom_service.trial_timing import trial_started_at
 from loom_service.usage_accounting import (
     PreRunBudgetEstimate,
@@ -2237,6 +2238,7 @@ async def _batch_service_execution_summary(
             .where(
                 ServiceExecutionLease.trial_id.in_(trial_ids),
                 ServiceExecutionLease.execution_role == "attempt",
+                ServiceExecutionLease.id == latest_execution_id(),
             )
             .group_by(
                 lifecycle_expr,
@@ -2530,6 +2532,7 @@ async def get_batch(
     rerunnable_failed_count = sum(1 for trial in original_trials if _is_rerunnable_failure(trial))
     extra = {
         "service_execution_summary": service_execution_summary,
+        "progress": await progress_summary(s, select(Trial.id).where(Trial.batch_id == b.id)),
         "rerun_batches": [
             {
                 "id": str(child.id),

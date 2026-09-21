@@ -12,7 +12,7 @@ describe("TaskImagePreparationCard", () => {
       phases: [{ name: "build", state: "terminated", exit_code: 37 }], resources_released: true,
     }]} />);
     expect(screen.getByText(/Check the task Dockerfile/)).toBeInTheDocument();
-    expect(screen.getByText("build: terminated · exit code 37")).toBeInTheDocument();
+    expect(screen.getByText("Build / scratch cleanup: terminated · exit code 37")).toBeInTheDocument();
     expect(screen.getByText("Build resources released")).toBeInTheDocument();
     expect(screen.getByText(/later cache rebuild can change this view/)).toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();

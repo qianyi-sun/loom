@@ -134,7 +134,7 @@ const taskSet = {
   created_at: "2026-07-16T00:00:00Z",
 };
 
-function monitorSummary() {
+export function monitorSummary() {
   return {
     scope: { view: "trials", team_id: team.id, benchmark_id: null, agent: null, model: null, batch_id: null, state: null },
     state_counts: {
