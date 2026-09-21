@@ -96,27 +96,16 @@ NEBIUS_PLATFORM_EXACT = {
 }
 NEBIUS_PLATFORM_PREFIXES = ("deploy/nebius/",)
 
-PROTECTED_STAGING_ROLLOUT_EXACT = {
+PROTECTED_DEPLOYMENT_EXACT = {
     ".github/workflows/deploy-environment.yml",
     ".github/workflows/release-promotion-gate.yml",
     "deploy/environments/staging.cluster.toml",
     "deploy/environment-state/staging.toml",
-    "deploy/worker-pools/gb10/known_hosts",
-    "deploy/worker-pools/gb10/loom-staging-rollout-platform-dev.exports",
-    "deploy/worker-pools/gb10/loom-staging-rollout-shared-work2-export-authority.sudoers",
-    "deploy/worker-pools/gb10/ssh_config",
     "scripts/ops/deploy_environment.sh",
     "scripts/ops/release_gate.py",
     "scripts/ops/release_identity.py",
     "scripts/ops/verify_production_release_gate.sh",
-    "scripts/ops/verify_staging_rollout_secret_boundary.py",
     "scripts/validate_environment_isolation.py",
-    "src/loom_cli/rollout/steps/s04_gb10_prep.py",
-    "src/loom_cli/rollout/steps/s10_env_state.py",
-    "src/loom_cli/rollout_lock.py",
-    "src/loom_cli/rollout_lock_cli.py",
-    "tests/loom_cli/rollout/steps/test_env_state_external_prereqs.py",
-    "tests/loom_cli/test_rollout_lock.py",
     "tests/loom_cli/test_cluster_target_boundary.py",
     "tests/loom_cli/test_cluster_hosted_retirement.py",
     "src/loom_cli/application_migration_contract.py",
@@ -129,48 +118,6 @@ PROTECTED_STAGING_ROLLOUT_EXACT = {
     "tests/ops/test_release_identity.py",
     "tests/ops/test_release_promotion_gate.py",
 }
-
-PROTECTED_STAGING_ROLLOUT_PREFIXES = (
-    "deploy/staging-rollout/",
-    "scripts/ops/staging_rollout_",
-    "src/loom_cli/rollout/",
-    "tests/loom_cli/rollout/",
-    "tests/ops/test_staging_rollout_",
-)
-
-PROTECTED_NATIVE_AUTHORITY_EXACT = {
-    "deploy/worker-pools/gb10/README.md",
-    "docs/architecture/2026-08-31-personal-dev-native-runtime-authority-design.md",
-    "docs/architecture/2026-09-01-personal-dev-native-operator-material-authority-design.md",
-    "docs/implementation-plans/2026-09-01-personal-dev-native-operator-material-authority.md",
-    "docs/runbooks/personal-dev-native-builder-acceptance.md",
-    "docs/runbooks/personal-dev-native-builder-runtime.md",
-    "scripts/ops/converge_personal_dev_native_builder_release.py",
-    "scripts/ops/install_personal_dev_native_builder_runtime.py",
-    "scripts/ops/install_personal_dev_native_builder_runtime_authority.py",
-    "scripts/ops/personal_dev_native_builder_conformance.py",
-    "scripts/ops/personal_dev_native_builder_runtime_crypto.py",
-    "scripts/ops/personal_dev_native_builder_runtime_authority.py",
-    "scripts/ops/personal_dev_native_builder_runtime_authority_client.py",
-    "scripts/ops/personal_dev_native_builder_runtime_authority_launcher.py",
-    "scripts/ops/personal_dev_native_builder_runtime_authority_material_client.py",
-    "scripts/ops/personal_dev_native_builder_runtime_authority_protocol.py",
-    "scripts/ops/personal_dev_native_builder_runtime_profile.py",
-    "tests/ops/test_converge_personal_dev_native_builder_release.py",
-    "tests/ops/test_install_personal_dev_native_builder_runtime.py",
-    "tests/ops/test_install_personal_dev_native_builder_runtime_authority.py",
-    "tests/ops/test_personal_dev_native_builder_conformance.py",
-    "tests/ops/test_personal_dev_native_builder_runbooks.py",
-    "tests/ops/test_personal_dev_native_builder_runtime_authority.py",
-    "tests/ops/test_personal_dev_native_builder_runtime_authority_protocol.py",
-    "tests/ops/test_personal_dev_native_builder_runtime_profile.py",
-    # Retired path tombstones keep removal diffs inside the protected lane.
-    "scripts/ops/personal_dev_native_builder_conformance.sh",
-    "scripts/ops/personal_dev_native_runtime_authority.py",
-    "tests/ops/test_personal_dev_native_runtime_authority.py",
-}
-
-PROTECTED_NATIVE_AUTHORITY_PREFIXES = ("deploy/personal-dev-native-builder/",)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPONENT_OWNERSHIP_MANIFEST = REPO_ROOT / "config/component-ownership.toml"
@@ -268,20 +215,8 @@ def _is_dependency_authority_path(path: str) -> bool:
     )
 
 
-def _is_protected_staging_rollout_path(path: str) -> bool:
-    return _matches(
-        path,
-        exact=PROTECTED_STAGING_ROLLOUT_EXACT,
-        prefixes=PROTECTED_STAGING_ROLLOUT_PREFIXES,
-    )
-
-
-def _is_protected_native_authority_path(path: str) -> bool:
-    return _matches(
-        path,
-        exact=PROTECTED_NATIVE_AUTHORITY_EXACT,
-        prefixes=PROTECTED_NATIVE_AUTHORITY_PREFIXES,
-    )
+def _is_protected_deployment_path(path: str) -> bool:
+    return path in PROTECTED_DEPLOYMENT_EXACT
 
 
 @lru_cache(maxsize=512)
@@ -344,13 +279,9 @@ def plan_validations(
         for name in HEAVY_CHECKS:
             select(name, "ownership-authority-change")
 
-    if any(_is_protected_staging_rollout_path(path) for path in paths):
+    if any(_is_protected_deployment_path(path) for path in paths):
         for name in HEAVY_CHECKS:
-            select(name, "protected-staging-rollout")
-
-    if any(_is_protected_native_authority_path(path) for path in paths):
-        for name in HEAVY_CHECKS:
-            select(name, "protected-native-authority")
+            select(name, "protected-deployment")
 
     integration_exact = {
         ".github/workflows/ci.yml",
@@ -485,8 +416,7 @@ def plan_validations(
             or path in OWNERSHIP_AUTHORITY_PATHS
             or _matches(path, exact=NEBIUS_IAC_EXACT, prefixes=NEBIUS_IAC_PREFIXES)
             or _matches(path, exact=NEBIUS_PLATFORM_EXACT, prefixes=NEBIUS_PLATFORM_PREFIXES)
-            or _is_protected_staging_rollout_path(path)
-            or _is_protected_native_authority_path(path)
+            or _is_protected_deployment_path(path)
             or bool(test_owner_lanes)
         )
         for lane in test_owner_lanes:

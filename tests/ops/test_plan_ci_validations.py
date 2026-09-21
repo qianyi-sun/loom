@@ -543,36 +543,13 @@ def test_dependency_authority_changes_select_every_heavy_gate(path: str) -> None
     [
         "deploy/environments/staging.cluster.toml",
         "deploy/environment-state/staging.toml",
-        "deploy/staging-rollout/loom-staging-rollout.sudoers",
-        "deploy/worker-pools/gb10/known_hosts",
-        "deploy/worker-pools/gb10/loom-staging-rollout-platform-dev.exports",
-        "deploy/worker-pools/gb10/loom-staging-rollout-shared-work2-export-authority.sudoers",
-        "deploy/worker-pools/gb10/ssh_config",
-        "scripts/ops/staging_rollout_host.py",
-        "scripts/ops/staging_rollout_sealed_source.py",
-        "scripts/ops/staging_rollout_shared_repo.py",
-        "scripts/ops/staging_rollout_shared_work2.py",
-        "scripts/ops/staging_rollout_shared_work2_export.py",
-        "scripts/ops/staging_rollout_shared_work2_export_authority.py",
-        "scripts/ops/staging_rollout_shared_repo_consumer.py",
         "scripts/ops/deploy_environment.sh",
         "scripts/ops/release_gate.py",
         "scripts/ops/release_identity.py",
         "scripts/ops/verify_production_release_gate.sh",
-        "scripts/ops/verify_staging_rollout_secret_boundary.py",
         "scripts/validate_environment_isolation.py",
         ".github/workflows/deploy-environment.yml",
         ".github/workflows/release-promotion-gate.yml",
-        "src/loom_cli/rollout/rehearsal_executor.py",
-        "src/loom_cli/rollout/operator/broker.py",
-        "src/loom_cli/rollout/steps/s04_gb10_prep.py",
-        "src/loom_cli/rollout/steps/s10_env_state.py",
-        "src/loom_cli/rollout_lock.py",
-        "src/loom_cli/rollout_lock_cli.py",
-        "tests/loom_cli/rollout/test_rehearsal_executor.py",
-        "tests/loom_cli/rollout/operator/test_broker.py",
-        "tests/loom_cli/rollout/steps/test_env_state_external_prereqs.py",
-        "tests/loom_cli/test_rollout_lock.py",
         "tests/loom_cli/test_cluster_target_boundary.py",
         "tests/ops/test_deploy_environment_release_manifest.py",
         "tests/ops/test_environment_isolation.py",
@@ -580,40 +557,21 @@ def test_dependency_authority_changes_select_every_heavy_gate(path: str) -> None
         "tests/ops/test_release_promotion_gate.py",
         "tests/loom_cli/test_cluster_render.py",
         "tests/loom_cli/test_environment_state.py",
-        "tests/ops/test_staging_rollout_host.py",
-        "tests/ops/test_staging_rollout_sealed_source.py",
-        "tests/ops/test_staging_rollout_shared_repo.py",
-        "tests/ops/test_staging_rollout_shared_repo_consumer.py",
-        "tests/ops/test_staging_rollout_shared_work2.py",
-        "tests/ops/test_staging_rollout_shared_work2_export.py",
-        "tests/ops/test_staging_rollout_shared_work2_export_authority.py",
     ],
 )
-def test_protected_staging_rollout_paths_select_every_heavy_gate(path: str) -> None:
+def test_protected_deployment_paths_select_every_heavy_gate(path: str) -> None:
     plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
 
     assert plan.unowned_runtime is False
     assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
-    assert all("protected-staging-rollout" in plan.reasons[check] for check in HEAVY_CHECKS)
-
-
-def test_rollout_module_changes_are_protected_staging_authority() -> None:
-    plan = plan_validations(
-        changed_paths=["src/loom_cli/rollout/operator_notes.py"],
-        labels=set(),
-        event_name="pull_request",
-    )
-
-    assert plan.unowned_runtime is False
-    assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
-    assert all("protected-staging-rollout" in plan.reasons[check] for check in HEAVY_CHECKS)
+    assert all("protected-deployment" in plan.reasons[check] for check in HEAVY_CHECKS)
 
 
 @pytest.mark.parametrize(
     "path",
     [
-        "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/instruction.md",
-        "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/instruction.md",
+        "deploy/catalog/unowned-fixture/tasks/hello-world/instruction.md",
+        "deploy/catalog/unowned-fixture/tasks/oracle-hello-world/instruction.md",
         "unowned-runtime/new-input-two.bin",
         "unowned-runtime/new-input.bin",
     ],
