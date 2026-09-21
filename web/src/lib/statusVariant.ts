@@ -16,7 +16,11 @@ export function trialStateVariant(state: string): StatusVariant {
       return "success";
     case "running":
     case "claimed":
+    case "image_preparation":
+    case "starting":
+    case "archiving":
       return "running";
+    case "execution_wait":
     case "queued":
     case "protected-pending":
     case "submitted":

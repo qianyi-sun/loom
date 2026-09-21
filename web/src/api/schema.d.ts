@@ -39,6 +39,16 @@ export interface paths {
       };
     };
   };
+  "/api/v1/monitor/placement": {
+    get: {
+      parameters: { query: {
+        target_id: string; team_id?: string; batch_id?: string; q?: string;
+        benchmark_id?: string; agent_name?: string; model_provider?: string;
+        model_name?: string; provider_connection_id?: string; provider_model_id?: string;
+      } };
+      responses: { 200: { content: { "application/json": components["schemas"]["MonitorPlacement"] } } };
+    };
+  };
   "/api/v1/trials": {
     get: {
       parameters: {
@@ -704,7 +714,57 @@ export interface paths {
 
 export interface components {
   schemas: {
+    TrialProgress: {
+      stage: string;
+      label: string;
+      detail: string | null;
+      wait_message: string | null;
+      observed_at: string | null;
+      observation_stale: boolean;
+      node_name: string | null;
+      timeline: { label: string; started_at: string | null; finished_at: string | null; seconds: number | null }[];
+    };
+    ProgressSummary: {
+      oldest_wait_since_submission_seconds?: Record<string, number>;
+      stages: Record<string, number>;
+      trial_count: number;
+      images: { states: Record<string, number>; image_count: number; waiting_trials: number };
+    };
+    PlacementResources: { cpu_millis: number; memory_mib: number; storage_mib: number };
+    PlacementWorkload: {
+      kind: "build" | "execution";
+      trial_id: string;
+      label: string;
+      state: string;
+      wait_message: string | null;
+      requests: components["schemas"]["PlacementResources"];
+    };
+    MonitorPlacement: {
+      available: boolean;
+      is_fresh: boolean;
+      observed_at?: string;
+      capacity_scope?: "shared_target";
+      workload_scope?: "authorized_filtered_trials";
+      build_concurrency_limit?: number | null;
+      pending_builds?: number;
+      pending_executions?: number;
+      pending: components["schemas"]["PlacementWorkload"][];
+      nodes: {
+        id: string;
+        label: string;
+        ready: boolean;
+        draining: boolean | null;
+        deleting: boolean;
+        unschedulable: boolean;
+        allocatable: components["schemas"]["PlacementResources"];
+        requested: components["schemas"]["PlacementResources"];
+        build_pods: number;
+        execution_pods: number;
+        workloads: components["schemas"]["PlacementWorkload"][];
+      }[];
+    };
     MonitorSummary: {
+      progress?: components["schemas"]["ProgressSummary"];
       scope: {
         view: "batches" | "trials";
         team_id: string | null;
@@ -908,6 +968,7 @@ export interface components {
       group_ratio: number | null;
     };
     Trial: {
+      progress?: components["schemas"]["TrialProgress"];
       id: string;
       task_id: string;
       team_id: string;
@@ -1368,6 +1429,7 @@ export interface components {
     BatchDetail: components["schemas"]["Batch"] & {
       task_resource_requests?: Record<string, components["schemas"]["TaskResourceRequests"]>;
       trial_summary: Record<string, number>;
+      progress?: components["schemas"]["ProgressSummary"];
       service_execution_summary?: {
         lease_count: number;
         lifecycle_stages: Record<string, number>;

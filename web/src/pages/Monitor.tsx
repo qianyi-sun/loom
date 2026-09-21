@@ -1,3 +1,6 @@
+import type { components } from "../api/schema";
+import { ProgressSummary, TrialProgressPill } from "../components/TrialProgress";
+import { NebiusPlacement } from "../components/NebiusPlacement";
 /**
  * Monitor — single route with a segmented toggle between Batches and
  * Trials. Shares a filter bar (search + state) across both views and
@@ -39,13 +42,14 @@ import {
   type SubmittedByUser,
 } from "../lib/ownership";
 import { batchInspectionCommands } from "../lib/quickstartSnippets";
-import { batchStateVariant, trialStateVariant } from "../lib/statusVariant";
+import { batchStateVariant } from "../lib/statusVariant";
 import { formatTokenUsage } from "../lib/tokenUsage";
 
 type View = "batches" | "trials";
 
 const BATCH_STATE_OPTIONS = ["submitted", "running", "finished", "cancelled"];
 const TRIAL_STATE_OPTIONS = [
+  "stage:image_preparation", "stage:execution_wait", "stage:starting", "stage:running", "stage:archiving",
   "queued",
   "protected-pending",
   "claimed",
@@ -59,12 +63,17 @@ const TERMINAL_BATCH_STATES = new Set(["finished", "cancelled"]);
 const TERMINAL_TRIAL_STATES = new Set(["succeeded", "failed", "cancelled"]);
 
 const STATE_OPTION_LABELS: Record<string, string> = {
+  "stage:image_preparation": "Preparing image",
+  "stage:execution_wait": "Waiting for execution",
+  "stage:starting": "Starting environment",
+  "stage:running": "Running (native stage)",
+  "stage:archiving": "Archiving output",
   cancelled: "Cancelled - stopped",
   claimed: "Claimed - worker reserved it",
   failed: "Failed - needs diagnosis",
   finished: "Finished - all trials terminal",
   "protected-pending": "Protected pending - waiting for runtime admission",
-  queued: "Queued - waiting for worker",
+  queued: "Queued - awaiting prerequisites or scheduling",
   running: "Running - in progress",
   materializing: "Materializing - securing complete output",
   submitted: "Submitted - waiting for scheduling",
@@ -159,6 +168,7 @@ interface BatchRow {
   cost_estimate_source?: string | null;
 }
 interface TrialRow {
+  progress?: components["schemas"]["TrialProgress"];
   id: string;
   team_id?: string;
   team_name?: string | null;
@@ -216,6 +226,10 @@ function queueStatusVariant(status: string): StatusVariant {
 }
 
 function queueStatusText(summary: MonitorSummary): string {
+  if (summary.progress && summary.service_execution?.targets.length) {
+    const stages = summary.progress.stages;
+    return `${stages.image_preparation ?? 0} preparing images · ${stages.execution_wait ?? 0} waiting for execution · ${stages.starting ?? 0} starting · ${stages.running ?? 0} running.`;
+  }
   const { active_workers, running, status, waiting } = summary.queue;
   const resources = summary.resources?.aggregate;
   if (status === "blocked") {
@@ -335,7 +349,7 @@ function NebiusExecutionBreakdown({
       <div>
         <h3 className="text-sm font-semibold text-slate-900">Nebius service execution</h3>
         <p className="mt-1 text-xs text-slate-600">
-          Provider capacity is separate from Docker worker slots. Configured headroom is not executable capacity until a fresh observation confirms it.
+          Image builds and executions share node capacity. Scale headroom becomes executable capacity only after nodes are ready.
         </p>
       </div>
       {serviceExecution.targets.map((target) => {
@@ -375,6 +389,7 @@ function NebiusExecutionBreakdown({
               <span>quota: {Math.round((observation?.provider_used_vcpu_millis ?? 0) / 1000)} / {Math.round((observation?.provider_quota_vcpu_millis ?? 0) / 1000)} vCPU</span>
               <span>commands waiting: {target.command_backlog}</span>
             </div>
+            <NebiusPlacement targetId={target.target_id} />
             {[...target.blockers, ...(profile?.blockers ?? [])].length > 0 ? (
               <p className="mt-2 break-words text-xs text-amber-800">
                 Blockers: {[...new Set([...target.blockers, ...(profile?.blockers ?? [])])].join(", ")}
@@ -386,8 +401,8 @@ function NebiusExecutionBreakdown({
       {activity ? (
         <div className="space-y-2">
           <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
-            <CountBox label="Execution leases" value={`${activity.lease_count}`} />
-            <CountBox label="Materializing" value={`${activity.materialization.backlog}`} />
+            <CountBox label="Latest execution attempts" value={`${activity.lease_count}`} />
+            <CountBox label="Archiving output" value={`${activity.materialization.backlog}`} />
             <CountBox label="Oldest pending" value={activity.materialization.oldest_pending_age_seconds == null ? "—" : `${activity.materialization.oldest_pending_age_seconds}s`} />
             <CountBox label="Unavailable" value={`${activity.materialization.states.unavailable ?? 0}`} />
             <CountBox label="Transfer retries" value={`${activity.materialization.retry_attempts}`} />
@@ -527,6 +542,8 @@ function MonitorHealthSummary({
         }
       />
       <Card.Body className="space-y-4">
+        <ProgressSummary progress={data.progress} batchId={batchId} />
+        {!(data.progress && data.service_execution?.targets.length) ? <>
         <div className="grid gap-3 md:grid-cols-4">
           <CountBox
             label="Concurrent tasks"
@@ -579,6 +596,7 @@ function MonitorHealthSummary({
           </div>
         </div>
         <ResourcePoolBreakdown resources={data.resources} />
+        </> : null}
         <NebiusExecutionBreakdown serviceExecution={data.service_execution} />
         <div className="flex flex-wrap gap-2 text-xs text-slate-500">
           <span>
@@ -1027,9 +1045,7 @@ function TrialsView({
                       {ownershipLabel(t)}
                     </td>
                     <td className="px-4 py-3">
-                      <StatusPill variant={trialStateVariant(t.state)}>
-                        {t.state}
-                      </StatusPill>
+                      <TrialProgressPill progress={t.progress} state={t.state} />
                     </td>
                     <td className="px-4 py-3 text-slate-700">
                       {t.agent_name ?? "—"}

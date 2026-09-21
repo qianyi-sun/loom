@@ -1,0 +1,37 @@
+# Nebius progress and placement
+
+The Monitor, Batch detail and Trial detail share a read-only progress projection.
+Persisted Trial, image materialization and execution lease states remain the
+scheduling authorities. The state=stage:image_preparation filter (and the other
+public stages) uses the same SQL expression as summary counts.
+Raw Trial state filters remain supported.
+
+Public stages are image preparation, execution wait, environment startup,
+execution, output archival and terminal outcome. Task verifier activity must not
+be inferred from output upload or archival. Shared image counts are distinct
+from affected Trial counts. Terminal Trial outcomes take precedence over later
+shared cache changes.
+
+Migration 0153 adds a nullable Trial scheduling observation and a nullable
+capacity-wait reason. A scheduler rejection records a bounded reason and time;
+successful reservation retains the image-readiness boundary and lease identity
+for the timeline. Historical records without that boundary show combined
+preparation/admission time instead of inventing a build duration. The new
+observation is diagnostic only and never grants capacity or execution authority.
+
+GET /api/v1/monitor/placement?target_id=... reads existing capacity observations
+on demand. Resource and Pod totals cover the shared target; workload links are
+restricted to the reader's authorized Trial scope and Monitor filters. Ordinary
+members see logical node labels, not physical node/provider identifiers or
+other teams' workloads. Both execution and build Pods consume shared resources.
+Requests are reservations, not measured resource utilization. Latest-attempt
+Trial counts do not remove older attempts from cleanup/capacity accounting.
+
+The UI retains adaptive polling and fetches node detail only while expanded.
+Observation freshness is explicit. A build concurrency limit observed from an
+active native build is shown only while fresh and unambiguous; missing evidence
+is unavailable, never a hardcoded node count or inferred zero capacity.
+
+Focused verification uses API/database fixtures, a build/failure/cache-reuse
+path and browser interactions. These checks do not replace the ordinary-member
+deployed browser journey in issue #1981, nor require another paid model batch.

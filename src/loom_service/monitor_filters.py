@@ -14,6 +14,7 @@ from sqlalchemy import String, cast, func, or_
 from loom.auth import AuthContext
 from loom.db.schema import Batch, Task, Trial
 from loom_service.auth_guards import is_admin, require_team_or_admin
+from loom_service.trial_progress import progress_stage_case
 
 
 def resolve_monitor_team_filter(
@@ -177,5 +178,7 @@ def apply_trial_monitor_filters(
         stmt = stmt.where(Trial.provider_model_id == provider_model_id)
     wanted = split_state_filter(state)
     if wanted:
-        stmt = stmt.where(Trial.state.in_(wanted))
+        stages = [value.removeprefix("stage:") for value in wanted if value.startswith("stage:")]
+        states = [value for value in wanted if not value.startswith("stage:")]
+        stmt = stmt.where(or_(Trial.state.in_(states), progress_stage_case().in_(stages)))
     return stmt
