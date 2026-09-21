@@ -1,3 +1,3 @@
-"""Fail-closed authority for allocation-contained task-image builders."""
+"""Signed task-image execution and retained publication compatibility."""
 
 __all__: list[str] = []

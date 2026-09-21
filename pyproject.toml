@@ -113,7 +113,6 @@ ci-coverage = [
 
 [project.scripts]
 loom = "loom_cli.__main__:main"
-loom-task-image-authority = "loom_task_image_authority.__main__:main"
 loom-task-image-signer = "loom_task_image_signer.__main__:main"
 
 [project.entry-points."loom.family.keys"]

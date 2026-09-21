@@ -33,7 +33,7 @@ def test_frontend_changes_do_not_select_unrelated_python_integration(path: str) 
 
 
 @pytest.mark.parametrize("path", [
-    "src/loom_task_image_authority/api.py",
+    "src/loom_task_image_authority/execution_store.py",
     "src/loom/task_image_materialization.py",
     "src/loom/db/schema.py",
     "src/loom/security/secret_store.py",

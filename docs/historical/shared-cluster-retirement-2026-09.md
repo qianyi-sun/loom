@@ -78,6 +78,13 @@ grant-revocation constraints continue to matter when reading or restoring old
 data. Migration tests use retained row fixtures instead of requiring retired
 controllers to create that history.
 
+The standalone task-image build authority, projection/session APIs, bundle
+issuance, registry token signer, publication worker and collector are retired.
+`loom_task_image_authority` now retains signed execution readers and historical
+publication validation. Slurm cluster/job identifiers in immutable signed
+publication schemas are required to verify existing records; they do not expose
+a build service. Nebius task-image builds use the native execution actuator.
+
 ## Operational boundary
 
 This is a repository retirement. It neither performs nor proves infrastructure

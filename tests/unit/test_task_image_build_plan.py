@@ -15,7 +15,6 @@ from loom.task_image_build_plan import (
     TaskImageBuildPlanV1,
     derive_task_image_build_plan,
 )
-from loom_task_image_authority.store import TaskImageBuildSessionAuthorization
 
 NOW = datetime(2026, 9, 3, 14, 0, tzinfo=UTC)
 GRANT_ID = UUID("11111111-1111-1111-1111-111111111111")
@@ -23,7 +22,7 @@ SESSION_ID = UUID("22222222-2222-2222-2222-222222222222")
 MATERIALIZATION_ID = UUID("33333333-3333-3333-3333-333333333333")
 
 
-def _authorization(**changes: object) -> TaskImageBuildSessionAuthorization:
+def _authorization(**changes: object) -> SimpleNamespace:
     values: dict[str, object] = {
         "grant_id": GRANT_ID,
         "session_id": SESSION_ID,
@@ -43,7 +42,7 @@ def _authorization(**changes: object) -> TaskImageBuildSessionAuthorization:
         "grant_expires_at": NOW + timedelta(hours=1),
     }
     values.update(changes)
-    return TaskImageBuildSessionAuthorization(**values)  # type: ignore[arg-type]
+    return SimpleNamespace(**values)  # type: ignore[arg-type]
 
 
 def _task_config() -> dict[str, object]:

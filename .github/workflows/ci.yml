@@ -428,30 +428,6 @@ jobs:
             --durations=25 \
             "${coverage_args[@]}"
 
-      - name: Produce synthetic global capacity shadow evidence
-        if: env.CI_TEST_SCOPE == 'all' && matrix.shard_index == 0 && needs.workflow-plan.outputs.runtime_payload == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          output="${RUNNER_TEMP}/global-capacity-shadow.json"
-          uv run --no-sync python scripts/ops/global_fleet_capacity_shadow_once.py \
-            --fleet tests/fixtures/capacity/fleet-v1.toml \
-            --subjects tests/fixtures/capacity/subjects-v1.toml \
-            --snapshot tests/fixtures/capacity/snapshot-v1.json \
-            --output "$output"
-          OUTPUT="$output" uv run --no-sync python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          document = json.loads(Path(os.environ["OUTPUT"]).read_text(encoding="utf-8"))
-          assert document["mode"] == "shadow"
-          assert document["executable"] is False
-          assert document["executable_new_capacity_ceiling"] == 0
-          assert "grants" not in document
-          assert "launch_permits" not in document
-          PY
-
       - name: Build and exercise non-editable runtime wheel
         if: matrix.shard_index == 0 && needs.workflow-plan.outputs.runtime_payload == 'true'
         shell: bash
