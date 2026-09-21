@@ -859,17 +859,22 @@ configuration; omission leaves native building disabled:
 
 `cache_bucket` is optional. When absent, cache credentials and import/export are
 omitted. Source, backup and trajectory buckets cannot be used as build cache.
-`max_concurrent` bounds unfinished builds, including cleanup, and renders the
-matching build-namespace quota. For a batch of uncached task environments, start
-with two concurrent builds if the shared execution pool has room for their
-CPU, memory and temporary storage. Apply the operator configuration through the
+`max_concurrent` accepts 1–16, defaults to 1, bounds unfinished builds including
+cleanup, and renders the matching build-namespace quota. Set it to 16 in the
+operator configuration to prepare up to 16 uncached task environments at once.
+With the per-build resources above, that allows 16 CPU, 32 GiB memory and 256 GiB
+temporary storage across the build namespace. It does not reserve that capacity
+up front or force 16 builds to run: node capacity, provider quota and shared
+capacity admission still determine how many can start. On the shared execution
+pool, account for the 16 GiB storage request per build alongside Trial requests;
+builds can need several nodes even when their total CPU would fit on one.
+Apply the operator configuration through the
 normal renderer/deployer; changing only the actuator environment or namespace
 quota leaves the two limits inconsistent. Builds still compete with executions
 through shared capacity admission. Image-unready Trials have no execution Pods,
 so increasing a node-group ceiling alone does not parallelize their preparation.
 Verify overlapping build attempts and resource release with disposable no-model
-fixtures before increasing concurrency further; retained image cache avoids
-repeating this cold-build cost.
+fixtures; retained image cache avoids repeating this cold-build cost.
 
 Before activation, provision these Secrets through the same protected operator
 path as the other platform credentials in `<execution_namespace>-build`:

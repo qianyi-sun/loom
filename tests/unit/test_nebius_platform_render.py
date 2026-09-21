@@ -108,7 +108,7 @@ def test_scheduler_deadline_requires_positive_integer(platform_inputs: tuple, ma
         build_platform(config, candidate, profile, {}, repo_root=ROOT)
 
 
-@pytest.mark.parametrize("concurrency", [1, 2])
+@pytest.mark.parametrize("concurrency", [1, 2, 16])
 def test_native_builds_share_the_actuator_but_have_an_isolated_namespace(
     platform_inputs: tuple, concurrency: int,
 ) -> None:
@@ -155,6 +155,8 @@ def test_native_builds_share_the_actuator_but_have_an_isolated_namespace(
     assert quota["spec"]["hard"]["requests.cpu"] == f"{1000 * concurrency}m"
     assert quota["spec"]["hard"]["requests.memory"] == f"{2048 * concurrency}Mi"
     assert quota["spec"]["hard"]["requests.ephemeral-storage"] == f"{16384 * concurrency}Mi"
+    for resource in ("cpu", "memory", "ephemeral-storage"):
+        assert quota["spec"]["hard"][f"limits.{resource}"] == quota["spec"]["hard"][f"requests.{resource}"]
     assert quota["spec"]["hard"]["count/configmaps"] == str(concurrency + 1)
     network = next(doc for doc in build_docs if doc["kind"] == "NetworkPolicy")
     assert network["spec"]["ingress"] == []
@@ -167,6 +169,10 @@ def test_native_builds_share_the_actuator_but_have_an_isolated_namespace(
     "builder",
     [
         {"registry_repository": "docker.io/public/task-images"},
+        {
+            "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
+            "max_concurrent": 17,
+        },
         {
             "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
             "ephemeral_storage_mib": 2048,

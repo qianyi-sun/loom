@@ -16,6 +16,7 @@ from typing import Any
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
+from loom.nebius_terminus_image import prepare_nebius_terminus_image
 from loom.service_execution_materialization import (
     automatic_service_execution_rejections,
 )
@@ -30,38 +31,36 @@ VERIFIER_SCRIPT_PATH = "verifier/run.sh"
 _GLOB_MAGIC = re.compile(r"[][*?]")
 
 
-# Catalog offline wrapper (deploy/catalog/nebius-terminal-bench/.../verifier/run.sh).
-# Embedded so ingest works when the package is installed without the deploy tree.
+# The transformed Harbor script retains its task-specific setup and pytest args.
+# Only its dependency installation moves into the derived task image.
 _OFFLINE_VERIFIER_RUN_SH = b"""#!/bin/sh
-# Offline environment preparation for the unchanged Harbor test assertions.
+# Loom native Harbor runner: preserve the original offline test semantics.
 set -eu
 : "${LOOM_VERIFIER_OUTPUT:?LOOM_VERIFIER_OUTPUT is required}"
 task_dir="${LOOM_TASK_DIR:-/app}"
 mkdir -p /tests /logs/verifier /loom/verifier
-cp "$task_dir/tests/test_outputs.py" /tests/test_outputs.py
+cp -R "$task_dir/tests/." /tests/
 rm -f /logs/verifier/reward.txt /logs/verifier/ctrf.json
 set +e
-/opt/verifier/bin/pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA
+bash "$task_dir/verifier/harbor-offline.sh"
 rc=$?
 set -e
-reward=0
-passed=false
-if [ "$rc" -eq 0 ]; then reward=1; passed=true; fi
-printf '%s\\n' "$reward" > /logs/verifier/reward.txt
+if [ "$rc" -ne 0 ]; then
+    echo "offline Harbor verifier script failed" >&2
+    exit "$rc"
+fi
+reward=$(cat /logs/verifier/reward.txt)
+case "$reward" in
+    0) passed=false ;;
+    1) passed=true ;;
+    *) echo "Harbor verifier reward must be 0 or 1" >&2; exit 1 ;;
+esac
 mkdir -p "$(dirname "$LOOM_VERIFIER_OUTPUT")"
 cat > "$LOOM_VERIFIER_OUTPUT" <<JSONEOF
 {"rewards":{"resolved":$reward,"passed":$reward},"checks":[{"name":"harbor_test_sh","passed":$passed,"score":$reward,"message":"exit=$rc"}],"structured":{"exit_code":$rc,"reward":$reward}}
 JSONEOF
 """
 
-_ONLINE_BOOTSTRAP_MARKERS = (
-    b"pip install",
-    b"uv pip",
-    b"uvx ",
-    b"curl ",
-    b"wget ",
-    b"apt-get",
-)
 _HARBOR_BRIDGE_MARKERS = (
     b"harbor loom bridge",
     b"tests/test.sh",
@@ -97,30 +96,19 @@ def resolve_execution_profile(value: str | None) -> str | None:
 def offline_verifier_run_sh_bytes() -> bytes:
     """Return the Nebius offline ``verifier/run.sh`` template bytes."""
 
-    catalog = (
-        Path(__file__).resolve().parents[2]
-        / "deploy"
-        / "catalog"
-        / "nebius-terminal-bench"
-        / "file-archive-manifest"
-        / "verifier"
-        / "run.sh"
-    )
-    if catalog.is_file():
-        return catalog.read_bytes()
     return _OFFLINE_VERIFIER_RUN_SH
 
 
 def _needs_offline_verifier_wrapper(existing: bytes | None) -> bool:
     if existing is None:
         return True
-    if _OFFLINE_MARKER in existing:
+    if existing == _OFFLINE_VERIFIER_RUN_SH:
         return False
-    if any(marker in existing for marker in _ONLINE_BOOTSTRAP_MARKERS):
+    if _OFFLINE_MARKER in existing:
         return True
     if any(marker in existing for marker in _HARBOR_BRIDGE_MARKERS):
         return True
-    return False
+    raise ValueError("nebius-terminus cannot replace a custom verifier; provide a reviewed native adaptation")
 
 
 def _ensure_offline_verifier_wrapper(staged: Path) -> bool:
@@ -173,7 +161,7 @@ def adapt_bundle_for_nebius_terminus(
     staged: Path,
     config: dict[str, Any],
 ) -> tuple[dict[str, Any], NebiusTerminusAdaptStats]:
-    """Mutate *config* + staged verifier for Nebius Terminus admission.
+    """Derive staged image/verifier inputs and config for Nebius Terminus.
 
     Returns a shallow-copied config dict (nested sections that are mutated are
     also copied) and counters describing what changed.
@@ -231,6 +219,7 @@ def adapt_bundle_for_nebius_terminus(
     adapted["environment"] = environment
     adapted["verifier"] = verifier
 
+    prepare_nebius_terminus_image(staged, environment)
     wrapper_installed = _ensure_offline_verifier_wrapper(staged)
     return adapted, NebiusTerminusAdaptStats(
         resources_filled=resources_filled,
