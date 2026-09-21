@@ -1091,7 +1091,8 @@ or the same gateway transport when `LOOM_DEPLOY_SSH_TARGET`,
 `LOOM_DEPLOY_SSH_KEY_FILE`, and `LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE` are set:
 
 ```sh
-uv run python scripts/ops/nebius_idle_rollout.py run \
+uv sync --locked --no-dev --extra cluster
+uv run --no-sync python scripts/ops/nebius_idle_rollout.py run \
   --publication-dir /protected/downloaded-candidate \
   --candidate <published-dev-sha> \
   --kubeconfig /protected/kubeconfig \
