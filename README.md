@@ -235,11 +235,13 @@ Primary runbooks:
 - Staging release validation:
   [`docs/runbooks/staging-launch.md`](docs/runbooks/staging-launch.md)
 - Hosted deployment:
-  [`docs/ops/nebius-deployment.md`](docs/ops/nebius-deployment.md)
+  [`docs/runbooks/nebius-deployment.md`](docs/runbooks/nebius-deployment.md)
 
 ## Where to Read More
 
 - [`docs/index.md`](docs/index.md) - documentation map.
+- [Repository layout](docs/contributing/repository-layout.md) - source, packages,
+  deployment, migrations and documentation ownership.
 - [`docs/user-guide.md`](docs/user-guide.md) - install, quickstarts, CLI and
   web workflows, providers, usage, downloads, and troubleshooting.
 - [`docs/architecture/overview.md`](docs/architecture/overview.md) - component

@@ -14,27 +14,9 @@ cd loom
 
 ## Repo layout
 
-```
-LICENSE                            # Apache-2.0
-src/loom/                          # foundation library (types, errors, models)
-src/loom_cli/                      # `loom` CLI entry point
-src/loom_drivers/                  # cloud Driver implementations (Modal)
-src/loom_control_plane/            # FastAPI Control Plane service
-src/loom_llm_gateway/              # OpenAI-compatible LLM Gateway service
-src/loom_worker/                   # Worker process
-src/loom_service/                  # REST surface for SPA / external clients
-src/loom_benchmark_tool/           # `loom-benchmark` operator CLI
-packages/loom-launcher/            # PyPI-style agent-adapter framework
-packages/loom-benchmarks/          # PyPI-style benchmark adapters + bundled catalog
-packages/loom-benchmark-terminal-bench-2/  # TB-2 canonical adapter
-migrations/                        # Alembic
-tests/{unit,contract,integration,system,property,loom_cli,fixtures}/
-web/                               # React SPA
-deploy/                            # images, Compose, Kubernetes, environment, and fleet config
-docs/                              # current user, architecture, integration, and runbook docs
-archive/                           # non-current designs, plans, history, and evidence
-scripts/                           # operator + test helpers
-```
+See the [repository map](repository-layout.md) for source, package, deployment,
+migration and documentation ownership. The [architecture overview](../architecture/overview.md)
+connects those directories to hosted and local execution.
 
 ## Components
 
@@ -42,10 +24,10 @@ scripts/                           # operator + test helpers
 |---|---|---|
 | Foundation library | `src/loom/` | (used by all) |
 | `loom` CLI | `src/loom_cli/` | adapters, local disk, provider SDKs |
-| Cloud drivers | `src/loom_drivers/` | Modal |
+| Local CLI drivers | `src/loom_drivers/` | Modal |
 | Control Plane | `src/loom_control_plane/` | Postgres, MinIO |
 | LLM Gateway | `src/loom_llm_gateway/` | Anthropic / OpenAI / Google, Postgres |
-| Worker | `src/loom_worker/` | Control Plane, Gateway, MinIO, Docker |
+| Local/disposable worker | `src/loom_worker/` | Control Plane, Gateway, MinIO, Docker |
 | Service (REST) | `src/loom_service/` | CP, Gateway, Postgres |
 | Web SPA | `web/` (served by `loom-web` k8s pod via nginx) | `loom_service` `/api/v1/*` |
 | Benchmark adapters | `packages/loom-benchmarks/` + `packages/loom-benchmark-terminal-bench-2/` | (discovered via entry-points) |

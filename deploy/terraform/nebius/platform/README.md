@@ -72,7 +72,7 @@ backup buckets are versioned; source objects use the existing acknowledged
 retention/GC contract. There is no calendar deletion of completed user output.
 
 After apply, follow `docs/runbooks/nebius-platform.md` and
-`docs/ops/nebius-candidate.md` from the repository root. DNS, certificates, scoped
+`docs/runbooks/nebius-candidate.md` from the repository root. DNS, certificates, scoped
 Secrets, signed publication, restore exercises and real
 workload acceptance are separate operations; successful Terraform alone does
 not establish their completion. Do not destroy versioned buckets or retire the

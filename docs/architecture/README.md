@@ -2,11 +2,13 @@
 
 Current contracts for Loom's implementation. Start with
 [`overview.md`](overview.md), then follow the area-specific references below.
-Design proposals, implementation plans, and decision history are kept in
-[`../../archive/docs/architecture/`](../../archive/docs/architecture/) rather
-than mixed with current behavior.
+These pages describe implemented behavior. Keep implementation plans outside
+this repository; [historical records](../historical/README.md) explain retired
+architecture and retained data.
 
 ## Core execution
+
+- **[Platform contract](nebius-primary-platform.md)** — Nebius-only scope, workload gaps, lineage and native build fairness.
 
 - **[Overview](overview.md)** — components, execution modes, and main data
   flows.
@@ -22,8 +24,7 @@ than mixed with current behavior.
 - **[Family runs](family-runs.md)** — ordered related trials, state adapters,
   and the optional family orchestrator.
 - **[Pipeline orchestrator](pipeline-orchestrator.md)** — persisted RunGraph
-  reconciliation, the disabled-by-default controller boundary, and the
-  executable BEHAVIOR rollout-stage adapter.
+  reconciliation, the disabled-by-default controller boundary, and retained/local pipeline semantics; hosted creation and retry are retired.
 
 ## Extension contracts
 
@@ -53,6 +54,8 @@ than mixed with current behavior.
 
 ## Security and tenancy
 
+- **[Nebius execution security](nebius-execution-security.md)** — native isolation and acceptance boundaries.
+
 - **[Authentication and teams](auth-and-teams.md)** — accounts,
   teams, sessions, setup/reset links, audit events, and operator controls.
 - **[Authentication threat model](auth-threat-model.md)** — enforced trust
@@ -61,10 +64,12 @@ than mixed with current behavior.
   supported workload trust mode.
 - **[Environment naming](env-naming-convention.md)** — canonical environment
   identities and route prefixes.
+
 ## Data, storage, and shared results
 
-- **[Historical staging data lifecycle](staging-data-lifecycle.md)** — retained
-  database and backup lineage from the retired shared-cluster backend.
+- **[Task-image materialization](task-image-materialization.md)** — native build identity, admission and cleanup.
+- **[Preflight artifact lifecycle](preflight-artifact-lifecycle.md)** — exact lookup and retention authority.
+
 - **[Storage retention](storage-retention.md)** — lifecycle policy rendering
   and apply behavior for supported object stores.
 - **[Run Library](run-library.md)** — shared completed-run metadata, artifacts,
@@ -93,6 +98,10 @@ than mixed with current behavior.
   probing and Responses-to-Chat fallback.
 
 ## Web application and observability
+
+- **[Nebius progress and placement](nebius-monitoring.md)** — shared progress stages, scheduling observations and scoped node views.
+
+- **[Pipeline preview](pipeline-live-preview.md)** — retained/local preview lifecycle and trust boundary.
 
 - **[Human-readable web UX](human-readable-spa-ux.md)** — default and
   diagnostics presentation rules.

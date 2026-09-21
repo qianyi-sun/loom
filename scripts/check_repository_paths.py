@@ -1,10 +1,21 @@
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-FORBIDDEN_TRACKED_PREFIXES = ("docs/superpowers/",)
+
+def _is_execution_plan(path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    normalized = tuple(part.lower().replace("_", "-") for part in parts)
+    if any(part in {"implementation-plans", "implementation-plan"} for part in normalized):
+        return True
+    if normalized[0] in {"plans", ".superpowers"}:
+        return True
+    if path.startswith(("docs/plans/", "docs/superpowers/")):
+        return True
+    return bool(re.search(r"(?:^|-)implementation-plans?(?:[.-]|$)", normalized[-1]))
 
 
 def _repository_root(cwd: Path) -> Path:
@@ -45,8 +56,7 @@ def main() -> int:
     forbidden = sorted(
         path
         for path in tracked_paths
-        if path == "docs/superpowers"
-        or path.startswith(FORBIDDEN_TRACKED_PREFIXES)
+        if path == "docs/superpowers" or _is_execution_plan(path)
     )
     if not forbidden:
         return 0
@@ -55,7 +65,7 @@ def main() -> int:
     for path in forbidden:
         print(f"  {path}", file=sys.stderr)
     print(
-        "Move durable designs to docs/architecture/ and keep execution plans local.",
+        "Move durable designs to docs/architecture/ and keep execution plans outside the repository.",
         file=sys.stderr,
     )
     return 1

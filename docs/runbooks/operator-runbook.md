@@ -17,7 +17,7 @@ GitHub Environment secrets separate.
 | staging | pinned `dev` SHA | `loom-staging` | `https://yylx.world/staging` | `https://yylx.world/staging/api` |
 | production | `main` | `loom-prod` | `https://yylx.world/prod` | `https://yylx.world/prod/api` |
 
-Use the [native Nebius deployment procedure](../ops/nebius-deployment.md) with
+Use the [native Nebius deployment procedure](nebius-deployment.md) with
 reviewed environment JSON, signed candidate, runtime profile and trusted keyring.
 The shared-cluster deployment workflow is retired. Automated hosted rollout is
 unavailable until environment-specific native inputs and approval wiring are
@@ -44,7 +44,7 @@ the environment implicitly.
 ## Hosted deployment
 
 Nebius is the only supported hosted platform. Use the
-[Nebius deployment procedure](../ops/nebius-deployment.md), including its exact
+[Nebius deployment procedure](nebius-deployment.md), including its exact
 cluster identity, backup, migration, readiness and evidence checks. The
 shared-cluster rollout broker and remote-worker deployment paths are retired.
 `loom cluster up` accepts disposable development targets only.

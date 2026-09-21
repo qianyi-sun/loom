@@ -580,7 +580,7 @@ The original runtime trace and usage remain available under
 `source/trajectory/events.jsonl` and `source/accounting/usage.json`, alongside
 the unchanged source manifests. Already-published affected Trials can be corrected
 with the bounded operator command described in
-[the accounting repair runbook](../ops/nebius-accounting-repair.md), without
+[the accounting repair runbook](../runbooks/nebius-accounting-repair.md), without
 rerunning the workload or overwriting its original objects.
 
 Event and command payloads are database-bounded at 64 KiB. An execution lease
@@ -866,3 +866,27 @@ infrastructure shutdown or acceptance of unsupported workloads.
 - Later #1536 children: infrastructure, workload conversion, canary, and
   independently authorized production routing. No child implicitly owns
   live shared-cluster shutdown.
+
+## Command routing and cancellation
+
+Execution commands belong to one target. Each actuator, including callers of
+`POST /admin/service-execution/commands/claim`, supplies its `target_id`; the
+claim transaction selects only leases for that target before locking commands.
+There is no default global consumer. Cancellation also covers an attempt that
+never created a Job: authoritative namespace reconciliation must finish its
+existing cleanup path without treating an active create as deleted.
+
+Legacy worker heartbeat and stale-claim requeues exclude Trials whose current
+attempt belongs to a service-execution lease, including revoked leases awaiting
+cleanup. The service scheduler never selects a cancel-requested queued Trial.
+Retry-exhaustion sweeps leave cancellation-requested records to cancellation
+authority, while ordinary exhausted retries still become failed.
+Ordinary cancellation replay can settle historical queued cancellation records
+without creating work or changing a deleted lease; the original request time is
+preserved. If provider cleanup is still pending, its admission, provisioning and
+cost reservations remain held until the actuator confirms resource absence.
+
+Browser-session cancellation carries the session and CSRF credentials to the
+control plane, which independently validates the caller's submit scope and team.
+Bearer-token cancellation retains the same authority checks. Neither path may
+substitute an administrator credential for the ordinary user.

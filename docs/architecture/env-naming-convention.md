@@ -23,7 +23,7 @@ Do not derive them from a route abbreviation or infer live values from the
 integration example. Keep environment credentials and data stores separate.
 
 Use `scripts/ops/render_nebius_platform.py` and the
-[Nebius deployment procedure](../ops/nebius-deployment.md). The former shared-cluster
+[Nebius deployment procedure](../runbooks/nebius-deployment.md). The former shared-cluster
 profile discovery, environment-state deployment and autoscaler timer conventions
 are retired. Automated native staging/production rollout awaits reviewed inputs
 and approval wiring; release promotion and production evidence controls remain.

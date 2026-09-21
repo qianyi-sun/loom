@@ -93,6 +93,26 @@ Before declaring work shipped:
 root are owner-local context files, gitignored. They are not part of
 the project artifact and must never be committed.
 
+## Documentation and repository layout
+
+Use the [repository map](docs/contributing/repository-layout.md) and
+[documentation index](docs/index.md) to place durable project material.
+Architecture pages describe implemented contracts; runbooks describe repeatable
+procedures; contributor pages describe development and validation. Update the
+owning index and all inbound references when moving or deleting a page.
+
+Implementation plans, execution checklists for individual changes, session
+notes and agent scratch work belong **outside the repository**, including its
+ignored directories. Do not commit them under `docs/`, package directories or
+an archive. `scripts/check_repository_paths.py` rejects known planning paths and
+implementation-plan filenames; reviewers also check content, since a filename
+cannot distinguish every plan from a durable contract.
+
+Use Git history for superseded source and docs. Keep only concise, clearly
+marked decision or data-lineage records under `docs/historical/`. Generated
+run reports belong in external evidence artifacts. Published migration chains,
+package layouts and vendored dependency boundaries are not cosmetic clutter.
+
 ## Branching
 
 - `feature/<short-name>` for product or platform features
@@ -105,7 +125,7 @@ Feature branches, including Nebius work, cut from `dev`. PRs target `dev`.
 `codex/nebius-main` records the earlier isolated integration series. `main` is reserved
 for release promotion PRs from `dev`.
 
-The [Nebius CI integration](docs/ops/nebius-ci.md) retains `dev`'s four protected
+The [Nebius CI integration](docs/contributing/ci.md) retains `dev`'s four protected
 checks and uses GitHub-hosted runners with amd64 PR image builds. Python tests
 normally run without coverage instrumentation. Use `ci:coverage-summary` or the
 CI dispatch input `coverage_summary` for coverage accounting within the selected

@@ -4006,7 +4006,7 @@ def _up(args: argparse.Namespace) -> int:
         return 1
     assert environment is not None
     if environment in PROTECTED_ENVIRONMENTS:
-        sys.stderr.write("error: hosted environments require the Nebius deployment entrypoint; see docs/ops/nebius-deployment.md.\n")
+        sys.stderr.write("error: hosted environments require the Nebius deployment entrypoint; see docs/runbooks/nebius-deployment.md.\n")
         return 1
     try:
         cfg_path = Path(args.config).resolve() if args.config else None
@@ -4048,7 +4048,7 @@ def _up(args: argparse.Namespace) -> int:
         sys.stderr.write(f"error: preflight config invalid: {exc}\n")
         return 2
     if snapshot.protected_target is not None:
-        sys.stderr.write("error: hosted configurations require the Nebius deployment entrypoint; see docs/ops/nebius-deployment.md.\n")
+        sys.stderr.write("error: hosted configurations require the Nebius deployment entrypoint; see docs/runbooks/nebius-deployment.md.\n")
         return 1
     try:
         _apply_config_target_fields(

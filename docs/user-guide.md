@@ -39,7 +39,6 @@ Pick the path that matches what you have:
 |---|---|
 | No stack at all, just a task + a model key, throwaway run | [Laptop-only `loom run`](#quickstart-laptop-only-loom-run) |
 | No account; you want to run the full stack on your own machine | [Run Loom locally](#quickstart-run-loom-locally) |
-| An account on an operator-enabled personal-development service; deploy your checkout | [Deploy a personal development environment](#quickstart-deploy-a-personal-development-environment) |
 | An account on a running Loom and prefer a terminal | [Submit from the CLI to a Loom server](#quickstart-submit-from-the-cli-to-a-loom-server) |
 | The same account and want clicks | [Submit from the web app](#quickstart-submit-from-the-web-app) |
 

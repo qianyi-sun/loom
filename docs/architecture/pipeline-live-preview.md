@@ -1,5 +1,9 @@
 # Pipeline Stage 1 live preview
 
+This contract describes retained/local pipeline functionality. Hosted BEHAVIOR
+GPU execution and pipeline creation/retry are unsupported; see
+[the pipeline boundary](pipeline-orchestrator.md#retired-hosted-execution).
+
 The BEHAVIOR Stage 1 live preview is an optional, ephemeral progress signal. It is never an
 Artifact, acceptance result, retry input, lineage edge, billing record, or domain-outcome
 authority. Only the committed `behavior_rollout_bundle.v1` Artifact is final evidence.

@@ -62,8 +62,13 @@ NEW_SESSION_BRIEFING.md
 .claude/
 
 # Agent planning plugins may default to this path. Loom keeps durable designs
-# under docs/architecture/ and keeps execution plans in local ignored state.
+# under docs/architecture/; execution plans belong outside the repository.
 /docs/superpowers/
+/docs/plans/
+/plans/
+.superpowers/
+implementation-plans/
+implementation_plans/
 
 # Codex feature worktrees.
 .worktrees/

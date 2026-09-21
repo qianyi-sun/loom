@@ -1,26 +1,40 @@
 # Runbooks
 
-Current procedures for Loom operators and developers. Start with the master
-operator runbook; use the narrower runbooks for the named environment or
-deployment workflow.
+Repeatable procedures for the supported Nebius platform and local development.
+Begin with the [operator runbook](operator-runbook.md). Use the architecture
+[platform contract](../architecture/nebius-primary-platform.md) for behavior and
+[CI documentation](../contributing/ci.md) for repository validation.
 
-## Cluster and release operations
+## Platform and delivery
 
-- **[Nebius deployment](../ops/nebius-deployment.md)** — hosted deployment, backup
-  protection, migration and readiness checks.
-- **[Nebius restore](../ops/nebius-restore.md)** — isolated restore verification.
+- [Infrastructure](nebius-infrastructure.md): Terraform, identities, networking and resource convergence.
+- [Platform operations](nebius-platform.md): service rendering, capacity and deployment diagnostics.
+- [Candidate publication](nebius-candidate.md): immutable images and candidate records.
+- [Deployment](nebius-deployment.md): target binding, backup, migrations and readiness.
+- [Staging credentials](nebius-staging-credentials.md): scoped identities and PostgreSQL trust.
+- [Staging release validation](staging-launch.md): candidate-bound promotion evidence.
 
-- **[Operator runbook](operator-runbook.md)** — deployment, upgrades,
-  rollback, credentials, storage, capacity, monitoring, and incident response.
-- **[Staging release validation](staging-launch.md)** — candidate-bound checks
-  required before production promotion.
+## Recovery and execution
+
+- [Restore verification](nebius-restore.md): isolated backup restoration.
+- [Historical lineage conversion](nebius-lineage-conversion.md): qualified conversion of divergent Nebius revisions.
+- [Accounting repair](nebius-accounting-repair.md): recover a previously committed Terminus export.
+- [Cold-start diagnosis](nebius-cold-start.md): capacity and scale-from-zero evidence.
+- [Execution security](nebius-execution-security.md): bounded isolation validation.
+- [Trial resource accounting](trial-resource-accounting.md): usage durability and capacity calibration.
+- [Deadline canary](isolated-deadline-canary.md): isolated timeout fixture and its acceptance boundary.
+
+## Workload preparation
+
+- [Terminus-2](nebius-terminus2.md): prepare and validate native Terminal-Bench execution.
+- [Harbor runtime versions](harbor-runtime-versions.md): select and register a published runtime.
+- [Harbor90 x86 sources](nebius-harbor90-migration.md): preserve benchmark identity while publishing x86 inputs.
+- [TerminalGen corpus publication](terminalgen-corpus-publication.md): publication and read contracts.
 
 ## Local development
 
-- **[Local development](local-dev-workflow.md)** — local Docker Compose stack and
-  pre-push checks.
+- [Local workflow](local-dev-workflow.md): disposable Compose stack, checks and reset.
 
-Create a separate runbook only for a repeatable procedure with distinct safety,
-rollback, or coordination requirements. Put component behavior in architecture
-docs and one-off migration records in the
-[runbook archive](../../archive/docs/runbooks/).
+Create a runbook for a repeatable procedure with distinct safety or recovery
+requirements. Keep implementation plans outside the repository. Retain only
+necessary schema/decision context in [history](../historical/README.md).
