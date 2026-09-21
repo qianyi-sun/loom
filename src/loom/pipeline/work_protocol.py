@@ -203,6 +203,7 @@ class ResourceExecutionVariantV1(PipelineModel):
     memory_accounting_kind: Literal["separate", "unified_shared"]
     container_memory_bytes_override: NonNegativeSafeInt | None
     same_gpu_model_required: bool
+    # Historical snapshots retain these pool identifiers; new GPU claims are disabled.
     pool_class: Literal[
         "behavior-cpu-data",
         "behavior-gpu-oldlab",

@@ -158,8 +158,6 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
         "behavior-export-io@1",
         "behavior-offline-gateway@1",
         "behavior-offline-none@1",
-        "behavior-sim-local-gateway@1",
-        "behavior-sim-local-none@1",
         "pipeline-test-cpu-gateway@1",
         "pipeline-test-cpu-none@1",
         "terminalgen-generate-gateway@1",
@@ -173,8 +171,6 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
         "behavior-export-io@1": (8, 64 << 30, 768 << 30, None, 7_200, "none"),
         "behavior-offline-gateway@1": (8, 16 << 30, 50 << 30, None, 3_600, "gateway"),
         "behavior-offline-none@1": (8, 16 << 30, 50 << 30, None, 3_600, "none"),
-        "behavior-sim-local-gateway@1": (16, 64 << 30, 150 << 30, None, 14_400, "gateway"),
-        "behavior-sim-local-none@1": (16, 64 << 30, 150 << 30, None, 14_400, "none"),
         "pipeline-test-cpu-gateway@1": (2, 1 << 30, 2 << 30, None, 600, "gateway"),
         "pipeline-test-cpu-none@1": (2, 1 << 30, 2 << 30, None, 600, "none"),
         "terminalgen-generate-gateway@1": (4, 16 << 30, 320 << 30, 1_024, 3_600, "gateway"),
@@ -217,38 +213,6 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
             "terminalgen-validator",
         ),
     }
-    gpu_variants = [
-        {
-            "variant_id": "gb10-shared-1gpu",
-            "cpu_arch": "arm64",
-            "gpu_count_exact": 1,
-            "gpu_vendor": "nvidia",
-            "allowed_gpu_models": ["NVIDIA GB10"],
-            "gpu_memory_kind": "unified",
-            "gpu_memory_mb_min": None,
-            "gpu_unified_memory_mb_min": 120_000,
-            "memory_accounting_kind": "unified_shared",
-            "container_memory_bytes_override": 125_829_120_000,
-            "same_gpu_model_required": True,
-            "pool_class": "behavior-gpu-gb10",
-            "device_roles": {"sim_gpu_index": 0, "vla_gpu_index": 0},
-        },
-        {
-            "variant_id": "oldlab-rtx5080-2gpu",
-            "cpu_arch": "x86_64",
-            "gpu_count_exact": 2,
-            "gpu_vendor": "nvidia",
-            "allowed_gpu_models": ["NVIDIA GeForce RTX 5080"],
-            "gpu_memory_kind": "dedicated",
-            "gpu_memory_mb_min": 16_000,
-            "gpu_unified_memory_mb_min": None,
-            "memory_accounting_kind": "separate",
-            "container_memory_bytes_override": None,
-            "same_gpu_model_required": True,
-            "pool_class": "behavior-gpu-oldlab",
-            "device_roles": {"sim_gpu_index": 0, "vla_gpu_index": 1},
-        },
-    ]
     expected_features = {
         "behavior-export-io@1": ([], ["behavior-cpu-data"]),
         "behavior-offline-gateway@1": (
@@ -256,14 +220,6 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
             ["behavior-cpu-data"],
         ),
         "behavior-offline-none@1": ([], ["behavior-cpu-data"]),
-        "behavior-sim-local-gateway@1": (
-            ["egl", "loom-secret-tmpfs-v1", "nvidia-container-runtime"],
-            ["isaac-sim-5.1", "omnigibson-3.8"],
-        ),
-        "behavior-sim-local-none@1": (
-            ["egl", "nvidia-container-runtime"],
-            ["isaac-sim-5.1", "omnigibson-3.8"],
-        ),
         "pipeline-test-cpu-gateway@1": (
             ["loom-secret-tmpfs-v1"],
             ["pipeline-test-cpu"],
@@ -321,9 +277,7 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
             raise ResourceProfileRegistryError(f"{record.identity} feature contract drift")
         variant_ids = tuple(item.variant_id for item in profile.execution_variants)
         expected_variants = (
-            ("gb10-shared-1gpu", "oldlab-rtx5080-2gpu")
-            if record.identity.startswith("behavior-sim-local-")
-            else ("pipeline-test-cpu-x86_64",)
+            ("pipeline-test-cpu-x86_64",)
             if record.identity.startswith("pipeline-test-cpu-")
             else ("terminalgen-cpu-x86_64",)
             if record.identity.startswith("terminalgen-")
@@ -343,9 +297,7 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
                 "pool_class": pool_class,
             }
         if actual_variants != (
-            gpu_variants
-            if record.identity.startswith("behavior-sim-local-")
-            else [pipeline_test_cpu_variant]
+            [pipeline_test_cpu_variant]
             if record.identity.startswith("pipeline-test-cpu-")
             else [terminalgen_variant]
             if terminalgen_variant is not None

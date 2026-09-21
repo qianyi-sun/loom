@@ -4,7 +4,7 @@
   ],
   "execution_class_id": "linux-amd64-cpu-pod-v1",
   "schema_version": "loom.service-workload-compatibility-report.v2",
-  "source_sha256": "67cbec53cd529d9364c014cad0b0019e944c8af3233134294b161b5478fa66d3",
+  "source_sha256": "5a8cd7ab9673eba57eeab894ac3ec183f833f388f7355a525e92562b79185e73",
   "summary": {
     "pools": {
       "nebius-cpu": {
@@ -1209,6 +1209,36 @@
       "workload_id": "user-taskset-bundle"
     },
     {
+      "kind": "dynamic_service_workload",
+      "pool_dispositions": [
+        {
+          "disposition": "unsupported",
+          "logical_pool_id": "nebius-cpu",
+          "owner": "qianyi-sun",
+          "reason": "The shared-cluster GPU execution profile is retired; retained results remain readable.",
+          "required_actions": [
+            "use direct local Behavior execution; no hosted GPU replacement is supported"
+          ]
+        }
+      ],
+      "workload_id": "pipeline:behavior-sim-local-gateway@1"
+    },
+    {
+      "kind": "dynamic_service_workload",
+      "pool_dispositions": [
+        {
+          "disposition": "unsupported",
+          "logical_pool_id": "nebius-cpu",
+          "owner": "qianyi-sun",
+          "reason": "The shared-cluster GPU execution profile is retired; retained results remain readable.",
+          "required_actions": [
+            "use direct local Behavior execution; no hosted GPU replacement is supported"
+          ]
+        }
+      ],
+      "workload_id": "pipeline:behavior-sim-local-none@1"
+    },
+    {
       "kind": "pipeline_resource_profile",
       "policy_pattern": "behavior-export-io",
       "pool_dispositions": [
@@ -1264,40 +1294,6 @@
       ],
       "source": "config/resource-profiles.toml",
       "workload_id": "pipeline:behavior-offline-none@1"
-    },
-    {
-      "kind": "pipeline_resource_profile",
-      "policy_pattern": "behavior-sim-local-*",
-      "pool_dispositions": [
-        {
-          "disposition": "unsupported",
-          "logical_pool_id": "nebius-cpu",
-          "owner": "qianyi-sun",
-          "reason": "Behavior simulation profiles require NVIDIA GPUs and host runtime features outside the CPU-only service contract.",
-          "required_actions": [
-            "local execution only; no hosted GPU replacement is supported"
-          ]
-        }
-      ],
-      "source": "config/resource-profiles.toml",
-      "workload_id": "pipeline:behavior-sim-local-gateway@1"
-    },
-    {
-      "kind": "pipeline_resource_profile",
-      "policy_pattern": "behavior-sim-local-*",
-      "pool_dispositions": [
-        {
-          "disposition": "unsupported",
-          "logical_pool_id": "nebius-cpu",
-          "owner": "qianyi-sun",
-          "reason": "Behavior simulation profiles require NVIDIA GPUs and host runtime features outside the CPU-only service contract.",
-          "required_actions": [
-            "local execution only; no hosted GPU replacement is supported"
-          ]
-        }
-      ],
-      "source": "config/resource-profiles.toml",
-      "workload_id": "pipeline:behavior-sim-local-none@1"
     },
     {
       "kind": "pipeline_resource_profile",

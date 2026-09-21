@@ -512,18 +512,8 @@ WITH candidates AS (
           AND variant->>'cpu_arch' = w.capability_snapshot_json->>'cpu_arch'
           AND variant->>'cpu_arch' = s.image_runtime_contract_json->>'cpu_arch'
           AND w.pool_name = variant->>'pool_class'
-          AND (
-            (variant->>'gpu_count_exact')::integer = 0
-            OR EXISTS (
-              SELECT 1
-                FROM pipeline_run_gpu_backend_selections backend_selection
-               WHERE backend_selection.pipeline_run_id = r.id
-                 AND backend_selection.variant_id = variant->>'variant_id'
-                 AND backend_selection.policy_id = w.pool_name
-                 AND backend_selection.gpu_backend_selection_sha256 =
-                     s.resolved_execution_spec_json->>'gpu_backend_selection_sha256'
-            )
-          )
+          -- GPU Pipeline execution is retired; retained snapshots cannot be claimed.
+          AND (variant->>'gpu_count_exact')::integer = 0
           AND (w.capability_snapshot_json->>'memory_bytes')::bigint >=
               COALESCE(
                 (variant->>'container_memory_bytes_override')::bigint,

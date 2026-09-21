@@ -48,14 +48,13 @@ same transaction creates cancellation-outbox rows for live Attempts; cleanup
 acknowledgements are durable and replay-safe. No retry may be scheduled after a
 terminal cause is present.
 
-## Acceptance seams
+## Retired hosted execution
 
-Acceptance preflight and fault-hold behavior is expressed through strict,
-injected protocols. The controller persists authorization, candidate, worker,
-Slurm allocation, capability, policy, and epoch snapshots before advancing a
-preflight fence. The process does not provide production acceptance adapters
-or execute a fixed-candidate acceptance run. It never reads secret values from
-graph or result documents.
+Hosted Loom execution is Nebius only. Shared-cluster acceptance, Stage1 worker
+execution and GPU backend selection have been removed. Historical authorizations,
+GPU selections and execution snapshots remain readable, but are not eligible for
+new claims. Pipeline classes awaiting native conversion are documented in the
+[compatibility report](../evidence/service-workload-compatibility-v2.json).
 
 ## BEHAVIOR rollout stage
 
@@ -82,8 +81,9 @@ with depth recording disabled. Request, input, recipe, image, execution-spec,
 and compatibility digests are revalidated before the attempt workspace can
 commit output.
 
-The runtime contract accepts either two RTX 5080 devices on `oldlab`, split
-between simulator and VLA roles, or one GB10 device shared by both roles. The
+Direct local execution accepts one or two explicitly described GPU devices, with
+simulator and VLA roles each assigned exactly once. It does not select a hosted
+backend or provision GPUs. The
 adapter applies the request's uint32 seed in a fixed Python, NumPy, PyTorch,
 CUDA, and OmniGibson order. It starts the VLA server first, allows 180
 one-second TCP readiness probes, then starts the one-episode simulator in the
@@ -99,10 +99,7 @@ catalog. Identity, seed, step count, frame count, media format, byte budget,
 and provenance must agree across those files. Partial adapter output and
 scratch data are removed on every failure.
 
-`scripts/behavior/run_rollout.sbatch` is a two-argument compatibility shim for
-the command above. It does not submit a Slurm job or own fan-out, retries,
-input fetching, or upload; those remain surrounding Loom Pipeline authorities.
-The adapter itself owns VLA and simulator child-process supervision.
+The adapter owns VLA and simulator child-process supervision.
 `python -m loom.integrations.behavior.cli validate` provides read-only
 canonical request, result, and artifact validation.
 

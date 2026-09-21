@@ -433,15 +433,15 @@ def _write_inputs(root: Path, task: Any, dataset: Any, policy: Any) -> None:
     checkpoint.write_bytes(b"checkpoint")
 
 
-def _runtime(platform: Literal["oldlab", "gb10"] = "oldlab") -> RolloutRuntimeContractV1:
-    if platform == "oldlab":
+def _runtime(platform: Literal["split", "shared"] = "split") -> RolloutRuntimeContractV1:
+    if platform == "split":
         devices = [
-            RolloutGpuV1(logical_index=0, model="RTX 5080", roles=["sim"]),
-            RolloutGpuV1(logical_index=1, model="RTX 5080", roles=["vla"]),
+            RolloutGpuV1(logical_index=0, model="local-gpu", roles=["sim"]),
+            RolloutGpuV1(logical_index=1, model="local-gpu", roles=["vla"]),
         ]
     else:
-        devices = [RolloutGpuV1(logical_index=0, model="GB10", roles=["sim", "vla"])]
-    return RolloutRuntimeContractV1(platform=platform, devices=devices, system_env={"LANG": "C"})
+        devices = [RolloutGpuV1(logical_index=0, model="local-gpu", roles=["sim", "vla"])]
+    return RolloutRuntimeContractV1(devices=devices, system_env={"LANG": "C"})
 
 
 def _scene_source() -> dict[str, Any]:
@@ -682,8 +682,8 @@ def test_seed_order_same_seed_replay_and_vla_reseed_rejection() -> None:
 
 
 def test_fixed_argv_env_gpu_topologies_and_ffmpeg_options(tmp_path: Path) -> None:
-    oldlab = _runtime("oldlab")
-    gb10 = _runtime("gb10")
+    split = _runtime("split")
+    shared = _runtime("shared")
     assert build_vla_argv(7, 1) == (
         "/opt/loom/venv-vla/bin/python",
         "-m",
@@ -711,14 +711,14 @@ def test_fixed_argv_env_gpu_topologies_and_ffmpeg_options(tmp_path: Path) -> Non
         "--scratch",
         "/scratch/rollout",
     )
-    assert build_vla_env(oldlab)["CUDA_VISIBLE_DEVICES"] == "1"
-    assert build_vla_env(oldlab)["OMNIGIBSON_DATA_PATH"] == (
+    assert build_vla_env(split)["CUDA_VISIBLE_DEVICES"] == "1"
+    assert build_vla_env(split)["OMNIGIBSON_DATA_PATH"] == (
         "/inputs/dataset/payload/omnigibson"
     )
-    assert build_simulator_env(oldlab)["CUDA_VISIBLE_DEVICES"] == "0,1"
-    assert build_vla_env(gb10)["CUDA_VISIBLE_DEVICES"] == "0"
-    assert build_simulator_env(gb10)["CUDA_VISIBLE_DEVICES"] == "0"
-    assert "SLURM_JOB_ID" not in build_simulator_env(oldlab)
+    assert build_simulator_env(split)["CUDA_VISIBLE_DEVICES"] == "0,1"
+    assert build_vla_env(shared)["CUDA_VISIBLE_DEVICES"] == "0"
+    assert build_simulator_env(shared)["CUDA_VISIBLE_DEVICES"] == "0"
+    assert "UNAPPROVED_HOST_SECRET" not in build_simulator_env(split)
     command = FfmpegCompositeBuilder("ffmpeg").command(
         tmp_path / "left", tmp_path / "right", tmp_path / "head", tmp_path / "out"
     )
@@ -1011,15 +1011,13 @@ def test_adapter_removes_engine_staging_before_attempt_commit(tmp_path: Path) ->
 
 
 def test_runtime_topology_is_closed() -> None:
-    with pytest.raises(ValidationError, match="count/model/roles"):
+    with pytest.raises(ValidationError, match="roles assigned exactly once"):
         RolloutRuntimeContractV1(
-            platform="oldlab",
-            devices=[RolloutGpuV1(logical_index=0, model="RTX 5080", roles=["sim", "vla"])],
+            devices=[RolloutGpuV1(logical_index=0, model="local-gpu", roles=["sim"])],
             system_env={},
         )
     with pytest.raises(ValidationError, match="unapproved"):
         RolloutRuntimeContractV1(
-            platform="gb10",
-            devices=[RolloutGpuV1(logical_index=0, model="GB10", roles=["sim", "vla"])],
+            devices=[RolloutGpuV1(logical_index=0, model="local-gpu", roles=["sim", "vla"])],
             system_env={"API_KEY": "not-allowed"},
         )
