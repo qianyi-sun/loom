@@ -245,7 +245,7 @@ async def test_registration_advertises_execution_reader_only_with_explicit_trust
 def test_trial_only_reader_measures_native_host_without_pipeline_capabilities(tmp_path, monkeypatch):
     monkeypatch.setattr(ml, "_host_cpu_arch", lambda: "arm64")
     monkeypatch.setattr(ml, "_pipeline_registration_payload", Mock(side_effect=AssertionError("Pipeline must remain disabled")))
-    values = ml._trial_execution_registration_payload(SimpleNamespace(trajectory_cache_dir=tmp_path, pool_name="gb10"))
+    values = ml._trial_execution_registration_payload(SimpleNamespace(trajectory_cache_dir=tmp_path, pool_name="local_gpu"))
     snapshot = values["capability_snapshot"]
     assert snapshot["cpu_arch"] == "arm64"
     assert snapshot["cpu_cores"] > 0 and snapshot["memory_bytes"] > 0 and snapshot["scratch_bytes"] > 0

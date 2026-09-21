@@ -253,7 +253,6 @@ async def test_exhaustion_preserves_requested_cancel_for_normal_replay(
         assert swept == [retry_id]
         result = await cancel_trial_under_authority(
             session_factory=factory,
-            protected_store=None,
             trial_id=cancelled_id,
             team_id=team_id,
         )

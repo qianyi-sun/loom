@@ -1,4 +1,4 @@
-"""Fail closed if the inert task-image authority acquires runtime composition."""
+"""Keep signed-result readers isolated from worker and scheduler runtime."""
 
 from __future__ import annotations
 
@@ -57,30 +57,16 @@ ALLOWED_AUTHORITY_IMPORTS = {
     "loom.task_image_build_plan",
     "loom.task_image_materialization",
 }
-# Reviewed D2 adapters only: no ambient SDK session/client or general storage
-# composition becomes available to the authority API or its other modules.
+# Signed-result readers cannot acquire deployment or worker runtime imports.
 ALLOWED_AUTHORITY_MODULE_IMPORTS = {
     "execution_grant.py": {"loom.models.task"},
     # Shared-queue delivery reuses the existing closed wire schemas, not the
     # scheduler or worker runtime. The store verifies the persisted capability
     # snapshot with the same canonical bytes used during worker registration.
-    # These exact pure dependencies are not admitted to the authority API.
     "execution_delivery.py": {"loom.pipeline.spec", "loom.pipeline.work_protocol"},
     "execution_store.py": {"loom.models.worker_capabilities", "loom.pipeline.keys"},
     "publication_set.py": {"loom.models.task"},
-    "bundle_capability.py": {"loom.task_image_bundle_manifest"},
-    "bundle_s3_backend.py": {"loom.task_image_bundle_manifest", "loom.trajectory.storage"},
-    "bundle_s3_listing.py": {"xml.parsers"},
-    "bundle_s3_signing.py": {"botocore.auth", "botocore.awsrequest", "botocore.credentials"},
-    "bundle_s3_transport.py": {"loom.task_image_bundle_manifest"},
-    # Native V2 admission uses only the frozen source type and transactional
-    # journal preflight. No storage SDK/client factory is admitted to the API.
-    "materializations.py": {
-        "loom.task_bundle_source",
-        "loom.task_bundle_source_journal",
-        # Pure architecture policy shared by new signed-session build claims.
-        "loom.execution_architecture",
-    },
+
 }
 
 
@@ -175,13 +161,13 @@ def test_execution_adapters_do_not_admit_worker_or_scheduler_runtime(module: str
     assert _unexpected_authority_imports(forbidden, source=AUTHORITY_ROOT / module) == forbidden
 
 
-def test_only_the_dedicated_authority_api_imports_the_projection_store() -> None:
+def test_no_production_code_imports_retired_projection_store() -> None:
     importers = {
         path
         for path in PRODUCTION_ROOT.rglob("*.py")
         if _imports_store(_tree(path))
     }
-    assert importers == {AUTHORITY_ROOT / "api.py", AUTHORITY_ROOT / "publication_store.py"}
+    assert not importers
 
 
 def test_no_other_production_package_imports_the_authority_api() -> None:
@@ -193,24 +179,6 @@ def test_no_other_production_package_imports_the_authority_api() -> None:
         and api_module in _imported_modules(_tree(path))
     }
     assert not importers
-
-
-def test_authority_api_has_no_slurm_worker_provider_or_public_route_dependency() -> None:
-    imports = _imported_modules(_tree(AUTHORITY_ROOT / "api.py"))
-    forbidden_prefixes = (
-        "docker",
-        "loom_capacity_",
-        "loom_control_plane",
-        "loom_service",
-        "loom_worker",
-        "subprocess",
-    )
-
-    assert not {
-        imported
-        for imported in imports
-        if imported.startswith(forbidden_prefixes)
-    }
 
 
 def test_authority_package_is_in_default_static_validation() -> None:

@@ -18,7 +18,7 @@ from loom.task_bundle_source_storage import (
     write_task_bundle_source_object,
 )
 from loom.trajectory.storage import MinioObjectStore
-from tests.integration.test_task_image_bundle_minio_signing import minio_tls  # noqa: F401
+from tests.support.minio_tls import minio_tls  # noqa: F401
 
 pytestmark = [pytest.mark.docker, pytest.mark.timeout(120)]
 

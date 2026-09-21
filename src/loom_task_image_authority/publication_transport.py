@@ -1,9 +1,8 @@
-"""Fixed-operation mutual-TLS publication signer client; no signing private key.
+"""Fixed-operation mutual-TLS execution and verification-keyset signing clients.
 
 Explicit trusted composition supplies a dedicated CA and client TLS identity.
-This is transport, not proof of distribution, signature validity or readiness:
-the existing publication verifier and fenced final transaction remain mandatory.
-No production runtime composes this client until those other gates are met.
+Transport does not prove signature validity or execution readiness; callers
+verify retained publications and grants before the fenced execution start.
 """
 
 from __future__ import annotations
@@ -22,10 +21,6 @@ from loom_task_image_authority.config import _validate_https_origin
 from loom_task_image_authority.execution_grant import MAX_EXECUTION_GRANT_ENVELOPE_BYTES
 from loom_task_image_authority.execution_signing_request import decode_execution_signing_request
 from loom_task_image_authority.keyset_signing_request import decode_keyset_signing_request
-from loom_task_image_authority.publication_contracts import (
-    MAX_SIGNER_REPLY_BYTES,
-    decode_unsigned_input,
-)
 from loom_task_image_authority.publication_keyset import MAX_KEYSET_ENVELOPE_BYTES
 
 
@@ -260,20 +255,6 @@ class _HTTPSFixedSigner:
         finally:
             if writer is not None:
                 writer.transport.abort()
-
-
-class HTTPSPublicationSigner(_HTTPSFixedSigner):
-    """Fixed publication operation; signature verification remains caller-owned."""
-
-    async def sign_publication(
-        self, canonical_unsigned_input: bytes, *, maximum_reply_bytes: int,
-    ) -> bytes:
-        if type(maximum_reply_bytes) is not int or not 0 < maximum_reply_bytes <= MAX_SIGNER_REPLY_BYTES:
-            raise ValueError("invalid publication signer reply limit")
-        decode_unsigned_input(canonical_unsigned_input)
-        return await self._request(
-            canonical_unsigned_input, maximum_reply_bytes=maximum_reply_bytes, target=b"/v1/publications/sign",
-        )
 
 
 class HTTPSKeysetSigner(_HTTPSFixedSigner):

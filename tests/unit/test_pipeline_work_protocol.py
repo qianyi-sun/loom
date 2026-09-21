@@ -17,7 +17,6 @@ from loom.integrations.terminalgen.authority import (
 from loom.pipeline.keys import canonical_digest, canonical_document
 from loom.pipeline.state import RetryClass, StageResultV1
 from loom.pipeline.work_protocol import (
-    AcceptancePreflightGrantV1,
     ExecutionAttemptClaimV1,
     ExecutionCancelAckV1,
     ExecutionCompleteV1,
@@ -26,8 +25,6 @@ from loom.pipeline.work_protocol import (
     ExecutionFailedV1,
     ExecutionHeartbeatV1,
     ExecutionStartedV1,
-    PipelineInputMaterializationEvidenceReportV1,
-    Stage1SmokeGrantV1,
     StageRequestGrantV1,
     TerminalGenAuthoringGrantV1,
     TerminalTaskValidationGrantV1,
@@ -218,14 +215,11 @@ def attempt_claim() -> dict[str, Any]:
         "image_runtime_contract_digest": spec["image_runtime_contract_digest"],
         "worker_capability_snapshot": worker_capability(),
         "worker_capability_snapshot_digest": canonical_digest(worker_capability()),
-        "slurm_gpu_allocation_evidence": None,
-        "slurm_gpu_allocation_evidence_digest": None,
         "input_bindings": [binding()],
         "outputs": spec["container_node"]["outputs"],
         "checkpoint": None,
         "fanout_commit": None,
         "stage_request": None,
-        "acceptance_preflight": None,
         "provider_connection_ref": None,
         "secret_refs": [],
         "resume_checkpoint": None,
@@ -450,56 +444,6 @@ def test_stage_request_grant_requires_exact_canonical_bytes_size_and_digest() ->
         StageRequestGrantV1.model_validate(noncanonical)
 
 
-def test_acceptance_preflight_pins_variant_policy_cluster_node_and_cache_phase() -> None:
-    value = {
-        "authorization_id": UUID(int=20),
-        "authorization_snapshot_sha256": D0,
-        "action": "matrix",
-        "candidate_sha256": D1,
-        "preflight_input_set_id": "S02",
-        "prerequisite_pipeline_run_id": RUN_ID,
-        "exclusive_fence_id": UUID(int=21),
-        "node_key": "oldlab-rtx5080-2gpu_acceptance_preflight_cold",
-        "backend_variant_id": "oldlab-rtx5080-2gpu",
-        "cache_expectation": "cold_after_eviction",
-        "sealed_input_descriptor_set_sha256": D2,
-        "policy_id": "behavior-gpu-oldlab",
-        "policy_config_sha256": D3,
-        "policy_activation_epoch": 3,
-        "slurm_cluster_id": "oldlab",
-        "slurm_cluster_config_sha256": D0,
-        "slurm_allocation_id": "oldlab:123",
-        "image_runtime_contract_digest": D1,
-        "resource_profile_digest": D2,
-        "network_profile": "none",
-        "renderer_digest": D3,
-    }
-    assert AcceptancePreflightGrantV1.model_validate(value).policy_id == "behavior-gpu-oldlab"
-    with pytest.raises(ValidationError, match="variant/policy/cluster drift"):
-        AcceptancePreflightGrantV1.model_validate({**value, "slurm_cluster_id": "gb10"})
-    with pytest.raises(ValidationError, match="node/cache phase drift"):
-        AcceptancePreflightGrantV1.model_validate({**value, "cache_expectation": "warm_reuse_only"})
-
-
-def test_stage1_smoke_grant_is_closed_and_binds_the_selected_child() -> None:
-    value = {
-        "authorization_id": UUID(int=30),
-        "pipeline_run_id": RUN_ID,
-        "candidate_sha256": D0,
-        "authorization_sha256": D1,
-        "preflight_sha256": D2,
-        "policy_activation_epoch": 7,
-        "recipe_digest": D3,
-        "platform_child_digest": D0,
-        "image_runtime_contract_digest": D1,
-        "resolved_input_bindings_digest": D2,
-        "renderer_digest": D3,
-    }
-    assert Stage1SmokeGrantV1.model_validate(value).policy_activation_epoch == 7
-    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        Stage1SmokeGrantV1.model_validate({**value, "raw_image_override": IMAGE})
-
-
 def test_terminalgen_authoring_and_validation_grants_are_exact_and_fail_closed() -> None:
     value = terminalgen_validation_claim()
     parsed = ExecutionAttemptClaimV1.model_validate(value)
@@ -667,25 +611,7 @@ def test_started_complete_failed_and_cancel_reports_are_strict() -> None:
     assert cancel.outcome == "forced"
 
 
-def test_input_evidence_and_cleanup_ack_enforce_exact_positive_observations() -> None:
-    evidence = PipelineInputMaterializationEvidenceReportV1.model_validate(
-        {
-            "schema_version": "loom.pipeline-input-materialization-evidence-report.v1",
-            "execution_attempt_id": ATTEMPT_ID,
-            "worker_id": WORKER_ID,
-            "lease_epoch": 1,
-            "cache_expectation": "cold_after_eviction",
-            "ordered_manifest_sha256s": [D0, D1, D2, D3, "sha256:" + "4" * 64],
-            "manifest_open_count": 5,
-            "file_open_count": 8,
-            "file_bytes": 100,
-            "archive_extraction_count": 1,
-            "cas_rename_count": 5,
-            "input_view_sha256": D0,
-        }
-    )
-    assert len(evidence.ordered_manifest_sha256s) == 5
-
+def test_cleanup_ack_enforces_exact_positive_observations() -> None:
     proof = WorkerCleanupProofV1.model_validate(cleanup_proof())
     assert proof.active_upload_session_ids == []
     with pytest.raises(ValidationError):
@@ -698,16 +624,75 @@ def test_input_evidence_and_cleanup_ack_enforce_exact_positive_observations() ->
             "schema_version": "loom.worker-lost-cleanup-ack.v1",
             "observer_kind": "worker_journal",
             "observed_at": NOW,
-            "allocation_id": None,
-            "allocation_terminal": None,
             "resources": cleanup_proof(),
         }
     )
     assert journal.observer_kind == "worker_journal"
-    with pytest.raises(ValidationError, match="terminal allocation identity"):
+    with pytest.raises(ValidationError, match="worker_journal"):
         WorkerLostCleanupAckV1.model_validate(
             {
                 **journal.model_dump(),
                 "observer_kind": "slurm_node_reaper",
             }
         )
+
+
+def test_local_attempt_claim_does_not_require_retired_allocation_fields() -> None:
+    payload = attempt_claim()
+    assert ExecutionAttemptClaimV1.model_validate(payload).execution_attempt_id == ATTEMPT_ID
+
+
+def test_worker_lost_cleanup_rejects_retired_reaper_authority() -> None:
+    with pytest.raises(ValidationError):
+        WorkerLostCleanupAckV1.model_validate({
+            "schema_version": "loom.worker-lost-cleanup-ack.v1",
+            "observer_kind": "slurm_node_reaper",
+            "observed_at": NOW,
+            "allocation_id": "oldlab:123",
+            "allocation_terminal": True,
+            "resources": cleanup_proof(),
+        })
+
+
+@pytest.mark.parametrize("drift", [None, "count", "model", "memory", "driver"])
+def test_local_gpu_claim_preserves_resource_checks_without_cluster_authority(drift) -> None:
+    payload = attempt_claim()
+    profile = payload["resource_profile_snapshot"]
+    variant = profile["execution_variants"][0]
+    variant.update(variant_id="local-gpu", gpu_count_exact=1, gpu_vendor="nvidia",
+                   allowed_gpu_models=["test-gpu"], gpu_memory_kind="dedicated",
+                   gpu_memory_mb_min=8192, same_gpu_model_required=True,
+                   device_roles={"sim_gpu_index": 0, "vla_gpu_index": 0})
+    image = payload["image_runtime_contract_snapshot"]
+    image.update(gpu_vendor="nvidia", cuda_userspace_version="12.0",
+                 min_nvidia_driver_version="550.1")
+    capability = payload["worker_capability_snapshot"]
+    device = dict(allocation_id="local-device-0", device_uuid="GPU-local-0",
+                  vendor="nvidia", model="test-gpu", memory_kind="dedicated",
+                  memory_mb=16384, unified_memory_mb=None,
+                  nvidia_driver_version="550.2", mig_mode="disabled")
+    profile["required_host_runtime_features"] = ["egl", "nvidia-container-runtime"]
+    capability["container_runtime_features"] = ["egl", "nvidia-container-runtime"]
+    profile["required_image_features"] = ["isaac-sim-5.1", "omnigibson-3.8"]
+    image["application_features"] = ["isaac-sim-5.1", "omnigibson-3.8"]
+    capability["gpu_devices"] = [device]
+    if drift == "count":
+        capability["gpu_devices"] = []
+    elif drift == "model":
+        device["model"] = "other-gpu"
+    elif drift == "memory":
+        device["memory_mb"] = 4096
+    elif drift == "driver":
+        device["nvidia_driver_version"] = "549.9"
+    spec = payload["execution_spec_snapshot"]
+    spec["execution_variant_id"] = "local-gpu"
+    spec["gpu_backend_selection_sha256"] = D1
+    for name, value in (("resource_profile", profile), ("image_runtime_contract", image)):
+        payload[f"{name}_digest"] = spec[f"{name}_digest"] = canonical_digest(value)
+    payload["worker_capability_snapshot_digest"] = canonical_digest(capability)
+    payload["execution_spec_digest"] = canonical_digest(spec)
+    if drift is None:
+        assert ExecutionAttemptClaimV1.model_validate(payload).worker_capability_snapshot.gpu_devices
+    else:
+        with pytest.raises(ValidationError):
+            ExecutionAttemptClaimV1.model_validate(payload)

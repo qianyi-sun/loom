@@ -1,7 +1,7 @@
 """Provision a deployment-managed headless smoke-user credential.
 
 The release-gate / operator trajectory smoke (``s13_smoke``,
-``submit_mode="user-token"``) submits ``oracle × gb10-smoke`` via
+``submit_mode="user-token"``) submits a smoke trial via
 ``POST /api/v1/trials``. That route requires a *user-owned* API token:
 ``require_submitting_user`` rejects anything whose ``ctx.user_id`` is
 ``None`` (a bare admin or "legacy" team token cannot submit user-facing
@@ -12,9 +12,8 @@ This module provisions one the way operational infra should be created —
 service-account-owned, repo-driven, no human login and no personal
 token: a dedicated non-human ``loom-smoke`` User + Team + owner
 membership, then a freshly-minted user-owned token with ``submit`` scope.
-The deploy runs this against the target DB and writes the returned raw
-token into ``loom-secrets`` for the release-gate to read via
-``smoke_api_token_source`` — see ``docs/runbooks/deploy-staging-k3s.md``.
+Authorized credential provisioning writes the returned raw token into the
+target Secret for the release-gate to read via ``smoke_api_token_source``.
 
 Idempotent on the identity (user/team/membership are get-or-create);
 each run mints a fresh token and, by default, revokes the smoke user's
@@ -220,9 +219,8 @@ def ensure_batch_runner_token(
     non-user ``worker`` token scoped to ``submit:batch``. A fresh or
     post-cutover DB has no valid one, so ``LOOM_SVC_BATCH_RUNNER_CP_TOKEN``
     (from ``loom-secrets/batch-runner-cp-token``) 401s and batches never
-    dispatch. The deploy runs this against the target DB, writes the raw
-    token into ``loom-secrets``, and restarts loom-service to pick it up —
-    see ``docs/runbooks/deploy-staging-k3s.md``.
+    dispatch. Authorized credential provisioning writes the raw token into
+    the target Secret before restarting loom-service to pick it up.
 
     Idempotent by rotation: prior deploy-provisioned batch-runner tokens
     (tagged by name) are revoked so exactly one is live after each run.

@@ -1,0 +1,169 @@
+{
+  "teams": [
+    {
+      "id": "d625f3fb-1008-48de-bcc3-d5c441f4e0a1",
+      "name": "admin",
+      "created_at": "2026-09-21T14:23:15.273728+00:00",
+      "disabled_at": null,
+      "disabled_reason": null,
+      "submissions_paused_at": null,
+      "submissions_paused_reason": null,
+      "public_registration_enabled": false
+    },
+    {
+      "id": "2c9506e1-7d5e-4b49-b532-4b8f0a3f5ea9",
+      "name": "loom-system-taskset-fence-canary",
+      "created_at": "2026-09-21T14:23:15.273728+00:00",
+      "disabled_at": null,
+      "disabled_reason": null,
+      "submissions_paused_at": null,
+      "submissions_paused_reason": null,
+      "public_registration_enabled": false
+    },
+    {
+      "id": "b9b0b947-838c-482e-9b79-78ab03b60bad",
+      "name": "native-store-b9b0b947-838c-482e-9b79-78ab03b60bad",
+      "created_at": "2026-09-21T14:23:23.707988+00:00",
+      "disabled_at": null,
+      "disabled_reason": null,
+      "submissions_paused_at": null,
+      "submissions_paused_reason": null,
+      "public_registration_enabled": false
+    }
+  ],
+  "users": [
+    {
+      "id": "c7290944-1b65-47c2-85bd-9ffc70d6062c",
+      "email": null,
+      "display_name": "Qianyi",
+      "is_platform_admin": true,
+      "created_at": "2026-09-21T14:23:15.273728+00:00",
+      "last_login_at": null,
+      "username": "Qianyi",
+      "username_normalized": "qianyi",
+      "password_hash": null,
+      "password_set_at": null,
+      "status": "pending_setup",
+      "disabled_at": null
+    },
+    {
+      "id": "44717e16-6c6a-4679-a7bd-9cad80c656ea",
+      "email": null,
+      "display_name": "Hongjian",
+      "is_platform_admin": true,
+      "created_at": "2026-09-21T14:23:15.273728+00:00",
+      "last_login_at": null,
+      "username": "Hongjian",
+      "username_normalized": "hongjian",
+      "password_hash": null,
+      "password_set_at": null,
+      "status": "pending_setup",
+      "disabled_at": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000001216",
+      "email": null,
+      "display_name": "Loom Pipeline acceptance controller",
+      "is_platform_admin": false,
+      "created_at": "2026-09-21T14:23:15.273728+00:00",
+      "last_login_at": null,
+      "username": "loom-pipeline-acceptance-controller",
+      "username_normalized": "loom-pipeline-acceptance-controller",
+      "password_hash": null,
+      "password_set_at": null,
+      "status": "active",
+      "disabled_at": null
+    },
+    {
+      "id": "3487bd3e-e1bf-4e64-bf85-ef24c50b6cf9",
+      "email": "3487bd3e-e1bf-4e64-bf85-ef24c50b6cf9@example.test",
+      "display_name": null,
+      "is_platform_admin": false,
+      "created_at": "2026-09-21T14:23:23.707988+00:00",
+      "last_login_at": null,
+      "username": "native-store-3487bd3e-e1bf-4e64-bf85-ef24c50b6cf9",
+      "username_normalized": "native-store-3487bd3e-e1bf-4e64-bf85-ef24c50b6cf9",
+      "password_hash": null,
+      "password_set_at": null,
+      "status": "active",
+      "disabled_at": null
+    }
+  ],
+  "personal_dev_candidates": [
+    {
+      "id": "fba6d867-d697-4658-85ed-9bc5df200b4a",
+      "owner_user_id": "3487bd3e-e1bf-4e64-bf85-ef24c50b6cf9",
+      "owner_team_id": "b9b0b947-838c-482e-9b79-78ab03b60bad",
+      "candidate_sha": "2fe6d4e7efa34f109954b9f00e26464a2fe6d4e7efa34f109954b9f00e26464a",
+      "source_sha256": "f7403105b4194fc4bf2f9c8591c36c93f7403105b4194fc4bf2f9c8591c36c93",
+      "archive_sha256": "31561dc0ee8c4e01a3b8629589c62f4831561dc0ee8c4e01a3b8629589c62f48",
+      "build_contract_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "source_commit": "5555555555555555555555555555555555555555",
+      "dirty": true,
+      "manifest_json": {
+        "schema_version": 1,
+        "attestation_scope": "personal-dev-only"
+      },
+      "object_bucket": "artifacts",
+      "object_key": "personal-dev/sources/b9b0b947-838c-482e-9b79-78ab03b60bad/3487bd3e-e1bf-4e64-bf85-ef24c50b6cf9/2fe6d4e7efa34f109954b9f00e26464a2fe6d4e7efa34f109954b9f00e26464a/fba6d867-d697-4658-85ed-9bc5df200b4a/31561dc0ee8c4e01a3b8629589c62f4831561dc0ee8c4e01a3b8629589c62f48.tar",
+      "archive_size_bytes": 4096,
+      "status": "building",
+      "image_manifest_digest": null,
+      "publication_json": null,
+      "publication_sha256": null,
+      "failure_reason": null,
+      "created_at": "2026-08-30T18:00:00+00:00",
+      "updated_at": "2026-08-30T18:00:00+00:00",
+      "ready_at": null,
+      "source_generation_id": "fba6d867-d697-4658-85ed-9bc5df200b4a",
+      "registry_prefix": null,
+      "artifact_state": "retained",
+      "artifact_gc_lease_epoch": 0,
+      "artifact_gc_unreferenced_at": null,
+      "artifact_gc_lease_expires_at": null,
+      "artifact_collected_at": null,
+      "artifact_gc_claimed_by": null,
+      "artifact_gc_blocked_reason": null,
+      "artifact_gc_manifest_json": null,
+      "artifact_gc_manifest_sha256": null
+    }
+  ],
+  "personal_dev_candidate_build_attempts": [
+    {
+      "id": "58598f74-3c0c-44d0-9296-57c3974af017",
+      "candidate_id": "fba6d867-d697-4658-85ed-9bc5df200b4a",
+      "subject_id": "ff001170-e3ed-4668-a7cd-b295eea9318a",
+      "subject_incarnation": "54c3e610-4863-4e2b-aa32-d34668c52a87",
+      "operation_id": "a5a72531-1c0f-4f20-b2c9-c9e696dfd4ab",
+      "operation_epoch": 3,
+      "attempt_sequence": 2,
+      "state": "running",
+      "lease_epoch": 7,
+      "claimed_by": "personal-builder-test",
+      "lease_expires_at": "2026-08-30T18:30:00+00:00",
+      "failure_reason": null,
+      "created_at": "2026-08-30T18:00:00+00:00",
+      "updated_at": "2026-08-30T18:00:00+00:00",
+      "started_at": "2026-08-30T18:00:00+00:00",
+      "finished_at": null
+    }
+  ],
+  "personal_dev_build_platform_requests": [
+    {
+      "id": "9d7329a4-64b0-5688-a564-283bdda464cf",
+      "owner_user_id": "3487bd3e-e1bf-4e64-bf85-ef24c50b6cf9",
+      "candidate_id": "fba6d867-d697-4658-85ed-9bc5df200b4a",
+      "attempt_id": "58598f74-3c0c-44d0-9296-57c3974af017",
+      "attempt_lease_epoch": 7,
+      "platform": "linux/arm64",
+      "subject_id": "d62ec288-ab0f-54ee-8ce2-174e93e5bfa1",
+      "subject_incarnation": "00000000-0000-0000-0000-000000000500",
+      "deployment_generation": 1,
+      "bucket_id": "build-376f89611b1e54a4257439d55ee61ff323c887a35e1031699cf2e68ea82aa704",
+      "source_binding_sha256": "1b9ac058fa8d09a8784bdd923a0efa280969e5a6416559becea4601998e5296e",
+      "runtime_installation_sha256": "cae24781883f5a35f6604e9df06b2fa96cb808d49b8b0679d7f1e25f1b4057e0",
+      "created_at": "2026-08-30T18:00:00+00:00",
+      "cancelled_at": null
+    }
+  ]
+}

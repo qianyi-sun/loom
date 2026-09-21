@@ -23,12 +23,10 @@ from loom.db.schema import (
     PipelineInputImport,
     PipelineRun,
     PipelineRunControlBinding,
-    PipelineRunGpuBackendSelection,
     PipelineStageRun,
 )
 from loom.pipeline.budget import TerminalCause
-from loom.pipeline.gpu_backend import select_ordinary_gpu_backend
-from loom.pipeline.keys import canonical_digest, canonical_document
+from loom.pipeline.keys import canonical_digest
 from loom.pipeline.public_api import (
     PipelineIdempotencyEndpoint,
     PipelineRunRetryRequestV1,
@@ -126,49 +124,23 @@ def _logical_control_slots(graph: RunGraphSpecV1) -> tuple[tuple[str, str], ...]
     )
 
 
-def _graph_has_gpu_nodes(graph: RunGraphSpecV1) -> bool:
-    if graph.budget.max_gpu_seconds == 0:
-        return False
+def _validate_execution_profiles(graph: RunGraphSpecV1) -> None:
+    """Reject retired GPU execution, including requests with a zero GPU budget."""
     registry = ResourceProfileRegistry.load()
     try:
-        return any(
-            any(
-                variant.gpu_count_exact > 0
-                for variant in registry.get(node.resource_profile).profile.execution_variants
-            )
-            for node in graph.nodes
-            if hasattr(node, "resource_profile")
+        has_gpu = any(
+            any(variant.gpu_count_exact > 0 for variant in
+                registry.get(node.resource_profile).profile.execution_variants)
+            for node in graph.nodes if hasattr(node, "resource_profile")
         )
     except ResourceProfileRegistryError as exc:
         raise PipelineApiError(
             422, "stage_request_invalid", "Resource profile is unavailable"
         ) from exc
-
-
-def _add_ordinary_gpu_selection(
-    session: AsyncSession, run: PipelineRun, graph: RunGraphSpecV1
-) -> None:
-    if not _graph_has_gpu_nodes(graph):
-        return
-    selection = select_ordinary_gpu_backend(
-        recipe_digest=run.recipe_digest,
-        pipeline_run_id=run.id,
-        selected_at=run.created_at,
-    )
-    value = selection.model_dump(mode="json")
-    session.add(
-        PipelineRunGpuBackendSelection(
-            pipeline_run_id=run.id,
-            scope=selection.scope,
-            variant_id=selection.variant_id,
-            policy_id=selection.policy_id,
-            selection_source=selection.selection_source,
-            selected_at=selection.selected_at,
-            selection_json=value,
-            selection_bytes=canonical_document(value),
-            gpu_backend_selection_sha256=selection.gpu_backend_selection_sha256,
+    if has_gpu:
+        raise PipelineApiError(
+            422, "execution_unsupported", "Behavior GPU pipeline execution is retired"
         )
-    )
 
 
 def encode_pipeline_cursor(
@@ -505,7 +477,7 @@ async def create_public_run(
         await binding_resolver.persist_run_bindings(
             session, pipeline_run_id=run.id, items=binding_result
         )
-    _add_ordinary_gpu_selection(session, run, graph)
+    _validate_execution_profiles(graph)
     await session.flush()
     response = run_projection(run)
     complete_idempotency(
@@ -676,7 +648,7 @@ async def create_retry_run(
                     per_call_timeout_seconds=frozen_binding.per_call_timeout_seconds,
                 )
             )
-    _add_ordinary_gpu_selection(session, new_run, graph)
+    _validate_execution_profiles(graph)
     await session.flush()
     response = run_projection(new_run)
     complete_idempotency(

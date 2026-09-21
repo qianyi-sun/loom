@@ -18,7 +18,6 @@ from typing import Literal, Protocol, runtime_checkable
 from uuid import UUID
 
 from loom_worker.pipeline_gpu_lifecycle import (
-    PipelineGpuCluster,
     PipelineGpuLifecycleTracker,
 )
 
@@ -519,7 +518,6 @@ class PipelineContainerRunner:
     preflight: PipelineExecutionPreflight | None = None
     cancellation_grace_seconds: int = 30
     cancellation_poll_seconds: int = 5
-    gpu_cluster: PipelineGpuCluster | None = None
     gpu_lifecycle: PipelineGpuLifecycleTracker | None = None
     live_preview: PipelineLivePreviewLifecycle | None = None
 
@@ -562,13 +560,8 @@ class PipelineContainerRunner:
                     input_view=input_view,
                 )
             if self.spec.gpu_device_uuids and self.gpu_lifecycle is not None:
-                if self.gpu_cluster is None:
-                    raise PipelineContainerContractError(
-                        "GPU lifecycle tracking requires a closed slurm cluster"
-                    )
                 self.gpu_lifecycle.mark(
                     request.attempt_id,
-                    cluster=self.gpu_cluster,
                     reason="pre_start",
                 )
             backend_started = True
@@ -582,10 +575,8 @@ class PipelineContainerRunner:
             )
             if process_result is None:
                 if self.spec.gpu_device_uuids and self.gpu_lifecycle is not None:
-                    assert self.gpu_cluster is not None
                     self.gpu_lifecycle.mark(
                         request.attempt_id,
-                        cluster=self.gpu_cluster,
                         reason="cleanup_pending",
                     )
                 try:
@@ -631,10 +622,8 @@ class PipelineContainerRunner:
                 self.live_preview.stop()
             if backend_started and not backend_torn_down:
                 if self.spec.gpu_device_uuids and self.gpu_lifecycle is not None:
-                    assert self.gpu_cluster is not None
                     self.gpu_lifecycle.mark(
                         request.attempt_id,
-                        cluster=self.gpu_cluster,
                         reason="cleanup_pending",
                     )
                 try:
@@ -673,13 +662,11 @@ class PipelineContainerRunner:
         try:
             while True:
                 if self.spec.gpu_device_uuids and self.gpu_lifecycle is not None:
-                    assert self.gpu_cluster is not None
                     if await self.backend.expected_process_group_present(attempt_id=attempt_id):
                         self.gpu_lifecycle.process_present(attempt_id)
                     else:
                         self.gpu_lifecycle.mark(
                             attempt_id,
-                            cluster=self.gpu_cluster,
                             reason="process_absent",
                         )
                 done, _pending = await asyncio.wait(

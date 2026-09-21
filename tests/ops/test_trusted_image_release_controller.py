@@ -106,7 +106,7 @@ def test_github_client_binds_exact_nonexpired_release_artifact(
             "artifacts": [
                 {
                     "id": 99,
-                    "name": "personal-dev-trusted-release-run-11-attempt-1",
+                    "name": "trusted-image-release-run-11-attempt-1",
                     "expired": False,
                     "size_in_bytes": 3745,
                     "workflow_run": {"id": 11, "head_sha": HEAD},
@@ -119,7 +119,7 @@ def test_github_client_binds_exact_nonexpired_release_artifact(
     assert client.has_trusted_release_artifact(_run(sha=HEAD, run_id=11)) is True
     assert observed_paths == [
         "/repos/qianyi-sun/loom/actions/runs/11/artifacts?"
-        "name=personal-dev-trusted-release-run-11-attempt-1&per_page=100"
+        "name=trusted-image-release-run-11-attempt-1&per_page=100"
     ]
 
 
@@ -199,7 +199,7 @@ def test_github_client_rejects_boolean_artifact_workflow_run_id(
             "artifacts": [
                 {
                     "id": 99,
-                    "name": "personal-dev-trusted-release-run-1-attempt-1",
+                    "name": "trusted-image-release-run-1-attempt-1",
                     "expired": False,
                     "size_in_bytes": 3745,
                     "workflow_run": {"id": True, "head_sha": HEAD},
@@ -221,7 +221,7 @@ def test_github_client_rejects_boolean_artifact_workflow_run_id(
             "artifacts": [
                 {
                     "id": 99,
-                    "name": "personal-dev-trusted-release-run-11-attempt-1",
+                    "name": "trusted-image-release-run-11-attempt-1",
                     "expired": True,
                     "size_in_bytes": 3745,
                     "workflow_run": {"id": 11, "head_sha": HEAD},
@@ -233,7 +233,7 @@ def test_github_client_rejects_boolean_artifact_workflow_run_id(
             "artifacts": [
                 {
                     "id": 99,
-                    "name": "personal-dev-trusted-release-run-12-attempt-1",
+                    "name": "trusted-image-release-run-12-attempt-1",
                     "expired": False,
                     "size_in_bytes": 3745,
                     "workflow_run": {"id": 11, "head_sha": HEAD},
@@ -245,7 +245,7 @@ def test_github_client_rejects_boolean_artifact_workflow_run_id(
             "artifacts": [
                 {
                     "id": 99,
-                    "name": "personal-dev-trusted-release-run-11-attempt-1",
+                    "name": "trusted-image-release-run-11-attempt-1",
                     "expired": False,
                     "size_in_bytes": 0,
                     "workflow_run": {"id": 11, "head_sha": HEAD},
@@ -257,7 +257,7 @@ def test_github_client_rejects_boolean_artifact_workflow_run_id(
             "artifacts": [
                 {
                     "id": 99,
-                    "name": "personal-dev-trusted-release-run-11-attempt-1",
+                    "name": "trusted-image-release-run-11-attempt-1",
                     "expired": False,
                     "size_in_bytes": 3745,
                     "workflow_run": {"id": 12, "head_sha": HEAD},

@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
-import loom_worker.artifact_input_journal as journal_module
 from loom.pipeline.keys import canonical_document, digest_bytes
-from loom.pipeline.work_protocol import AcceptanceEvictionGrantV1
 from loom_worker.artifact_input_journal import (
-    AcceptanceEvictionCommandHandler,
     ArtifactInputJournal,
     ArtifactInputJournalError,
     allocatable_capacity,
@@ -79,117 +75,23 @@ def test_capacity_rejects_overcommit_and_formula_is_exact(tmp_path: Path) -> Non
         )
 
 
-class _Authority:
-    def __init__(self, grant: AcceptanceEvictionGrantV1) -> None:
-        self.grant = grant
+def test_restart_resumes_local_gc_from_historical_tombstone(tmp_path: Path, monkeypatch) -> None:
+    import loom_worker.artifact_input_journal as module
 
-    async def authorize(self, **_: object) -> AcceptanceEvictionGrantV1:
-        return self.grant
-
-
-async def test_acceptance_eviction_is_all_five_and_replayable(tmp_path: Path) -> None:
     journal = _journal(tmp_path)
-    manifests = tuple(f"sha256:{index:064x}" for index in range(1, 6))
-    _ready(journal, manifests[0])
-    grant = AcceptanceEvictionGrantV1(
-        schema_version="loom.acceptance-eviction-grant.v1",
-        command_id=uuid4(),
-        authorization_id=uuid4(),
-        candidate_sha256="sha256:" + "c" * 64,
-        worker_id=uuid4(),
-        worker_lease_epoch=1,
-        ordered_manifest_sha256s=list(manifests),
-        pipeline_run_id=uuid4(),
-        exclusive_fence_id=uuid4(),
-        authorization_snapshot_sha256="sha256:" + "d" * 64,
-        backend_variant_id="oldlab-rtx5080-2gpu",
-        policy_id="behavior-gpu-oldlab",
-        policy_config_sha256="sha256:" + "e" * 64,
-        policy_activation_epoch=1,
-        slurm_cluster_id="oldlab",
-        slurm_cluster_config_sha256="sha256:" + "f" * 64,
-        slurm_allocation_id="123",
-        worker_capability_snapshot_digest="sha256:" + "1" * 64,
-        action="matrix",
-    )
-    authority = _Authority(grant)
-    handler = AcceptanceEvictionCommandHandler(journal=journal, authority=authority)
+    digest = "sha256:" + "c" * 64
+    _ready(journal, digest)
+    remove = module._remove_tree_no_links
 
-    first = await handler.evict_acceptance_entries(
-        authorization_id=grant.authorization_id,
-        candidate_sha256=grant.candidate_sha256,
-        worker_id=grant.worker_id,
-        ordered_manifest_sha256s=manifests,
-    )
-    replay = await handler.evict_acceptance_entries(
-        authorization_id=grant.authorization_id,
-        candidate_sha256=grant.candidate_sha256,
-        worker_id=grant.worker_id,
-        ordered_manifest_sha256s=manifests,
-    )
+    def interrupted(_path: Path) -> None:
+        raise OSError("simulated GC interruption")
 
-    assert first == replay
-    assert first.finished_at <= datetime.now(UTC)
-    assert first.evicted_count == 1
-    assert first.absence_verified is True
-    assert all(journal.get_entry(digest) is None for digest in manifests)
-
-
-async def test_restart_resumes_acceptance_tombstone_to_exact_result(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    journal = _journal(tmp_path)
-    manifests = tuple(f"sha256:{index:064x}" for index in range(11, 16))
-    _ready(journal, manifests[0])
-    grant = AcceptanceEvictionGrantV1(
-        schema_version="loom.acceptance-eviction-grant.v1",
-        command_id=uuid4(),
-        authorization_id=uuid4(),
-        candidate_sha256="sha256:" + "a" * 64,
-        worker_id=uuid4(),
-        worker_lease_epoch=1,
-        ordered_manifest_sha256s=list(manifests),
-        pipeline_run_id=uuid4(),
-        exclusive_fence_id=uuid4(),
-        authorization_snapshot_sha256="sha256:" + "b" * 64,
-        backend_variant_id="gb10-shared-1gpu",
-        policy_id="behavior-gpu-gb10",
-        policy_config_sha256="sha256:" + "c" * 64,
-        policy_activation_epoch=1,
-        slurm_cluster_id="gb10",
-        slurm_cluster_config_sha256="sha256:" + "d" * 64,
-        slurm_allocation_id="456",
-        worker_capability_snapshot_digest="sha256:" + "e" * 64,
-        action="matrix",
-    )
-    original_remove = journal_module._remove_tree_no_links
-
-    def crash(_path: Path) -> None:
-        raise RuntimeError("crash seam")
-
-    monkeypatch.setattr(journal_module, "_remove_tree_no_links", crash)
-    handler = AcceptanceEvictionCommandHandler(
-        journal=journal, authority=_Authority(grant)
-    )
-    with pytest.raises(RuntimeError, match="crash seam"):
-        await handler.evict_acceptance_entries(
-            authorization_id=grant.authorization_id,
-            candidate_sha256=grant.candidate_sha256,
-            worker_id=grant.worker_id,
-            ordered_manifest_sha256s=manifests,
-        )
-
-    monkeypatch.setattr(journal_module, "_remove_tree_no_links", original_remove)
-    restarted = _journal(tmp_path)
-    restarted.reconcile()
-    replay = await AcceptanceEvictionCommandHandler(
-        journal=restarted, authority=_Authority(grant)
-    ).evict_acceptance_entries(
-        authorization_id=grant.authorization_id,
-        candidate_sha256=grant.candidate_sha256,
-        worker_id=grant.worker_id,
-        ordered_manifest_sha256s=manifests,
-    )
-
-    assert replay.evicted_count == 1
-    assert replay.absence_verified is True
+    monkeypatch.setattr(module, "_remove_tree_no_links", interrupted)
+    with pytest.raises(OSError, match="simulated GC interruption"):
+        journal.gc_zero_ref(target_bytes=0)
+    assert journal.get_entry(digest).state == "deleting"
+    monkeypatch.setattr(module, "_remove_tree_no_links", remove)
+    recovered = _journal(tmp_path)
+    recovered.reconcile()
+    assert recovered.get_entry(digest) is None
+    assert not recovered.ready_path(digest).exists()

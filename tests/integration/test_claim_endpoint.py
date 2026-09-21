@@ -10,8 +10,6 @@ from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import (
     AdminAuditEvent,
-    GB10WorkerNodeStatus,
-    GB10WorkerPoolDesiredState,
     ModelSwitchPlan,
     Task,
     TaskImageMaterialization,
@@ -21,7 +19,6 @@ from loom.db.schema import (
     Trial,
     TrialTaskImageMaterialization,
     Worker,
-    WorkerPoolAutoscalerPolicy,
 )
 from loom.models.model_switch_plan import PRNG_VERSION
 from loom_control_plane.app import create_app
@@ -73,9 +70,6 @@ def claim_seed(postgres_url: str) -> Iterator[tuple[UUID, str, UUID]]:
     finally:
         with session_factory() as s:
             s.execute(delete(AdminAuditEvent))
-            s.execute(delete(WorkerPoolAutoscalerPolicy))
-            s.execute(delete(GB10WorkerNodeStatus))
-            s.execute(delete(GB10WorkerPoolDesiredState))
             s.execute(delete(Trial))
             s.execute(delete(TaskImageMaterialization))
             s.execute(delete(Worker))
@@ -94,6 +88,8 @@ def app(
     tmp_path,
 ):
     for k, v in {
+        "LOOM_ENV": "development",
+        "LOOM_LOCAL_EXECUTION": "1",
         "LOOM_CP_DB_URL": postgres_url,
         "LOOM_CP_MINIO_ENDPOINT": "http://minio:9000",
         "LOOM_CP_MINIO_ACCESS_KEY": "x",
@@ -287,353 +283,15 @@ def test_claim_carries_frozen_task_image_execution_grant(
     }
 
 
-@pytest.mark.legacy_pool
-def test_prod_pressure_controller_fences_claim_and_recovers_after_agent_confirmation(
-    app,
-    claim_seed,
-    postgres_url: str,
-):  # type: ignore[no-untyped-def]
-    worker_id, raw_worker, _ = claim_seed
-    admin_headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
-    worker_headers = {"Authorization": f"Bearer {raw_worker}"}
-    with TestClient(app) as client:
-        desired = client.put(
-            "/admin/gb10-worker-pools/staging/default/desired-state",
-            headers=admin_headers,
-            json={
-                "image_tag": "staging-local",
-                "max_concurrent": 1,
-                "env_config_version": "staging-local",
-                "target_slots": 1,
-                "host_intents": {"h": "active"},
-            },
-        )
-        assert desired.status_code == 200, desired.text
 
-        pressure = client.get(
-            "/admin/worker-pools/default/prod-pressure",
-            headers=admin_headers,
-        )
-        assert pressure.status_code == 200, pressure.text
-        assert pressure.json()["prod_pending_count"] == 1
-        assert pressure.json()["has_pressure"] is True
 
-        drain = client.post(
-            "/admin/gb10-worker-pools/staging/default/prod-pressure",
-            headers=admin_headers,
-            json={
-                **pressure.json(),
-                "source": "control-plane prod queue summary",
-                "preemptible": True,
-                "grace_period_seconds": 600,
-            },
-        )
-        assert drain.status_code == 200, drain.text
-        assert drain.json()["action"] == "draining"
-        assert drain.json()["new_staging_claims_allowed"] is False
-        assert drain.json()["host_intents"] == {"h": "stopped"}
-        assert drain.json()["grace"]["action"] == "wait"
 
-        engine = create_engine(postgres_url)
-        session_factory = sessionmaker(engine)
-        with session_factory() as session:
-            worker = session.get(Worker, worker_id)
-            assert worker is not None
-            assert worker.drain_state == "drained"
-            assert worker.drain_owner == "prod-pressure-controller"
 
-        stale_active_report = client.post(
-            "/admin/gb10-worker-pools/staging/default/nodes/h/report",
-            headers=admin_headers,
-            json={
-                "current_image_tag": "staging-local",
-                "current_max_concurrent": 1,
-                "current_env_config_version": "staging-local",
-                "current_intent": "active",
-                "apply_state": "applied",
-                "last_apply_result": "stale report while prod pressure remains active",
-            },
-        )
-        assert stale_active_report.status_code == 200, stale_active_report.text
-
-        fenced = client.post(
-            "/trials/claim",
-            headers=worker_headers,
-            json={"worker_id": str(worker_id), "caps": [_LINUX_PUBLIC_CAP]},
-        )
-        assert fenced.status_code == 204
-
-        recovery = client.post(
-            "/admin/gb10-worker-pools/staging/default/prod-pressure",
-            headers=admin_headers,
-            json={
-                "prod_pending_count": 0,
-                "prod_active_count": 0,
-                "prod_capacity_shortfall": 0,
-                "source": "control-plane prod queue summary",
-                "preemptible": True,
-                "grace_period_seconds": 600,
-            },
-        )
-        assert recovery.status_code == 200, recovery.text
-        assert recovery.json()["action"] == "recovered"
-        assert recovery.json()["host_intents"] == {"h": "active"}
-
-        with session_factory() as session:
-            worker = session.get(Worker, worker_id)
-            assert worker is not None
-            assert worker.drain_state == "drained"
-            assert worker.drain_owner == "prod-pressure-controller"
-
-        still_fenced = client.post(
-            "/trials/claim",
-            headers=worker_headers,
-            json={"worker_id": str(worker_id), "caps": [_LINUX_PUBLIC_CAP]},
-        )
-        assert still_fenced.status_code == 204
-
-        confirmed = client.post(
-            "/admin/gb10-worker-pools/staging/default/nodes/h/report",
-            headers=admin_headers,
-            json={
-                "current_image_tag": "staging-local",
-                "current_max_concurrent": 1,
-                "current_env_config_version": "staging-local",
-                "current_intent": "active",
-                "apply_state": "applied",
-                "last_apply_result": "docker compose worker reconciled",
-            },
-        )
-        assert confirmed.status_code == 200, confirmed.text
-
-        with session_factory() as session:
-            worker = session.get(Worker, worker_id)
-            assert worker is not None
-            assert worker.drain_state == "active"
-            assert worker.drain_owner is None
-        engine.dispose()
-
-        claimed = client.post(
-            "/trials/claim",
-            headers=worker_headers,
-            json={"worker_id": str(worker_id), "caps": [_LINUX_PUBLIC_CAP]},
-        )
-        assert claimed.status_code == 200, claimed.text
 
 
 @pytest.mark.legacy_pool
-def test_prod_pressure_keeps_non_preemptible_busy_host_running(
-    app,
-    claim_seed,
-    postgres_url: str,
-):  # type: ignore[no-untyped-def]
-    worker_id, raw_worker, _ = claim_seed
-    admin_headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
-    with TestClient(app) as client:
-        assert client.put(
-            "/admin/gb10-worker-pools/staging/default/desired-state",
-            headers=admin_headers,
-            json={
-                "image_tag": "staging-local",
-                "max_concurrent": 1,
-                "env_config_version": "staging-local",
-                "target_slots": 1,
-                "host_intents": {"h": "active"},
-            },
-        ).status_code == 200
-        claimed = client.post(
-            "/trials/claim",
-            headers={"Authorization": f"Bearer {raw_worker}"},
-            json={"worker_id": str(worker_id), "caps": [_LINUX_PUBLIC_CAP]},
-        )
-        assert claimed.status_code == 200, claimed.text
-
-        drain = client.post(
-            "/admin/gb10-worker-pools/staging/default/prod-pressure",
-            headers=admin_headers,
-            json={
-                "prod_pending_count": 1,
-                "prod_active_count": 1,
-                "prod_capacity_shortfall": 1,
-                "preemptible": False,
-                "grace_period_seconds": 0,
-            },
-        )
-        assert drain.status_code == 200, drain.text
-        body = drain.json()
-        assert body["new_staging_claims_allowed"] is False
-        assert body["host_intents"] == {"h": "active"}
-        assert body["running_staging_trials"] == 1
-        assert body["retryable_preemption_trials"] == 0
-        assert body["grace"]["action"] == "not_preemptible"
-
-    engine = create_engine(postgres_url)
-    with sessionmaker(engine)() as session:
-        worker = session.get(Worker, worker_id)
-        trial = session.execute(
-            select(Trial).where(Trial.worker_id == worker_id),
-        ).scalar_one()
-        assert worker is not None
-        assert worker.drain_state == "draining"
-        assert trial.state == "claimed"
-        assert trial.failure_reason is None
-    engine.dispose()
 
 
-@pytest.mark.legacy_pool
-def test_prod_pressure_preempts_busy_host_only_after_zero_grace(
-    app,
-    claim_seed,
-    postgres_url: str,
-):  # type: ignore[no-untyped-def]
-    worker_id, raw_worker, _ = claim_seed
-    admin_headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
-    with TestClient(app) as client:
-        assert client.put(
-            "/admin/gb10-worker-pools/staging/default/desired-state",
-            headers=admin_headers,
-            json={
-                "image_tag": "staging-local",
-                "max_concurrent": 1,
-                "env_config_version": "staging-local",
-                "target_slots": 1,
-                "host_intents": {"h": "active"},
-            },
-        ).status_code == 200
-        claimed = client.post(
-            "/trials/claim",
-            headers={"Authorization": f"Bearer {raw_worker}"},
-            json={"worker_id": str(worker_id), "caps": [_LINUX_PUBLIC_CAP]},
-        )
-        assert claimed.status_code == 200, claimed.text
-
-        preempt = client.post(
-            "/admin/gb10-worker-pools/staging/default/prod-pressure",
-            headers=admin_headers,
-            json={
-                "prod_pending_count": 1,
-                "prod_active_count": 1,
-                "prod_capacity_shortfall": 1,
-                "preemptible": True,
-                "grace_period_seconds": 0,
-            },
-        )
-        assert preempt.status_code == 200, preempt.text
-        body = preempt.json()
-        assert body["action"] == "preempting_after_grace"
-        assert body["host_intents"] == {"h": "stopped"}
-        assert body["running_staging_trials"] == 1
-        assert body["retryable_preemption_trials"] == 1
-        assert body["grace"]["action"] == "cancel_retryable"
-
-    engine = create_engine(postgres_url)
-    with sessionmaker(engine)() as session:
-        trial = session.execute(
-            select(Trial).where(Trial.worker_id == worker_id),
-        ).scalar_one()
-        audit = session.execute(
-            select(AdminAuditEvent).order_by(AdminAuditEvent.created_at.desc()),
-        ).scalars().first()
-        assert trial.state == "claimed"
-        assert trial.failure_reason == "prod_capacity_pressure"
-        assert "safe to retry" not in (trial.failure_message or "")
-        assert "crash reclaim returns it to queued" in (trial.failure_message or "")
-        assert audit is not None
-        assert audit.event_metadata["retryable_preemption_trials"] == 1
-    engine.dispose()
-
-
-@pytest.mark.legacy_pool
-def test_neutral_prod_pressure_route_records_slurm_drain_intent(
-    app,
-    claim_seed,
-    postgres_url: str,
-):  # type: ignore[no-untyped-def]
-    admin_headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
-    engine = create_engine(postgres_url)
-    with sessionmaker(engine)() as session:
-        session.execute(insert(WorkerPoolAutoscalerPolicy).values(
-            environment="staging",
-            pool_name="slurm-pool",
-            actuator="slurm",
-            enabled=True,
-            min_slots=0,
-            max_slots=6,
-            actuator_config={"backend": "docker", "cpu_arch": "x86_64"},
-        ))
-        session.commit()
-    engine.dispose()
-
-    with TestClient(app) as client:
-        # #892: the actuator-neutral route drives a Slurm pool and records
-        # drain intent (no GB10 desired state exists for this pool).
-        drain = client.post(
-            "/admin/worker-pools/staging/slurm-pool/prod-pressure",
-            headers=admin_headers,
-            json={
-                "prod_pending_count": 2,
-                "prod_active_count": 0,
-                "prod_capacity_shortfall": 2,
-                "preemptible": True,
-                "grace_period_seconds": 600,
-            },
-        )
-        assert drain.status_code == 200, drain.text
-        body = drain.json()
-        assert body["action"] == "draining"
-        assert body["actuator"] == "slurm"
-        assert body["new_staging_claims_allowed"] is False
-        assert body["drain_intent_active"] is True
-
-    engine = create_engine(postgres_url)
-    with sessionmaker(engine)() as session:
-        policy = session.execute(
-            select(WorkerPoolAutoscalerPolicy).where(
-                WorkerPoolAutoscalerPolicy.pool_name == "slurm-pool",
-            ),
-        ).scalar_one()
-        assert policy.prod_pressure_state is not None
-        assert policy.prod_pressure_state["state"] == "draining"
-    engine.dispose()
-
-
-@pytest.mark.legacy_pool
-def test_gb10_prod_pressure_alias_route_still_drains_gb10_pool(
-    app,
-    claim_seed,
-    postgres_url: str,
-):  # type: ignore[no-untyped-def]
-    admin_headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
-    with TestClient(app) as client:
-        assert client.put(
-            "/admin/gb10-worker-pools/staging/default/desired-state",
-            headers=admin_headers,
-            json={
-                "image_tag": "staging-local",
-                "max_concurrent": 1,
-                "env_config_version": "staging-local",
-                "target_slots": 1,
-                "host_intents": {"h": "active"},
-            },
-        ).status_code == 200
-
-        # The legacy alias keeps driving the GB10 desired-state path.
-        drain = client.post(
-            "/admin/gb10-worker-pools/staging/default/prod-pressure",
-            headers=admin_headers,
-            json={
-                "prod_pending_count": 1,
-                "prod_active_count": 0,
-                "prod_capacity_shortfall": 1,
-                "preemptible": True,
-                "grace_period_seconds": 600,
-            },
-        )
-        assert drain.status_code == 200, drain.text
-        body = drain.json()
-        assert body["action"] == "draining"
-        assert body["new_staging_claims_allowed"] is False
-        assert body["host_intents"] == {"h": "stopped"}
 
 
 def test_claim_clears_stale_failure_diagnostic(

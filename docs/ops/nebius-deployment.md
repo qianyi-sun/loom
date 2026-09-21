@@ -1,9 +1,19 @@
 # Independent Nebius deployment
 
+Hosted rollout automation from the shared-cluster era is retired. This procedure
+requires separately reviewed environment inputs and operator authority; checked-in
+examples are not production deployment authorization. For production, preserve
+release-owner and Production Environment approval, and run
+`scripts/ops/verify_production_release_gate.sh` from the promoted `main` checkout
+with the approved candidate, image and release-gate run before applying manifests.
+Automated native staging/production rollout remains an explicit integration gap.
+
+
 `scripts/ops/deploy_nebius_platform.py` plans or applies the output of
 `render_nebius_platform.py`. Its default is a read-only cluster preflight; cloud
-mutation requires explicit `--apply`. This entry point does not use the legacy
-rollout broker, OLDLAB, GB10, `dev` deployment workflow, or a shared database.
+mutation requires explicit `--apply`. This is the supported hosted deployment entrypoint. `loom cluster up` is
+limited to disposable development targets; the shared-cluster rollout broker
+and its CLI command are retired.
 
 ## Before the first application
 

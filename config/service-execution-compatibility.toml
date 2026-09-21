@@ -6,22 +6,6 @@ execution_class_id = "linux-amd64-cpu-pod-v1"
 logical_pool_id = "nebius-cpu"
 mode = "workload_specific"
 
-[[pool_policies]]
-logical_pool_id = "oldlab"
-mode = "runtime_admission"
-default_disposition = "runtime_admission_required"
-owner = "qianyi-sun"
-reason = "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task."
-required_actions = ["project the exact TaskConfig into legacy claim requirements", "require matching fresh executable worker evidence before claim"]
-
-[[pool_policies]]
-logical_pool_id = "gb10"
-mode = "runtime_admission"
-default_disposition = "runtime_admission_required"
-owner = "qianyi-sun"
-reason = "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task."
-required_actions = ["project the exact TaskConfig into legacy claim requirements", "require matching fresh executable worker evidence before claim"]
-
 # Every first-party benchmark entry point must match exactly one policy. The
 # generator fails closed on missing or overlapping rules and expands these
 # family policies into one explicit machine-readable row per benchmark slug.
@@ -204,12 +188,19 @@ owner = "qianyi-sun"
 reason = "The CPU offline profiles still bind legacy runtime features and execution pools."
 required_changes = ["map the profile to WorkloadRequirementsV1", "materialize an immutable Pod image", "remove physical pool binding"]
 
-[[pipeline_profile_policies]]
-pattern = "behavior-sim-local-*"
+[[additional_workloads]]
+workload_id = "pipeline:behavior-sim-local-gateway@1"
 disposition = "unsupported"
 owner = "qianyi-sun"
-reason = "Behavior simulation profiles require NVIDIA GPUs and host runtime features outside the CPU-only service contract."
-required_changes = ["retain in a separately accepted GPU product or remove from service scheduling"]
+reason = "The shared-cluster GPU execution profile is retired; retained results remain readable."
+required_changes = ["use direct local Behavior execution; no hosted GPU replacement is supported"]
+
+[[additional_workloads]]
+workload_id = "pipeline:behavior-sim-local-none@1"
+disposition = "unsupported"
+owner = "qianyi-sun"
+reason = "The shared-cluster GPU execution profile is retired; retained results remain readable."
+required_changes = ["use direct local Behavior execution; no hosted GPU replacement is supported"]
 
 [[pipeline_profile_policies]]
 pattern = "pipeline-test-cpu-*"

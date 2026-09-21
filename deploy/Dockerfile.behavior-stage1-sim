@@ -1,8 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-# OLDLAB Stage 1 is intentionally single-platform.  The graph pins the final
-# Loom OCI index while the runtime contract pins the linux/amd64 child built
-# from this exact Isaac Sim platform manifest.
+# Local simulator development image, excluded from hosted release publication.
+# The runtime pins the linux/amd64 child of this Isaac Sim platform manifest.
 FROM nvcr.io/nvidia/isaac-sim@sha256:93b0f99635ab126fb5b33298d513c11520f119f0ee60ff8414ccef67ea977829
 
 ARG LOOM_BUILD_SHA

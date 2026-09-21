@@ -1,4 +1,4 @@
-"""Owned durable publication inputs and worker fences, with no execution authority."""
+"""Retained publication snapshots and fences; no worker lifecycle or new builds."""
 
 from __future__ import annotations
 

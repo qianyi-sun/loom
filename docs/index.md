@@ -7,9 +7,10 @@ databases, or object storage themselves.
 
 This page explains Loom from the outside in. Follow it in order for the system
 model; use the linked pages when you need the contract for one part. All pages
-under `docs/` describe current behavior. Historical decisions, completed
-migrations, research notes, and implementation plans live in
-[`archive/`](../archive/).
+under `docs/` describe current behavior except the explicitly marked
+[`historical/`](historical/shared-cluster-retirement-2026-09.md) records. Hosted
+Loom uses Nebius only. Older decisions, completed migrations, research notes,
+and implementation plans live in [`archive/`](../archive/).
 
 ## 1. Start with Loom's boundary
 
@@ -76,8 +77,8 @@ the supporting services differently.
 3. **Prepare the environment.** The worker obtains the task bundle and asks a
    [Driver](architecture/driver-protocol.md) to create its sandbox. Drivers
    provide the common lifecycle implemented by Docker, Fake, and
-   Modal. Kubernetes and Slurm can host worker pools, but they are not
-   additional Driver implementations.
+   Modal for local CLI workflows. Hosted workloads use Nebius Kubernetes
+   execution through the native actuator.
 4. **Run the agent.** The shared `Trial.run()` orchestrator gives the task
    instruction to a built-in agent or an
    [agent adapter](architecture/agent-adapter.md). Model calls go directly to
@@ -131,8 +132,8 @@ has five layers:
    containers or create Batch or Trial rows.
 3. **Execution.** Workers poll for eligible trials, materialize their inputs,
    invoke the shared trial runtime, and use a driver to isolate the agent and
-   task. [Remote worker pools](runbooks/remote-worker-pool.md) add execution
-   hosts without moving control-plane ownership to those hosts.
+   task in local development. Hosted execution uses durable attempts and
+   Nebius Kubernetes Jobs; see [native execution](architecture/nebius-service-execution.md).
 4. **Inference.** The LLM Gateway resolves the permitted provider connection,
    proxies model traffic, and records token, diagnostic, and
    [cost data](architecture/cost-and-rate-cards.md). Trial sandboxes receive a

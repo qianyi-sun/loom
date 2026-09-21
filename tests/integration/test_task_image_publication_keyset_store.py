@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import importlib
 from dataclasses import replace
 from datetime import timedelta
 
 import pytest
-import rfc8785
 from alembic import command
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import create_engine, inspect, select, text
@@ -21,7 +19,7 @@ from loom.db.schema_startup import service_schema_head
 from loom_task_image_authority.publication_signing import PublicationState
 from tests.integration.test_task_image_registry_credential_migration import _config
 from tests.unit.test_task_image_publication_keyset import _b64, _sign, fixture
-from tests.unit.test_task_image_publication_signing import NOW, setup_signing
+from tests.unit.test_task_image_publication_signing import NOW
 
 
 def module():
@@ -408,45 +406,3 @@ def test_migration_refuses_busy_parents_without_waiting(isolated_migration_postg
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == ("0137" if direction == "upgrade" else service_schema_head())
     finally:
         engine.dispose()
-
-
-async def test_real_signed_distribution_composes_with_publication_signing_without_locks(database):
-    m = module()
-    contracts, signing, publication_private, key, _, _, unsigned, _ = setup_signing()
-    execution_private, root, payload, *_ = fixture()
-    async with database[1].begin() as session:
-        session.add(TaskImagePublicationKey(**vars(key)))
-    async with database[1].begin() as session:
-        plan = await m.prepare_keyset(session, trust_root=root)
-    payload.update(keyset_version=1, revocation_epoch=0, keys=[member.model_dump(mode="json", exclude_none=True) for member in plan.keys])
-    keyset_wire = _sign(payload, execution_private)
-    async with database[1].begin() as session:
-        retained = await m.finalize_keyset(session, preparation=plan, wire=keyset_wire, trust_root=root, clock=lambda: NOW)
-    adapter = m.DatabasePublicationDistribution(database[0], trust_root=root, clock=lambda: NOW)
-    distributed = await adapter.snapshot(state=retained.state, key=key)
-
-    class Signer:
-        async def sign_publication(self, request, *, maximum_reply_bytes):
-            # Real independent transaction proves distribution held no lock
-            # over this test signer invocation. Production signer is external.
-            async with database[1].begin() as probe:
-                await probe.execute(select(TaskImagePublicationState).with_for_update(nowait=True))
-            statement = signing.prepare_publication_statement(
-                contracts.decode_unsigned_input(request), key=key, state=retained.state,
-                distribution=distributed, signer_now=NOW,
-            )
-            canonical = contracts.canonical_publication_bytes(statement)
-            wire = rfc8785.dumps(dict(
-                canonical_statement=canonical.decode(), statement_sha256=hashlib.sha256(canonical).hexdigest(),
-                key_id=key.key_id, algorithm="Ed25519",
-                signature=_b64(publication_private.sign(contracts.PUBLICATION_DOMAIN + canonical)),
-            ))
-            assert len(wire) <= maximum_reply_bytes
-            return wire
-
-    result = await signing.request_publication_signature(
-        Signer(), unsigned, key=key, state=retained.state, distribution=distributed,
-        clock=lambda: NOW, timeout_seconds=2,
-    )
-    assert result.statement.unsigned_input() == unsigned
-    assert result.statement.distributed_keyset_version == 1

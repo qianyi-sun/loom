@@ -32,7 +32,6 @@ from loom.db.schema import (
     Token,
     Trial,
     Worker,
-    WorkerPoolAutoscalerPolicy,
 )
 from loom.models.task import TaskConfig, normalize_steps
 from loom_control_plane.scheduler.claim import claim_one
@@ -213,7 +212,6 @@ async def runner_setup(
         with sl() as s:
             s.execute(delete(Trial))
             s.execute(delete(Worker))
-            s.execute(delete(WorkerPoolAutoscalerPolicy))
             s.execute(delete(Token))
             s.execute(delete(Batch))
             s.execute(delete(ProviderConnection))
@@ -225,19 +223,18 @@ async def runner_setup(
         sync_engine.dispose()
 
 
-def _insert_pool_arch_policy(
+def _insert_pool_worker(
     postgres_url: str, *, pool_name: str, cpu_arch: str,
 ) -> None:
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
-        s.execute(insert(WorkerPoolAutoscalerPolicy).values(
-            environment="test",
+        s.execute(insert(Worker).values(
+            id=uuid4(), hostname="local-capability-worker", version="test",
             pool_name=pool_name,
-            actuator="gb10" if cpu_arch == "arm64" else "slurm",
-            enabled=True,
-            max_slots=10,
-            actuator_config={"backend": "docker", "cpu_arch": cpu_arch},
+            capabilities=[{"backend": "docker", "cpu_arch": cpu_arch}],
+            registered_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
+            status="active",
         ))
         s.commit()
     sync_engine.dispose()
@@ -316,7 +313,7 @@ async def test_runner_fans_out_required_worker_pool_coverage_units(
             state="submitted",
             created_by_token_prefix="abcdef12",
             expected_trial_count=3,
-            required_worker_pools=["oldlab", "k8s-worker"],
+            required_worker_pools=["local_x86", "k8s-worker"],
         )
         s.add(c)
         await s.commit()
@@ -332,7 +329,7 @@ async def test_runner_fans_out_required_worker_pool_coverage_units(
 
     assert [body.get("required_worker_pool") for body in captured] == [
         None,
-        "oldlab",
+        "local_x86",
         "k8s-worker",
     ]
     assert [body["idempotency_key"] for body in captured] == [
@@ -341,7 +338,7 @@ async def test_runner_fans_out_required_worker_pool_coverage_units(
             cid,
             task_ids[0],
             1,
-            required_worker_pool="oldlab",
+            required_worker_pool="local_x86",
         ),
         _idempotency_key(
             cid,
@@ -372,7 +369,7 @@ async def test_runner_rejects_required_pool_coverage_when_tasks_mismatch_pool_ar
     postgres_url: str,
 ) -> None:
     session_factory, http_client, team_id, task_ids, captured = runner_setup
-    _insert_pool_arch_policy(postgres_url, pool_name="gb10", cpu_arch="arm64")
+    _insert_pool_worker(postgres_url, pool_name="local_arm", cpu_arch="arm64")
     async with session_factory() as s:
         c = Batch(
             team_id=team_id,
@@ -385,7 +382,7 @@ async def test_runner_rejects_required_pool_coverage_when_tasks_mismatch_pool_ar
             state="submitted",
             created_by_token_prefix="abcdef12",
             expected_trial_count=2,
-            required_worker_pools=["gb10"],
+            required_worker_pools=["local_arm"],
         )
         s.add(c)
         await s.commit()
@@ -418,7 +415,7 @@ async def test_runner_rejects_required_pool_coverage_when_tasks_mismatch_pool_ar
     assert batch_row.fanout_errors
     error = batch_row.fanout_errors[0]
     assert error["reason"] == "required_worker_pool_incompatible"
-    assert error["required_worker_pool"] == "gb10"
+    assert error["required_worker_pool"] == "local_arm"
     assert error["pool_cpu_arches"] == ["arm64"]
     assert error["task_cpu_arches"] == {"x86_64": [task_ids[0]]}
 
@@ -430,7 +427,7 @@ async def test_runner_selects_claimable_task_for_x86_required_pool_coverage(
     postgres_url: str,
 ) -> None:
     session_factory, http_client, team_id, task_ids, captured = runner_setup
-    _insert_pool_arch_policy(postgres_url, pool_name="x86-test-pool", cpu_arch="x86_64")
+    _insert_pool_worker(postgres_url, pool_name="x86-test-pool", cpu_arch="x86_64")
     async with session_factory() as s:
         c = Batch(
             team_id=team_id,

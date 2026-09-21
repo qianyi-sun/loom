@@ -117,13 +117,6 @@ if TYPE_CHECKING:
         enabled: bool = False
 
     @dataclass(frozen=True)
-    class _Gb10PoolConfig:
-        ssh_config: str = ""
-        ssh_identity_file: str = ""
-        ssh_certificate_file: str = ""
-        hosts: list[dict[str, Any]] = field(default_factory=list)
-
-    @dataclass(frozen=True)
     class _GatewayHpaConfig:
         enabled: bool = False
         min_replicas: int = 2
@@ -182,8 +175,6 @@ if TYPE_CHECKING:
         # the rollout host pushes through a loopback-bound registry port.
         container_registry_push: str = ""
         runtime_environment: str = "production"
-        env_state_profile: str = ""
-        gb10_pool: _Gb10PoolConfig = field(default_factory=_Gb10PoolConfig)
         ingress_cert_manager_cluster_issuer: str = ""
         ingress_class_name: str = "nginx"
         ingress_host: str = "loom.example.com"
@@ -201,9 +192,6 @@ if TYPE_CHECKING:
         k8s_worker: _K8sWorkerConfig = field(default_factory=_K8sWorkerConfig)
         llm_gateway_sandbox: _LlmGatewaySandboxConfig = field(
             default_factory=_LlmGatewaySandboxConfig
-        )
-        pipeline_stage1_smoke_authority: _PipelineStage1SmokeAuthorityConfig = field(
-            default_factory=_PipelineStage1SmokeAuthorityConfig
         )
         nebius_execution: _NebiusExecutionConfig = field(default_factory=_NebiusExecutionConfig)
         nebius_private_entry: _NebiusPrivateEntryConfig = field(

@@ -15,6 +15,7 @@ from loom.admin_secret import AdminSecretVerifier, load_optional_admin_secret_ve
 from loom.db.schema_startup import assert_schema_at_head
 from loom.execution_image_admission import ImageAdmissionKeyring
 from loom.pipeline.artifact_commit import ArtifactCommitService
+from loom.service_execution_backend import local_execution_enabled
 from loom.storage_credentials import build_s3_client
 from loom.trajectory.source_spool import ServiceExecutionSourceConfig
 from loom.trajectory.storage import MinioObjectStore
@@ -27,20 +28,8 @@ from loom_control_plane.artifact_commit_runtime import (
 )
 from loom_control_plane.artifact_read_service import ArtifactReadService
 from loom_control_plane.config import ControlPlaneSettings
-from loom_control_plane.elastic_slurm_worker_controller import (
-    SubprocessSlurmCommandRunner,
-    build_controller_config,
-    run_elastic_slurm_worker_controller_loop,
-)
-from loom_control_plane.input_materialization_evidence import (
-    PipelineInputMaterializationEvidenceService,
-)
 from loom_control_plane.live_preview import run_live_preview_reconciler_loop
 from loom_control_plane.metrics_refresher import run_metrics_refresher_loop
-from loom_control_plane.protected_worker_session import (
-    ProtectedWorkerSessionStore,
-    load_protected_worker_runtime_db_url,
-)
 from loom_control_plane.retry_exhausted_sweeper import (
     run_retry_exhausted_sweeper_loop,
 )
@@ -75,9 +64,6 @@ from loom_control_plane.task_image_execution import (
     configured_execution_service,
 )
 from loom_control_plane.task_lifecycle import cancel_and_drain_tasks as _cancel_and_drain_tasks
-from loom_control_plane.worker_pool_autoscaler import (
-    run_worker_pool_autoscaler_loop,
-)
 from loom_task_image_authority.execution_config import load_execution_admission_settings
 
 
@@ -101,8 +87,6 @@ def create_app(
     task_image_execution_factory: Callable[[AsyncEngine], TaskImageExecutionService] | None = None,
 ) -> FastAPI:
     execution_config_file = settings.task_image_execution_config_file
-    if (task_image_execution_factory is not None or execution_config_file is not None) and settings.protected_worker_runtime_db_url_file is not None:
-        raise ValueError("signed legacy execution cannot replace protected worker authority")
     if task_image_execution_factory is not None and execution_config_file is not None:
         raise ValueError("execution configuration conflicts with injected factory")
     execution_config = load_execution_admission_settings(execution_config_file) if execution_config_file is not None else None
@@ -123,25 +107,6 @@ def create_app(
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         admin_secret_verifier = _load_admin_secret_verifier(settings)
 
-        protected_worker_runtime_engine: AsyncEngine | None = None
-        protected_worker_session_store: ProtectedWorkerSessionStore | None = None
-        if settings.protected_worker_runtime_db_url_file is not None:
-            protected_worker_runtime_engine = create_async_engine(
-                load_protected_worker_runtime_db_url(settings.protected_worker_runtime_db_url_file),
-                isolation_level="SERIALIZABLE",
-                pool_pre_ping=True,
-                pool_size=5,
-                max_overflow=5,
-                pool_timeout=settings.db_pool_timeout_sec,
-            )
-            protected_worker_session_store = ProtectedWorkerSessionStore(
-                async_sessionmaker(
-                    protected_worker_runtime_engine,
-                    expire_on_commit=False,
-                )
-            )
-            resources.push_async_callback(protected_worker_runtime_engine.dispose)
-            await protected_worker_session_store.assert_ready()
 
         minio_client = build_s3_client(
             endpoint_url=settings.minio_endpoint,
@@ -160,7 +125,6 @@ def create_app(
             app.state.task_image_execution = await resources.enter_async_context(configured_execution_service(engine, execution_config))
         app.state.admin_secret_verifier = admin_secret_verifier
         app.state.minio_client = minio_client
-        app.state.protected_worker_session_store = protected_worker_session_store
 
         artifact_store = MinioObjectStore(
             endpoint_url=settings.minio_endpoint,
@@ -191,9 +155,6 @@ def create_app(
             session_factory=session_factory,
         )
         app.state.execution_attempt_completion_service = ExecutionAttemptCompletionService()
-        app.state.input_materialization_evidence_service = (
-            PipelineInputMaterializationEvidenceService()
-        )
         app.state.artifact_read_service = ArtifactReadService(
             resolver=SqlArtifactInputResolver(
                 session_factory=session_factory,
@@ -202,29 +163,6 @@ def create_app(
             ),
             store=artifact_store,
             bucket=settings.artifacts_bucket,
-        )
-
-        slurm_controller_config = build_controller_config(
-            enabled=settings.slurm_worker_controller_enabled,
-            environment=settings.slurm_worker_controller_environment,
-            pool_name=settings.slurm_worker_controller_pool_name,
-            allowed_nodes_csv=settings.slurm_worker_controller_allowed_nodes,
-            env_file=settings.slurm_worker_controller_env_file,
-            repo_dir=settings.slurm_worker_controller_repo_dir,
-            partition=settings.slurm_worker_controller_partition,
-            time_limit=settings.slurm_worker_controller_time_limit,
-            requested_cpus=settings.slurm_worker_controller_requested_cpus,
-            requested_memory_mib=settings.slurm_worker_controller_requested_memory_mib,
-            requested_concurrency=(settings.slurm_worker_controller_requested_concurrency),
-            max_jobs=settings.slurm_worker_controller_max_jobs,
-            pending_job_cap=settings.slurm_worker_controller_pending_job_cap,
-            min_queued_trials=settings.slurm_worker_controller_min_queued_trials,
-            stale_after_seconds=settings.slurm_worker_controller_stale_after_seconds,
-            sbatch_path=settings.slurm_worker_controller_sbatch_path,
-            squeue_path=settings.slurm_worker_controller_squeue_path,
-            sacct_path=settings.slurm_worker_controller_sacct_path,
-            scancel_path=settings.slurm_worker_controller_scancel_path,
-            command_timeout_seconds=(settings.slurm_worker_controller_command_timeout_seconds),
         )
 
         background_tasks: list[asyncio.Task[None]] = []
@@ -279,16 +217,6 @@ def create_app(
             name="loom-cp-retry-exhausted-sweeper",
         )
         background_tasks.append(retry_exhausted_task)
-        worker_pool_autoscaler_task = asyncio.create_task(
-            run_worker_pool_autoscaler_loop(
-                session_factory=session_factory,
-                environment=settings.slurm_worker_controller_environment,
-                interval_sec=settings.worker_reclaim_sweep_interval_sec,
-                freshness_sec=settings.worker_heartbeat_expiry_sec,
-            ),
-            name="loom-cp-worker-pool-autoscaler",
-        )
-        background_tasks.append(worker_pool_autoscaler_task)
         live_preview_reconciler_task = asyncio.create_task(
             run_live_preview_reconciler_loop(
                 session_factory=session_factory,
@@ -297,20 +225,6 @@ def create_app(
             name="loom-cp-live-preview-reconciler",
         )
         background_tasks.append(live_preview_reconciler_task)
-        slurm_controller_task: asyncio.Task[None] | None = None
-        if slurm_controller_config is not None:
-            slurm_controller_task = asyncio.create_task(
-                run_elastic_slurm_worker_controller_loop(
-                    session_factory=session_factory,
-                    config=slurm_controller_config,
-                    runner=SubprocessSlurmCommandRunner().bind_config(
-                        slurm_controller_config,
-                    ),
-                    interval_sec=settings.worker_reclaim_sweep_interval_sec,
-                ),
-                name="loom-cp-elastic-slurm-worker-controller",
-            )
-            background_tasks.append(slurm_controller_task)
         service_execution_scheduler_task: asyncio.Task[None] | None = None
         if settings.service_execution_scheduler_enabled:
             service_execution_scheduler_task = asyncio.create_task(
@@ -369,7 +283,9 @@ def create_app(
     app.include_router(trials.router)
     app.include_router(resource_usage.router)
     app.include_router(service_executions.router)
-    app.include_router(workers.router)
+    if local_execution_enabled():
+        app.include_router(workers.router)
+        app.include_router(task_image_materializations.router)
     app.include_router(state.router)
     app.include_router(trajectory.router)
     app.include_router(artifacts.router)
@@ -378,7 +294,6 @@ def create_app(
     app.include_router(admin.router)
     app.include_router(step_tokens.router)
     app.include_router(trial_cache.router)
-    app.include_router(task_image_materializations.router)
     app.include_router(task_image_execution.router)
     # /metrics: standard prometheus_client ASGI app. Mounted at the
     # top-level for prometheus scrapers (operator-supplied

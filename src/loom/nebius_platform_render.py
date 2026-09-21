@@ -1571,7 +1571,6 @@ def build_platform(
                     ),
                     "LOOM_CP_SERVICE_EXECUTION_MATERIALIZER_ENABLED": "true",
                     "LOOM_CP_SERVICE_EXECUTION_SOURCE_RETENTION_SEC": 86400,
-                    "LOOM_CP_SLURM_WORKER_CONTROLLER_ENABLED": "false",
                     "LOOM_CP_EXECUTION_IMAGE_ADMISSION_PUBLIC_KEYS_JSON": canonical(
                         keyring
                     ).decode(),
@@ -1587,8 +1586,6 @@ def build_platform(
                     "LOOM_SVC_GATEWAY_URL": f"http://loom-llm-gateway.{ns}.svc:9100",
                     "LOOM_SVC_PUBLIC_BASE_URL": "https://" + config["public_host"],
                     "LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON": canonical(profile).decode(),
-                    "LOOM_SVC_PERSONAL_DEV_CAPACITY_POOL_CAPABILITIES_JSON": "[]",
-                    "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_ENABLED": "false",
                     "LOOM_SVC_TEAM_REGISTRATION_OPEN": "false",
                 }
             )

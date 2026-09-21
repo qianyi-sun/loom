@@ -1,30 +1,21 @@
 # Nebius service execution contract
 
-> **Target revision, 2026-09-14:** on `dev`, the
-> [full Nebius platform contract](nebius-primary-platform.md) supersedes the
-> permanent hybrid target below. Existing implementation details describe the
-> migration baseline; OLDLAB/GB10 are to be retired after pure Nebius acceptance.
-
-Status: accepted hybrid target architecture for issue #1548. The
-provider-neutral durable control plane, namespace-scoped Kubernetes Job
-adapter, read-only capacity collector, and evidence-gated resource forecast
-are implemented. Development opt-in traffic and current-quota live batches have
-run through the durable path; wider routing, the 200-overlap gate, maintenance
-drains, and any future pool retirement remain separately authorized work.
+Status: Nebius-only hosted architecture following the repository retirement
+of shared-cluster execution. The [platform contract](nebius-primary-platform.md)
+owns the deployment boundary. Repository cleanup preserves published migrations
+and durable records; it does not establish live workload acceptance or authorize
+infrastructure shutdown.
 
 ## Decision
 
-Loom service mode has one provider-neutral admission and authority model over
-three accepted concurrent pools: `nebius-cpu`, `oldlab`, and `gb10`. A normal
-user explicitly selects the logical Batch backend: `backend=nebius` fences the
-attempt to `nebius-cpu`, while `backend=docker` fences it to OLDLAB/GB10.
-Nebius
-uses fenced Kubernetes Job execution units; OLDLAB and GB10 retain the existing
-worker-claim adapter. A trial declares `WorkloadRequirementsV1`; Loom records
-one versioned routing decision, then exactly one adapter may obtain execution
-authority for that attempt. Users never select a physical provider target,
-region, cluster, worker name, or reusable slot directly, and no cross-backend
-fallback is allowed.
+Hosted service execution uses `backend=nebius`, the `nebius-cpu` logical pool,
+and fenced Kubernetes Job execution units. A trial declares
+`WorkloadRequirementsV1`; Loom records one versioned routing decision, then
+exactly one adapter may obtain execution authority for that attempt. Users
+never select a physical provider target, region, cluster, worker name, or
+reusable slot directly. Unsupported workloads fail admission without fallback.
+Explicit local Docker and disposable development execution remain available
+outside hosted service admission.
 
 The checked contracts live in
 `src/loom/execution_contract.py`. Their generated JSON schemas and the complete
@@ -32,8 +23,7 @@ repo-known compatibility report live under `docs/evidence/`. Unknown fields,
 unknown schema versions, implicit resource limits, mutable images, or a
 capability that would be silently weakened fail admission.
 
-This decision does not retire, disable, or subordinate OLDLAB/GB10, and does
-not make configured slots, a registered worker, or Nebius quota equivalent to
+Configured slots, a registered worker, and Nebius quota are not equivalent to
 fresh executable capacity.
 
 ## Authority topology
@@ -42,15 +32,15 @@ fresh executable capacity.
 | --- | --- | --- |
 | Task, batch, trial, immutable workload requirements | Loom/Postgres | Written before fan-out; user input cannot write derived admission fields. |
 | Execution class, pool candidates, routing decision, desired lease, attempt generation | Loom/Postgres | Versioned selection and fencing authority; a selected adapter/pool is immutable once execution authority is issued. |
-| OLDLAB/GB10 worker claims | Existing Loom scheduler and workers | May claim only a queued Trial routed to their exact pool; they do not interpret a Nebius lease. |
 | Provider project, Kubernetes cluster, node group, Pod/Job, RuntimeClass | Nebius/Kubernetes | Observed resource state only; never the source of trial intent. |
 | Reconciliation cursor, observation, condition, retry | Loom/Postgres | The reconciler records every comparison and action outcome. |
 | Trial artifacts and immutable image identity | Object store/registry plus Postgres digest references | A mutable tag or local-only build is not executable service identity. |
 
 The Nebius actuator is the only adapter allowed to translate a
-`kubernetes_job` route and lease into Kubernetes operations. Existing worker
-claim paths remain the adapters for `legacy_worker_claim` routes. API handlers
-persist intent; they do not call Nebius or create Pods inline. The reconciler reads one fenced
+`kubernetes_job` route and lease into hosted Kubernetes operations. Historical
+worker claims remain readable; local worker claims are not hosted fallback.
+API handlers persist intent; they do not call Nebius or create Pods inline.
+The reconciler reads one fenced
 desired generation, observes the provider and Kubernetes objects, performs an
 idempotent action, and records the resulting observation. A stale generation,
 unknown object owner, target-health failure, or ambiguous action outcome stops
@@ -59,7 +49,7 @@ progress and never broadens placement.
 The identity chain is:
 
 `task revision -> workload requirements digest -> routing generation and digest ->`
-`selected pool/adapter -> lease or worker claim -> attempt generation ->`
+`selected pool/adapter -> execution lease -> attempt generation ->`
 `provider resource identity -> artifact digests`.
 
 Kubernetes garbage collection may remove children owned by a task-scoped
@@ -114,8 +104,6 @@ The accepted service pool identities and adapter boundaries are:
 
 | Pool | Adapter | Eligibility evidence |
 | --- | --- | --- |
-| `oldlab` | Existing worker claim | Exact capability match plus a fresh compatible worker observation, or bounded configured autoscaler headroom explicitly recorded as such. |
-| `gb10` | Existing worker claim | Exact capability match plus a fresh compatible worker observation, or bounded configured autoscaler headroom explicitly recorded as such. |
 | `nebius-cpu` | Kubernetes Job lease | Compatible execution class, healthy target, accepted runtime/image evidence, and separately proven target capacity. |
 
 Every uploaded TaskSet receives an immutable, canonical input manifest and
@@ -157,15 +145,14 @@ When the environment scheduler is enabled, it fairly selects one queued,
 converted Trial, requires a fresh healthy target in the bound environment,
 and records a `preexisting_assignment` routing decision before creating the
 lease. The later provisioning boundary still requires fresh executable target
-capacity before a Kubernetes create. A Batch submitted with `backend=docker`
-retains the legacy worker path regardless of whether the task could compile for
-Nebius. An explicit admin target binding remains audited and is not the normal
-workflow.
+capacity before a Kubernetes create. Hosted admission rejects `backend=docker`;
+explicit local development keeps its own execution path. An explicit admin
+target binding remains audited and is not the normal workflow.
 
 `Trial.execution_route_generation` advances while the Trial is queued. The
 selected pool, adapter, target/class when applicable, reason, candidate
 evidence, and digest are copied into the immutable execution lease/outbox or
-honored by the legacy claim query. Once a worker claim or execution lease owns
+honored by the retained local claim query. Once a worker claim or execution lease owns
 the attempt, the route cannot change. Cross-pool recovery first revokes the old
 authority, proves cleanup/seat release, returns the Trial to queued state, and
 creates a new routing generation for the next attempt. It never creates two
@@ -173,15 +160,9 @@ authorities for one attempt generation.
 
 ## Capacity observation and concurrency admission
 
-`loom.pool-capacity.v1` is the normalized operator projection for every legacy
-autoscaler pool. It reports the configured ceiling and scale headroom
-separately from observed active, occupied, pending, and route-assigned queued
-slots. An observation older than the requested freshness window retains its
-diagnostic values but reports `executable_free_slots=0`,
-`capacity_is_fresh=false`, and is excluded from executable aggregation. This
-prevents quota, configured slots, or stale worker counts from becoming a claim
-of runnable capacity. `loom admin worker-pools autoscaler status` exposes the
-same contract as `GET /admin/worker-pool-autoscalers/status`.
+Nebius capacity observations distinguish configured ceilings and provider quota
+from fresh executable target capacity. Historical pool records remain diagnostic
+and cannot authorize hosted claims or autoscaling.
 
 Concurrency admission is a separate persisted boundary. Operators can enable
 independent positive ceilings for `global`, `environment`, `region`, `team`,
@@ -192,8 +173,8 @@ preserves its history. `GET /admin/execution-admission/status` and
 `loom admin worker-pools admission-status` report the durable counter, the
 reservation-ledger count, and whether they agree.
 
-Both legacy worker claim endpoints and Kubernetes Job lease reservation call
-the same database admission function before changing Trial authority. The
+Kubernetes Job lease reservation and retained local worker claims call the
+same database admission function before changing Trial authority. The
 function locks every matching policy row in canonical scope order, increments
 all matching counters with reservation creation in the same transaction, and
 fails closed when any scope is full. Disjoint scopes remain concurrent. A
@@ -205,14 +186,15 @@ counter and retain the released ledger row. The reservation is therefore both
 the concurrency seat and the audit evidence, not a cache derived from worker
 heartbeats.
 
-A pre-start legacy `node_setup_health` refund releases the old attempt's slot
+For retained local claims and historical compatibility, a pre-start
+`node_setup_health` refund releases the old attempt's slot
 in an `AFTER UPDATE` trigger using `OLD.attempt_count`, in the same transaction as
 the refundable counter decrement. Only that explicitly marked
 released legacy reservation permits a new reservation with the same logical
 attempt/role; the old row stays immutable. Other release reasons, NULL reasons
 and nonlegacy owners retain their historical uniqueness fence. Every replacement
 legacy claim has its own persisted UUID, independently of that refundable count.
-See [claim identity and migration order](2026-09-10-task-image-execution-trust.md#refundable-legacy-claims-and-migration-order)
+See [claim identity and migration order](../historical/shared-cluster-retirement-2026-09.md#historical-schema-and-data)
 for protected-caller compatibility and the prospective-only repair boundary.
 
 Paid Nebius execution adds a second, independent finance admission boundary.
@@ -221,7 +203,7 @@ USD rates, source URI/version, effective and observation timestamps, the full
 canonical rate payload, and its digest. A target price binding is versioned and
 must be explicitly enabled. Nebius lease reservation fails closed before the
 create command when the binding is absent, mismatched, disabled, or not yet
-effective; other pools are not changed by this provider-specific requirement.
+effective.
 
 The preflight estimate prices the complete requested Pod envelope for its full
 deadline: execution container, native sidecars, runtime materializer,
@@ -798,22 +780,23 @@ class.
 
 `config/service-execution-compatibility.toml` assigns every repo-known
 benchmark entry point, dynamic service workload class, and pipeline resource
-profile an independent `nebius-cpu`, `oldlab`, and `gb10` disposition, owner,
+profile a `nebius-cpu` disposition, owner,
 reason, and required action. Generate the deterministic report and schemas with:
 
 ```bash
-python scripts/ops/generate_execution_contract_artifacts.py
-python scripts/ops/generate_execution_contract_artifacts.py --check
+uv run --no-sync python scripts/ops/generate_execution_contract_artifacts.py
+uv run --no-sync python scripts/ops/generate_execution_contract_artifacts.py --check
 ```
 
 The generator fails on missing/overlapping rules, missing accepted-pool
 identities, and duplicate workload identities. At this decision point no
 workload is statically supported on Nebius: 66 require conversion and OSWorld
 plus the two GPU/host-specialized Behavior profiles are unsupported there.
-Every catalog row has `runtime_admission_required` for OLDLAB and GB10. That
-disposition preserves both accepted service paths while requiring the exact
-materialized task capability and fresh worker evidence; it is not a claim that
-either pool can currently execute every row.
+OLDLAB, GB10, and Slurm are retired and cannot receive hosted work.
+The unconverted catalog classes are availability gaps, not fallback routes.
+Desktop/GUI and Behavior GPU execution remain local-only. Pipeline submission
+and retry remain local-only until a supported native execution path exists;
+historical runs, artifacts, and cancellation remain accessible.
 
 The report covers the repository's current static catalog. Operator-local,
 remapped, user-supplied, and live database TaskSets are unbounded classes, not
@@ -821,63 +804,37 @@ a finite checked-in list. At rollout, admission must freeze every materialized
 `TaskConfig` into `WorkloadRequirementsV1` and emit a per-task disposition
 before fan-out. A static report does not claim coverage of mutable live rows.
 
-## Terminology and deprecation
+## Service identity and retained compatibility
 
-The following migration applies only to service scheduling. Unrelated uses
-such as storage backend, state backend, LLM provider backend, and Ingress
-backend keep their domain-specific names.
+Hosted Batch submission, clone, and rerun use `backend=nebius`. Backend catalogs
+and UI choices expose hosted availability without offering retired pools.
+Historical `Batch.backend`, worker capabilities, pool names, routing decisions,
+and attempt records remain readable for audit and artifact access; their
+presence does not grant current execution authority.
 
-| Current surface | Transitional read | Terminal service model |
-| --- | --- | --- |
-| `POST /api/v1/batches.backend`, `Batch.backend`, clone/rerun payloads | User-visible, explicit execution choice: `docker` admits only GB10/OLDLAB worker execution; `nebius` admits only the `nebius-cpu` service-execution pool. | Retained as the stable user choice. No cross-backend fallback is allowed. |
-| `GET /api/v1/backends`, overview/monitor `available_backends` | Reports live-worker evidence separately from fresh scale-from-zero authority. | Retained as the user-facing backend catalog. |
-| NewBatch backend picker and BatchDetail/Run Library backend labels | Displays the explicit backend and whether it is live, scale-from-zero capable, or unavailable. | Retained. Users choose Docker or Nebius; they do not choose a physical node or target. |
-| Monitor and Trial Detail execution telemetry | Reports Nebius configured headroom separately from fresh executable slots, plus node/autoscaler/quota, Pod lifecycle, canonical-transfer backlog/retries, and source cleanup. | Retained as the user-visible persistent lifecycle; non-admin responses omit target identity and raw internal errors. |
-| `Trial.requires_caps` | Versioned frozen `WorkloadRequirementsV1` projection is stored alongside legacy JSON during bounded migration. | Legacy unversioned caps removed. |
-| Worker `capabilities[].backend` and `Worker.pool_name` | Observed adapter capability and pool identity; never normal user submission identity. | Retained for accepted OLDLAB/GB10 worker claims and joined with provider-neutral route observability. |
-| `required_worker_pools` / `required_worker_pool` | Operator-only smoke/pin evidence within the already selected backend; user batches remain forbidden from setting it. | Operator control remains distinct from the stable user-facing backend choice. |
-| `autoscaler_pool_name`, physical pool policies, slot counts | Legacy-adapter assignment must match the versioned Trial route; configured and fresh capacity are reported separately. | Retained while OLDLAB/GB10 operate, alongside target/Pod evidence for Nebius. |
-| `loom run --backend` | Unchanged local-only driver selection; it is distinct from service Batch admission. | Local Docker, Modal, and fake drivers may remain CLI-only. Service `backend=nebius` is handled by the durable control-plane path, not a local Nebius driver. |
+Monitor and Trial Detail telemetry reports configured headroom separately from
+fresh executable slots, node/autoscaler/quota state, Pod lifecycle, canonical
+transfer backlog/retries, and source cleanup. Non-admin responses omit target
+identity and raw internal errors. Immutable `WorkloadRequirementsV1` and runtime
+plans continue to fence admission and execution.
 
-Hybrid Nebius plus OLDLAB/GB10 operation is an accepted terminal state. Adapter
-specific fields have an owner and telemetry, but their existence is not a
-deprecation or retirement schedule.
+`loom run --backend` remains explicit local driver selection. Local Docker,
+Modal, and fake drivers do not imply a hosted backend or cross-provider fallback.
+Unrelated storage, state, LLM-provider and Ingress backend terminology is unchanged.
 
-The explicit backend is a routing fence, not a preference. `backend=docker`
-admits only the GB10/OLDLAB worker adapter, even when a task revision already
-carries a compatible service-execution binding. `backend=nebius` admits only
-the `nebius-cpu` lease adapter: it uses a valid legacy binding or compiles the
-exact supported ordinary task shape from the persisted runtime profile, and
-otherwise rejects the Batch. Neither direction falls back across the fence.
+## Repository and rollout boundaries
 
-## Migration and authority gates
+Shared-cluster controllers, attachment tooling, and hosted OLDLAB/GB10/Slurm
+routes are retired from the repository. Published application and guard
+migrations, historical schema-reference recipes, durable execution records, and
+artifacts remain compatible. No data deletion or migration-history rewrite is
+part of source retirement.
 
-The accepted repository and rollout boundaries are:
-
-1. Merge this contract, generated schemas/inventory, and terminology map.
-2. Add immutable requirements, route, target, lease, attempt-generation, and
-   reconciliation persistence without changing live traffic.
-3. Keep existing OLDLAB/GB10 routes operational; test route selection and
-   duplicate-authority fences in the repository and an authorized environment.
-4. Implement the fail-closed Nebius actuator and observed-state reconciler.
-5. Provision development infrastructure, then prove sandbox/runtime and
-   workload conversion; provisioning authority is separate from repository
-   merge authority.
-6. Provision isolated staging, run bounded canaries, and record target health,
-   node-backed capacity, Pod outcomes, artifact hashes, cleanup, and cost.
-7. Accept the approved production binding on the shared baseline cluster before
-   production can use it. A second cluster, region, or automatic regional
-   failover is outside this architecture unless separately required.
-8. Change pool weights, enable a Nebius route, or independently drain one pool
-   only through protected rollout authority with explicit candidate, route,
-   health, capacity, rollback, and operator approval evidence.
-9. Retire a pool only under a future explicit owner decision; this architecture
-   neither requires nor authorizes OLDLAB/GB10 retirement.
-
-Passing repository CI authorizes merge only. Merge does not authorize or prove
-infrastructure. Provisioned infrastructure does not authorize or prove a live
-canary. A successful canary does not authorize pool-weight changes, a drain,
-traffic routing, or retirement.
+Nebius workload conversion, bounded canaries, capacity, cleanup, artifact and
+cost evidence still require validation for the selected candidate. Production
+routing requires the protected deployment and release authority. Repository CI
+proves source checks only; it neither authorizes live operations nor proves
+infrastructure shutdown or acceptance of unsupported workloads.
 
 ## Reconciliation invariants
 
@@ -899,7 +856,7 @@ traffic routing, or retirement.
 ## Follow-on ownership
 
 - #1540: durable execution state and provider-neutral lease schema; implemented
-  and held traffic-disabled in this change.
+  with persistent attempt and routing fences.
 - #1549: namespace-scoped Kubernetes Job actuator and observed-state
   reconciliation; the persistent system-node actuator remains available while
   user execution nodes scale independently to zero.
@@ -908,4 +865,4 @@ traffic routing, or retirement.
 - #1551: proportionate Kubernetes execution security baseline.
 - Later #1536 children: infrastructure, workload conversion, canary, and
   independently authorized production routing. No child implicitly owns
-  OLDLAB/GB10 retirement.
+  live shared-cluster shutdown.

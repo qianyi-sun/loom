@@ -8,7 +8,7 @@ streams.
 
 - **[provider-onboarding.md](provider-onboarding.md)** — hosted third-party
   API setup (OpenAI-compatible endpoints, provider-native APIs) and
-  user-operated Slurm/vLLM checkpoint deployment. Provider testing, model
+  user-managed OpenAI-compatible model servers. Provider testing, model
   refresh, and safe registration.
 - **[authoring-a-task.md](authoring-a-task.md)** — `task.toml` schema,
   on-disk layout, agent/verifier choices, network policies, healthchecks,

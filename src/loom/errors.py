@@ -105,7 +105,6 @@ import re  # noqa: E402
 from collections.abc import Mapping  # noqa: E402
 from datetime import UTC, datetime  # noqa: E402
 
-from loom.driver.build_containment import ImageBuildForbiddenError  # noqa: E402
 from loom.models.result import ExceptionInfo, FailureReason  # noqa: E402
 from loom.security.redaction import redact_text  # noqa: E402
 
@@ -417,12 +416,6 @@ def classify_failure(exc: BaseException) -> tuple[FailureReason, str | None]:
 
     if isinstance(exc, AgentSetupTimeoutError):
         return FailureReason.AGENT_ERROR, None
-    # #1169: a containment-required worker refuses to build an uncached image
-    # (ImageBuildForbiddenError, a RuntimeError). Surface its self-explaining
-    # message BEFORE the generic INTERNAL_ERROR fallthrough — and classify it as
-    # an env-start failure since it aborts `driver.start()`.
-    if isinstance(exc, ImageBuildForbiddenError):
-        return FailureReason.ENV_START_FAILURE, _redact_failure_excerpt(str(exc)) or None
     # #1169: previously every DriverError was reported with a `None` message, so
     # env-start failures (build refusals, cgroup errors, container create/start
     # failures) surfaced with an empty `failure_message` and the cause was only

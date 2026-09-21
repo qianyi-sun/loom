@@ -27,7 +27,6 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
-ROOT = Path(__file__).resolve().parents[2]
 NGINX = "nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236"
 PYTHON = "python:3.12-slim"
 FIXTURE = r"""
@@ -159,10 +158,12 @@ def main() -> None:
         try:
             for image in (NGINX, PYTHON):
                 command("docker", "image", "inspect", image)
-            profile = ROOT / "deploy/environments/staging.multinode.cluster.toml"
             config = work / "cluster.toml"
             config.write_text(
-                profile.read_text()
+                'namespace = "loom-staging"\nruntime_environment = "staging"\n'
+                + 'ingress_host = "yylx.world"\ningress_tls_secret_name = "loom-staging-tls"\n'
+                + '[topology]\nmulti_node = true\nstorage_backend = "longhorn"\n'
+                + "postgres_replicas = 3\nminio_replicas = 4\n"
                 + '\n[nebius_private_entry]\nenabled = true\nnode_name = "staging-control-1"\n'
                 + 'wireguard_address = "10.253.71.2"\npeer_address = "10.253.71.1"\n'
                 + f"proxy_image = {json.dumps(NGINX)}\n"

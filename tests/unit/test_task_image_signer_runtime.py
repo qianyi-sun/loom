@@ -65,7 +65,7 @@ async def test_runtime_closes_listener_and_database_after_cancelled_service(tmp_
     with pytest.raises(asyncio.CancelledError):
         async with m.running_signer(configured(tmp_path)):
             raise asyncio.CancelledError
-    assert events == ["preflight", "key", "key", "policy", "server", "start", "close", "dispose"]
+    assert events == ["preflight", "key", "policy", "server", "start", "close", "dispose"]
 
 
 @pytest.mark.parametrize("url", [

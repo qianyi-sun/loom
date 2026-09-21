@@ -908,17 +908,6 @@ def test_cli_up_rejects_protected_namespace_environment_downgrade_before_lock_or
     skip_preflight: bool,
 ) -> None:
     captures = _patch_full_up_path(monkeypatch)
-    lock_attempts: list[str] = []
-
-    def _unexpected_lock(*args, **kwargs):  # type: ignore[no-untyped-def]
-        lock_attempts.append("called")
-        return None
-
-    monkeypatch.setattr(
-        "loom_cli.cluster_cmd._acquire_protected_rollout_lock",
-        _unexpected_lock,
-    )
-
     command = [
         "cluster",
         "up",
@@ -934,7 +923,6 @@ def test_cli_up_rejects_protected_namespace_environment_downgrade_before_lock_or
     rc = main(command)
 
     assert rc == 1
-    assert lock_attempts == []
     assert "apply_ns" not in captures
     assert "protected-target-environment" in capsys.readouterr().err
 
@@ -1162,10 +1150,10 @@ def test_cli_up_backup_guard_flags_thread_to_preflight(
 ) -> None:
     manifest = tmp_path / "backup-manifest.json"
     manifest.write_text("{}", encoding="utf-8")
-    config = tmp_path / "production.cluster.toml"
+    config = tmp_path / "development.cluster.toml"
     config.write_text(
-        'namespace = "loom-production"\n'
-        'runtime_environment = "production"\n'
+        'namespace = "loom-dev"\n'
+        'runtime_environment = "development"\n'
         "[workload_contract]\n"
         'workload_trust_mode = "internal_trusted"\n'
         "taskset_transforms_enabled = false\n"
@@ -1180,9 +1168,9 @@ def test_cli_up_backup_guard_flags_thread_to_preflight(
             "cluster",
             "up",
             "--namespace",
-            "loom-production",
+            "loom-dev",
             "--environment",
-            "production",
+            "development",
             "--config",
             str(config),
             "--backup-manifest",
@@ -1193,7 +1181,7 @@ def test_cli_up_backup_guard_flags_thread_to_preflight(
     )
 
     assert rc == 0
-    assert captures["preflight_kwargs"]["environment"] == "production"
+    assert captures["preflight_kwargs"]["environment"] == "development"
     assert captures["preflight_kwargs"]["backup_manifest"] == manifest.resolve()
     assert captures["preflight_kwargs"]["backup_max_age_hours"] == 12
 

@@ -247,10 +247,8 @@ _PROGRAMS: tuple[_ScenarioProgram, ...] = (
     _program(36, "selected_provider_profile", "tests/integration/test_pipeline_binding_claim.py::test_claim_sql_fences_control_snapshot_provider_assets_and_budget_before_pick"),
     _program(37, "acceptance_evidence_state_machine", "tests/integration/test_pipeline_acceptance_evidence_commit.py::test_controller_authority_is_the_only_byte_source", supporting_tiers=("typed_model", "object_store")),
     _program(38, "internal_trusted_unknown_inputs", "tests/integration/test_pipeline_internal_trusted_inputs.py::test_internal_trusted_boundary_disables_untrusted_transforms"),
-    _program(39, "dual_backend_prerequisites", "tests/integration/test_pipeline_dual_slurm_clusters.py::test_cluster_local_job_ids_and_reconcile_writers_are_isolated", supporting_tiers=("typed_model", "persisted_postgres")),
     _program(40, "concurrent_provider_attempt_slices", "tests/integration/test_pipeline_budget_reservations.py::test_attempt_local_provider_slice_serializes_concurrent_dispatches", supporting_tiers=("typed_model", "persisted_postgres")),
     _program(41, "distributed_fault_arms", "tests/integration/test_pipeline_acceptance_worker_fault_arms.py::test_fault_arm_lookup_is_claim_bound_and_404_is_inert"),
-    _program(42, "policy_config_activation_epoch", "tests/integration/test_pipeline_policy_activation.py::test_acceptance_never_activates_repo_policy_capacity"),
     _program(43, "offline_codex_process_lifecycle", "tests/integration/test_pipeline_codex_subprocess.py::test_official_codex_process_has_closed_per_process_environments"),
     _program(44, "profile_calibration_evidence", "tests/integration/test_pipeline_profile_calibration_evidence_commit.py::test_catalog_finalization_consumes_one_authoritative_document", supporting_tiers=("typed_model", "object_store")),
 )
@@ -484,11 +482,9 @@ def run_fault_scenario(row: int) -> FaultMatrixSnapshot:
     """Execute one bounded scenario and return its actual terminal evidence."""
 
     try:
-        program = _PROGRAMS[row - 1]
-    except IndexError as exc:
-        raise ValueError("fault matrix row must be 1..44") from exc
-    if program.row != row:
-        raise ValueError("fault matrix program ordering drift")
+        program = next(program for program in _PROGRAMS if program.row == row)
+    except StopIteration as exc:
+        raise ValueError("unknown or retired fault matrix row") from exc
     _exercise_audit_gap(program)
     ledger = _EvidenceLedger(program)
     ledger.apply()

@@ -144,8 +144,8 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         "cluster_render_audit": {
             "status": "pass",
             "url": "https://github.com/qianyi-sun/loom/actions/runs/1003",
-            "staging_config": "deploy/environments/staging.multinode.cluster.toml",
-            "production_config": "deploy/environments/production.cluster.toml",
+            "staging_config": "/tmp/release-evidence/staging.platform.json",
+            "production_config": "/tmp/release-evidence/production.platform.json",
         },
         "migration_dry_run": {
             "status": "pass",
@@ -214,35 +214,23 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
             "direct_hf_egress_required": False,
             "secret_safe": True,
         },
-        "worker_capacity_smoke": {
+        "execution_capacity_smoke": {
             "status": "pass",
             "url": "https://github.com/qianyi-sun/loom/actions/runs/1009",
-            "batch_id": "batch-worker-capacity",
-            "k8s_workers": 3,
-            "oldlab_workers": 3,
+            "batch_id": "batch-native-capacity",
+            "provider": "nebius",
             "runtime_seconds": 120,
             "failures": 0,
-            "oldlab_worker_records": [
+            "execution_records": [
                 {
-                    "node_name": "TRT-EAI-OLDLAB-1",
-                    "slurm_job_id": "13441",
-                    "worker_id": "worker-oldlab-1",
-                    "concurrency": 6,
-                    "trials_claimed": 4,
-                },
-                {
-                    "node_name": "trt-EAI-OLDLAB-2",
-                    "slurm_job_id": "13442",
-                    "worker_id": "worker-oldlab-2",
-                    "concurrency": 6,
-                    "trials_claimed": 4,
-                },
-                {
-                    "node_name": "trt-eai-oldlab-3",
-                    "slurm_job_id": "13443",
-                    "worker_id": "worker-oldlab-3",
-                    "concurrency": 6,
-                    "trials_claimed": 4,
+                    "trial_id": "trial-native-1",
+                    "attempt_id": "attempt-native-1",
+                    "target_id": "staging-primary",
+                    "project_id": "project-fixture",
+                    "cluster_id": "cluster-fixture",
+                    "namespace": "loom-staging",
+                    "job_uid": "job-native-1",
+                    "node_name": "execution-node-1",
                 },
             ],
         },
@@ -374,7 +362,7 @@ def test_release_gate_accepts_complete_manifest_and_writes_artifacts(tmp_path: P
     assert "score_positive_canary" in markdown
     assert "benchmark_score_alignment" in markdown
     assert "hf_mirror_token_boundary" in markdown
-    assert "worker_capacity_smoke" in markdown
+    assert "execution_capacity_smoke" in markdown
     assert "frontend_route_evidence" in markdown
     assert "prod_staging_isolation" in markdown
     assert "raw_delivery_export_status" in markdown
@@ -777,11 +765,11 @@ def test_release_gate_requires_immutable_semver_prod_tag(
     assert "prod_tag must be an immutable SemVer tag like v1.0.0" in result.stderr
 
 
-def test_release_gate_requires_oldlab_worker_records_when_enabled(
+def test_release_gate_requires_native_execution_records(
     tmp_path: Path,
 ) -> None:
     manifest = _passing_evidence()
-    manifest["checks"]["worker_capacity_smoke"].pop("oldlab_worker_records")
+    manifest["checks"]["execution_capacity_smoke"].pop("execution_records")
 
     result = _run_release_gate(
         tmp_path,
@@ -794,22 +782,14 @@ def test_release_gate_requires_oldlab_worker_records_when_enabled(
     )
 
     assert result.returncode == 1
-    assert "worker_capacity_smoke.oldlab_worker_records" in result.stderr
+    assert "execution_capacity_smoke.execution_records" in result.stderr
 
 
-def test_release_gate_rejects_incomplete_oldlab_worker_record(
+def test_release_gate_rejects_incomplete_native_execution_record(
     tmp_path: Path,
 ) -> None:
     manifest = _passing_evidence()
-    manifest["checks"]["worker_capacity_smoke"]["oldlab_workers"] = 1
-    manifest["checks"]["worker_capacity_smoke"]["oldlab_worker_records"] = [
-        {
-            "node_name": "trt-eai-oldlab-4",
-            "slurm_job_id": "14004",
-            "concurrency": 6,
-            "trials_claimed": 2,
-        },
-    ]
+    manifest["checks"]["execution_capacity_smoke"]["execution_records"][0].pop("job_uid")
 
     result = _run_release_gate(
         tmp_path,
@@ -822,7 +802,42 @@ def test_release_gate_rejects_incomplete_oldlab_worker_record(
     )
 
     assert result.returncode == 1
-    assert "oldlab_worker_records[0].worker_id" in result.stderr
+    assert "execution_records[0].job_uid" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("provider", "other", "provider must be 'nebius'"),
+        ("execution_records", [], "must contain native execution evidence"),
+        ("failures", 1, "failures must be zero"),
+        ("failures", False, "failures must be zero"),
+        ("runtime_seconds", float("nan"), "finite non-negative number"),
+    ],
+)
+def test_release_capacity_evidence_rejects_invalid_observations(
+    tmp_path: Path, field: str, value: object, message: str,
+) -> None:
+    manifest = _passing_evidence()
+    manifest["checks"]["execution_capacity_smoke"][field] = value
+    result = _run_release_gate(
+        tmp_path, manifest, "validate", "--candidate-sha", _candidate_sha(),
+        "--image-tag", "release-0123456789ab",
+    )
+    assert result.returncode == 1
+    assert message in result.stderr
+
+
+def test_release_capacity_evidence_rejects_duplicate_attempts(tmp_path: Path) -> None:
+    manifest = _passing_evidence()
+    records = manifest["checks"]["execution_capacity_smoke"]["execution_records"]
+    records.append(dict(records[0]))
+    result = _run_release_gate(
+        tmp_path, manifest, "validate", "--candidate-sha", _candidate_sha(),
+        "--image-tag", "release-0123456789ab",
+    )
+    assert result.returncode == 1
+    assert "repeats an execution attempt" in result.stderr
 
 
 def test_release_gate_verify_production_rejects_candidate_or_image_mismatch(
@@ -1010,40 +1025,12 @@ def test_release_promotion_workflow_uploads_candidate_evidence() -> None:
         index for index, step in enumerate(job["steps"]) if "actions/upload-artifact" in str(step)
     )
     assert validate_step < verify_step < upload_step
-    assert "scripts/validate_environment_isolation.py" in str(job)
-    assert "deploy/environments/staging.multinode.cluster.toml" in str(job)
-    assert "deploy/environments/production.cluster.toml" in str(job)
+    assert "tests/unit/test_nebius_platform_render.py" in str(job)
+    assert "tests/ops/test_deploy_nebius_platform.py" in str(job)
     assert "actions/upload-artifact" in str(job)
     assert "release-gate-evidence" in str(job)
 
 
-def test_production_deploy_requires_successful_release_gate() -> None:
-    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/deploy-environment.yml").read_text())
-    dispatch_inputs = _workflow_on(workflow)["workflow_dispatch"]["inputs"]
-    assert dispatch_inputs["candidate_sha"]["required"] is False
-    assert dispatch_inputs["release_gate_run_id"]["required"] is False
-    assert workflow["permissions"]["actions"] == "read"
-
-    prod_job = workflow["jobs"]["deploy-production"]
-    assert prod_job["environment"]["name"] == "production"
-    assert prod_job["env"]["LOOM_CANDIDATE_SHA"] == "${{ inputs.candidate_sha }}"
-    assert prod_job["env"]["LOOM_RELEASE_GATE_RUN_ID"] == "${{ inputs.release_gate_run_id }}"
-    step_names = [step.get("name", "") for step in prod_job["steps"]]
-    assert step_names.index("Verify release gate evidence") < step_names.index("Deploy production")
-    assert "scripts/ops/verify_production_release_gate.sh" in str(prod_job)
-    assert "refs/heads/main" in prod_job["if"]
-    assert "refs/tags/" not in prod_job["if"]
-
-    steps = prod_job["steps"]
-    verify_index = next(
-        index
-        for index, step in enumerate(steps)
-        if step.get("name") == "Verify release gate evidence"
-    )
-    setup_uv_index = next(
-        index for index, step in enumerate(steps) if "astral-sh/setup-uv" in str(step)
-    )
-    assert verify_index < setup_uv_index
 
 
 def test_release_pr_template_requires_exact_promotion_evidence() -> None:

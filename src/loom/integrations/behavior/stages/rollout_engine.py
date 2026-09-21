@@ -1,6 +1,6 @@
 """One-episode BEHAVIOR engine entrypoint owned and supervised by Loom.
 
-This module intentionally contains no campaign, Slurm, Hydra, or output-upload
+This module intentionally contains no campaign, cluster scheduling, Hydra, or output-upload
 logic.  The GPU image supplies the simulator-facing ``EpisodeDriver`` while
 this code owns the signed request, seed points, and exactly-one episode loop.
 """

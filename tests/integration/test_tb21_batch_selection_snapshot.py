@@ -59,6 +59,8 @@ async def profile_batch_setup(
     postgres_url: str,
 ) -> AsyncIterator[tuple[FastAPI, str, UUID, async_sessionmaker[AsyncSession]]]:
     for key, value in {
+        "LOOM_ENV": "development",
+        "LOOM_LOCAL_EXECUTION": "1",
         "LOOM_SVC_DB_URL": postgres_url,
         "LOOM_SVC_MINIO_ENDPOINT": "http://minio:9000",
         "LOOM_SVC_MINIO_ACCESS_KEY": "x",

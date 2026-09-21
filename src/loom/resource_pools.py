@@ -15,7 +15,7 @@ from uuid import UUID
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom.db.schema import Trial, Worker, WorkerPoolAutoscalerPolicy
+from loom.db.schema import Trial, Worker
 
 
 @dataclass(frozen=True)
@@ -29,16 +29,7 @@ class ResourcePoolSnapshot(TypedDict):
     pool_name: str
     backend: str
     cpu_arch: str
-    autoscaler_environment: str | None
-    autoscaler_actuator: str | None
-    autoscaler_enabled: bool
-    autoscaler_idle_since_at: str | None
-    autoscaler_idle_seconds: int | None
-    desired_slots: int
-    pending_slots: int
     current_active_slots: int
-    max_slots: int
-    ceiling_slots: int
     active_workers: int
     draining_workers: int
     total_slots: int
@@ -50,22 +41,10 @@ class ResourcePoolSnapshot(TypedDict):
     pre_start_heartbeat_fresh_tasks: int
     oldest_starting_task_age_sec: int | None
     queued_tasks: int
-    last_autoscaler_decision: str | None
-    last_autoscaler_reason: str | None
-    decision_reason: str | None
-    last_autoscaler_blocked_reason: str | None
-    blocked_reason: str | None
-    last_autoscaler_blocked_details: dict[str, Any] | None
-    blocked_details: dict[str, Any] | None
-    last_autoscaler_error: str | None
 
 
 class ResourcePoolAggregate(TypedDict):
-    desired_slots: int
-    pending_slots: int
     current_active_slots: int
-    max_slots: int
-    ceiling_slots: int
     active_workers: int
     draining_workers: int
     total_slots: int
@@ -87,14 +66,6 @@ class ResourcePoolSummary(TypedDict):
 @dataclass
 class _MutablePool:
     key: ResourcePoolKey
-    autoscaler_environment: str | None = None
-    autoscaler_actuator: str | None = None
-    autoscaler_enabled: bool = False
-    autoscaler_idle_since_at: str | None = None
-    autoscaler_idle_seconds: int | None = None
-    desired_slots: int = 0
-    pending_slots: int = 0
-    max_slots: int | None = None
     active_workers: int = 0
     draining_workers: int = 0
     total_slots: int = 0
@@ -106,40 +77,21 @@ class _MutablePool:
     pre_start_heartbeat_fresh_tasks: int = 0
     oldest_starting_task_age_sec: int | None = None
     queued_tasks: int = 0
-    last_autoscaler_decision: str | None = None
-    last_autoscaler_reason: str | None = None
-    last_autoscaler_blocked_reason: str | None = None
-    last_autoscaler_blocked_details: dict[str, Any] | None = None
-    last_autoscaler_error: str | None = None
 
     @property
     def current_active_slots(self) -> int:
         return self.total_slots
 
     @property
-    def policy_max_slots(self) -> int:
-        return self.max_slots if self.max_slots is not None else self.current_active_slots
-
-    @property
     def free_slots(self) -> int:
         return max(0, self.current_active_slots - self.claimable_occupied_slots)
 
     def as_dict(self) -> ResourcePoolSnapshot:
-        max_slots = self.policy_max_slots
         return {
             "pool_name": self.key.pool_name,
             "backend": self.key.backend,
             "cpu_arch": self.key.cpu_arch,
-            "autoscaler_environment": self.autoscaler_environment,
-            "autoscaler_actuator": self.autoscaler_actuator,
-            "autoscaler_enabled": self.autoscaler_enabled,
-            "autoscaler_idle_since_at": self.autoscaler_idle_since_at,
-            "autoscaler_idle_seconds": self.autoscaler_idle_seconds,
-            "desired_slots": self.desired_slots,
-            "pending_slots": self.pending_slots,
             "current_active_slots": self.current_active_slots,
-            "max_slots": max_slots,
-            "ceiling_slots": max_slots,
             "active_workers": self.active_workers,
             "draining_workers": self.draining_workers,
             "total_slots": self.total_slots,
@@ -151,14 +103,6 @@ class _MutablePool:
             "pre_start_heartbeat_fresh_tasks": self.pre_start_heartbeat_fresh_tasks,
             "oldest_starting_task_age_sec": self.oldest_starting_task_age_sec,
             "queued_tasks": self.queued_tasks,
-            "last_autoscaler_decision": self.last_autoscaler_decision,
-            "last_autoscaler_reason": self.last_autoscaler_reason,
-            "decision_reason": self.last_autoscaler_reason,
-            "last_autoscaler_blocked_reason": self.last_autoscaler_blocked_reason,
-            "blocked_reason": self.last_autoscaler_blocked_reason,
-            "last_autoscaler_blocked_details": self.last_autoscaler_blocked_details,
-            "blocked_details": self.last_autoscaler_blocked_details,
-            "last_autoscaler_error": self.last_autoscaler_error,
         }
 
 
@@ -185,18 +129,6 @@ def _pool_key(
     )
 
 
-def _policy_pool_key(row: WorkerPoolAutoscalerPolicy) -> ResourcePoolKey:
-    actor_config = row.actuator_config or {}
-    backend = actor_config.get("backend", "docker")
-    default_arch = "arm64" if row.actuator == "gb10" else "x86_64"
-    cpu_arch = actor_config.get("cpu_arch", default_arch)
-    return ResourcePoolKey(
-        pool_name=row.pool_name.strip() or "default",
-        backend=backend if isinstance(backend, str) else "docker",
-        cpu_arch=cpu_arch if isinstance(cpu_arch, str) else default_arch,
-    )
-
-
 def _trial_matches_pool(requires_caps: object, key: ResourcePoolKey) -> bool:
     if not isinstance(requires_caps, dict) or not requires_caps:
         return True
@@ -214,10 +146,7 @@ def _aggregate(
     *,
     queued_tasks: int,
 ) -> ResourcePoolAggregate:
-    desired_slots = sum(pool["desired_slots"] for pool in pools)
-    pending_slots = sum(pool["pending_slots"] for pool in pools)
     current_active_slots = sum(pool["current_active_slots"] for pool in pools)
-    max_slots = sum(pool["max_slots"] for pool in pools)
     active_workers = sum(pool["active_workers"] for pool in pools)
     draining_workers = sum(pool["draining_workers"] for pool in pools)
     total_slots = sum(pool["total_slots"] for pool in pools)
@@ -232,11 +161,7 @@ def _aggregate(
         default=None,
     )
     return {
-        "desired_slots": desired_slots,
-        "pending_slots": pending_slots,
         "current_active_slots": current_active_slots,
-        "max_slots": max_slots,
-        "ceiling_slots": max_slots,
         "active_workers": active_workers,
         "draining_workers": draining_workers,
         "total_slots": total_slots,
@@ -301,42 +226,6 @@ async def get_resource_pool_summary(
         elif drain_state_name == "draining":
             pool.draining_workers += 1
             pool.draining_slots += slots
-
-    policy_rows = (await session.execute(
-        select(WorkerPoolAutoscalerPolicy).order_by(
-            WorkerPoolAutoscalerPolicy.environment,
-            WorkerPoolAutoscalerPolicy.pool_name,
-        ),
-    )).scalars().all()
-    for policy in policy_rows:
-        key = _policy_pool_key(policy)
-        pool = pools_by_key.setdefault(key, _MutablePool(key=key))
-        pool.autoscaler_environment = policy.environment
-        pool.autoscaler_actuator = policy.actuator
-        pool.autoscaler_enabled = bool(policy.enabled)
-        pool.max_slots = int(policy.max_slots or 0)
-        if policy.idle_since_at is None:
-            pool.autoscaler_idle_since_at = None
-            pool.autoscaler_idle_seconds = None
-        else:
-            pool.autoscaler_idle_since_at = policy.idle_since_at.isoformat()
-            pool.autoscaler_idle_seconds = max(
-                0,
-                int((now - policy.idle_since_at).total_seconds()),
-            )
-        pool.desired_slots = int(
-            policy.last_desired_slots
-            if policy.last_desired_slots is not None
-            else policy.min_slots or 0,
-        )
-        pool.pending_slots = int(policy.last_pending_slots or 0)
-        if policy.last_draining_slots is not None:
-            pool.draining_slots = max(pool.draining_slots, int(policy.last_draining_slots))
-        pool.last_autoscaler_decision = policy.last_decision
-        pool.last_autoscaler_reason = policy.last_decision_reason
-        pool.last_autoscaler_blocked_reason = policy.last_blocked_reason
-        pool.last_autoscaler_blocked_details = policy.last_blocked_details
-        pool.last_autoscaler_error = policy.last_error
 
     if trial_stmt is None:
         trial_stmt = select(

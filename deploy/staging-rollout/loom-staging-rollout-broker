@@ -1,4 +1,0 @@
-#!/bin/sh
-set -eu
-
-exec /usr/local/libexec/loom-rollout-broker --env staging "$@"

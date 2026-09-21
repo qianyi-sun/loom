@@ -6,7 +6,9 @@ from fastapi import HTTPException
 from loom_control_plane.routes.trials import _resolve_required_worker_pool_for_backend
 
 
-def test_docker_ignores_nebius_task_binding() -> None:
+def test_docker_ignores_nebius_task_binding(monkeypatch) -> None:
+    monkeypatch.setenv("LOOM_ENV", "development")
+    monkeypatch.setenv("LOOM_LOCAL_EXECUTION", "1")
     assert (
         _resolve_required_worker_pool_for_backend(
             batch_backend="docker",
@@ -17,7 +19,9 @@ def test_docker_ignores_nebius_task_binding() -> None:
     )
 
 
-def test_docker_rejects_operator_pin_to_nebius_pool() -> None:
+def test_docker_rejects_operator_pin_to_nebius_pool(monkeypatch) -> None:
+    monkeypatch.setenv("LOOM_ENV", "development")
+    monkeypatch.setenv("LOOM_LOCAL_EXECUTION", "1")
     with pytest.raises(HTTPException, match="requires backend 'nebius'"):
         _resolve_required_worker_pool_for_backend(
             batch_backend="docker",

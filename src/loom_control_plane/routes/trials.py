@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -31,7 +30,11 @@ from loom.execution_architecture import execution_cpu_arch
 from loom.llm_call_ledger import serialize_llm_call
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
-from loom.service_execution_backend import NEBIUS_BACKEND, NEBIUS_LOGICAL_POOL_ID
+from loom.service_execution_backend import (
+    NEBIUS_BACKEND,
+    NEBIUS_LOGICAL_POOL_ID,
+    local_execution_enabled,
+)
 from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
     automatic_service_execution_rejections,
@@ -39,18 +42,7 @@ from loom.service_execution_materialization import (
 )
 from loom.submission_identity import require_submitting_user
 from loom.task_image_materialization import ensure_task_image_materializations
-from loom_capacity_agent.contracts import AtomicTrialSubmissionV1
-from loom_capacity_guard.contracts import SealedRequirementsV1, canonical_digest
-from loom_control_plane.protected_worker_session import (
-    EXECUTOR_WORKER_CREDENTIAL_HEADER,
-    ProtectedPrincipalTrialSession,
-    ProtectedTrialCancellationError,
-    ProtectedTrialSubmissionConflictError,
-    ProtectedTrialSubmissionError,
-    ProtectedWorkerPrincipal,
-    ProtectedWorkerSession,
-    protected_trial_worker_session,
-)
+from loom_control_plane.request_auth import RequestPrincipal
 from loom_control_plane.scheduler.requires_caps import derive_requires_caps
 from loom_control_plane.trial_cancellation import cancel_trial_under_authority
 from loom_service.auth_guards import require_human_or_admin, require_scope
@@ -74,6 +66,8 @@ def _resolve_required_worker_pool_for_backend(
     """Map an explicit user backend to exactly one execution mechanism."""
 
     if batch_backend != NEBIUS_BACKEND:
+        if not local_execution_enabled():
+            raise HTTPException(status_code=400, detail="Hosted execution supports Nebius only")
         if requested_pool == NEBIUS_LOGICAL_POOL_ID:
             raise HTTPException(
                 status_code=400,
@@ -160,30 +154,6 @@ def _required_worker_pool(payload: dict[str, Any]) -> str | None:
     return pool
 
 
-def _protected_physical_pool(
-    pool: str | None,
-) -> Literal["oldlab", "gb10"] | None:
-    if pool is None:
-        return None
-    if pool == "oldlab":
-        return "oldlab"
-    if pool == "gb10":
-        return "gb10"
-    if pool == "behavior-gpu-gb10":
-        return "gb10"
-    if pool in {
-        "behavior-cpu-data",
-        "behavior-gpu-oldlab",
-        "terminalgen-generate-gateway",
-        "terminalgen-package-none",
-        "terminalgen-plan-none",
-        "terminalgen-validate-none",
-    }:
-        return "oldlab"
-    raise HTTPException(
-        status_code=400,
-        detail="required_worker_pool is not managed by protected OLDLAB/GB10 capacity",
-    )
 
 
 @router.post("/trials", status_code=201)
@@ -208,7 +178,7 @@ async def submit_trial(
     # tenant from the parent batch row.
     batch_id = payload.get("batch_id")
     batch_team_id: UUID | None = None
-    batch_backend = "docker"
+    batch_backend = "docker" if local_execution_enabled() else NEBIUS_BACKEND
     batch_submitter_user_id: UUID | None = None
     batch_usage_user_id: UUID | None = None
     batch_usage_actor: str | None = None
@@ -263,11 +233,6 @@ async def submit_trial(
     else:
         raise HTTPException(status_code=401, detail="not authorized to submit")
 
-    protected_submission_store = (
-        getattr(request.app.state, "protected_worker_session_store", None)
-        if batch_backend == "docker"
-        else None
-    )
 
     # Plan 19: if `idempotency_key` was supplied and a trial with that
     # key already exists FOR THIS TEAM, return its trial_id without
@@ -277,10 +242,7 @@ async def submit_trial(
     # has `ON CONFLICT DO NOTHING` which closes the race window; the
     # early read just skips the (heavier) license + quota work on the
     # common "runner re-submits an already-emitted trial" path.
-    # Protected Docker replays must traverse the atomic guard procedure so a
-    # crash between origin creation and prerequisite publication can repair the
-    # original inert row before it becomes observable as demand.
-    if idempotency_key is not None and protected_submission_store is None:
+    if idempotency_key is not None:
         async with request.app.state.session_factory() as session:
             existing_row = (
                 await session.execute(
@@ -421,11 +383,6 @@ async def submit_trial(
     )
     if required_worker_pool is not None:
         requires_caps_json["worker_pool"] = required_worker_pool
-    protected_required_pool = (
-        _protected_physical_pool(required_worker_pool)
-        if protected_submission_store is not None
-        else None
-    )
 
     trial_id = uuid4()
     async with request.app.state.session_factory() as session:
@@ -509,113 +466,6 @@ async def submit_trial(
             "provider_model_id": provider_model_id,
             "family_key": family_key,
         }
-        if protected_submission_store is not None:
-            await session.commit()
-            requirements = SealedRequirementsV1(
-                os=requires_caps.os,
-                cpu_arch=requires_caps.cpu_arch,
-                gpu_vendor=requires_caps.gpu_vendor,
-                network_policies=tuple(sorted(requires_caps.network_policies)),
-                required_pool=protected_required_pool,
-            )
-            try:
-                registration = await protected_submission_store.current_registration()
-                protected_submission = AtomicTrialSubmissionV1(
-                    **registration.model_dump(mode="python"),
-                    trial_id=trial_id,
-                    protected_attempt_id=uuid4(),
-                    execution_generation=registration.deployment_generation,
-                    requirements=requirements,
-                    requirements_digest=canonical_digest(requirements),
-                    team_id=submit_team_id,
-                    task_id=task_id,
-                    config=trial_config.model_dump(mode="json"),
-                    submit_priority=trial_config.submit_priority,
-                    batch_id=UUID(str(batch_id)) if batch_id is not None else None,
-                    idempotency_key=(
-                        str(idempotency_key) if idempotency_key is not None else None
-                    ),
-                    sample_idx=sample_idx,
-                    combination_idx=combination_idx,
-                    provider_connection_id=(
-                        UUID(str(provider_connection_id))
-                        if provider_connection_id is not None
-                        else None
-                    ),
-                    provider_model_id=(
-                        str(provider_model_id) if provider_model_id is not None else None
-                    ),
-                    submitted_by_user_id=submitter_user_id,
-                    usage_attributed_user_id=usage_user_id,
-                    usage_attributed_actor=usage_actor,
-                    family_key=family_key,
-                )
-                receipt = await protected_submission_store.submit_trial(
-                    registration=registration,
-                    submission=protected_submission,
-                    public_requires_caps=requires_caps_json,
-                )
-            except ProtectedTrialSubmissionConflictError as exc:
-                raise HTTPException(
-                    status_code=409,
-                    detail="protected trial idempotency conflict",
-                ) from exc
-            except (ProtectedTrialSubmissionError, ValidationError) as exc:
-                raise HTTPException(
-                    status_code=503,
-                    detail="protected trial submission unavailable",
-                ) from exc
-            trial_id = receipt.trial_id
-            submitted_at = receipt.submitted_at
-            await _ensure_trial_task_image_links(
-                session,
-                trial_id=trial_id,
-                task_row=task_row,
-            )
-            if trial_config.multi_model is not None and trial_config.multi_model.enabled:
-                from loom.model_switch_store import persist_model_switch_plan
-
-                conn_id = None
-                if provider_connection_id:
-                    conn_id = UUID(str(provider_connection_id))
-                inherit_raw = payload.get("inherit_model_switch_plan_from_trial_id")
-                inherit_from = UUID(str(inherit_raw)) if inherit_raw else None
-                conn_row = None
-                if conn_id is not None:
-                    conn_row = (
-                        await session.execute(
-                            select(ProviderConnection).where(
-                                ProviderConnection.id == conn_id,
-                            ),
-                        )
-                    ).scalar_one_or_none()
-                dumped = trial_config.model_dump(mode="json")
-                await persist_model_switch_plan(
-                    session,
-                    trial_id=trial_id,
-                    trial_config=dumped,
-                    agent_model=trial_config.agent_model,
-                    provider_connection_id=conn_id,
-                    combination_idx=combination_idx,
-                    inherit_from_trial_id=inherit_from,
-                    provider_connection=conn_row,
-                )
-            await session.commit()
-            try:
-                await protected_submission_store.publish_trial_readiness(
-                    trial_id=trial_id,
-                    protected_attempt_id=receipt.protected_attempt_id,
-                )
-            except ProtectedTrialSubmissionError as exc:
-                raise HTTPException(
-                    status_code=503,
-                    detail="protected trial readiness unavailable",
-                ) from exc
-            return {
-                "trial_id": str(trial_id),
-                "state": "queued",
-                "submitted_at": submitted_at.isoformat(),
-            }
         if idempotency_key is not None:
             # The partial unique index is `WHERE idempotency_key IS NOT
             # NULL`; the ON CONFLICT predicate must match it for
@@ -813,19 +663,12 @@ async def cancel_trial(
         scoped_team_id = None if caller_is_admin else ctx.team_id
 
     row: Any | None = None
-    protected_store = getattr(request.app.state, "protected_worker_session_store", None)
-    try:
-        row = await cancel_trial_under_authority(
-            session_factory=request.app.state.session_factory,
-            protected_store=protected_store,
-            trial_id=trial_id,
-            team_id=scoped_team_id,
-        )
-    except ProtectedTrialCancellationError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="protected trial cancellation unavailable",
-        ) from exc
+    row = await cancel_trial_under_authority(
+        session_factory=request.app.state.session_factory,
+
+        trial_id=trial_id,
+        team_id=scoped_team_id,
+    )
 
     if row is None:
         raise HTTPException(
@@ -842,8 +685,7 @@ async def cancel_trial(
 async def get_trial(
     trial_id: UUID,
     request: Request,
-    principal: ProtectedWorkerPrincipal,
-    protected_worker_session: ProtectedPrincipalTrialSession,
+    principal: RequestPrincipal,
 ) -> dict[str, Any]:
     ctx = principal
     if ctx is None:
@@ -889,8 +731,7 @@ async def get_trial(
 async def get_trial_llm_calls(
     trial_id: UUID,
     request: Request,
-    principal: ProtectedWorkerPrincipal,
-    protected_worker_session: ProtectedPrincipalTrialSession,
+    principal: RequestPrincipal,
 ) -> dict[str, Any]:
     """List every llm_calls row for this trial, ordered by capture time.
     Read by the worker at finalize to project LLMCallEvents into the
@@ -956,30 +797,8 @@ async def _terminus_principal(
 TerminusPrincipal = Annotated[AuthContext | None, Depends(_terminus_principal)]
 
 
-async def _protected_terminus_worker_session(
-    trial_id: UUID,
-    request: Request,
-    principal: TerminusPrincipal,
-    worker_credential: str | None = Header(
-        default=None,
-        alias=EXECUTOR_WORKER_CREDENTIAL_HEADER,
-    ),
-) -> AsyncIterator[ProtectedWorkerSession | None]:
-    if principal is None or principal.type != "worker":
-        yield None
-        return
-    async for protected_session in protected_trial_worker_session(
-        trial_id,
-        request,
-        worker_credential,
-    ):
-        yield protected_session
 
 
-ProtectedTerminusWorkerSession = Annotated[
-    ProtectedWorkerSession | None,
-    Depends(_protected_terminus_worker_session),
-]
 
 
 @router.post("/trials/{trial_id}/terminus/reclaim")
@@ -988,7 +807,6 @@ async def reclaim_terminus(
     payload: _TerminusReclaimBody,
     request: Request,
     principal: TerminusPrincipal,
-    protected_worker_session: ProtectedTerminusWorkerSession,
 ) -> dict[str, Any]:
     ctx = principal
     if ctx is None:
@@ -1021,7 +839,6 @@ async def post_episode_checkpoint(
     payload: _EpisodeCheckpointBody,
     request: Request,
     principal: TerminusPrincipal,
-    protected_worker_session: ProtectedTerminusWorkerSession,
 ) -> dict[str, Any]:
     ctx = principal
     if ctx is None:

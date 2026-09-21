@@ -214,16 +214,7 @@ def test_ci_requires_real_locked_install_on_nebius_server_architecture() -> None
     assert setup_uv["with"]["checksum"] == MATRIX_CHECKSUM_EXPRESSION
 
 
-def test_deploy_environment_installs_locked_runtime() -> None:
-    deploy_script = (ROOT / "scripts/ops/deploy_environment.sh").read_text(encoding="utf-8")
-    assert "uv sync --locked --extra cluster --python 3.11" in deploy_script
-    assert "uv run --no-sync" in deploy_script
 
-    # The staging rollout host installer (scripts/ops/staging_rollout_host.py)
-    # must also bind its runtime venv to the uv.lock digest, but dev has since
-    # restructured that installer and the original binding was dropped in an
-    # earlier merge. Re-grafting + validating it against the real rollout host
-    # is tracked separately (#920) so it is not asserted here.
 
 
 def test_runbook_uv_commands_never_resolve_implicitly() -> None:

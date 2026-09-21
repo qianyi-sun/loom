@@ -18,7 +18,6 @@ from loom.db.schema import (
     ArtifactUploadFile,
     ArtifactUploadSession,
     ExecutionAttempt,
-    PipelineAcceptancePreflightPrerequisite,
     PipelineBudgetLedger,
     PipelineBudgetReservation,
     PipelineExecutionCheckpoint,
@@ -1541,51 +1540,11 @@ class SqlArtifactInputResolver:
                     and imported is not None
                     and imported.recipe_digest == frozen.get("recipe_digest")
                 )
-                prerequisite = await db.get(PipelineAcceptancePreflightPrerequisite, run.id)
-                consumed_attempt = (
-                    await db.get(ExecutionAttempt, prerequisite.consumed_attempt_id)
-                    if prerequisite is not None and prerequisite.consumed_attempt_id is not None
-                    else None
-                )
-                consumed_stage = (
-                    await db.get(PipelineStageRun, consumed_attempt.stage_run_id)
-                    if consumed_attempt is not None
-                    else None
-                )
-                acceptance_phase_chain = (
-                    stage.node_key.endswith("acceptance_preflight_cold")
-                    and prerequisite is not None
-                    and prerequisite.consumed_attempt_id == attempt.id
-                ) or (
-                    stage.node_key.endswith("acceptance_preflight_warm")
-                    and consumed_stage is not None
-                    and consumed_stage.pipeline_run_id == run.id
-                    and consumed_stage.node_key.endswith("acceptance_preflight_cold")
-                )
-                acceptance_authorized = (
-                    run.submission_policy == "acceptance_authorization_only"
-                    and run.acceptance_authorization_id is not None
-                    and run.acceptance_candidate_sha256 is not None
-                    and stage.node_key.endswith(
-                        ("acceptance_preflight_cold", "acceptance_preflight_warm")
-                    )
-                    and binding.binding_name in {"dataset", "policy", "mop_bank"}
-                    and imported is not None
-                    and imported.kind == binding.binding_name
-                    and prerequisite is not None
-                    and prerequisite.authorization_id == run.acceptance_authorization_id
-                    and prerequisite.candidate_sha256 == run.acceptance_candidate_sha256
-                    and prerequisite.preflight_input_set_id == "S02"
-                    and prerequisite.state == "consumed"
-                    and acceptance_phase_chain
-                    and prerequisite.fence_state == "active"
-                    and prerequisite.worker_id == attempt.worker_id
-                )
                 if (
                     imported is None
                     or imported.state != "committed"
                     or imported.trust_class != "internal_trusted"
-                    or not (ordinary_authorized or acceptance_authorized)
+                    or not ordinary_authorized
                 ):
                     raise KeyError(item.artifact_id)
             root = cast(dict[str, Any], upload.canonical_manifest_json)

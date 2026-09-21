@@ -8,8 +8,6 @@ artifacts_bucket = "artifacts"
 container_registry = ""
 # Operator-local publication prefix for container_registry (no scheme or trailing slash). It must be set together with container_registry. This may differ from the pull prefix when k3s registry mirrors expose the same registry through a node-local endpoint, for example localhost:5000 -> 192.168.50.13:5000.
 container_registry_push = ""
-# Optional environment-state TOML profile used by protected rollout steps. Relative paths resolve from the cluster-config file directory.
-env_state_profile = ""
 # Public path prefix prepended by the SPA API client before /api/v1. Must match frontend_route_path for protected dev/staging/prod routes.
 frontend_api_base_path = ""
 # Public SPA environment identity written to the runtime frontend config.
@@ -61,13 +59,6 @@ enabled = false
 min_replicas = 2
 max_replicas = 8
 cpu_target_pct = 60
-# GB10 hosts whose direct worker and node-agent units are checked and held disabled by protected rollout. ssh_config optionally points at the operator SSH configuration used for every host; ssh_identity_file and ssh_certificate_file point at deployment authentication material for detached rollout runners. Each host entry contains only ssh_target and node_agent_service. External Slurm policy owns on-demand capacity.
-
-[gb10_pool]
-ssh_config = ""
-ssh_identity_file = ""
-ssh_certificate_file = ""
-hosts = []
 
 [k8s_worker]
 enabled = false
@@ -99,11 +90,6 @@ enabled = true
 default_pool_size = 25
 max_client_conn = 500
 min_pool_size = 5
-# Explicitly mount the protected Stage 1 operator public key into loom-service. Disabled profiles keep every live-smoke mutation fail-closed.
-
-[pipeline_stage1_smoke_authority]
-enabled = false
-public_key_secret_name = "loom-stage1-smoke-authority"
 # Postgres runtime tuning. max_connections leaves room for PgBouncer backend pools, LISTEN watchers, Alembic, and administrative connections.
 
 [postgres]

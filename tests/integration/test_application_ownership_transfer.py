@@ -14,14 +14,19 @@ from testcontainers.postgres import PostgresContainer
 
 from loom.application_ownership_transfer import transfer_application_ownership
 from loom.application_schema_inventory import read_application_schema_inventory
+from loom.application_schema_provisioning import (
+    PsycopgSharedFixtureSqlExecutor,
+    ReferenceDatabase,
+    _new_credentials,
+    derive_identity,
+    instance_database_url,
+    render_create_database_sql,
+    render_role_convergence_sql,
+)
 from loom.application_schema_reference import (
     application_schema_reference,
     require_application_schema_reference,
 )
-from loom.dev_instance import derive_identity
-from loom.dev_instance_provision import render_create_database_sql, render_role_convergence_sql
-from loom.dev_instance_runtime import PsycopgSharedFixtureSqlExecutor, instance_database_url
-from loom.personal_dev_capacity_runtime import PsycopgPersonalDevCapacityDatabase, _new_credentials
 
 pytestmark = pytest.mark.parametrize("transfer_postgres", [16, 17], indirect=True)
 
@@ -49,15 +54,14 @@ async def transfer_database(
     identity = derive_identity(f"transfer-{uuid4().hex[:8]}")
     password = uuid4().hex
     if getattr(request, "param", None) == "protected-staging":
-        from loom.staging_capacity_database_bootstrap import staging_capacity_identity
-        identity = staging_capacity_identity()
+        identity = replace(identity, name="staging", database="loom", db_role="loom")
     if getattr(request, "param", None) in {"staging-credential", "protected-staging"}:
         # Fixed staging DB/role names only inside this disposable PostgreSQL.
         identity = replace(identity, database="loom", db_role="loom")
         password = "ab" * 16
     baseline = getattr(request, "param", None) == "baseline"
     from scripts.application_schema_baseline import BaselineReferenceDatabase
-    provisioner = (BaselineReferenceDatabase if baseline else PsycopgPersonalDevCapacityDatabase)(transfer_postgres_url)
+    provisioner = (BaselineReferenceDatabase if baseline else ReferenceDatabase)(transfer_postgres_url)
     await PsycopgSharedFixtureSqlExecutor(transfer_postgres_url).apply_role_and_database(
         identity,
         role_sql=render_role_convergence_sql(identity, password),
@@ -133,11 +137,18 @@ async def transfer_database(
             admin.execute(
                 psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(target))
             )
-        await provisioner.destroy(identity)
+        if identity.name.startswith("transfer-") and derive_identity(identity.name) == identity:
+            await provisioner.destroy(identity)
+        else:
+            # Fixed historical role names are confined to this disposable container.
+            with psycopg.connect(maintenance, autocommit=True) as admin:
+                for role, alias in bindings.items():
+                    if alias != "provisioner":
+                        admin.execute(psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(role)))
 
 
 def _install_staging_readonly(admin):
-    from loom_cli.rollout.readonly_database_bootstrap import (
+    from loom.application_schema_readonly import (
         ReadonlyDatabaseCredential,
         render_readonly_role_sql,
     )
@@ -166,11 +177,11 @@ async def test_closed_handoff_and_replay_preserve_the_bound_coordination_guard(t
     )
     from loom.application_login_sealing import seal_application_login
     from loom.staging_mutation_coordination import (
+        STAGING_MUTATION_HEALTH_SQL,
         STAGING_MUTATION_TRY_LOCK_SQL,
         rollout_guard_application_name,
         rollout_guard_bind_sql,
     )
-    from loom_cli.rollout.operator.staging_mutation_guard import _HEALTH_SQL
     from tests.integration.test_application_database_admission import _handoff, _maintenance
 
     url, owner, bindings = transfer_database
@@ -256,12 +267,17 @@ async def test_closed_handoff_and_replay_preserve_the_bound_coordination_guard(t
                                 return result
 
                         with admin.transaction():
-                            with pytest.raises(RuntimeError, match="coordination guard"):
+                            # PostgreSQL can reject the lost guard before the Python
+                            # readback does; both paths must roll back the handoff.
+                            with pytest.raises((RuntimeError, psycopg.OperationalError),
+                                               match=r"coordination guard|quiescent legacy authority") as refusal:
                                 transfer_application_ownership(
                                     LoseGuardAfterMutation(), owner_role=owner, role_bindings=bindings,
                                     admission_target=target, coordination_guard=saved_guard,
                                     schema_acl_profile=schema_acl_profile,
                                 )
+                            if isinstance(refusal.value, psycopg.OperationalError):
+                                assert refusal.value.sqlstate in {"55000", "55L01"}
                             assert changed == [True]
                             # The caller transaction survives, but EVERY ownership,
                             # ACL and definer mutation in the helper rolled back.
@@ -269,7 +285,7 @@ async def test_closed_handoff_and_replay_preserve_the_bound_coordination_guard(t
                                 read_application_schema_inventory(admin, role_bindings=bindings),
                                 profile=legacy_profile,
                             )
-                        assert guard.execute(_HEALTH_SQL).fetchone() == (saved_guard.backend.pid, False)
+                        assert guard.execute(STAGING_MUTATION_HEALTH_SQL).fetchone() == (saved_guard.backend.pid, False)
                         return  # A lost guard is never reacquired to resume this test operation.
                     for _ in range(2):
                         require_application_database_drained(
@@ -283,7 +299,7 @@ async def test_closed_handoff_and_replay_preserve_the_bound_coordination_guard(t
                                 schema_acl_profile=schema_acl_profile,
                             )
                             guard.execute("SET statement_timeout='1s'")
-                            assert guard.execute(_HEALTH_SQL).fetchone() == (saved_guard.backend.pid, True)
+                            assert guard.execute(STAGING_MUTATION_HEALTH_SQL).fetchone() == (saved_guard.backend.pid, True)
                     guard.execute("SELECT pg_advisory_unlock(5498691230183247727)")
                     with admin.transaction(), pytest.raises(RuntimeError, match="coordination guard"):
                         transfer_application_ownership(

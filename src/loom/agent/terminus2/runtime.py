@@ -193,8 +193,8 @@ def _install_tmux_session_alive_guard(agent: Any) -> None:
     4. On recreate failure, or a second death after a recover → fail closed
        with :data:`_TMUX_SESSION_LOST_MID_DISPATCH`.
 
-    Instance-local wrap only — GB10 workers run many Terminus2 trials
-    concurrently, so a process-global monkeypatch would race.
+    Keep the wrap instance-local: concurrent Terminus2 trials would race
+    with a process-global monkeypatch.
     """
     session = getattr(agent, "_session", None)
     if session is None:

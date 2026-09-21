@@ -59,13 +59,12 @@ async def running_signer(settings: SignerSettings) -> AsyncIterator[SignerServer
             await verify_signer_database_role(engine, execution_enabled=True)
         else:
             await verify_signer_database_role(engine)
-        publication = load_signing_key(settings.publication.seed_file, expected_public_key=settings.publication.public_bytes())
         execution = load_signing_key(settings.execution.seed_file, expected_public_key=settings.execution.public_bytes())
         # TLS private identity is also protected; SSL parses it without prompts.
         read_owner_only_bytes(settings.private_key_file, max_bytes=16 * 1024)
         policy = SignerPolicy(
-            engine, trust_root=settings.trust_root(), publication_key_id=settings.publication.key_id,
-            publication_provider=publication, execution_provider=execution,
+            engine, trust_root=settings.trust_root(),
+            execution_provider=execution,
             selections=settings.selections, timeout_seconds=settings.policy_timeout_seconds,
             keyset_lifetime_seconds=settings.keyset_lifetime_seconds,
         )

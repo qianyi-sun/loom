@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import tomllib
 from pathlib import Path
 
 import pytest
 
-from loom.agent.litellm import _render_artifact_body
-from loom.models.task import TaskConfig, normalize_steps
 from loom_cli import datasets_cmd
 
 _TASK_TOML = """\
@@ -404,46 +401,6 @@ def test_publish_local_explicit_flatten_override_is_visible_in_output(
     assert rc == 0
     out = capsys.readouterr().out
     assert "compat_flattened_files=2" in out
-
-
-@pytest.mark.legacy_pool
-def test_gb10_smoke_catalog_fixture_is_publish_local_ready(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    root = Path("deploy/catalog/gb10-smoke")
-
-    rc = datasets_cmd.dispatch(["validate-local", str(root)])
-
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "benchmark_id: loom-smoke" in out
-    assert "tasks:        2 valid" in out
-
-    oracle_task_toml = root / "tasks" / "gb10-oracle-hello-world" / "task.toml"
-    oracle_raw = tomllib.loads(oracle_task_toml.read_text(encoding="utf-8"))
-    assert oracle_raw["task"]["id"] == "loom-smoke/gb10-oracle-hello-world"
-    assert oracle_raw["verifier"]["name"] == "pytest"
-    assert oracle_raw["environment"]["cpu_arch"] in {"any", "arm64"}
-
-    dockerfile = root / "tasks" / "gb10-oracle-hello-world" / "environment" / "Dockerfile"
-    dockerfile_text = dockerfile.read_text(encoding="utf-8")
-    assert "pytest-jsonreport" not in dockerfile_text
-    assert "pytest-json-report" in dockerfile_text
-
-    direct_task_toml = root / "tasks" / "gb10-direct-completion-hello-world" / "task.toml"
-    direct_task = normalize_steps(
-        TaskConfig.model_validate(tomllib.loads(direct_task_toml.read_text(encoding="utf-8")))
-    )
-    assert direct_task.task.id == "loom-smoke/gb10-direct-completion-hello-world"
-    assert direct_task.agent.name == "direct-completion"
-    assert direct_task.steps[0].artifacts == ["answer.txt"]
-    assert (
-        _render_artifact_body(
-            "I checked the workspace.\nFinal answer: hello\n",
-            direct_task.steps[0].artifacts[0],
-        )
-        == "hello"
-    )
 
 
 def test_validate_local_forwards_nebius_terminus_execution_profile(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any, Protocol, cast
+from typing import Annotated, Any, Protocol
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, Response
@@ -24,12 +24,10 @@ from loom.db.schema import (
     PipelineBudgetReservation,
     PipelineCancellationOutbox,
     PipelineEvent,
-    PipelineInputMaterializationEvidence,
     PipelineLivePreviewFrame,
     PipelineLivePreviewGeneration,
     PipelineRun,
     PipelineStageRun,
-    SlurmWorkerJob,
     Worker,
 )
 from loom.pipeline.artifact_commit import ArtifactCommitError
@@ -60,7 +58,6 @@ from loom.pipeline.work_protocol import (
     FinalOutputFileCompleteV1,
     FinalOutputPrepareRequestV1,
     FinalOutputSessionCommitV1,
-    PipelineInputMaterializationEvidenceReportV1,
     UploadTokenRenewV1,
     WorkerLostCleanupAckV1,
 )
@@ -85,14 +82,9 @@ from loom_control_plane.metrics import (
     PIPELINE_ARTIFACT_BYTES_TOTAL,
     PIPELINE_ARTIFACT_COMMIT_FAILURES_TOTAL,
     PIPELINE_CANCEL_LATENCY_SECONDS,
-    PIPELINE_GPU_SECONDS_TOTAL,
     PIPELINE_LIVE_PREVIEW_BYTES_TOTAL,
     PIPELINE_LIVE_PREVIEW_FRAMES_TOTAL,
     PIPELINE_STAGE_DURATION_SECONDS,
-)
-from loom_control_plane.protected_worker_session import (
-    ProtectedAttemptWorkerSession,
-    bind_request_protected_worker_auth,
 )
 
 router = APIRouter()
@@ -360,16 +352,6 @@ async def _settle_attempt_reservations(
     return gpu_actual
 
 
-def _gpu_metric_labels(stage: PipelineStageRun) -> tuple[str, str] | None:
-    frozen = stage.resolved_execution_spec_json or {}
-    variant = frozen.get("execution_variant_id")
-    if variant == "gb10-shared-1gpu":
-        return "gb10", "one"
-    if variant == "oldlab-rtx5080-2gpu":
-        return "oldlab", "two"
-    return None
-
-
 async def _require_no_active_uploads(session: AsyncSession, *, attempt_id: UUID) -> None:
     active = (
         await session.execute(
@@ -397,7 +379,7 @@ async def _worker_auth(
         ctx = await verify_bearer_token(auth_session, authorization)
     if ctx is None or scope not in ctx.scopes:
         raise HTTPException(status_code=401, detail="not authorized")
-    return bind_request_protected_worker_auth(request, ctx)
+    return ctx
 
 
 def _raise_fence(exc: AttemptFenceError) -> None:
@@ -495,7 +477,6 @@ async def publish_live_preview_frame(
     attempt_id: UUID,
     sequence: Annotated[int, Path(ge=0)],
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -691,7 +672,6 @@ async def heartbeat_attempt(
     attempt_id: UUID,
     payload: ExecutionHeartbeatV1,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -735,7 +715,6 @@ async def heartbeat_attempt(
 async def get_attempt_control(
     attempt_id: UUID,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -790,7 +769,6 @@ async def append_attempt_events(
     attempt_id: UUID,
     payload: ExecutionEventsV1,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -875,7 +853,6 @@ async def report_attempt_started(
     attempt_id: UUID,
     payload: ExecutionStartedV1,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -904,12 +881,6 @@ async def report_attempt_started(
                 select(PipelineStageRun).where(PipelineStageRun.id == attempt.stage_run_id)
             )
         ).scalar_one()
-        if stage.node_key.endswith(("acceptance_preflight_cold", "acceptance_preflight_warm")):
-            evidence = await session.get(PipelineInputMaterializationEvidence, attempt.id)
-            if evidence is None or evidence.input_view_sha256 != payload.input_view_digest:
-                raise HTTPException(
-                    status_code=409, detail="input_materialization_evidence_required"
-                )
         attempt.state = "running"
         attempt.started_at = datetime.now(UTC)
         attempt.container_id = payload.container_id
@@ -1021,7 +992,7 @@ async def _terminal_report(
         )
         if ledger is None:
             raise HTTPException(status_code=409, detail="pipeline_budget_unavailable")
-        gpu_seconds = await _settle_attempt_reservations(
+        await _settle_attempt_reservations(
             session,
             stage=stage,
             attempt=attempt,
@@ -1100,11 +1071,6 @@ async def _terminal_report(
         stage_duration = max((observed_at - stage.created_at).total_seconds(), 0)
         resource_class = _stage_resource_class(stage)
         await session.commit()
-        gpu_labels = _gpu_metric_labels(stage)
-        if gpu_seconds and gpu_labels is not None:
-            PIPELINE_GPU_SECONDS_TOTAL.labels(
-                slurm_cluster=gpu_labels[0], gpu_count_class=gpu_labels[1]
-            ).inc(gpu_seconds)
         PIPELINE_STAGE_DURATION_SECONDS.labels(
             resource_class=resource_class,
             result="retry_wait" if decision.retry else "failed",
@@ -1117,7 +1083,6 @@ async def report_attempt_failed(
     attempt_id: UUID,
     payload: ExecutionFailedV1,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -1143,7 +1108,6 @@ async def report_attempt_cancelled(
     attempt_id: UUID,
     payload: ExecutionCancelAckV1,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -1282,7 +1246,6 @@ async def report_attempt_complete(
     attempt_id: UUID,
     payload: ExecutionCompleteV1,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -1316,7 +1279,7 @@ async def report_attempt_complete(
         run = await session.get(PipelineRun, stage.pipeline_run_id)
         if run is None:
             raise HTTPException(status_code=409, detail="pipeline_run_unavailable")
-        gpu_seconds = await _settle_attempt_reservations(
+        await _settle_attempt_reservations(
             session,
             stage=stage,
             attempt=attempt,
@@ -1370,63 +1333,10 @@ async def report_attempt_complete(
         for artifact_class, byte_count in (committed_bytes or {}).items():
             if byte_count:
                 PIPELINE_ARTIFACT_BYTES_TOTAL.labels(artifact_class=artifact_class).inc(byte_count)
-        gpu_labels = _gpu_metric_labels(stage)
-        if gpu_seconds and gpu_labels is not None:
-            PIPELINE_GPU_SECONDS_TOTAL.labels(
-                slurm_cluster=gpu_labels[0], gpu_count_class=gpu_labels[1]
-            ).inc(gpu_seconds)
         PIPELINE_STAGE_DURATION_SECONDS.labels(
             resource_class=resource_class,
             result="succeeded",
         ).observe(stage_duration)
-        return response
-
-
-@router.post("/execution-attempts/{attempt_id}/input-materialization-evidence")
-async def report_input_materialization_evidence(
-    attempt_id: UUID,
-    payload: PipelineInputMaterializationEvidenceReportV1,
-    request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
-    claim_id: ClaimIdHeader,
-    lease_epoch: LeaseEpochHeader,
-    lease_token: LeaseTokenHeader,
-    request_id: RequestIdHeader,
-    authorization: str | None = Header(default=None),
-) -> dict[str, Any]:
-    if payload.execution_attempt_id != attempt_id or payload.lease_epoch != lease_epoch:
-        raise HTTPException(status_code=409, detail="claim_fenced")
-    ctx = await _worker_auth(request, authorization, scope="worker:report")
-    async with request.app.state.session_factory() as session:
-        attempt, replay = await _begin_mutation(
-            session,
-            attempt_id=attempt_id,
-            ctx=ctx,
-            claim_id=claim_id,
-            lease_epoch=lease_epoch,
-            lease_token=lease_token,
-            request_id=request_id,
-            route="input-materialization-evidence",
-            payload=payload,
-        )
-        if replay is not None:
-            return replay
-        if attempt.worker_id != payload.worker_id:
-            raise HTTPException(status_code=409, detail="claim_fenced")
-        service = getattr(request.app.state, "input_materialization_evidence_service", None)
-        if service is None:
-            raise HTTPException(status_code=503, detail="input_materializer_unavailable")
-        evidence_ref = await service.persist(attempt=attempt, report=payload, session=session)
-        response = cast(dict[str, Any], evidence_ref.model_dump(mode="json"))
-        await _journal_response(
-            session,
-            attempt_id=attempt_id,
-            route="input-materialization-evidence",
-            request_id=request_id,
-            payload=payload,
-            response=response,
-        )
-        await session.commit()
         return response
 
 
@@ -1435,7 +1345,6 @@ async def report_worker_lost_cleanup(
     attempt_id: UUID,
     payload: WorkerLostCleanupAckV1,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     request_id: RequestIdHeader,
@@ -1469,25 +1378,7 @@ async def report_worker_lost_cleanup(
         worker = await session.get(Worker, attempt.worker_id)
         if worker is None:
             raise HTTPException(status_code=409, detail="cleanup_authority_invalid")
-        allocation = worker.slurm_gpu_allocation_evidence_json
-        if payload.observer_kind == "worker_journal":
-            # verify_attempt_claim already bound this bearer hash to the exact
-            # durable Worker row recorded on the expired claim.
-            pass
-        else:
-            if allocation is None or allocation.get("allocation_id") != payload.allocation_id:
-                raise HTTPException(status_code=409, detail="cleanup_authority_invalid")
-            job = (
-                await session.execute(
-                    select(SlurmWorkerJob).where(
-                        SlurmWorkerJob.worker_id == attempt.worker_id,
-                        SlurmWorkerJob.slurm_cluster_id == allocation.get("slurm_cluster_id"),
-                        SlurmWorkerJob.job_id == allocation.get("job_id"),
-                    )
-                )
-            ).scalar_one_or_none()
-            if job is None or job.state not in {"completed", "failed", "cancelled", "stale"}:
-                raise HTTPException(status_code=409, detail="allocation_not_terminal")
+        # verify_attempt_claim binds the worker journal to this expired claim.
         terminal_cause = (
             await session.execute(
                 select(PipelineBudgetLedger.terminal_cause)
@@ -1670,7 +1561,6 @@ async def read_input_manifest(
     binding_name: str,
     item_key: str,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -1702,7 +1592,6 @@ async def read_input_file(
     item_key: str,
     file_index: int,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -1797,7 +1686,6 @@ async def prepare_checkpoint(
     attempt_id: UUID,
     payload: CheckpointPrepareRequestV1,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -1836,7 +1724,6 @@ async def commit_checkpoint_session(
     session_id: UUID,
     payload: FinalOutputSessionCommitV1,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -1872,7 +1759,6 @@ async def renew_checkpoint_token(
     session_id: UUID,
     payload: UploadTokenRenewV1,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -1900,7 +1786,6 @@ async def put_checkpoint_part(
     file_index: int,
     part_number: int,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -1944,7 +1829,6 @@ async def complete_checkpoint_file(
     file_index: int,
     payload: FinalOutputFileCompleteV1,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -1979,7 +1863,6 @@ async def abort_checkpoint_session(
     session_id: UUID,
     payload: FinalOutputAbortV1,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -2008,7 +1891,6 @@ async def prepare_final_output(
     attempt_id: UUID,
     payload: FinalOutputPrepareRequestV1,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -2034,7 +1916,6 @@ async def renew_final_output(
     session_id: UUID,
     payload: UploadTokenRenewV1,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -2061,7 +1942,6 @@ async def put_final_output_part(
     file_index: int,
     part_number: int,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -2104,7 +1984,6 @@ async def complete_final_output_file(
     file_index: int,
     payload: FinalOutputFileCompleteV1,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -2138,7 +2017,6 @@ async def commit_final_output_session(
     session_id: UUID,
     payload: FinalOutputSessionCommitV1,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,
@@ -2173,7 +2051,6 @@ async def abort_final_output_session(
     session_id: UUID,
     payload: FinalOutputAbortV1,
     request: Request,
-    protected_worker_session: ProtectedAttemptWorkerSession,
     claim_id: ClaimIdHeader,
     lease_epoch: LeaseEpochHeader,
     lease_token: LeaseTokenHeader,

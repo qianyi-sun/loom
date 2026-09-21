@@ -51,7 +51,6 @@ from loom.pipeline.spec import (
     validate_fanout_manifest,
 )
 from loom.pipeline.state import PipelineStageRunState, RetryClass
-from loom_control_plane.metrics import PIPELINE_GPU_SECONDS_TOTAL
 
 LEASE_SECONDS = 60
 PICKER_BATCH = 50
@@ -157,9 +156,6 @@ class ReadinessCandidate:
     parameters_json: dict[str, Any]
     resolved_inputs_json: list[dict[str, Any]]
     official_submission_kind: str | None
-    authority_candidate_json: dict[str, Any] | None
-    gpu_backend_selection_json: dict[str, Any] | None
-    gpu_backend_selection_digest: str | None
     fanout_item_json: dict[str, Any] | None = None
     fanout_source_manifest_digest: str | None = None
     fanout_item_digest: str | None = None
@@ -780,18 +776,11 @@ class PipelineRepository:
                                run.recipe_digest, run.graph_spec_digest,
                                run.parameters_json, run.resolved_inputs_json,
                                run.control_binding_snapshots_json,
-                               run.official_submission_kind,
-                               stage1.candidate_json AS authority_candidate_json,
-                               gpu.selection_json AS gpu_backend_selection_json,
-                               gpu.gpu_backend_selection_sha256 AS gpu_backend_selection_digest
+                               run.official_submission_kind
                           FROM pipeline_stage_runs stage
                           JOIN pipeline_runs run ON run.id=stage.pipeline_run_id
                           JOIN pipeline_budget_ledgers ledger
                             ON ledger.pipeline_run_id=stage.pipeline_run_id
-                          LEFT JOIN pipeline_stage1_smoke_authorizations stage1
-                            ON stage1.pipeline_run_id=run.id
-                          LEFT JOIN pipeline_run_gpu_backend_selections gpu
-                            ON gpu.pipeline_run_id=run.id AND gpu.scope='all_gpu_nodes'
                           LEFT JOIN pipeline_fanout_expansions expansion
                             ON expansion.id=stage.fanout_expansion_id
                          WHERE stage.pipeline_run_id=:run_id AND stage.node_kind='container'
@@ -898,9 +887,6 @@ class PipelineRepository:
                         parameters_json=row["parameters_json"],
                         resolved_inputs_json=row["resolved_inputs_json"],
                         official_submission_kind=row["official_submission_kind"],
-                        authority_candidate_json=row["authority_candidate_json"],
-                        gpu_backend_selection_json=row["gpu_backend_selection_json"],
-                        gpu_backend_selection_digest=row["gpu_backend_selection_digest"],
                         fanout_item_json=row["fanout_item_json"],
                         fanout_source_manifest_digest=row["fanout_source_manifest_digest"],
                         fanout_item_digest=row["fanout_item_digest"],
@@ -3893,7 +3879,6 @@ class PipelineRepository:
     ) -> ReservationRecord:
         if actual_amount < 0:
             raise ValueError("settlement amount cannot be negative")
-        gpu_labels: tuple[str, str] | None = None
         async with self._sessions() as session, session.begin():
             await self._lock_fence(session, lease)
             reservation = await self._lock_reservation(session, lease, reservation_id)
@@ -3904,26 +3889,6 @@ class PipelineRepository:
             if reservation["state"] != "active":
                 raise BudgetReservationConflictError("released reservation cannot settle")
             kind = BudgetKind(reservation["kind"])
-            if kind is BudgetKind.GPU and actual_amount > 0:
-                variant_id = (
-                    await session.execute(
-                        text("""
-                        SELECT selection.variant_id
-                          FROM execution_attempts AS attempt
-                          JOIN pipeline_stage_runs AS stage ON stage.id = attempt.stage_run_id
-                          JOIN pipeline_run_gpu_backend_selections AS selection
-                            ON selection.pipeline_run_id = stage.pipeline_run_id
-                           AND selection.gpu_backend_selection_sha256 =
-                               stage.resolved_execution_spec_json->>'gpu_backend_selection_sha256'
-                         WHERE attempt.id = :attempt_id
-                        """),
-                        {"attempt_id": reservation["execution_attempt_id"]},
-                    )
-                ).scalar_one_or_none()
-                if variant_id == "gb10-shared-1gpu":
-                    gpu_labels = ("gb10", "one")
-                elif variant_id == "oldlab-rtx5080-2gpu":
-                    gpu_labels = ("oldlab", "two")
             limit_col, reserved_col, settled_col, _cause = _COUNTERS[kind]
             ledger = (
                 (
@@ -3978,10 +3943,6 @@ class PipelineRepository:
             updated = dict(reservation)
             updated.update(state="settled", settled_amount=actual_amount)
             result = self._reservation_record(updated)
-        if gpu_labels is not None:
-            PIPELINE_GPU_SECONDS_TOTAL.labels(
-                slurm_cluster=gpu_labels[0], gpu_count_class=gpu_labels[1]
-            ).inc(actual_amount)
         return result
 
     async def release_budget(self, lease: RunLease, *, reservation_id: UUID) -> ReservationRecord:

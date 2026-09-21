@@ -6,7 +6,7 @@ import re
 from alembic import context
 from sqlalchemy import engine_from_config, pool, text
 
-from loom_capacity_build_guard.migration_privileges import verify_migration_privileges
+from loom.db.build_guard_migration_privileges import verify_migration_privileges
 
 config = context.config
 schema = "loom_capacity_build_guard"

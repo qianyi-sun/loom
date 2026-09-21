@@ -302,6 +302,8 @@ async def create_execution_resource_calibration(
     if class_contract.cpu_architecture != source_architecture:
         raise ValueError("calibration architecture does not match the target execution class")
 
+    # Retained trial usage can predate native routing; preserve its historical
+    # pool attribution without treating that field as current scheduling intent.
     route_matches = or_(
         Trial.execution_route_pool_name == source_pool_id,
         and_(

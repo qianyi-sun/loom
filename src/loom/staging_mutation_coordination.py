@@ -13,6 +13,12 @@ from sqlalchemy import Connection, Engine, text
 STAGING_MUTATION_ADVISORY_LOCK_KEY = 5_498_691_230_183_247_727
 STAGING_MUTATION_TRY_LOCK_SQL = f"SELECT pg_try_advisory_lock({STAGING_MUTATION_ADVISORY_LOCK_KEY})"
 STAGING_MUTATION_UNLOCK_SQL = f"SELECT pg_advisory_unlock({STAGING_MUTATION_ADVISORY_LOCK_KEY})"
+STAGING_MUTATION_HEALTH_SQL = (
+    "SELECT pg_backend_pid() AS backend_pid, count(*) = 1 AS owns_lock "
+    "FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() "
+    "AND classid = 1280263818 AND objid = 1621151599 AND objsubid = 1 "
+    "AND mode = 'ExclusiveLock' AND granted"
+)
 _REQUEST_RE = re.compile(r"^[a-z0-9][a-z0-9-]{7,79}$")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _GENERATION_RE = re.compile(r"^[0-9a-f]{32}$")

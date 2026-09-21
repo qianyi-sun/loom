@@ -7,11 +7,11 @@ import pytest
 import scripts.build_application_schema_reference as builder
 
 from loom.application_schema_inventory import ApplicationSchemaInventory, ApplicationSchemaObject
+from loom.application_schema_provisioning import derive_identity
 from loom.application_schema_reference import (
     APPLICATION_SCHEMA_REVISIONS,
     application_schema_reference,
 )
-from loom.dev_instance import derive_identity
 
 
 @pytest.mark.asyncio
@@ -101,7 +101,7 @@ async def test_reference_cancellation_reaps_real_migration_child_before_database
     database._converge_roles = AsyncMock()
     database.destroy = AsyncMock()
     monkeypatch.setattr(builder, "PsycopgSharedFixtureSqlExecutor", lambda _url: bootstrap)
-    monkeypatch.setattr(builder, "PsycopgPersonalDevCapacityDatabase", lambda _url: database)
+    monkeypatch.setattr(builder, "ReferenceDatabase", lambda _url: database)
     create_process = asyncio.create_subprocess_exec
     child = None
     ready = asyncio.Event()

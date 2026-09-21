@@ -3,14 +3,13 @@
 import hashlib
 import importlib
 import json
-from uuid import uuid4
 
 import pytest
 import rfc8785
 
 from loom.task_image_build_plan import TaskImageBuildPlanV1
+from tests.support.historical_build_plan import _plan
 from tests.unit.test_task_image_build_plan import _authorization, _row
-from tests.unit.test_task_image_bundle_capability import NOW, _FakeBundleBackend, _plan, _provider
 
 
 def _module():
@@ -82,25 +81,3 @@ def test_v2_parser_never_infers_missing_version_or_registered_digest(field):
 def test_versioned_parser_bounds_input_before_parsing():
     with pytest.raises(ValueError):
         _module().parse_task_image_build_plan(b" " * (64 * 1024 + 1))
-
-
-def test_v1_bundle_provider_cannot_issue_weaker_capability_for_v2_plan():
-    plan = _module().parse_task_image_build_plan(json.dumps(strong_payload()))
-    backend = _FakeBundleBackend(())
-    with pytest.raises(RuntimeError):
-        _provider(backend).issue(plan, now=NOW)
-    assert not backend.list_bounds and not backend.presign_expiries
-
-
-def test_claim_response_preserves_nested_v2_plan_without_downcasting():
-    from loom_task_image_authority.http_contracts import TaskImageMaterializationClaimResponseV1
-
-    plan = _module().parse_task_image_build_plan(json.dumps(strong_payload()))
-    response = TaskImageMaterializationClaimResponseV1(
-        claim_id=uuid4(), materialization_id=plan.materialization_id, attempt_id=uuid4(),
-        lease_epoch=1, state="claimed", deterministic_failure_count=0,
-        lease_expires_at=plan.authorization_expires_at, plan=plan,
-    )
-    restored = TaskImageMaterializationClaimResponseV1.model_validate_json(response.model_dump_json())
-    assert restored.plan == plan
-    assert restored.plan.content_manifest_digest == "6" * 64

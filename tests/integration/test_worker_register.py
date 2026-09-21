@@ -42,6 +42,8 @@ def worker_token(postgres_url: str) -> Iterator[str]:
 @pytest.fixture
 def app(monkeypatch: pytest.MonkeyPatch, postgres_url: str, worker_token: str):
     for k, v in {
+        "LOOM_LOCAL_EXECUTION": "1",
+        "LOOM_ENV": "development",
         "LOOM_CP_DB_URL": postgres_url,
         "LOOM_CP_MINIO_ENDPOINT": "http://minio:9000",
         "LOOM_CP_MINIO_ACCESS_KEY": "x",
@@ -89,11 +91,11 @@ def test_register_persists_worker_capacity_and_pool(
             "/workers/register",
             headers={"Authorization": f"Bearer {worker_token}"},
             json={
-                "hostname": "trt-gb10-7",
+                "hostname": "local-worker-7",
                 "version": "0.1",
                 "capabilities": [_VALID_CAP],
                 "max_concurrent": 10,
-                "pool_name": "gb10",
+                "pool_name": "local",
             },
         )
         assert r.status_code == 200, r.text
@@ -113,7 +115,7 @@ def test_register_persists_worker_capacity_and_pool(
         engine.dispose()
 
     assert row[0] == 10
-    assert row[1] == "gb10"
+    assert row[1] == "local"
 
 
 @pytest.mark.parametrize("case", ["x86_64", "arm64", "no-reader", "wrong-digest"])
@@ -128,7 +130,7 @@ def test_ordinary_trial_only_registration_keeps_measured_signed_reader_identity(
     with TestClient(app) as client:
         response = client.post("/workers/register", headers={"Authorization": f"Bearer {worker_token}"}, json=dict(
             hostname="ordinary-worker", version="test", capabilities=[dict(_VALID_CAP, cpu_arch=arch, network_policies=["public", "allowlist", "no-network"])],
-            supported_work_kinds=["trial"], pool_name="gb10" if arch == "arm64" else "oldlab", max_concurrent=2,
+            supported_work_kinds=["trial"], pool_name="local", max_concurrent=2,
             capability_snapshot=snapshot.model_dump(mode="json"), capability_snapshot_digest="sha256:" + "0" * 64 if case == "wrong-digest" else snapshot.digest))
     if case in {"no-reader", "wrong-digest"}:
         assert response.status_code in {400, 409}
@@ -206,23 +208,11 @@ def test_register_rejects_partial_or_overcommitted_cache_snapshot(
     assert overcommitted.status_code == 400
 
 
-@pytest.mark.legacy_pool
-def test_gpu_registration_requires_exact_slurm_pool_and_persists_evidence(
+def test_local_gpu_registration_persists_capabilities_without_cluster_allocation(
     app,
     worker_token,
     postgres_url: str,
 ):  # type: ignore[no-untyped-def]
-    evidence = {
-        "allocation_id": "oldlab:123",
-        "slurm_cluster_id": "oldlab",
-        "job_id": "123",
-        "node_name": "trt-eai-oldlab-3",
-        "partition": "all",
-        "gpu_tres": "gpu:rtx5080:2",
-        "allocated_device_ids": [0, 1],
-        "device_uuids": ["GPU-5080-0", "GPU-5080-1"],
-        "variant_id": "oldlab-rtx5080-2gpu",
-    }
     snapshot = {
         "schema_version": "loom.worker-capabilities.v1",
         "cpu_arch": "x86_64",
@@ -237,24 +227,23 @@ def test_gpu_registration_requires_exact_slurm_pool_and_persists_evidence(
         ],
         "gpu_devices": [
             {
-                "allocation_id": "oldlab:123",
-                "device_uuid": device_uuid,
+                "allocation_id": "local:gpu-0",
+                "device_uuid": "GPU-LOCAL",
                 "vendor": "nvidia",
-                "model": "NVIDIA GeForce RTX 5080",
-                "memory_kind": "dedicated",
-                "memory_mb": 16_384,
-                "unified_memory_mb": None,
+                "model": "NVIDIA test GPU",
+                "memory_kind": "unified",
+                "memory_mb": None,
+                "unified_memory_mb": 124_000,
                 "nvidia_driver_version": "580.12.0",
                 "mig_mode": "disabled",
             }
-            for device_uuid in evidence["device_uuids"]
         ],
         "input_cache_capacity_bytes": 1_649_267_441_664,
         "input_cache_reserved_bytes": 0,
         "input_cache_ready_bytes": 0,
     }
     payload = {
-        "hostname": "trt-eai-oldlab-3",
+        "hostname": "local-gpu-worker",
         "version": "0.1",
         "capabilities": [
             {
@@ -266,17 +255,10 @@ def test_gpu_registration_requires_exact_slurm_pool_and_persists_evidence(
         ],
         "supported_work_kinds": ["trial", "execution_attempt"],
         "max_concurrent": 1,
-        "pool_name": "behavior-gpu-oldlab",
+        "pool_name": "local-gpu",
         "capability_snapshot": snapshot,
-        "slurm_gpu_allocation_evidence": evidence,
     }
     with TestClient(app) as client:
-        rejected = client.post(
-            "/workers/register",
-            headers={"Authorization": f"Bearer {worker_token}"},
-            json={**payload, "pool_name": "oldlab"},
-        )
-        assert rejected.status_code == 409
         response = client.post(
             "/workers/register",
             headers={"Authorization": f"Bearer {worker_token}"},
@@ -291,8 +273,8 @@ def test_gpu_registration_requires_exact_slurm_pool_and_persists_evidence(
             row = connection.execute(
                 text(
                     "SELECT capability_snapshot_json->>'cpu_arch',"
-                    "slurm_gpu_allocation_evidence_json->>'allocation_id',"
-                    "slurm_gpu_allocation_evidence_digest "
+                    "capability_snapshot_json->'gpu_devices'->0->>'device_uuid',"
+                    "capability_snapshot_digest "
                     "FROM workers WHERE id=:worker_id"
                 ),
                 {"worker_id": worker_id},
@@ -300,7 +282,7 @@ def test_gpu_registration_requires_exact_slurm_pool_and_persists_evidence(
     finally:
         engine.dispose()
     assert row[0] == "x86_64"
-    assert row[1] == "oldlab:123"
+    assert row[1] == "GPU-LOCAL"
     assert row[2].startswith("sha256:")
 
 

@@ -41,7 +41,7 @@ def test_regular_subprocess_gateway_url_needs_no_extra_hosts() -> None:
 
 
 def test_worker_hostname_prefers_configured_value() -> None:
-    assert _worker_hostname("trt-gb10-7") == "trt-gb10-7"
+    assert _worker_hostname("local-worker-7") == "local-worker-7"
 
 
 def test_worker_hostname_falls_back_to_runtime_hostname(monkeypatch) -> None:  # type: ignore[no-untyped-def]

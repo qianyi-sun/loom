@@ -556,7 +556,7 @@ def test_main_writes_evidence_when_run_library_list_times_out(
             return FakeResponse(
                 b'{"id":"batch-1","debug_evidence":{"trials":{'
                 b'"summary":{"claimed_without_started":0},'
-                b'"worker_pools":{"terminal":{"oldlab":1},'
+                b'"worker_pools":{"terminal":{"local-worker":1},'
                 b'"unknown_terminal":0}}}}'
             )
         if path == "/api/v1/run-library/batches/batch-1":
@@ -707,7 +707,7 @@ def test_run_smoke_fails_when_required_worker_pool_has_no_terminal_trials(
                 body = (
                     b'{"id":"batch-1","debug_evidence":{"trials":{'
                     b'"summary":{"claimed_without_started":0},'
-                    b'"worker_pools":{"terminal":{"gb10":12},'
+                    b'"worker_pools":{"terminal":{"local-gpu":12},'
                     b'"unknown_terminal":0}}}}'
                 )
             elif path == "/api/v1/run-library/batches":
@@ -730,7 +730,7 @@ def test_run_smoke_fails_when_required_worker_pool_has_no_terminal_trials(
             "--batch-id",
             "batch-1",
             "--required-worker-pool",
-            "oldlab",
+            "local-worker",
         ]
     )
 
@@ -738,8 +738,8 @@ def test_run_smoke_fails_when_required_worker_pool_has_no_terminal_trials(
     result = next(r for r in report.results if r.check_id == "runs.worker_pool_coverage")
 
     assert result.status == "fail"
-    assert "oldlab" in result.detail
-    assert "gb10=12" in result.detail
+    assert "local-worker" in result.detail
+    assert "local-gpu=12" in result.detail
     assert "required worker pools" in result.remediation.lower()
 
 
@@ -750,19 +750,19 @@ def test_worker_pool_coverage_passes_when_required_pools_have_terminal_trials() 
         headers={},
         body=(
             b'{"debug_evidence":{"trials":{"worker_pools":{"terminal":'
-            b'{"gb10":158,"k8s-worker":12,"oldlab":2},'
+            b'{"local-gpu":158,"k8s-worker":12,"local-worker":2},'
             b'"unknown_terminal":0}}}}'
         ),
     )
 
     result = gate._worker_pool_coverage_result(
         response,
-        ["oldlab", "gb10"],
+        ["local-worker", "local-gpu"],
     )
 
     assert result.status == "pass"
-    assert "oldlab=2" in result.detail
-    assert "gb10=158" in result.detail
+    assert "local-worker=2" in result.detail
+    assert "local-gpu=158" in result.detail
 
 
 def test_run_smoke_fails_when_service_pod_reports_oom_restart(monkeypatch) -> None:
@@ -859,7 +859,7 @@ def test_run_smoke_rechecks_service_stability_after_route_probe_oom(
                 body = (
                     b'{"id":"batch-1","debug_evidence":{"trials":{'
                     b'"summary":{"claimed_without_started":0},'
-                    b'"worker_pools":{"terminal":{"gb10":1}}}}}'
+                    b'"worker_pools":{"terminal":{"local-gpu":1}}}}}'
                 )
             elif path == "/api/v1/run-library/batches":
                 body = b'{"items":[{"id":"batch-1"}]}'

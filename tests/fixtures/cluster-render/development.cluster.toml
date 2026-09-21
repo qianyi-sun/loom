@@ -1,0 +1,28 @@
+# Synthetic renderer input; not an operator deployment profile.
+namespace = "loom-dev"
+runtime_environment = "development"
+ingress_host = "yylx.world"
+ingress_redirect_hosts = ["www.yylx.world"]
+ingress_tls_secret_name = "loom-dev-tls"
+frontend_environment = "development"
+frontend_route_path = "/dev"
+frontend_api_base_path = "/dev"
+trajectories_bucket = "loom-dev-trajectories"
+artifacts_bucket = "loom-dev-artifacts"
+persistent_storage_backend = "static-host-path"
+persistent_storage_host_path_root = "/data/loom-dev"
+
+[k8s_worker]
+enabled = false
+
+[workload_contract]
+workload_trust_mode = "internal_trusted"
+taskset_transforms_enabled = false
+taskset_transform_network_isolated = false
+untrusted_workload_isolation = false
+
+[topology]
+multi_node = false
+storage_backend = "host_path"
+postgres_replicas = 1
+minio_replicas = 1

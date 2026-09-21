@@ -699,14 +699,14 @@ describe("NewBatch", () => {
     expect(screen.queryByLabelText(/^Agent$/i)).not.toBeInTheDocument();
   });
 
-  it("defaults backend to docker once the catalog loads", async () => {
+  it("defaults backend to Nebius once the catalog loads", async () => {
     mockEndpoints({ matchingTasks: 12 });
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
     const dropdown = (await screen.findByLabelText(
       "Backend",
     )) as HTMLSelectElement;
-    expect(dropdown.value).toBe("docker");
+    expect(dropdown.value).toBe("nebius");
   });
 
   it("offers Nebius as an explicit scale-from-zero backend", async () => {

@@ -22,8 +22,6 @@ def test_checked_in_profiles_are_exact_and_have_no_unsuffixed_alias() -> None:
         "behavior-export-io@1",
         "behavior-offline-gateway@1",
         "behavior-offline-none@1",
-        "behavior-sim-local-gateway@1",
-        "behavior-sim-local-none@1",
         "pipeline-test-cpu-gateway@1",
         "pipeline-test-cpu-none@1",
         "terminalgen-generate-gateway@1",
@@ -43,18 +41,6 @@ def test_checked_in_profiles_are_exact_and_have_no_unsuffixed_alias() -> None:
         for record in registry.list()
         if not record.identity.startswith("terminalgen-")
     )
-
-
-@pytest.mark.legacy_pool
-def test_gpu_variants_encode_split_and_shared_device_roles_exactly() -> None:
-    profile = load_resource_profiles().get("behavior-sim-local-none@1").profile
-    gb10, oldlab = profile.execution_variants
-    assert gb10.variant_id == "gb10-shared-1gpu"
-    assert (gb10.device_roles.sim_gpu_index, gb10.device_roles.vla_gpu_index) == (0, 0)  # type: ignore[union-attr]
-    assert gb10.memory_accounting_kind == "unified_shared"
-    assert gb10.container_memory_bytes_override == 125_829_120_000
-    assert (oldlab.device_roles.sim_gpu_index, oldlab.device_roles.vla_gpu_index) == (0, 1)  # type: ignore[union-attr]
-    assert oldlab.memory_accounting_kind == "separate"
 
 
 def test_pipeline_test_profiles_have_an_unprovisioned_non_behavior_pool() -> None:
@@ -122,22 +108,24 @@ def test_terminalgen_profiles_are_closed_cpu_pools_with_profile_owned_pid_limits
 
 
 def test_profiles_reject_network_and_memory_accounting_overrides() -> None:
-    source = load_resource_profiles().get("behavior-sim-local-gateway@1").profile.model_dump()
+    source = load_resource_profiles().get("behavior-offline-gateway@1").profile.model_dump()
     drift = deepcopy(source)
     drift["required_host_runtime_features"].remove("loom-secret-tmpfs-v1")
     with pytest.raises(ValidationError, match="loom-secret-tmpfs-v1"):
-        ResourceProfileV1.model_validate(drift)
-    drift = deepcopy(source)
-    drift["execution_variants"][0]["memory_accounting_kind"] = "separate"
-    with pytest.raises(ValidationError, match="unified GPU memory"):
         ResourceProfileV1.model_validate(drift)
 
 
 def test_user_parameters_cannot_select_variant_pool_device_or_network() -> None:
     reject_user_resource_overrides({"task": {"seed": 7}})
     with pytest.raises(ResourceProfileRegistryError, match="execution_variant_id"):
-        reject_user_resource_overrides({"task": {"execution_variant_id": "gb10-shared-1gpu"}})
+        reject_user_resource_overrides({"task": {"execution_variant_id": "local-gpu"}})
     with pytest.raises(ResourceProfileRegistryError, match="network_profile"):
         reject_user_resource_overrides({"network_profile": "gateway"})
     with pytest.raises(ResourceProfileRegistryError, match="pids_limit"):
         reject_user_resource_overrides({"pids_limit": 65_536})
+
+
+@pytest.mark.parametrize("identity", ["behavior-sim-local-gateway@1", "behavior-sim-local-none@1"])
+def test_retired_gpu_profiles_cannot_be_selected(identity: str) -> None:
+    with pytest.raises(ResourceProfileRegistryError, match="unknown"):
+        load_resource_profiles().get(identity)

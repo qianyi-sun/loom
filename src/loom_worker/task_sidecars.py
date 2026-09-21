@@ -22,7 +22,6 @@ from uuid import UUID
 import docker
 from docker.errors import APIError, ImageNotFound, NotFound
 
-from loom.driver.build_containment import forbid_build_when_contained
 from loom.driver.task_image import TaskImageBuildTimeoutError, _registry_tag_for
 from loom.models.healthcheck import HealthcheckSpec
 from loom.models.resource_usage import ResourceLimits
@@ -141,8 +140,7 @@ class DockerTaskSidecarRuntime:
         self.health_poll_interval_sec = health_poll_interval_sec
         self.docker_api_timeout_sec = docker_api_timeout_sec
         self.setup_slot_provider = setup_slot_provider
-        # #896: per-container hard caps for setup-sidecar containers on
-        # non-exclusive (packed) workers. Slurm admission requires positive caps.
+        # Apply the caller's resource limits to setup-sidecar containers.
         self.container_cpus = container_cpus
         self.container_memory_mib = container_memory_mib
         self.container_pids = container_pids
@@ -400,10 +398,6 @@ class DockerTaskSidecarRuntime:
             return
         except ImageNotFound:
             pass
-        # #1146: sidecar image builds run outside the Slurm job cgroup. A
-        # container_cgroup_parent means this is a containment-required
-        # (non-exclusive) worker — refuse the build; pre-build/cache the image.
-        forbid_build_when_contained(bool(self.container_cgroup_parent), tag)
         rel_dockerfile = dockerfile.relative_to(build_context).as_posix()
         _enforce_build_context_limits(build_context)
         self._client.images.build(
@@ -467,8 +461,7 @@ class DockerTaskSidecarRuntime:
         healthcheck = _docker_healthcheck(sidecar.healthcheck)
         if healthcheck is not None:
             kwargs["healthcheck"] = healthcheck
-        # #896: apply per-container hard caps when configured (>0); unset
-        # (0) remains available to non-Slurm callers; Slurm admission rejects it.
+        # Positive values set container limits; zero leaves Docker defaults.
         if self.container_cpus > 0:
             kwargs["nano_cpus"] = int(self.container_cpus * 1_000_000_000)
         if self.container_memory_mib > 0:

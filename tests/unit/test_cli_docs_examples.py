@@ -25,7 +25,8 @@ def test_staging_validation_smoke_matches_current_gate_contract() -> None:
     assert "--provider-connection-name CONNECTION" in runbook
     assert "--provider-model-provider PROVIDER" in runbook
     assert "--provider-model-name MODEL" in runbook
-    assert "--required-worker-pool gb10" in runbook
+    assert "--required-worker-pool local" in runbook
+    assert "local/disposable diagnostic" in runbook
     assert "--fail-on-skip" in runbook
     assert "--team-a-token file:/secure/path/team-a-token" in runbook
     assert "--team-b-token file:/secure/path/team-b-token" in runbook

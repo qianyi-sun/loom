@@ -6,16 +6,15 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
-from tests.integration.test_capacity_agent_store import (
-    _initialize_and_register,
-    _owner_session,
-    _seed_trial,
-)
 from tests.integration.test_capacity_trial_writer_fence import (
     _control_session,
     _freeze,
     _initialize,
     _legacy_engine,
+)
+from tests.support.historical_capacity import (
+    historical_agent_rows,
+    seed_unprotected_trial,
 )
 
 
@@ -24,7 +23,7 @@ async def test_freeze_refuses_active_writer_then_counts_committed_ledger(
     capacity_guard_database: dict[str, object],
 ) -> None:
     database = capacity_guard_database
-    trial = _seed_trial(database)
+    trial = seed_unprotected_trial(database)
     initial = await _initialize(database)
     operation = uuid4()
     engine = _legacy_engine(database)
@@ -82,7 +81,7 @@ async def test_ledger_counts_insert_update_delete_but_not_noop_or_rollback(
     capacity_guard_database: dict[str, object],
 ) -> None:
     database = capacity_guard_database
-    source = _seed_trial(database)
+    source = seed_unprotected_trial(database)
     initial = await _initialize(database)
     clone = uuid4()
     engine = _legacy_engine(database)
@@ -130,8 +129,8 @@ async def test_old_transaction_cannot_omit_new_initialization_boundary(
     isolation: str,
 ) -> None:
     database = capacity_guard_database
-    trial = _seed_trial(database)
-    _, registration = await _initialize_and_register(database)
+    trial = seed_unprotected_trial(database)
+    _, registration = await historical_agent_rows(database)
     engine = _legacy_engine(database, isolation=isolation)
     try:
         with engine.connect() as writer:
@@ -159,20 +158,19 @@ async def test_freeze_serializes_with_actual_authority_and_agent_reconfiguration
     commit_reconfiguration: bool,
 ) -> None:
     database = capacity_guard_database
-    fence, registration = await _initialize_and_register(database)
+    _, registration = await historical_agent_rows(database)
     initial = await _initialize(database, registration=registration)
     operation = uuid4()
-    replacement_fence = fence.model_copy(update={"configuration_generation": 12})
-    replacement_registration = registration.model_copy(update={"configuration_generation": 12})
-    async with _owner_session(database) as (agent_store, guard_store, session):
-        await guard_store.reconfigure_disabled_authority(
-            replacement_fence, expected_configuration_generation=11
-        )
-        await agent_store.reconfigure_agent(
-            replacement_registration, expected_configuration_generation=11
-        )
-        # Use the real stores, retaining their transaction's row locks while a
-        # separate READ COMMITTED connection attempts the protected freeze.
+    async with _control_session(database) as session:
+        await session.execute(text(
+            "UPDATE loom_capacity_guard.authority_state SET configuration_generation=12, "
+            "updated_at=statement_timestamp()"
+        ))
+        await session.execute(text(
+            "UPDATE loom_capacity_guard.agent_registrations SET configuration_generation=12"
+        ))
+        # Retain the historical authority row locks while another transaction
+        # attempts the protected freeze.
         with pytest.raises(DBAPIError) as busy:
             await _freeze(database, initial["writer_incarnation"], operation)
         assert busy.value.orig.sqlstate == "55P03"
@@ -197,8 +195,8 @@ async def test_initialization_refuses_unbound_active_writer_then_retries(
     capacity_guard_database: dict[str, object],
 ) -> None:
     database = capacity_guard_database
-    trial = _seed_trial(database)
-    _, registration = await _initialize_and_register(database)
+    trial = seed_unprotected_trial(database)
+    _, registration = await historical_agent_rows(database)
     engine = _legacy_engine(database)
     try:
         with engine.connect() as writer:

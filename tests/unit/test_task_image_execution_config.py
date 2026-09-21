@@ -102,11 +102,7 @@ def test_standard_control_plane_rejects_conflicting_or_missing_release_config(tm
     for name, value in {"DB_URL": "postgresql+psycopg://test:test@localhost/test", "MINIO_ACCESS_KEY": "x", "MINIO_SECRET_KEY": "y"}.items():
         monkeypatch.setenv("LOOM_CP_" + name, value)
     path = save(tmp_path, document(tmp_path, admission=True))
-    settings = ControlPlaneSettings(_env_file=None, task_image_execution_config_file=path,
-                                   protected_worker_runtime_db_url_file=tmp_path / "protected-db")
-    with pytest.raises(ValueError, match="protected"):
-        create_app(settings)
-    settings = settings.model_copy(update={"protected_worker_runtime_db_url_file": None})
+    settings = ControlPlaneSettings(_env_file=None, task_image_execution_config_file=path)
     with pytest.raises(ValueError, match="configuration"):
         create_app(settings, task_image_execution_factory=Mock())
     path.unlink()
@@ -169,10 +165,10 @@ def test_configured_control_plane_owns_signer_and_engine_on_all_exits(tmp_path, 
     monkeypatch.setattr(cp_app, "_assert_schema_startup", AsyncMock(side_effect=ValueError("fixture schema failure") if case == "schema-failure" else None))
     monkeypatch.setattr(cp_app, "build_s3_client", lambda **_: object())
     for name in ("run_crash_detector_loop", "run_metrics_refresher_loop", "run_retry_exhausted_sweeper_loop",
-                 "run_worker_pool_autoscaler_loop", "run_live_preview_reconciler_loop", "run_service_execution_materializer_loop"):
+                 "run_live_preview_reconciler_loop", "run_service_execution_materializer_loop"):
         monkeypatch.setattr(cp_app, name, idle)
     if case == "later-startup-failure":
-        monkeypatch.setattr(cp_app, "build_controller_config", Mock(side_effect=ValueError("fixture later failure")))
+        monkeypatch.setattr(cp_app, "SqlArtifactCommitRepository", Mock(side_effect=ValueError("fixture later failure")))
     elif case == "partial-background-failure":
         monkeypatch.setattr(cp_app, "ServiceExecutionMaterializer", Mock(side_effect=ValueError("fixture partial background failure")))
     app = cp_app.create_app(ControlPlaneSettings(_env_file=None, db_url="postgresql+psycopg://test:test@localhost/test",

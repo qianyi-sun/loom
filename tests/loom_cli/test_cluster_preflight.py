@@ -1256,7 +1256,7 @@ def test_cli_up_skip_preflight_cannot_bypass_protected_workload_contract(
 
     assert rc == 1
     assert applied == []
-    assert "workload-trust-contract preflight failed" in capsys.readouterr().err
+    assert "hosted environments require the Nebius deployment entrypoint" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("skip_args", [[], ["--skip-preflight"]])
@@ -1295,7 +1295,7 @@ def test_cli_up_protected_malformed_workload_contract_is_a_named_preflight_failu
     )
 
     assert rc == 1
-    assert "workload-trust-contract preflight failed" in capsys.readouterr().err
+    assert "hosted environments require the Nebius deployment entrypoint" in capsys.readouterr().err
 
 
 def test_cli_preflight_warn_alone_returns_0(

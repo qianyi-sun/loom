@@ -13,11 +13,11 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from loom.db import schema
 from loom.db.schema_startup import service_schema_head
 from loom_task_image_authority.retention_inventory import derive_attempt_repository_inventory
-from tests.integration.test_task_image_publication_jobs import (
+from tests.integration.test_task_image_registry_credential_migration import _config
+from tests.support.historical_task_images import NOW, historical_attempt
+from tests.support.historical_task_images import (
     registry_authority_session as registry_authority_session,
 )
-from tests.integration.test_task_image_registry_credential_migration import _config
-from tests.integration.test_task_image_registry_credentials import NOW, _claimed_attempt
 
 
 def _model():
@@ -28,7 +28,7 @@ def _model():
 
 async def _observation(session):
     model = _model()
-    _, _, _, _, _, materialization, attempt = await _claimed_attempt(session)
+    materialization, attempt = await historical_attempt(session)
     inventory = derive_attempt_repository_inventory(
         materialization=materialization,
         attempt=attempt,

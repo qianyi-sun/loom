@@ -221,8 +221,8 @@ async def test_post_trial_forwards_pool_pin_and_idempotency_key(
             json={
                 "task_id": "local/task-1",
                 "config": {"agent_name": "oracle", "agent_model": None},
-                "required_worker_pool": "oldlab",
-                "idempotency_key": "oldlab-release-witness-1",
+                "required_worker_pool": "local_cpu",
+                "idempotency_key": "local_cpu-release-witness-1",
             },
         )
 
@@ -232,8 +232,8 @@ async def test_post_trial_forwards_pool_pin_and_idempotency_key(
         "config": {"agent_name": "oracle", "agent_model": None},
         "provider_connection_id": None,
         "provider_model_id": None,
-        "required_worker_pool": "oldlab",
-        "idempotency_key": "oldlab-release-witness-1",
+        "required_worker_pool": "local_cpu",
+        "idempotency_key": "local_cpu-release-witness-1",
     }
 
 

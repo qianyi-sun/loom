@@ -28,8 +28,6 @@ def test_worker_lost_cleanup_requires_positive_all_absent_proof() -> None:
         schema_version="loom.worker-lost-cleanup-ack.v1",
         observer_kind="worker_journal",
         observed_at=datetime(2026, 8, 12, tzinfo=UTC),
-        allocation_id=None,
-        allocation_terminal=None,
         resources=_proof(),
     )
     assert payload.resources.active_upload_session_ids == []

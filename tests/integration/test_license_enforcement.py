@@ -147,6 +147,8 @@ def seed(postgres_url: str) -> Iterator[dict]:
 @pytest.fixture
 def app(monkeypatch: pytest.MonkeyPatch, postgres_url: str, seed: dict):
     for k, v in {
+        "LOOM_ENV": "development",
+        "LOOM_LOCAL_EXECUTION": "1",
         "LOOM_CP_DB_URL": postgres_url,
         "LOOM_CP_MINIO_ENDPOINT": "http://minio:9000",
         "LOOM_CP_MINIO_ACCESS_KEY": "x",

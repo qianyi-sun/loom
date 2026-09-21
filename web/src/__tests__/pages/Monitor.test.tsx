@@ -41,11 +41,7 @@ const monitorSummaryPayload = {
   },
   resources: {
     aggregate: {
-      desired_slots: 18,
-      pending_slots: 6,
       current_active_slots: 12,
-      max_slots: 162,
-      ceiling_slots: 162,
       active_workers: 2,
       draining_workers: 1,
       total_slots: 12,
@@ -61,16 +57,7 @@ const monitorSummaryPayload = {
         pool_name: "worker-pool-a",
         backend: "docker",
         cpu_arch: "arm64",
-        autoscaler_environment: "production",
-        autoscaler_actuator: "kubernetes",
-        autoscaler_enabled: true,
-        autoscaler_idle_since_at: "2026-06-27T12:00:00+00:00",
-        autoscaler_idle_seconds: 601,
-        desired_slots: 150,
-        pending_slots: 0,
         current_active_slots: 10,
-        max_slots: 150,
-        ceiling_slots: 150,
         active_workers: 1,
         draining_workers: 1,
         total_slots: 10,
@@ -80,27 +67,12 @@ const monitorSummaryPayload = {
         running_tasks: 1,
         starting_tasks: 0,
         queued_tasks: 1,
-        last_autoscaler_decision: "request_drain",
-        last_autoscaler_reason: "idle_excess_capacity",
-        decision_reason: "idle_excess_capacity",
-        last_autoscaler_blocked_reason: null,
-        blocked_reason: null,
-        last_autoscaler_error: null,
       },
       {
         pool_name: "staging-x86",
         backend: "docker",
         cpu_arch: "x86_64",
-        autoscaler_environment: "production",
-        autoscaler_actuator: "kubernetes",
-        autoscaler_enabled: true,
-        autoscaler_idle_since_at: null,
-        autoscaler_idle_seconds: null,
-        desired_slots: 6,
-        pending_slots: 6,
         current_active_slots: 2,
-        max_slots: 12,
-        ceiling_slots: 12,
         active_workers: 1,
         draining_workers: 0,
         total_slots: 2,
@@ -110,12 +82,6 @@ const monitorSummaryPayload = {
         running_tasks: 1,
         starting_tasks: 1,
         queued_tasks: 1,
-        last_autoscaler_decision: "scale_up",
-        last_autoscaler_reason: "queued_deficit",
-        decision_reason: "queued_deficit",
-        last_autoscaler_blocked_reason: "pending_cap",
-        blocked_reason: "pending_cap",
-        last_autoscaler_error: null,
       },
     ],
   },
@@ -567,15 +533,9 @@ describe("Monitor human-readable labels", () => {
     expect(screen.getByText("worker-pool-a")).toBeInTheDocument();
     expect(screen.getByText("staging-x86")).toBeInTheDocument();
     expect(screen.getByText("Used / active slots")).toBeInTheDocument();
-    expect(screen.getByText("Max")).toBeInTheDocument();
-    expect(screen.getAllByText("kubernetes").length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText("Autoscaler")).not.toBeInTheDocument();
     expect(screen.getByText("1/10")).toBeInTheDocument();
     expect(screen.getByText("2/2")).toBeInTheDocument();
-    expect(screen.getByText("601s")).toBeInTheDocument();
-    expect(screen.getByText("request_drain")).toBeInTheDocument();
-    expect(screen.getByText("idle_excess_capacity")).toBeInTheDocument();
-    expect(screen.getByText("scale_up")).toBeInTheDocument();
-    expect(screen.getByText("pending_cap")).toBeInTheDocument();
     expect(screen.getByText("Nebius service execution")).toBeInTheDocument();
     expect(screen.getByText("nebius-cpu · development · eu-north1")).toBeInTheDocument();
     expect(screen.getByText("12 slots")).toBeInTheDocument();
