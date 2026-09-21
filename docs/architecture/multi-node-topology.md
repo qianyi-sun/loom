@@ -1,5 +1,9 @@
 # Multi-Node Topology
 
+This generic cluster renderer is retained for local/disposable validation.
+Hosted deployment uses the [Nebius platform](nebius-primary-platform.md)
+renderer and deployment contract.
+
 Loom can render either single-node stateful services or an HA-shaped
 multi-node deployment through the `topology` cluster configuration table.
 Profiles pin this table explicitly so the schema defaults do not change an
@@ -52,10 +56,6 @@ must exist before applying the manifests.
 anti-affinity needs enough eligible Kubernetes nodes for every replica.
 `min_available` controls the applicable disruption budgets; MinIO also retains
 its replica-derived quorum budget.
-
-GB10 machines are external workers, not Kubernetes control-plane or storage
-nodes. They reach the cluster's worker, object-store, and Gateway router
-surfaces through the configured external transport.
 
 ## Operations
 

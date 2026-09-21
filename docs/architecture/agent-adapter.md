@@ -300,7 +300,7 @@ The cache-key slot prevents duplicate builds of the same
 second guard for shared Docker daemons: it serializes or caps different cold
 cache keys before they start apt/npm/pip setup containers on the same
 containerd snapshotter. Keep `trial_cache_build_max_concurrent=1` for shared
-OLDLAB/k8s daemons; raise it only when each worker host has an isolated daemon
+local Docker daemons; raise it only when each worker host has an isolated daemon
 and measured build headroom.
 
 ### Optional shared registry

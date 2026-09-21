@@ -297,7 +297,7 @@ watchdog hard-deadline cancellation, or the Control Plane stale-running reclaim
 for a still-heartbeating but silent worker, writes a terminal `failed` trial
 with `failure_reason=agent_timeout` and a diagnostic message containing the
 runtime, configured timeout, last event/LLM activity, and worker heartbeat
-freshness. This keeps GB10/opencode hangs distinct from user cancellation.
+freshness. This keeps local runtime hangs distinct from user cancellation.
 
 After a successful trial finalizes, the Worker sends a fenced
 `PATCH /trials/{id}/trajectory_index` before reporting terminal

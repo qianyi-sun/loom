@@ -31,16 +31,6 @@ All metrics use the `loom_*` prefix and follow these cardinality rules:
 | Control Plane | `loom_worker_pool_workers` | Gauge | `pool_name`, `backend`, `cpu_arch` |
 | Control Plane | `loom_worker_pool_draining_slots` | Gauge | `pool_name`, `backend`, `cpu_arch` |
 | Control Plane | `loom_worker_pool_draining_workers` | Gauge | `pool_name`, `backend`, `cpu_arch` |
-| Control Plane | `loom_slurm_worker_desired_slots` | Gauge | `environment`, `pool_name` |
-| Control Plane | `loom_slurm_worker_active_slots` | Gauge | `environment`, `pool_name` |
-| Control Plane | `loom_slurm_worker_pending_slots` | Gauge | `environment`, `pool_name` |
-| Control Plane | `loom_slurm_worker_stale_slots` | Gauge | `environment`, `pool_name` |
-| Control Plane | `loom_slurm_worker_running_jobs` | Gauge | `environment`, `pool_name` |
-| Control Plane | `loom_slurm_worker_pending_jobs` | Gauge | `environment`, `pool_name` |
-| Control Plane | `loom_slurm_worker_stale_jobs` | Gauge | `environment`, `pool_name` |
-| Control Plane | `loom_slurm_worker_failed_submissions` | Gauge | `environment`, `pool_name` |
-| Control Plane | `loom_slurm_worker_cancelled_pending_jobs` | Gauge | `environment`, `pool_name` |
-| Control Plane | `loom_slurm_worker_idle_exits` | Gauge | `environment`, `pool_name` |
 | Control Plane | `loom_worker_reclaim_total` | Counter | — |
 | LLM Gateway | `loom_gateway_llm_calls_total` | Counter | `provider`, `dialect`, `result` |
 | LLM Gateway | `loom_gateway_llm_call_latency_sec` | Histogram | `provider`, `dialect` |
@@ -96,11 +86,9 @@ Grafana sidecar auto-discovers and imports them.
 - State PATCH outcomes (ok / fenced / timeout)
 - Worker reclaim rate
 - Active workers gauge
-- Worker pool total, occupied, free, desired, pending, draining, idle-window,
-  and autoscaler decision state by pool/backend/CPU architecture
-- Elastic Slurm worker desired, active, and pending slots by environment/pool
-- Elastic Slurm job counts for running, pending, failed submissions, cancelled
-  pending jobs, and idle exits
+- Local worker pool total, occupied, free and draining slots by
+  pool/backend/CPU architecture
+- Nebius execution targets, fresh capacity observations and native Job lifecycle
 
 **LLM Gateway** — drill in when `LoomGatewayProviderErrorRate` fires or cost anomalies appear:
 - Call rate by provider (stacked)
@@ -165,17 +153,12 @@ at least one panel in the dashboards above.
 ### Queue backlog (`LoomQueueBacklog`)
 
 1. Open **Control Plane** dashboard → Queue Depth per Team panel.
-2. Check `loom_workers_active`. If low, scale the worker Deployment: `kubectl scale deploy/loom-worker --replicas=N`.
-3. Check claim latency P95. If high, see `LoomClaimLatencyP95High` path.
-4. If this environment uses elastic Slurm capacity, run
-   `loom admin slurm-workers status --cp-url <private-cp-url>`. Pending slots
-   with pending reasons point to Slurm scheduling pressure; failed submissions
-   point to controller/config errors; stale records mean Loom expected capacity
-   that Slurm no longer reports or a running Slurm job whose Loom worker
-   heartbeat is stale. Check Control Plane logs for
-   `elastic_slurm_worker_decision`, `elastic_slurm_worker_submit_failed`, and
-   `elastic_slurm_worker_cancel_failed` to distinguish capacity math,
-   submission failures, and cancellation failures.
+2. For hosted execution, inspect the Nebius target's admission decisions,
+   capacity observation freshness and Kubernetes Job/Pod state in Monitor.
+   See [Nebius service execution](nebius-service-execution.md).
+3. For explicit local development, check `loom_workers_active`, worker logs,
+   free slots and claim latency. Local worker capacity does not represent
+   Nebius hosted capacity.
 
 ### Claim latency (`LoomClaimLatencyP95High`)
 

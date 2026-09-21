@@ -144,8 +144,8 @@ trial Worker, a laptop Docker **task-image-builder** sidecar, and the React SPA.
 It runs migrations, seeds local tokens (including a least-privilege
 `task-image:build` token), and prints endpoint URLs.
 
-The local builder sidecar uses the laptop Docker daemon. It is **not** the
-production exclusive Slurm builder. Trial workers stay pull-only. Dockerfile-backed
+The local builder sidecar uses the laptop Docker daemon. Hosted task images
+use Nebius native build Jobs. Trial workers stay pull-only. Dockerfile-backed
 `loom eval batch create` trials remain `queued` until that sidecar publishes a
 ready digest for the laptop architecture. `loom run` (CLI, not service-mode)
 can still build locally without the registry.
@@ -1496,10 +1496,9 @@ that isolation automatically. Select it at batch create with
 `--workspace-staging-policy tb21` so model agents cannot read
 `solution/` / `tests/` / `verifier/` from the sandbox.
 
-Full-cluster rollout smoke must use an explicit audited physical task ID via
-`--smoke-task-id terminal-bench-2@tb2.1-r6/<task>`. Loom never guesses a TB2
-default. The `current-gb10` scope alone keeps the Loom-owned
-`loom-smoke/gb10-oracle-hello-world` default.
+Hosted acceptance must use an explicit audited physical task ID such as
+`terminal-bench-2@tb2.1-r6/<task>`. Follow the
+[Nebius Terminus 2 runbook](runbooks/nebius-terminus2.md) for native acceptance.
 
 The hidden `/benchmarks` route remains a power-user diagnostic view rather
 than the normal submission path. It includes the same registry readiness states

@@ -4,12 +4,11 @@ How service-mode workers pick the next trial to run. CLI mode has no
 scheduler — `loom run` runs whatever you asked for in submission
 order.
 
-This page documents the current reusable-worker claim path. The accepted
-terminal path uses frozen workload requirements, execution classes, durable
-leases, environment bindings on a shared cluster, and Kubernetes execution units as specified in
-[Nebius service execution](nebius-service-execution.md). During migration,
-legacy `requires_caps`, backend, and pool fields are compatibility evidence;
-they cannot silently satisfy or weaken the versioned admission contract.
+This page documents the reusable-worker claim path for explicit local
+development. Hosted execution uses frozen workload requirements, execution
+classes, durable leases and Kubernetes execution units as specified in
+[Nebius service execution](nebius-service-execution.md). Retained worker and
+pool fields cannot satisfy or weaken hosted admission.
 
 ## The model: claim, don't push
 
@@ -168,27 +167,8 @@ is one atomic SQL statement, which:
 - Lets workers retry on `None` (queue empty) without any
 scheduler-side state.
 
-GB10 capacity intent and prod-pressure control use the same atomic claim
-boundary. Publishing `draining`/`stopped` desired intent, or applying a prod
-pressure signal while a busy host temporarily keeps active intent, reconciles
-every matching worker registration by hostname and pool before node-agent
-shutdown; the `EXISTS` clause above requires `w.drain_state = 'active'`. This
-makes a still-running or duplicate container unclaimable while graceful work drains.
-Recovery requires a subsequent node-agent report confirming
-`current_intent=active` and `apply_state=applied`; changing a file-only
-capacity manifest never bypasses this registry fence.
-
-## Bounded prod-pressure preemption
-
-- A normal drain is non-preemptive: registry fencing stops new claims while
-  the busy Compose worker remains active.
-- A preemptible staging lease may advance to `stopped` only after its configured
-  grace period. The Control Plane records `prod_capacity_pressure` on affected
-  claimed/running trials before stopping the host. The existing crash detector
-  then returns those trials to `queued` with retry backoff while preserving the
-  explicit pressure diagnostic.
-- Non-preemptible busy hosts never advance to stopped because of prod pressure;
-  they stop only after their assigned claimed/running count reaches zero.
+The claim predicate requires `w.drain_state = 'active'`, so local workers
+stop accepting new claims while their existing work drains.
 
 ## What this is NOT
 
