@@ -32,6 +32,9 @@ describe("NavBar", () => {
     expect(screen.getByRole("link", { name: "New batch" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Monitor" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Settings" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "Task Sets" }),
+    ).not.toBeInTheDocument();
   });
 
   it("uses a responsive shell that becomes a sidebar only on large screens", () => {

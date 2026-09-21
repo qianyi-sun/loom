@@ -24,7 +24,7 @@
 
 import { useMutation, useQueries, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import {
   api,
@@ -1723,13 +1723,23 @@ export default function NewBatch(): JSX.Element {
               >
                 {batchPurpose === "trajectory_generation" ? (
                   <div className="min-w-0">
-                    <FieldLabel
-                      hint={
-                        subsetKind === "explicit" ? "implied by ids" : "primary"
-                      }
-                    >
-                      TaskSets
-                    </FieldLabel>
+                    <div className="flex min-w-0 items-center justify-between gap-2">
+                      <FieldLabel
+                        hint={
+                          subsetKind === "explicit"
+                            ? "implied by ids"
+                            : "primary"
+                        }
+                      >
+                        TaskSets
+                      </FieldLabel>
+                      <Link
+                        to="/task-sets"
+                        className="mb-1 shrink-0 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:border-slate-300 hover:bg-slate-50"
+                      >
+                        Manage TaskSets
+                      </Link>
+                    </div>
                     <BenchmarkPicker
                       items={(evalTaskSets.data?.items ?? [])
                         .filter(
