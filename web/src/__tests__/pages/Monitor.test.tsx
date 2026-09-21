@@ -689,7 +689,7 @@ describe("Monitor human-readable labels", () => {
     expect(screen.queryByText("blocked/stale")).not.toBeInTheDocument();
     expect(screen.getAllByText("Unknown")).toHaveLength(3);
     expect(screen.getByText(/eu-west1 · Disabled/)).toBeInTheDocument();
-    expect(screen.getByText("Draining")).toBeInTheDocument();
+    expect(screen.getByText("Draining", { selector: "span" })).toBeInTheDocument();
     expect(screen.getByText("12 slots")).toBeInTheDocument();
   });
 
