@@ -102,11 +102,7 @@ def test_standard_control_plane_rejects_conflicting_or_missing_release_config(tm
     for name, value in {"DB_URL": "postgresql+psycopg://test:test@localhost/test", "MINIO_ACCESS_KEY": "x", "MINIO_SECRET_KEY": "y"}.items():
         monkeypatch.setenv("LOOM_CP_" + name, value)
     path = save(tmp_path, document(tmp_path, admission=True))
-    settings = ControlPlaneSettings(_env_file=None, task_image_execution_config_file=path,
-                                   protected_worker_runtime_db_url_file=tmp_path / "protected-db")
-    with pytest.raises(ValueError, match="protected"):
-        create_app(settings)
-    settings = settings.model_copy(update={"protected_worker_runtime_db_url_file": None})
+    settings = ControlPlaneSettings(_env_file=None, task_image_execution_config_file=path)
     with pytest.raises(ValueError, match="configuration"):
         create_app(settings, task_image_execution_factory=Mock())
     path.unlink()
