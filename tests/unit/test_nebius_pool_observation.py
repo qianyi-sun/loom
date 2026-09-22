@@ -64,7 +64,8 @@ def _pod(owner=1, *, name=None, pending=False):
             name=name or f"pod-{owner}", uid=f"uid-{name or owner}", namespace=f"run-{owner}",
             labels={"app.kubernetes.io/managed-by": "loom-execution-actuator",
                     "loom.openai.com/lease-id": "same-local-claim", "loom.openai.com/generation": "1"},
-            annotations={"loom.openai.com/target-id": f"target-{owner}"},
+            annotations={"loom.openai.com/target-id": f"target-{owner}",
+                         "loom.openai.com/execution-role": "attempt"},
             owner_references=[k8s.V1OwnerReference(
                 api_version="batch/v1", kind="Job", name=f"job-{owner}", uid=f"job-uid-{owner}", controller=True,
             )],
@@ -224,6 +225,8 @@ async def test_builds_and_verifiers_share_the_same_physical_accounting(kind):
         pod.metadata.namespace = "run-1-build"
         pod.metadata.labels = {"app.kubernetes.io/component": "task-image-builder",
                                "loom.materialization-id": "materialization", "loom.lease-epoch": "1"}
+    else:
+        pod.metadata.annotations["loom.openai.com/execution-role"] = "verifier"
     scope = PoolObservationScope.model_validate(data)
     snapshot = await _capture([], [pod], scope)
     assert snapshot.pending_pods[0].lease_id == "reservation:00000000-0000-0000-0000-000000000015"
@@ -343,3 +346,56 @@ async def test_pool_rejects_incomplete_pod_list_instead_of_reporting_empty_capac
     )
     with pytest.raises(KubernetesObservationError):
         await reader.capture_pool(scope=_scope())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resize", ["legacy_status", "condition", "allocated", "status_requests", "pod_level"])
+async def test_pool_never_frees_capacity_during_unqualified_in_place_resize(resize):
+    pod = _pod(1)
+    pod.metadata.namespace = "foreign"
+    with k8s.ApiClient() as api:
+        raw = api.sanitize_for_serialization(pod)
+    if resize == "legacy_status":
+        raw["status"]["resize"] = "InProgress"
+    elif resize == "condition":
+        raw["status"]["conditions"] = [{"type": "PodResizeInProgress", "status": "True"}]
+    elif resize == "pod_level":
+        raw["status"]["resources"] = {"requests": {"cpu": "3", "memory": "3Gi"}}
+    else:
+        values = {"cpu": "3", "memory": "3Gi"}
+        status = {"name": "work", "ready": True, "restartCount": 0, "image": "test", "imageID": "test"}
+        status["allocatedResources" if resize == "allocated" else "resources"] = (
+            values if resize == "allocated" else {"requests": values}
+        )
+        raw["status"]["containerStatuses"] = [status]
+    with pytest.raises(KubernetesObservationError, match="resize"):
+        await _capture([_node()], [pod], raw_pods=[raw])
+
+
+@pytest.mark.asyncio
+async def test_equal_allocated_status_and_unrelated_pool_resize_do_not_block_inventory():
+    first, other = _pod(1), _pod(2)
+    other.metadata.namespace = "foreign"
+    other.spec.node_name = "other-node"
+    with k8s.ApiClient() as api:
+        raw = api.sanitize_for_serialization([first, other])
+    raw[0]["status"]["containerStatuses"] = [{
+        "name": "work", "ready": True, "restartCount": 0, "image": "test", "imageID": "test",
+        "allocatedResources": {"cpu": "1", "memory": "1Gi"},
+    }]
+    raw[1]["status"]["resize"] = "InProgress"
+    snapshot = await _capture([_node()], [first, other], raw_pods=raw)
+    assert snapshot.requested.cpu_millis == 1000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["verifier", None])
+async def test_wrong_or_missing_execution_role_cannot_discount_trial_grant(role):
+    pod = _pod()
+    if role is None:
+        pod.metadata.annotations.pop("loom.openai.com/execution-role")
+    else:
+        pod.metadata.annotations["loom.openai.com/execution-role"] = role
+    snapshot = await _capture([_node()], [pod])
+    assert snapshot.nodes[0].managed_pods == []
+    assert snapshot.nodes[0].requested.cpu_millis == 1000
