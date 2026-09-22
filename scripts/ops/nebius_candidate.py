@@ -14,6 +14,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -315,6 +317,56 @@ def _run(*command: str) -> str:
     return result.stdout.strip()
 
 
+def _copy_image(archive: Path, tag: str, *, timeout_seconds: float = 300) -> None:
+    """Bound registry upload and expose progress without publishing raw diagnostics."""
+    operation = "skopeo copy"
+    print(f"Nebius publication: {operation} (timeout {timeout_seconds:g}s)", flush=True)
+    started = time.monotonic()
+    timed_out = threading.Event()
+    diagnostic = ""
+    with subprocess.Popen(
+        ["skopeo", "copy", "--preserve-digests", f"oci-archive:{archive}", f"docker://{tag}"],
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
+    ) as process:
+        def expire() -> None:
+            if process.poll() is None:
+                timed_out.set()
+                process.kill()
+
+        timer = threading.Timer(timeout_seconds, expire)
+        timer.daemon = True
+        timer.start()
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                safe_line = sanitize_diagnostic(line)
+                diagnostic = (diagnostic + safe_line + "\n")[-16_384:]
+                # Prefix every line so tool output cannot become a workflow command.
+                for safe_part in safe_line.splitlines():
+                    print(f"{operation}: {safe_part}", flush=True)
+            returncode = process.wait()
+        finally:
+            timer.cancel()
+            timer.join()
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+    elapsed = round(time.monotonic() - started, 2)
+    if timed_out.is_set() or returncode:
+        if _diagnostic_dir is not None:
+            write_json(_diagnostic_dir / "failed-command.json", {
+                "operation": operation,
+                "returncode": returncode,
+                "timed_out": timed_out.is_set(),
+                "timeout_seconds": timeout_seconds,
+                "elapsed_seconds": elapsed,
+                "diagnostic": diagnostic,
+            })
+        reason = f"timed out after {timeout_seconds:g}s" if timed_out.is_set() else f"failed with exit code {returncode}"
+        raise ValueError(f"{operation} {reason}; inspect failed-command.json")
+    print(f"Nebius publication: {operation} completed in {elapsed:g}s", flush=True)
+
+
 def inspect_oci_archive(
     archive: Path, *, candidate: str, runtime: bool = False,
     runtime_metadata: dict[str, str] | None = None,
@@ -536,9 +588,7 @@ def build(args: argparse.Namespace) -> None:
                 args.registry_prefix,
                 Path(os.environ["REGISTRY_AUTH_FILE"]),
             )
-            _run(
-                "skopeo", "copy", "--preserve-digests", f"oci-archive:{archive}", f"docker://{tag}"
-            )
+            _copy_image(archive, tag)
             published_digest = _run(
                 "skopeo", "inspect", "--format", "{{.Digest}}", f"docker://{tag}"
             )

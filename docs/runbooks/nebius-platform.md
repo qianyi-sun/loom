@@ -17,6 +17,17 @@ publish or deploy new candidates from it. Use the successful `nebius-candidate`
 run for the exact merged `dev` commit, with its matching candidate and runtime
 profile. Candidate publication does not itself deploy the environment.
 
+Registry uploads have a five-minute wall-clock limit per image. The publisher
+streams redacted `skopeo copy` output and reports elapsed time on success. On
+timeout it kills and reaps the upload process, fails publication, and preserves
+the last 16 KiB of redacted output, exit code, elapsed time and timeout budget in
+`failed-command.json` through the existing candidate artifact upload. A failed
+publication cannot start automatic rollout. Inspect that evidence before retrying;
+uploads are not automatically retried. The limit bounds the upload operation,
+not image construction or scanning, and does not change the workflow's overall
+timeout. A failed upload may leave registry blobs, but no deployable candidate
+record is produced until all images have been published and verified.
+
 Published platform and task images have a separate
 [image-retention maintenance workflow](nebius-image-retention.md). Its initial
 daily mode is preview; rollout skip decisions do not delete registry images.

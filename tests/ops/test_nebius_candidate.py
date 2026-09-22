@@ -362,6 +362,10 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
         return ""
 
     monkeypatch.setattr(candidate, "_run", run)
+    monkeypatch.setattr(
+        candidate, "_copy_image",
+        lambda archive, tag: run("skopeo", "copy", "--preserve-digests", f"oci-archive:{archive}", f"docker://{tag}"),
+    )
     monkeypatch.setattr(candidate, "install_trivy", lambda *args, **kwargs: Path("scanner"))
     validation_options = []
     monkeypatch.setattr(
@@ -485,6 +489,62 @@ def test_builder_diagnostics_bound_output_and_remove_credentials(monkeypatch):
 
 def test_builder_diagnostics_remain_bounded_after_redaction_expands_lines():
     assert len(candidate.sanitize_diagnostic("password\n" * 3000)) <= 16_384
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "timeout"])
+def test_registry_copy_streams_redacted_progress_and_bounds_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, outcome: str,
+) -> None:
+    import builtins
+    import time
+
+    acknowledged = tmp_path / "progress-seen"
+    executable = tmp_path / "skopeo"
+    executable.write_text(
+        f"#!{Path(sys.executable).resolve()}\n"
+        "import os, sys, time\nfrom pathlib import Path\n"
+        "assert sys.argv[1:3] == ['copy', '--preserve-digests']\n"
+        "print('upload progress ' + os.environ['TEST_UPLOAD_TOKEN'], flush=True)\n"
+        f"ack = Path({str(acknowledged)!r})\n"
+        "deadline = time.monotonic() + 1\n"
+        "while not ack.exists() and time.monotonic() < deadline: time.sleep(0.01)\n"
+        "if not ack.exists(): sys.exit(19)\n"
+        "print('registry response https://registry.invalid/path?token=hidden', file=sys.stderr, flush=True)\n"
+        + ("time.sleep(60)\n" if outcome == "timeout" else "")
+        + f"sys.exit({7 if outcome == 'failure' else 0})\n"
+    )
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("TEST_UPLOAD_TOKEN", "upload-secret-123")
+    monkeypatch.setattr(candidate, "_diagnostic_dir", tmp_path)
+
+    def progress(*args, **kwargs):
+        if args and "upload progress" in str(args[0]):
+            acknowledged.touch()
+        builtins.print(*args, **kwargs)
+
+    monkeypatch.setattr(candidate, "print", progress, raising=False)
+    started = time.monotonic()
+    if outcome == "success":
+        candidate._copy_image(tmp_path / "image.tar", "registry.invalid/test", timeout_seconds=2)
+        assert not (tmp_path / "failed-command.json").exists()
+    else:
+        reason = "timed out" if outcome == "timeout" else "exit code 7"
+        with pytest.raises(ValueError, match=reason):
+            candidate._copy_image(tmp_path / "image.tar", "registry.invalid/test", timeout_seconds=2)
+        evidence = json.loads((tmp_path / "failed-command.json").read_text())
+        assert evidence["timed_out"] is (outcome == "timeout")
+        assert evidence["timeout_seconds"] == 2
+        assert evidence["returncode"] == (-9 if outcome == "timeout" else 7)
+        assert "registry response [url]" in evidence["diagnostic"]
+        assert len(evidence["diagnostic"]) <= 16_384
+        assert "upload-secret-123" not in json.dumps(evidence)
+    assert time.monotonic() - started < 5
+    assert acknowledged.exists(), "progress must be visible before the subprocess exits"
+    output = capsys.readouterr().out
+    assert "upload progress [redacted]" in output
+    assert "registry.invalid" not in output
+    assert "upload-secret-123" not in output
 
 
 def test_oci_scan_layout_reuses_native_archive_and_cleans_up(tmp_path: Path) -> None:
