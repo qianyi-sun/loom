@@ -658,6 +658,36 @@ canonical hosted profiles use `https://yylx.world/dev`,
 routed under the matching `/dev/api/v1`, `/staging/api/v1`, or `/prod/api/v1`
 prefix and rewritten to the service's `/api/v1` surface.
 
+**Deployed version display (#2009):** the sidebar's persistent version entry
+("Nebius · &lt;env&gt; · &lt;12-char commit&gt;") and the backend's
+`GET /api/v1/version` both read locally available, immutable build
+metadata — never GitHub, Kubernetes, or the database. The release publisher
+(`scripts/ops/nebius_candidate.py`) already builds every component image,
+web and service included, with `--build-arg LOOM_BUILD_SHA=<candidate>`; it
+additionally passes `--build-arg LOOM_SOURCE_REF=<source_ref>` for this
+feature. `deploy/Dockerfile.service` writes the candidate SHA and an image
+build timestamp to `/opt/loom/build-sha` / `/opt/loom/build-time`, which
+`loom_service.build_info` reads leniently (a missing/malformed file yields
+`null`, never a failed request) for the version endpoint.
+`deploy/Dockerfile.web` uses the same build args two ways: it sets them as
+`VITE_BUILD_REVISION`/`VITE_BUILD_SOURCE_REF`/`VITE_BUILD_TIME` before
+`npm run build` so Vite `define` (see `web/vite.config.ts` and
+`web/src/lib/buildInfo.ts`) freezes them into the JS bundle itself — the
+*loaded* identity, fixed for the lifetime of an already-open tab, never
+changed by a later fetch — and it also stamps them into the nginx image's
+environment/`/etc/loom-frontend-build-time` so
+`deploy/web-runtime-config.sh` includes them in `loom-frontend-config.json`
+as the *served* identity. `web/src/lib/buildVersion.ts` polls that served
+identity (and the backend endpoint) only on window focus, throttled via
+react-query's `staleTime`, and surfaces drift from the loaded identity as a
+non-disruptive notice in the version details with an explicit refresh
+action — it never reloads or discards input on its own. A plain local build
+with no `--build-arg` bakes the Dockerfiles' literal `unknown` default for
+revision/source ref (build time is always a real timestamp — it's computed
+at build time either way, not sourced from a build-arg); the frontend and
+backend both treat that placeholder the same as absent, so the UI shows an
+honest "local"/"unknown" identity rather than a misleading commit link.
+
 For local dev: `cd web && npm run dev` runs Vite's dev server on
 :5173 with HMR. Vite's `server.proxy` config sends `/api/*` to
 `localhost:8090`, which is what `docker-compose.dev.yml` exposes

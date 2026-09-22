@@ -554,6 +554,11 @@ def build(args: argparse.Namespace) -> None:
                 f"label:org.opencontainers.image.revision={candidate}",
                 "--opt",
                 f"build-arg:LOOM_BUILD_SHA={candidate}",
+                # #2009: displayed frontend/backend version detail reuses this
+                # same candidate identity. A Dockerfile that doesn't declare
+                # the ARG silently ignores it — safe to pass unconditionally.
+                "--opt",
+                f"build-arg:LOOM_SOURCE_REF={SOURCE_REF}",
                 *(["--opt", f"build-arg:LOOM_AGENT_VERSION={version}"]
                   if component == "harbor_runtime" else []),
                 "--output",

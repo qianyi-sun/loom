@@ -186,6 +186,11 @@ function defaultApiResponse(
     if (role === "logged-out") return jsonResponse({ detail: "unauthorized" }, 401);
     return jsonResponse(auth(role));
   }
+  // #2009: VersionInfo (rendered in NavBar, so on every authenticated page)
+  // fetches this unauthenticated, role-independent endpoint on mount.
+  if (path === "/v1/version") {
+    return jsonResponse({ buildRevision: null, buildTime: null });
+  }
   if (path === "/v1/overview") return jsonResponse(overview);
   if (path === "/v1/monitor/summary") return jsonResponse(monitorSummary());
   if (path === "/v1/tasksets") return jsonResponse({ items: [taskSet] });
