@@ -37,11 +37,14 @@ printed `dev-SLUG-ENVIRONMENT_UUID_HEX` context. Use the printed
 credentials and local model-provider keys are not copied. Managed contexts retain
 their environment/incarnation/origin binding; login refresh cannot retarget them.
 Explicit child-local settings survive repeated login.
+Normal management session/CSRF refresh still updates its original management
+config; child credentials are saved only in the new child context.
 
 Add `--browser` to also open a separate browser proof. Confirm sign-in on the
 personal environment page within 90 seconds. The browser proof is separate from
 the consumed CLI proof, carried only in a URL fragment and removed before app
-startup requests; it is never printed or saved in CLI config. A failed browser
+startup requests; it is never printed or saved in CLI config. Session-producing
+browser requests reject redirects before they can forward credentials. A failed browser
 launch leaves the CLI login saved and requests a fresh browser login. This requires
 the managed child protocol in the deployed candidate; login alone is not proof
 that shared task execution or installed multi-owner acceptance is enabled.
