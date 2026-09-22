@@ -49,6 +49,7 @@ from loom_service.metrics import (
     HTTP_REQUESTS_TOTAL,
 )
 from loom_service.pipeline_control_bindings import SqlPipelineRecipeBindingResolver
+from loom_service.provider_secret_gc import run_loop as provider_secret_gc_run_loop
 from loom_service.routes import (
     admin_audit,
     agents,
@@ -299,10 +300,17 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         )
         app.state.taskset_gc_task = gc_task
 
+        secret_gc_task = asyncio.create_task(
+            provider_secret_gc_run_loop(session_factory=session_factory),
+            name="loom-svc-provider-secret-gc",
+        )
+        app.state.provider_secret_gc_task = secret_gc_task
+
         try:
             yield
         finally:
             runner_task.cancel()
+            secret_gc_task.cancel()
             materializer_task.cancel()
             gc_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -311,6 +319,8 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                 await materializer_task
             with contextlib.suppress(asyncio.CancelledError):
                 await gc_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await secret_gc_task
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

@@ -741,6 +741,42 @@ host ports bind to
   (prevents fence-bump races); then drain in-flight trials with a
   configurable budget (default 5 min); then exit.
 
+## Provider API key retirement
+
+Rotating a provider key or soft-deleting its connection records
+`secrets.provider_retired_at` in the same transaction as the connection change.
+The old value remains decryptable for at least 24 hours. Each service worker
+runs a cancellable collector every minute: one transaction discovers at most
+100 legacy soft-deleted keys and examines at most 100 expired retirements.
+Discovery starts a fresh grace period, independent of key age or deletion age.
+Historical rotation orphans without a retained owner are deliberately retained;
+a `team:` namespace alone does not establish provider ownership.
+
+Collection checks all active provider references, including shared keys, and
+all retained `DevInstance.secret_ref`, task-image build bootstrap/session refs,
+and `PipelineStageRun.secret_refs`, regardless of consumer state. A referenced
+candidate gets a fresh grace clock. Soft-deleted provider rows retain attribution
+without retaining credentials forever. The gateway looks up and decrypts the
+current key per request; already-started requests get the retirement grace.
+
+Migration 0156 guards newly attached canonical `loom://team:<uuid>/<uuid>` refs
+with a secret-row key-share lock and rejects missing refs. Other namespaces and
+unchanged historical refs keep their existing contract. Reactivating a deleted
+provider also requires its secret to exist. The guard uses a fixed-search-path
+security-definer function with public execution revoked, so reference writers
+do not gain ciphertext access. Collection locks only candidate secret rows,
+skips locked rows, and rechecks references after claiming rows. This makes concurrent attachment and deletion safe without locking entire
+consumer tables. Rewrap locks the same row before decrypting; concurrent walkers
+and startup validation tolerate refs reclaimed after their initial listing.
+The consumer guard and collector reference inventory must grow together if a new
+secret-reference column is introduced.
+
+A pass has a 15-second deadline, a 1-second lock timeout, and a 10-second statement
+timeout. Failure or cancellation rolls back the entire pass; a later pass retries.
+Shutdown cancels and awaits the loop. Reverting migration 0156 removes collection
+metadata and attachment guards, but cannot recover already reclaimed ciphertext;
+key recovery requires an authorized backup restore or supplying a new key.
+
 ## See also
 
 - [overview.md](overview.md)

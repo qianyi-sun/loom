@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from loom.security.secret_store import (
     _MASTER_KEY_LEN,
     LocalEncryptedSecretStore,
+    SecretNotFoundError,
     SecretStoreError,
     load_master_keys_from_env,
 )
@@ -143,6 +144,9 @@ async def rewrap_all_secrets(
             log.info(
                 "secret.rewrap ref=%s actor=%s", ref, admin_actor,
             )
+        except SecretNotFoundError:
+            # A retired ref collected after the listing needs no rewrap.
+            continue
         except Exception as exc:
             err = str(exc)
             log.warning(
