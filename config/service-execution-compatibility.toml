@@ -174,6 +174,48 @@ required_changes = ["materialize immutable images", "reject unsupported capabili
 # Pipeline ResourceProfileV1 rows are also service workload classes. They are
 # expanded from config/resource-profiles.toml and must match exactly one rule.
 
+[[additional_workloads]]
+workload_id = "capability:nested_docker"
+disposition = "unsupported"
+owner = "qianyi-sun"
+reason = "No qualified service class provides an isolated trial-owned Docker daemon and build cache."
+required_changes = ["qualify daemon, nested build, resource limits and teardown in a separately isolated runtime", "never mount a trusted host Docker socket"]
+
+[[additional_workloads]]
+workload_id = "capability:singularity_mounts"
+disposition = "unsupported"
+owner = "qianyi-sun"
+reason = "Singularity bootstrap, image mounts and loop-device semantics are unqualified."
+required_changes = ["qualify the declared Singularity version and image format in an isolated runtime", "preserve image size, egress, artifact transfer and cleanup requirements"]
+
+[[additional_workloads]]
+workload_id = "capability:isolated_kernel_settings"
+disposition = "unsupported"
+owner = "qianyi-sun"
+reason = "The shared-kernel CPU class cannot isolate task-specific kernel settings."
+required_changes = ["qualify isolated kernel configuration and restoration", "never change shared-host kernel settings for a task"]
+
+[[additional_workloads]]
+workload_id = "capability:external_cluster"
+disposition = "unsupported"
+owner = "qianyi-sun"
+reason = "External cluster endpoint, managed authentication and trial-owned lifecycle are unqualified."
+required_changes = ["bind managed endpoint and secret prerequisites", "qualify cluster API behavior, egress, ownership and cleanup; review local fixtures separately"]
+
+[[additional_workloads]]
+workload_id = "capability:pkcs11_authentication"
+disposition = "unsupported"
+owner = "qianyi-sun"
+reason = "Physical or emulated smartcard authentication and socket forwarding are unqualified."
+required_changes = ["declare the actual fixture or device and managed authentication prerequisites", "qualify authentication and forwarding without passwordless bypass"]
+
+[[additional_workloads]]
+workload_id = "capability:dpdk_networking"
+disposition = "unsupported"
+owner = "qianyi-sun"
+reason = "DPDK traffic generation, owned devices, hugepages and driver binding are unqualified."
+required_changes = ["qualify a dedicated isolated device and traffic runtime with cleanup", "distinguish full traffic generation from tasks whose original verifier accepts captured initialization failure"]
+
 [[pipeline_profile_policies]]
 pattern = "behavior-export-io"
 disposition = "conversion_required"

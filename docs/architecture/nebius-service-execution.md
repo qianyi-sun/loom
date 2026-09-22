@@ -826,6 +826,61 @@ the CPU class. They must be converted to the exact contract or retained in a
 separately accepted product; compatibility is never obtained by relaxing this
 class.
 
+### Declared execution capabilities and prerequisites
+
+Tasks can retain special execution requirements in the ordinary task schema:
+
+```toml
+[environment.execution_requirements]
+capabilities = ["external_cluster"]
+
+[[environment.execution_requirements.prerequisites]]
+name = "cluster"
+kind = "endpoint"
+reference = "loom://inventory/cluster"
+
+[[environment.execution_requirements.prerequisites]]
+name = "cluster_auth"
+kind = "managed_secret"
+reference = "k8s-secret://team/cluster-auth"
+```
+
+The bounded declaration survives Harbor normalization and freezing into
+`WorkloadRequirementsV1`. Absent declarations preserve the previous frozen
+serialization. Capability names are explicit; task names or script keywords
+never infer them. References are opaque `loom://` or `k8s-secret://` inventory
+identifiers, not credentials or proof of availability. Prerequisite kinds are
+`endpoint`, `managed_secret`, `device`, and `fixture`. Unknown fields, literal
+secret values, duplicate capabilities and duplicate prerequisite names are
+rejected. Invalid declaration values are redacted from compatibility reports.
+
+Both execution-class admission and the ordinary TaskSet compiler reject every
+currently declared special capability. The local compatibility report records
+the same reasons before bootstrap adaptation, so later conversion errors do
+not hide them. A prerequisite without a reference yields
+`execution_prerequisite_missing`; a supplied reference yields
+`execution_prerequisite_unverified`. No reference resolver or new runtime class
+is implemented by this declaration contract.
+
+| Capability | Qualification required before support |
+| --- | --- |
+| `nested_docker` | Trial-owned daemon and cache, nested builds, limits and teardown; no trusted host socket. |
+| `singularity_mounts` | Declared Singularity version, image format, bootstrap/mount behavior, image transfer and cleanup. |
+| `isolated_kernel_settings` | An isolated kernel with task-specific configuration and restoration; no shared-host sysctl changes. |
+| `external_cluster` | Owned endpoint, managed authentication, API behavior, egress and resource cleanup. |
+| `pkcs11_authentication` | Actual emulated or physical authentication fixture, socket forwarding and device isolation where needed. |
+| `dpdk_networking` | Owned NICs, hugepages, driver binding, isolated traffic and cleanup in a dedicated runtime. |
+
+These remain unsupported classes, not a privilege switch. The existing
+`ExecutionClassV1` prohibition on privileged containers, host paths/network,
+nested containers and host devices remains enforced. Local cluster fixtures
+must be evaluated on their own evidence; they do not necessarily require a
+real external cluster or credentials. Likewise, a task that downloads a Docker
+installer does not necessarily run Docker, and an original verifier accepting
+a captured DPDK initialization failure does not establish working DPDK support.
+Review the original instructions, Dockerfile, fixtures and private verifier
+together without weakening any of them.
+
 ## Compatibility inventory
 
 `config/service-execution-compatibility.toml` assigns every repo-known
@@ -839,9 +894,11 @@ uv run --no-sync python scripts/ops/generate_execution_contract_artifacts.py --c
 ```
 
 The generator fails on missing/overlapping rules, missing accepted-pool
-identities, and duplicate workload identities. At this decision point no
-workload is statically supported on Nebius: 66 require conversion and OSWorld
-plus the two GPU/host-specialized Behavior profiles are unsupported there.
+identities, and duplicate workload identities. The generated report records
+the current counts. No workload is statically supported on Nebius: catalog
+candidates require per-task conversion and admission; OSWorld, the two
+GPU/host-specialized Behavior profiles, and the six special execution
+capabilities above are unsupported there.
 OLDLAB, GB10, and Slurm are retired and cannot receive hosted work.
 The unconverted catalog classes are availability gaps, not fallback routes.
 Desktop/GUI and Behavior GPU execution remain local-only. Pipeline submission
