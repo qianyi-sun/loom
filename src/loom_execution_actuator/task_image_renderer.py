@@ -48,6 +48,7 @@ class TaskImageJobConfig:
     ephemeral_storage_mib: int = MIN_TASK_IMAGE_EPHEMERAL_STORAGE_MIB
     max_processes: int = 512
     active_deadline_seconds: int = 1800
+    snapshotter: Literal["overlayfs", "native"] = "overlayfs"
 
     def __post_init__(self) -> None:
         for image in (self.service_image, self.buildkit_image):
@@ -68,6 +69,8 @@ class TaskImageJobConfig:
                 raise ValueError(f"{name} must be a positive integer")
         if self.ephemeral_storage_mib < MIN_TASK_IMAGE_EPHEMERAL_STORAGE_MIB:
             raise ValueError("native task-image builds require at least 16 GiB ephemeral storage")
+        if self.snapshotter not in {"overlayfs", "native"}:
+            raise ValueError("task-image snapshotter must be overlayfs or native")
 
 
 def task_image_job_name(materialization_id: UUID, lease_epoch: int) -> str:
@@ -303,7 +306,10 @@ def render_task_image_job(
             {"name": "XDG_RUNTIME_DIR", "value": "/scratch/runtime"},
             {
                 "name": "BUILDKITD_FLAGS",
-                "value": "--root /scratch/state --oci-worker-no-process-sandbox --oci-worker-snapshotter=native",
+                "value": (
+                    "--root /scratch/state --oci-worker-no-process-sandbox "
+                    f"--oci-worker-snapshotter={config.snapshotter}"
+                ),
             },
         ],
         "resources": {"requests": resources.copy(), "limits": resources.copy()},

@@ -239,9 +239,32 @@ def test_build_commands_cover_each_component_and_set_limits_before_rootlesskit(i
         and environment["DOCKER_CONFIG"] == "/scratch/docker-config"
     )
     assert "--oci-worker-no-process-sandbox" in environment["BUILDKITD_FLAGS"]
-    assert "--oci-worker-snapshotter=native" in environment["BUILDKITD_FLAGS"]
+    assert "--oci-worker-snapshotter=overlayfs" in environment["BUILDKITD_FLAGS"]
     assert "/var/run/loom-task-build" not in script
     assert not any(flag in script for flag in ("--secret", "--ssh", "push=true", "--allow"))
+
+
+def test_buildkit_snapshotter_native_rollback(inputs) -> None:
+    inputs["config"] = replace(inputs["config"], snapshotter="native")
+    _, job = render_task_image_job(**inputs)
+    builder = next(
+        container
+        for container in job["spec"]["template"]["spec"]["initContainers"]
+        if container["name"] == "build"
+    )
+    environment = {entry["name"]: entry["value"] for entry in builder["env"]}
+    assert "--oci-worker-snapshotter=native" in environment["BUILDKITD_FLAGS"]
+    assert "--oci-worker-snapshotter=overlayfs" not in environment["BUILDKITD_FLAGS"]
+
+
+def test_task_image_job_config_rejects_unknown_snapshotter() -> None:
+    with pytest.raises(ValueError, match="snapshotter"):
+        TaskImageJobConfig(
+            service_image="registry.example/service@sha256:" + "a" * 64,
+            source_secret_name="loom-task-build-source",
+            registry_secret_name="loom-task-build-registry",
+            snapshotter="aufs",  # type: ignore[arg-type]
+        )
 
 
 def test_dockerfile_paths_cannot_inject_shell_commands(inputs) -> None:

@@ -885,9 +885,16 @@ configuration; omission leaves native building disabled:
   "memory_mib": 2048,
   "ephemeral_storage_mib": 16384,
   "max_processes": 512,
-  "active_deadline_seconds": 1800
+  "active_deadline_seconds": 1800,
+  "snapshotter": "overlayfs"
 }
 ```
+
+`snapshotter` selects the BuildKit OCI worker snapshotter (`overlayfs` or
+`native`). It defaults to `overlayfs` (the measured Nebius improvement over the
+historical forced-native setting). Set `"snapshotter": "native"` to roll back
+without redeploying a prior actuator image. Omission uses the same OverlayFS
+default.
 
 `cache_bucket` is optional. When absent, cache credentials and import/export are
 omitted. Source, backup and trajectory buckets cannot be used as build cache.
