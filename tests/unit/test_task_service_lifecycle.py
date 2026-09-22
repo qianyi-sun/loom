@@ -42,6 +42,7 @@ def test_undeclared_handoff_options_do_not_change_existing_task_serialization():
     task, _, _ = _inputs()
     assert "mutable_paths" not in task.environment.model_dump(mode="json")
     assert "service_lifecycle" not in task.environment.model_dump(mode="json")
+    assert "execution_requirements" not in task.environment.model_dump(mode="json")
 
 
 @pytest.mark.parametrize("startup", [[""], ["/bin/sh", "bad\x00value"]])

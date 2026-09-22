@@ -105,7 +105,9 @@ class EnvironmentConfig(BaseModel):
     workdir: PurePosixPath = PurePosixPath("/workspace")
     mutable_paths: tuple[PurePosixPath, ...] = Field(default=(), max_length=16)
     service_lifecycle: ServiceLifecycleConfig | None = None
-    execution_requirements: TaskExecutionRequirementsV1 | None = None
+    execution_requirements: TaskExecutionRequirementsV1 | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     user: str | int = "agent"
     network_policies_supported: frozenset[NetworkPolicyKind] = frozenset({"public"})
     baseline_network_policy: NetworkPolicy = Public()
