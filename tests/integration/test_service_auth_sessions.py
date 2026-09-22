@@ -34,7 +34,9 @@ RAW_ADMIN_TOKEN = "loom_admin_" + "A" * 43
 @pytest.fixture
 async def auth_setup(
     monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    request: pytest.FixtureRequest,
 ) -> AsyncIterator[tuple[FastAPI, UUID, UUID, UUID, UUID]]:
+    hosted = getattr(request, "param", None) == "hosted"
     for k, v in {
         "LOOM_SVC_DB_URL": postgres_url,
         "LOOM_SVC_MINIO_ENDPOINT": "http://minio:9000",
@@ -43,8 +45,11 @@ async def auth_setup(
         "LOOM_SVC_CONTROL_PLANE_URL": "http://cp:8080/",
         "LOOM_SVC_GATEWAY_URL": "http://gw:9100/",
         "LOOM_SVC_AUTH_RETURN_LOGIN_TOKEN": "1",
+        "LOOM_SVC_AUTH_LOCAL_HTTP": "false" if hosted else "true",
     }.items():
         monkeypatch.setenv(k, v)
+    if hosted:
+        monkeypatch.setenv("LOOM_SVC_PUBLIC_BASE_URL", "https://alice.dev.example.com")
     settings = LoomServiceSettings(_env_file=None)
     app = create_app(settings)
     engine = create_async_engine(str(settings.db_url))
@@ -168,6 +173,52 @@ async def _login(
     )
     assert complete.status_code == 200, complete.text
     return complete.json(), complete.headers.get_list("set-cookie")
+
+
+@pytest.mark.parametrize("auth_setup", ["hosted"], indirect=True)
+async def test_hosted_session_ignores_legacy_injection_and_rejects_sibling_origin(auth_setup):
+    app, *_ = auth_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://alice.dev.example.com") as ac:
+        body, set_cookie = await _login(ac)
+        cookie = ac.cookies.get("__Host-loom_session")
+        assert cookie
+        assert "Secure" in set_cookie[0] and "Domain=" not in set_cookie[0]
+        assert (await ac.get("/api/v1/auth/me")).status_code == 200
+        # auth/me rotates CSRF; fetch the current value for the write checks.
+        csrf = (await ac.get("/api/v1/auth/me")).json()["csrf_token"]
+        denied = await ac.post("/api/v1/auth/logout", headers={
+            "Origin": "https://bob.dev.example.com", "X-Loom-CSRF": csrf,
+        })
+        assert denied.status_code == 403
+        assert (await ac.get("/api/v1/auth/me")).status_code == 200
+        csrf = (await ac.get("/api/v1/auth/me")).json()["csrf_token"]
+        missing = await ac.post("/api/v1/auth/logout", headers={"Origin": "https://alice.dev.example.com"})
+        assert missing.status_code == 403
+        accepted = await ac.post("/api/v1/auth/logout", headers={
+            "Origin": "https://alice.dev.example.com", "X-Loom-CSRF": csrf,
+        })
+        assert accepted.status_code == 204
+        assert "__Host-loom_session=" in accepted.headers["set-cookie"]
+        assert "Secure" in accepted.headers["set-cookie"]
+    async with httpx.AsyncClient(transport=transport, base_url="https://alice.dev.example.com") as ac:
+        # Even a real secret under the injectable legacy name is not accepted.
+        body, _ = await _login(ac)
+        cookie = ac.cookies.get("__Host-loom_session")
+        ac.cookies.clear()
+        denied = await ac.get("/api/v1/auth/me", headers={"Cookie": f"loom_session={cookie}"})
+        assert denied.status_code == 401
+
+
+@pytest.mark.parametrize("auth_setup", ["hosted"], indirect=True)
+async def test_hosted_login_rejects_cross_origin_before_issuing_session(auth_setup):
+    app, *_ = auth_setup
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="https://alice.dev.example.com") as ac:
+        response = await ac.post("/api/v1/auth/login/start", json={"email": "owner@example.com"},
+                                 headers={"Origin": "https://bob.dev.example.com"})
+        assert response.status_code == 403
+        assert "set-cookie" not in response.headers
 
 
 async def test_login_me_and_cookie_flags(

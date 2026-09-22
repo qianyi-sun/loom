@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from loom.auth import AuthContext
+from loom_service.config import LoomServiceSettings
 from loom_service.session_auth import (
     hash_secret,
     is_staging_admin_browser_session,
@@ -130,3 +131,45 @@ def test_verify_csrf_skips_bearer_contexts() -> None:
         auth_kind="bearer",
     )
     verify_csrf(ctx, None)
+
+
+@pytest.mark.parametrize("environment", ["development", "staging", "production", ""])
+def test_hosted_cookie_is_host_scoped_in_every_environment(monkeypatch, environment):
+    monkeypatch.setenv("LOOM_ENV", environment)
+    monkeypatch.delenv("LOOM_SVC_AUTH_LOCAL_HTTP", raising=False)
+    settings = LoomServiceSettings(
+        _env_file=None, db_url="postgresql+psycopg://u:p@localhost/loom",
+        minio_access_key="x", minio_secret_key="y",
+    )
+    options = session_cookie_options(settings)
+    assert options["key"] == "__Host-loom_session"
+    assert options["secure"] and options["httponly"]
+    assert options["path"] == "/"
+    assert "domain" not in options
+
+
+def test_explicit_local_http_uses_legacy_cookie(monkeypatch):
+    monkeypatch.setenv("LOOM_ENV", "development")
+    monkeypatch.setenv("LOOM_SVC_AUTH_LOCAL_HTTP", "true")
+    settings = LoomServiceSettings(
+        _env_file=None, db_url="postgresql+psycopg://u:p@localhost/loom",
+        minio_access_key="x", minio_secret_key="y",
+    )
+    options = session_cookie_options(settings)
+    assert options["key"] == "loom_session"
+    assert options["secure"] is False
+
+
+@pytest.mark.parametrize("environment,public_url", [
+    ("production", None), ("development", "https://alice.dev.example.com"),
+])
+def test_local_http_cannot_downgrade_hosted_or_production(monkeypatch, environment, public_url):
+    monkeypatch.setenv("LOOM_ENV", environment)
+    monkeypatch.setenv("LOOM_SVC_AUTH_LOCAL_HTTP", "true")
+    settings = LoomServiceSettings(
+        _env_file=None, db_url="postgresql+psycopg://u:p@localhost/loom",
+        minio_access_key="x", minio_secret_key="y", public_base_url=public_url,
+    )
+    options = session_cookie_options(settings)
+    assert options["key"] == "__Host-loom_session"
+    assert options["secure"] is True
