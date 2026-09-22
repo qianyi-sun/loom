@@ -107,3 +107,28 @@ def test_identity_cannot_apply_to_an_ordinary_sidecar_or_the_controller():
     raw["run_as_user"] = 0
     with pytest.raises(ValueError):
         ExecutionRuntimePlanV1.model_validate(raw)
+
+
+@pytest.mark.parametrize("declaration", ["template_identity", "task_identity", "lifecycle", "mutable_paths", "template_egress"])
+def test_explicit_template_cannot_bypass_automatic_capability_readiness(declaration):
+    task, trial, profile = _inputs()
+    plan = compile_service_execution_plan(
+        task=task, trial=trial, profile=profile, source_provenance=_provenance(),
+        task_revision_sha256="sha256:" + "c" * 64,
+    )
+    template = plan.canonical_payload()
+    del template["task_revision_sha256"]
+    payload = task.model_dump(mode="json")
+    payload["service_execution"] = {"logical_pool_id": profile.logical_pool_id, "runtime_template": template}
+    if declaration == "template_identity":
+        template["sidecars"][0]["identity"] = {"run_as_user": 0, "run_as_group": 0, "home": "/root"}
+    elif declaration == "task_identity":
+        payload["environment"]["user"] = "root"
+    elif declaration == "lifecycle":
+        payload["environment"]["service_lifecycle"] = {"readiness": {"command": "/bin/true"}}
+    elif declaration == "mutable_paths":
+        payload["environment"]["mutable_paths"] = ["/data"]
+    else:
+        template["task_egress"] = {"kind": "web-allowlist", "destinations": [{"host": "example.org", "protocol": "https"}]}
+    with pytest.raises(ValueError, match="automatic native execution"):
+        TaskConfig.model_validate(payload)
