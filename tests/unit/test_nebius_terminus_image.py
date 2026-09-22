@@ -157,3 +157,91 @@ def test_rejects_unknown_base_before_writing_outputs(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Debian/Ubuntu"):
         prepare_nebius_terminus_image(tmp_path, environment)
     assert not (tmp_path / OFFLINE_SCRIPT).exists()
+
+
+def test_plain_pip_keeps_base_dependencies_and_both_pytest_results(tmp_path: Path) -> None:
+    environment = bundle(tmp_path)
+    script = """pip install pytest==8.4.1 pytest-json-ctrf==0.3.5 --break-system-packages
+python -m pytest --ctrf /logs/verifier/original.json -rA
+ORIGINAL_EXIT_CODE=$?
+python -m pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA
+ADDITIONAL_EXIT_CODE=$?
+if [ $ORIGINAL_EXIT_CODE -eq 0 ] && [ $ADDITIONAL_EXIT_CODE -eq 0 ]; then
+    echo 1 > /logs/verifier/reward.txt
+else
+    echo 0 > /logs/verifier/reward.txt
+fi
+"""
+    (tmp_path / "tests/test.sh").write_text(script)
+    prepare_nebius_terminus_image(tmp_path, environment)
+    derived = (tmp_path / environment["dockerfile"]).read_text()
+    offline = (tmp_path / OFFLINE_SCRIPT).read_text()
+    assert '--python "$(command -v python3)" --system-site-packages /opt/verifier' in derived
+    assert offline.count("/opt/verifier/bin/python -m pytest") == 2
+    assert offline.endswith(script[script.index("ADDITIONAL_EXIT_CODE") :])
+    assert "pip install" not in offline
+
+
+def test_combined_apt_and_preinstalled_uv_keep_task_commands() -> None:
+    script = SCRIPT.replace(
+        "apt-get update\napt-get install -y curl primer3",
+        "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y curl primer3",
+    )
+    script = script.replace("curl -LsSf https://astral.sh/uv/0.9.5/install.sh | sh\n", "")
+    script = script.replace('source "$HOME/.local/bin/env"\n', "")
+    result = adapt_harbor_test_script(script)
+    assert result.apt_packages == ("curl", "primer3")
+    assert "python3 /tests/gen_large_csv.py input" in result.script
+    assert "apt-get" not in result.script
+
+
+def test_explicit_uv_venv_relocates_activation_and_preserves_python() -> None:
+    result = adapt_harbor_test_script("""uv venv -p 3.12 .tb
+source .tb/bin/activate
+uv pip install pytest==8.4.1 mailman==3.3.8 pytest-json-ctrf==0.3.5
+uv run pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA
+""")
+    assert result.python_version == "3.12"
+    assert result.script.startswith("source /opt/verifier/bin/activate\n")
+    assert "mailman==3.3.8" in result.requirements
+    assert "uv " not in result.script
+
+
+def test_cpu_index_pinned_git_and_download_are_prepared_offline(tmp_path: Path) -> None:
+    environment = bundle(tmp_path)
+    (tmp_path / "environment/Dockerfile").write_text("FROM python:3.11\nWORKDIR /app\n")
+    script = SCRIPT.replace(
+        "uvx \\\n",
+        """COMMIT_HASH='34bbbfdface3c18e5221aa7de6032d7220c6c6a1'
+curl -L -o mobile_sam.pt https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt
+uvx --index https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match \\
+""",
+    ).replace(
+        "-w pandas==2.3.3", "-w git+https://github.com/ChaoningZhang/MobileSAM.git@${COMMIT_HASH}"
+    )
+    (tmp_path / "tests/test.sh").write_text(script)
+    prepare_nebius_terminus_image(tmp_path, environment)
+    derived = (tmp_path / environment["dockerfile"]).read_text()
+    offline = (tmp_path / OFFLINE_SCRIPT).read_text()
+    assert (
+        "--index https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match" in derived
+    )
+    assert ".git@34bbbfdface3c18e5221aa7de6032d7220c6c6a1" in derived
+    assert "curl --fail --location" in derived
+    assert "cp /opt/verifier-assets/mobile_sam.pt mobile_sam.pt" in offline
+    assert "curl " not in offline
+    assert "${COMMIT_HASH}" not in derived
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pip install pytest>=8",
+        "pip install pytest==8.4.1 && touch /tmp/unreviewed",
+        "uvx -p 3.13 -w pytest==8.4.1 -w git+https://example.com/repo.git@main pytest /tests/test.py",
+        "curl -L -o ../weights https://example.com/weights",
+    ],
+)
+def test_unknown_dependency_sources_or_shell_remain_rejected(command: str) -> None:
+    with pytest.raises(ValueError, match="nebius-terminus"):
+        adapt_harbor_test_script(command + "\npytest /tests/test.py\n")

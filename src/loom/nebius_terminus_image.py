@@ -26,12 +26,18 @@ _UV_SOURCE = re.compile(r'source\s+(?:"\$HOME/\.local/bin/env"|\$HOME/\.local/bi
 class HarborOfflineBootstrap:
     script: str
     apt_packages: tuple[str, ...]
-    python_version: str
+    python_version: str | None
     requirements: tuple[str, ...]
+    index_args: tuple[str, ...] = ()
+    downloads: tuple[tuple[str, str], ...] = ()
 
 
 def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
-    """Relocate the known apt/uvx bootstrap; refuse unrecognized installers."""
+    """Relocate explicit Harbor installer forms, retaining test/setup semantics.
+
+    This is a bounded command recognizer, not a shell evaluator. Unknown shell
+    syntax, dependency sources and installers require an explicit adaptation.
+    """
     logical_lines: list[str] = []
     pending = ""
     for physical_line in script.splitlines(keepends=True):
@@ -44,21 +50,57 @@ def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
     output: list[str] = []
     packages: list[str] = []
     requirements: list[str] = []
+    indexes: list[str] = []
+    downloads: list[tuple[str, str]] = []
+    constants: dict[str, str] = {}
     python_version: str | None = None
-    installer_count = source_count = uvx_count = 0
+    installer_count = source_count = uvx_count = pip_count = pytest_count = 0
+    venv: str | None = None
+    venv_activated = False
+
+    def requirement(value: str) -> str:
+        if _REQUIREMENT.fullmatch(value):
+            return value
+        # Expand only a literal commit variable, never arbitrary shell expressions.
+        for name, commit in constants.items():
+            value = value.replace("${" + name + "}", commit)
+        if re.fullmatch(r"git\+https://[A-Za-z0-9.-]+/[A-Za-z0-9_./-]+\.git@[0-9a-f]{40}", value):
+            return value
+        raise ValueError("nebius-terminus: verifier requirements must use exact version pins")
+
+    def pytest_command(arguments: list[str], *, module: bool = False) -> str:
+        if not arguments or any(
+            not re.fullmatch(r"[A-Za-z0-9/_.,=:+-]+", arg) for arg in arguments
+        ):
+            raise ValueError("nebius-terminus: unsupported shell syntax in pytest invocation")
+        executable = "/opt/verifier/bin/python -m pytest" if module else "/opt/verifier/bin/pytest"
+        return executable + " " + shlex.join(arguments) + "\n"
+
     for line in logical_lines:
         command = re.sub(r"\\\r?\n", " ", line).strip()
         if not command or command.startswith("#"):
             output.append(line)
             continue
+        constant = re.fullmatch(r"([A-Z][A-Z0-9_]*)=['\"]([0-9a-f]{40})['\"]", command)
+        if constant:
+            constants[constant[1]] = constant[2]
+            output.append(line)
+            continue
         if re.fullmatch(r"apt-get update(?: -qq)?", command):
             continue
-        if command.startswith("apt-get install "):
-            words = shlex.split(command)[2:]
-            if "-y" not in words:
-                raise ValueError("nebius-terminus: apt bootstrap requires noninteractive -y")
+        apt = re.fullmatch(
+            r"(?:apt-get update(?: -qq)?\s*&&\s*)?"
+            r"(?:DEBIAN_FRONTEND=noninteractive\s+)?apt-get install (.+)",
+            command,
+        )
+        if apt:
+            words = shlex.split(apt[1])
             names = [word for word in words if word not in {"-y", "--no-install-recommends"}]
-            if not names or any(not _PACKAGE.fullmatch(name) for name in names):
+            if (
+                "-y" not in words
+                or not names
+                or any(not _PACKAGE.fullmatch(name) for name in names)
+            ):
                 raise ValueError("nebius-terminus: unsupported apt bootstrap")
             packages.extend(names)
             continue
@@ -68,41 +110,125 @@ def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
         if _UV_SOURCE.fullmatch(command):
             source_count += 1
             continue
-        if command.startswith("uvx "):
+        words = shlex.split(command)
+        if words[:2] == ["uv", "venv"]:
+            if (
+                len(words) != 5
+                or words[2] != "-p"
+                or not re.fullmatch(r"\d+\.\d+", words[3])
+                or not re.fullmatch(r"[A-Za-z0-9_.-]+", words[4])
+                or venv is not None
+            ):
+                raise ValueError("nebius-terminus: unsupported verifier venv bootstrap")
+            python_version, venv = words[3], words[4]
+            continue
+        if venv is not None and words == ["source", venv + "/bin/activate"]:
+            output.append("source /opt/verifier/bin/activate\n")
+            venv_activated = True
+            continue
+        pip_prefix = next(
+            (
+                prefix
+                for prefix in (
+                    ("pip", "install"),
+                    ("pip3", "install"),
+                    ("python", "-m", "pip", "install"),
+                    ("python3", "-m", "pip", "install"),
+                    ("uv", "pip", "install"),
+                )
+                if words[: len(prefix)] == list(prefix)
+            ),
+            None,
+        )
+        if pip_prefix:
+            if pip_prefix[0] == "uv" and not venv_activated:
+                raise ValueError("nebius-terminus: uv pip requires the declared verifier venv")
+            values = [
+                word for word in words[len(pip_prefix) :] if word != "--break-system-packages"
+            ]
+            if not values:
+                raise ValueError("nebius-terminus: empty verifier requirements")
+            requirements.extend(requirement(value) for value in values)
+            pip_count += 1
+            continue
+        if words[0] == "uvx":
             uvx_count += 1
-            words = shlex.split(command)
-            if len(words) < 6 or words[1] != "-p" or not re.fullmatch(r"\d+\.\d+", words[2]):
-                raise ValueError("nebius-terminus: unsupported uvx Python declaration")
-            python_version = words[2]
-            position = 3
-            while position + 1 < len(words) and words[position] == "-w":
-                requirement = words[position + 1]
-                if not _REQUIREMENT.fullmatch(requirement):
-                    raise ValueError(
-                        "nebius-terminus: verifier requirements must use exact version pins"
-                    )
-                requirements.append(requirement)
+            position = 1
+            while position + 1 < len(words) and words[position] in {"--index", "--index-strategy"}:
+                option, value = words[position : position + 2]
+                if (
+                    option == "--index"
+                    and not re.fullmatch(r"https://[A-Za-z0-9.-]+/[A-Za-z0-9_./-]+", value)
+                ) or (
+                    option == "--index-strategy"
+                    and value not in {"first-index", "unsafe-best-match"}
+                ):
+                    raise ValueError("nebius-terminus: unsupported verifier package index")
+                indexes.extend((option, value))
                 position += 2
-            if position >= len(words) or words[position] != "pytest":
+            if (
+                words[position : position + 1] != ["-p"]
+                or position + 1 >= len(words)
+                or not re.fullmatch(r"\d+\.\d+", words[position + 1])
+            ):
+                raise ValueError("nebius-terminus: unsupported uvx Python declaration")
+            python_version = words[position + 1]
+            position += 2
+            while position + 1 < len(words) and words[position] == "-w":
+                requirements.append(requirement(words[position + 1]))
+                position += 2
+            if words[position : position + 1] != ["pytest"]:
                 raise ValueError(
                     "nebius-terminus: only the pinned uvx pytest bootstrap is supported"
                 )
-            arguments = words[position + 1 :]
-            if not arguments or any(
-                not re.fullmatch(r"[A-Za-z0-9/_.,=:+-]+", arg) for arg in arguments
-            ):
-                raise ValueError("nebius-terminus: unsupported shell syntax in pytest invocation")
-            output.append("/opt/verifier/bin/pytest " + shlex.join(arguments) + "\n")
+            output.append(pytest_command(words[position + 1 :]))
+            pytest_count += 1
             continue
-        # Do not silently convert a script that still needs online installers.
+        pytest_prefix = next(
+            (
+                prefix
+                for prefix in (
+                    ("pytest",),
+                    ("python", "-m", "pytest"),
+                    ("python3", "-m", "pytest"),
+                    ("uv", "run", "pytest"),
+                )
+                if words[: len(prefix)] == list(prefix)
+            ),
+            None,
+        )
+        if pytest_prefix:
+            if pytest_prefix[0] == "uv" and not venv_activated:
+                raise ValueError("nebius-terminus: uv run requires the declared verifier venv")
+            output.append(pytest_command(words[len(pytest_prefix) :], module="-m" in pytest_prefix))
+            pytest_count += 1
+            continue
+        if words[:3] == ["curl", "-L", "-o"] and len(words) == 5:
+            destination, url = words[3:]
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", destination) or not re.fullmatch(
+                r"https://[A-Za-z0-9.-]+/[A-Za-z0-9_./-]+", url
+            ):
+                raise ValueError("nebius-terminus: unsupported verifier asset download")
+            downloads.append((url, destination))
+            output.append(f"cp /opt/verifier-assets/{destination} {destination}\n")
+            continue
         if re.search(r"\b(?:apt-get|apt|pip|pip3|uv|uvx|curl|wget)\b", command):
             raise ValueError(
                 "nebius-terminus: unsupported online bootstrap command in tests/test.sh"
             )
         output.append(line)
-    if (installer_count, source_count, uvx_count) != (1, 1, 1) or python_version is None:
+    uvx_mode = uvx_count == 1 and pip_count == 0 and venv is None
+    pip_mode = pip_count == 1 and uvx_count == 0
+    if (
+        not (uvx_mode or pip_mode)
+        or pytest_count == 0
+        or installer_count > 1
+        or source_count > 1
+        or installer_count != source_count
+        or (venv is not None and not venv_activated)
+    ):
         raise ValueError(
-            "nebius-terminus: tests/test.sh requires the recognized Harbor uv 0.9.5 bootstrap"
+            "nebius-terminus: tests/test.sh requires a recognized Harbor verifier bootstrap"
         )
     if not any(item.startswith("pytest==") for item in requirements):
         raise ValueError("nebius-terminus: verifier pytest must have an exact version pin")
@@ -111,6 +237,8 @@ def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
         apt_packages=tuple(sorted(set(packages))),
         python_version=python_version,
         requirements=tuple(dict.fromkeys(requirements)),
+        index_args=tuple(indexes),
+        downloads=tuple(downloads),
     )
 
 
@@ -133,7 +261,7 @@ def _bundle_path(staged: Path, value: str, *, directory: bool = False) -> Path:
 def _preparation_dockerfile(original: str, bootstrap: HarborOfflineBootstrap, workdir: str) -> str:
     from_lines = re.findall(r"(?im)^FROM\s+(\S+)", original)
     if not from_lines or not re.fullmatch(
-        r"(?:ubuntu:[A-Za-z0-9_.-]+|debian:[A-Za-z0-9_.-]+|python:[A-Za-z0-9_.-]*slim(?:-(?:bookworm|bullseye|trixie))?)",
+        r"(?:ubuntu:[A-Za-z0-9_.-]+|debian:[A-Za-z0-9_.-]+|python:(?:[A-Za-z0-9_.-]*slim(?:-(?:bookworm|bullseye|trixie))?|[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-(?:bookworm|bullseye|trixie))?))",
         from_lines[-1],
     ):
         raise ValueError(
@@ -154,22 +282,33 @@ def _preparation_dockerfile(original: str, bootstrap: HarborOfflineBootstrap, wo
             *bootstrap.apt_packages,
         }
     )
-    requirements = " ".join(shlex.quote(item) for item in bootstrap.requirements)
+    requirements = shlex.join((*bootstrap.index_args, *bootstrap.requirements))
+    if bootstrap.python_version is None:
+        # Plain pip scripts use the base interpreter and its task dependencies.
+        python_setup = 'loom-nebius-uv venv --python "$(command -v python3)" --system-site-packages /opt/verifier'
+    else:
+        python_setup = (
+            f"UV_PYTHON_INSTALL_DIR=/opt/verifier-python loom-nebius-uv python install {bootstrap.python_version} && "
+            f"UV_PYTHON_INSTALL_DIR=/opt/verifier-python loom-nebius-uv venv --python {bootstrap.python_version} /opt/verifier"
+        )
+    assets = "".join(
+        f"RUN mkdir -p /opt/verifier-assets && curl --fail --location {shlex.quote(url)} -o /opt/verifier-assets/{name} && chmod 644 /opt/verifier-assets/{name}\n"
+        for url, name in bootstrap.downloads
+    )
     return (
         original.rstrip()
         + f"""\n\n# Loom Nebius: build-only nonroot/offline preparation; original task above.
 USER root
 COPY --from=ghcr.io/astral-sh/uv:0.9.5 /uv /usr/local/bin/loom-nebius-uv
 RUN apt-get update -qq && apt-get install -y --no-install-recommends {" ".join(packages)} && \\
-    UV_PYTHON_INSTALL_DIR=/opt/verifier-python loom-nebius-uv python install {bootstrap.python_version} && \\
-    UV_PYTHON_INSTALL_DIR=/opt/verifier-python loom-nebius-uv venv --python {bootstrap.python_version} /opt/verifier && \\
+    {python_setup} && \\
     loom-nebius-uv pip install --python /opt/verifier/bin/python {requirements} && \\
     (getent group 65532 >/dev/null || groupadd --gid 65532 agent) && \\
     (getent passwd 65532 >/dev/null || useradd --uid 65532 --gid 65532 --home-dir /home/agent agent) && \\
     mkdir -p {workdir} /home/agent /tests /logs/verifier /loom/verifier && \\
     chown -R 65532:65532 {workdir} /home/agent /tests /logs/verifier /loom/verifier && \\
     rm -rf /var/lib/apt/lists/* /root/.cache
-ENV HOME=/home/agent
+{assets}ENV HOME=/home/agent
 # Preserve the base image PATH and agent interpreter; verifier uses its own venv.
 USER 65532:65532
 WORKDIR {workdir}
