@@ -53,7 +53,8 @@ def _name(value: Any, label: str) -> str:
 
 
 def validate_environment(config: dict[str, Any]) -> None:
-    if config.get("schema_version") != "loom.nebius-platform.v1":
+    managed = config.get("schema_version") == "loom.nebius-managed-environment.v1"
+    if not managed and config.get("schema_version") != "loom.nebius-platform.v1":
         raise NebiusPlatformError("unsupported platform configuration")
     expected = {
         "schema_version",
@@ -83,6 +84,8 @@ def validate_environment(config: dict[str, Any]) -> None:
         "capacity_policy",
         "execution_price",
     }
+    if managed:
+        expected.add("registration")
     if (
         set(config)
         - {
@@ -118,14 +121,37 @@ def validate_environment(config: dict[str, Any]) -> None:
         "storage_class",
     ):
         _name(config.get(key), key)
-    if config["namespace"] == config["execution_namespace"] or any(
-        not config[key].startswith("loom-nebius-") for key in ("namespace", "execution_namespace")
-    ):
-        raise NebiusPlatformError("independent Nebius system and execution namespaces are required")
-    if config.get("environment") != "development":
-        raise NebiusPlatformError(
-            "this independent integration lane requires environment=development"
-        )
+    if managed:
+        from loom.nebius_environment_contract import EnvironmentRegistrationV1
+
+        registration = EnvironmentRegistrationV1.model_validate(config["registration"])
+        for key, expected_value in (
+            ("namespace", registration.application_namespace),
+            ("execution_namespace", registration.execution_namespace),
+            ("environment", registration.kind),
+            ("target_id", registration.target_id),
+            ("cluster_id", registration.cluster_id),
+            ("execution_node_group_id", registration.physical_pool_id),
+            ("public_host", registration.public_host),
+        ):
+            if config[key] != expected_value:
+                raise NebiusPlatformError(f"managed {key} differs from registered binding")
+        if (
+            config.get("regional_execution_targets")
+            or "task_image_builder" in config
+            or not isinstance(config["capacity_policy"], dict)
+            or config["capacity_policy"].get("enabled") is not False
+        ):
+            raise NebiusPlatformError("managed execution requires shared admission; currently disabled")
+    else:
+        if config["namespace"] == config["execution_namespace"] or any(
+            not config[key].startswith("loom-nebius-") for key in ("namespace", "execution_namespace")
+        ):
+            raise NebiusPlatformError("independent Nebius system and execution namespaces are required")
+        if config.get("environment") != "development":
+            raise NebiusPlatformError(
+                "this independent integration lane requires environment=development"
+            )
     host = config.get("public_host", "")
     if not isinstance(host, str) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]+\.[a-z]{2,63}", host):
         raise NebiusPlatformError("public_host must be a DNS hostname")
@@ -241,7 +267,7 @@ def validate_environment(config: dict[str, Any]) -> None:
             raise NebiusPlatformError(
                 "execution_resource_quota values must be nonnegative Kubernetes quantities"
             )
-    if policy.get("enabled") is not True:
+    if not managed and policy.get("enabled") is not True:
         raise NebiusPlatformError("capacity policy must explicitly enable the bounded target")
     price = config.get("execution_price", {})
     rate_keys = (
@@ -770,6 +796,21 @@ def public_tls_config(config: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _requested_quantity(value: str | int, resource: str) -> int:
+    """Round supported template quantities up to millicores or MiB, offline."""
+    text = str(value)
+    if resource == "cpu":
+        amount = Decimal(text[:-1]) if text.endswith("m") else Decimal(text) * 1000
+    else:
+        factor = Decimal(1) / (1024 * 1024)
+        for unit, scale in (("Ki", 1 / 1024), ("Mi", 1), ("Gi", 1024), ("Ti", 1024 * 1024)):
+            if text.endswith(unit):
+                text, factor = text[: -len(unit)], Decimal(str(scale))
+                break
+        amount = Decimal(text) * factor
+    return int(amount.to_integral_value(rounding=ROUND_CEILING))
+
+
 def _execution_quota(config: dict[str, Any], documents: list[dict[str, Any]]) -> dict[str, str]:
     """Technical envelope plus the actual namespace controller/collector requests.
 
@@ -783,19 +824,6 @@ def _execution_quota(config: dict[str, Any], documents: list[dict[str, Any]]) ->
         "memory": policy["max_memory_mib"],
         "ephemeral-storage": policy["max_storage_mib"],
     }
-
-    def quantity(value: str | int, resource: str) -> int:
-        text = str(value)
-        if resource == "cpu":
-            amount = Decimal(text[:-1]) if text.endswith("m") else Decimal(text) * 1000
-        else:
-            factor = Decimal(1) / (1024 * 1024)
-            for unit, scale in (("Ki", 1 / 1024), ("Mi", 1), ("Gi", 1024), ("Ti", 1024 * 1024)):
-                if text.endswith(unit):
-                    text, factor = text[: -len(unit)], Decimal(str(scale))
-                    break
-            amount = Decimal(text) * factor
-        return int(amount.to_integral_value(rounding=ROUND_CEILING))
 
     for doc in documents:
         if doc["kind"] == "Deployment":
@@ -819,7 +847,7 @@ def _execution_quota(config: dict[str, Any], documents: list[dict[str, Any]]) ->
         for resource in ("cpu", "memory", "ephemeral-storage"):
 
             def request(container: dict[str, Any], resource: str = resource) -> int:
-                return quantity(
+                return _requested_quantity(
                     container.get("resources", {}).get("requests", {}).get(resource, 0), resource
                 )
 
@@ -1269,6 +1297,20 @@ def build_platform(
     repo_root: Path,
 ) -> dict[str, list[dict[str, Any]]]:
     """Build Kubernetes resources from published image refs and environment settings."""
+    if config.get("schema_version") == "loom.nebius-managed-environment.v1":
+        raise NebiusPlatformError("use render_environment for managed children")
+    return _build_platform(config, candidate, profile, keyring, repo_root=repo_root)
+
+
+def _build_platform(
+    config: dict[str, Any],
+    candidate: dict[str, Any],
+    profile: dict[str, Any],
+    keyring: dict[str, Any],
+    *,
+    repo_root: Path,
+) -> dict[str, list[dict[str, Any]]]:
+    """Shared stack templates; managed output is finalized by its owning renderer."""
     validate_environment(config)
     # Resolve the environment-owned baseline once and persist it with the
     # environment and each release profile. Task limits remain source-owned.
@@ -1749,7 +1791,10 @@ def build_platform(
     app_docs.append(web)
     files["40-services.yaml"] = app_docs
     files["50-configure.yaml"] = [job(f"loom-platform-configure-{short}", "configure")]
-    execution_docs = _execution_documents(config, images, repo_root)
+    execution_docs = (
+        [] if config["schema_version"] == "loom.nebius-managed-environment.v1"
+        else _execution_documents(config, images, repo_root)
+    )
     for regional in config.get("regional_execution_targets", []):
         primary_docs, _ = _regional_documents(config, regional, images, repo_root)
         execution_docs.extend(primary_docs)

@@ -19,6 +19,16 @@ from tests.unit.test_nebius_platform_render import platform_inputs, regional_inp
 from loom.nebius_platform_render import build_platform, write_platform
 
 
+def test_standalone_deployer_rejects_managed_child(request, tmp_path):
+    from tests.unit.test_nebius_environment_render import rendered
+
+    inputs = request.getfixturevalue("platform_inputs")
+    result = rendered(inputs)
+    write_platform(result.files, result.config, inputs[1], tmp_path)
+    with pytest.raises(deploy.DeploymentError, match="managed"):
+        deploy.load_render(tmp_path)
+
+
 def test_on_demand_build_secret_preflight_and_namespace(
     request: pytest.FixtureRequest, tmp_path: Path
 ) -> None:

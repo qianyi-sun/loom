@@ -523,6 +523,36 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
             row["enabled"] and row["max_concurrent"] == 7
             for row in api("GET", "execution-admission/status")["policies"]
         )
+        # Converting a protected standalone binding must close execution even
+        # when the previous operator customized its numeric capacity limits.
+        from loom.nebius_environment_contract import EnvironmentRegistrationV1, FoundationBinding
+        from loom.nebius_environment_render import render_environment
+        from tests.unit.test_nebius_environment_contract import foundation_from, registration_for
+
+        foundation = foundation_from(environment)
+        foundation = FoundationBinding.model_validate({
+            **foundation.model_dump(), "public_dns_zone": environment["public_host"].split(".", 1)[1],
+        })
+        row = registration_for(foundation, "dev", scope="shared")
+        row = EnvironmentRegistrationV1.model_validate({
+            **row.model_dump(), "binding_mode": "imported",
+            "application_namespace": environment["namespace"],
+            "execution_namespace": environment["execution_namespace"],
+            "build_namespace": environment["execution_namespace"] + "-build",
+            "target_id": environment["target_id"], "public_host": environment["public_host"],
+        })
+        child = render_environment(row, candidate, foundation, profile=profile, keyring={},
+                                   repo_root=Path(__file__).resolve().parents[2])
+        (tmp_path / "catalog.json").write_text(child.files["10-config-network.yaml"][0]["data"]["catalog.json"])
+        explicit = {**environment["capacity_policy"], "max_create_per_minute": 1,
+                    "reason": "Custom operator limit retained across import"}
+        api("PUT", capacity_path, explicit)
+        for _ in range(2):
+            bootstrap.configure_platform(child.config, config_dir=tmp_path, admin_secret=admin_path)
+            policies = api("GET", "execution-capacity/status")["targets"]
+            closed = next(item["policy"] for item in policies if item["target_id"] == row.target_id)
+            assert closed["enabled"] is False
+            assert all(closed[key] == value for key, value in explicit.items() if key != "enabled")
         regional_environment, regional_candidate, regional_profile = request.getfixturevalue(
             "regional_inputs"
         )
