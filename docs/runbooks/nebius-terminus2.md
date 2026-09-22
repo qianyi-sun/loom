@@ -272,6 +272,32 @@ loom datasets publish-local /path/to/benchmark \
   --minio-region eu-north1
 ```
 
+Before applying the profile to unfamiliar tasks, inspect all inputs through
+the ordinary validation command:
+
+```sh
+loom datasets validate-local /path/to/benchmark \
+  --execution-profile nebius-terminus --compatibility-report --json \
+  > compatibility-report.json
+```
+
+The complete report is emitted even when a task is blocked (exit code 1).
+Each task retains its source location and declared requirements. Package
+defects such as missing `COPY` sources, unsupported bootstrap conversions,
+and missing runtime capabilities have separate dispositions and suggested
+actions. Explicit users, network policies, workdirs, services and verifier
+entrypoints must not disappear behind successful profile-admission counters.
+The report lists generated image inputs and defaulted values separately from
+declared requirement changes. It performs no builds or model calls, does not
+establish registry availability, and makes no changes to the source tree.
+
+For custom trajectory-generation archives, publication belongs in a team-owned
+TaskSet with `intents=["trajectory_generation"]`; `publish-local` is the catalog
+benchmark path. Validation itself publishes nothing. The original 60 inputs
+in [#2046](https://github.com/qianyi-sun/loom/issues/2046) still need their
+original archives for a complete matrix and real trajectory-generation
+acceptance; fixture checks do not establish that evidence.
+
 That profile forces `cpu_arch=x86_64`, `gateway-only` networking, fills missing
 `cpus`/`memory_mb`/`storage_mb` (defaults 1 / 2048 / 4096), sets
 `user=agent` + compatible `/app` workdir, strips custom verifier identity,

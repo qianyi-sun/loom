@@ -599,6 +599,27 @@ copy into `config/benchmarks.toml`. With `source_subdir = "tasks"`, the
 DB task id stays `team-evals/alpha` while the materializer source points
 at `fixture://team-evals/tasks/alpha`.
 
+For a complete static intake matrix, add `--compatibility-report --json`.
+The report records every discovered task, including malformed TOML, with a
+stable task ID, source location, reason and suggested action. It returns exit
+code 1 when any task is blocked while still printing the full report. Without
+an execution profile, `schema_valid` covers schema and local Docker build input
+checks only. With `--execution-profile nebius-terminus`, the report also dry-runs
+adaptation and admission in temporary copies, retains original declarations,
+lists configuration changes, and distinguishes package defects, unsupported
+conversions and unavailable runtime capabilities. A successful admission check
+can coexist with a blocked disposition when the profile changes declared task
+requirements. The report does not build images, submit model work, upload files
+or modify the input tree; ordinary publication validation remains unchanged.
+
+Literal local `COPY`/`ADD` sources are checked against their declared build
+context. Dockerfile heredoc bodies and `COPY --from` references are not mistaken
+for local files. Build-argument expansion, remote sources, `.dockerignore`
+filtering and registry availability still require a real image build. Missing
+sources require an explicit package repair; validation never invents an empty
+directory. Unknown runtime needs embedded in task instructions or arbitrary
+scripts require author review and are not inferred by this static report.
+
 For production, use `loom datasets publish-local <folder>` instead of
 `sync-config` when workers should materialize from object storage rather than a
 shared fixture mount. It uploads bundle files under

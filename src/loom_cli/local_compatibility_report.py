@@ -222,7 +222,8 @@ def _build_context_diagnostics(bundle: Path, task: TaskConfig, report: TaskCompa
                 relative = source.lstrip("/")
                 if ".." in Path(relative).parts:
                     continue
-                if not any(context.glob(relative)):
+                exists = (context / relative).exists() if not any(char in relative for char in "*?[") else any(context.glob(relative))
+                if not exists:
                     report.add("package_defect", "missing_copy_source",
                                f"{instruction.keyword} source {source!r} is absent from build context {env.docker_build_context or '.'}.",
                                "Restore the original source or publish an explicit reviewed package repair; do not invent an empty directory.",

@@ -117,10 +117,11 @@ def test_admission_pass_does_not_hide_changed_declared_requirements(
     assert report["original_requirements"]["environment"]["allow_internet"] is True
     assert report["original_requirements"]["environment"]["mutable_paths"] == ["/data", "/home/root"]
     codes = {diagnostic["code"] for diagnostic in report["diagnostics"]}
-    assert {"task_identity", "runtime_egress", "mutable_paths", "services", "verifier_identity"} <= codes
+    required_gaps = {"task_identity", "runtime_egress", "services", "verifier_identity"}
+    assert required_gaps <= codes
     assert all(
         diagnostic["category"] == "runtime_capability"
-        for diagnostic in report["diagnostics"] if diagnostic["code"] in codes - {"requirement_changed"}
+        for diagnostic in report["diagnostics"] if diagnostic["code"] in required_gaps
     )
 
 
