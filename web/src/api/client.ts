@@ -827,6 +827,9 @@ async function mutateAuthSession(
     response = await fetch(`${apiBase()}${path}`, {
       method: "POST",
       body: JSON.stringify(body),
+      // Session endpoints return JSON at their exact origin. A 307/308 must
+      // never forward passwords, invitation tokens or one-use managed proofs.
+      redirect: "error",
       credentials: "include",
       headers: {
         "Content-Type": "application/json",
