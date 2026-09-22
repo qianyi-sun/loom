@@ -422,3 +422,18 @@ def test_metadata_only_harbor_schema_1_1_is_stamped_as_loom_schema() -> None:
     task = TaskConfig.model_validate(normalize_terminal_bench_task_toml(raw, task_id="context"))
     assert task.task.id == "context"
     assert task.schema_version == "1"
+
+
+def test_native_harbor_preserves_explicit_service_lifecycle_declaration() -> None:
+    raw = {
+        "task": {"name": "service-task"},
+        "environment": {"service_lifecycle": {
+            "startup_command": ["/usr/local/bin/start-fixture"],
+            "readiness": {"command": "test -f /data/ready"},
+        }},
+    }
+    normalized = normalize_terminal_bench_task_toml(raw)
+    assert normalized["environment"]["service_lifecycle"] == {
+        "startup_command": ["/usr/local/bin/start-fixture"],
+        "readiness": {"command": "test -f /data/ready"},
+    }
