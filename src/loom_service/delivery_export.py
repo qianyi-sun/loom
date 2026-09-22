@@ -862,7 +862,15 @@ def _select_trials_by_ids(
     selected: list[SelectedTrial] = []
     for trial_id in trial_ids:
         trial = trials_by_id[trial_id]
-        batch = batch_by_id[trial.batch_id]
+        batch_id = trial.batch_id
+        if batch_id is None or batch_id not in batch_by_id:
+            raise InvalidDeliveryBatchFamilyError(
+                {
+                    "message": "selected trial ids are not in the authorized batch family",
+                    "unknown_trial_ids": [str(trial.id)],
+                }
+            )
+        batch = batch_by_id[batch_id]
         if not _is_delivery_eligible(trial):
             ineligible.append(
                 {
