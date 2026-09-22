@@ -254,7 +254,7 @@ async def test_real_management_api_derives_owner_and_rejects_other_users(
                     "username": name, "password": name + "-owner-passphrase",
                 })
                 assert response.status_code == 200
-                client.headers["X-Loom-CSRF"] = client.cookies.get("loom_csrf")
+                client.headers["X-Loom-CSRF"] = response.json()["csrf_token"]
             request = {"slug": "alice", "candidate_id": str(candidate_id)}
             first = await a.post("/api/v1/environments", json=request, headers={"Idempotency-Key": "api-create-1"})
             assert first.status_code == 202, first.text
