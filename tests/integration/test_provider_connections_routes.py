@@ -891,8 +891,8 @@ def test_update_base_url_re_resolves_and_re_pendings(app_setup) -> None:
 
 def test_update_api_key_rotates_ref(app_setup) -> None:
     """PATCH with api_key encrypts the new value and swaps the
-    encrypted_api_key_ref. Both old and new refs persist (Phase 5
-    cleanup walker reclaims orphaned old refs)."""
+    encrypted_api_key_ref. Both old and new refs persist; delayed
+    cleanup of orphaned old refs is not implemented."""
     app, tokens, _team_ids = app_setup
     c = _client(app)
     create = c.post(
@@ -944,7 +944,7 @@ def test_update_api_key_rotates_ref(app_setup) -> None:
     sync_engine.dispose()
 
     assert new_ref != orig_ref
-    # Both refs are in the secrets table (Phase 5 will GC the orphan).
+    # Both refs remain in the secrets table until cleanup is implemented.
     assert len(secret_count) == 2
 
 

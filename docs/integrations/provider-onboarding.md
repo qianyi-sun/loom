@@ -17,6 +17,18 @@ the evaluation, gateway, scheduling, storage, and monitoring surfaces; the
 model-serving endpoint is supplied and operated by the team, whether it is a
 third-party API or a self-hosted OpenAI-compatible service such as vLLM.
 
+## Credential retention
+
+Rotating an API key changes the connection's active encrypted secret reference.
+Deleting a connection disables and soft-deletes it while retaining attribution
+for historical results. Neither action currently removes the previous encrypted
+secret from Loom's database: delayed secret cleanup is not implemented.
+
+Loom does not revoke keys at the inference provider. Revoke superseded keys
+through that provider once in-flight work no longer needs them. Database secret
+cleanup requires a separate implementation that accounts for cached credentials
+and in-flight requests.
+
 ## Hosted Third-Party API
 
 Use this path for OpenAI-compatible hosts such as Together, Fireworks, vLLM

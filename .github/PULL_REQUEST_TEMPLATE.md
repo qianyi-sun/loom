@@ -16,17 +16,17 @@
 ## Target Branch
 
 - [ ] This PR targets `dev` for normal development.
-- [ ] For this normal `dev` PR, the trusted base-branch controller enables
-      squash auto-merge for every non-draft PR, regardless of author or
-      reviewer. GitHub keeps the candidate queued until
+- [ ] For this normal `dev` PR, a developer or maintainer enables
+      GitHub's native squash auto-merge for the non-draft PR, regardless of
+      author or reviewer. GitHub keeps the candidate queued until
       `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
       `staging-smoke-gate` succeed on the current head SHA. These four strict,
       app-bound checks are the only merge authority: `dev` requires no human
       approval, no CODEOWNER approval, and no conversation resolution.
 - [ ] This PR targets `main` only for a production release promotion from `dev`;
-      the same author-neutral controller enables squash auto-merge after the
-      release evidence is attached. Human or CODEOWNER approval is not merge
-      authority; the current-head CI gates are.
+      a developer or maintainer enables GitHub's native squash auto-merge after
+      `main-promotion-gate` passes. That current-head gate is the only merge
+      authority; release-owner and Environment approvals govern deployment.
 
 ## Scope
 

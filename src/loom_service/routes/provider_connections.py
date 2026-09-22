@@ -855,21 +855,18 @@ async def update_connection(
         changed_fields.append("rate_card_provider")
         row.rate_card_provider = payload.rate_card_provider
 
-    # API key rotation: encrypt new value, swap ref, queue old ref for
-    # delete. The old ref's secret can't be deleted in this request
-    # because in-flight gateway requests may still be using it (cache
-    # holds the decrypted key for up to one indexed-updated_at-lookup
-    # window). Phase 5 ships a cleanup job for revoked refs older than
-    # the cache TTL.
+    # API key rotation encrypts the new value and swaps the active ref.
+    # Retain the old secret for in-flight gateway requests. No delayed
+    # cleanup job is implemented; old refs currently remain indefinitely.
     if payload.api_key is not None:
         changed_fields.append("api_key")
         secret_store = _make_secret_store(session)
         new_ref = await secret_store.put(
             namespace=f"team:{row.team_id}", value=payload.api_key,
         )
-        # TODO Phase 5: track old refs in a `revoked_secrets` table for
-        # delayed cleanup. For now, the old secret stays decryptable
-        # but is no longer pointed at by any connection.
+        # TODO: persist retired refs and reclaim them after a safe grace
+        # period. For now, the old secret stays decryptable but is no
+        # longer the active ref for this connection.
         row.encrypted_api_key_ref = new_ref
         row.status = "pending"
 
@@ -1350,13 +1347,13 @@ async def delete_connection(
     x_loom_admin_actor: str | None = Header(default=None),
 ) -> None:
     """Soft-delete: sets `deleted_at = now()`. Existing Trial /
-    Batch FKs (when those land in the next PR) retain attribution
-    for billing/audit. Re-using the display_name is permitted after
+    Batch records retain attribution for billing/audit. Re-using the
+    display_name is permitted after
     soft-delete (partial UNIQUE WHERE deleted_at IS NULL).
 
     The SecretStore ref is NOT deleted here — in-flight gateway
-    requests may still need it. Phase 5 cleanup walker reclaims
-    refs whose owning connection has been deleted for > cache TTL.
+    requests may still need it. No cleanup walker is implemented;
+    soft-deletion currently retains the encrypted secret indefinitely.
     """
     session, ctx = sc
     _require_provider_management(ctx)
