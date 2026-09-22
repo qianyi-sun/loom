@@ -1,0 +1,139 @@
+"""Protected installation inventory must be read-only and never export payloads."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+import yaml
+from scripts.ops import nebius_management_preflight as preflight
+
+
+class Cluster:
+    def __init__(self):
+        self.calls = []
+        self.config = {"cluster_id": "mk8scluster-test", "namespace": "loom-nebius-platform",
+                       "execution_namespace": "loom-nebius-platform-execution", "public_host": "loom.example.test",
+                       "execution_node_group_id": "mk8snodegroup-test", "ignored": "private-payload"}
+        self.view = {"clusters": [{"name": "cluster-test", "cluster": {
+            "server": "https://api.example.test", "certificate-authority-data": "private-ca"}}],
+            "users": [{"user": {"token": "private-token"}}]}
+        self.config["kubernetes_api_server"] = "https://api.example.test"
+        node = {"metadata": {"name": "computeinstance-test", "uid": "node-uid", "labels": {
+            "loom.nebius/node-role": "system", "loom.nebius/platform": "integration"}},
+            "spec": {"providerID": "nebius://computeinstance-test"},
+            "status": {"allocatable": {"cpu": "7900m", "memory": "30000Mi", "ephemeral-storage": "100Gi", "pods": "110"},
+                       "conditions": [{"type": "Ready", "status": "True"}]}}
+        self.lists = {
+            "nodes": [node],
+            "namespaces": [{"metadata": {"name": "loom-nebius-platform", "uid": "ns-uid"}}],
+            "pods": [{"metadata": {"name": "service-1", "namespace": "loom-nebius-platform", "uid": "pod-uid",
+                                    "annotations": {"private": "private-annotation"}},
+                      "spec": {"nodeName": "computeinstance-test", "containers": [{"name": "service",
+                          "env": [{"value": "private-env"}], "resources": {"requests": {"cpu": "500m", "memory": "512Mi"}}}],
+                          "initContainers": [{"name": "init", "resources": {"requests": {"cpu": "1"}}}],
+                          "overhead": {"memory": "20Mi"}}, "status": {"phase": "Running"}}],
+            "services": [{"metadata": {"name": "public", "namespace": "loom-nebius-platform", "uid": "svc-uid"},
+                          "spec": {"type": "LoadBalancer"}, "status": {"loadBalancer": {"ingress": [{"ip": "192.0.2.1"}]}}}],
+            "ingresses": [], "ingressclasses": [], "persistentvolumeclaims": [],
+            "storageclasses": [{"metadata": {"name": "network-ssd", "uid": "sc-uid"},
+                                "provisioner": "disk.csi.nebius.ai", "parameters": {"key": "private-storage"}}],
+        }
+
+    def get(self, kind, name, namespace):
+        self.calls.append(("get", kind, name, namespace))
+        assert (kind, name, namespace) == ("configmap", "loom-platform-config", "loom-nebius-platform")
+        return {"data": {"environment.json": json.dumps(self.config),
+                         "profile.json": json.dumps({"candidate_sha": "a" * 40, "private": "private-profile"}),
+                         "keyring.json": "private-keyring"}}
+
+    def run(self, *args, **kwargs):
+        self.calls.append(args)
+        if args[:2] == ("config", "view"):
+            return json.dumps(self.view)
+        assert args[0] == "get", "inventory attempted a write"
+        return json.dumps({"items": self.lists[args[1]]})
+
+
+def test_inventory_projects_capacity_and_routes_without_claiming_installation_readiness():
+    cluster = Cluster()
+    result = preflight.inspect(cluster, namespace="loom-nebius-platform", expected_cluster_id="mk8scluster-test")
+    assert result["status"] == "observed"
+    # The ConfigMap can advance before workload rollout/migration succeeds.
+    assert result["configured_candidate_sha"] == "a" * 40
+    assert "running_candidate_correspondence" in result["unverified"]
+    assert result["configured_execution_node_group_id"] == "mk8snodegroup-test"
+    assert result["nodes"][0]["allocatable"]["memory"] == "30000Mi"
+    assert result["pods"][0]["containers"][0]["requests"] == {"cpu": "500m", "memory": "512Mi"}
+    assert result["pods"][0]["init_containers"][0]["requests"] == {"cpu": "1"}
+    assert result["pods"][0]["overhead"] == {"memory": "20Mi"}
+    assert result["ingress_classes"] == []
+    assert result["services"][0]["type"] == "LoadBalancer"
+    assert result["services"][0]["load_balancer"] == [{"ip": "192.0.2.1"}]
+    assert "provider_iam" in result["unverified"] and "wildcard_dns_tls" in result["unverified"]
+    assert "private-" not in json.dumps(result)
+    assert all(command[0] in {"get", "config"} for command in cluster.calls)
+
+
+@pytest.mark.parametrize("mutation", ["wrong_cluster", "wrong_namespace", "wrong_server", "insecure", "non_nebius", "no_system"])
+def test_wrong_target_stops_before_cluster_inventory(mutation):
+    cluster = Cluster()
+    if mutation == "wrong_cluster":
+        cluster.config["cluster_id"] = "mk8scluster-other"
+    elif mutation == "wrong_namespace":
+        cluster.config["namespace"] = "other"
+    elif mutation == "wrong_server":
+        cluster.view["clusters"][0]["cluster"]["server"] = "https://wrong.example.test"
+    elif mutation == "insecure":
+        cluster.view["clusters"][0]["cluster"]["insecure-skip-tls-verify"] = True
+    elif mutation == "non_nebius":
+        cluster.lists["nodes"][0]["spec"]["providerID"] = "foreign://node"
+    else:
+        cluster.lists["nodes"] = []
+    with pytest.raises(preflight.DeploymentError):
+        preflight.inspect(cluster, namespace="loom-nebius-platform", expected_cluster_id="mk8scluster-test")
+    assert not any(command[:2] == ("get", "pods") for command in cluster.calls)
+
+
+@pytest.mark.parametrize("resource", ["pods", "ingresses", "storageclasses"])
+def test_incomplete_inventory_is_never_reported_as_empty(resource):
+    class Unreadable(Cluster):
+        def run(self, *args, **kwargs):
+            if args[:2] == ("get", resource):
+                return json.dumps({"kind": "Status", "message": "private-diagnostic"})
+            return super().run(*args, **kwargs)
+
+    with pytest.raises(preflight.DeploymentError, match="inventory"):
+        preflight.inspect(Unreadable(), namespace="loom-nebius-platform", expected_cluster_id="mk8scluster-test")
+
+
+def test_command_preserves_sanitized_failure_evidence(monkeypatch, tmp_path, capsys):
+    class Broken(Cluster):
+        def get(self, *args):
+            raise RuntimeError("private-provider-secret")
+
+    monkeypatch.setattr(preflight, "Kubectl", lambda path: Broken())
+    monkeypatch.setattr("sys.argv", ["preflight", "--kubeconfig", "protected-kubeconfig", "--expected-cluster-id",
+                                   "mk8scluster-test", "--evidence-dir", str(tmp_path)])
+    assert preflight.main() == 1
+    evidence = (tmp_path / "management-preflight.json").read_text()
+    assert json.loads(evidence)["status"] == "blocked"
+    captured = capsys.readouterr()
+    assert "private-provider-secret" not in evidence + captured.out + captured.err
+
+
+def test_protected_manual_inventory_cannot_select_rollout_or_unprotected_environment():
+    workflow = yaml.load((Path(__file__).parents[2] / ".github/workflows/nebius-rollout.yml").read_text(), Loader=yaml.BaseLoader)
+    assert workflow["on"]["workflow_dispatch"]["inputs"]["operation"]["options"] == ["rollout", "inspect"]
+    assert "inputs.operation != 'inspect'" in workflow["jobs"]["rollout"]["if"]
+    job = workflow["jobs"]["inspect"]
+    assert job["environment"]["name"] == "nebius-integration"
+    assert job["permissions"] == {"contents": "read"}
+    for condition in ("github.repository == 'qianyi-sun/loom'", "github.ref == 'refs/heads/dev'",
+                      "github.event_name == 'workflow_dispatch'", "inputs.operation == 'inspect'"):
+        assert condition in job["if"]
+    commands = "\n".join(step.get("run", "") for step in job["steps"])
+    assert "nebius_management_preflight.py" in commands
+    assert "nebius_idle_rollout.py" not in commands
+    assert "--apply" not in commands
