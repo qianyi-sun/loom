@@ -67,7 +67,10 @@ async def test_signal_and_finalization_budget_do_not_grant_unsafe_handoff(
     monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
     monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
     monkeypatch.setenv("LOOM_EXECUTION_PHASE_DEADLINE", str(time.time() + 0.05))
-    monkeypatch.setenv("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "0.1")
+    # The successful handoff performs real archive IO on worker threads. Give
+    # it scheduling headroom under the full suite; expiry cases keep the short
+    # budget so they still prove the grace period cannot restart.
+    monkeypatch.setenv("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "2" if mode == "deadline_signal" else "0.1")
     callbacks = []
     loop = asyncio.get_running_loop()
     monkeypatch.setattr(loop, "add_signal_handler", lambda _, callback: callbacks.append(callback))
