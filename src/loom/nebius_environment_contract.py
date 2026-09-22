@@ -134,6 +134,18 @@ class EnvironmentRegistrationV1(_Contract):
         return self
 
 
+class EnvironmentOperationV1(_Contract):
+    """Public operation state; pending creation is never execution readiness."""
+
+    operation_id: UUID
+    environment_id: UUID
+    deployment_generation: int = Field(ge=1, strict=True)
+    action: Literal["create", "destroy_retained"]
+    phase: Literal["pending", "running", "blocked", "completed"]
+    error_code: str | None = None
+    execution_enabled: Literal[False] = False
+
+
 def new_environment_registration(
     foundation: FoundationBinding,
     *,
