@@ -141,14 +141,15 @@ use the seven-image Nebius set. Retired personal-development fleet images are
 not built or published.
 
 Deployment environments are separated from branch workflow. The retained
-`yylx.world/dev`, `/staging`, and `/prod` routes describe the earlier installation,
+`https://yylx.world/dev`, `https://yylx.world/staging`, and
+`https://yylx.world/prod` routes describe the earlier installation,
 not a three-environment ceiling or a mandate for newly provisioned Nebius hosts.
 The [managed environment contract](docs/architecture/nebius-primary-platform.md#managed-environment-identity-and-rendering)
 uses distinct hostnames behind shared HTTPS ingress; its renderer is currently
 execution-disabled and does not itself establish provisioned entrypoints.
 Use only the hostname verified for the selected deployment; do not invent
-environment-specific yylx subdomains. Production follows `main` or immutable
-`vX.Y.Z` release tags and uses the protected GitHub
+environment-specific yylx subdomains. Production follows `main` or
+immutable `vX.Y.Z` production release tags and uses the protected GitHub
 Environment named `production`; normal development jobs must not use production
 kubeconfig, database, object-store, provider, SecretStore, or worker-token
 secrets.
