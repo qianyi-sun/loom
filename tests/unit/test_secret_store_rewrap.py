@@ -380,3 +380,22 @@ async def test_tampered_ciphertext_raises_decrypt_error(
     row.ciphertext = bytes([row.ciphertext[0] ^ 0xFF]) + row.ciphertext[1:]
     with pytest.raises(DecryptError, match="AEAD verification failed"):
         await store.get(ref)
+
+
+@pytest.mark.asyncio
+async def test_startup_validation_tolerates_ref_collected_after_listing(
+    fake_session: _FakeSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom.security.secret_store import SecretNotFoundError
+
+    key = _make_key()
+    monkeypatch.setenv("LOOM_SECRET_STORE_MASTER_KEY", _b64(key))
+    monkeypatch.delenv("LOOM_SECRET_STORE_MASTER_KEYS", raising=False)
+    store = LocalEncryptedSecretStore(fake_session, master_key=key)  # type: ignore[arg-type]
+    await store.put(namespace="team:test", value="retired-key")
+
+    async def collected_get(self: LocalEncryptedSecretStore, ref: str) -> str:
+        raise SecretNotFoundError("collected after listing")
+
+    monkeypatch.setattr(LocalEncryptedSecretStore, "get", collected_get)
+    assert await assert_existing_secrets_decryptable(fake_session) == 0  # type: ignore[arg-type]

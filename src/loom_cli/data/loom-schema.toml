@@ -185,13 +185,13 @@ description = "Maximum admitted deadline, including phase timeouts, termination 
 used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]
 python_type = "str"
 default     = "minio"
-description = "Object-store backend. S3-compatible values are minio (default), s3, r2, b2, and wasabi. The renderer library also supports gcs, but `bootstrap-storage-lifecycle` applies only S3-compatible backends. This value selects the renderer and credential chain."
+description = "Object-store backend. S3-compatible values are minio (default), s3, r2, b2, and wasabi. Non-S3 backends are unsupported. The lifecycle policy must match this backend."
 
 [service_config.storage_auth_kind]
 used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]
 python_type = "str"
 default     = "static_keys"
-description = "Credentials strategy. static_keys reads minio-access-key and minio-secret-key from loom-secrets for MinIO and other S3-compatible stores. irsa lets boto3 use an AWS IAM role from the projected service-account token. workload_identity and sa_json describe GCS credentials for renderer-library consumers; the lifecycle CLI does not apply GCS policies."
+description = "Credentials strategy. static_keys reads minio-access-key and minio-secret-key from loom-secrets for MinIO and other S3-compatible stores. irsa lets boto3 use an AWS IAM role from the projected service-account token. Other credential strategies are unsupported."
 
 [service_config.minio_endpoint]
 used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]

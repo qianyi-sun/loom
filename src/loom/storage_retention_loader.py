@@ -10,12 +10,11 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
-from typing import Any
 
 from loom.storage_retention import RetentionConfig, RetentionRule
 
 _REQUIRED_TOP_LEVEL = {"backend"}
-_KNOWN_RULE_FIELDS = {"bucket", "strategy", "days", "hours", "rule_id"}
+_KNOWN_RULE_FIELDS = {"bucket", "strategy", "days", "hours"}
 
 
 def load_retention_config(path: Path) -> RetentionConfig:
@@ -42,8 +41,15 @@ def load_retention_config(path: Path) -> RetentionConfig:
             f"{sorted(missing)}",
         )
 
-    backend = str(raw["backend"]).strip()
-    rules_raw: list[dict[str, Any]] = list(raw.get("retention", []))
+    unknown = set(raw) - {"backend", "retention"}
+    if unknown:
+        raise ValueError(f"storage-lifecycle.toml has unknown keys: {sorted(unknown)}")
+    if not isinstance(raw["backend"], str):
+        raise ValueError("storage-lifecycle backend must be a string")
+    backend = raw["backend"].strip()
+    rules_raw = raw.get("retention", [])
+    if not isinstance(rules_raw, list):
+        raise ValueError("retention must be an array of TOML tables")
     rules: list[RetentionRule] = []
     for i, entry in enumerate(rules_raw):
         if not isinstance(entry, dict):
@@ -58,11 +64,13 @@ def load_retention_config(path: Path) -> RetentionConfig:
                 f"has unknown keys: {sorted(unknown)} "
                 f"(known: {sorted(_KNOWN_RULE_FIELDS)})",
             )
+        missing_fields = {"bucket", "strategy"} - set(entry)
+        if missing_fields:
+            raise ValueError(f"[[retention]] entry #{i} missing fields: {sorted(missing_fields)}")
         rules.append(RetentionRule(
-            bucket=str(entry["bucket"]),
+            bucket=entry["bucket"],
             strategy=entry["strategy"],
             days=entry.get("days"),
             hours=entry.get("hours"),
-            rule_id=entry.get("rule_id"),
         ))
     return RetentionConfig(backend=backend, rules=tuple(rules))

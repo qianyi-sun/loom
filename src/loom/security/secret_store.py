@@ -438,6 +438,12 @@ class LocalEncryptedSecretStore:
                 f"new_master_key length {len(new_master_key)} != "
                 f"{_MASTER_KEY_LEN}",
             )
+        # Lock before decrypting so rewrap and collection cannot act on stale rows.
+        # populate_existing also refreshes any row already in this session.
+        await self._session.execute(
+            select(Secret).where(Secret.ref == ref).with_for_update()
+            .execution_options(populate_existing=True),
+        )
         plaintext = await self.get(ref)
         new_aead = AESGCM(new_master_key)
         new_nonce = os.urandom(_NONCE_LEN)
@@ -486,6 +492,9 @@ async def assert_existing_secrets_decryptable(session: AsyncSession) -> int:
     for ref in refs:
         try:
             await store.get(ref)
+        except SecretNotFoundError:
+            # A concurrent retirement collector may remove a ref after the scan.
+            continue
         except DecryptError as exc:
             raise DecryptError(
                 "SecretStore startup validation failed for "

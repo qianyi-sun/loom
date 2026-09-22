@@ -10639,6 +10639,15 @@ class Secret(Base):
     are re-encrypted in place inside the rotation transaction."""
 
     __tablename__ = "secrets"
+    __table_args__ = (
+        Index(
+            "secrets_provider_retired_idx", "provider_retired_at", "ref",
+            postgresql_where=text("provider_retired_at IS NOT NULL"),
+        ),
+    )
+    provider_retired_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
     ref: Mapped[str] = mapped_column(Text, primary_key=True)
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     # 12-byte AES-GCM nonce.

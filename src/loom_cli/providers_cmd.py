@@ -545,8 +545,8 @@ def _rotate_key(args: argparse.Namespace) -> int:
          under a fresh ref.
       2. `provider_connections.encrypted_api_key_ref` is swapped to
          the new ref; the row's `updated_at` advances.
-      3. The old secret stays decryptable but is no longer referenced
-         by a connection.
+      3. The old secret stays decryptable for at least 24 hours; the
+         service reclaims it once no active or historical consumer needs it.
 
     Gateway-side: there is no in-memory cache for provider connection
     rows (the gateway looks up by id per-request — see
