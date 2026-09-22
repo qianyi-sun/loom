@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  fetchServedBuildInfo,
   FrontendConfigLoadError,
   frontendHomePath,
   getFrontendConfig,
@@ -277,5 +278,100 @@ describe("frontend runtime config", () => {
         "/",
       );
     }
+  });
+
+  it("#2009: resolves the served build fields when present", () => {
+    const config = resolveFrontendConfig(
+      {
+        environment: "development",
+        environmentLabel: "Development",
+        routePath: "/dev",
+        apiBase: "/dev",
+        buildRevision: "a".repeat(40),
+        sourceRef: "refs/heads/dev",
+        buildTime: "2026-09-22T10:00:00Z",
+      },
+      new URL("https://yylx.world/dev/library"),
+    );
+
+    expect(config.servedBuildRevision).toBe("a".repeat(40));
+    expect(config.servedSourceRef).toBe("refs/heads/dev");
+    expect(config.servedBuildTime).toBe("2026-09-22T10:00:00Z");
+  });
+
+  it("#2009: treats missing or 'unknown' served build fields as null, never a load failure", () => {
+    const missing = resolveFrontendConfig(
+      {
+        environment: "development",
+        environmentLabel: "Development",
+        routePath: "/dev",
+        apiBase: "/dev",
+      },
+      new URL("https://yylx.world/dev/library"),
+    );
+    expect(missing.servedBuildRevision).toBeNull();
+
+    const placeholder = resolveFrontendConfig(
+      {
+        environment: "development",
+        environmentLabel: "Development",
+        routePath: "/dev",
+        apiBase: "/dev",
+        buildRevision: "unknown",
+        sourceRef: "unknown",
+        buildTime: "unknown",
+      },
+      new URL("https://yylx.world/dev/library"),
+    );
+    expect(placeholder.servedBuildRevision).toBeNull();
+    expect(placeholder.servedSourceRef).toBeNull();
+    expect(placeholder.servedBuildTime).toBeNull();
+  });
+
+  it("#2009: fetchServedBuildInfo re-fetches independently of startup config state", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          environment: "development",
+          environmentLabel: "Development",
+          routePath: "/dev",
+          apiBase: "/dev",
+          buildRevision: "b".repeat(40),
+          sourceRef: "refs/heads/dev",
+          buildTime: "2026-09-22T11:00:00Z",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    window.history.replaceState(null, "", "/dev/library");
+
+    const result = await fetchServedBuildInfo();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/dev/loom-frontend-config.json",
+      expect.objectContaining({ cache: "no-store" }),
+    );
+    expect(result).toEqual({
+      revision: "b".repeat(40),
+      sourceRef: "refs/heads/dev",
+      buildTime: "2026-09-22T11:00:00Z",
+    });
+    // Never mutates the config startup consumers rely on for API routing.
+    expect(getFrontendConfig().environment).toBe("local");
+  });
+
+  it("#2009: fetchServedBuildInfo never throws — an update check must not block the app", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+    await expect(fetchServedBuildInfo()).resolves.toBeNull();
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("not json", { status: 200 }),
+    );
+    await expect(fetchServedBuildInfo()).resolves.toBeNull();
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("server error", { status: 500 }),
+    );
+    await expect(fetchServedBuildInfo()).resolves.toBeNull();
   });
 });

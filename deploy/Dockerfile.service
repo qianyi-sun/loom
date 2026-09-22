@@ -24,8 +24,13 @@ RUN chmod -R a+rX ./src ./packages ./migrations ./database/capacity_guard_migrat
     python -c 'from nebius.sdk import SDK; import loom_execution_actuator.task_image_runtime'
 ARG LOOM_BUILD_SHA=unknown
 LABEL org.opencontainers.image.revision="${LOOM_BUILD_SHA}"
+# #2009: /api/v1/version reads these two files (loom_service.build_info) to
+# report this instance's own build identity without querying GitHub, k8s,
+# or the database. Build time is informational only, never a trust input.
 RUN install -d -m 0755 /opt/loom && \
     printf '%s\n' "${LOOM_BUILD_SHA}" > /opt/loom/build-sha && \
-    chmod 0444 /opt/loom/build-sha
+    chmod 0444 /opt/loom/build-sha && \
+    date -u +%Y-%m-%dT%H:%M:%SZ > /opt/loom/build-time && \
+    chmod 0444 /opt/loom/build-time
 EXPOSE 8090
 CMD ["python", "-m", "loom_service"]

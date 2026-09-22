@@ -12,6 +12,18 @@ api_base="${LOOM_FRONTEND_API_BASE:-${route_path}}"
 public_origin="${LOOM_FRONTEND_PUBLIC_ORIGIN:-}"
 rehearsal_id="${LOOM_FRONTEND_REHEARSAL_ID:-}"
 
+# #2009: "currently served build" identity — image-build-time facts, never
+# deploy-manifest overridable, so a rollout's served config always reflects
+# what this container actually shipped. build_time comes from a file
+# because Dockerfile ENV can't hold a `date` computed at build time.
+build_revision="${LOOM_FRONTEND_BUILD_REVISION:-unknown}"
+source_ref="${LOOM_FRONTEND_SOURCE_REF:-unknown}"
+build_time_path="${LOOM_FRONTEND_BUILD_TIME_PATH:-/etc/loom-frontend-build-time}"
+build_time=""
+if [ -f "${build_time_path}" ]; then
+  build_time="$(cat "${build_time_path}")"
+fi
+
 case "${environment}" in
   local|development|staging|production) ;;
   *)
@@ -119,7 +131,10 @@ cat > "${tmp_path}" <<EOF
   "environmentLabel": "$(json_escape "${label}")",
   "routePath": "$(json_escape "${route_path}")",
   "apiBase": "$(json_escape "${api_base}")",
-  "apiRouteBase": "$(json_escape "${api_route_base}")"
+  "apiRouteBase": "$(json_escape "${api_route_base}")",
+  "buildRevision": "$(json_escape "${build_revision}")",
+  "sourceRef": "$(json_escape "${source_ref}")",
+  "buildTime": "$(json_escape "${build_time}")"
 }
 EOF
 mv "${tmp_path}" "${config_path}"

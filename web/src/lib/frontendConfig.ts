@@ -10,6 +10,17 @@ export interface FrontendConfig {
   routePath: string;
   apiBase: string;
   apiRouteBase: string;
+  /**
+   * #2009: the "currently served" build identity — whatever this fetch of
+   * `loom-frontend-config.json` reports right now, independent of what this
+   * tab's own JS bundle already loaded (see lib/buildInfo.ts for that).
+   * Optional/lenient: an older cached config or a field this build predates
+   * must not fail config resolution, so missing values default to `null`
+   * rather than throwing.
+   */
+  servedBuildRevision?: string | null;
+  servedSourceRef?: string | null;
+  servedBuildTime?: string | null;
 }
 
 export type FrontendConfigFailureKind = "network" | "http" | "invalid";
@@ -42,6 +53,18 @@ interface RawFrontendConfig {
   routePath?: unknown;
   apiBase?: unknown;
   apiRouteBase?: unknown;
+  buildRevision?: unknown;
+  sourceRef?: unknown;
+  buildTime?: unknown;
+}
+
+/** Lenient: a non-string, empty, or `"unknown"` placeholder all mean "not
+ * reported", never a thrown error — version metadata must never block
+ * startup. */
+function optionalBuildString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed && trimmed !== "unknown" ? trimmed : null;
 }
 
 const STAGING_REHEARSAL_ROUTE_PATTERN =
@@ -201,6 +224,9 @@ export function resolveFrontendConfig(
     routePath,
     apiBase,
     apiRouteBase: resolveApiRouteBase(raw, apiBase, location),
+    servedBuildRevision: optionalBuildString(raw.buildRevision),
+    servedSourceRef: optionalBuildString(raw.sourceRef),
+    servedBuildTime: optionalBuildString(raw.buildTime),
   };
 }
 
@@ -286,6 +312,37 @@ export function getFrontendConfig(): FrontendConfig {
 
 export function getApiBase(): string {
   return currentConfig.apiBase;
+}
+
+/**
+ * #2009: an independent, side-effect-free re-fetch of the "currently
+ * served" build identity — used by the focus-triggered staleness check.
+ * Deliberately does not touch `currentConfig`/`currentLoad`: startup
+ * config resolution and update polling are separate concerns, and a
+ * failed poll must never disturb the config the app is already running
+ * with. Never throws; a failure just means "couldn't tell right now".
+ */
+export async function fetchServedBuildInfo(): Promise<{
+  revision: string | null;
+  sourceRef: string | null;
+  buildTime: string | null;
+} | null> {
+  try {
+    const resp = await fetch(configUrlForLocation(window.location), {
+      cache: "no-store",
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    });
+    if (!resp.ok) return null;
+    const raw = (await resp.json()) as RawFrontendConfig;
+    return {
+      revision: optionalBuildString(raw.buildRevision),
+      sourceRef: optionalBuildString(raw.sourceRef),
+      buildTime: optionalBuildString(raw.buildTime),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function setFrontendConfigForTests(config: FrontendConfig | null): void {

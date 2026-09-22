@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,15 +12,23 @@ function renderNav(
   currentTeamName: string | null = null,
   currentUsername: string | null = null,
 ) {
+  // #2009: the sidebar's VersionInfo entry uses react-query for its
+  // focus-triggered build checks, so NavBar now needs a QueryClientProvider
+  // ancestor even in isolation.
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
+  });
   return render(
-    <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-      <NavBar
-        isAdmin={isAdmin}
-        currentTeamRole={currentTeamRole}
-        currentTeamName={currentTeamName}
-        currentUsername={currentUsername}
-      />
-    </MemoryRouter>,
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+        <NavBar
+          isAdmin={isAdmin}
+          currentTeamRole={currentTeamRole}
+          currentTeamName={currentTeamName}
+          currentUsername={currentUsername}
+        />
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 
