@@ -27,6 +27,11 @@ class LoomServiceSettings(_BaseSettings):
             raise ValueError("service_mode must be application or management")
         if self.service_mode == "application":
             self.storage_credentials()
+        if self.environment_management_config_file is not None and (
+            self.service_mode != "management" or self.environment_management_github_token is None
+            or not self.environment_management_github_token.get_secret_value().strip()
+        ):
+            raise ValueError("environment management configuration requires management mode and a GitHub credential")
         return self
 
     def storage_credentials(self) -> tuple[str, str]:

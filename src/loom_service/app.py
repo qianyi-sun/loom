@@ -42,6 +42,7 @@ from loom.workload_trust import WorkloadTrustContract
 from loom_service.batch_runner import run_loop as batch_run_loop
 from loom_service.behavior_pipeline_adapter import install_behavior_pipeline_public_adapter
 from loom_service.config import LoomServiceSettings
+from loom_service.environment_management.installation import ManagementInstallation
 from loom_service.environment_management.registry import ManagementError
 from loom_service.metrics import (
     HTTP_REQUEST_LATENCY_SEC,
@@ -165,6 +166,14 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         app.state.admin_secret_verifier = _load_admin_secret_verifier(settings)
         app.state.settings = settings
         app.state.session_factory = session_factory
+        if settings.environment_management_config_file is not None:
+            installation = ManagementInstallation.load(settings.environment_management_config_file)
+            client = httpx.AsyncClient(trust_env=False, timeout=30, follow_redirects=False)
+            app.state._owned_management_http_client = client
+            assert settings.environment_management_github_token is not None
+            app.state.environment_manager = await installation.manager(
+                session_factory, http=client, token=settings.environment_management_github_token.get_secret_value(),
+            )
         yield
 
     @asynccontextmanager
@@ -313,9 +322,12 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         finally:
             # SQLAlchemy engines can reconnect after dispose. Remove admission
             # access before closing its resources, including failed startup.
+            if hasattr(app.state, "environment_manager"):
+                del app.state.environment_manager
             if hasattr(app.state, "session_factory"):
                 del app.state.session_factory
             for attribute in (
+                "_owned_management_http_client",
                 "_owned_service_gateway_client",
                 "_owned_service_http_client",
             ):
