@@ -228,7 +228,9 @@ def test_nonactive_registration_cannot_render_running_stack(platform_inputs, sta
         render_environment(row, candidate, foundation, profile=profile, keyring={}, repo_root=ROOT)
 
 
-def test_import_preserves_exact_existing_names_and_buckets(platform_inputs):
+@pytest.mark.parametrize("certificate_covers_host", [True, False])
+def test_import_preserves_exact_existing_names_and_buckets(platform_inputs, certificate_covers_host):
+    from loom.nebius_environment_contract import FoundationBinding
     from loom.nebius_environment_render import render_environment
 
     config, candidate, profile = platform_inputs
@@ -238,6 +240,13 @@ def test_import_preserves_exact_existing_names_and_buckets(platform_inputs):
         **row.model_dump(), "binding_mode": "imported", "application_namespace": config["namespace"],
         "execution_namespace": config["execution_namespace"], "build_namespace": config["execution_namespace"] + "-build",
         "target_id": config["target_id"], "public_host": config["public_host"],
+    })
+    if not certificate_covers_host:
+        with pytest.raises(ValueError, match="certificate"):
+            render_environment(row, candidate, foundation, profile=profile, keyring={}, repo_root=ROOT)
+        return
+    foundation = FoundationBinding.model_validate({
+        **foundation.model_dump(), "public_dns_zone": config["public_host"].split(".", 1)[1],
     })
     result = render_environment(row, candidate, foundation, profile=profile, keyring={}, repo_root=ROOT)
     assert result.config["buckets"] == config["buckets"]
