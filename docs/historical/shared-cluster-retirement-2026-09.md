@@ -28,7 +28,11 @@ Hosted deployment uses `scripts/ops/deploy_nebius_platform.py`, preserving
 its target, backup and migration checks. The old broker entrypoint is retired;
 `loom cluster up` refuses hosted targets. Cluster release evidence no longer
 requires external worker pools, Slurm authority, GB10 status or GB10 mirror probes.
-CI, native AMD64/ARM64 image builds and publication use GitHub-hosted runners.
+CI, image builds and publication use GitHub-hosted runners. The current
+ordinary hosted image workflow selects AMD64 builds; ARM64 publication is not
+a current hosted release prerequisite. This does not remove local development
+on Apple Silicon. See the [image workflow](../../.github/workflows/images.yml)
+for the current build selection.
 The retired manager, executor and personal-development images are no longer
 built or published. Trusted image reconciliation uses a current-run publication
 receipt after verified architecture and manifest publication, without a fleet
