@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loom.nebius_kubernetes import (
     NebiusKubernetesConnection,
@@ -20,6 +20,9 @@ from loom_execution_capacity_collector.contracts import (
     NodeTemplateSample,
     ResourceTotals,
 )
+
+if TYPE_CHECKING:
+    from loom_execution_capacity_collector.pool import PoolObservationScope, PoolPodClassifier
 
 _MIB = Decimal(1024 * 1024)
 _TARGET_ANNOTATION = "loom.openai.com/target-id"
@@ -450,6 +453,7 @@ class InClusterKubernetesCapacityReader:
         namespace: str,
         target_id: str,
         node_label_selector: str,
+        pool: PoolPodClassifier | None = None,
     ) -> KubernetesCapacitySnapshot:
         try:
             nodes, node_version = self._list_all(
@@ -474,6 +478,8 @@ class InClusterKubernetesCapacityReader:
             if isinstance(exc, KubernetesObservationError):
                 raise
             raise KubernetesObservationError("Kubernetes capacity list failed") from exc
+        if pool is not None:
+            pool.validate_inventory(nodes, pods)
         node_names = {
             str(node.metadata.name)
             for node in nodes
@@ -505,23 +511,36 @@ class InClusterKubernetesCapacityReader:
         reasons: dict[str, int] = {}
         by_node: dict[str, list[Any]] = {name: [] for name in node_names}
         pending_pods: list[ManagedPodPlacement] = []
+        managed_by_uid: dict[str, ManagedPodPlacement] = {}
+        observed_reservations: set[str] = set()
         for pod in pods:
             phase = getattr(pod.status, "phase", None)
             if phase in {"Succeeded", "Failed"}:
                 continue
-            node_name = getattr(pod.spec, "node_name", None)
-            target = _target_pod(pod, namespace=namespace, target_id=target_id)
+            node_name = getattr(pod.spec, "node_name", None) or None
+            target = (_target_pod(pod, namespace=namespace, target_id=target_id)
+                      if pool is None else pool.registered(pod))
+            include_pending = target if pool is None else pool.includes_pending(pod)
+            managed = (_managed_placement(pod) if target else None) if pool is None else pool.managed(pod)
+            if managed is not None:
+                if pool is not None and managed.lease_id in observed_reservations:
+                    raise KubernetesObservationError("multiple live Pods for one shared reservation")
+                observed_reservations.add(managed.lease_id)
+                managed_by_uid[managed.uid] = managed
             if target and node_name is not None and node_name not in node_names:
                 raise KubernetesObservationError(
                     "managed target Pod is scheduled outside the selected node group"
                 )
-            if node_name in node_names or (target and node_name is None and phase == "Pending"):
+            if node_name in node_names or (include_pending and node_name is None and phase == "Pending"):
                 requested_rows.append(_pod_request(pod))
             if node_name in node_names:
                 by_node[node_name].append(pod)
-            elif target and node_name is None and phase == "Pending":
-                pending_pods.append(_managed_placement(pod))
-            if not target:
+            elif include_pending and node_name is None and phase == "Pending":
+                pending_pods.append(managed if managed is not None else ManagedPodPlacement(
+                    uid=_identity(pod.metadata.uid, name="Pod UID"),
+                    lease_id="foreign-pod:" + pod.metadata.uid, generation=1, requests=_pod_request(pod),
+                ))
+            if not (target or (pool is not None and (node_name in node_names or include_pending))):
                 continue
             pending, unschedulable, image_pull, reason = _pending_state(pod)
             pending_jobs += int(pending)
@@ -547,9 +566,9 @@ class InClusterKubernetesCapacityReader:
                 pod_slots=_positive_int(node.status.allocatable.get("pods"), name="node Pod slots"),
                 used_pod_slots=len(assigned),
                 managed_pods=[
-                    _managed_placement(pod)
+                    managed_by_uid[pod.metadata.uid]
                     for pod in assigned
-                    if _target_pod(pod, namespace=namespace, target_id=target_id)
+                    if pod.metadata.uid in managed_by_uid
                 ],
             )
             placements.append(placement)
@@ -561,6 +580,7 @@ class InClusterKubernetesCapacityReader:
                 "nodes": str(node_version),
                 "pods": str(pod_version),
                 "daemonsets": str(daemon_version),
+                **({"pool_scope": pool.fingerprint} if pool is not None else {}),
             },
             active_nodes=len(nodes),
             ready_nodes=sum(_node_ready(node) for node in nodes),
@@ -615,6 +635,21 @@ class InClusterKubernetesCapacityReader:
             namespace=namespace,
             target_id=target_id,
             node_label_selector=node_label_selector,
+        )
+
+    async def capture_pool(self, *, scope: PoolObservationScope) -> KubernetesCapacitySnapshot:
+        """One physical inventory; never combine per-environment snapshots.
+
+        Only protected registry/Job-journal bindings may populate ``scope``.
+        The global admission writer must separately bind this selector to the
+        native node group and reject stale/incomplete provider observations.
+        """
+        from loom_execution_capacity_collector.pool import PoolPodClassifier
+
+        pool = PoolPodClassifier(scope)
+        return await asyncio.to_thread(
+            self._capture_sync, namespace="", target_id="",
+            node_label_selector=pool.node_selector, pool=pool,
         )
 
 

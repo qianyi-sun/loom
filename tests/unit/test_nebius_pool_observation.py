@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
 from kubernetes import client as k8s
+from pydantic import ValidationError
 
-from loom_control_plane.execution_placement import plan_placement
+from loom_control_plane.execution_placement import PlacementUnavailableError, plan_placement
 from loom_execution_capacity_collector.contracts import (
     CapacityPlacement,
     NodeGroupPlacement,
@@ -126,6 +128,8 @@ async def test_two_environments_observe_one_pool_and_distinct_global_grants():
     ] + [("unobserved:1", demand)], sample=None)
     assert result.additional_nodes == 0
     assert len(result.observed_lease_ids) == 2
+    with pytest.raises(PlacementUnavailableError):
+        plan_placement(_placement(snapshot), [("new-a:1", demand), ("new-b:1", demand)], sample=None)
 
 
 @pytest.mark.asyncio
@@ -197,3 +201,106 @@ async def test_registered_work_scheduled_outside_pool_is_not_invented_free_capac
     pod.spec.node_name = "different-pool"
     with pytest.raises(KubernetesObservationError, match="outside"):
         await _capture([_node()], [pod])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["verifier", "task_image_build"])
+async def test_builds_and_verifiers_share_the_same_physical_accounting(kind):
+    from loom_execution_capacity_collector.pool import PoolObservationScope
+
+    data = _scope().model_dump()
+    data["jobs"][0]["workload_kind"] = kind
+    pod = _pod(1, pending=True)
+    if kind == "task_image_build":
+        data["jobs"][0].update(namespace="run-1-build", lease_id="task-image:materialization")
+        pod.metadata.namespace = "run-1-build"
+        pod.metadata.labels = {"app.kubernetes.io/component": "task-image-builder",
+                               "loom.materialization-id": "materialization", "loom.lease-epoch": "1"}
+    scope = PoolObservationScope.model_validate(data)
+    snapshot = await _capture([], [pod], scope)
+    assert snapshot.pending_pods[0].lease_id == "reservation:00000000-0000-0000-0000-000000000015"
+    assert snapshot.pending_pods[0].requests.cpu_millis == 1000
+    assert snapshot.pending_jobs == 1
+
+
+@pytest.mark.asyncio
+async def test_terminating_work_sidecar_init_peak_and_foreign_resident_pods_are_charged():
+    pod = _pod(1)
+    pod.metadata.deletion_timestamp = datetime.now(UTC)
+    pod.spec.init_containers = [
+        k8s.V1Container(name="sidecar", restart_policy="Always",
+                        resources=k8s.V1ResourceRequirements(requests={"cpu": "100m"})),
+        k8s.V1Container(name="init", resources=k8s.V1ResourceRequirements(requests={"cpu": "2"})),
+    ]
+    pod.spec.overhead = {"cpu": "50m"}
+    pod.spec.containers[0].env = [k8s.V1EnvVar(name="SECRET", value="never-export")]
+    pod.spec.containers[0].command = ["never-export-command"]
+    foreign = _pod(2)
+    foreign.metadata.namespace = "outside"
+    # A running foreign Pod counts even if its selector no longer matches.
+    foreign.spec.node_selector = {"loom.nebius/role": "different-pool"}
+    snapshot = await _capture([_node()], [pod, foreign])
+    assert snapshot.nodes[0].requested.cpu_millis == 3150
+    assert snapshot.nodes[0].used_pod_slots == 2
+    assert snapshot.nodes[0].managed_pods[0].requests.cpu_millis == 2150
+    assert "never-export" not in snapshot.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_lost_job_receipt_keeps_pod_charge_without_claiming_observation():
+    from loom_execution_capacity_collector.pool import PoolObservationScope
+
+    data = _scope().model_dump()
+    data["jobs"] = []
+    snapshot = await _capture([_node()], [_pod(1)], PoolObservationScope.model_validate(data))
+    assert snapshot.nodes[0].managed_pods == []
+    assert snapshot.nodes[0].requested.cpu_millis == 1000
+
+
+@pytest.mark.asyncio
+async def test_pool_scope_fingerprint_is_order_independent_and_binds_gateway_receipts():
+    from loom_execution_capacity_collector.pool import PoolObservationScope
+
+    scope = _scope()
+    first = await _capture([], [], scope)
+    reordered = scope.model_dump()
+    reordered["environments"] = list(reversed(reordered["environments"]))
+    reordered["jobs"] = list(reversed(reordered["jobs"]))
+    second = await _capture([], [], PoolObservationScope.model_validate(reordered))
+    assert first.source_versions["pool_scope"] == second.source_versions["pool_scope"]
+    reordered["jobs"][0]["job_uid"] = "new-job-uid"
+    third = await _capture([], [], PoolObservationScope.model_validate(reordered))
+    assert first.source_versions["pool_scope"] != third.source_versions["pool_scope"]
+
+
+@pytest.mark.parametrize("change", [
+    "environment", "incarnation", "namespace", "target", "job_uid", "job_name", "reservation",
+    "wrong_incarnation", "wrong_namespace", "nil", "empty_selector", "selector_injection",
+])
+def test_ambiguous_or_unbound_management_scope_is_rejected(change):
+    from loom_execution_capacity_collector.pool import PoolObservationScope
+
+    data = _scope().model_dump()
+    if change in {"environment", "incarnation", "namespace", "target"}:
+        key = {"environment": "environment_id", "incarnation": "incarnation",
+               "namespace": "execution_namespace", "target": "target_id"}[change]
+        data["environments"][1][key] = data["environments"][0][key]
+    elif change in {"job_uid", "job_name", "reservation"}:
+        key = "reservation_id" if change == "reservation" else change
+        data["jobs"][1][key] = data["jobs"][0][key]
+        if change == "job_name":
+            # Same names in different namespaces are legitimate; duplicate the
+            # exact namespace/name pair within a single registered environment.
+            data["jobs"][1].update(environment_id=UUID(int=1), incarnation=UUID(int=11), namespace="run-1")
+    elif change == "wrong_incarnation":
+        data["jobs"][0]["incarnation"] = UUID(int=99)
+    elif change == "wrong_namespace":
+        data["jobs"][0]["namespace"] = "run-1-build"
+    elif change == "nil":
+        data["jobs"][0]["reservation_id"] = UUID(int=0)
+    elif change == "empty_selector":
+        data["node_selector"] = {}
+    else:
+        data["node_selector"] = {"pool": "x,other=true"}
+    with pytest.raises(ValidationError):
+        PoolObservationScope.model_validate(data)
