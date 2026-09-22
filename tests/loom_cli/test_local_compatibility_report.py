@@ -139,7 +139,7 @@ def test_report_without_profile_labels_schema_check_not_runtime_qualification(
     assert payload["compatibility_report"]["runtime_verified"] is False
 
 
-def test_report_includes_raw_harbor_missing_identity_without_losing_next_task(
+def test_report_supplies_raw_harbor_identity_from_source_context(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     bundle = _write_bundle(tmp_path, "anonymous")
@@ -148,11 +148,11 @@ def test_report_includes_raw_harbor_missing_identity_without_losing_next_task(
 
     rc, payload = _report(tmp_path, capsys, profile=False)
 
-    assert rc == 1
+    assert rc == 0
     reports = payload["compatibility_report"]["tasks"]
     assert len(reports) == 2
-    assert reports[0]["status"] == "blocked"
-    assert "task.id" in reports[0]["diagnostics"][0]["reason"]
+    assert reports[0]["status"] == "schema_valid"
+    assert reports[0]["task_id"] == "slice/anonymous"
     assert reports[1]["status"] == "schema_valid"
 
 

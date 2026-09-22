@@ -112,6 +112,20 @@ def test_registration_normalizes_terminal_bench_shape_and_retains_source_identit
     assert b"[metadata]" in path.read_bytes()
 
 
+def test_registration_supplies_anonymous_harbor_identity_without_changing_source(tmp_path):
+    root = _bundle(tmp_path)
+    path = root / "task.toml"
+    source = b'[metadata]\ntags = ["shell"]\n[environment]\ncpus = 2\nmemory = "4G"\nstorage = "10G"\n'
+    path.write_bytes(source)
+
+    registered = _module().prepare_task_bundle_registration(root, task_id="custom/alpha")
+
+    assert registered.task_config.task.id == "custom/alpha"
+    assert registered.task_config.environment.cpus == 2
+    assert registered.task_config.environment.memory_mb == 4096
+    assert path.read_bytes() == source
+
+
 def test_registration_views_cannot_change_the_frozen_binding(tmp_path):
     root = _bundle(tmp_path)
     registered = _module().prepare_task_bundle_registration(root, task_id="bench/local-id")
