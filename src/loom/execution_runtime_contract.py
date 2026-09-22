@@ -21,6 +21,7 @@ from pydantic import (
 
 from loom.execution_contract import VerifierTopology, WorkloadRequirementsV1
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
+from loom.sandbox_identity import SandboxIdentityV1
 
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -181,6 +182,15 @@ class SidecarContainerV1(_Strict):
     readiness_probe: ProbeV1
     depends_on: tuple[str, ...] = Field(default=(), max_length=32)
     private_sandbox: bool = False
+    identity: SandboxIdentityV1 | None = None
+
+    @model_validator(mode="after")
+    def _identity_is_private(self) -> SidecarContainerV1:
+        if self.identity is not None and not self.private_sandbox:
+            raise ValueError("task identity requires a private sandbox")
+        if self.identity is not None and "HOME" in self.environment:
+            raise ValueError("sandbox HOME must be declared by its identity")
+        return self
 
     @field_validator("image_ref")
     @classmethod
@@ -421,6 +431,8 @@ class ExecutionRuntimePlanV1(_Strict):
         for sidecar in payload["sidecars"]:
             if not sidecar["private_sandbox"]:
                 sidecar.pop("private_sandbox")
+            if sidecar["identity"] is None:
+                sidecar.pop("identity")
         return payload
 
     @property

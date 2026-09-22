@@ -36,6 +36,7 @@ from loom.execution_runtime_contract import (
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.pipeline.keys import canonical_digest
+from loom.sandbox_identity import resolve_sandbox_identity
 from loom.task_image_materialization import TaskImageExecutionGrantV1, resolve_prepared_task
 
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
@@ -122,6 +123,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     controller_resources: ControllerComputeResourcesV1 | None = None
     default_task_resource_requests: ExecutionResourceRequestsV1 | None = None
     task_resource_requests: dict[str, TaskExecutionResourceRequestsV1] = Field(default_factory=dict)
+    supports_task_identity: bool = False
     runtime_image_ref: str
     runtime_binary_sha256: str = Field(pattern=_SHA256.pattern)
     image_admission: ExecutionImageAdmissionBundleV1
@@ -143,6 +145,8 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
             payload.pop("default_task_resource_requests", None)
         if not self.service_lifecycle_ready:
             payload.pop("service_lifecycle_ready", None)
+        if not self.supports_task_identity:
+            payload.pop("supports_task_identity", None)
         return payload
 
     @model_validator(mode="after")
@@ -281,12 +285,19 @@ def automatic_service_execution_rejections(
     elif env.cpus > 128 or env.memory_mb > 1_048_576 or env.storage_mb > 1_048_576:
         reasons.append("resource_limits_out_of_range")
     if (env.workdir not in {PurePosixPath("/workspace"), PurePosixPath("/app")}
-        if terminus else env.workdir != PurePosixPath("/workspace")) or env.user != "agent":
+        if terminus else env.workdir != PurePosixPath("/workspace")) or (not terminus and env.user != "agent"):
         reasons.append("standard_workspace_identity_required")
+    if terminus:
+        try:
+            resolve_sandbox_identity(env.user, env.environment.get("HOME"))
+            if task.verifier.user is not None:
+                resolve_sandbox_identity(task.verifier.user, env.environment.get("HOME"))
+        except ValueError:
+            reasons.append("unsupported_task_identity")
     if env.baseline_network_policy.kind != "gateway-only":
         reasons.append("gateway_only_network_required")
     if (
-        env.environment
+        (set(env.environment) - ({"HOME"} if terminus else set()))
         or env.sidecars
         or env.extra_hosts
         or env.dns
@@ -300,7 +311,7 @@ def automatic_service_execution_rejections(
         reasons.append("agent_capabilities_unsupported")
     if task.agent.extra_mcp_servers or task.agent.skills or task.agent.user is not None:
         reasons.append("extended_agent_runtime_unsupported")
-    if task.verifier.user is not None:
+    if task.verifier.user is not None and not terminus:
         reasons.append("custom_verifier_identity_unsupported")
     if len(task.steps) != 1 or task.multi_step is not None:
         reasons.append("single_step_required")
@@ -402,10 +413,12 @@ def compile_service_execution_plan(
         admitted = {item.statement.image_ref for item in profile.image_admission.admissions}
         profile_reasons = (() if selected_agent_image in admitted
                            else ("task_image_not_in_runtime_profile",))
+        if _requires_task_identity(task) and not profile.supports_task_identity:
+            profile_reasons += ("task_identity_runtime_unavailable",)
     if "terminus_controller_unavailable" in profile_reasons:
         raise ValueError("active runtime profile has no Terminus controller image")
     if profile_reasons:
-        raise ValueError("task image is not provided by the active runtime profile")
+        raise ValueError("task image is not provided by the active runtime profile: " + ",".join(profile_reasons))
     binding = service_execution_input_binding(source_provenance)
     assert binding is not None
     assert task.environment.cpus is not None
@@ -599,6 +612,11 @@ def freeze_agent_runtime_releases(
     })
 
 
+def _requires_task_identity(task: TaskConfig) -> bool:
+    return (task.environment.user != "agent" or "HOME" in task.environment.environment
+            or task.verifier.user is not None)
+
+
 def runtime_profile_rejections(
     task: TaskConfig, trial: TrialConfig, profile: ServiceExecutionRuntimeProfileV1,
     *, allow_task_image_preparation: bool = False,
@@ -611,6 +629,8 @@ def runtime_profile_rejections(
     if trial.agent_name != "terminus-2":
         return (() if task.environment.docker_image == profile.task_image_ref
                 else ("task_image_not_in_runtime_profile",))
+    if _requires_task_identity(task) and not profile.supports_task_identity:
+        return ("task_identity_runtime_unavailable",)
     agent_image = controller_image_for_trial(profile, trial)
     if agent_image is None:
         return ("terminus_controller_unavailable",)
@@ -655,10 +675,17 @@ def _compile_terminus_plan(
     for role in ("task-sandbox", "verifier-sandbox"):
         socket = f"/loom/sandboxes/{role}/sandbox.sock"
         probe = ProbeV1(kind="exec", argv=(binary, "--check-socket", socket))
+        user = (task.verifier.user if role == "verifier-sandbox" and task.verifier.user is not None
+                else env.user)
+        identity = resolve_sandbox_identity(
+            user, env.environment.get("HOME"),
+            default_uid=profile.run_as_user, default_gid=profile.run_as_group,
+        )
         sidecars.append(SidecarContainerV1(
             role_name=role, image_ref=env.docker_image,
             argv=(binary, "--socket", socket, "--exec-timeout-seconds", exec_limit), resources=resources,
             startup_probe=probe, readiness_probe=probe, private_sandbox=True,
+            identity=identity,
         ))
     phase_env = {
         "LOOM_TASK_TRIAL_JSON": trial.model_dump_json(exclude_defaults=True),

@@ -54,6 +54,7 @@ type probe struct {
 }
 
 type sidecar struct {
+	Identity       *sandboxIdentity  `json:"identity,omitempty"`
 	PrivateSandbox bool              `json:"private_sandbox,omitempty"`
 	RoleName       string            `json:"role_name"`
 	ImageRef       string            `json:"image_ref"`
@@ -63,6 +64,12 @@ type sidecar struct {
 	StartupProbe   probe             `json:"startup_probe"`
 	ReadinessProbe probe             `json:"readiness_probe"`
 	DependsOn      []string          `json:"depends_on"`
+}
+
+type sandboxIdentity struct {
+	RunAsUser  *int64 `json:"run_as_user"`
+	RunAsGroup *int64 `json:"run_as_group"`
+	Home       string `json:"home"`
 }
 
 type taskInput struct {
@@ -476,6 +483,23 @@ func (p phase) validate() error {
 }
 
 func (s sidecar) validate(known map[string]bool) error {
+	if s.Identity != nil {
+		i := s.Identity
+		if !s.PrivateSandbox || i.RunAsUser == nil || i.RunAsGroup == nil || *i.RunAsUser < 0 || *i.RunAsUser > 2_147_483_647 || *i.RunAsGroup < 0 || *i.RunAsGroup > 2_147_483_647 {
+			return fmt.Errorf("invalid private sandbox identity")
+		}
+		if _, present := s.Environment["HOME"]; present {
+			return fmt.Errorf("sandbox HOME must use identity")
+		}
+		if len(i.Home) > 4096 || !regexp.MustCompile(`^/(?:[-A-Za-z0-9._]+/)*[-A-Za-z0-9._]+$`).MatchString(i.Home) || filepath.Clean(i.Home) != i.Home {
+			return fmt.Errorf("invalid sandbox HOME")
+		}
+		for _, protected := range []string{"/proc", "/sys", "/dev", "/run", "/loom", "/tests", "/verifier", "/solution"} {
+			if i.Home == protected || strings.HasPrefix(i.Home, protected+"/") {
+				return fmt.Errorf("protected sandbox HOME")
+			}
+		}
+	}
 	if s.PrivateSandbox != (s.RoleName == "task-sandbox" || s.RoleName == "verifier-sandbox") {
 		return fmt.Errorf("sandbox roles require private mounts")
 	}

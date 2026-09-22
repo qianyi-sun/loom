@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from loom.dockerfile_instructions import DockerfileParseError, dockerfile_instructions
+from loom.sandbox_identity import SandboxIdentityV1, resolve_sandbox_identity
 
 OFFLINE_SCRIPT = "verifier/harbor-offline.sh"
 _DOCKERFILE_SUFFIX = ".loom-nebius"
@@ -96,7 +97,11 @@ def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
             command,
         )
         if apt:
-            words = shlex.split(apt[1])
+            # Relocate only the conventional apt metadata cleanup. It is
+            # already performed after build-time dependency installation;
+            # arbitrary chained commands still fail the package recognizer.
+            package_args = re.sub(r"\s*&&\s*rm -rf /var/lib/apt/lists/\*\s*$", "", apt[1])
+            words = shlex.split(package_args)
             names = [word for word in words if word not in {"-y", "--no-install-recommends"}]
             if (
                 "-y" not in words
@@ -260,7 +265,9 @@ def _bundle_path(staged: Path, value: str, *, directory: bool = False) -> Path:
     return path
 
 
-def _preparation_dockerfile(original: str, bootstrap: HarborOfflineBootstrap, workdir: str) -> str:
+def _preparation_dockerfile(
+    original: str, bootstrap: HarborOfflineBootstrap, workdir: str, identity: SandboxIdentityV1,
+) -> str:
     try:
         instructions = dockerfile_instructions(original)
     except DockerfileParseError as exc:
@@ -318,22 +325,41 @@ def _preparation_dockerfile(original: str, bootstrap: HarborOfflineBootstrap, wo
         f"RUN mkdir -p /opt/verifier-assets && curl --fail --location {shlex.quote(url)} -o /opt/verifier-assets/{name} && chmod 644 /opt/verifier-assets/{name}\n"
         for url, name in bootstrap.downloads
     )
+    uid, gid, home = identity.run_as_user, identity.run_as_group, identity.home
+    name = "agent" if uid == 65532 else f"loom-task-{uid}"
+    identity_setup = (
+        f"(getent group {gid} >/dev/null || groupadd --gid {gid} {name}) && "
+        f"(getent passwd {uid} >/dev/null || useradd --uid {uid} --gid {gid} --home-dir {home} {name})"
+    )
+    workspace_setup = (
+        f"mkdir -p {workdir} {home} /tests /logs/verifier /loom/verifier && "
+        f"chown -R {uid}:{gid} {workdir} {home} /tests /logs/verifier /loom/verifier"
+    )
+    if uid != 65532 or gid != 65532 or home != "/home/agent":
+        # Preserve authored ownership within the task image for explicit users.
+        # Only newly created HOME/workspace roots need initial ownership; the
+        # private verifier/harness directories are controlled by preparation.
+        workspace_setup = (
+            f'for directory in {workdir} {home}; do '
+            f'if [ ! -e "$directory" ]; then mkdir -p "$directory" && '
+            f'chown {uid}:{gid} "$directory"; fi; done && '
+            f"mkdir -p /tests /logs/verifier /loom/verifier && "
+            f"chown -R {uid}:{gid} /tests /logs/verifier /loom/verifier"
+        )
     return (
         original.rstrip()
-        + f"""\n\n# Loom Nebius: build-only nonroot/offline preparation; original task above.
+        + f"""\n\n# Loom Nebius: build-only harness/verifier preparation; original task above.
 USER root
 COPY --from=ghcr.io/astral-sh/uv:0.9.5 /uv /usr/local/bin/loom-nebius-uv
 RUN apt-get update -qq && apt-get install -y --no-install-recommends {" ".join(packages)} && \\
     {python_setup} && \\
     loom-nebius-uv pip install --python /opt/verifier/bin/python {requirements} && \\
-    (getent group 65532 >/dev/null || groupadd --gid 65532 agent) && \\
-    (getent passwd 65532 >/dev/null || useradd --uid 65532 --gid 65532 --home-dir /home/agent agent) && \\
-    mkdir -p {workdir} /home/agent /tests /logs/verifier /loom/verifier && \\
-    chown -R 65532:65532 {workdir} /home/agent /tests /logs/verifier /loom/verifier && \\
+    {identity_setup} && \\
+    {workspace_setup} && \\
     rm -rf /var/lib/apt/lists/* /root/.cache
-{assets}ENV HOME=/home/agent
+{assets}ENV HOME={home}
 # Preserve the base image PATH and agent interpreter; verifier uses its own venv.
-USER 65532:65532
+USER {uid}:{gid}
 WORKDIR {workdir}
 """
     )
@@ -363,7 +389,10 @@ def prepare_nebius_terminus_image(staged: Path, environment: dict[str, Any]) -> 
     if not source.is_file() or not test_script.is_file():
         raise ValueError("nebius-terminus: original Dockerfile and tests/test.sh are required")
     bootstrap = adapt_harbor_test_script(test_script.read_text())
-    dockerfile = _preparation_dockerfile(source.read_text(), bootstrap, workdir)
+    identity = resolve_sandbox_identity(
+        environment.get("user", "agent"), (environment.get("environment") or {}).get("HOME"),
+    ) or SandboxIdentityV1(run_as_user=65532, run_as_group=65532, home="/home/agent")
+    dockerfile = _preparation_dockerfile(source.read_text(), bootstrap, workdir, identity)
     target_name = source_name + _DOCKERFILE_SUFFIX
     target = _bundle_path(staged, target_name)
     offline = _bundle_path(staged, OFFLINE_SCRIPT)

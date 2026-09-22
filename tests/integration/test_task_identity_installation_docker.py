@@ -82,7 +82,7 @@ async def sandboxes(native_binary, tmp_path):
 async def test_root_installs_real_deb_and_fresh_verifier_observes_owned_system_state(sandboxes, tmp_path):
     agent, verifier, default = sandboxes
     for driver in (agent, verifier):
-        result = await driver.exec("test ! -e /usr/local/share/loom-identity-proof && ! dpkg-query -W loom-identity-proof")
+        result = await driver.exec("mkdir -p /app && test ! -e /usr/local/share/loom-identity-proof && ! dpkg-query -W loom-identity-proof")
         assert result.return_code == 0, result.stderr
     default_result = await default.exec("id -u; id -g; printf '%s\\n' \"$HOME\"; touch /usr/local/forbidden")
     assert default_result.return_code != 0

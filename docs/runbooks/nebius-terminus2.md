@@ -354,6 +354,38 @@ verifier Python under `/opt/verifier-python`, preserving the task interpreter
 and PATH even when the task image uses an older Python. Incompatible dependency
 pins still fail the image build; they are never silently omitted or relaxed.
 
+Task users are container-local declarations. With a deployment profile that
+explicitly enables `supports_task_identity`, Terminus accepts `environment.user`
+as `root`, `0`, or a numeric `UID:GID`. Numeric nonroot identities also require
+`environment.environment.HOME`; HOME must be an absolute canonical directory
+outside the private runtime and verifier paths. The existing `agent` default
+retains the profile's nonroot UID/GID. Arbitrary usernames and a nonroot UID
+without its GID remain unsupported because admission cannot resolve the image's
+passwd/group metadata. A declared `verifier.user` is preserved and applied to
+the independent verifier; it must be able to restore the task's recorded file
+ownership. Per-step and agent-process identity overrides remain unsupported.
+
+The trusted controller keeps its nonroot identity. Explicitly root private task
+and verifier containers retain no-new-privileges and drop all capabilities,
+then receive only `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`, and `KILL`
+for package installation and cleanup of descendants that drop UID. This grants
+no host mounts, devices, kernel administration, nested-container service, or
+privileged mode. The active runtime binary and namespace security policy must
+support this configuration before the deployment-owned opt-in is enabled.
+
+Declare every relevant installed directory in `environment.mutable_paths`,
+including package-manager state when required; root access alone does not copy
+changes into a fresh verifier. For example, an installation into
+`/usr/local/share/my-tool` tracked by dpkg needs that directory and
+`/var/lib/dpkg` declared. Directory transfer retains its size, protected-path
+and filesystem-entry restrictions; it is not a whole-rootfs snapshot. The local
+Docker regression `tests/integration/test_task_identity_installation_docker.py`
+installs an initially absent `.deb`, executes its ownership/UID-changing
+maintainer script, cleans up its child process and verifies package files and
+dpkg state in a fresh private sandbox without model calls or network access.
+Real tasks requiring additional package paths, sockets, services, devices or
+external inputs still need their corresponding support and acceptance evidence.
+
 This is distinct from `scripts/ops/prepare_nebius_terminal_bench.py`, which
 builds a one-task TaskSet upload. Use the TaskSet helper for a single adapted
 upload; use `--execution-profile nebius-terminus` when republishing a catalog
