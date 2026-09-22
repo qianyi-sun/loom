@@ -4,6 +4,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import VersionInfo from "../../components/VersionInfo";
+import {
+  setFrontendConfigForTests,
+  type FrontendConfig,
+} from "../../lib/frontendConfig";
 
 const { LOADED_REVISION } = vi.hoisted(() => ({
   LOADED_REVISION: "a".repeat(40),
@@ -31,6 +35,14 @@ function jsonResponse(body: unknown): Response {
   });
 }
 
+const BASE_CONFIG: FrontendConfig = {
+  environment: "development",
+  environmentLabel: "Development",
+  routePath: "/dev",
+  apiBase: "/dev",
+  apiRouteBase: "https://yylx.world/dev/api",
+};
+
 function renderVersionInfo() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
@@ -45,6 +57,7 @@ function renderVersionInfo() {
 describe("VersionInfo (#2009)", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    setFrontendConfigForTests(null);
   });
 
   it("shows the persistent sidebar entry with environment and short loaded commit", () => {
@@ -91,20 +104,23 @@ describe("VersionInfo (#2009)", () => {
   });
 
   it("shows a non-disruptive update notice with an explicit refresh action when the served build differs from the loaded one", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
-      const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("loom-frontend-config.json")) {
-        return Promise.resolve(jsonResponse({ buildRevision: "b".repeat(40) }));
-      }
-      return Promise.resolve(
-        jsonResponse({ buildRevision: null, buildTime: null }),
-      );
+    // #2009 regression: the served-build check must not issue its own
+    // fetch on mount (that would double up on the config request
+    // loadFrontendConfig() already made at startup and break the app's
+    // "runtime config loads once per navigation" contract). It instead
+    // seeds from that same already-resolved config, exactly like this.
+    setFrontendConfigForTests({
+      ...BASE_CONFIG,
+      servedBuildRevision: "b".repeat(40),
     });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ buildRevision: null, buildTime: null }),
+    );
     renderVersionInfo();
 
-    await waitFor(() =>
-      expect(screen.getByTitle("A newer build is available")).toBeInTheDocument(),
-    );
+    expect(
+      screen.getByTitle("A newer build is available"),
+    ).toBeInTheDocument();
 
     await userEvent.click(
       screen.getByRole("button", { name: "Deployed version details" }),
@@ -119,21 +135,33 @@ describe("VersionInfo (#2009)", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows no update notice when the served build matches the loaded one", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
-      const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("loom-frontend-config.json")) {
-        return Promise.resolve(
-          jsonResponse({ buildRevision: LOADED_REVISION }),
-        );
-      }
-      return Promise.resolve(
-        jsonResponse({ buildRevision: null, buildTime: null }),
-      );
+  it("shows no update notice when the served build matches the loaded one", () => {
+    setFrontendConfigForTests({
+      ...BASE_CONFIG,
+      servedBuildRevision: LOADED_REVISION,
     });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ buildRevision: null, buildTime: null }),
+    );
     renderVersionInfo();
 
-    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled());
     expect(screen.queryByTitle("A newer build is available")).toBeNull();
+  });
+
+  it("issues no request for the served build on mount, only the backend's own version", async () => {
+    // Pins the fix itself: a fresh page load must fetch
+    // `/api/v1/version` (backend) but not re-fetch
+    // `loom-frontend-config.json` (served frontend build) a second time.
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(jsonResponse({ buildRevision: null, buildTime: null }));
+    renderVersionInfo();
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const requestedUrls = fetchMock.mock.calls.map((call) => String(call[0]));
+    expect(requestedUrls.some((url) => url.includes("loom-frontend-config.json"))).toBe(
+      false,
+    );
+    expect(requestedUrls.some((url) => url.includes("/api/v1/version"))).toBe(true);
   });
 });

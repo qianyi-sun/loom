@@ -1,13 +1,17 @@
 /**
  * #2009: staleness check for the persistent version entry.
  *
- * Two independent signals, both polled only on window focus and throttled
- * via react-query's `staleTime` (built-in request dedup/throttling — no
- * hand-rolled timer):
- *   - the frontend's own *currently served* build (a fresh fetch of
- *     `loom-frontend-config.json`), compared against the *loaded* build
- *     this tab's JS was actually built from (buildInfo.ts, frozen, never
- *     refetched);
+ * Two independent signals, both throttled via react-query's `staleTime`
+ * (built-in request dedup/throttling — no hand-rolled timer):
+ *   - the frontend's own *currently served* build, compared against the
+ *     *loaded* build this tab's JS was actually built from (buildInfo.ts,
+ *     frozen, never refetched). The served value seeds from the config
+ *     `loadFrontendConfig()` already fetched at startup — no extra request
+ *     on mount, only ever a fresh fetch when the window regains focus.
+ *     Startup's own fetch is the app's single source of truth for routing
+ *     (`apiBase`/`apiRouteBase`); an independent fetch here on every mount
+ *     would double it and break the "runtime config loads once per
+ *     navigation" contract the app relies on.
  *   - the backend's own build, from whichever instance answers the
  *     request — evidence for that instance only, not proof every replica
  *     has rolled.
@@ -19,7 +23,7 @@
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 
 import { apiFetch } from "../api/client";
-import { fetchServedBuildInfo } from "./frontendConfig";
+import { fetchServedBuildInfo, getFrontendConfig } from "./frontendConfig";
 
 const STALE_TIME_MS = 60_000;
 
@@ -42,6 +46,17 @@ export function useServedFrontendBuild(): UseQueryResult<
   return useQuery({
     queryKey: ["build-version", "frontend-served"],
     queryFn: fetchServedBuildInfo,
+    // Seed from startup's own already-fetched config instead of issuing a
+    // second request for the same resource on mount.
+    initialData: () => {
+      const config = getFrontendConfig();
+      return {
+        revision: config.servedBuildRevision ?? null,
+        sourceRef: config.servedSourceRef ?? null,
+        buildTime: config.servedBuildTime ?? null,
+      };
+    },
+    refetchOnMount: false,
     refetchOnWindowFocus: true,
     staleTime: STALE_TIME_MS,
     retry: false,
