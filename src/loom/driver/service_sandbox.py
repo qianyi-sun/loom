@@ -282,7 +282,7 @@ class ServiceSandboxDriver:
         try:
             await self.upload(src, remote)
             result = await self.exec(
-                f"mkdir -p {destination} && tar -C {destination} -xpf {archive}"
+                f"mkdir -p {destination} && tar --numeric-owner -C {destination} -xpf {archive}"
             )
             if result.return_code or result.stderr:
                 raise DriverError("unable to restore workspace archive")

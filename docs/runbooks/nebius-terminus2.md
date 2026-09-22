@@ -298,17 +298,23 @@ benchmark path. Validation itself publishes nothing. Full acceptance of the
 report against the original archives and real trajectory-generation delivery;
 fixture checks alone do not establish that evidence.
 
-That profile forces `cpu_arch=x86_64`, `gateway-only` networking, fills missing
-`cpus`/`memory_mb`/`storage_mb` (defaults 1 / 2048 / 4096), sets
-`user=agent` + compatible `/app` workdir, strips custom verifier identity,
-points the verifier at relative `verifier/run.sh`, drops Harbor TB2.1
-artifact globs that admission rejects, and prepares a derived Dockerfile for the
-native non-root UID 65532. The original Dockerfile and `tests/test.sh` remain
+That profile selects `cpu_arch=x86_64`, preserves an explicit `web-allowlist`
+policy, and otherwise selects `gateway-only` networking. It fills missing
+`cpus`/`memory_mb`/`storage_mb` (defaults 1 / 2048 / 4096), defaults missing
+`user` to `agent`, preserves explicit task and verifier identities, and uses
+`/app` when the declared workdir is neither `/app` nor `/workspace`.
+The compatibility report flags changes to declared network or workdir
+requirements for review. The profile points the verifier at relative
+`verifier/run.sh`, drops Harbor TB2.1 artifact globs that admission rejects,
+and prepares a derived Dockerfile for the selected numeric identity.
+Explicit identity and web egress require qualified deployment opt-ins;
+the default runtime remains non-root with gateway-only networking.
+The original Dockerfile and `tests/test.sh` remain
 unchanged in the source bundle. The derived image prepares writable workspace,
 home and verifier directories, installs Terminus tools, and preinstalls the
 Python version and pinned verifier dependencies declared by the supported Harbor
-bootstrap. Build-time installation may run as root; task execution remains
-non-root with gateway-only networking.
+bootstrap. Build-time dependency installation may run as root independently
+of the selected task execution identity.
 
 The generated `verifier/harbor-offline.sh` removes only recognized online
 bootstrap and runs pytest from the preinstalled verifier environment. Plain pip
