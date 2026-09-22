@@ -235,19 +235,25 @@ async def consume_login_challenge(
     raw_token: str,
     session_ttl_seconds: int,
 ) -> CreatedSession:
-    now = datetime.now(UTC)
     challenge = (await session.execute(
         select(LoginChallenge).where(
             LoginChallenge.challenge_hash == hash_secret(raw_token),
             LoginChallenge.consumed_at.is_(None),
-        ),
+        ).with_for_update(),
     )).scalar_one_or_none()
-    if challenge is None or challenge.expires_at < now:
+    if challenge is None:
         raise HTTPException(status_code=400, detail="invalid login token")
 
     user = (await session.execute(
-        select(User).where(User.id == challenge.user_id),
+        select(User).where(User.id == challenge.user_id).with_for_update(),
     )).scalar_one()
+    # Lock waits can exceed a short proof's TTL. Use the database clock only
+    # after acquiring both locks, never a pre-wait process timestamp.
+    now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
+    if challenge.expires_at <= now:
+        raise HTTPException(status_code=400, detail="invalid login token")
+    if user.status != "active" or user.disabled_at is not None:
+        raise HTTPException(status_code=403, detail="user is disabled or inactive")
     role = "platform_admin" if user.is_platform_admin else None
     team_id: UUID | None = None
     if role is None:
@@ -255,6 +261,8 @@ async def consume_login_challenge(
         if first is None:
             raise HTTPException(status_code=403, detail="user has no teams")
         membership, _team = first
+        if _team.disabled_at is not None:
+            raise HTTPException(status_code=403, detail="team is disabled")
         role = membership.role
         team_id = membership.team_id
 

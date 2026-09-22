@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from loom_service.environment_management.registry import OperationLease
@@ -36,6 +36,7 @@ class ProvisioningContext:
     registration: dict[str, Any]
     config: dict[str, Any]
     identities: dict[str, str]
+    documents: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def namespaces(self) -> tuple[str, ...]:

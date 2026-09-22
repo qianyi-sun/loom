@@ -40,8 +40,13 @@ _NAME = re.compile(r"[a-z0-9](?:[-a-z0-9.]{0,251}[a-z0-9])?")
 def _contains(actual: Any, expected: Any) -> bool:
     """Allow server defaults, but never drop/change/reorder a frozen field."""
     if isinstance(expected, dict):
-        return isinstance(actual, dict) and all(key in actual and _contains(actual[key], value)
-                                                for key, value in expected.items())
+        # Kubernetes omits zero-length optional lists (e.g. default-deny
+        # ingress/egress rules). Scalar false/zero MUST NOT be treated as absent:
+        # their defaults can grant authority or start replicas.
+        return isinstance(actual, dict) and all(
+            (_contains(actual[key], value) if key in actual else value == [])
+            for key, value in expected.items()
+        )
     if isinstance(expected, list):
         return (isinstance(actual, list) and len(actual) == len(expected)
                 and all(_contains(a, b) for a, b in zip(actual, expected, strict=True)))
@@ -168,4 +173,26 @@ class KubernetesEnvironmentProvider:
             if not ready:
                 raise ProviderWaitingError("kubernetes_not_ready")
             return uid
+        if step.kind == "application_ready":
+            namespace = step.payload["namespace"]
+            identities = []
+            for name in ("loom-service", "loom-control-plane", "loom-llm-gateway", "loom-web"):
+                key = f"k8s:Deployment:{namespace}:{name}"
+                doc, recorded = context.documents.get(key), context.identities.get(key)
+                if doc is None or recorded is None:
+                    raise ProviderBlockedError("kubernetes_readiness_identity_missing")
+                expected = self._expected(context, ProvisioningStep(key, "kubernetes", doc))
+                _, path = self._path(context, expected)
+                actual = await self._request("GET", path)
+                if actual is None:
+                    raise ProviderBlockedError("kubernetes_recorded_resource_missing")
+                identities.append(self._identity(actual, expected, recorded))
+                status = actual.get("status", {})
+                replicas = expected["spec"]["replicas"]
+                if (replicas < 1 or status.get("observedGeneration", 0) < actual["metadata"].get("generation", 1)
+                        or any(status.get(field, 0) != replicas for field in (
+                            "replicas", "readyReplicas", "updatedReplicas", "availableReplicas",
+                        ))):
+                    raise ProviderWaitingError("kubernetes_not_ready")
+            return "deployments:" + hashlib.sha256(json.dumps(identities).encode()).hexdigest()
         raise ProviderBlockedError("kubernetes_step_not_supported")

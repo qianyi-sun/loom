@@ -222,6 +222,39 @@ class EnvironmentRegistry:
                 operation=operation_view(operation) if operation is not None else None,
             )
 
+    async def ready_access(
+        self, environment_id: UUID, *, principal: AuthContext,
+    ) -> tuple[EnvironmentRegistrationV1, dict[str, Any]]:
+        """Internal-only child control material, never an API response model.
+
+        Close this transaction before contacting the child. Lifecycle must close
+        child login issuance before stopping it, so a concurrent remote exchange
+        cannot reopen a destroyed/suspended owner's access.
+        """
+        from loom.security.secret_store import LocalEncryptedSecretStore, parse_ref
+
+        owner, team = owner_identity(principal)
+        async with self.session_factory.begin() as session:
+            row = (await session.scalars(select(NebiusEnvironment).where(
+                NebiusEnvironment.environment_id == environment_id,
+                NebiusEnvironment.owner_user_id == owner, NebiusEnvironment.owner_team_id == team,
+            ).with_for_update())).one_or_none()
+            if row is None:
+                raise ManagementError("environment_forbidden", 403)
+            operation = (await session.scalars(select(NebiusEnvironmentOperation).where(
+                NebiusEnvironmentOperation.environment_id == environment_id,
+                NebiusEnvironmentOperation.deployment_generation == row.deployment_generation,
+            ))).one_or_none()
+            if (row.desired_state != "active" or operation is None or operation.action != "create"
+                    or operation.phase != "completed"):
+                raise ManagementError("environment_not_ready")
+            material = await session.get(NebiusEnvironmentResource, (operation.operation_id, "credentials:material"))
+            if (material is None or material.provider_identity is None or material.phase != "applied"
+                    or parse_ref(material.provider_identity).namespace != "nebius-environment:" + str(environment_id)):
+                raise ManagementError("environment_credentials_unavailable", 503)
+            value: dict[str, Any] = json.loads(await LocalEncryptedSecretStore(session).get(material.provider_identity))
+            return registration_view(row), value
+
     async def _locked_operation(
         self, session: AsyncSession, operation_id: UUID,
     ) -> tuple[NebiusEnvironmentOperation, NebiusEnvironment, datetime]:
@@ -305,6 +338,8 @@ class EnvironmentRegistry:
             ))).all()
             return ProvisioningContext(lease, operation.plan_json["registration"], operation.plan_json["config"], {
                 row.resource_key: row.provider_identity for row in rows if row.provider_identity is not None
+            }, {
+                row.resource_key: row.payload_json for row in rows if row.kind == "kubernetes"
             })
 
     async def finish_attempt(self, lease: OperationLease, *, error_code: str, retry: bool) -> None:

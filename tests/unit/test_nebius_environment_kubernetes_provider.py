@@ -160,3 +160,77 @@ async def test_namespace_replacement_blocks_creation_into_the_same_name():
         with pytest.raises(ProviderBlockedError):
             await KubernetesEnvironmentProvider(http).apply(ctx, ProvisioningStep("cm", "kubernetes", doc))
     assert "POST" not in calls
+
+
+async def test_application_readiness_requires_all_frozen_deployments_and_current_rollout():
+    from loom_service.environment_management.kubernetes_provider import (
+        KubernetesEnvironmentProvider,
+    )
+    from loom_service.environment_management.provider import (
+        ProviderBlockedError,
+        ProviderWaitingError,
+    )
+
+    ctx = context()
+    rows = {}
+
+    def api(request):
+        path = request.url.path
+        if request.method == "POST":
+            doc = json.loads(request.content)
+            doc["metadata"].update(uid="uid-" + doc["metadata"]["name"], generation=1)
+            if doc["kind"] == "Deployment":
+                doc["status"] = {"observedGeneration": 1, "replicas": 1, "readyReplicas": 1,
+                                 "updatedReplicas": 1, "availableReplicas": 1}
+            rows[path + "/" + doc["metadata"]["name"]] = doc
+            return httpx.Response(201, json=doc)
+        return httpx.Response(200, json=rows[path]) if path in rows else httpx.Response(404)
+
+    async with httpx.AsyncClient(base_url="https://kubernetes.test", transport=httpx.MockTransport(api)) as http:
+        provider = KubernetesEnvironmentProvider(http)
+        ctx.identities["k8s:Namespace:-:loom-dev-alice"] = await provider.apply(ctx, namespace())
+        for name in ("loom-service", "loom-control-plane", "loom-llm-gateway", "loom-web"):
+            key = "k8s:Deployment:loom-dev-alice:" + name
+            doc = {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"namespace": "loom-dev-alice", "name": name},
+                   "spec": {"replicas": 1, "template": {"spec": {"containers": [{"name": name, "image": "approved@sha256:" + "a" * 64}]}}}}
+            ctx.identities[key] = await provider.apply(ctx, ProvisioningStep(key, "kubernetes", doc))
+            ctx.documents[key] = doc
+        step = ProvisioningStep("ready:services", "application_ready", {"namespace": "loom-dev-alice", "phase": "services"})
+        service = rows["/apis/apps/v1/namespaces/loom-dev-alice/deployments/loom-service"]
+        service["status"]["observedGeneration"] = 0
+        with pytest.raises(ProviderWaitingError):
+            await provider.apply(ctx, step)
+        service["status"]["observedGeneration"] = 1
+        identity = await provider.apply(ctx, step)
+        assert identity.startswith("deployments:")
+        assert await provider.apply(ctx, step) == identity
+        service["spec"]["template"]["spec"]["containers"][0]["image"] = "unapproved:changed"
+        with pytest.raises(ProviderBlockedError):
+            await provider.apply(ctx, step)
+
+
+async def test_api_empty_list_omission_preserves_default_deny_readback():
+    from loom_service.environment_management.kubernetes_provider import (
+        KubernetesEnvironmentProvider,
+    )
+
+    ctx, rows = context(), {}
+
+    def api(request):
+        if request.method == "POST":
+            doc = json.loads(request.content)
+            doc["metadata"]["uid"] = "uid-" + doc["metadata"]["name"]
+            if doc["kind"] == "NetworkPolicy":
+                doc["spec"].pop("ingress")
+                doc["spec"].pop("egress")
+            rows[request.url.path + "/" + doc["metadata"]["name"]] = doc
+            return httpx.Response(201, json=doc)
+        return httpx.Response(200, json=rows[request.url.path]) if request.url.path in rows else httpx.Response(404)
+
+    doc = {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+           "metadata": {"namespace": "loom-dev-alice", "name": "default-deny"},
+           "spec": {"podSelector": {}, "policyTypes": ["Ingress", "Egress"], "ingress": [], "egress": []}}
+    async with httpx.AsyncClient(base_url="https://kubernetes.test", transport=httpx.MockTransport(api)) as http:
+        provider = KubernetesEnvironmentProvider(http)
+        ctx.identities["k8s:Namespace:-:loom-dev-alice"] = await provider.apply(ctx, namespace())
+        assert await provider.apply(ctx, ProvisioningStep("policy", "kubernetes", doc)) == "uid-default-deny"

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Header, Request, Response
 
 from loom.auth import AuthContext
 from loom.nebius_environment_contract import (
@@ -58,6 +58,15 @@ async def list_environments(request: Request, principal: ManagementPrincipal) ->
 @router.get("/environments/{environment_id}")
 async def environment_status(request: Request, environment_id: UUID, principal: ManagementPrincipal) -> EnvironmentStatusV1:
     return await manager(request).registry.status(environment_id, principal=principal)
+
+
+@router.post("/environments/{environment_id}/login")
+async def environment_login(
+    request: Request, response: Response, environment_id: UUID, principal: ManagementPrincipal,
+) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return await manager(request).login(principal, environment_id)
 
 
 @router.get("/environment-operations/{operation_id}")

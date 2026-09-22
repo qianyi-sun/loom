@@ -49,6 +49,7 @@ class LoomServiceSettings(BaseSettings):
     k8s_worker_enabled: bool = True
     local_servers_json: str = "{}"
     log_level: LogLevel = "info"
+    managed_environment_config_file: Path | None = None
     minio_access_key: SecretStr | None = None
     minio_endpoint: str = "http://loom-minio:9000"
     minio_public_endpoint: str | None = None

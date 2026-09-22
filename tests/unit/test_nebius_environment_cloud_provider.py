@@ -119,6 +119,16 @@ def test_plan_records_each_iam_effect_before_bucket_and_secret_publication(platf
         assert keys.index(f"iam:{identity}:access_key") < keys.index("secret:loom-platform-storage")
     assert keys.index("credentials:material") < keys.index("secret:loom-platform-db")
     assert keys.index("secret:loom-platform-db") < keys.index("ready:database")
+    configure = next(key for key in keys if key.startswith("k8s:Job:") and "configure" in key)
+    assert keys.index("ready:services") < keys.index(configure)
+    assert keys.index("child:owner") < keys.index("ready:application")
+    service = next(doc for doc in prepared.files["40-services.yaml"]
+                   if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "loom-service")
+    pod = service["spec"]["template"]["spec"]
+    assert {item["name"]: item.get("value") for item in pod["containers"][0]["env"]}[
+        "LOOM_SVC_MANAGED_ENVIRONMENT_CONFIG_FILE"
+    ] == "/var/run/loom-managed/environment.json"
+    assert any(volume.get("configMap", {}).get("name") == "loom-platform-config" for volume in pod["volumes"])
     # Personal environments must not require a copied installation inference key.
     for document in prepared.files["40-services.yaml"]:
         if document["kind"] == "Deployment" and document["metadata"]["name"] == "loom-llm-gateway":

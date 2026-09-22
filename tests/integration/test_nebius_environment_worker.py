@@ -191,3 +191,103 @@ async def test_worker_renews_lease_and_stops_external_work_if_lease_is_lost(envi
     provider.release.set()
     assert provider.resources == {}
     assert (await registry.provisioning_context(successor)).identities == {}
+
+
+async def test_only_ready_owner_can_obtain_scoped_child_control_material(environment_registry, monkeypatch):
+    import base64
+
+    from loom_service.environment_management.registry import ManagementError
+
+    monkeypatch.setenv("LOOM_SECRET_STORE_MASTER_KEY", base64.b64encode(b"m" * 32).decode())
+    monkeypatch.delenv("LOOM_SECRET_STORE_MASTER_KEYS", raising=False)
+    registry, _, (alice, bob), prepare = environment_registry
+    operation = await registry.create(principal=alice, idempotency_key="login", prepared=prepare())
+    with pytest.raises(ManagementError, match="environment_not_ready"):
+        await registry.ready_access(operation.environment_id, principal=alice)
+    lease = await registry.claim(operation.operation_id)
+    while (step := await registry.next_step(lease)) is not None:
+        if step.key == "credentials:material":
+            await registry.store_material(lease, step.key, {"loom-admin-secret": {"secrets.toml": "child-private-material"}})
+        else:
+            await registry.confirm_step(lease, step.key, provider_identity="owned:" + step.key)
+    await registry.complete(lease)
+    with pytest.raises(ManagementError, match="environment_forbidden"):
+        await registry.ready_access(operation.environment_id, principal=bob)
+    row, material = await registry.ready_access(operation.environment_id, principal=alice)
+    assert row.environment_id == operation.environment_id
+    assert material == {"loom-admin-secret": {"secrets.toml": "child-private-material"}}
+
+
+async def test_management_login_issues_only_target_child_proof_with_real_auth(
+    environment_registry, platform_inputs, monkeypatch, isolated_migration_postgres_url,
+):
+    import base64
+
+    import httpx
+
+    from loom.db.schema import TeamMembership, User
+    from loom_service.app import create_app
+    from loom_service.config import LoomServiceSettings
+    from loom_service.environment_management.child_client import ChildEnvironmentClient
+    from loom_service.environment_management.manager import (
+        EnvironmentManager,
+        EnvironmentPlanFactory,
+    )
+    from loom_service.password_auth import hash_password
+    from tests.unit.test_nebius_environment_contract import foundation_from
+    from tests.unit.test_nebius_platform_render import ROOT
+
+    monkeypatch.setenv("LOOM_SECRET_STORE_MASTER_KEY", base64.b64encode(b"m" * 32).decode())
+    monkeypatch.delenv("LOOM_SECRET_STORE_MASTER_KEYS", raising=False)
+    registry, factory, (alice, bob), prepare = environment_registry
+    prepared = prepare()
+    operation = await registry.create(principal=alice, idempotency_key="login", prepared=prepared)
+    lease = await registry.claim(operation.operation_id)
+    while (step := await registry.next_step(lease)) is not None:
+        if step.key == "credentials:material":
+            await registry.store_material(lease, step.key, {"loom-admin-secret": {"secrets.toml": '[admin]\ntoken="child-only-admin"\n'}})
+        else:
+            await registry.confirm_step(lease, step.key, provider_identity="owned:" + step.key)
+    await registry.complete(lease)
+    async with factory.begin() as session:
+        for principal in (alice, bob):
+            user = await session.get(User, principal.user_id)
+            user.password_hash = hash_password("owner-passphrase")
+            session.add(TeamMembership(user_id=principal.user_id, team_id=principal.team_id, role="owner"))
+
+    class NoCatalog:
+        async def resolve(self, candidate_id):
+            pytest.fail("login tried to resolve a publication")
+
+    def remote_child(request):
+        assert request.headers["authorization"] == "Bearer child-only-admin"
+        assert not request.headers.get("cookie")
+        assert request.url.host == prepared.registration.public_host
+        row = prepared.registration
+        return httpx.Response(200, json={"environment_id": str(row.environment_id), "incarnation": str(row.incarnation),
+                                        "owner_user_id": str(row.owner_user_id), "owner_team_id": str(row.owner_team_id),
+                                        "origin": "https://" + row.public_host, "login_token": "loom_env_login_" + "a" * 43,
+                                        "expires_in": 90})
+
+    settings = LoomServiceSettings(_env_file=None, service_mode="management", public_base_url="https://manage.example.com",
+                                   db_url=isolated_migration_postgres_url)
+    app = create_app(settings)
+    app.state.settings = settings
+    app.state.session_factory = factory
+    async with httpx.AsyncClient(transport=httpx.MockTransport(remote_child)) as remote:
+        app.state.environment_manager = EnvironmentManager(registry, EnvironmentPlanFactory(
+            foundation_from(platform_inputs[0]), NoCatalog(), keyring={}, repo_root=ROOT,
+        ), child=ChildEnvironmentClient(remote))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://manage.example.com") as client:
+            for user, expected in (("bob", 403), ("alice", 200)):
+                login = await client.post("/api/v1/auth/login", json={"username": user, "password": "owner-passphrase"})
+                assert login.status_code == 200
+                client.headers["X-Loom-CSRF"] = login.json()["csrf_token"]
+                response = await client.post(f"/api/v1/environments/{operation.environment_id}/login")
+                assert response.status_code == expected, response.text
+                if expected == 200:
+                    assert response.json()["login_token"] == "loom_env_login_" + "a" * 43
+                    assert response.headers["cache-control"] == "no-store"
+                    assert "child-only-admin" not in response.text
+            client.headers.pop("X-Loom-CSRF")
+            assert (await client.post(f"/api/v1/environments/{operation.environment_id}/login")).status_code == 403

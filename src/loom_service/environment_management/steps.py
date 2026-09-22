@@ -59,6 +59,14 @@ def creation_steps(prepared: RenderedEnvironment) -> list[ProvisioningStep]:
     for filename in ("30-migrate.yaml", "40-services.yaml", "50-configure.yaml", "60-execution.yaml",
                      "70-public.yaml", "80-backup.yaml"):
         documents(filename)
+        if filename == "40-services.yaml":
+            steps.append(ProvisioningStep("ready:services", "application_ready", {
+                "namespace": namespace, "phase": "services",
+            }))
+    steps.append(ProvisioningStep("child:owner", "credentials", {
+        "action": "child_owner", "namespace": namespace,
+        "owner_user_id": str(row.owner_user_id), "owner_team_id": str(row.owner_team_id),
+    }))
     steps.append(ProvisioningStep("ready:application", "application_ready", {
         "namespace": namespace, "public_host": row.public_host,
         "owner_user_id": str(row.owner_user_id), "owner_team_id": str(row.owner_team_id),

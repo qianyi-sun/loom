@@ -200,6 +200,15 @@ def render_environment(
             if doc["metadata"]["name"] == "loom-web":
                 pod["containers"] = pod["containers"][:1]
                 pod.pop("volumes", None)
+            if doc["metadata"]["name"] == "loom-service":
+                pod.setdefault("volumes", []).append({"name": "managed-environment", "configMap": {
+                    "name": "loom-platform-config", "items": [{"key": "environment.json", "path": "environment.json"}],
+                }})
+                pod["containers"][0].setdefault("volumeMounts", []).append({
+                    "name": "managed-environment", "mountPath": "/var/run/loom-managed", "readOnly": True,
+                })
+                pod["containers"][0]["env"].append({"name": "LOOM_SVC_MANAGED_ENVIRONMENT_CONFIG_FILE",
+                                                    "value": "/var/run/loom-managed/environment.json"})
             for container in pod.get("initContainers", []) + pod["containers"]:
                 container["env"] = [env for env in container.get("env", []) if env["name"] not in {
                     "LOOM_GW_LOCAL_YIBU_API_KEY", "LOOM_GW_LOCAL_YIBU_BASE_URL",
