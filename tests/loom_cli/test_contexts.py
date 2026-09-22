@@ -83,3 +83,74 @@ def test_context_selection_resets_after_exception(tmp_xdg_home):
             assert config_path() != default_path
             raise RuntimeError("failed command")
     assert config_path() == default_path
+
+
+def managed_binding(origin="https://alice.example.com", identity="20000000-0000-4000-8000-000000000001"):
+    from loom_cli.contexts import ManagedEnvironmentBinding
+
+    return ManagedEnvironmentBinding(environment_id=identity, incarnation=identity,
+                                     management_origin="https://management.example.com", child_origin=origin)
+
+
+def test_managed_context_refuses_changed_or_removed_binding_and_server(tmp_xdg_home):
+    from dataclasses import replace
+
+    from loom_cli.contexts import selected_context
+    from loom_cli.server_client import authed_client
+
+    binding = managed_binding()
+    with selected_context("alice"):
+        save_config(LoomConfig(server_url=binding.child_origin, auth_token="child", managed_environment=binding))
+        original = config_path().read_bytes()
+        for changes in ({"server_url": "https://foreign.example.com"}, {"managed_environment": None},
+                        {"managed_environment": replace(binding, incarnation="20000000-0000-4000-8000-000000000002")}):
+            cfg = load_config()
+            for key, value in changes.items():
+                setattr(cfg, key, value)
+            with pytest.raises(ValueError, match="binding"):
+                save_config(cfg)
+            assert config_path().read_bytes() == original
+        cfg = load_config()
+        cfg.server_url = "https://foreign.example.com"
+        with pytest.raises(ValueError, match="binding"):
+            authed_client(cfg)
+
+
+def test_management_or_unbound_existing_context_cannot_be_replaced_by_child(tmp_xdg_home):
+    from loom_cli.contexts import selected_context
+
+    binding = managed_binding()
+    with pytest.raises(ValueError, match="named context"):
+        save_config(LoomConfig(server_url=binding.child_origin, managed_environment=binding))
+    with selected_context("alice"):
+        save_config(LoomConfig(server_url=binding.child_origin, auth_token="preexisting-login"))
+        with pytest.raises(ValueError, match="binding"):
+            save_config(LoomConfig(server_url=binding.child_origin, managed_environment=binding))
+        assert load_config().auth_token == "preexisting-login"
+
+
+def test_competing_first_managed_context_writes_keep_exactly_one_binding(tmp_xdg_home):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from loom_cli.contexts import selected_context
+
+    barrier = Barrier(2)
+
+    def create(identity):
+        with selected_context("same-name"):
+            cfg = LoomConfig(server_url="https://alice.example.com", auth_token=identity,
+                             managed_environment=managed_binding(identity=identity))
+            barrier.wait()
+            try:
+                save_config(cfg)
+                return "saved"
+            except ValueError:
+                return "conflict"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(create, ["20000000-0000-4000-8000-000000000001", "20000000-0000-4000-8000-000000000002"]))
+    assert sorted(results) == ["conflict", "saved"]
+    with selected_context("same-name"):
+        cfg = load_config()
+        assert cfg.auth_token == cfg.managed_environment.environment_id
