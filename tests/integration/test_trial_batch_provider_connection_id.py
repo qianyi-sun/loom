@@ -37,6 +37,7 @@ from loom.db.schema import (
     ProviderConnection,
     ProviderConnectionShare,
     ProviderModelCache,
+    Secret,
     Task,
     Team,
     TeamMembership,
@@ -222,6 +223,11 @@ async def app_setup(
             (conn_b, team_b, "active-b"),
             (conn_a_deleted, team_a, "deleted-a"),
         ):
+            # Submission tests validate ownership without decrypting the key.
+            s.execute(insert(Secret).values(
+                ref=f"loom://team:{t}/{cid}", ciphertext=b"unused-fixture",
+                nonce=b"0" * 12, master_key_version=1,
+            ))
             s.execute(
                 insert(ProviderConnection).values(
                     id=cid,
@@ -322,9 +328,15 @@ async def app_setup(
                     ProviderConnectionShare.provider_connection_id.in_(owned_connection_ids)
                 )
             )
+            secret_refs = list(s.scalars(
+                select(ProviderConnection.encrypted_api_key_ref).where(
+                    ProviderConnection.id.in_(owned_connection_ids),
+                ),
+            ))
             s.execute(
                 delete(ProviderConnection).where(ProviderConnection.id.in_(owned_connection_ids))
             )
+            s.execute(delete(Secret).where(Secret.ref.in_(secret_refs)))
             s.execute(delete(Token).where(Token.team_id.in_(owned_team_ids)))
             s.execute(delete(UserSession).where(UserSession.user_id.in_(owned_user_ids)))
             s.execute(delete(TeamMembership).where(TeamMembership.team_id.in_(owned_team_ids)))

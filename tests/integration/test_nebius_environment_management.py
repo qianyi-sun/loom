@@ -338,9 +338,24 @@ async def test_real_management_api_derives_owner_and_rejects_other_users(
                 **request, "owner_user_id": str(alice.user_id),
             }, headers={"Idempotency-Key": "impersonate"})
             assert impersonation.status_code == 422
+            destroy_path = f"/api/v1/environments/{environment_id}/operations"
+            destroy_body = {"action": "destroy_retained", "expected_generation": 1}
+            destroy_headers = {"Idempotency-Key": "api-destroy-1"}
+            assert (await b.post(destroy_path, json=destroy_body, headers=destroy_headers)).status_code == 403
+            assert (await a.post(destroy_path, json={**destroy_body, "action": "purge"}, headers=destroy_headers)).status_code == 422
+            destroyed = await a.post(destroy_path, json=destroy_body, headers=destroy_headers)
+            assert destroyed.status_code == 202, destroyed.text
+            assert destroyed.json()["action"] == "destroy_retained"
+            assert destroyed.json()["deployment_generation"] == 2
+            assert (await a.post(destroy_path, json=destroy_body, headers=destroy_headers)).json() == destroyed.json()
+            assert (await b.post(f"/api/v1/environment-operations/{operation_id}/retry")).status_code == 403
+            assert (await a.post(f"/api/v1/environment-operations/{operation_id}/retry")).status_code == 409
+            retry = await a.post(f"/api/v1/environment-operations/{destroyed.json()['operation_id']}/retry")
+            assert retry.status_code == 202 and retry.json() == destroyed.json()
             a.headers.pop("X-Loom-CSRF")
             assert (await a.post("/api/v1/environments", json=request,
                                  headers={"Idempotency-Key": "no-csrf"})).status_code == 403
+            assert (await a.post(destroy_path, json=destroy_body, headers=destroy_headers)).status_code == 403
 
 
 async def test_same_login_can_poll_while_publication_waits_without_pool_deadlock(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -16,6 +17,8 @@ from loom.nebius_environment_contract import (
     new_environment_registration,
 )
 from loom.nebius_environment_render import RenderedEnvironment, render_environment
+from loom_service.environment_management.child_client import ChildEnvironmentClient
+from loom_service.environment_management.provider import ProviderError
 from loom_service.environment_management.registry import (
     EnvironmentRegistry,
     ManagementError,
@@ -61,9 +64,25 @@ class EnvironmentPlanFactory:
 
 
 class EnvironmentManager:
-    def __init__(self, registry: EnvironmentRegistry, plans: EnvironmentPlanFactory):
+    def __init__(self, registry: EnvironmentRegistry, plans: EnvironmentPlanFactory, *, child: ChildEnvironmentClient | None = None):
         self.registry = registry
         self.plans = plans
+        self.child = child
+
+    async def login(self, principal: AuthContext, environment_id: UUID) -> dict[str, Any]:
+        row, material = await self.registry.ready_access(environment_id, principal=principal)
+        if self.child is None:
+            raise ManagementError("child_login_not_configured", 503)
+        try:
+            token = tomllib.loads(material["loom-admin-secret"]["secrets.toml"])["admin"]["token"]
+            if not isinstance(token, str) or not token:
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            raise ManagementError("environment_credentials_unavailable", 503) from None
+        try:
+            return await self.child.login(row, admin_token=token)
+        except ProviderError as exc:
+            raise ManagementError(exc.code, 503) from None
 
     async def create(self, principal: AuthContext, request: EnvironmentCreateRequestV1, *,
                      idempotency_key: str) -> EnvironmentOperationV1:

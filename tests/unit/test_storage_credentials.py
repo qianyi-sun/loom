@@ -102,22 +102,11 @@ def test_irsa_ignores_passed_credentials() -> None:
     assert "aws_secret_access_key" not in kwargs
 
 
-def test_workload_identity_raises_with_tracking_issue() -> None:
-    """The GCS auth_kinds are structurally valid in the schema but
-    not yet wired here — surface a clear error pointing at the
-    follow-up rather than silently fall through to static_keys."""
-    with pytest.raises(UnsupportedAuthKindError, match="#254"):
+@pytest.mark.parametrize("auth_kind", ["workload_identity", "sa_json"])
+def test_non_s3_auth_kind_is_rejected(auth_kind: str) -> None:
+    with pytest.raises(UnsupportedAuthKindError, match="not supported"):
         build_s3_client(
-            endpoint_url="https://storage.googleapis.com",
-            auth_kind="workload_identity",
-        )
-
-
-def test_sa_json_raises_with_tracking_issue() -> None:
-    with pytest.raises(UnsupportedAuthKindError, match="#254"):
-        build_s3_client(
-            endpoint_url="https://storage.googleapis.com",
-            auth_kind="sa_json",
+            endpoint_url="https://storage.example.com", auth_kind=auth_kind,
         )
 
 

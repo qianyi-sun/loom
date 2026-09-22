@@ -9,6 +9,7 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from dataclasses import replace
+from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -1915,25 +1916,98 @@ def test_guard_migration_changes_rebuild_both_consuming_images() -> None:
     assert {"control-plane", "service"} <= {entry["image"] for entry in matrix}
 
 
-def test_nebius_image_ownership_covers_every_local_copy_input() -> None:
+def _local_copy_sources(dockerfile: str) -> Iterator[str]:
+    # All retained Dockerfiles use shell COPY, including flags and continuations.
+    for line in dockerfile.replace("\\\n", " ").splitlines():
+        instruction = line.strip().split(maxsplit=1)
+        if not instruction or instruction[0].upper() != "COPY":
+            continue
+        arguments = shlex.split(instruction[1], comments=True)
+        if any(word.startswith("--from=") for word in arguments):
+            continue
+        assert not any(word.startswith("[") for word in arguments), "JSON COPY needs parsing"
+        yield from (word for word in arguments[:-1] if not word.startswith("--"))
+
+
+def _copy_includes(path: str, source: str) -> bool:
+    # Docker globs match individual path segments; a matched directory copies
+    # all descendants. Unlike fnmatch on a full path, '*' cannot cross '/'.
+    pattern = PurePosixPath(source).parts
+    parts = PurePosixPath(path).parts
+    return len(parts) >= len(pattern) and all(
+        fnmatchcase(part, glob) for part, glob in zip(parts, pattern, strict=False)
+    )
+
+
+def test_copy_input_matching_handles_globs_and_stages() -> None:
+    dockerfile = "COPY --chmod=0444 ./src/*.py \\\n    ./dest/\nCOPY assets/* /assets/\nCOPY --from=build /dest /app\n"
+    assert list(_local_copy_sources(dockerfile)) == ["./src/*.py", "assets/*"]
+    assert _copy_includes("src/main.py", "./src/*.py")
+    assert not _copy_includes("src/nested/main.py", "./src/*.py")
+    assert _copy_includes("assets/images/logo.png", "assets/*")
+    assert _copy_includes("src/main.py", ".")
+    assert not _copy_includes("src-other/main.py", "src")
+
+
+def test_all_image_ownership_covers_every_local_copy_input() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=REPO_ROOT, text=True).split("\0")
-    components = {component.id: component for component in manifest.components}
+    tracked = (
+        subprocess.check_output(
+            ["git", "ls-files", "-z"],
+            cwd=REPO_ROOT,
+            text=True,
+        )
+        .rstrip("\0")
+        .split("\0")
+    )
     missing = []
-    for image in component_ownership.release_image_matrix(manifest, image_set="nebius"):
-        component = components[image["image"]]
-        dockerfile = (REPO_ROOT / component.dockerfile).read_text().replace("\\\n", " ")
-        for line in dockerfile.splitlines():
-            if not line.startswith("COPY ") or "--from=" in line:
-                continue
-            arguments = shlex.split(line)[1:]
-            for source in arguments[:-1]:
-                if source.startswith("--"):
-                    continue
-                source = source.removeprefix("./").rstrip("/")
-                inputs = [path for path in tracked if path == source or path.startswith(source + "/")]
-                assert inputs, (component.id, source)
-                for path in inputs:
-                    if not any(component_ownership.matches_path(path, pattern) for pattern in component.source_paths):
-                        missing.append((component.id, path))
+    for component in manifest.components:
+        context = PurePosixPath(component.build_context)
+        context_paths = {
+            path: PurePosixPath(path).relative_to(context).as_posix()
+            for path in tracked
+            if PurePosixPath(path).is_relative_to(context)
+        }
+        dockerfile = (REPO_ROOT / component.dockerfile).read_text()
+        for source in _local_copy_sources(dockerfile):
+            inputs = [
+                path for path, relative in context_paths.items() if _copy_includes(relative, source)
+            ]
+            assert inputs, (component.id, component.build_context, source)
+            for path in inputs:
+                if not any(
+                    component_ownership.matches_path(path, pattern)
+                    for pattern in component.source_paths
+                ):
+                    missing.append((component.id, path))
     assert not missing, missing
+
+
+@pytest.mark.parametrize(
+    ("path", "consumer"),
+    [
+        ("src/loom_listen/metrics.py", "egress-xds"),
+        ("src/loom_service/app.py", "pipeline-orchestrator"),
+        ("config/resource-profiles.toml", "pipeline-orchestrator"),
+    ],
+)
+def test_retained_image_copy_changes_select_consumers(path: str, consumer: str) -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    assert (REPO_ROOT / path).is_file()
+    # The compatibility matrix still supports selective queries; this does not
+    # change the native image allowlist or enable dormant image publication.
+    legacy = component_ownership.select_release_image_matrix(
+        manifest,
+        changed_paths=(path,),
+        force_all=False,
+    )
+    assert consumer in {entry["image"] for entry in legacy}
+    assert "behavior-stage1-sim" not in {entry["image"] for entry in legacy}
+    native = component_ownership.select_release_image_matrix(
+        manifest,
+        changed_paths=(path,),
+        force_all=False,
+        image_set="nebius",
+    )
+    assert consumer not in {entry["image"] for entry in native}
+    assert "behavior-stage1-sim" not in {entry["image"] for entry in native}

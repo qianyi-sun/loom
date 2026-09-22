@@ -891,8 +891,7 @@ def test_update_base_url_re_resolves_and_re_pendings(app_setup) -> None:
 
 def test_update_api_key_rotates_ref(app_setup) -> None:
     """PATCH with api_key encrypts the new value and swaps the
-    encrypted_api_key_ref. Both old and new refs persist; delayed
-    cleanup of orphaned old refs is not implemented."""
+    encrypted_api_key_ref. Retirement is atomic and both refs survive grace."""
     app, tokens, _team_ids = app_setup
     c = _client(app)
     create = c.post(
@@ -944,8 +943,11 @@ def test_update_api_key_rotates_ref(app_setup) -> None:
     sync_engine.dispose()
 
     assert new_ref != orig_ref
-    # Both refs remain in the secrets table until cleanup is implemented.
+    # Both remain during grace; only the superseded key has a retirement clock.
     assert len(secret_count) == 2
+    retirement = {row.ref: row.provider_retired_at for row in secret_count}
+    assert retirement[orig_ref] is not None
+    assert retirement[new_ref] is None
 
 
 def test_update_rate_card_provider(app_setup) -> None:
@@ -1114,6 +1116,15 @@ def test_delete_soft_deletes_and_returns_204(app_setup) -> None:
         headers=_auth(tokens["team_a"]),
     )
     assert r.status_code == 204
+    engine = create_engine(str(app.state.settings.db_url))
+    try:
+        with sessionmaker(engine)() as session:
+            connection = session.get(ProviderConnection, UUID(conn_id))
+            assert connection is not None
+            secret = session.get(Secret, connection.encrypted_api_key_ref)
+            assert secret is not None and secret.provider_retired_at is not None
+    finally:
+        engine.dispose()
 
     # GET / LIST should now treat it as nonexistent.
     g = c.get(
@@ -2188,3 +2199,32 @@ def test_models_routes_cross_team_return_404(app_setup) -> None:
     ]:
         r = c.post(path, headers=_auth(tokens["team_b"]))
         assert r.status_code == 404, path
+
+
+@pytest.mark.asyncio
+async def test_concurrent_rotation_retires_each_superseded_ref(app_setup) -> None:
+    import asyncio
+
+    from sqlalchemy import select
+
+    app, tokens, _ = app_setup
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            "/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
+            json={"name": "concurrent", "type": "openai-compatible",
+                  "base_url": "https://api.openai.com/", "api_key": "original"},
+        )
+        assert created.status_code == 201
+        connection_id = created.json()["id"]
+        responses = await asyncio.gather(*(
+            client.patch(f"/api/v1/provider-connections/{connection_id}",
+                         headers=_auth(tokens["team_a"]), json={"api_key": value})
+            for value in ("rotation-one", "rotation-two")
+        ))
+        assert [response.status_code for response in responses] == [200, 200]
+    async with app.state.session_factory() as session:
+        connection = await session.get(ProviderConnection, UUID(connection_id))
+        secrets = (await session.scalars(select(Secret))).all()
+        assert len(secrets) == 3
+        assert sum(secret.provider_retired_at is not None for secret in secrets) == 2
+        assert (await session.get(Secret, connection.encrypted_api_key_ref)).provider_retired_at is None

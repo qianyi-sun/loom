@@ -170,6 +170,7 @@ def _patch_service_background_loops(
     service_app: object,
 ) -> None:
     monkeypatch.setattr(service_app, "batch_run_loop", _blocking_run_loop)
+    monkeypatch.setattr(service_app, "provider_secret_gc_run_loop", _blocking_run_loop)
     monkeypatch.setattr(
         service_app,
         "taskset_materializer_run_loop",
@@ -223,7 +224,10 @@ def test_service_lifespan_validates_existing_secret_store_rows(
 
     with TestClient(app) as client:
         assert client.get("/api/v1/health").status_code == 200
+        gc_task = app.state.provider_secret_gc_task
+        assert not gc_task.done()
 
+    assert gc_task.done() and gc_task.cancelled()
     assert calls == 1
 
 

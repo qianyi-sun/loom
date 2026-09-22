@@ -67,6 +67,7 @@ from loom_service.provider_connections_service import (
     validate_pricing,
 )
 from loom_service.provider_model_classifier import classify_model_id
+from loom_service.provider_secret_gc import retire_provider_secret
 
 router = APIRouter()
 
@@ -381,18 +382,19 @@ async def _get_provider_api_key(
 
 async def _get_active_connection(
     session: AsyncSession, connection_id: UUID, ctx: AuthContext,
+    *, for_update: bool = False,
 ) -> ProviderConnection:
     """Lookup a connection visible to `ctx`. Returns 404 for nonexistent
     / soft-deleted / cross-team rows alike — same response so existence
     can't be probed across team boundaries. Admins see any team's rows; team
     tokens see their own rows plus rows explicitly shared with their team."""
-    row = (await session.execute(
-        select(ProviderConnection)
-        .where(
-            ProviderConnection.id == connection_id,
-            ProviderConnection.deleted_at.is_(None),
-        ),
-    )).scalar_one_or_none()
+    stmt = select(ProviderConnection).where(
+        ProviderConnection.id == connection_id,
+        ProviderConnection.deleted_at.is_(None),
+    )
+    if for_update:
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
+    row = (await session.execute(stmt)).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="provider_connection not found")
     if is_admin(ctx) or row.team_id == ctx.team_id:
@@ -803,7 +805,7 @@ async def update_connection(
             status_code=400,
             detail="PATCH requires team-scoped or admin token",
         )
-    row = await _get_active_connection(session, connection_id, ctx)
+    row = await _get_active_connection(session, connection_id, ctx, for_update=True)
     _require_provider_owner_or_admin(ctx, row)
     changed_fields: list[str] = []
 
@@ -856,17 +858,14 @@ async def update_connection(
         row.rate_card_provider = payload.rate_card_provider
 
     # API key rotation encrypts the new value and swaps the active ref.
-    # Retain the old secret for in-flight gateway requests. No delayed
-    # cleanup job is implemented; old refs currently remain indefinitely.
+    # Retirement is committed atomically with the swap; GC observes a full grace.
     if payload.api_key is not None:
         changed_fields.append("api_key")
         secret_store = _make_secret_store(session)
         new_ref = await secret_store.put(
             namespace=f"team:{row.team_id}", value=payload.api_key,
         )
-        # TODO: persist retired refs and reclaim them after a safe grace
-        # period. For now, the old secret stays decryptable but is no
-        # longer the active ref for this connection.
+        await retire_provider_secret(session, ref=row.encrypted_api_key_ref, team_id=row.team_id)
         row.encrypted_api_key_ref = new_ref
         row.status = "pending"
 
@@ -1351,14 +1350,14 @@ async def delete_connection(
     display_name is permitted after
     soft-delete (partial UNIQUE WHERE deleted_at IS NULL).
 
-    The SecretStore ref is NOT deleted here — in-flight gateway
-    requests may still need it. No cleanup walker is implemented;
-    soft-deletion currently retains the encrypted secret indefinitely.
+    Retire the key atomically; the collector preserves it for a full grace
+    period and while another active or historical consumer references it.
     """
     session, ctx = sc
     _require_provider_management(ctx)
-    row = await _get_active_connection(session, connection_id, ctx)
+    row = await _get_active_connection(session, connection_id, ctx, for_update=True)
     _require_provider_owner_or_admin(ctx, row)
+    await retire_provider_secret(session, ref=row.encrypted_api_key_ref, team_id=row.team_id)
     await session.execute(
         update(ProviderConnection)
         .where(ProviderConnection.id == row.id)
