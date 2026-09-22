@@ -114,7 +114,12 @@ def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Pa
             result = apply([bad], dry_run=True)
             assert result.exit_code != 0, "unsafe variation was admitted"
         # A policy bound to this namespace must not affect another namespace.
-        result = apply([{"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace + "-other"}}])
+        result = apply([
+            {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace + "-other"}},
+            {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": {
+                "name": "default", "namespace": namespace + "-other",
+            }},
+        ])
         assert result.exit_code == 0
         other = deepcopy(pod)
         other["metadata"]["namespace"] = namespace + "-other"
