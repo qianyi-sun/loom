@@ -22,6 +22,7 @@ from pydantic import (
 
 from loom.agent_runtime import AgentRuntimeBindingV1, AgentRuntimeReleaseV1
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
+from loom.execution_requirements import execution_requirement_diagnostics
 from loom.execution_runtime_contract import (
     TASK_EGRESS_OUTPUT,
     ContainerResourcesV1,
@@ -269,6 +270,7 @@ def automatic_service_execution_rejections(
     env = task.environment
     terminus = trial.agent_name == "terminus-2"
     reasons: list[str] = []
+    reasons.extend(item.code for item in execution_requirement_diagnostics(env.execution_requirements))
     if service_execution_input_binding(source_provenance) is None:
         reasons.append("immutable_task_input_unavailable")
     if env.os != "linux" or env.cpu_arch not in {"x86_64", "any"}:

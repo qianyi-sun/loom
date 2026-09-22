@@ -19,6 +19,7 @@ from pydantic import (
     model_validator,
 )
 
+from loom.execution_requirements import TaskExecutionRequirementsV1
 from loom.models.healthcheck import HealthcheckSpec
 from loom.models.mcp import MCPConnection
 from loom.models.networking import NetworkPolicy, Public
@@ -104,6 +105,7 @@ class EnvironmentConfig(BaseModel):
     workdir: PurePosixPath = PurePosixPath("/workspace")
     mutable_paths: tuple[PurePosixPath, ...] = Field(default=(), max_length=16)
     service_lifecycle: ServiceLifecycleConfig | None = None
+    execution_requirements: TaskExecutionRequirementsV1 | None = None
     user: str | int = "agent"
     network_policies_supported: frozenset[NetworkPolicyKind] = frozenset({"public"})
     baseline_network_policy: NetworkPolicy = Public()

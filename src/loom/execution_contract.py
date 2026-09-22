@@ -27,6 +27,10 @@ from pydantic import (
     model_validator,
 )
 
+from loom.execution_requirements import (
+    TaskExecutionRequirementsV1,
+    execution_requirement_diagnostics,
+)
 from loom.models.networking import WebAllowlist
 from loom.models.task import TaskConfig
 
@@ -304,6 +308,9 @@ class WorkloadRequirementsV1(_StrictContract):
     nested_containers: bool
     host_devices: bool
     host_specialized: bool
+    execution_requirements: TaskExecutionRequirementsV1 | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
 
     @model_serializer(mode="wrap")
     def _omit_unused_egress(self, handler: Any) -> dict[str, Any]:
@@ -482,6 +489,7 @@ def workload_requirements_from_task(task: TaskConfig) -> WorkloadRequirementsV1:
     """
 
     env = task.environment
+    capabilities = env.execution_requirements.capabilities if env.execution_requirements else ()
     if env.dockerfile is not None:
         materialization = ImageMaterialization.TASK_DOCKERFILE
         image_ref: str | None = None
@@ -530,9 +538,10 @@ def workload_requirements_from_task(task: TaskConfig) -> WorkloadRequirementsV1:
         privileged=False,
         host_path=False,
         host_network=False,
-        nested_containers=False,
-        host_devices=False,
-        host_specialized=False,
+        nested_containers=bool({"nested_docker", "singularity_mounts"}.intersection(capabilities)),
+        host_devices="dpdk_networking" in capabilities,
+        host_specialized="isolated_kernel_settings" in capabilities,
+        execution_requirements=env.execution_requirements,
     )
 
 
@@ -546,6 +555,9 @@ def evaluate_execution_admission(
 
     def reject(code: str, message: str) -> None:
         reasons.append(CompatibilityReasonV1(code=code, message=message))
+
+    for diagnostic in execution_requirement_diagnostics(requirements.execution_requirements):
+        reject(diagnostic.code, diagnostic.reason)
 
     if requirements.operating_system != execution_class.operating_system:
         reject("operating_system_unsupported", "execution class only supports Linux")
