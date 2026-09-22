@@ -133,6 +133,32 @@ async def test_child_ticket_does_not_reactivate_disabled_owner(child_app):
     assert (await http.post("/api/v1/admin/managed-environment/login", json=body, headers=headers)).status_code == 403
 
 
+@pytest.mark.parametrize("enrolled", [True, False])
+async def test_retained_destroy_revokes_sessions_proofs_and_delayed_enrollment(child_app, enrolled):
+    http, binding, admin, _ = child_app
+    body = {"environment_id": str(binding.environment_id), "incarnation": str(binding.incarnation)}
+    headers = {"Authorization": "Bearer " + admin}
+    prefix = "/api/v1/admin/managed-environment/"
+    proof = None
+    if enrolled:
+        assert (await http.post(prefix + "owner", json=body, headers=headers)).status_code == 200
+        first = await http.post(prefix + "login", json=body, headers=headers)
+        assert (await http.post("/api/v1/auth/login/complete", json={"token": first.json()["login_token"]})).status_code == 200
+        proof = (await http.post(prefix + "login", json=body, headers=headers)).json()["login_token"]
+    # Destroy cannot be called by the child owner, only the protected manager.
+    assert (await http.post(prefix + "revoke", json=body)).status_code in {401, 403}
+    assert (await http.post(prefix + "revoke", json={**body, "incarnation": str(uuid4())}, headers=headers)).status_code == 409
+    for _ in range(2):
+        revoked = await http.post(prefix + "revoke", json=body, headers=headers)
+        assert revoked.status_code == 200, revoked.text
+        assert revoked.json()["incarnation"] == str(binding.incarnation)
+    if proof is not None:
+        assert (await http.post("/api/v1/auth/login/complete", json={"token": proof})).status_code == 403
+        assert (await http.get("/api/v1/auth/whoami")).status_code in {401, 403}
+    assert (await http.post(prefix + "owner", json=body, headers=headers)).status_code == 403
+    assert (await http.post(prefix + "login", json=body, headers=headers)).status_code == 403
+
+
 async def test_child_login_proof_expiry_is_checked_after_waiting_for_database_lock(child_app):
     http, binding, admin, factory = child_app
     body = {"environment_id": str(binding.environment_id), "incarnation": str(binding.incarnation)}

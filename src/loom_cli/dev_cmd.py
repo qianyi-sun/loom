@@ -26,6 +26,7 @@ def _run(args: argparse.Namespace) -> int:
         key = ""
         if args.dev_command == "create":
             create_request = EnvironmentCreateRequestV1(slug=args.slug, candidate_id=UUID(args.candidate))
+        if args.dev_command in {"create", "destroy"}:
             key = args.idempotency_key or str(uuid4())
             if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", key) is None:
                 raise ValueError("invalid idempotency key")
@@ -35,10 +36,20 @@ def _run(args: argparse.Namespace) -> int:
         with EnvironmentClient() as client:
             if create_request is not None:
                 print(client.create(create_request, idempotency_key=key).model_dump_json())
+            elif args.dev_command == "destroy":
+                identity = UUID(args.environment_id)
+                generation = args.expected_generation
+                if generation is None:
+                    generation = client.status(identity).registration.deployment_generation
+                print(f"Retaining data and namespace claims. Retry: loom dev destroy {identity} "
+                      f"--expected-generation {generation} --idempotency-key {key}", file=sys.stderr)
+                print(client.destroy(identity, expected_generation=generation, idempotency_key=key).model_dump_json())
             elif args.dev_command == "list":
                 print(json.dumps({"items": [row.model_dump(mode="json") for row in client.list()]}))
             elif args.dev_command == "status":
                 print(client.status(UUID(args.environment_id)).model_dump_json())
+            elif args.dev_command == "retry":
+                print(client.retry(UUID(args.operation_id)).model_dump_json())
             elif args.dev_command == "wait":
                 operation, terminal = client.wait(UUID(args.operation_id), timeout=args.timeout)
                 print(operation.model_dump_json())
@@ -66,8 +77,14 @@ def add_dev_subparser(sub: argparse._SubParsersAction) -> None:  # type: ignore[
     create.add_argument("--candidate", required=True, help="Approved candidate UUID from the management installation")
     create.add_argument("--idempotency-key", help="Reuse this key when retrying the same create")
     commands.add_parser("list", help="List your retained environment identities")
+    destroy = commands.add_parser("destroy", help="Stop your personal environment, retaining database/object data and names")
+    destroy.add_argument("environment_id")
+    destroy.add_argument("--expected-generation", type=int, help="Fence this exact generation; otherwise read current status")
+    destroy.add_argument("--idempotency-key", help="Reuse with the printed generation after a lost response")
     status = commands.add_parser("status", help="Read desired state and current provisioning operation")
     status.add_argument("environment_id")
+    retry = commands.add_parser("retry", help="Explicitly retry a blocked operation without changing its identities or plan")
+    retry.add_argument("operation_id")
     wait = commands.add_parser("wait", help="Wait for an operation; timeout does not cancel it")
     wait.add_argument("operation_id")
     wait.add_argument("--timeout", type=float, default=300)

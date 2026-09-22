@@ -48,18 +48,22 @@ class EnvironmentWorker:
             await self.registry.renew(lease, lease_seconds=self.lease_seconds)
 
     async def _advance(self, lease: OperationLease) -> None:
+        active_key, deadline = "", 0.0
         while (step := await self.registry.next_step(lease)) is not None:
-            deadline = asyncio.get_running_loop().time() + self.readiness_timeout
-            while True:
-                context = await self.registry.provisioning_context(lease)
-                try:
-                    async with asyncio.timeout(self.step_timeout):
-                        identity = await self.provider.apply(context, step)
-                    break
-                except ProviderWaitingError:
-                    if asyncio.get_running_loop().time() >= deadline:
-                        raise ProviderBlockedError("environment_readiness_timeout") from None
-                    await asyncio.sleep(self.readiness_poll_seconds)
+            if step.key != active_key:
+                active_key = step.key
+                deadline = asyncio.get_running_loop().time() + self.readiness_timeout
+            context = await self.registry.provisioning_context(lease)
+            try:
+                async with asyncio.timeout(self.step_timeout):
+                    identity = await self.provider.apply(context, step)
+            except ProviderWaitingError:
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise ProviderBlockedError("environment_readiness_timeout") from None
+                await asyncio.sleep(self.readiness_poll_seconds)
+                # Cleanup can journal discovered CronJob children before its
+                # final readiness intent. Always reload the durable next step.
+                continue
             await self.registry.confirm_step(lease, step.key, provider_identity=identity)
         await self.registry.complete(lease)
 

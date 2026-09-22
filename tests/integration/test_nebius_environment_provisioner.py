@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import copy
 import json
@@ -77,20 +78,67 @@ async def test_full_provider_recovers_bucket_reply_loss_and_readies_owner_withou
             assert any(row["metadata"]["id"] == identity for row in self.objects.values())
             return {"access-key": "key-" + identity, "secret-key": "secret-" + identity}
 
+        async def revoke_access_key(self, identity, expected, *, idempotency_key):
+            key = self.key("access_key", expected)
+            assert self.objects[key]["metadata"]["id"] == identity
+            del self.objects[key]
+
     resources = {}
+    pod_present = False
+    terminal_pod_present = False
+    inspected_pods = asyncio.Event()
 
     def kubernetes(request):
+        nonlocal terminal_pod_present
         if request.method == "GET":
+            if request.url.path.endswith("/pods"):
+                inspected_pods.set()
+                pods = []
+                if request.url.path == f"/api/v1/namespaces/{prepared.registration.application_namespace}/pods":
+                    if pod_present:
+                        pods.append({"metadata": {"name": "terminating", "uid": "pod-uid"}, "status": {"phase": "Running"}})
+                    if terminal_pod_present:
+                        pods.append(resources[request.url.path + "/finished-backup"])
+                return httpx.Response(200, json={"items": pods})
+            if request.url.path.endswith(("/jobs", "/replicasets")):
+                return httpx.Response(200, json={"items": [doc for path, doc in resources.items()
+                                                           if path.rsplit("/", 1)[0] == request.url.path]})
             value = resources.get(request.url.path)
             return httpx.Response(200, json=value) if value is not None else httpx.Response(404)
+        if request.method == "PATCH":
+            value = resources[request.url.path]
+            patch = json.loads(request.content)
+            assert patch[:2] == [{"op": "test", "path": "/metadata/uid", "value": value["metadata"]["uid"]},
+                                 {"op": "test", "path": "/metadata/resourceVersion", "value": value["metadata"]["resourceVersion"]}]
+            for edit in patch[2:]:
+                if edit["path"] == "/spec":
+                    value["spec"] = edit["value"]
+                elif edit["path"] == "/metadata/annotations/loom.nebius~1retained-by":
+                    value["metadata"]["annotations"]["loom.nebius/retained-by"] = edit["value"]
+                elif edit["path"] == "/metadata/annotations":
+                    value["metadata"]["annotations"] = edit["value"]
+                else:
+                    raise AssertionError(edit)
+            value["metadata"].update(resourceVersion="2", generation=2)
+            value["status"] = {"observedGeneration": 2, "replicas": 0, "readyReplicas": 0,
+                               "conditions": [{"type": "Suspended", "status": "True"}]}
+            return httpx.Response(200, json=value)
+        if request.method == "DELETE":
+            assert request.url.path.endswith("/pods/finished-backup")
+            assert json.loads(request.content)["preconditions"]["uid"] == "terminal-pod-uid"
+            terminal_pod_present = False
+            del resources[request.url.path]
+            return httpx.Response(200, json={"kind": "Status", "status": "Success"})
         assert request.method == "POST"
         value = json.loads(request.content)
-        value["metadata"].update(uid=str(uuid4()), generation=1)
+        value["metadata"].update(uid=str(uuid4()), generation=1, resourceVersion="1")
         if value["kind"] == "Job":
             value["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
         elif value["kind"] in {"Deployment", "StatefulSet"}:
             value["status"] = {"observedGeneration": 1, "replicas": 1, "readyReplicas": 1,
                                "updatedReplicas": 1, "availableReplicas": 1}
+        elif value["kind"] == "ResourceQuota":
+            value["status"] = {"hard": copy.deepcopy(value["spec"]["hard"]), "used": {"pods": "0"}}
         if value["kind"] == "Secret" and value["metadata"]["name"] == "loom-admin-secret":
             token = tomllib.loads(base64.b64decode(value["data"]["secrets.toml"]).decode())["admin"]["token"]
             child.state.admin_secret_verifier = AdminSecretVerifier.from_token(token)
@@ -123,5 +171,50 @@ async def test_full_provider_recovers_bucket_reply_loss_and_readies_owner_withou
             assert len(quotas) == 2 and all(doc["spec"]["hard"]["pods"] == "0" for doc in quotas)
             storage = next(doc for doc in resources.values() if doc["kind"] == "Secret" and doc["metadata"]["name"] == "loom-platform-storage")
             assert len({storage["data"][name] for name in ("secret-key", "source-secret-key", "backup-secret-key")}) == 3
+            from loom.db.nebius_environment_schema import NebiusPlatformReservation
+
+            pod_present = True
+            terminal_pod_present = True
+            cron = next(doc for doc in resources.values() if doc["kind"] == "CronJob")
+            backup_job = {"apiVersion": "batch/v1", "kind": "Job", "metadata": {
+                "name": "scheduled-backup", "namespace": prepared.registration.application_namespace,
+                "uid": "backup-job-uid", "resourceVersion": "1", "generation": 1,
+                "ownerReferences": [{"kind": "CronJob", "name": cron["metadata"]["name"],
+                                     "uid": cron["metadata"]["uid"], "controller": True}],
+            }, "spec": copy.deepcopy(cron["spec"]["jobTemplate"]["spec"])}
+            resources[f"/apis/batch/v1/namespaces/{prepared.registration.application_namespace}/jobs/scheduled-backup"] = backup_job
+            resources[f"/api/v1/namespaces/{prepared.registration.application_namespace}/pods/finished-backup"] = {
+                "apiVersion": "v1", "kind": "Pod", "metadata": {
+                    "name": "finished-backup", "uid": "terminal-pod-uid", "namespace": prepared.registration.application_namespace,
+                    "ownerReferences": [{"kind": "Job", "name": "scheduled-backup", "uid": "backup-job-uid", "controller": True}],
+                }, "status": {"phase": "Succeeded"},
+            }
+            destroy = await registry.destroy_retained(operation.environment_id, principal=alice,
+                                                       expected_generation=1, idempotency_key="destroy")
+            task = asyncio.create_task(EnvironmentWorker(registry, provider, readiness_poll_seconds=0.01).reconcile_once(destroy.operation_id))
+            try:
+                await asyncio.wait_for(inspected_pods.wait(), timeout=5)
+                async with registry.session_factory() as session:
+                    reservation = await session.get(NebiusPlatformReservation, operation.environment_id)
+                    assert reservation.cpu_millis > 0
+                assert not task.done(), "live Pods must keep cleanup running and capacity charged"
+                pod_present = False
+                await asyncio.wait_for(task, timeout=10)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            assert (await registry.get_operation(destroy.operation_id, principal=alice)).phase == "completed"
+            async with registry.session_factory() as session:
+                reservation = await session.get(NebiusPlatformReservation, operation.environment_id)
+                assert reservation.cpu_millis == reservation.memory_mib == reservation.ephemeral_storage_mib == 0
+                assert reservation.storage_mib > 0
+            assert len(cloud.objects) == 13 and sum(kind == "bucket" for kind, _, _ in cloud.objects) == 4
+            assert backup_job["spec"]["suspend"] is True and terminal_pod_present is False
+            stopped_namespaces = {doc["metadata"]["namespace"] for doc in resources.values()
+                                  if doc["kind"] == "ResourceQuota" and doc["metadata"]["name"] == "loom-environment-retained"
+                                  and doc["spec"]["hard"] == {"pods": "0"}}
+            assert stopped_namespaces == set(row.namespaces)
+            assert any(doc["kind"] == "StatefulSet" for doc in resources.values())
+            assert (await child_http.get("https://" + row.public_host + "/api/v1/auth/whoami")).status_code in {401, 403}
     finally:
         await engine.dispose()

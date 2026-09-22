@@ -33,6 +33,58 @@ class CloudApi:
         return actual
 
 
+@pytest.mark.parametrize("foreign", [False, True])
+async def test_sdk_revocation_is_identity_bound_and_recovers_a_lost_delete_reply(foreign):
+    import json
+    from types import SimpleNamespace
+
+    from nebius.api.nebius.iam.v2 import AccessKey
+
+    from loom_service.environment_management.nebius_api import NebiusSdkEnvironmentApi
+    from loom_service.environment_management.provider import (
+        ProviderBlockedError,
+        ProviderRetryError,
+    )
+
+    expected = {"metadata": {"parent_id": "owned-project", "name": "owned-key", "labels": {"loom-incarnation": "owned"}},
+                "spec": {"description": "owned"}}
+    actual = copy.deepcopy(expected)
+    actual["metadata"]["id"] = "access-key-owned"
+    if foreign:
+        actual["metadata"]["labels"]["loom-incarnation"] = "foreign"
+    deleted = []
+
+    class Client:
+        async def get(self, request, **kwargs):
+            assert request.id == "access-key-owned"
+            if actual is None:
+                from grpc import StatusCode
+                from nebius.aio.service_error import RequestError, RequestStatusExtended
+
+                raise RequestError(RequestStatusExtended(code=StatusCode.NOT_FOUND, message="absent", details=[],
+                                                         request_id="test", trace_id="test", service_errors=[]))
+            return AccessKey.from_json(json.dumps(actual))
+
+        async def delete(self, request, **kwargs):
+            nonlocal actual
+            assert request.id == "access-key-owned"
+            assert kwargs["metadata"] == [("x-idempotency-key", "cleanup-key")]
+            actual = None
+            deleted.append(request.id)
+            raise TimeoutError("response lost after deletion")
+
+    api = NebiusSdkEnvironmentApi(SimpleNamespace(), clients={"access_key": Client()})
+    if foreign:
+        with pytest.raises(ProviderBlockedError, match="cloud_resource_identity_conflict"):
+            await api.revoke_access_key("access-key-owned", expected, idempotency_key="cleanup-key")
+        assert actual is not None and deleted == []
+    else:
+        with pytest.raises(ProviderRetryError):
+            await api.revoke_access_key("access-key-owned", expected, idempotency_key="cleanup-key")
+        await api.revoke_access_key("access-key-owned", expected, idempotency_key="cleanup-key")
+        assert actual is None and deleted == ["access-key-owned"]
+
+
 async def test_service_account_replay_has_stable_key_and_rejects_foreign_match():
     from loom_service.environment_management.cloud_provider import NebiusEnvironmentCloudProvider
     from loom_service.environment_management.provider import ProviderBlockedError

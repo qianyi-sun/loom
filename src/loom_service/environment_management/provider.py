@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from loom_service.environment_management.registry import OperationLease
 from loom_service.environment_management.steps import ProvisioningStep
@@ -37,6 +37,8 @@ class ProvisioningContext:
     config: dict[str, Any]
     identities: dict[str, str]
     documents: dict[str, dict[str, Any]] = field(default_factory=dict)
+    action: Literal["create", "destroy_retained"] = "create"
+    source: ProvisioningContext | None = None
 
     @property
     def namespaces(self) -> tuple[str, ...]:

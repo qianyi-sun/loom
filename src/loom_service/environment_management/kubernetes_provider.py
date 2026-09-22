@@ -37,19 +37,25 @@ _RESOURCES = {
 _NAME = re.compile(r"[a-z0-9](?:[-a-z0-9.]{0,251}[a-z0-9])?")
 
 
-def _contains(actual: Any, expected: Any) -> bool:
+def _contains(actual: Any, expected: Any, path: tuple[str, ...] = ()) -> bool:
     """Allow server defaults, but never drop/change/reorder a frozen field."""
     if isinstance(expected, dict):
+        if (path[-2:] == ("env", "*") and "value" in expected and "valueFrom" not in expected
+                and isinstance(actual, dict) and "valueFrom" in actual):
+            return False
         # Kubernetes omits zero-length optional lists (e.g. default-deny
         # ingress/egress rules). Scalar false/zero MUST NOT be treated as absent:
         # their defaults can grant authority or start replicas.
         return isinstance(actual, dict) and all(
-            (_contains(actual[key], value) if key in actual else value == [])
+            (_contains(actual[key], value, (*path, key)) if key in actual else (
+                value == [] or (path[-2:] == ("env", "*") and key == "value"
+                                and value == "" and "valueFrom" not in actual)
+            ))
             for key, value in expected.items()
         )
     if isinstance(expected, list):
         return (isinstance(actual, list) and len(actual) == len(expected)
-                and all(_contains(a, b) for a, b in zip(actual, expected, strict=True)))
+                and all(_contains(a, b, (*path, "*")) for a, b in zip(actual, expected, strict=True)))
     return type(actual) is type(expected) and actual == expected
 
 
@@ -78,16 +84,20 @@ class KubernetesEnvironmentProvider:
         collection = prefix + "/" + resource
         return collection, collection + "/" + name
 
-    async def _request(self, method: str, path: str, *, body: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    async def _request(
+        self, method: str, path: str, *, body: dict[str, Any] | list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
         try:
-            response = await self.http.request(method, path, json=body, follow_redirects=False, timeout=30)
+            headers = {"Content-Type": "application/json-patch+json"} if isinstance(body, list) else {}
+            response = await self.http.request(method, path, json=body, headers=headers, follow_redirects=False, timeout=30)
         except httpx.TransportError:
             raise ProviderRetryError("kubernetes_unavailable") from None
-        if response.status_code == 404 and method == "GET":
+        if response.status_code == 404 and method in {"GET", "DELETE"}:
             return None
-        if response.status_code == 409 or response.status_code == 429 or response.status_code >= 500:
+        if (response.status_code in (409, 429) or response.status_code >= 500
+                or (method == "PATCH" and response.status_code == 422)):
             raise ProviderRetryError("kubernetes_retry_required")
-        if response.status_code not in (200, 201):
+        if response.status_code not in ((200, 202) if method == "DELETE" else (200, 201)):
             raise ProviderBlockedError("kubernetes_request_rejected")
         try:
             value = response.json()
@@ -144,6 +154,8 @@ class KubernetesEnvironmentProvider:
                     raise ProviderBlockedError("kubernetes_recorded_resource_missing")
                 actual = await self._request("POST", collection, body=expected)
             assert actual is not None
+            if actual.get("metadata", {}).get("annotations", {}).get("loom.nebius/retained-by") is not None:
+                raise ProviderBlockedError("kubernetes_resource_retained")
             return self._identity(actual, expected, context.identities.get(step.key))
         if step.kind in {"job_ready", "database_ready"}:
             kind = "Job" if step.kind == "job_ready" else "StatefulSet"

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Header, Request, Response
 from loom.auth import AuthContext
 from loom.nebius_environment_contract import (
     EnvironmentCreateRequestV1,
+    EnvironmentOperationRequestV1,
     EnvironmentOperationV1,
     EnvironmentRegistrationV1,
     EnvironmentStatusV1,
@@ -55,6 +56,16 @@ async def list_environments(request: Request, principal: ManagementPrincipal) ->
     return {"items": await manager(request).registry.list_environments(principal=principal)}
 
 
+@router.post("/environments/{environment_id}/operations", status_code=202)
+async def request_environment_operation(
+    request: Request, environment_id: UUID, payload: EnvironmentOperationRequestV1, principal: ManagementPrincipal,
+    idempotency_key: Annotated[str, Header(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")],
+) -> EnvironmentOperationV1:
+    return await manager(request).registry.destroy_retained(
+        environment_id, principal=principal, expected_generation=payload.expected_generation, idempotency_key=idempotency_key,
+    )
+
+
 @router.get("/environments/{environment_id}")
 async def environment_status(request: Request, environment_id: UUID, principal: ManagementPrincipal) -> EnvironmentStatusV1:
     return await manager(request).registry.status(environment_id, principal=principal)
@@ -72,3 +83,8 @@ async def environment_login(
 @router.get("/environment-operations/{operation_id}")
 async def operation_status(request: Request, operation_id: UUID, principal: ManagementPrincipal) -> EnvironmentOperationV1:
     return await manager(request).registry.get_operation(operation_id, principal=principal)
+
+
+@router.post("/environment-operations/{operation_id}/retry", status_code=202)
+async def retry_environment_operation(request: Request, operation_id: UUID, principal: ManagementPrincipal) -> EnvironmentOperationV1:
+    return await manager(request).registry.retry(operation_id, principal=principal)

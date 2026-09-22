@@ -35,7 +35,12 @@ from loom.nebius_environment_contract import (
     EnvironmentStatusV1,
 )
 from loom.nebius_environment_render import RenderedEnvironment
-from loom_service.environment_management.steps import ProvisioningStep, StepKind, creation_steps
+from loom_service.environment_management.steps import (
+    ProvisioningStep,
+    StepKind,
+    creation_steps,
+    retained_steps,
+)
 
 if TYPE_CHECKING:
     from loom_service.environment_management.provider import ProvisioningContext
@@ -255,6 +260,95 @@ class EnvironmentRegistry:
             value: dict[str, Any] = json.loads(await LocalEncryptedSecretStore(session).get(material.provider_identity))
             return registration_view(row), value
 
+    async def retry(self, operation_id: UUID, *, principal: AuthContext) -> EnvironmentOperationV1:
+        """Explicit owner retry of the same frozen intent; never reset epochs.
+
+        Pending/running/completed replay is a no-op. An exhausted automatic retry
+        allowance permits one new reconciliation per explicit owner request.
+        This cannot repair conflicting provider identity by rewriting the plan.
+        """
+        owner, team = owner_identity(principal, mutation=True)
+        async with self.session_factory.begin() as session:
+            permitted = await session.scalar(select(NebiusEnvironmentOperation.operation_id).join(
+                NebiusEnvironment, NebiusEnvironment.environment_id == NebiusEnvironmentOperation.environment_id,
+            ).where(NebiusEnvironmentOperation.operation_id == operation_id,
+                    NebiusEnvironment.owner_user_id == owner, NebiusEnvironment.owner_team_id == team))
+            if permitted is None:
+                raise ManagementError("environment_forbidden", 403)
+            operation, environment, _ = await self._locked_operation(session, operation_id)
+            if environment.deployment_generation != operation.deployment_generation:
+                raise ManagementError("stale_operation_generation")
+            if operation.phase == "blocked":
+                operation.phase = "pending"
+                operation.error_code = None
+            return operation_view(operation)
+
+    async def destroy_retained(
+        self, environment_id: UUID, *, principal: AuthContext, expected_generation: int, idempotency_key: str,
+    ) -> EnvironmentOperationV1:
+        """Close access and older leases atomically; retain data, names and charges."""
+        owner, team = owner_identity(principal, mutation=True)
+        if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", idempotency_key) is None:
+            raise ManagementError("invalid_idempotency_key", 422)
+        if type(expected_generation) is not int or expected_generation < 1:
+            raise ManagementError("invalid_environment_generation", 422)
+        fingerprint = hashlib.sha256(json.dumps({
+            "action": "destroy_retained", "environment_id": str(environment_id),
+            "owner_team_id": str(team), "expected_generation": expected_generation,
+        }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        try:
+            async with self.session_factory.begin() as session:
+                environment = (await session.scalars(select(NebiusEnvironment).where(
+                    NebiusEnvironment.environment_id == environment_id,
+                    NebiusEnvironment.owner_user_id == owner, NebiusEnvironment.owner_team_id == team,
+                ).with_for_update())).one_or_none()
+                if environment is None:
+                    raise ManagementError("environment_forbidden", 403)
+                replay = (await session.scalars(select(NebiusEnvironmentOperation).where(
+                    NebiusEnvironmentOperation.owner_user_id == owner,
+                    NebiusEnvironmentOperation.idempotency_key == idempotency_key,
+                ))).one_or_none()
+                if replay is not None:
+                    if replay.request_sha256 != fingerprint:
+                        raise ManagementError("idempotency_conflict")
+                    return operation_view(replay)
+                if environment.deployment_generation != expected_generation:
+                    raise ManagementError("environment_generation_conflict")
+                source = (await session.scalars(select(NebiusEnvironmentOperation).where(
+                    NebiusEnvironmentOperation.environment_id == environment_id,
+                    NebiusEnvironmentOperation.deployment_generation == expected_generation,
+                ).with_for_update())).one_or_none()
+                if (source is None or source.action != "create" or environment.desired_state != "active"
+                        or environment.scope != "personal" or environment.binding_mode != "generated"):
+                    raise ManagementError("retained_destroy_not_supported")
+                was_ready = source.phase == "completed"
+                source_rows = (await session.scalars(select(NebiusEnvironmentResource).where(
+                    NebiusEnvironmentResource.operation_id == source.operation_id,
+                ).order_by(NebiusEnvironmentResource.sequence))).all()
+                source.phase, source.error_code = "blocked", "environment_destroy_requested"
+                source.lease_token = source.lease_expires_at = None
+                environment.desired_state = "destroyed"
+                environment.deployment_generation += 1
+                operation = NebiusEnvironmentOperation(
+                    operation_id=uuid4(), environment_id=environment_id, owner_user_id=owner,
+                    idempotency_key=idempotency_key, request_sha256=fingerprint,
+                    deployment_generation=environment.deployment_generation, action="destroy_retained", phase="pending",
+                    plan_json={"registration": registration_view(environment).model_dump(mode="json"),
+                               "config": source.plan_json["config"], "source_operation_id": str(source.operation_id)},
+                )
+                session.add(operation)
+                await session.flush()
+                steps = retained_steps([ProvisioningStep(row.resource_key, cast(StepKind, row.kind), row.payload_json)
+                                        for row in source_rows], was_ready=was_ready)
+                session.add_all([NebiusEnvironmentResource(
+                    operation_id=operation.operation_id, resource_key=step.key,
+                    sequence=1000000 if step.key == "ready:retained" else sequence,
+                    kind=step.kind, payload_json=step.payload, phase="planned",
+                ) for sequence, step in enumerate(steps)])
+                return operation_view(operation)
+        except IntegrityError:
+            raise ManagementError("idempotency_conflict") from None
+
     async def _locked_operation(
         self, session: AsyncSession, operation_id: UUID,
     ) -> tuple[NebiusEnvironmentOperation, NebiusEnvironment, datetime]:
@@ -334,13 +428,65 @@ class EnvironmentRegistry:
             operation, _ = await self._leased_operation(session, lease)
             rows = (await session.scalars(select(NebiusEnvironmentResource).where(
                 NebiusEnvironmentResource.operation_id == lease.operation_id,
-                NebiusEnvironmentResource.provider_identity.is_not(None),
             ))).all()
+            source_context = None
+            if operation.action == "destroy_retained":
+                source = await session.get(NebiusEnvironmentOperation, UUID(operation.plan_json["source_operation_id"]))
+                if source is None or source.environment_id != lease.environment_id or source.action != "create":
+                    raise ManagementError("retained_source_operation_invalid")
+                source_rows = (await session.scalars(select(NebiusEnvironmentResource).where(
+                    NebiusEnvironmentResource.operation_id == source.operation_id,
+                ))).all()
+                identities = {row.resource_key: row.provider_identity for row in source_rows if row.provider_identity is not None}
+                for row in rows:
+                    if row.provider_identity is not None and row.payload_json.get("action") in {"retained_namespace", "retained_stop"}:
+                        identities[row.payload_json["source_key"]] = row.provider_identity
+                source_context = ProvisioningContext(
+                    OperationLease(source.operation_id, source.environment_id, source.deployment_generation,
+                                   source.runner_epoch, lease.lease_token),
+                    source.plan_json["registration"], source.plan_json["config"], identities,
+                    {row.resource_key: row.payload_json for row in source_rows if row.kind == "kubernetes"},
+                )
             return ProvisioningContext(lease, operation.plan_json["registration"], operation.plan_json["config"], {
                 row.resource_key: row.provider_identity for row in rows if row.provider_identity is not None
             }, {
-                row.resource_key: row.payload_json for row in rows if row.kind == "kubernetes"
-            })
+                row.resource_key: row.payload_json for row in rows if row.kind == "kubernetes" or
+                row.payload_json.get("action") in {"retained_dependent_job", "retained_terminal_pod"}
+            }, action=cast(Any, operation.action), source=source_context)
+
+    async def journal_retained_resources(self, lease: OperationLease, steps: list[ProvisioningStep]) -> None:
+        """Discovery commits exact child UIDs before any destructive API request."""
+        async with self.session_factory.begin() as session:
+            operation, _ = await self._leased_operation(session, lease)
+            if operation.action != "destroy_retained" or len(steps) > 1000:
+                raise ManagementError("retained_discovery_invalid")
+            binding = EnvironmentRegistrationV1.model_validate(operation.plan_json["registration"])
+            last = await session.scalar(select(func.max(NebiusEnvironmentResource.sequence)).where(
+                NebiusEnvironmentResource.operation_id == lease.operation_id,
+                NebiusEnvironmentResource.sequence < 1000000,
+            ))
+            sequence = int(last or 0)
+            for step in steps:
+                doc = step.payload.get("resource", {})
+                metadata = doc.get("metadata", {})
+                uid = metadata.get("uid")
+                kind = doc.get("kind")
+                action = {"Job": "retained_dependent_job", "Pod": "retained_terminal_pod"}.get(kind)
+                if (step.kind != "credentials" or action is None or step.payload.get("action") != action
+                        or not isinstance(uid, str) or re.fullmatch(r"[A-Za-z0-9-]{1,128}", uid) is None
+                        or metadata.get("namespace") not in binding.namespaces
+                        or step.key != "retain:dependent:" + str(kind) + ":" + uid):
+                    raise ManagementError("retained_discovery_invalid")
+                existing = await session.get(NebiusEnvironmentResource, (lease.operation_id, step.key))
+                if existing is not None:
+                    if existing.payload_json != step.payload:
+                        raise ManagementError("retained_discovery_conflict")
+                    continue
+                sequence += 1
+                if sequence >= 1000:
+                    raise ManagementError("retained_discovery_limit")
+                session.add(NebiusEnvironmentResource(operation_id=lease.operation_id, resource_key=step.key,
+                                                      sequence=sequence, kind=step.kind, payload_json=step.payload, phase="planned"))
 
     async def finish_attempt(self, lease: OperationLease, *, error_code: str, retry: bool) -> None:
         if re.fullmatch(r"[a-z][a-z0-9_]{0,95}", error_code) is None:
@@ -379,8 +525,14 @@ class EnvironmentRegistry:
         from loom.security.secret_store import LocalEncryptedSecretStore, parse_ref
 
         async with self.session_factory.begin() as session:
-            await self._leased_operation(session, lease)
-            row = await session.get(NebiusEnvironmentResource, (lease.operation_id, key))
+            operation, _ = await self._leased_operation(session, lease)
+            material_operation_id = lease.operation_id
+            if operation.action == "destroy_retained":
+                original = await session.get(NebiusEnvironmentOperation, UUID(operation.plan_json["source_operation_id"]))
+                if original is None or original.environment_id != lease.environment_id or original.action != "create":
+                    raise ManagementError("retained_source_operation_invalid")
+                material_operation_id = original.operation_id
+            row = await session.get(NebiusEnvironmentResource, (material_operation_id, key))
             if (row is None or row.kind != "credentials" or row.payload_json.get("action") != "material"
                     or row.provider_identity is None
                     or parse_ref(row.provider_identity).namespace != "nebius-environment:" + str(lease.environment_id)):
@@ -424,12 +576,26 @@ class EnvironmentRegistry:
 
     async def complete(self, lease: OperationLease) -> None:
         async with self.session_factory.begin() as session:
+            # Reservation mutations take budget -> environment -> operation locks.
+            cluster_id = await session.scalar(select(NebiusEnvironment.cluster_id).where(
+                NebiusEnvironment.environment_id == lease.environment_id,
+            ))
+            await session.scalar(select(NebiusPlatformBudget).where(
+                NebiusPlatformBudget.cluster_id == cluster_id,
+            ).with_for_update())
             operation, _ = await self._leased_operation(session, lease)
             rows = (await session.execute(select(NebiusEnvironmentResource).where(
                 NebiusEnvironmentResource.operation_id == lease.operation_id,
             ).order_by(NebiusEnvironmentResource.sequence))).scalars().all()
             if not rows or rows[-1].kind != "application_ready" or any(row.phase != "applied" for row in rows):
                 raise ManagementError("operation_resources_incomplete")
+            if operation.action == "destroy_retained":
+                if rows[-1].payload_json.get("phase") != "retained":
+                    raise ManagementError("operation_resources_incomplete")
+                reservation = await session.get(NebiusPlatformReservation, lease.environment_id)
+                if reservation is None:
+                    raise ManagementError("platform_reservation_missing")
+                reservation.cpu_millis = reservation.memory_mib = reservation.ephemeral_storage_mib = 0
             operation.phase = "completed"
             operation.error_code = None
             operation.lease_token = None

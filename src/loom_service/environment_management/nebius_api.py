@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from loom_service.environment_management.kubernetes_provider import _contains
 from loom_service.environment_management.provider import ProviderBlockedError, ProviderRetryError
 
 
@@ -109,3 +110,25 @@ class NebiusSdkEnvironmentApi:
         if not response.aws_access_key_id or not response.secret:
             raise ProviderBlockedError("nebius_access_key_secret_unavailable")
         return {"access-key": str(response.aws_access_key_id), "secret-key": str(response.secret)}
+
+    async def revoke_access_key(self, identity: str, expected: dict[str, Any], *, idempotency_key: str) -> None:
+        """Delete only a recorded, readback-matching key ID; never a bucket/data."""
+        from nebius.api.nebius.iam.v2 import DeleteAccessKeyRequest, GetAccessKeyRequest
+
+        client = self.clients["access_key"]
+        current = await self._call(client.get, GetAccessKeyRequest(id=identity), missing=True)
+        if current is None:
+            return
+        actual = self._value(current)
+        if actual.get("metadata", {}).get("id") != identity or not _contains(actual, expected):
+            raise ProviderBlockedError("cloud_resource_identity_conflict")
+        operation = await self._call(client.delete, DeleteAccessKeyRequest(id=identity), key=idempotency_key, missing=True)
+        if operation is not None:
+            try:
+                await operation.wait(timeout=30, poll_retries=0)
+            except Exception:
+                raise ProviderRetryError("nebius_key_revocation_unconfirmed") from None
+            if not operation.successful():
+                raise ProviderBlockedError("nebius_key_revocation_failed")
+        if await self._call(client.get, GetAccessKeyRequest(id=identity), missing=True) is not None:
+            raise ProviderRetryError("nebius_key_revocation_unconfirmed")

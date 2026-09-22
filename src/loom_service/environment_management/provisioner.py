@@ -11,6 +11,7 @@ from loom_service.environment_management.credentials import EnvironmentCredentia
 from loom_service.environment_management.kubernetes_provider import KubernetesEnvironmentProvider
 from loom_service.environment_management.provider import ProviderBlockedError, ProvisioningContext
 from loom_service.environment_management.registry import EnvironmentRegistry
+from loom_service.environment_management.retained_destroy import EnvironmentRetainedDestroy
 from loom_service.environment_management.steps import ProvisioningStep
 
 
@@ -32,6 +33,8 @@ class EnvironmentProvisioner:
             raise ProviderBlockedError("credential_admin_invalid") from None
 
     async def apply(self, context: ProvisioningContext, step: ProvisioningStep) -> str:
+        if context.action == "destroy_retained":
+            return await EnvironmentRetainedDestroy(self.registry, self.kubernetes, self.credentials.cloud, self.child).apply(context, step)
         if step.kind in {"kubernetes", "database_ready", "job_ready"}:
             return await self.kubernetes.apply(context, step)
         if step.kind == "object_bucket" or (step.kind == "credentials" and step.payload.get("action") in {

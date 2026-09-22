@@ -12,6 +12,22 @@ import pytest
 from loom_service.environment_management.steps import ProvisioningStep
 
 
+@pytest.mark.parametrize("actual,want", [
+    ({"name": "EMPTY"}, True),
+    ({"name": "EMPTY", "value": ""}, True),
+    ({"name": "EMPTY", "value": "other"}, False),
+    ({"name": "EMPTY", "valueFrom": {"secretKeyRef": {"name": "foreign", "key": "token"}}}, False),
+    ({"name": "EMPTY", "value": "", "valueFrom": {"secretKeyRef": {"name": "foreign", "key": "token"}}}, False),
+])
+def test_api_omitted_empty_environment_value_preserves_literal_not_secret_source(actual, want):
+    from loom_service.environment_management.kubernetes_provider import _contains
+
+    expected = {"spec": {"template": {"spec": {"containers": [{"env": [{"name": "EMPTY", "value": ""}]}]}}}}
+    observed = {"spec": {"template": {"spec": {"containers": [{"env": [actual]}]}}}}
+    assert _contains(observed, expected) is want
+    assert not _contains({"name": "EMPTY"}, {"name": "EMPTY", "value": ""})
+
+
 def context():
     from loom_service.environment_management.provider import ProvisioningContext
     from loom_service.environment_management.registry import OperationLease

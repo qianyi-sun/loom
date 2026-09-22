@@ -75,3 +75,24 @@ def creation_steps(prepared: RenderedEnvironment) -> list[ProvisioningStep]:
     if len({step.key for step in steps}) != len(steps):
         raise ValueError("duplicate provisioning resource identity")
     return steps
+
+
+def retained_steps(source: list[ProvisioningStep], *, was_ready: bool) -> list[ProvisioningStep]:
+    """Stop every possible named workload, including unconfirmed create replies."""
+    steps = [ProvisioningStep("retain:" + step.key, "credentials", {
+        "action": "retained_namespace", "source_key": step.key,
+    }) for step in source if step.kind == "kubernetes" and step.payload["kind"] == "Namespace"]
+    if was_ready:
+        steps.append(ProvisioningStep("retain:owner", "credentials", {"action": "retained_owner_revoke"}))
+    steps.extend(ProvisioningStep("retain:quota:" + step.payload["metadata"]["name"], "credentials", {
+        "action": "retained_quota", "namespace": step.payload["metadata"]["name"],
+    }) for step in source if step.kind == "kubernetes" and step.payload["kind"] == "Namespace")
+    for kind in ("Ingress", "CronJob", "Job", "Deployment", "StatefulSet"):
+        steps.extend(ProvisioningStep("retain:" + step.key, "credentials", {
+            "action": "retained_stop", "source_key": step.key,
+        }) for step in source if step.kind == "kubernetes" and step.payload["kind"] == kind)
+    steps.extend(ProvisioningStep("retain:key:" + purpose, "credentials", {
+        "action": "retained_key_revoke", "purpose": purpose,
+    }) for purpose in ("canonical", "source", "backup"))
+    steps.append(ProvisioningStep("ready:retained", "application_ready", {"phase": "retained"}))
+    return steps

@@ -77,3 +77,6 @@ class ChildEnvironmentClient:
 
     async def owner(self, row: EnvironmentRegistrationV1, *, admin_token: str) -> dict[str, Any]:
         return self._verify(row, await self._request(row, method="GET", action="owner", admin_token=admin_token))
+
+    async def revoke(self, row: EnvironmentRegistrationV1, *, admin_token: str) -> dict[str, Any]:
+        return self._verify(row, await self._request(row, method="POST", action="revoke", admin_token=admin_token))

@@ -75,18 +75,18 @@ async def read_owner(
     return _identity(row)
 
 
-@router.post("/owner")
-async def enroll_owner(request: Request, response: Response, payload: ChildIdentity, sc: AdminSessionAndCtx) -> dict[str, str]:
-    session, ctx = sc
-    row = _binding(request, payload, ctx)
-    await _lock(session, row)
-    if await session.get(User, row.owner_user_id) is None:
+async def _ensure_owner_rows(session: AsyncSession, row: EnvironmentRegistrationV1) -> tuple[User, Team]:
+    user = await session.get(User, row.owner_user_id, with_for_update=True)
+    if user is None:
         assert row.owner_user_id is not None
         name = "owner-" + row.owner_user_id.hex
-        session.add(User(id=row.owner_user_id, username=name, username_normalized=name,
-                         display_name=row.slug, status="active", is_platform_admin=False))
-    if await session.get(Team, row.owner_team_id) is None:
-        session.add(Team(id=row.owner_team_id, name="Development " + row.slug))
+        user = User(id=row.owner_user_id, username=name, username_normalized=name,
+                    display_name=row.slug, status="active", is_platform_admin=False)
+        session.add(user)
+    team = await session.get(Team, row.owner_team_id, with_for_update=True)
+    if team is None:
+        team = Team(id=row.owner_team_id, name="Development " + row.slug)
+        session.add(team)
     await session.flush()
     membership = await session.scalar(select(TeamMembership).where(
         TeamMembership.user_id == row.owner_user_id, TeamMembership.team_id == row.owner_team_id,
@@ -94,9 +94,44 @@ async def enroll_owner(request: Request, response: Response, payload: ChildIdent
     if membership is None:
         session.add(TeamMembership(user_id=row.owner_user_id, team_id=row.owner_team_id, role="owner"))
     await session.flush()
+    return user, team
+
+
+@router.post("/owner")
+async def enroll_owner(request: Request, response: Response, payload: ChildIdentity, sc: AdminSessionAndCtx) -> dict[str, str]:
+    session, ctx = sc
+    row = _binding(request, payload, ctx)
+    await _lock(session, row)
+    await _ensure_owner_rows(session, row)
     await _owner(session, row)
     await write_admin_audit_event(session, actor="managed-environment:" + str(row.environment_id), action="managed_environment.owner.enroll",
                                  target_type="environment", target_id=str(row.environment_id), request=request,
+                                 metadata={"incarnation": str(row.incarnation), "owner_user_id": str(row.owner_user_id)})
+    await session.commit()
+    response.headers["Cache-Control"] = "no-store"
+    return _identity(row)
+
+
+@router.post("/revoke")
+async def revoke_owner(request: Request, response: Response, payload: ChildIdentity, sc: AdminSessionAndCtx) -> dict[str, str]:
+    """Irreversible enrollment tombstone for retained destroy, not suspension.
+
+    A delayed enrollment must find a disabled identity even if it never existed.
+    Do not delete challenges: their consumption locks challenge then user; taking
+    those locks in reverse during revocation could deadlock. The user lock and
+    disabled-state checks already fence both proof consumption and sessions.
+    """
+    session, ctx = sc
+    row = _binding(request, payload, ctx)
+    await _lock(session, row)
+    user, team = await _ensure_owner_rows(session, row)
+    now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
+    user.status = "disabled"
+    user.disabled_at = user.disabled_at or now
+    team.disabled_at = team.disabled_at or now
+    await write_admin_audit_event(session, actor="managed-environment:" + str(row.environment_id),
+                                 action="managed_environment.owner.revoke", target_type="environment",
+                                 target_id=str(row.environment_id), request=request,
                                  metadata={"incarnation": str(row.incarnation), "owner_user_id": str(row.owner_user_id)})
     await session.commit()
     response.headers["Cache-Control"] = "no-store"
