@@ -317,3 +317,16 @@ def test_preparation_rejects_unresolved_named_user_before_writing(tmp_path):
     with pytest.raises(ValueError, match="unsupported task identity"):
         prepare_nebius_terminus_image(tmp_path, environment)
     assert not (tmp_path / OFFLINE_SCRIPT).exists()
+
+
+def test_apt_metadata_cleanup_is_relocated_with_explicit_packages():
+    source = SCRIPT.replace("apt-get update\napt-get install -y curl primer3", 
+                            "apt-get update && apt-get install -y curl primer3 && rm -rf /var/lib/apt/lists/*")
+    assert adapt_harbor_test_script(source) == adapt_harbor_test_script(SCRIPT)
+
+
+@pytest.mark.parametrize("suffix", [" && rm -rf /app/*", " && touch /app/setup", " || true"])
+def test_apt_cleanup_does_not_hide_arbitrary_task_commands(suffix):
+    with pytest.raises(ValueError, match="unsupported apt bootstrap"):
+        adapt_harbor_test_script(SCRIPT.replace("apt-get install -y curl primer3", 
+                                               "apt-get install -y curl primer3" + suffix))

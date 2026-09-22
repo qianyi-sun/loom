@@ -73,7 +73,7 @@ def test_default_identity_preserves_legacy_plan_bytes_and_security():
 
 @pytest.mark.parametrize("user,home", [
     ("miles", "/home/miles"), (1001, "/home/miles"), ("1001:1002", None),
-    ("root", "/root/../tests"), ("root", "/loom/private"),
+    ("root", "/root/../tests"), ("root", "/loom/private"), ("root", ""),
 ])
 def test_unsupported_or_ambiguous_identity_is_rejected_before_execution(user, home):
     task, trial, _ = _identity_task(user, home)
