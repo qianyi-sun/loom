@@ -373,7 +373,7 @@ async def accept_invite(
     async with request.app.state.session_factory() as session:
         ctx = await verify_session_cookie(
             session,
-            request.cookies.get(settings.auth_session_cookie_name),
+            request.cookies.get(settings.session_cookie_name),
         )
         session_user = None
         if ctx is not None and ctx.type == "user":

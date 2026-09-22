@@ -17,6 +17,12 @@ _TEST_STEP_JWT_SIGNING_KEY = "test-step-jwt-signing-key-do-not-use-in-prod"
 
 
 @pytest.fixture(autouse=True)
+def _local_http_test_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy ASGI fixtures use HTTP. Hosted-auth tests explicitly turn this off."""
+    monkeypatch.setenv("LOOM_SVC_AUTH_LOCAL_HTTP", "true")
+
+
+@pytest.fixture(autouse=True)
 def _default_step_jwt_signing_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """ControlPlaneSettings + GatewaySettings now require this env var.
     Existing tests don't know about it; this autouse fixture supplies a
@@ -50,5 +56,4 @@ def postgres_url() -> Iterator[str]:
             check=True,
         )
         yield url
-
 

@@ -9,7 +9,7 @@ connections, usage attribution, members, and API-token administration.
 
 | Identity | Credential | Scope |
 | --- | --- | --- |
-| Browser or CLI user | Username/password followed by a `loom_session` cookie | Current team and membership role |
+| Browser or CLI user | Username/password followed by a host-scoped session cookie | Current team and membership role |
 | User-owned API token | `loom_api_...` bearer token linked to a user | Its user and team |
 | Legacy team token | Unowned `loom_team_...` bearer token | Its team, with compatibility restrictions |
 | Platform administrator | User with `is_platform_admin=true` | Cross-team administrative access |
@@ -60,7 +60,12 @@ public registration enabled or disabled through the admin team routes.
 ## Sessions and CSRF
 
 Successful password login creates a database-backed session and sets the raw
-session secret in an HttpOnly `loom_session` cookie. Loom stores hashes of the
+session secret in an HttpOnly `__Host-loom_session` cookie. Hosted sessions use
+Secure, Path=/, SameSite=Lax and no Domain attribute, including development.
+`auth_session_cookie_name` configures the base name; hosted mode adds `__Host-`
+unless already present. The injectable legacy cookie name is not authenticated
+in hosted mode. Existing hosted users must log in again after this change.
+Loom stores hashes of the
 session and CSRF secrets. The CSRF secret is returned in authentication JSON
 and kept in application or CLI memory; it is sent as `X-Loom-CSRF` on unsafe
 session-authenticated requests.
@@ -70,8 +75,28 @@ Refreshing a normal session rotates both the session and CSRF secrets. Logout
 revokes the session and clears the authentication cookies. Bearer-token
 requests do not use the browser-session CSRF check.
 
+Hosted unsafe browser requests must also match the canonical `public_base_url`
+origin. Sibling-host, null and malformed origins are rejected, including before
+unauthenticated login. When Origin is absent, cross-site/same-site Fetch Metadata
+is rejected; non-browser clients without either header retain normal auth/CSRF
+requirements. This is an origin check, not a wildcard CORS allowance. Configure
+the actual HTTPS public origin at the ingress; forwarded headers cannot override
+that configured origin.
+
+Local HTTP compatibility requires `LOOM_SVC_AUTH_LOCAL_HTTP=true`; the local
+Compose file explicitly selects it. It retains `loom_session` and the CSRF-token
+check while allowing the Vite proxy's local origins. It cannot disable Secure or
+host scoping for production, an HTTPS `public_base_url`, or a `__Host-` name.
+
 The CLI stores its current session cookie and CSRF token in the selected Loom
-profile. These values are credentials and must not be printed or committed.
+profile, including the issued cookie name. It understands both legacy and hosted
+cookies, rejects invalid hosted cookie attributes and name downgrades, and bounds
+session requests and redirects to the authenticated origin. Changing `server_url`
+with `loom config set` clears the old environment's login credentials. These
+values are credentials and must not be printed or committed. Internal trial
+cancellation continues to normalize the public cookie name to the existing
+Service-to-Control-Plane contract; the Control Plane independently verifies the
+session and CSRF secret against that environment's database.
 
 ## CLI workflow
 

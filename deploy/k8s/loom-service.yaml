@@ -23,6 +23,8 @@ spec:
           value: loom_csrf
         - name: LOOM_SVC_AUTH_CSRF_HEADER_NAME
           value: X-Loom-CSRF
+        - name: LOOM_SVC_AUTH_LOCAL_HTTP
+          value: 'False'
         - name: LOOM_SVC_AUTH_LOGIN_CHALLENGE_TTL_SEC
           value: '900'
         - name: LOOM_SVC_AUTH_RETURN_LOGIN_TOKEN

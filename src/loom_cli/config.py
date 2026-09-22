@@ -61,6 +61,7 @@ class LoomConfig:
     # Username/password login stores the same session cookie + CSRF token the
     # web UI uses. Stored in the same owner-only config file as bearer tokens.
     auth_session_cookie: str | None = None
+    auth_session_cookie_name: str = "loom_session"
     auth_csrf_token: str | None = None
     local_providers: dict[str, LocalProvider] = field(default_factory=dict)
 
@@ -74,6 +75,7 @@ class LoomConfig:
             out["auth_token"] = self.auth_token
         if self.auth_session_cookie is not None:
             out["auth_session_cookie"] = self.auth_session_cookie
+            out["auth_session_cookie_name"] = self.auth_session_cookie_name
         if self.auth_csrf_token is not None:
             out["auth_csrf_token"] = self.auth_csrf_token
         if self.local_providers:
@@ -107,6 +109,9 @@ def load_config() -> LoomConfig:
     auth_session_cookie = raw.get("auth_session_cookie")
     if auth_session_cookie is not None and not isinstance(auth_session_cookie, str):
         raise ValueError(f"{path}: auth_session_cookie must be a string")
+    auth_session_cookie_name = raw.get("auth_session_cookie_name", "loom_session")
+    if auth_session_cookie_name not in ("loom_session", "__Host-loom_session"):
+        raise ValueError(f"{path}: unsupported auth_session_cookie_name")
     auth_csrf_token = raw.get("auth_csrf_token")
     if auth_csrf_token is not None and not isinstance(auth_csrf_token, str):
         raise ValueError(f"{path}: auth_csrf_token must be a string")
@@ -146,6 +151,7 @@ def load_config() -> LoomConfig:
         server_url=server_url,
         auth_token=auth_token,
         auth_session_cookie=auth_session_cookie,
+        auth_session_cookie_name=auth_session_cookie_name,
         auth_csrf_token=auth_csrf_token,
         local_providers=local_providers,
     )

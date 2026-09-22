@@ -988,7 +988,9 @@ approves a team role, and manually shares the one-time password setup link.
 Forgot-password follows the same pattern: the user submits a reset request,
 the admin approves it, and the user receives a one-time reset link. On deployed
 web environments, setup and reset links are generated with the public HTTPS
-origin. The service sets an HttpOnly session cookie. Auth responses return a
+origin. The service sets a host-only Secure/HttpOnly `__Host-loom_session` cookie,
+so personal environments do not share browser sessions. After upgrading from
+the legacy hosted cookie, log in again. Auth responses return a
 CSRF token that the SPA keeps in memory; the browser sends cookies
 automatically, and mutating requests include the CSRF header. You should not
 paste a raw bearer token into the production SPA. The CLI stores the same
@@ -996,6 +998,9 @@ session cookie plus CSRF token in the owner-only config file; `loom auth
 whoami` persists rotated session/CSRF values returned by the server, and
 mutating CLI requests refresh the session
 CSRF before retrying a CSRF-specific rejection.
+Changing the CLI's `server_url` clears the old login; authenticate separately to
+the new environment. Local Compose explicitly permits HTTP sessions for local
+development only.
 
 Your current team controls execution, cost attribution, provider credentials,
 members, and user-owned API tokens. Roles are enforced by the API:

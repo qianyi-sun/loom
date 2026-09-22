@@ -6,6 +6,7 @@ here.
 """
 from __future__ import annotations
 
+import os
 from functools import cached_property
 from typing import Any
 
@@ -17,6 +18,23 @@ from loom_service.config._generated import LoomServiceSettings as _BaseSettings
 
 class LoomServiceSettings(_BaseSettings):
     """LoomServiceSettings adds behavior on top of the codegen'd class."""
+
+    @property
+    def hosted_session_cookie(self) -> bool:
+        """Secure by default; local HTTP must be explicitly selected."""
+        return (
+            not self.auth_local_http
+            or self.auth_session_cookie_name.startswith("__Host-")
+            or os.environ.get("LOOM_ENV", "").lower() == "production"
+            or (self.public_base_url is not None and self.public_base_url.scheme == "https")
+        )
+
+    @property
+    def session_cookie_name(self) -> str:
+        name = self.auth_session_cookie_name
+        if self.hosted_session_cookie and not name.startswith("__Host-"):
+            return "__Host-" + name
+        return name
 
     @cached_property
     def workload_contract(self) -> WorkloadTrustContract:

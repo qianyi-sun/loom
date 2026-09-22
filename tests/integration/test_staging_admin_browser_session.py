@@ -43,6 +43,7 @@ async def staging_admin_session_app(
 ) -> AsyncIterator[tuple[FastAPI, UUID, str]]:
     for key, value in {
         "LOOM_ENV": "staging",
+        "LOOM_SVC_AUTH_LOCAL_HTTP": "false",
         "LOOM_SVC_DB_URL": postgres_url,
         "LOOM_SVC_MINIO_ENDPOINT": "http://minio:9000",
         "LOOM_SVC_MINIO_ACCESS_KEY": "x",
@@ -184,7 +185,7 @@ async def test_bootstrap_sets_fixed_secure_cookie_and_safe_audit(
         cookies = response.headers.get_list("set-cookie")
         assert len(cookies) == 1
         cookie = cookies[0].lower()
-        assert "loom_session=loom_session_staging_admin_" in cookie
+        assert "__host-loom_session=loom_session_staging_admin_" in cookie
         assert "httponly" in cookie
         assert "secure" in cookie
         assert "samesite=lax" in cookie
@@ -590,7 +591,7 @@ async def test_ordinary_platform_admin_session_retains_write_authority(
         base_url="https://svc.example",
     ) as client:
         client.cookies.set(
-            "loom_session",
+            "__Host-loom_session",
             created.raw_session,
             domain="svc.example",
             path="/",

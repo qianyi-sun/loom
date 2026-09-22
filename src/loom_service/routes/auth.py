@@ -1048,7 +1048,10 @@ def _set_auth_cookies(
 
 def _clear_auth_cookies(response: Response, request: Request) -> None:
     settings = request.app.state.settings
-    response.delete_cookie(settings.auth_session_cookie_name, path="/")
+    response.delete_cookie(
+        settings.session_cookie_name, path="/", secure=settings.hosted_session_cookie,
+        httponly=True, samesite="lax",
+    )
     response.delete_cookie(settings.auth_csrf_cookie_name, path="/")
 
 
@@ -1150,7 +1153,7 @@ async def switch_team(
     await switch_session_team(session, ctx=ctx, team_id=payload.team_id)
     await session.flush()
     refreshed = await verify_session_cookie(
-        session, request.cookies.get(request.app.state.settings.auth_session_cookie_name),
+        session, request.cookies.get(request.app.state.settings.session_cookie_name),
     )
     if refreshed is None:
         raise HTTPException(status_code=401, detail="missing or invalid session")
@@ -1166,7 +1169,7 @@ async def refresh(
     session, ctx = sc
     settings = request.app.state.settings
     if is_staging_admin_browser_session(
-        request.cookies.get(settings.auth_session_cookie_name),
+        request.cookies.get(settings.session_cookie_name),
     ):
         raise HTTPException(
             status_code=403,

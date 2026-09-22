@@ -519,7 +519,9 @@ function initialChecks() {
 }
 
 export function validateBootstrapCookie(cookies, nowSeconds) {
-  const matches = cookies.filter((cookie) => cookie.name === "loom_session");
+  const matches = cookies.filter((cookie) =>
+    ["loom_session", "__Host-loom_session"].includes(cookie.name),
+  );
   if (matches.length !== 1) return false;
   const cookie = matches[0];
   const remaining = cookie.expires - nowSeconds;

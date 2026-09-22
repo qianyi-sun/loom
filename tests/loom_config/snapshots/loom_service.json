@@ -19,6 +19,11 @@
     "default": "'X-Loom-CSRF'",
     "required": false
   },
+  "auth_local_http": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
   "auth_login_challenge_ttl_sec": {
     "annotation": "<class 'int'>",
     "default": "900",

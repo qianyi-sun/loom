@@ -78,6 +78,7 @@ from loom_service.routes import (
     usage,
 )
 from loom_service.session_auth import (
+    browser_origin_allowed,
     is_staging_admin_browser_session,
     staging_admin_browser_request_allowed,
 )
@@ -380,7 +381,12 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         call_next,
     ):
         """Fail closed on every mutation except exact session cleanup."""
-        raw_cookie = request.cookies.get(settings.auth_session_cookie_name)
+        if not browser_origin_allowed(request, settings):
+            return JSONResponse(
+                status_code=403, content={"detail": "browser origin rejected"},
+                headers={"Cache-Control": "no-store"},
+            )
+        raw_cookie = request.cookies.get(settings.session_cookie_name)
         request_path = request.scope.get("path", request.url.path)
         hidden_bootstrap_probe = (
             os.environ.get("LOOM_ENV", "").strip().lower() != "staging"

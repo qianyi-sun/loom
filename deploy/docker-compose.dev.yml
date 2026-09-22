@@ -179,6 +179,7 @@ services:
       LOOM_SVC_GATEWAY_URL: http://llm-gateway:9100/
       LOOM_SVC_LOG_LEVEL: debug
       LOOM_SVC_DEV_RELOAD: "1"
+      LOOM_SVC_AUTH_LOCAL_HTTP: "true"
       LOOM_SVC_ADMIN_SECRET_FILE: /var/run/loom/admin/secrets.toml
       # Minted by `loom service up` via POST /admin/batch-runner-tokens
       # and written to .env. Without this token the batch fan-out loop

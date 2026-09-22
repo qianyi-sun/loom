@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from fastapi import FastAPI
+from pydantic import HttpUrl
 from sqlalchemy import create_engine, delete, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -333,9 +334,9 @@ async def test_setup_link_uses_public_base_url_when_configured(
 ) -> None:
     monkeypatch.delenv("LOOM_PUBLIC_BASE_URL", raising=False)
     app, team_id, _team_name = username_auth_app
-    app.state.settings.public_base_url = "https://loom.example.com"
+    app.state.settings.public_base_url = HttpUrl("https://loom.example.com")
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="https://loom.example.com") as client:
         admin_me = await _login(client, username="Qianyi", password=ADMIN_PASSWORD)
         csrf = str(admin_me["csrf_token"])
         created = await client.post(

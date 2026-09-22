@@ -52,6 +52,12 @@ def _set(key: str, value: str) -> int:
             return 2
         cfg.tokens[provider] = value
     elif key == "server_url":
+        if cfg.server_url != value:
+            # Login credentials belong to one environment, not the new target.
+            cfg.auth_token = None
+            cfg.auth_session_cookie = None
+            cfg.auth_csrf_token = None
+            cfg.auth_session_cookie_name = "loom_session"
         cfg.server_url = value
     elif key.startswith("local."):
         parts = key.split(".")

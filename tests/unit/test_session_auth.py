@@ -42,6 +42,8 @@ def test_session_cookie_options_support_controlled_short_secure_cookie(
     monkeypatch.setenv("LOOM_ENV", "staging")
     settings = SimpleNamespace(
         auth_session_cookie_name="loom_session",
+        session_cookie_name="loom_session",
+        hosted_session_cookie=False,
         auth_session_ttl_sec=604800,
     )
 
@@ -173,3 +175,12 @@ def test_local_http_cannot_downgrade_hosted_or_production(monkeypatch, environme
     options = session_cookie_options(settings)
     assert options["key"] == "__Host-loom_session"
     assert options["secure"] is True
+
+
+def test_host_prefixed_custom_cookie_never_loses_secure(monkeypatch):
+    monkeypatch.setenv("LOOM_SVC_AUTH_LOCAL_HTTP", "true")
+    settings = LoomServiceSettings(
+        _env_file=None, db_url="postgresql+psycopg://u:p@localhost/loom",
+        minio_access_key="x", minio_secret_key="y", auth_session_cookie_name="__Host-custom",
+    )
+    assert session_cookie_options(settings)["secure"] is True

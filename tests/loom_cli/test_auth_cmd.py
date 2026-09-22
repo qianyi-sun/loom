@@ -415,6 +415,71 @@ def test_hosted_session_client_sends_persisted_name_and_rejects_other_origins():
     assert len(received) == 1
 
 
+def test_changing_cli_server_clears_credentials_bound_to_old_environment():
+    save_config(LoomConfig(
+        server_url="https://alice.dev.example.com", auth_session_cookie="alice-session",
+        auth_session_cookie_name="__Host-loom_session", auth_csrf_token="alice-csrf",
+        auth_token="alice-token",
+    ))
+    assert main(["config", "set", "server_url", "https://bob.dev.example.com"]) == 0
+    config = load_config()
+    assert config.server_url == "https://bob.dev.example.com"
+    assert config.auth_session_cookie is None
+    assert config.auth_csrf_token is None
+    assert config.auth_token is None
+
+
+def test_hosted_session_redirect_does_not_leak_credentials():
+    cfg = LoomConfig(
+        server_url="https://alice.dev.example.com", auth_session_cookie="private-session",
+        auth_session_cookie_name="__Host-loom_session", auth_csrf_token="private-csrf",
+    )
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(302, headers={"Location": "https://bob.dev.example.com/stolen"})
+
+    with authed_client(cfg, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError, match="origin"):
+            client.get("/redirect", follow_redirects=True)
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("header", [
+    "__Host-loom_session=new; Path=/; HttpOnly",  # missing Secure
+    "__Host-loom_session=new; Path=/; Secure; Domain=dev.example.com",
+    "__Host-loom_session=new; Path=/api; Secure",
+    "loom_session=new; Path=/; Secure",  # cannot downgrade a hosted session
+])
+def test_cli_rejects_unsafe_hosted_cookie_rotation(header):
+    from loom_cli.server_client import persist_session_credentials_from_response
+
+    cfg = LoomConfig(server_url="https://alice.dev.example.com",
+                     auth_session_cookie="old", auth_session_cookie_name="__Host-loom_session")
+    response = httpx.Response(200, headers={"set-cookie": header}, json={},
+                              request=httpx.Request("GET", "https://alice.dev.example.com/api/v1/auth/me"))
+    assert not persist_session_credentials_from_response(cfg, response)
+    assert cfg.auth_session_cookie == "old"
+
+
+def test_cli_cookie_jar_cannot_override_verified_hosted_session():
+    cfg = LoomConfig(server_url="https://alice.dev.example.com",
+                     auth_session_cookie="verified", auth_session_cookie_name="__Host-loom_session")
+    received = []
+
+    def handler(request):
+        received.append(request.headers.get("cookie"))
+        return httpx.Response(200, json={}, headers={
+            "set-cookie": "__Host-loom_session=unverified; Domain=dev.example.com; Path=/",
+        })
+
+    with authed_client(cfg, transport=httpx.MockTransport(handler)) as client:
+        client.get("/api/v1/auth/me")
+        client.get("/api/v1/auth/me")
+    assert received == ["__Host-loom_session=verified"] * 2
+
+
 def test_setup_password_uses_secret_sources(
     monkeypatch: pytest.MonkeyPatch,
     mock_public_auth_server: MockAuthServer,

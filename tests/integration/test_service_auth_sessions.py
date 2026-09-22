@@ -180,7 +180,7 @@ async def test_hosted_session_ignores_legacy_injection_and_rejects_sibling_origi
     app, *_ = auth_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="https://alice.dev.example.com") as ac:
-        body, set_cookie = await _login(ac)
+        _body, set_cookie = await _login(ac)
         cookie = ac.cookies.get("__Host-loom_session")
         assert cookie
         assert "Secure" in set_cookie[0] and "Domain=" not in set_cookie[0]
@@ -203,7 +203,7 @@ async def test_hosted_session_ignores_legacy_injection_and_rejects_sibling_origi
         assert "Secure" in accepted.headers["set-cookie"]
     async with httpx.AsyncClient(transport=transport, base_url="https://alice.dev.example.com") as ac:
         # Even a real secret under the injectable legacy name is not accepted.
-        body, _ = await _login(ac)
+        _body, _ = await _login(ac)
         cookie = ac.cookies.get("__Host-loom_session")
         ac.cookies.clear()
         denied = await ac.get("/api/v1/auth/me", headers={"Cookie": f"loom_session={cookie}"})
