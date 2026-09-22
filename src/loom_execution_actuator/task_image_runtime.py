@@ -16,10 +16,11 @@ import subprocess
 import tarfile
 import tempfile
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import boto3
 from botocore.config import Config
