@@ -12,6 +12,7 @@ import { NavLink } from "react-router-dom";
 
 import { cn } from "../lib/cn";
 import { getFrontendConfig } from "../lib/frontendConfig";
+import VersionInfo from "./VersionInfo";
 
 const NAV_ITEMS = [
   { to: "/", label: "Home" },
@@ -151,6 +152,8 @@ export default function NavBar({
       >
         Settings
       </NavLink>
+
+      <VersionInfo environmentLabel={frontendConfig.environmentLabel} />
     </nav>
   );
 }

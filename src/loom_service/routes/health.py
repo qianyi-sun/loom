@@ -10,6 +10,7 @@ import os
 
 from fastapi import APIRouter, Request, Response
 
+from loom_service.build_info import read_build_revision, read_build_time
 from loom_service.dependencies import SessionAndCtx
 from loom_service.readiness import probe_dependencies
 
@@ -19,6 +20,23 @@ router = APIRouter()
 @router.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/version")
+async def version(response: Response) -> dict[str, str | None]:
+    """#2009: this responding instance's own immutable build revision.
+
+    Unauthenticated, like `/health` — the frontend needs it before login,
+    and it carries nothing sensitive. Reads locally available build
+    metadata only (never GitHub, Kubernetes, or the database), so it stays
+    cheap and never blocks on an unhealthy dependency. One response is
+    evidence for this instance only, not proof every replica has rolled.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "buildRevision": read_build_revision(),
+        "buildTime": read_build_time(),
+    }
 
 
 

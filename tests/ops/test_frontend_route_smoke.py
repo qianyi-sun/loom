@@ -33,6 +33,9 @@ def _run_runtime_config(
     environment: str,
     route_path: str,
     rehearsal_id: str = "",
+    build_revision: str | None = None,
+    source_ref: str | None = None,
+    build_time_path: Path | None = None,
 ) -> tuple[dict[str, object], str]:
     config_path = tmp_path / "loom-frontend-config.json"
     template_path = tmp_path / "index.html.template"
@@ -53,7 +56,17 @@ def _run_runtime_config(
         "LOOM_FRONTEND_API_BASE": route_path,
         "LOOM_FRONTEND_PUBLIC_ORIGIN": "https://yylx.world",
         "LOOM_FRONTEND_REHEARSAL_ID": rehearsal_id,
+        # #2009: point the build-time file at a test path so the script
+        # never needs /etc write access; a missing path is the normal
+        # local/dev shape and must not fail the run (asserted below).
+        "LOOM_FRONTEND_BUILD_TIME_PATH": str(
+            build_time_path or (tmp_path / "missing-build-time"),
+        ),
     }
+    if build_revision is not None:
+        env["LOOM_FRONTEND_BUILD_REVISION"] = build_revision
+    if source_ref is not None:
+        env["LOOM_FRONTEND_SOURCE_REF"] = source_ref
     subprocess.run(
         ["sh", "deploy/web-runtime-config.sh"],
         check=True,
@@ -64,6 +77,44 @@ def _run_runtime_config(
     return json.loads(config_path.read_text(encoding="utf-8")), index_path.read_text(
         encoding="utf-8",
     )
+
+
+def test_runtime_config_reports_build_metadata_for_focus_staleness_check(
+    tmp_path: Path,
+) -> None:
+    """#2009: this is the "currently served build" signal an open tab
+    polls on focus — independent of whatever build its own JS bundle
+    already loaded."""
+    build_time_path = tmp_path / "build-time"
+    build_time_path.write_text("2026-09-20T08:00:00Z\n", encoding="utf-8")
+    config, _html = _run_runtime_config(
+        tmp_path,
+        environment="development",
+        route_path="/dev",
+        build_revision="a" * 40,
+        source_ref="refs/heads/dev",
+        build_time_path=build_time_path,
+    )
+
+    assert config["buildRevision"] == "a" * 40
+    assert config["sourceRef"] == "refs/heads/dev"
+    assert config["buildTime"] == "2026-09-20T08:00:00Z"
+
+
+def test_runtime_config_reports_honest_unknown_build_metadata_when_absent(
+    tmp_path: Path,
+) -> None:
+    """A local/dev image built without --build-arg must not fail the
+    entrypoint or fabricate a build identity."""
+    config, _html = _run_runtime_config(
+        tmp_path,
+        environment="development",
+        route_path="/dev",
+    )
+
+    assert config["buildRevision"] == "unknown"
+    assert config["sourceRef"] == "unknown"
+    assert config["buildTime"] == ""
 
 
 def test_runtime_config_accepts_only_exact_staging_rehearsal_route(tmp_path: Path) -> None:
@@ -1784,6 +1835,9 @@ def test_web_runtime_config_script_writes_public_metadata(tmp_path: Path) -> Non
         "routePath": "/prod",
         "apiBase": "/prod",
         "apiRouteBase": "https://yylx.world/prod/api",
+        "buildRevision": "unknown",
+        "sourceRef": "unknown",
+        "buildTime": "",
     }
 
 
