@@ -8,7 +8,6 @@ This initial managed format deliberately cannot execute tasks or native builds.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 from typing import Any, Literal
 
@@ -19,6 +18,7 @@ from loom.nebius_platform_render import (
     _namespace,
     _network_policy,
     _obj,
+    _requested_quantity,
     _service,
 )
 
@@ -46,8 +46,12 @@ def _configuration(
     row: EnvironmentRegistrationV1, foundation: FoundationBinding,
 ) -> dict[str, Any]:
     config = foundation.platform_config
+    if row.desired_state != "active":
+        raise NebiusPlatformError("only an active desired registration may render a running stack")
     if row.cluster_id != config["cluster_id"] or row.physical_pool_id != config["execution_node_group_id"]:
         raise NebiusPlatformError("registration is outside the protected cluster/pool")
+    if row.public_host.partition(".")[2] != foundation.public_dns_zone:
+        raise NebiusPlatformError("host is outside the shared wildcard certificate scope")
     if row.binding_mode == "imported":
         for actual, expected in (
             (row.application_namespace, config["namespace"]),
@@ -124,13 +128,6 @@ def _shared_ingress(row: EnvironmentRegistrationV1, foundation: FoundationBindin
     return ingress
 
 
-def _amount(value: str, resource: str) -> int:
-    from kubernetes.utils.quantity import parse_quantity
-
-    scale = Decimal(1000) if resource == "cpu" else Decimal(1) / (1024 * 1024)
-    return int((Decimal(parse_quantity(value)) * scale).to_integral_value(rounding=ROUND_CEILING))
-
-
 def _envelope(files: dict[str, list[dict[str, Any]]]) -> PlatformEnvelope:
     totals = dict.fromkeys(("cpu", "memory", "ephemeral-storage"), 0)
     storage = 0
@@ -145,13 +142,13 @@ def _envelope(files: dict[str, list[dict[str, Any]]]) -> PlatformEnvelope:
                 if kind == "Deployment":
                     count += spec["strategy"]["rollingUpdate"]["maxSurge"]
                 for claim in spec.get("volumeClaimTemplates", []):
-                    storage += spec["replicas"] * _amount(claim["spec"]["resources"]["requests"]["storage"], "storage")
+                    storage += spec["replicas"] * _requested_quantity(claim["spec"]["resources"]["requests"]["storage"], "storage")
             if kind == "CronJob":
                 spec = spec["jobTemplate"]["spec"]
             pod = spec["template"]["spec"]
             for resource in totals:
-                regular = sum(_amount(c["resources"]["requests"][resource], resource) for c in pod["containers"])
-                initial = max((_amount(c["resources"]["requests"][resource], resource) for c in pod.get("initContainers", [])), default=0)
+                regular = sum(_requested_quantity(c["resources"]["requests"][resource], resource) for c in pod["containers"])
+                initial = max((_requested_quantity(c["resources"]["requests"][resource], resource) for c in pod.get("initContainers", [])), default=0)
                 totals[resource] += count * max(regular, initial)
     return PlatformEnvelope(totals["cpu"], totals["memory"], storage, totals["ephemeral-storage"])
 

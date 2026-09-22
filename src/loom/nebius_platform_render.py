@@ -796,6 +796,21 @@ def public_tls_config(config: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _requested_quantity(value: str | int, resource: str) -> int:
+    """Round supported template quantities up to millicores or MiB, offline."""
+    text = str(value)
+    if resource == "cpu":
+        amount = Decimal(text[:-1]) if text.endswith("m") else Decimal(text) * 1000
+    else:
+        factor = Decimal(1) / (1024 * 1024)
+        for unit, scale in (("Ki", 1 / 1024), ("Mi", 1), ("Gi", 1024), ("Ti", 1024 * 1024)):
+            if text.endswith(unit):
+                text, factor = text[: -len(unit)], Decimal(str(scale))
+                break
+        amount = Decimal(text) * factor
+    return int(amount.to_integral_value(rounding=ROUND_CEILING))
+
+
 def _execution_quota(config: dict[str, Any], documents: list[dict[str, Any]]) -> dict[str, str]:
     """Technical envelope plus the actual namespace controller/collector requests.
 
@@ -809,19 +824,6 @@ def _execution_quota(config: dict[str, Any], documents: list[dict[str, Any]]) ->
         "memory": policy["max_memory_mib"],
         "ephemeral-storage": policy["max_storage_mib"],
     }
-
-    def quantity(value: str | int, resource: str) -> int:
-        text = str(value)
-        if resource == "cpu":
-            amount = Decimal(text[:-1]) if text.endswith("m") else Decimal(text) * 1000
-        else:
-            factor = Decimal(1) / (1024 * 1024)
-            for unit, scale in (("Ki", 1 / 1024), ("Mi", 1), ("Gi", 1024), ("Ti", 1024 * 1024)):
-                if text.endswith(unit):
-                    text, factor = text[: -len(unit)], Decimal(str(scale))
-                    break
-            amount = Decimal(text) * factor
-        return int(amount.to_integral_value(rounding=ROUND_CEILING))
 
     for doc in documents:
         if doc["kind"] == "Deployment":
@@ -845,7 +847,7 @@ def _execution_quota(config: dict[str, Any], documents: list[dict[str, Any]]) ->
         for resource in ("cpu", "memory", "ephemeral-storage"):
 
             def request(container: dict[str, Any], resource: str = resource) -> int:
-                return quantity(
+                return _requested_quantity(
                     container.get("resources", {}).get("requests", {}).get(resource, 0), resource
                 )
 

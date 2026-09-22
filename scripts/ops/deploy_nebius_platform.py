@@ -61,6 +61,8 @@ def load_render(
         raise DeploymentError("platform configuration identity is ambiguous")
     config = json.loads(configs[0]["data"]["environment.json"])
     validate_environment(config)
+    if config["schema_version"] == "loom.nebius-managed-environment.v1":
+        raise DeploymentError("managed children require the environment-management lifecycle")
     namespaces = {config["namespace"], config["execution_namespace"]}
     if config.get("task_image_builder") is not None:
         namespaces.add(config["execution_namespace"] + "-build")
