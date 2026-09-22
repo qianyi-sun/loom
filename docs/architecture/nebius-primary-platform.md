@@ -18,6 +18,66 @@ pending separate qualification; checked-in regional support is not evidence
 that a region is operationally accepted. Current deployment and recovery
 procedures are indexed in [runbooks](../runbooks/README.md).
 
+## Managed environment identity and rendering
+
+`loom.nebius_environment_contract` separates an environment's UUID/incarnation
+from its class (`development`, `staging`, `production`), owner and mutable
+deployment generation. Multiple developers can have development environments;
+the class is not an instance identifier or an execution-capacity allocation.
+Fresh shared dev is `loom-dev`; a personal application's namespace is
+`loom-dev-<slug>`. Its execution namespace is `loom-run-<incarnation-hex>` and its
+build namespace adds `-build`. Slugs such as `alice-exec` cannot collide with
+Alice's auxiliary namespaces. A deployment update preserves these identities.
+
+The separate, protected `FoundationBinding` contains operator-owned installation
+settings, a public DNS zone, shared ingress identity and a configurable pool-wide
+warm floor (default zero). It cannot be supplied by feature source. Constructing
+this object validates inputs; it does not provision infrastructure or change the
+native autoscaler's settings.
+
+`loom.nebius_environment_render.render_environment` reuses the standalone stack
+templates for a registered child. Each render contains its own PostgreSQL
+StatefulSet/PVC, namespaced credential references, incarnation-derived bucket
+names and one environment-local V1 execution topology. Importing an existing
+binding requires exact namespace, target and hostname matches to its protected
+installation input and preserves existing bucket names. Import is an operator
+operation, not a user-selected namespace override.
+
+Each child has one HTTPS hostname, not a different public port: the shared
+ingress routes `/api` to that child's service and `/` to its static web server.
+The ingress controller owns the default wildcard certificate; no TLS private key
+or per-child public LoadBalancer/Caddy volume is rendered. Imported hosts must
+also fit that certificate's configured DNS zone. NetworkPolicy restricts this
+ingress to the configured controller namespace and Pod identity; database access
+remains namespace/role scoped. Actual DNS, certificate validity, credentials and
+object-store permissions require provisioning and installed verification.
+
+The renderer reports a conservative platform **request** envelope: all steady
+Pods, simultaneous Deployment surge, migration/configuration/backup Jobs,
+init-container peaks, backup scratch space and retained database storage. This
+is input for platform admission, not measured usage or a physical reservation.
+Execution tasks/builds are excluded from that envelope and belong on the shared
+execution pool.
+
+Migration `0154` adds `nebius_environments` and
+`nebius_environment_namespaces` without changing retained `dev_instances`.
+The management database owns these rows. A single physical-name index covers
+all three namespace roles, preventing cross-role collisions even under concurrent
+transactions. Registration and the complete namespace set must be reserved in
+one transaction before resource creation. Active/suspended/destroyed rows retain
+slug and hostname claims until verified purge; incarnation and target IDs are
+never reused. Purge verification and the transaction coordinator are lifecycle
+responsibilities, not capabilities conferred by inserting a row. A downgrade
+refuses to discard nonempty registration history.
+
+This is an **offline provisioning contract, not operational multi-person
+acceptance**. The managed format keeps the scheduler and capacity policy disabled,
+renders no actuator/collector Pods, grants only observer RBAC, and sets zero-Pod
+quotas in execution/build namespaces. The standalone deploy helper rejects this
+format. Candidate publication verification, management authentication/provisioning,
+shared admission/write enforcement, hosted cookie isolation and installed
+concurrent-owner execution are not established by rendering these resources.
+
 ## Supported workload boundary
 
 Native Kubernetes execution is the hosted path. OLDLAB, GB10, Slurm and remote
