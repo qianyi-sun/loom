@@ -17,21 +17,11 @@ from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from loom.nebius_candidate_contract import NEBIUS_PLATFORM_IMAGES as NEBIUS_PLATFORM_IMAGES
+
 
 class ManifestError(ValueError):
     """The component authority is malformed or unsafe to consume."""
-
-
-# Candidate keys and published names; build inputs remain manifest-owned.
-NEBIUS_PLATFORM_IMAGES = {
-    "service": "loom-service",
-    "control_plane": "loom-control-plane",
-    "web": "loom-web",
-    "gateway": "loom-llm-gateway",
-    "execution_runtime": "loom-execution-runtime",
-    "execution_actuator": "loom-execution-actuator",
-    "harbor_runtime": "loom-harbor-runtime",
-}
 
 
 _RELEASE_COMPANIONS: dict[str, tuple[str, ...]] = {

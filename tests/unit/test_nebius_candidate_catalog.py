@@ -63,6 +63,8 @@ def github_transport(responses, payload, *, location="https://store.blob.core.wi
     def respond(request):
         if request.url.host == "api.github.com":
             assert request.headers["Authorization"] == "Bearer test-github-secret"
+            # GitHub rejects otherwise valid requests without a User-Agent.
+            assert request.headers.get("User-Agent", "").startswith("loom-")
             path = request.url.path.removeprefix("/repos/qianyi-sun/loom/")
             if path == "actions/artifacts/123/zip":
                 return httpx.Response(302, headers={"Location": location})
@@ -76,12 +78,11 @@ def github_transport(responses, payload, *, location="https://store.blob.core.wi
 
 
 async def resolve(publication, *, location=None):
+    from loom.execution_image_admission import ImageAdmissionKeyring
     from loom_service.environment_management.candidates import (
         GitHubCandidateCatalog,
         ProtectedPublication,
     )
-
-    from loom.execution_image_admission import ImageAdmissionKeyring
 
     reference, responses, payload, keyring, candidate = publication
     transport = github_transport(responses, payload, **({"location": location} if location else {}))
