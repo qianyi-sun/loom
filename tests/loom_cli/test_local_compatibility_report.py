@@ -186,6 +186,7 @@ def test_copy_report_uses_build_context_and_ignores_heredoc_and_stage_sources(
         "FROM ubuntu:24.04 AS builder\n"
         "RUN <<'SCRIPT'\nCOPY fictional /heredoc/content\nSCRIPT\n"
         "FROM ubuntu:24.04\n"
+        "COPY . /app/\n"
         "COPY --from=builder /generated /app/generated\n"
         "COPY *.txt /app/\n"
         "COPY <<'CONTENT' /app/file\ninline contents\nCONTENT\n"
