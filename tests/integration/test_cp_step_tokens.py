@@ -10,13 +10,14 @@ from uuid import uuid4
 import jwt
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, delete, insert, text
+from sqlalchemy import create_engine, delete, insert, select, text
 from sqlalchemy.orm import sessionmaker
 
 from loom.auth import verify_step_jwt
 from loom.db.schema import (
     ProviderConnection,
     ProviderConnectionShare,
+    Secret,
     Task,
     Team,
     TeamQuota,
@@ -98,7 +99,11 @@ def seed(postgres_url: str) -> Iterator[dict]:
             # exercise issue #72; clean it up before Team to satisfy
             # the FK.
             s.execute(delete(ProviderConnectionShare))
+            secret_refs = list(s.scalars(
+                select(ProviderConnection.encrypted_api_key_ref),
+            ))
             s.execute(delete(ProviderConnection))
+            s.execute(delete(Secret).where(Secret.ref.in_(secret_refs)))
             s.execute(delete(Token))
             s.execute(delete(TeamQuota))
             s.execute(delete(Team))
@@ -508,6 +513,11 @@ def test_step_token_carries_trial_provider_connection_id(
     with session_local() as s:
         # FK trial → provider_connections requires the connection row
         # to exist. Seed a minimal one for this team.
+        # Routing tests need an existing credential row, but never decrypt it.
+        s.execute(insert(Secret).values(
+            ref=f"loom://team:{seed['team_id']}/{conn_id}", ciphertext=b"unused-fixture", nonce=b"0" * 12,
+            master_key_version=1,
+        ))
         s.execute(
             insert(ProviderConnection).values(
                 id=conn_id,
@@ -581,6 +591,11 @@ def _insert_provider(
         if s.get(Team, owner_team_id) is None:
             s.execute(insert(Team).values(id=owner_team_id, name=f"owner-{owner_team_id}"))
             s.execute(insert(TeamQuota).values(team_id=owner_team_id))
+        # Routing tests need an existing credential row, but never decrypt it.
+        s.execute(insert(Secret).values(
+            ref=f"loom://team:{owner_team_id}/{conn_id}", ciphertext=b"unused-fixture", nonce=b"0" * 12,
+            master_key_version=1,
+        ))
         s.execute(
             insert(ProviderConnection).values(
                 id=conn_id,
