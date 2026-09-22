@@ -14,6 +14,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -315,6 +317,87 @@ def _run(*command: str) -> str:
     return result.stdout.strip()
 
 
+def _copy_image(archive: Path, tag: str, *, timeout_seconds: float = 900) -> None:
+    """Share one wall-clock budget across an upload and at most one network retry."""
+    if timeout_seconds <= 0:
+        raise ValueError("upload timeout must be positive")
+    operation = "skopeo copy"
+    print(f"Nebius publication: {operation} (total timeout {timeout_seconds:g}s)", flush=True)
+    started = time.monotonic()
+    timed_out = threading.Event()
+    diagnostic = ""
+    returncode = None
+    attempts = 0
+    for attempt in range(1, 3):
+        remaining = timeout_seconds - (time.monotonic() - started)
+        if remaining <= 0:
+            timed_out.set()
+            break
+        attempts = attempt
+        attempt_diagnostic = ""
+        diagnostic = (diagnostic + f"Attempt {attempt}\n")[-16_384:]
+        with subprocess.Popen(
+            ["skopeo", "copy", "--preserve-digests", f"oci-archive:{archive}", f"docker://{tag}"],
+            cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
+        ) as process:
+            def expire() -> None:
+                if process.poll() is None:
+                    timed_out.set()
+                    process.kill()
+
+            timer = threading.Timer(remaining, expire)
+            timer.daemon = True
+            timer.start()
+            try:
+                assert process.stdout is not None
+                for line in process.stdout:
+                    safe_line = sanitize_diagnostic(line)
+                    attempt_diagnostic = (attempt_diagnostic + safe_line + "\n")[-16_384:]
+                    diagnostic = (diagnostic + safe_line + "\n")[-16_384:]
+                    # Prefix every line so tool output cannot become a workflow command.
+                    for safe_part in safe_line.splitlines():
+                        print(f"{operation} [{attempt}/2]: {safe_part}", flush=True)
+                returncode = process.wait()
+            finally:
+                timer.cancel()
+                timer.join()
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+        if returncode == 0 and not timed_out.is_set():
+            elapsed = round(time.monotonic() - started, 2)
+            print(f"Nebius publication: {operation} completed in {elapsed:g}s ({attempt} attempt(s))", flush=True)
+            return
+        # Only explicit network errors qualify. Authentication, permission and
+        # unknown errors fail closed; a total-budget timeout never starts over.
+        transient = re.search(
+            r"connection reset by peer|connection refused|i/o timeout|"
+            r"TLS handshake timeout|net/http: timeout awaiting response headers",
+            attempt_diagnostic, re.IGNORECASE,
+        ) and not re.search(
+            r"unauthorized|denied|authentication|forbidden|certificate|credential",
+            attempt_diagnostic, re.IGNORECASE,
+        )
+        if (timed_out.is_set() or attempt == 2 or not transient
+                or timeout_seconds - (time.monotonic() - started) <= 1):
+            break
+        print(f"Nebius publication: {operation} transient network failure; retrying once in 1s", flush=True)
+        time.sleep(1)
+    elapsed = round(time.monotonic() - started, 2)
+    if _diagnostic_dir is not None:
+        write_json(_diagnostic_dir / "failed-command.json", {
+            "operation": operation,
+            "returncode": returncode,
+            "attempts": attempts,
+            "timed_out": timed_out.is_set(),
+            "timeout_seconds": timeout_seconds,
+            "elapsed_seconds": elapsed,
+            "diagnostic": diagnostic,
+        })
+    reason = f"timed out after {timeout_seconds:g}s" if timed_out.is_set() else f"failed with exit code {returncode}"
+    raise ValueError(f"{operation} {reason}; inspect failed-command.json")
+
+
 def inspect_oci_archive(
     archive: Path, *, candidate: str, runtime: bool = False,
     runtime_metadata: dict[str, str] | None = None,
@@ -396,6 +479,8 @@ def oci_scan_layout(archive: Path, layout: Path) -> Iterator[Path]:
 def build(args: argparse.Namespace) -> None:
     """Only the protected integration workflow may build/publish this candidate."""
     global _diagnostic_dir
+    if args.upload_timeout_seconds <= 0:
+        raise ValueError("upload timeout must be positive")
     candidate = os.environ.get("GITHUB_SHA", "")
     if (
         os.environ.get("GITHUB_REPOSITORY") != REPOSITORY
@@ -536,9 +621,7 @@ def build(args: argparse.Namespace) -> None:
                 args.registry_prefix,
                 Path(os.environ["REGISTRY_AUTH_FILE"]),
             )
-            _run(
-                "skopeo", "copy", "--preserve-digests", f"oci-archive:{archive}", f"docker://{tag}"
-            )
+            _copy_image(archive, tag, timeout_seconds=args.upload_timeout_seconds)
             published_digest = _run(
                 "skopeo", "inspect", "--format", "{{.Digest}}", f"docker://{tag}"
             )
@@ -594,6 +677,8 @@ def main() -> int:
     builder.add_argument("--mode", choices=("platform", "harness-only"), default="platform")
     builder.add_argument("--agent-version")
     builder.add_argument("--registry-prefix", required=True)
+    builder.add_argument("--upload-timeout-seconds", type=int, default=900,
+                         help="Total per-image upload budget, including one transient-network retry (default: 900)")
     for command in (create, builder, release):
         command.add_argument("--signing-key", type=Path, required=True)
         command.add_argument("--signing-key-id", required=True)

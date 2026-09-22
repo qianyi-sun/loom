@@ -89,6 +89,7 @@ jobs:
           NEBIUS_SIGNING_KEY: ${{ secrets.NEBIUS_IMAGE_ADMISSION_SIGNING_KEY }}
           NEBIUS_SIGNING_KEY_ID: ${{ vars.NEBIUS_IMAGE_ADMISSION_SIGNING_KEY_ID }}
           NEBIUS_TRUSTED_KEYRING: ${{ vars.NEBIUS_IMAGE_ADMISSION_TRUSTED_KEYRING_JSON }}
+          NEBIUS_IMAGE_UPLOAD_TIMEOUT_SECONDS: ${{ vars.NEBIUS_IMAGE_UPLOAD_TIMEOUT_SECONDS || '900' }}
           PUBLICATION_MODE: ${{ inputs.mode || 'platform' }}
           AGENT_VERSION: ${{ inputs.agent_version }}
         shell: bash
@@ -127,6 +128,7 @@ jobs:
           uv run --no-sync python scripts/ops/nebius_candidate.py build \
             "${publication_args[@]}" \
             --registry-prefix "$NEBIUS_REGISTRY_PREFIX" \
+            --upload-timeout-seconds "$NEBIUS_IMAGE_UPLOAD_TIMEOUT_SECONDS" \
             --signing-key "$work/signing.pem" \
             --signing-key-id "$NEBIUS_SIGNING_KEY_ID" \
             --trusted-keyring "$work/keyring.json" \
