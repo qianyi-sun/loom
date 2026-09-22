@@ -169,3 +169,25 @@ class NebiusEnvironmentOperation(Base):
     lease_token: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     lease_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
+
+
+class NebiusEnvironmentResource(Base):
+    """Write-ahead intent and confirmed provider identity, not name-only adoption."""
+
+    __tablename__ = "nebius_environment_resources"
+    __table_args__ = (
+        UniqueConstraint("operation_id", "sequence", name="nebius_environment_resource_sequence_key"),
+        CheckConstraint("sequence >= 0", name="nebius_environment_resource_sequence_check"),
+        CheckConstraint("kind IN ('kubernetes', 'object_bucket', 'credentials', 'database_ready', 'job_ready', 'application_ready')",
+                        name="nebius_environment_resource_kind_check"),
+        CheckConstraint("phase IN ('planned', 'applied') AND ((phase = 'applied') = (provider_identity IS NOT NULL))",
+                        name="nebius_environment_resource_phase_check"),
+        CheckConstraint("jsonb_typeof(payload_json) = 'object'", name="nebius_environment_resource_payload_check"),
+    )
+    operation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("nebius_environment_operations.operation_id", ondelete="RESTRICT"), primary_key=True)
+    resource_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    phase: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_identity: Mapped[str | None] = mapped_column(Text)

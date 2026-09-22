@@ -59,11 +59,28 @@ def upgrade() -> None:
               (request_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(plan_json) = 'object'),
             CONSTRAINT nebius_environment_operation_lease_check CHECK ((lease_token IS NULL) = (lease_expires_at IS NULL))
         );
+        CREATE TABLE nebius_environment_resources (
+            operation_id uuid NOT NULL REFERENCES nebius_environment_operations(operation_id) ON DELETE RESTRICT,
+            resource_key text NOT NULL,
+            sequence bigint NOT NULL,
+            kind text NOT NULL,
+            payload_json jsonb NOT NULL,
+            phase text NOT NULL,
+            provider_identity text,
+            PRIMARY KEY (operation_id, resource_key),
+            CONSTRAINT nebius_environment_resource_sequence_key UNIQUE (operation_id, sequence),
+            CONSTRAINT nebius_environment_resource_sequence_check CHECK (sequence >= 0),
+            CONSTRAINT nebius_environment_resource_kind_check CHECK
+              (kind IN ('kubernetes', 'object_bucket', 'credentials', 'database_ready', 'job_ready', 'application_ready')),
+            CONSTRAINT nebius_environment_resource_phase_check CHECK
+              (phase IN ('planned', 'applied') AND ((phase = 'applied') = (provider_identity IS NOT NULL))),
+            CONSTRAINT nebius_environment_resource_payload_check CHECK (jsonb_typeof(payload_json) = 'object')
+        );
     """)
 
 
 def downgrade() -> None:
-    op.execute("LOCK TABLE nebius_environment_operations, nebius_platform_reservations, nebius_platform_budgets IN ACCESS EXCLUSIVE MODE NOWAIT")
+    op.execute("LOCK TABLE nebius_environment_resources, nebius_environment_operations, nebius_platform_reservations, nebius_platform_budgets IN ACCESS EXCLUSIVE MODE NOWAIT")
     op.execute("""
         DO $$ BEGIN
             IF EXISTS (SELECT 1 FROM nebius_environment_operations)
@@ -72,6 +89,7 @@ def downgrade() -> None:
                 RAISE EXCEPTION 'cannot remove managed provisioning or platform budget history';
             END IF;
         END $$;
+        DROP TABLE nebius_environment_resources;
         DROP TABLE nebius_environment_operations;
         DROP TABLE nebius_platform_reservations;
         DROP TABLE nebius_platform_budgets;
