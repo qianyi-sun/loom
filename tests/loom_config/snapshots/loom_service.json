@@ -1,14 +1,4 @@
 {
-  "environment_management_config_file": {
-    "annotation": "pathlib.Path | None",
-    "default": "None",
-    "required": false
-  },
-  "environment_management_github_token": {
-    "annotation": "pydantic.types.SecretStr | None",
-    "default": "None",
-    "required": false
-  },
   "admin_secret_file": {
     "annotation": "pathlib.Path | None",
     "default": "None",
@@ -119,6 +109,16 @@
     "default": "False",
     "required": false
   },
+  "environment_management_config_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
+  "environment_management_github_token": {
+    "annotation": "pydantic.types.SecretStr | None",
+    "default": "None",
+    "required": false
+  },
   "gateway_url": {
     "annotation": "<class 'pydantic.networks.HttpUrl'>",
     "default": "'http://loom-llm-gateway:9100'",
@@ -142,6 +142,11 @@
   "log_level": {
     "annotation": "typing.Literal['debug', 'info', 'warn', 'error', 'fatal']",
     "default": "'info'",
+    "required": false
+  },
+  "managed_environment_config_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
     "required": false
   },
   "minio_access_key": {

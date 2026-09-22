@@ -29,10 +29,15 @@ async def readiness(request: Request, response: Response) -> dict[str, str]:
                 ready = (await session.execute(text("SELECT 1"))).scalar_one() == 1
     except Exception:
         pass
-    if not ready:
+    runtime = getattr(request.app.state, "environment_runtime", None)
+    runtime_ready = runtime is None or runtime.ready
+    if not ready or not runtime_ready:
         response.status_code = 503
-    return {
-        "status": "ready" if ready else "not-ready",
+    result = {
+        "status": "ready" if ready and runtime_ready else "not-ready",
         "mode": "management",
         "postgres": "ready" if ready else "not-ready",
     }
+    if runtime is not None:
+        result["provisioner"] = "ready" if runtime_ready else "not-ready"
+    return result

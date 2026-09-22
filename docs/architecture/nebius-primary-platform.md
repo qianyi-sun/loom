@@ -96,16 +96,18 @@ The local-execution flag cannot turn management into a workload service.
 
 `/api/v1/health` is process liveness. In management mode `/api/v1/health/ready`
 is an unauthenticated, bounded, read-only database probe returning only component
-status, with HTTP 503 on failure. It reports no identities, credentials or database
-errors and has no dependency on child availability. Application-mode readiness
+status, with HTTP 503 on failure. When the optional provisioner is configured,
+its supervised-loop health is included; a dead or recovering worker is not ready.
+It reports no identities, credentials or database errors and has no dependency on
+child availability. Application-mode readiness
 and its authentication contract are unchanged. Hosted sessions retain secure
 host-only cookies and sibling-origin rejection in either mode.
 
-This runtime does **not yet create cloud resources**. Its request layer can
-reserve and journal a desired stack; the provider worker, retained cleanup, child
-credential exchange and installed two-owner acceptance remain unfinished. Do not
-enable owner creation on a live installation until that worker and cleanup are
-available. A healthy management process is not evidence that personal environments
+The optional provider worker can provision an execution-disabled child and perform
+retained teardown. These are implementation capabilities, **not installed Nebius
+acceptance**. Public DNS/TLS, IAM isolation, protected installation, multi-owner
+execution and lifecycle acceptance must still be qualified before enabling owner
+creation. A healthy management process is not evidence that personal environments
 or shared execution are operational.
 
 ### Managed provisioning requests
@@ -120,6 +122,18 @@ from developer input. The budget supplies nonnegative `cpu_millis`, `memory_mib`
 `storage_mib` and `ephemeral_storage_mib` available **after** fixed platform and
 management headroom. Startup inserts an absent budget or verifies an exact match;
 a changed allowance is rejected, not silently resized.
+
+Optional `provider_runtime` starts the worker. It supplies a `kubernetes` object
+with explicit HTTPS `endpoint`, CA `ca_file` and private Nebius `credentials_file`,
+plus a separate private `cloud_credentials_file`. Both credential files are bounded
+regular files, with no world access or group write; projected read-only Secret
+files are supported. No ambient kubeconfig, login, proxy or insecure transport is
+used. Native SDK token renewal stays pinned to the configured origin. `concurrency`
+defaults to four provisioning operations (range 1–16), and `poll_seconds` defaults
+to five (range 1–60); these are not task-capacity shares. Shutdown cancels operations
+and lease heartbeats before closing HTTP/SDK/database clients. Database outages
+leave uncertain intents charged and restart polling, without exposing exception
+contents. Without this option, accepted requests remain pending.
 
 `LOOM_SVC_ENVIRONMENT_MANAGEMENT_GITHUB_TOKEN` is a read-only credential for
 publication metadata, PR checks and artifacts. Configuration is rejected outside
@@ -147,6 +161,12 @@ The authenticated API supports:
 - `GET /api/v1/environments`: this user's current team's retained registrations.
 - `GET /api/v1/environments/{environment_id}`: desired registration and operation.
 - `GET /api/v1/environment-operations/{operation_id}`: current operation state.
+- `POST /api/v1/environment-operations/{operation_id}/retry`: explicitly retry the
+  owner's current blocked operation without changing its plan or identities.
+- `POST /api/v1/environments/{environment_id}/operations`: an `Idempotency-Key`
+  and `{action: "destroy_retained", expected_generation}` request retained cleanup.
+- `POST /api/v1/environments/{environment_id}/login`: return an environment-bound,
+  90-second one-use child login proof, never the management or child admin token.
 
 The actual user/team and scopes come from existing authentication; owner fields
 in the body are rejected, generic credentials without a user are insufficient,
@@ -161,9 +181,43 @@ Same-user, same-key, same-request retries recover the existing operation even if
 publication is now unavailable; changed requests conflict. The journal uses
 database-time expiring leases and increasing runner epochs to reject stale or
 out-of-order confirmations. Provider identities cannot change on replay, and
-completion requires all steps through application readiness. These are journal
-invariants; external write fencing and real readiness require the provider worker.
-No current background loop consumes this journal, so new requests remain pending.
+completion requires all steps through application readiness. Kubernetes creation
+is create-only with exact frozen-field/ownership and UID readback. Native IAM
+effects have individual intents and deterministic idempotency keys. Credentials
+are encrypted atomically with their journal confirmation before immutable child
+Secrets are published. Each child gets distinct DB roles, TLS, session/secret-store
+keys, admin/collector/batch credentials and canonical/source/backup object identities;
+the installation's model-provider credentials are not copied. IAM permissions are
+bucket-scoped, not project-wide data grants. Database TLS leaf certificates last
+365 days; rotation remains a lifecycle obligation, not an automatic immutable-Secret
+feature.
+
+Readiness waits for database/migration, all four application Deployments, configure
+completion and an authenticated exact-owner readback over the child's public HTTPS
+host. The child loads its protected identity from
+`LOOM_SVC_MANAGED_ENVIRONMENT_CONFIG_FILE`. Owner enrollment creates a non-platform-
+admin identity without copying a password. Management-issued proof is consumed by
+the child's existing `/api/v1/auth/login/complete` route, creating a new child
+session. Proof expiry is checked after database locks; concurrent replay cannot
+create two sessions. Login requires a mutation-capable management user session;
+an attributed bearer must also carry every child-owner scope (`read:own`, `submit`,
+`tokens:manage`, `providers:manage`, `team:manage`). Read-only or attenuated bearer
+credentials cannot be exchanged for owner authority. The CLI/browser context-
+selection UX is not yet implemented.
+
+Retained destroy advances the desired generation immediately, fencing earlier
+workers and management login issuance. It revokes the ready child's owner/team
+identity and delivered object access keys, closes Pod admission with zero-Pod
+quotas, suspends Jobs/CronJobs and scales application/database controllers to zero.
+Controller names stay occupied by stopped objects so delayed create requests cannot
+restart them. Changes test both UID and resource version; foreign/replaced/drifted
+objects block cleanup. Discovered backup Jobs and completed Pods are journaled by
+UID before their cleanup. Completion requires stopped-controller readback, complete
+Pod inventory and enforced zero-Pod quota usage. Only then are CPU/RAM/ephemeral
+reservations released. Namespaces, PVCs, buckets, storage reservations and name claims
+remain; there is no data purge, slug reuse or automatic result-expiry policy.
+Quota scopes and selectors must match the frozen intent, not merely contain its
+fields: a scoped zero-Pod quota is not evidence that all Pod admission is closed.
 
 After logging in to the selected management origin, the request/status commands are:
 
@@ -172,6 +226,8 @@ loom dev create alice --candidate <approved-candidate-uuid> --idempotency-key cr
 loom dev list
 loom dev status <environment-uuid>
 loom dev wait <operation-uuid> --timeout 60
+loom dev destroy <environment-uuid>
+loom dev retry <blocked-operation-uuid>
 ```
 
 `loom service up --environment dev-alice --candidate <approved-candidate-uuid>`
@@ -179,8 +235,15 @@ dispatches the same create request. It is not yet an update command or arbitrary
 source deployment. Reuse the printed idempotency key after a lost response; `wait`
 timeout exits 2 without cancelling the operation. Hosted-target errors never fall
 back to local Compose. No target (or explicit `--environment local`) retains local
-Compose and prints that target. Suspend/resume/update/destroy and shared-target
-management are not implemented by this request slice.
+Compose and prints that target. Destroy reads the current generation unless
+`--expected-generation` is supplied and prints the exact generation/idempotency-key
+retry command before mutation. Retained destroy is not suspend/resume or data purge.
+Explicit retry retains the runner epoch and all confirmed resource identities;
+pending/running/completed calls are no-ops. After the bounded automatic retry budget
+is exhausted, each explicit retry permits one additional reconciliation. It cannot
+revive a generation superseded by destroy or authorize adoption of a replaced object.
+Suspend/resume/update, arbitrary-source publication, shared execution and
+shared-target management remain separate delivery work.
 
 ## Supported workload boundary
 

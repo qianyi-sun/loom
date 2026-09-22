@@ -162,6 +162,13 @@ class EnvironmentStatusV1(_Contract):
     operation: EnvironmentOperationV1 | None
 
 
+class EnvironmentOperationRequestV1(_Contract):
+    """Only retained teardown is available before shared-execution lifecycle."""
+
+    action: Literal["destroy_retained"]
+    expected_generation: int = Field(ge=1, strict=True)
+
+
 def new_environment_registration(
     foundation: FoundationBinding,
     *,
