@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID
@@ -78,13 +79,20 @@ def _pod(owner=1, *, name=None, pending=False):
     )
 
 
-async def _capture(nodes, pods, scope=None):
+async def _capture(nodes, pods, scope=None, *, raw_pods=None):
     calls = []
 
     def listing(kind, items, **kwargs):
         calls.append(kind)
         if kind == "nodes":
             assert kwargs["label_selector"] == "loom.nebius/role=execution"
+        if kind == "pods" and kwargs.get("_preload_content") is False:
+            with k8s.ApiClient() as api:
+                data = raw_pods if raw_pods is not None else api.sanitize_for_serialization(items)
+            return SimpleNamespace(data=json.dumps({
+                "apiVersion": "v1", "kind": "PodList", "metadata": {"resourceVersion": "pods-1"},
+                "items": data,
+            }).encode())
         return SimpleNamespace(items=items, metadata=SimpleNamespace(resource_version=kind + "-1"))
 
     reader = InClusterKubernetesCapacityReader(
@@ -304,3 +312,34 @@ def test_ambiguous_or_unbound_management_scope_is_rejected(change):
         data["node_selector"] = {"pool": "x,other=true"}
     with pytest.raises(ValidationError):
         PoolObservationScope.model_validate(data)
+
+
+@pytest.mark.asyncio
+async def test_pool_reads_pod_level_requests_not_lost_by_older_kubernetes_sdk():
+    pod = _pod(1)
+    with k8s.ApiClient() as api:
+        raw = api.sanitize_for_serialization(pod)
+    # The pinned SDK does not declare V1PodSpec.resources, but the API can
+    # return PodLevelResources. The container's 1 CPU / 1 GiB is not its total.
+    raw["spec"]["resources"] = {"requests": {"cpu": "3", "memory": "4Gi"}}
+    raw["spec"]["overhead"] = {"cpu": "50m", "memory": "16Mi"}
+    snapshot = await _capture([_node()], [pod], raw_pods=[raw])
+    assert snapshot.requested.cpu_millis == 3050
+    assert snapshot.requested.memory_mib == 4112
+    assert snapshot.requested.storage_mib == 2048
+    assert snapshot.nodes[0].managed_pods[0].requests.cpu_millis == 3050
+
+
+@pytest.mark.asyncio
+async def test_pool_rejects_incomplete_pod_list_instead_of_reporting_empty_capacity():
+    reader = InClusterKubernetesCapacityReader(
+        core_api=SimpleNamespace(
+            list_node=lambda **_: SimpleNamespace(items=[], metadata=SimpleNamespace(resource_version="nodes-1")),
+            list_pod_for_all_namespaces=lambda **_: SimpleNamespace(data=b'{"metadata":{"resourceVersion":"1"}}'),
+        ),
+        apps_api=SimpleNamespace(list_daemon_set_for_all_namespaces=lambda **_: SimpleNamespace(
+            items=[], metadata=SimpleNamespace(resource_version="ds-1"),
+        )),
+    )
+    with pytest.raises(KubernetesObservationError):
+        await reader.capture_pool(scope=_scope())
