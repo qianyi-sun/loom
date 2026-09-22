@@ -3,10 +3,31 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from loom_config.codegen import render_cluster_config_example, render_service_settings
 from loom_config.loader import load_schema
 
 _REPO_SCHEMA = Path("config/loom-schema.toml")
+
+
+def test_generated_storage_requirement_can_differ_for_management_service() -> None:
+    schema = load_schema(_REPO_SCHEMA)
+    for service, name in (("loom-service", "LoomServiceSettings"), ("control-plane", "ControlPlaneSettings")):
+        namespace: dict = {}
+        exec(compile(render_service_settings(schema, service), "<settings>", "exec"), namespace)
+        settings_type = namespace[name]
+        if service == "loom-service":
+            settings = settings_type(_env_file=None, db_url="postgresql+psycopg://u:p@h/db")
+            assert settings.minio_access_key is None
+            assert settings.minio_secret_key is None
+        else:
+            with pytest.raises(ValidationError) as error:
+                settings_type(_env_file=None, db_url="postgresql+psycopg://u:p@h/db")
+            assert {e["loc"] for e in error.value.errors()} >= {
+                ("minio_access_key",), ("minio_secret_key",),
+            }
 
 
 def test_renders_control_plane_with_all_field_kinds() -> None:
