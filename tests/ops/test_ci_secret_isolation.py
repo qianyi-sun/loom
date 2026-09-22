@@ -77,7 +77,6 @@ def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache(
     assert workflow["permissions"] == {"contents": "read"}
     assert build["permissions"] == {"contents": "read"}
     assert _normalized_expression(build["if"]) == (
-        "github.event_name != 'push' && "
         "needs.plan.outputs.gate_mode == 'full' && "
         "needs.plan.outputs.required == 'true' && "
         f"needs.plan.outputs.{matrix_output} != '[]'"
@@ -101,84 +100,6 @@ def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache(
     assert "${{" not in script
 
 
-def test_images_publish_authority_is_main_push_only() -> None:
-    workflow = _workflow(".github/workflows/images.yml")
-    publish = workflow["jobs"]["publish"]
-
-    write_capable_jobs = {
-        job_name
-        for job_name, job in workflow["jobs"].items()
-        if job.get("permissions", {}).get("packages") == "write"
-    }
-    assert write_capable_jobs == {
-        "publish",
-        "publish-manifest",
-    }
-    assert publish["permissions"] == {
-        "attestations": "write",
-        "contents": "read",
-        "id-token": "write",
-        "packages": "write",
-    }
-    manifest = workflow["jobs"]["publish-manifest"]
-    assert manifest["permissions"] == {
-        "actions": "read",
-        "attestations": "write",
-        "contents": "read",
-        "id-token": "write",
-        "packages": "write",
-    }
-    assert _normalized_expression(publish["if"]) == (
-        "!cancelled() && "
-        "needs.plan.result == 'success' && "
-        "needs.trivy-binary.result == 'success' && "
-        "github.event_name == 'push' && "
-        "github.ref == 'refs/heads/main' && "
-        "needs.plan.outputs.gate_mode == 'full' && "
-        "needs.plan.outputs.required == 'true' && "
-        "needs.plan.outputs.images != '[]'"
-    )
-    assert _checkout_steps(publish)
-    assert all(
-        step.get("with", {}).get("persist-credentials") is False
-        for step in _checkout_steps(publish)
-    )
-    assert _normalized_expression(manifest["if"]) == (
-        "!cancelled() && needs.plan.result == 'success' && "
-        "github.event_name == 'push' && "
-        "github.ref == 'refs/heads/main' && "
-        "needs.plan.outputs.gate_mode == 'full' && "
-        "needs.plan.outputs.required == 'true' && "
-        "needs.plan.outputs.images != '[]' && "
-        "needs.publish.result == 'success'"
-    )
-    assert manifest["needs"] == ["plan", "publish"]
-    assert _checkout_steps(manifest)
-    assert all(
-        step.get("with", {}).get("persist-credentials") is False
-        for step in _checkout_steps(manifest)
-    )
-    login = _named_step(publish, "Log in to GHCR")
-    assert login["env"]["GHCR_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
-    assert "${{" not in login["run"]
-
-    script = "\n".join(_run_blocks(publish))
-    assert "docker login" in script
-    assert "docker push" in script
-    assert "--cache-from" not in script
-    assert "--cache-to" not in script
-    assert "Scan trusted image archive" in str(publish)
-    assert "Attest published architecture digest" in str(publish)
-    assert "${{" not in script
-
-    manifest_script = "\n".join(_run_blocks(manifest))
-    assert "docker buildx imagetools create" in manifest_script
-    assert '"${image}@${amd64_digest}"' in manifest_script
-    assert '"${image}@${arm64_digest}"' in manifest_script
-    assert '--architecture-digest "linux/amd64=${AMD64_DIGEST}"' in manifest_script
-    assert '--architecture-digest "linux/arm64=${ARM64_DIGEST}"' in manifest_script
-    assert "LOOM_CI_IMAGE_RUNS_ON" not in str(publish)
-    assert "LOOM_CI_IMAGE_RUNS_ON" not in str(manifest)
 
 
 def test_images_manual_dispatch_is_build_only() -> None:
@@ -210,8 +131,6 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         "trivy-binary",
         "build",
         "nebius-harness-build",
-        "publish",
-        "publish-manifest",
         "images-gate",
     }
     for job_name in (
@@ -227,22 +146,6 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         assert "id-token" not in effective
         assert all(value != "write" for value in effective.values())
 
-    assert jobs["publish"]["permissions"] == {
-        "attestations": "write",
-        "contents": "read",
-        "id-token": "write",
-        "packages": "write",
-    }
-    assert jobs["publish-manifest"]["permissions"] == {
-        "actions": "read",
-        "attestations": "write",
-        "contents": "read",
-        "id-token": "write",
-        "packages": "write",
-    }
-    assert "environment" not in jobs["publish"]
-    assert "environment" not in jobs["publish-manifest"]
-
 
 def test_images_secret_and_cache_authority_is_exact() -> None:
     workflow = _workflow(".github/workflows/images.yml")
@@ -254,10 +157,7 @@ def test_images_secret_and_cache_authority_is_exact() -> None:
         if isinstance(value, str) and "secrets." in value
     ]
 
-    assert secret_references == [
-        "${{ secrets.GITHUB_TOKEN }}",
-        "${{ secrets.GITHUB_TOKEN }}",
-    ]
+    assert secret_references == []
     for job in workflow["jobs"].values():
         assert job.get("continue-on-error") is not True
         for step in job.get("steps", []):
@@ -368,27 +268,6 @@ def test_untrusted_workflow_shell_receives_context_only_through_env(
         ("build", "REF_NAME", "dev; id", "FAIL:"),
         ("build", "PR_NUMBER", "--help", "FAIL:"),
         ("build", "HEAD_SHA", "abc`id`", "FAIL:"),
-        ("publish", "IMAGE_NAME", "worker; id", "component ownership validation failed:"),
-        (
-            "publish",
-            "IMAGE_DIGEST_NAME",
-            "loom-worker$(id)",
-            "component ownership validation failed:",
-        ),
-        (
-            "publish",
-            "DOCKERFILE",
-            "deploy/Dockerfile.worker\n--push",
-            "component ownership validation failed:",
-        ),
-        ("publish", "BUILD_CONTEXT", "../.", "component ownership validation failed:"),
-        ("publish", "EVENT_NAME", "push$(id)", "FAIL:"),
-        ("publish", "EVENT_NAME", "workflow_dispatch", "FAIL: publishing requires a main push"),
-        ("publish", "REF_NAME", "dev", "FAIL: publishing requires a main push"),
-        ("publish", "REF_NAME", "dev/../../main", "FAIL:"),
-        ("publish", "REPOSITORY_OWNER", "owner`id`", "FAIL:"),
-        ("publish", "GHCR_ACTOR", "--password-stdin", "FAIL:"),
-        ("publish", "HEAD_SHA", "deadbeef$(id)", "FAIL:"),
     ],
 )
 def test_image_input_validation_rejects_shell_metacharacters_and_ambiguous_values(
@@ -400,14 +279,14 @@ def test_image_input_validation_rejects_shell_metacharacters_and_ambiguous_value
     workflow = _workflow(".github/workflows/images.yml")
     step = _named_step(workflow["jobs"][job_name], "Validate image build inputs")
     env = {
-        "IMAGE_SET": "nebius" if job_name == "build" else "legacy",
+        "IMAGE_SET": "nebius",
         "IMAGE_NAME": "service",
         "IMAGE_DIGEST_NAME": "loom-service",
         "DOCKERFILE": "deploy/Dockerfile.service",
         "BUILD_CONTEXT": ".",
-        "EVENT_NAME": "pull_request" if job_name == "build" else "push",
-        "REF_NAME": "feature-safe" if job_name == "build" else "main",
-        "PR_NUMBER": "42" if job_name == "build" else "",
+        "EVENT_NAME": "pull_request",
+        "REF_NAME": "feature-safe",
+        "PR_NUMBER": "42",
         "HEAD_SHA": "a" * 40,
         "BASE_SHA": "b" * 40,
         "REPOSITORY_OWNER": "qianyi-sun",
@@ -432,7 +311,7 @@ def test_image_input_validation_never_evaluates_command_substitution(
     result = _run_validation_step(
         step,
         env={
-            "IMAGE_SET": "nebius" if job_name == "build" else "legacy",
+            "IMAGE_SET": "nebius",
             "IMAGE_NAME": f"worker$(touch {sentinel})",
             "IMAGE_DIGEST_NAME": "loom-service",
             "DOCKERFILE": "deploy/Dockerfile.service",
@@ -460,7 +339,6 @@ def test_image_input_validation_never_evaluates_command_substitution(
             "",
         ),
         ("build", "workflow_dispatch", "codex/ci-secret-isolation", ""),
-        ("publish", "push", "main", ""),
     ],
 )
 def test_image_input_validation_accepts_actual_github_context_shapes(
@@ -474,7 +352,7 @@ def test_image_input_validation_accepts_actual_github_context_shapes(
     result = _run_validation_step(
         step,
         env={
-            "IMAGE_SET": "nebius" if job_name == "build" else "legacy",
+            "IMAGE_SET": "nebius",
         "IMAGE_NAME": "service",
             "IMAGE_DIGEST_NAME": "loom-service",
             "DOCKERFILE": "deploy/Dockerfile.service",

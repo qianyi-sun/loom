@@ -39,7 +39,7 @@ def test_native_builds_use_the_complete_supported_matrix() -> None:
     assert jobs["build"]["strategy"]["matrix"]["include"] == "${{ fromJSON(needs.plan.outputs.ordinary_builds) }}"
 
 
-@pytest.mark.parametrize("event", ["pull_request", "merge_group", "push", "workflow_dispatch"])
+@pytest.mark.parametrize("event", ["pull_request", "merge_group", "workflow_dispatch"])
 def test_docs_plan_skips_builds_except_explicit_manual_validation(
     tmp_path: Path, event: str
 ) -> None:
@@ -77,15 +77,13 @@ def test_docs_plan_skips_builds_except_explicit_manual_validation(
     "images",
     [[], ["service"], ["web"], ["service", "web"]],
 )
-@pytest.mark.parametrize("event", ["pull_request", "merge_group", "workflow_dispatch", "push"])
-@pytest.mark.parametrize("fault", [None, "ordinary", "publish"])
-def test_gate_enforces_selected_build_and_publish_results(
+@pytest.mark.parametrize("event", ["pull_request", "merge_group", "workflow_dispatch"])
+@pytest.mark.parametrize("fault", [None, "ordinary", "harness"])
+def test_gate_enforces_selected_build_results(
     images: list[str], event: str, fault: str | None
 ) -> None:
     ordinary_selected = bool(images)
-    publish = event == "push"
-    ordinary = "success" if ordinary_selected and not publish else "skipped"
-    publish_result = "success" if images and publish else "skipped"
+    ordinary = "success" if ordinary_selected else "skipped"
     env = {
         **os.environ,
         "EVENT_NAME": event,
@@ -95,9 +93,7 @@ def test_gate_enforces_selected_build_and_publish_results(
         "STANDARD_IMAGES": json.dumps([{"image": image} for image in images]),
         "BUILD_RESULT": "failure" if fault == "ordinary" else ordinary,
         "HARBOR_REQUIRED": "true" if ordinary_selected else "false",
-        "HARNESS_BUILD_RESULT": "failure" if fault == "ordinary" else ordinary,
-        "PUBLISH_RESULT": "failure" if fault == "publish" else publish_result,
-        "MANIFEST_RESULT": publish_result,
+        "HARNESS_BUILD_RESULT": "failure" if fault == "harness" else ordinary,
     }
     step = _jobs()["images-gate"]["steps"][0]
     result = subprocess.run(
@@ -112,7 +108,6 @@ def test_parallel_builds_keep_native_scan_and_untrusted_permissions(job: str) ->
     build = jobs[job]
     assert build["permissions"] == {"contents": "read"}
     assert build["strategy"]["fail-fast"] is False
-    assert "github.event_name != 'push'" in build["if"]
     assert build["steps"] == jobs["build"]["steps"]
     scripts = "\n".join(step.get("run", "") for step in build["steps"])
     assert "scripts/validate_trivy_release_report.py" in scripts
@@ -135,8 +130,6 @@ def test_gate_rejects_missing_selected_matrix_after_dependency_failure(
         "BUILD_RESULT": "success",
         "HARBOR_REQUIRED": "true",
         "HARNESS_BUILD_RESULT": "success",
-        "PUBLISH_RESULT": "skipped",
-        "MANIFEST_RESULT": "skipped",
         result_name: result,
     }
     completed = subprocess.run(
@@ -150,59 +143,8 @@ def test_gate_rejects_missing_selected_matrix_after_dependency_failure(
     assert completed.returncode != 0
 
 
-@pytest.mark.parametrize("prerequisite", [None, "plan", "trivy-binary"])
-def test_trusted_publish_requires_successful_selected_dependencies(
-    prerequisite: str | None
-) -> None:
-    images = ["service"]
-    values = {
-        "github.event_name": "push",
-        "github.ref": "refs/heads/main",
-        "needs.plan.result": "success",
-        "needs.trivy-binary.result": "success",
-        "needs.plan.outputs.gate_mode": "full",
-        "needs.plan.outputs.required": "true",
-        "needs.plan.outputs.images": json.dumps(
-            [{"image": image} for image in images], separators=(",", ":")
-        ),
-    }
-    expression = _jobs()["publish"]["if"]
-    for result in ("failure", "skipped", "cancelled"):
-        if prerequisite:
-            values[f"needs.{prerequisite}.result"] = result
-        assert _condition(expression, values) == (prerequisite is None)
-        assert not _condition(expression, values, cancelled=True)
 
 
-@pytest.mark.parametrize(
-    ("key", "value"),
-    [
-        ("github.event_name", "pull_request"),
-        ("github.event_name", "merge_group"),
-        ("github.event_name", "workflow_dispatch"),
-        ("github.ref", "refs/heads/feature"),
-        ("github.ref", "refs/heads/dev"),
-        ("needs.plan.outputs.gate_mode", "filtered"),
-        ("needs.plan.outputs.required", "false"),
-        ("needs.plan.outputs.images", "[]"),
-    ],
-)
-@pytest.mark.parametrize("job", ["publish", "publish-manifest"])
-def test_publish_requires_trusted_event_branch_and_selection(
-    key: str, value: str, job: str
-) -> None:
-    values = {
-        "github.event_name": "push",
-        "github.ref": "refs/heads/main",
-        "needs.plan.result": "success",
-        "needs.trivy-binary.result": "success",
-        "needs.publish.result": "success",
-        "needs.plan.outputs.gate_mode": "full",
-        "needs.plan.outputs.required": "true",
-        "needs.plan.outputs.images": '[{"image":"service"}]',
-        key: value,
-    }
-    assert not _condition(_jobs()[job]["if"], values)
 
 
 @pytest.mark.parametrize("job", ["build"])
@@ -225,21 +167,3 @@ def test_untrusted_builds_do_not_run_after_required_dependency_failure(
     for result in ("failure", "skipped", "cancelled"):
         values[f"needs.{dependency}.result"] = result
         assert not _condition(selected["if"], values)
-
-
-@pytest.mark.parametrize("publish_result", ["success", "failure", "cancelled", "skipped"])
-def test_manifest_requires_publish_success(
-    publish_result: str,
-) -> None:
-    values = {
-        "github.event_name": "push",
-        "github.ref": "refs/heads/main",
-        "needs.plan.result": "success",
-        "needs.publish.result": publish_result,
-        "needs.plan.outputs.gate_mode": "full",
-        "needs.plan.outputs.required": "true",
-        "needs.plan.outputs.images": '[{"image":"service"}]',
-    }
-    condition = _jobs()["publish-manifest"]["if"]
-    assert _condition(condition, values) == (publish_result == "success")
-    assert not _condition(condition, values, cancelled=True)

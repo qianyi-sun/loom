@@ -190,13 +190,14 @@ secrets.
   validation. Draft events remain filtered and cannot authorize a merge.
 - Do not assume labels are the only way to select validation. For example,
   relevant image paths select `images-gate` automatically; `ci:images` adds
-  multi-arch image validation when the changed paths do not already require it.
+  Nebius AMD64 image validation when the changed paths do not already require it.
   In the checked-in workflow, pull requests, merge groups, and manual
   dispatches build with a read-only token, do not log in to GHCR, and do not
-  use a shared publication cache. Ordinary manual dispatch is build-only. The
-  `images` publication jobs request `packages: write` only for a push to `main`.
-  `nebius-candidate` owns automatic `dev` publication; the old personal-dev
-  publication controller and its manual publishing inputs have been removed.
+  use a shared publication cache. The `images` workflow has no publication
+  permissions or push trigger. `nebius-candidate` publishes the immutable Nebius
+  images from `dev`; production promotes those same digests through the existing
+  `dev` to `main` gates without rebuilding or republishing them to GHCR.
+  The old personal-dev controller and GHCR publisher have been removed.
   See the [workflow inventory](docs/contributing/ci.md#workflow-inventory) for
   the retained validation, publishing, and promotion entry points.
   This is not a repository-wide sandbox for

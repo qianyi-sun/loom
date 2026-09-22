@@ -32,7 +32,5 @@ def test_validation_has_direct_hosted_placement(workflow: str, job: str) -> None
 def test_image_builds_preserve_native_architecture_on_hosted_runners() -> None:
     document = yaml.safe_load((ROOT / ".github/workflows/images.yml").read_text())
     build = document["jobs"]["build"]
-    assert build["runs-on"] == (
-        "${{ matrix.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}"
-    )
+    assert build["runs-on"] == "ubuntu-24.04"
     assert set(build["needs"]) == {"plan", "trivy-binary"}

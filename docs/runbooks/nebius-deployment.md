@@ -1,13 +1,44 @@
 # Independent Nebius deployment
 
-Hosted rollout automation from the shared-cluster era is retired. This procedure
-requires separately reviewed environment inputs and operator authority; checked-in
-examples are not production deployment authorization. For production, preserve
-release-owner and Production Environment approval, and run
-`scripts/ops/verify_production_release_gate.sh` from the promoted `main` checkout
-with the approved candidate, image and release-gate run before applying manifests.
-Automated native staging/production rollout remains an explicit integration gap.
+Nebius is the image publication path for both development and production.
+`nebius-candidate` publishes the seven manifest-owned AMD64 images from an exact
+`dev` commit. Production promotes those same immutable digest references through
+`release-promotion-gate`, then the protected `dev` to `main` pull request and
+`main-promotion-gate`. A `main` push does not rebuild or publish images to GHCR.
+Use the candidate publication output as the source of image references; never
+substitute a mutable branch tag during promotion.
 
+Production still requires separately reviewed environment inputs, release-owner
+and Production Environment approval. Run
+`scripts/ops/verify_production_release_gate.sh` from the promoted `main` checkout
+with the approved candidate, image selector and release-gate run before applying
+manifests. Checked-in examples are not production deployment authorization.
+`nebius-rollout` automates the independent integration environment only; it does
+not turn a `main` merge into an automatic production rollout.
+
+Before applying production, protect each of the seven approved image digests
+with the release manifest's unused SemVer `prod_tag` in the same Nebius image
+repository. Keep these tags for running production and retained rollback versions;
+never move an existing release tag to another digest. Integration retention reads
+integration workloads, not production workloads, so a candidate-only tag can
+otherwise expire after production stops sharing integration's current version.
+Its existing policy preserves images with non-candidate tags, including SemVer
+release tags.
+
+After the production evidence verifier succeeds, use the operator's configured
+registry credentials for each approved `IMAGE_REF` (`repository@sha256:...`) and
+`PROD_TAG` from the release evidence:
+
+```sh
+skopeo copy --preserve-digests \
+  "docker://${IMAGE_REF}" "docker://${IMAGE_REF%@*}:${PROD_TAG}"
+test "$(skopeo inspect --format '{{.Digest}}' \
+  "docker://${IMAGE_REF%@*}:${PROD_TAG}")" = "${IMAGE_REF##*@}"
+```
+
+Do not apply production until all seven release tags read back the approved
+digests. Render and deploy the original digest references, not the tags. Adding
+these retention tags does not rebuild the images or create a second publisher.
 
 `scripts/ops/deploy_nebius_platform.py` plans or applies the output of
 `render_nebius_platform.py`. Its default is a read-only cluster preflight; cloud

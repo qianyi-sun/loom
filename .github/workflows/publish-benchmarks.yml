@@ -41,21 +41,19 @@ on:
 
 jobs:
   detect:
-    name: Detect changed adapters
+    name: Select requested benchmarks
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       benchmarks: ${{ steps.list.outputs.benchmarks }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          fetch-depth: 2
       - id: list
         name: Compute benchmark list (JSON for matrix)
         run: |
           set -euo pipefail
           python3 <<'PY' > /tmp/list.json
-          import json, os, pathlib, subprocess, sys
+          import json, os, pathlib
           adapter_dir = pathlib.Path(
               "packages/loom-benchmarks/loom_benchmarks/adapters",
           )
@@ -103,7 +101,7 @@ jobs:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
-          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          save-cache: true
           cache-dependency-glob: uv.lock
       - name: Sync locked workspace
         run: |

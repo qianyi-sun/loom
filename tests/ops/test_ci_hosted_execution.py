@@ -26,9 +26,8 @@ def test_ci_has_no_shared_host_placement_or_local_cache_dependency(name: str) ->
                 assert "manifest-file" not in step.get("with", {})
 
 
-@pytest.mark.parametrize("publishing", [False, True])
-def test_pr_matrix_runs_amd64_and_preserves_declared_publication_contract(
-    tmp_path: Path, publishing: bool,
+def test_candidate_matrix_runs_only_amd64(
+    tmp_path: Path,
 ) -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/images.yml").read_text())
     step = next(item for item in workflow["jobs"]["plan"]["steps"]
@@ -41,13 +40,13 @@ def test_pr_matrix_runs_amd64_and_preserves_declared_publication_contract(
     output = tmp_path / "output"
     result = subprocess.run(
         ["bash", "-c", step["run"]], text=True, capture_output=True,
-        env={**os.environ, "PUBLISHING": str(publishing).lower(),
+        env={**os.environ,
              "NATIVE_BUILDS": json.dumps(rows), "GITHUB_OUTPUT": str(output)},
     )
     assert result.returncode == 0, result.stderr
     matrices = dict(line.split("=", 1) for line in output.read_text().splitlines())
     selected = json.loads(matrices["ordinary_builds"])
-    assert selected == [row for row in rows if publishing or row["architecture"] == "amd64"]
+    assert selected == [row for row in rows if row["architecture"] == "amd64"]
 
 
 def test_linux_runtime_dependency_check_is_amd64_only() -> None:

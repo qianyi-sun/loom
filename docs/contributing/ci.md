@@ -16,7 +16,7 @@ Graph entry has no workflow YAML in this repository and is maintained separately
 | Category | Workflow file | Purpose and triggers |
 | --- | --- | --- |
 | Required CI | `ci.yml` | Repository checks on PRs, merge groups, and `main` pushes; full daily regression at 08:23 UTC; manual validation and compatibility checks. |
-| Required CI / main publication | `images.yml` | Image validation on PRs, merge groups, and manual dispatch; signed image publication only on `main` pushes. |
+| Required CI | `images.yml` | Read-only Nebius AMD64 image builds and scans on PRs, merge groups, and manual dispatch. |
 | Required CI | `cluster-smoke.yml` | Credential-free Kubernetes contract checks on PRs, merge groups, manual dispatch, and selected cluster-path pushes to `dev`. |
 | Required CI | `staging-smoke.yml` | Credential-free Compose system checks on PRs, merge groups, and manual dispatch. |
 | Contributor compatibility | `macos-locked-environment.yml` | macOS ARM64 locked workspace installation, daily at 09:17 UTC or manually. |
@@ -44,8 +44,7 @@ retain the [repository contract](../../CONTRIBUTING.md).
 
 The manifest retains ownership of both historical and Nebius tests. Daily dev CI
 selects Nebius and common contracts; historical compatibility is manual. PR image CI uses the same seven-image Nebius set as candidate publication,
-builds only affected AMD64 images and scans the resulting artifacts. Existing signed publication
-consumers retain their declared architecture manifests until migrated. Disposable
+builds only affected AMD64 images and scans the resulting artifacts. Disposable
 Kubernetes checks include the Nebius platform and execution contracts. Candidate
 publication uses the protected `nebius-integration` Environment from `dev`;
 PR checks do not receive its credentials. CI does not deploy the live platform.
@@ -138,11 +137,16 @@ uses its own selection, so a Web-only PR builds one image and a complete platfor
 validation builds seven, without a second Harbor build. PR scanner preparation
 fetches only AMD64.
 
-`images.yml` retains signed main-branch publication only on `main` pushes;
-every manual dispatch is build-only. The personal-dev publication controller,
-its reconciliation code, and the manual publishing inputs have been removed.
-Main publication retains its protected image/release contracts. Source
-retirement does not stop live host services or cancel existing jobs.
+All hosted image publication, including production candidates, uses Nebius.
+Production still promotes an exact `dev` candidate into `main` through
+`release-promotion-gate` and `main-promotion-gate`, reusing the seven immutable
+Nebius image digests. A `main` push does not rebuild or publish GHCR images.
+The personal-dev controller, GHCR publisher, ARM64 manifest joiner and their
+exclusive evidence/receipt helpers have been removed. `images.yml` is read-only
+for every event; scanning and selected-build failure checks remain required.
+See [production deployment](../runbooks/nebius-deployment.md) for the retained
+release and environment checks. Source retirement does not stop live host services
+or cancel existing jobs.
 
 ## Daily regression and expensive components
 
