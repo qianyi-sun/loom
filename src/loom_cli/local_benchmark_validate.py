@@ -161,7 +161,9 @@ def validate_local_benchmark(
         )
     else:
         for task_toml in task_tomls:
-            _validate_task_toml(task_toml)
+            relative = task_toml.parent.relative_to(task_root)
+            task_id = entry.id if relative == Path(".") else f"{entry.id}/{relative.as_posix()}"
+            _validate_task_toml(task_toml, task_id=task_id)
 
     profile_stats: NebiusTerminusProfileStats | None = None
     if profile == NEBIUS_TERMINUS_PROFILE and not compatibility_report:
@@ -227,14 +229,14 @@ def _load_benchmark_toml(path: Path) -> BenchmarkToml:
         ) from exc
 
 
-def _validate_task_toml(path: Path) -> None:
+def _validate_task_toml(path: Path, *, task_id: str | None = None) -> None:
     try:
         with path.open("rb") as f:
             raw = tomllib.load(f)
         # #341: Terminal-Bench-shaped bundles are auto-normalized to
         # Loom TaskConfig before validation so `publish-local` accepts
         # user-provided TB imports without operator-side conversion.
-        normalized = normalize_terminal_bench_task_toml(raw)
+        normalized = normalize_terminal_bench_task_toml(raw, task_id=task_id)
         task = TaskConfig.model_validate(normalized)
         execution_cpu_arch(task.environment.cpu_arch)
     except Exception as exc:
@@ -262,7 +264,7 @@ def _validate_nebius_terminus_profile(
             shutil.copytree(bundle_dir, staged, symlinks=False)
             with (staged / task_toml.name).open("rb") as f:
                 raw_cfg = tomllib.load(f)
-            raw_cfg = normalize_terminal_bench_task_toml(raw_cfg)
+            raw_cfg = normalize_terminal_bench_task_toml(raw_cfg, task_id=task_id)
             raw_cfg, adapt_stats = adapt_bundle_for_nebius_terminus(staged, raw_cfg)
             checksum = task_checksum(staged)
             _, sei_provenance = prepare_service_execution_input_manifest(

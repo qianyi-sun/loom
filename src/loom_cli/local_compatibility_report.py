@@ -91,7 +91,7 @@ def _inspect_task(path: Path, report: TaskCompatibilityReport, *, execution_prof
     if execution_profile == NEBIUS_TERMINUS_PROFILE:
         _declared_runtime_requirements(raw, report)
     try:
-        normalized = normalize_terminal_bench_task_toml(raw)
+        normalized = normalize_terminal_bench_task_toml(raw, task_id=report.task_id)
         task = TaskConfig.model_validate(normalized)
         execution_cpu_arch(task.environment.cpu_arch)
     except (ValueError, TypeError) as exc:
@@ -154,6 +154,11 @@ def _declared_runtime_requirements(raw: dict[str, Any], report: TaskCompatibilit
         add("task_identity", "environment.user", f"Task declares user {env['user']!r}; profile uses 'agent'.", 2049)
     if agent.get("user") is not None:
         add("agent_identity", "agent.user", "Custom agent identity is not admitted by this profile.", 2049)
+    if agent.get("continue_until_timeout") is not None:
+        report.add("runtime_capability", "agent_completion_policy",
+                   "The declared continue_until_timeout agent behavior has no supported Loom execution contract.",
+                   "Retain this task as blocked until the agent completion policy is supported; do not drop the declaration.",
+                   source=f"{report.source_location}#agent.continue_until_timeout")
     if verifier.get("user") is not None:
         add("verifier_identity", "verifier.user", "Profile removes the declared verifier identity.", 2049)
     if "workdir" in env and env["workdir"] not in ("/app", "/workspace"):
@@ -243,7 +248,7 @@ def _dropped_environment_requirements(
 ) -> None:
     """Do not silently label a lossy Harbor projection as compatible."""
     environment = _section(normalized, "environment")
-    recognized = {"architecture", "allow_internet", "env", "services"}
+    recognized = {"architecture", "allow_internet", "env", "services", "memory", "storage"}
     if "mutable_paths" not in EnvironmentConfig.model_fields:
         recognized.add("mutable_paths")  # already reported as a runtime gap
     for key in _section(raw, "environment"):
