@@ -242,6 +242,20 @@ def test_build_commands_cover_each_component_and_set_limits_before_rootlesskit(i
     assert "--oci-worker-snapshotter=overlayfs" in environment["BUILDKITD_FLAGS"]
     assert "/var/run/loom-task-build" not in script
     assert not any(flag in script for flag in ("--secret", "--ssh", "push=true", "--allow"))
+    assert '"loom_task_image_stage":"solve"' in script
+    assert '"loom_task_image_stage":"oci_export"' in script
+    assert '"loom_task_image_stage":"cleanup"' in script
+    assert '"included_in":"solve"' in script
+
+
+def test_build_script_stage_markers_include_duration_shell(inputs) -> None:
+    _, job = render_task_image_job(**inputs)
+    script = job["spec"]["template"]["spec"]["initContainers"][1]["command"][-1]
+    assert "solve_started=$(date +%s)" in script
+    assert "duration_ms" in script
+    assert script.index('"loom_task_image_stage":"solve"') < script.index(
+        "buildctl-daemonless.sh"
+    )
 
 
 def test_buildkit_snapshotter_native_rollback(inputs) -> None:

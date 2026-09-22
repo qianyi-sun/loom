@@ -15,9 +15,11 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import time
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import boto3
 from botocore.config import Config
@@ -47,10 +49,33 @@ _CACHE_BYTES = 1024 * 1024 * 1024
 _CACHE_TOTAL_BYTES = 4 * _CACHE_BYTES
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _KEY = re.compile(r"[0-9a-f]{64}\Z")
+# Stable Job-log markers for stage timing (Phase 2). Logs only — no DB schema.
+_STAGE_KEY = "loom_task_image_stage"
 
 
 class BuildPreparationError(ValueError):
     pass
+
+
+def emit_stage(stage: str, event: str, **fields: Any) -> None:
+    """Emit one JSON line operators can grep from prepare/build/publish logs."""
+    payload = {_STAGE_KEY: stage, "event": event, **fields}
+    print(json.dumps(payload, separators=(",", ":"), sort_keys=True), flush=True)
+
+
+@contextmanager
+def stage_span(stage: str, **fields: Any) -> Iterator[None]:
+    started = time.perf_counter()
+    emit_stage(stage, "start", **fields)
+    try:
+        yield
+    finally:
+        emit_stage(
+            stage,
+            "end",
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            **fields,
+        )
 
 
 def load_claim(path: Path) -> dict[str, Any]:
@@ -228,46 +253,74 @@ def _cache_prefix(claim: dict[str, Any]) -> str:
 
 
 def prepare(claim: dict[str, Any], work: Path, secrets: Path) -> None:
-    source = _client(claim, secrets / "source")
-    try:
-        download_bundle(claim, source, work / "context")
-    finally:
-        source.close()
-    (work / "oci").mkdir(exist_ok=True)
-    if not (secrets / "cache").is_dir():
-        return
-    cache = _client(claim, secrets / "cache")
-    try:
-        for index, _ in enumerate(derive_task_image_build_components(claim["task_config"])):
-            with tempfile.TemporaryDirectory() as temporary:
-                archive = Path(temporary) / "cache.tar"
-                try:
-                    _download(
-                        cache,
-                        bucket=claim["cache_bucket"],
-                        key=_cache_prefix(claim) + f"{index}.tar",
-                        destination=archive,
-                        limit=_CACHE_BYTES,
-                    )
-                except ClientError as error:
-                    if error.response.get("Error", {}).get("Code") in {"NoSuchKey", "404"}:
-                        continue
-                    raise
-                cache_directory = work / "cache-in" / str(index)
-                try:
-                    unpack_cache(archive, cache_directory)
-                except (BuildPreparationError, tarfile.TarError):
-                    # Disposable cache must not permanently poison this source
-                    # revision. No links are extracted by unpack_cache.
-                    shutil.rmtree(cache_directory, ignore_errors=False)
-                    print(
-                        json.dumps(
-                            {"cache": "miss", "reason": "invalid_archive", "component_index": index}
-                        ),
-                        flush=True,
-                    )
-    finally:
-        cache.close()
+    with stage_span("prepare"):
+        source = _client(claim, secrets / "source")
+        try:
+            download_bundle(claim, source, work / "context")
+        finally:
+            source.close()
+        (work / "oci").mkdir(exist_ok=True)
+        if not (secrets / "cache").is_dir():
+            return
+        cache = _client(claim, secrets / "cache")
+        try:
+            for index, _ in enumerate(derive_task_image_build_components(claim["task_config"])):
+                with stage_span("cache_import", component_index=index):
+                    with tempfile.TemporaryDirectory() as temporary:
+                        archive = Path(temporary) / "cache.tar"
+                        try:
+                            _download(
+                                cache,
+                                bucket=claim["cache_bucket"],
+                                key=_cache_prefix(claim) + f"{index}.tar",
+                                destination=archive,
+                                limit=_CACHE_BYTES,
+                            )
+                        except ClientError as error:
+                            if error.response.get("Error", {}).get("Code") in {
+                                "NoSuchKey",
+                                "404",
+                            }:
+                                emit_stage(
+                                    "cache_import",
+                                    "miss",
+                                    component_index=index,
+                                    reason="absent",
+                                )
+                                continue
+                            raise
+                        cache_directory = work / "cache-in" / str(index)
+                        try:
+                            unpack_cache(archive, cache_directory)
+                        except (BuildPreparationError, tarfile.TarError):
+                            # Disposable cache must not permanently poison this
+                            # source revision. No links are extracted by unpack_cache.
+                            shutil.rmtree(cache_directory, ignore_errors=False)
+                            emit_stage(
+                                "cache_import",
+                                "miss",
+                                component_index=index,
+                                reason="invalid_archive",
+                            )
+                            # Keep legacy field for existing log greps.
+                            print(
+                                json.dumps(
+                                    {
+                                        "cache": "miss",
+                                        "reason": "invalid_archive",
+                                        "component_index": index,
+                                    }
+                                ),
+                                flush=True,
+                            )
+                        else:
+                            emit_stage(
+                                "cache_import",
+                                "hit",
+                                component_index=index,
+                            )
+        finally:
+            cache.close()
 
 
 def pack_cache(directory: Path, archive: Path) -> None:
@@ -346,49 +399,51 @@ def publish(
             tag = f"{claim['registry_repository']}:{claim['materialization_key']}-{claim['lease_epoch']}-{index}"
             with tempfile.TemporaryDirectory() as temporary:
                 digest_file = Path(temporary) / "digest"
-                subprocess.run(
-                    [
-                        "skopeo",
-                        "--tmpdir",
-                        temporary,
-                        "copy",
-                        "--authfile",
-                        str(registry_auth),
-                        "--preserve-digests",
-                        "--digestfile",
-                        str(digest_file),
-                        f"oci-archive:{archive}",
-                        f"docker://{tag}",
-                    ],
-                    check=True,
-                    timeout=300,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                digest = digest_file.read_text().strip()
-                if not _DIGEST.fullmatch(digest):
-                    raise BuildPreparationError("registry did not return an OCI digest")
-                images[component.name] = f"{claim['registry_repository']}@{digest}"
-                receipt_path.write_text(
-                    json.dumps(
-                        {
-                            "materialization_id": claim["id"],
-                            "lease_epoch": claim["lease_epoch"],
-                            "registry_images": images,
-                        }
+                with stage_span("publish", component_index=index):
+                    subprocess.run(
+                        [
+                            "skopeo",
+                            "--tmpdir",
+                            temporary,
+                            "copy",
+                            "--authfile",
+                            str(registry_auth),
+                            "--preserve-digests",
+                            "--digestfile",
+                            str(digest_file),
+                            f"oci-archive:{archive}",
+                            f"docker://{tag}",
+                        ],
+                        check=True,
+                        timeout=300,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
                     )
-                )
+                    digest = digest_file.read_text().strip()
+                    if not _DIGEST.fullmatch(digest):
+                        raise BuildPreparationError("registry did not return an OCI digest")
+                    images[component.name] = f"{claim['registry_repository']}@{digest}"
+                    receipt_path.write_text(
+                        json.dumps(
+                            {
+                                "materialization_id": claim["id"],
+                                "lease_epoch": claim["lease_epoch"],
+                                "registry_images": images,
+                            }
+                        )
+                    )
                 cache_dir = work / "cache-out" / str(index)
                 if cache is not None and (cache_dir.exists() or cache_dir.is_symlink()):
-                    cache_dir = _output_path(work, f"cache-out/{index}", directory=True)
-                    cache_archive = Path(temporary) / "cache.tar"
-                    pack_cache(cache_dir, cache_archive)
-                    trim_cache(cache, claim["cache_bucket"], cache_archive.stat().st_size)
-                    cache.upload_file(
-                        str(cache_archive),
-                        claim["cache_bucket"],
-                        _cache_prefix(claim) + f"{index}.tar",
-                    )
+                    with stage_span("cache_export", component_index=index):
+                        cache_dir = _output_path(work, f"cache-out/{index}", directory=True)
+                        cache_archive = Path(temporary) / "cache.tar"
+                        pack_cache(cache_dir, cache_archive)
+                        trim_cache(cache, claim["cache_bucket"], cache_archive.stat().st_size)
+                        cache.upload_file(
+                            str(cache_archive),
+                            claim["cache_bucket"],
+                            _cache_prefix(claim) + f"{index}.tar",
+                        )
     finally:
         if cache is not None:
             cache.close()

@@ -896,6 +896,13 @@ historical forced-native setting). Set `"snapshotter": "native"` to roll back
 without redeploying a prior actuator image. Omission uses the same OverlayFS
 default.
 
+Prepare, BuildKit, and publish containers emit one JSON object per line with
+`loom_task_image_stage` set to `prepare`, `cache_import`, `solve`, `oci_export`,
+`cleanup`, `publish`, or `cache_export`, plus `event` (`start` / `end` / `hit` /
+`miss`) and `duration_ms` on timed `end` events. `solve` includes writing the
+OCI archive (`--output type=oci`); `oci_export` only records the resulting byte
+size. Grep Job logs for `loom_task_image_stage` when comparing cold builds.
+
 `cache_bucket` is optional. When absent, cache credentials and import/export are
 omitted. Source, backup and trajectory buckets cannot be used as build cache.
 `max_concurrent` accepts 1–16, defaults to 1, bounds unfinished builds including

@@ -143,11 +143,31 @@ def _build_script(
             lines.append(
                 f"if [ -f {shlex.quote(cache_in + '/index.json')} ]; then set -- --import-cache {shlex.quote('type=local,src=' + cache_in)}; fi"
             )
+        # Stage timing (Phase 2): solve covers buildctl LLB solve + OCI archive
+        # write (--output type=oci). oci_export records resulting bytes only;
+        # separate wall time needs an export-path change (Phase 5).
         lines.extend(
             [
-                f'echo "[loom-build] component={index} build started (budget={build_timeout_seconds}s)"',
+                (
+                    'echo \'{"loom_task_image_stage":"solve","event":"start",'
+                    f'"component_index":{index},"budget_seconds":{build_timeout_seconds}}}\''
+                ),
+                "solve_started=$(date +%s)",
                 f'if {shlex.join(argv)} "$@"; then',
-                f'  echo "[loom-build] component={index} build complete; scratch cleanup started"',
+                "  solve_ended=$(date +%s)",
+                (
+                    '  echo \'{"loom_task_image_stage":"solve","event":"end",'
+                    f'"component_index":{index},"duration_ms":\'"$(( (solve_ended - solve_started) * 1000 ))"\'}}\''
+                ),
+                (
+                    '  echo \'{"loom_task_image_stage":"oci_export","event":"end",'
+                    f'"component_index":{index},"included_in":"solve","bytes":\'"$(wc -c < {shlex.quote(output)})"\'}}\''
+                ),
+                (
+                    '  echo \'{"loom_task_image_stage":"cleanup","event":"start",'
+                    f'"component_index":{index}}}\''
+                ),
+                "  cleanup_started=$(date +%s)",
                 # The daemonless process has exited. Use the same user mapping to
                 # remove snapshots containing private directories owned by subuids;
                 # outer UID1000 alone cannot necessarily traverse them. The cleanup
@@ -156,10 +176,19 @@ def _build_script(
                 f"  TMPDIR=/scratch/cleanup rootlesskit rm -rf -- {_SCRATCH_DIRECTORIES}",
                 "  rm -rf -- /scratch/cleanup",
                 f"  mkdir -p {_SCRATCH_DIRECTORIES}",
-                f'  echo "[loom-build] component={index} scratch cleanup complete"',
+                "  cleanup_ended=$(date +%s)",
+                (
+                    '  echo \'{"loom_task_image_stage":"cleanup","event":"end",'
+                    f'"component_index":{index},"duration_ms":\'"$(( (cleanup_ended - cleanup_started) * 1000 ))"\'}}\''
+                ),
                 "else",
                 "  result=$?",
-                f'  echo "[loom-build] component={index} build failed (exit=$result)"',
+                "  solve_ended=$(date +%s)",
+                (
+                    '  echo \'{"loom_task_image_stage":"solve","event":"end",'
+                    f'"component_index":{index},"failed":true,"exit":\'"$result"'
+                    ',"duration_ms":\'"$(( (solve_ended - solve_started) * 1000 ))"\'}}\''
+                ),
                 "  case $result in 124) exit 124 ;; *) exit 1 ;; esac",
                 "fi",
             ]
