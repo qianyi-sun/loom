@@ -45,6 +45,7 @@ from loom_service.config import LoomServiceSettings
 from loom_service.environment_management.child import load_child_registration
 from loom_service.environment_management.installation import ManagementInstallation
 from loom_service.environment_management.registry import ManagementError
+from loom_service.environment_management.runtime import EnvironmentRuntime
 from loom_service.metrics import (
     HTTP_REQUEST_LATENCY_SEC,
     HTTP_REQUESTS_TOTAL,
@@ -170,15 +171,24 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         app.state.admin_secret_verifier = _load_admin_secret_verifier(settings)
         app.state.settings = settings
         app.state.session_factory = session_factory
-        if settings.environment_management_config_file is not None:
-            installation = ManagementInstallation.load(settings.environment_management_config_file)
-            client = httpx.AsyncClient(trust_env=False, timeout=30, follow_redirects=False)
-            app.state._owned_management_http_client = client
-            assert settings.environment_management_github_token is not None
-            app.state.environment_manager = await installation.manager(
-                session_factory, http=client, token=settings.environment_management_github_token.get_secret_value(),
-            )
-        yield
+        async with contextlib.AsyncExitStack() as resources:
+            if settings.environment_management_config_file is not None:
+                installation = ManagementInstallation.load(settings.environment_management_config_file)
+                client = httpx.AsyncClient(trust_env=False, timeout=30, follow_redirects=False)
+                app.state._owned_management_http_client = client
+                assert settings.environment_management_github_token is not None
+                app.state.environment_manager = await installation.manager(
+                    session_factory, http=client, token=settings.environment_management_github_token.get_secret_value(),
+                )
+                if installation.provider_runtime is not None:
+                    app.state.environment_runtime = await resources.enter_async_context(EnvironmentRuntime.open(
+                        installation.provider_runtime, app.state.environment_manager.registry, child_http=client,
+                    ))
+            try:
+                yield
+            finally:
+                if hasattr(app.state, "environment_runtime"):
+                    del app.state.environment_runtime
 
     @asynccontextmanager
     async def _service_lifespan(app: FastAPI) -> AsyncIterator[None]:

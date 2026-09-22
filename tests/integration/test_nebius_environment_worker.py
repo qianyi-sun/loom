@@ -33,6 +33,71 @@ class ExternalProvider:
         return identity
 
 
+async def test_worker_loop_recovers_database_outage_and_resumes_durable_work(environment_registry):
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from loom_service.environment_management.worker import EnvironmentWorker
+
+    registry, factory, (alice, _), prepare = environment_registry
+    operation = await registry.create(principal=alice, idempotency_key="outage", prepared=prepare())
+    engine = factory.kw["bind"]
+    url = engine.url
+    assert url.database.startswith("loom_migration_")
+    admin = create_async_engine(url.set(database="postgres"), isolation_level="AUTOCOMMIT")
+    database = admin.dialect.identifier_preparer.quote(url.database)
+    worker = EnvironmentWorker(registry, ExternalProvider())
+    task = None
+    try:
+        async with admin.connect() as connection:
+            await connection.execute(text(f"ALTER DATABASE {database} ALLOW_CONNECTIONS false"))
+        await engine.dispose()
+        task = asyncio.create_task(worker.run(poll_seconds=1))
+        await asyncio.sleep(0.2)
+        assert not task.done(), "database outage permanently killed the operation worker"
+        assert worker.healthy is False
+        async with admin.connect() as connection:
+            await connection.execute(text(f"ALTER DATABASE {database} ALLOW_CONNECTIONS true"))
+        async with asyncio.timeout(10):
+            while (await registry.get_operation(operation.operation_id, principal=alice)).phase != "completed":
+                await asyncio.sleep(0.1)
+        assert worker.healthy is True
+    finally:
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        async with admin.connect() as connection:
+            await connection.execute(text(f"ALTER DATABASE {database} ALLOW_CONNECTIONS true"))
+        await admin.dispose()
+
+
+async def test_slow_owner_does_not_block_other_available_worker_slots(environment_registry):
+    from loom_service.environment_management.worker import EnvironmentWorker
+
+    registry, _, (alice, bob), prepare = environment_registry
+    first = await registry.create(principal=alice, idempotency_key="slow", prepared=prepare())
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class OneSlowOwner(ExternalProvider):
+        async def apply(self, context, step):
+            if context.lease.environment_id == first.environment_id:
+                entered.set()
+                await release.wait()
+            return await super().apply(context, step)
+
+    task = asyncio.create_task(EnvironmentWorker(registry, OneSlowOwner()).run(concurrency=2, poll_seconds=1))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        second = await registry.create(principal=bob, idempotency_key="fast", prepared=prepare("bob", bob))
+        async with asyncio.timeout(5):
+            while (await registry.get_operation(second.operation_id, principal=bob)).phase != "completed":
+                await asyncio.sleep(0.1)
+        assert (await registry.get_operation(first.operation_id, principal=alice)).phase == "running"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_worker_recovers_lost_reply_and_finishes_existing_intents(environment_registry):
     from loom_service.environment_management.worker import EnvironmentWorker
 

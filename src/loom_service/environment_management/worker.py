@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from uuid import UUID
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from loom_service.environment_management.provider import (
     EnvironmentProvider,
@@ -16,6 +19,8 @@ from loom_service.environment_management.registry import (
     ManagementError,
     OperationLease,
 )
+
+_LOG = logging.getLogger(__name__)
 
 
 class EnvironmentWorker:
@@ -35,6 +40,7 @@ class EnvironmentWorker:
         self.max_attempts = max_attempts
         self.readiness_poll_seconds = readiness_poll_seconds
         self.readiness_timeout = readiness_timeout
+        self.healthy = False
 
     async def _heartbeat(self, lease: OperationLease) -> None:
         while True:
@@ -77,6 +83,10 @@ class EnvironmentWorker:
             await self._failure(lease, code, retry=lease.runner_epoch < self.max_attempts)
         except ProviderBlockedError as exc:
             await self._failure(lease, exc.code, retry=False)
+        except (SQLAlchemyError, OSError):
+            # Lost DB access is not a permanent failure of this immutable intent.
+            # Cancel provider work and let the loop recover the same leased row.
+            raise
         except Exception:
             await self._failure(lease, "provider_internal_error", retry=False)
         finally:
@@ -93,9 +103,35 @@ class EnvironmentWorker:
     async def run(self, *, concurrency: int = 4, poll_seconds: float = 5) -> None:
         if not 1 <= concurrency <= 16 or not 1 <= poll_seconds <= 60:
             raise ValueError("invalid environment worker loop limits")
-        while True:
-            operations = await self.registry.runnable_operations(limit=concurrency)
-            async with asyncio.TaskGroup() as group:
-                for identity in operations:
-                    group.create_task(self.reconcile_once(identity))
-            await asyncio.sleep(poll_seconds)
+        active: dict[UUID, asyncio.Task[None]] = {}
+
+        async def cancel_active() -> None:
+            for task in active.values():
+                task.cancel()
+            await asyncio.gather(*active.values(), return_exceptions=True)
+            active.clear()
+
+        try:
+            while True:
+                try:
+                    for identity, task in list(active.items()):
+                        if task.done():
+                            del active[identity]
+                            task.result()
+                    # Poll even at full concurrency: readiness must not claim a
+                    # working reconciler while its management DB is unavailable.
+                    operations = await self.registry.runnable_operations(limit=concurrency)
+                    for identity in operations:
+                        if identity not in active and len(active) < concurrency:
+                            active[identity] = asyncio.create_task(self.reconcile_once(identity))
+                    self.healthy = True
+                except Exception:
+                    # Do not log driver/SDK exceptions: they can include private
+                    # connection arguments. Durable leases preserve uncertain work.
+                    self.healthy = False
+                    _LOG.warning("environment_worker_recovering")
+                    await cancel_active()
+                await asyncio.sleep(poll_seconds)
+        finally:
+            self.healthy = False
+            await cancel_active()
