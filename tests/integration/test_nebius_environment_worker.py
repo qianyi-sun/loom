@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+from datetime import UTC, datetime
 
 import pytest
 
@@ -290,7 +292,7 @@ async def test_management_login_issues_only_target_child_proof_with_real_auth(
 
     import httpx
 
-    from loom.db.schema import TeamMembership, User
+    from loom.db.schema import TeamMembership, Token, User
     from loom_service.app import create_app
     from loom_service.config import LoomServiceSettings
     from loom_service.environment_management.child_client import ChildEnvironmentClient
@@ -356,3 +358,27 @@ async def test_management_login_issues_only_target_child_proof_with_real_auth(
                     assert "child-only-admin" not in response.text
             client.headers.pop("X-Loom-CSRF")
             assert (await client.post(f"/api/v1/environments/{operation.environment_id}/login")).status_code == 403
+
+            # User attribution on a team token is not permission to exchange
+            # deliberately attenuated credentials for a full child owner.
+            client.cookies.clear()
+            for scopes, expected in ((["read:own"], 403), (["read:own", "submit"], 403),
+                                     (["read:own", "submit", "tokens:manage", "providers:manage", "team:manage"], 200)):
+                token = "management-test-" + str(len(scopes))
+                async with factory.begin() as session:
+                    session.add(Token(token_hash=hashlib.sha256(token.encode()).digest(), type="team",
+                                      scopes=scopes, team_id=alice.team_id, created_by_user_id=alice.user_id,
+                                      issued_at=datetime.now(UTC)))
+                client.headers["Authorization"] = "Bearer " + token
+                assert (await client.get(f"/api/v1/environments/{operation.environment_id}")).status_code == 200
+                response = await client.post(f"/api/v1/environments/{operation.environment_id}/login")
+                assert response.status_code == expected, response.text
+            client.headers.pop("Authorization")
+            async with factory.begin() as session:
+                membership = await session.get(TeamMembership, (alice.user_id, alice.team_id))
+                membership.role = "viewer"
+            login = await client.post("/api/v1/auth/login", json={"username": "alice", "password": "owner-passphrase"})
+            assert login.status_code == 200
+            client.headers["X-Loom-CSRF"] = login.json()["csrf_token"]
+            response = await client.post(f"/api/v1/environments/{operation.environment_id}/login")
+            assert response.status_code == 403, response.text
