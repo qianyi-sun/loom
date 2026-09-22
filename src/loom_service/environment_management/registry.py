@@ -12,7 +12,7 @@ import json
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
@@ -36,6 +36,9 @@ from loom.nebius_environment_contract import (
 )
 from loom.nebius_environment_render import RenderedEnvironment
 from loom_service.environment_management.steps import ProvisioningStep, StepKind, creation_steps
+
+if TYPE_CHECKING:
+    from loom_service.environment_management.provider import ProvisioningContext
 
 
 class ManagementError(ValueError):
@@ -260,7 +263,7 @@ class EnvironmentRegistry:
         duration = self._lease_duration(lease_seconds)
         async with self.session_factory.begin() as session:
             operation, environment, now = await self._locked_operation(session, operation_id)
-            if operation.phase == "completed":
+            if operation.phase in {"completed", "blocked"}:
                 return None
             if environment.deployment_generation != operation.deployment_generation:
                 raise ManagementError("stale_operation_generation")
@@ -280,6 +283,77 @@ class EnvironmentRegistry:
         async with self.session_factory.begin() as session:
             operation, now = await self._leased_operation(session, lease)
             operation.lease_expires_at = now + duration
+
+    async def runnable_operations(self, *, limit: int = 4) -> list[UUID]:
+        if not 1 <= limit <= 16:
+            raise ValueError("invalid operation batch limit")
+        async with self.session_factory() as session:
+            return list((await session.scalars(select(NebiusEnvironmentOperation.operation_id).where(
+                NebiusEnvironmentOperation.phase.in_(("pending", "running")),
+                (NebiusEnvironmentOperation.lease_expires_at.is_(None)
+                 | (NebiusEnvironmentOperation.lease_expires_at <= func.clock_timestamp())),
+            ).order_by(NebiusEnvironmentOperation.created_at, NebiusEnvironmentOperation.operation_id).limit(limit))).all())
+
+    async def provisioning_context(self, lease: OperationLease) -> ProvisioningContext:
+        from loom_service.environment_management.provider import ProvisioningContext
+
+        async with self.session_factory.begin() as session:
+            operation, _ = await self._leased_operation(session, lease)
+            rows = (await session.scalars(select(NebiusEnvironmentResource).where(
+                NebiusEnvironmentResource.operation_id == lease.operation_id,
+                NebiusEnvironmentResource.provider_identity.is_not(None),
+            ))).all()
+            return ProvisioningContext(lease, operation.plan_json["registration"], operation.plan_json["config"], {
+                row.resource_key: row.provider_identity for row in rows if row.provider_identity is not None
+            })
+
+    async def finish_attempt(self, lease: OperationLease, *, error_code: str, retry: bool) -> None:
+        if re.fullmatch(r"[a-z][a-z0-9_]{0,95}", error_code) is None:
+            raise ValueError("invalid operation error code")
+        async with self.session_factory.begin() as session:
+            operation, _ = await self._leased_operation(session, lease)
+            operation.phase = "pending" if retry else "blocked"
+            operation.error_code = error_code
+            operation.lease_token = None
+            operation.lease_expires_at = None
+
+    async def store_material(self, lease: OperationLease, key: str, value: dict[str, Any]) -> str:
+        """Persist ciphertext and its intent confirmation in ONE transaction."""
+        from loom.security.secret_store import LocalEncryptedSecretStore
+
+        async with self.session_factory.begin() as session:
+            await self._leased_operation(session, lease)
+            row = await session.get(NebiusEnvironmentResource, (lease.operation_id, key))
+            if row is None or row.kind != "credentials" or row.payload_json.get("action") != "material":
+                raise ManagementError("credential_material_intent_missing")
+            if row.provider_identity is not None:
+                return row.provider_identity
+            earlier = await session.scalar(select(func.count()).select_from(NebiusEnvironmentResource).where(
+                NebiusEnvironmentResource.operation_id == lease.operation_id,
+                NebiusEnvironmentResource.phase == "planned", NebiusEnvironmentResource.sequence < row.sequence,
+            ))
+            if earlier:
+                raise ManagementError("resource_step_out_of_order")
+            ref = await LocalEncryptedSecretStore(session).put(
+                namespace="nebius-environment:" + str(lease.environment_id), value=json.dumps(value, sort_keys=True),
+            )
+            row.provider_identity, row.phase = ref, "applied"
+            return ref
+
+    async def load_material(self, lease: OperationLease, key: str) -> dict[str, Any]:
+        from loom.security.secret_store import LocalEncryptedSecretStore, parse_ref
+
+        async with self.session_factory.begin() as session:
+            await self._leased_operation(session, lease)
+            row = await session.get(NebiusEnvironmentResource, (lease.operation_id, key))
+            if (row is None or row.kind != "credentials" or row.payload_json.get("action") != "material"
+                    or row.provider_identity is None
+                    or parse_ref(row.provider_identity).namespace != "nebius-environment:" + str(lease.environment_id)):
+                raise ManagementError("credential_material_intent_missing")
+            value: dict[str, Any] = json.loads(await LocalEncryptedSecretStore(session).get(row.provider_identity))
+            if not isinstance(value, dict):
+                raise ManagementError("credential_material_invalid")
+            return value
 
     async def next_step(self, lease: OperationLease) -> ProvisioningStep | None:
         async with self.session_factory.begin() as session:

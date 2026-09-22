@@ -33,13 +33,24 @@ def creation_steps(prepared: RenderedEnvironment) -> list[ProvisioningStep]:
                 }))
 
     documents("00-namespaces.yaml")
+    for purpose in ("canonical", "source", "backup"):
+        for action in ("service_account", "group", "membership", "access_key"):
+            steps.append(ProvisioningStep(f"iam:{purpose}:{action}", "credentials", {
+                "action": action, "purpose": purpose,
+            }))
     for purpose, bucket in sorted(prepared.config["buckets"].items()):
         steps.append(ProvisioningStep("bucket:" + purpose, "object_bucket", {
             "name": bucket, "purpose": purpose,
         }))
-    steps.append(ProvisioningStep("credentials", "credentials", {
-        "namespace": namespace, "buckets": prepared.config["buckets"],
+    steps.append(ProvisioningStep("credentials:material", "credentials", {
+        "action": "material", "namespace": namespace,
     }))
+    for name in ("loom-platform-db", prepared.config["db_tls_secret_name"], "loom-platform-auth",
+                 "loom-admin-secret", "loom-platform-collector", "loom-platform-batch-runner",
+                 "loom-platform-storage"):
+        steps.append(ProvisioningStep("secret:" + name, "credentials", {
+            "action": "kubernetes_secret", "namespace": namespace, "name": name,
+        }))
     documents("10-config-network.yaml")
     documents("20-database.yaml")
     steps.append(ProvisioningStep("ready:database", "database_ready", {

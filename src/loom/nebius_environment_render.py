@@ -201,6 +201,9 @@ def render_environment(
                 pod["containers"] = pod["containers"][:1]
                 pod.pop("volumes", None)
             for container in pod.get("initContainers", []) + pod["containers"]:
+                container["env"] = [env for env in container.get("env", []) if env["name"] not in {
+                    "LOOM_GW_LOCAL_YIBU_API_KEY", "LOOM_GW_LOCAL_YIBU_BASE_URL",
+                }]
                 for env in container.get("env", []):
                     if env["name"] == "LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED":
                         env["value"] = "false"
