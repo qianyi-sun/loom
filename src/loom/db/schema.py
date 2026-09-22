@@ -38,6 +38,10 @@ from sqlalchemy.dialects.postgresql import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from loom.db.base import Base
+from loom.db.nebius_environment_schema import NebiusEnvironment as NebiusEnvironment
+from loom.db.nebius_environment_schema import (
+    NebiusEnvironmentNamespace as NebiusEnvironmentNamespace,
+)
 
 
 def _personal_storage_binding_check(environment_name: str) -> str:
