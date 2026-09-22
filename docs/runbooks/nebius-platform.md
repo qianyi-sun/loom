@@ -17,16 +17,25 @@ publish or deploy new candidates from it. Use the successful `nebius-candidate`
 run for the exact merged `dev` commit, with its matching candidate and runtime
 profile. Candidate publication does not itself deploy the environment.
 
-Registry uploads have a five-minute wall-clock limit per image. The publisher
-streams redacted `skopeo copy` output and reports elapsed time on success. On
-timeout it kills and reaps the upload process, fails publication, and preserves
-the last 16 KiB of redacted output, exit code, elapsed time and timeout budget in
-`failed-command.json` through the existing candidate artifact upload. A failed
-publication cannot start automatic rollout. Inspect that evidence before retrying;
-uploads are not automatically retried. The limit bounds the upload operation,
-not image construction or scanning, and does not change the workflow's overall
-timeout. A failed upload may leave registry blobs, but no deployable candidate
-record is produced until all images have been published and verified.
+Registry uploads default to a fifteen-minute total wall-clock budget per image.
+Set the positive integer GitHub Actions variable `NEBIUS_IMAGE_UPLOAD_TIMEOUT_SECONDS`
+to override it, or pass `build --upload-timeout-seconds SECONDS` to the publisher.
+This is an initial operational limit, not a measured upper bound for every image.
+The publisher streams redacted `skopeo copy` output and reports elapsed time and
+attempt count. Explicit connection reset/refused, network read
+or TLS/header timeout errors may retry **once**, after one second, within the
+same total budget. Authentication, permission, certificate and unknown errors
+fail immediately; total-budget exhaustion never restarts the upload. A quiet
+log alone is not treated as proof of stalled network transfer.
+
+On timeout the publisher kills and reaps the upload process. On final failure it
+preserves the last 16 KiB of redacted output, attempt count, exit code, elapsed
+time and timeout budget in `failed-command.json` through the existing candidate
+artifact upload. A failed publication cannot start automatic rollout. Inspect
+that evidence before a manual retry. The budget covers upload and its optional
+retry, not construction or scanning; the overall workflow timeout is unchanged.
+A failed upload may leave registry blobs, but no deployable candidate record is
+produced until all images have been published and verified.
 
 Published platform and task images have a separate
 [image-retention maintenance workflow](nebius-image-retention.md). Its initial
