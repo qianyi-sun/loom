@@ -21,6 +21,9 @@ def test_repository_checks_ruff_scope_matches_repo_wide_local_lint() -> None:
         "database/capacity_guard_migrations database/capacity_migrations"
     )
 
+    for doc in ("CONTRIBUTING.md", "docs/contributing/contributor-quickstart.md"):
+        assert ruff_step["run"] in _normalize_command((REPO_ROOT / doc).read_text())
+
 
 def test_local_python_version_is_pinned_to_ci_interpreter() -> None:
     assert (REPO_ROOT / ".python-version").read_text(encoding="utf-8").strip() == "3.11"

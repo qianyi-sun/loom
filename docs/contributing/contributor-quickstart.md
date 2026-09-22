@@ -212,7 +212,7 @@ or critical violations. Its exact request/response fixtures are local-only and
 contain no deployment credentials.
 
 ```bash
-uv run --no-sync ruff check src tests packages migrations
+uv run --no-sync ruff check src tests packages migrations database/capacity_guard_migrations database/capacity_migrations
 uv run --no-sync mypy
 mapfile -t root_tests < <(uv run --no-sync python scripts/component_ownership.py test-paths --lane tests-root --test-scope nebius)
 uv run --no-sync pytest "${root_tests[@]}" -m "not legacy_pool" -p no:cov
@@ -254,7 +254,7 @@ pytest tests/system -v
 
 # Live Modal — requires provider credentials
 LOOM_RUN_MODAL_INTEGRATION=1 \
-  pytest tests/integration/test_modal_driver.py -v
+  uv run --no-sync pytest tests/integration/test_modal_driver_live.py -v
 ```
 
 On GitHub, selected non-Docker integration tests are split into four disjoint,
