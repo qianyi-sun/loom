@@ -87,6 +87,7 @@ def authed_client(
     Synchronous httpx (not AsyncClient) because the CLI is a one-shot
     script — async ergonomics aren't worth the complexity here.
     """
+    cfg.validate_binding()
     assert cfg.server_url is not None  # require_logged_in guarantees
     kwargs: dict[str, Any] = {
         "base_url": cfg.server_url,

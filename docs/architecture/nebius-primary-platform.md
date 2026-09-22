@@ -202,8 +202,14 @@ session. Proof expiry is checked after database locks; concurrent replay cannot
 create two sessions. Login requires a mutation-capable management user session;
 an attributed bearer must also carry every child-owner scope (`read:own`, `submit`,
 `tokens:manage`, `providers:manage`, `team:manage`). Read-only or attenuated bearer
-credentials cannot be exchanged for owner authority. The CLI/browser context-
-selection UX is not yet implemented.
+credentials cannot be exchanged for owner authority. `loom dev login ENVIRONMENT_ID`
+exchanges the proof using a fresh, redirect-disabled client and saves a separate,
+identity-bound child context without replacing the management identity. Select it
+with `loom --context NAME <command>`. Optional `--browser` opens a second one-use
+proof in a URL fragment, scrubbed before app startup; the page requires an explicit
+sign-in click and refuses redirects before sending credentials to another origin.
+See [explicit server contexts](cli-mode.md#explicit-server-contexts). These source
+interfaces do not establish installed DNS/TLS or multi-owner execution readiness.
 
 Retained destroy advances the desired generation immediately, fencing earlier
 workers and management login issuance. It revokes the ready child's owner/team
