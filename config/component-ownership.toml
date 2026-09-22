@@ -275,6 +275,7 @@ source_paths = [
   "src/loom/execution_architecture.py",
   "src/loom/execution_contract.py",
   "src/loom/execution_image_admission.py",
+  "src/loom/execution_requirements.py",
   "src/loom/execution_runtime_contract.py",
   "src/loom/family_run/__init__.py",
   "src/loom/family_run/spec.py",
@@ -287,12 +288,14 @@ source_paths = [
   "src/loom/models/task.py",
   "src/loom/models/trial.py",
   "src/loom/models/types.py",
+  "src/loom/mutable_paths.py",
   "src/loom/nebius_kubernetes.py",
   "src/loom/nebius_rollout_guard.py",
   "src/loom/pipeline/__init__.py",
   "src/loom/pipeline/keys.py",
   "src/loom/request_params.py",
   "src/loom/resource_usage_store.py",
+  "src/loom/sandbox_identity.py",
   "src/loom/security/**",
   "src/loom/service_execution_materialization.py",
   "src/loom/startup_retry.py",
@@ -855,6 +858,9 @@ exclude_paths = [
   "tests/integration/test_trial_inprocess_e2e.py",
   "tests/integration/test_verify_cmd_humaneval.py",
   "tests/integration/test_workspace_snapshot_docker.py",
+  "tests/integration/test_mutable_paths_docker.py",
+  "tests/integration/test_task_identity_installation_docker.py",
+  "tests/integration/test_task_service_lifecycle_docker.py",
   "tests/integrations/behavior/**/*.py",
 ]
 
@@ -905,6 +911,9 @@ include_paths = [
   "tests/integration/test_trial_inprocess_e2e.py",
   "tests/integration/test_verify_cmd_humaneval.py",
   "tests/integration/test_workspace_snapshot_docker.py",
+  "tests/integration/test_mutable_paths_docker.py",
+  "tests/integration/test_task_identity_installation_docker.py",
+  "tests/integration/test_task_service_lifecycle_docker.py",
 ]
 
 [[test_suites]]
