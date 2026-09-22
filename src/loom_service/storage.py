@@ -19,11 +19,12 @@ def create_minio_client(
     previous behavior; ``irsa`` lights up automatically on EKS without
     further code changes.
     """
+    access_key, secret_key = settings.storage_credentials()
     return build_s3_client(
         endpoint_url=endpoint_url,
         auth_kind=settings.storage_auth_kind,
-        access_key=settings.minio_access_key.get_secret_value(),
-        secret_key=settings.minio_secret_key.get_secret_value(),
+        access_key=access_key,
+        secret_key=secret_key,
         region=settings.minio_region,
     )
 

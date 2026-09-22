@@ -59,6 +59,7 @@ from loom_service.routes import (
     health,
     invites,
     local_servers,
+    management_health,
     models,
     monitor,
     overview,
@@ -136,12 +137,37 @@ async def _assert_schema_startup(engine: AsyncEngine) -> int:
 
 
 def create_app(settings: LoomServiceSettings) -> FastAPI:
-    workload_contract = _validated_v1_workload_contract(settings)
+    management = settings.service_mode == "management"
+    workload_contract = None if management else _validated_v1_workload_contract(settings)
     # Fail deployment health immediately rather than discovering a malformed
     # automatic-execution profile on the first user Batch.
-    load_service_execution_runtime_profile(settings.service_execution_runtime_profile_json)
+    if not management:
+        load_service_execution_runtime_profile(settings.service_execution_runtime_profile_json)
+
+    @asynccontextmanager
+    async def _management_lifespan(app: FastAPI) -> AsyncIterator[None]:
+        engine = create_async_engine(
+            settings.db_engine_url, connect_args=settings.db_engine_connect_args,
+        )
+        app.state._owned_service_engine = engine
+        await _assert_schema_startup(engine)
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async def validate_secrets() -> int:
+            async with session_factory() as session:
+                return await assert_existing_secrets_decryptable(session)
+
+        await retry_startup_dependency(
+            validate_secrets, operation_name="management secret-store startup validation",
+        )
+        app.state.admin_secret_verifier = _load_admin_secret_verifier(settings)
+        app.state.settings = settings
+        app.state.session_factory = session_factory
+        yield
+
     @asynccontextmanager
     async def _service_lifespan(app: FastAPI) -> AsyncIterator[None]:
+        assert workload_contract is not None
         # Validate deterministic URL shape before opening database, mTLS, or
         # HTTP resources so a startup rejection cannot leak any of them.
         gw_path = settings.gateway_url.path or "/"
@@ -280,11 +306,13 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         """Close every owned client even when startup rejects before yielding."""
 
         try:
-            async with _service_lifespan(app):
+            async with (_management_lifespan(app) if management else _service_lifespan(app)):
                 yield
         finally:
             # SQLAlchemy engines can reconnect after dispose. Remove admission
             # access before closing its resources, including failed startup.
+            if hasattr(app.state, "session_factory"):
+                del app.state.session_factory
             for attribute in (
                 "_owned_service_gateway_client",
                 "_owned_service_http_client",
@@ -343,37 +371,25 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             ),
         }
 
-    app.include_router(health.router, prefix="/api/v1")
+    app.include_router(management_health.router if management else health.router, prefix="/api/v1")
     app.include_router(auth.router, prefix="/api/v1")
     app.include_router(auth.admin_router, prefix="/api/v1")
     app.include_router(invites.router, prefix="/api/v1")
     app.include_router(tokens.router, prefix="/api/v1")
-    app.include_router(trials.router, prefix="/api/v1")
-    app.include_router(trajectory.router, prefix="/api/v1")
-    app.include_router(atif.router, prefix="/api/v1")
-    app.include_router(tasks.router, prefix="/api/v1")
-    app.include_router(benchmarks.router, prefix="/api/v1")
-    app.include_router(tasksets.router, prefix="/api/v1")
-    app.include_router(terminalgen_corpora.router, prefix="/api/v1")
-    app.include_router(batches.router, prefix="/api/v1")
-    app.include_router(delivery_exports.router, prefix="/api/v1")
-    app.include_router(run_library.router, prefix="/api/v1")
-    app.include_router(rate_cards.router, prefix="/api/v1")
     app.include_router(admin_audit.router, prefix="/api/v1")
     app.include_router(team_registrations.router, prefix="/api/v1")
     app.include_router(teams.router, prefix="/api/v1")
-    app.include_router(usage.router, prefix="/api/v1")
-    app.include_router(agents.router, prefix="/api/v1")
-    app.include_router(models.router, prefix="/api/v1")
-    app.include_router(monitor.router, prefix="/api/v1")
-    app.include_router(overview.router, prefix="/api/v1")
-    app.include_router(pipeline.router, prefix="/api/v1")
-    if local_execution_enabled():
-        app.include_router(pipeline.local_execution_router, prefix="/api/v1")
-    app.include_router(backends.router, prefix="/api/v1")
-    app.include_router(local_servers.router, prefix="/api/v1")
-    app.include_router(provider_connections.router, prefix="/api/v1")
-    app.include_router(secret_store_admin.router, prefix="/api/v1")
+    if not management:
+        for workload_router in (
+            trials.router, trajectory.router, atif.router, tasks.router, benchmarks.router,
+            tasksets.router, terminalgen_corpora.router, batches.router, delivery_exports.router,
+            run_library.router, rate_cards.router, usage.router, agents.router, models.router,
+            monitor.router, overview.router, pipeline.router, backends.router, local_servers.router,
+            provider_connections.router, secret_store_admin.router,
+        ):
+            app.include_router(workload_router, prefix="/api/v1")
+        if local_execution_enabled():
+            app.include_router(pipeline.local_execution_router, prefix="/api/v1")
 
     @app.middleware("http")
     async def _staging_admin_validation_session_middleware(  # type: ignore[no-untyped-def]

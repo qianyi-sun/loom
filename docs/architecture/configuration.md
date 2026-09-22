@@ -20,6 +20,13 @@ entries may use one shared key or per-service keys. Required values have no
 runtime default; optional entries use their declared default or `None` where
 the generated type permits it.
 
+`required_per_service` may override requiredness for a consuming service. The
+storage keys use this only for Loom Service: `LOOM_SVC_SERVICE_MODE=application`
+(the default) still requires both keys at settings validation, while `management`
+needs no workload-storage credentials. Other services retain required storage
+keys. Mode-specific validation belongs in the settings wrapper, not a generated
+file. An unknown service mode is rejected at startup.
+
 `render_config` supports scalar values plus the schema's list and table field
 forms. Descriptions are copied into generated configuration surfaces, so they
 must describe current behavior and safe operator use.

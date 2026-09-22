@@ -135,9 +135,9 @@
     "required": false
   },
   "minio_access_key": {
-    "annotation": "<class 'pydantic.types.SecretStr'>",
-    "default": "PydanticUndefined",
-    "required": true
+    "annotation": "pydantic.types.SecretStr | None",
+    "default": "None",
+    "required": false
   },
   "minio_endpoint": {
     "annotation": "<class 'str'>",
@@ -155,9 +155,9 @@
     "required": false
   },
   "minio_secret_key": {
-    "annotation": "<class 'pydantic.types.SecretStr'>",
-    "default": "PydanticUndefined",
-    "required": true
+    "annotation": "pydantic.types.SecretStr | None",
+    "default": "None",
+    "required": false
   },
   "public_base_url": {
     "annotation": "pydantic.networks.HttpUrl | None",
@@ -167,6 +167,11 @@
   "service_execution_runtime_profile_json": {
     "annotation": "<class 'str'>",
     "default": "'{}'",
+    "required": false
+  },
+  "service_mode": {
+    "annotation": "<class 'str'>",
+    "default": "'application'",
     "required": false
   },
   "signed_url_expiry_sec": {

@@ -34,6 +34,7 @@ class ServiceConfigEntry:
     used_by: tuple[str, ...]
     python_type: str
     required: bool = False
+    required_per_service: Mapping[str, bool] = field(default_factory=dict)
     default: Any = None
     default_per_service: Mapping[str, Any] | None = None
     secret: SecretRef | None = None
@@ -143,11 +144,19 @@ def _parse_service_entry(
             f"service_config.{name}: unknown python_type {py!r} "
             f"(allowed: {sorted(_PYTHON_TYPES)})"
         )
+    required_per_service = raw.get("required_per_service", {})
+    if (
+        not isinstance(required_per_service, dict)
+        or set(required_per_service) - set(used_by)
+        or any(type(value) is not bool for value in required_per_service.values())
+    ):
+        raise ValueError(f"service_config.{name}.required_per_service must map consuming services to bool")
     return ServiceConfigEntry(
         name=name,
         used_by=used_by,
         python_type=py,
         required=bool(raw.get("required", False)),
+        required_per_service=required_per_service,
         default=raw.get("default"),
         default_per_service=raw.get("default_per_service"),
         secret=_parse_secret(raw.get("secret"), f"service_config.{name}"),

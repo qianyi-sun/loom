@@ -52,7 +52,7 @@ _PKG_NAME = {
 
 def _format_default(entry: ServiceConfigEntry, service: str, py: str) -> str:
     """4-rule precedence per spec §Codegen rules."""
-    if entry.required:
+    if entry.required_per_service.get(service, entry.required):
         return "<required>"
     if entry.default_per_service is not None and service in entry.default_per_service:
         return _literal(entry.default_per_service[service], py)
