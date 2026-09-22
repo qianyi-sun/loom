@@ -28,7 +28,7 @@ def _alembic(database_url: str, command: str, revision: str) -> None:
             "-m",
             "alembic",
             "-c",
-            "migrations/alembic.ini",
+            "database/migrations/alembic.ini",
             command,
             revision,
         ],

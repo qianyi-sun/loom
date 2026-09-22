@@ -4,7 +4,7 @@
 Replaces the manual sequence:
 
     docker compose --env-file .env -f deploy/docker-compose.dev.yml up -d
-    alembic -c migrations/alembic.ini upgrade head
+    alembic -c database/migrations/alembic.ini upgrade head
     python scripts/seed_test_data.py --db-url 'postgresql+psycopg://loom:loom@localhost:5432/loom'
 
 with:
@@ -174,12 +174,12 @@ def _wait_for_postgres(compose_file: Path, env_file: Path | None) -> bool:
 
 def _alembic_upgrade(db_url: str) -> int:
     """Run alembic migrations against the dev postgres. Alembic reads
-    `LOOM_DB_URL` per `migrations/env.py` convention."""
+    `LOOM_DB_URL` per `database/migrations/env.py` convention."""
     env = os.environ.copy()
     env["LOOM_DB_URL"] = db_url
     return subprocess.run(
         [sys.executable, "-m", "alembic",
-         "-c", "migrations/alembic.ini", "upgrade", "head"],
+         "-c", "database/migrations/alembic.ini", "upgrade", "head"],
         env=env, check=False,
     ).returncode
 

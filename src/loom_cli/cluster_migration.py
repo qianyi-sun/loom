@@ -15,7 +15,7 @@ This renderer emits a Job with:
   Postgres NetworkPolicy grants ingress (see network-policies.yaml.j2).
 * The release image tag (`loom-control-plane:<tag>`) so alembic sees
   the same migrations directory the release rolls out.
-* `LOOM_DB_URL` (the env var `migrations/env.py` reads) sourced from
+* `LOOM_DB_URL` (the env var `database/migrations/env.py` reads) sourced from
   `secretKeyRef: {name: loom-secrets, key: cp-db-url}` — reuses the
   control-plane's credential because Alembic needs the same perms; the
   var name matches the tool, not the consumer (#364).

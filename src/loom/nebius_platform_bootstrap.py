@@ -183,7 +183,7 @@ def bootstrap_database(config: dict[str, Any]) -> None:
     )
     # Do not forward arbitrary Alembic/driver errors containing protected URLs.
     result = subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
+        [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "head"],
         env=migration_env,
         check=False,
         capture_output=True,

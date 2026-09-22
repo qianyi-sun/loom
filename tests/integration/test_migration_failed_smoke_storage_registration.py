@@ -238,7 +238,7 @@ OBJECTS = (
 
 
 def _config(postgres_url: str) -> Config:
-    config = Config("migrations/alembic.ini")
+    config = Config("database/migrations/alembic.ini")
     config.set_main_option("sqlalchemy.url", postgres_url)
     return config
 

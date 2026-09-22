@@ -24,7 +24,7 @@ from loom_cli.cluster_workload_trust import (
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_ALEMBIC_INI = _REPO_ROOT / "migrations" / "alembic.ini"
+_DEFAULT_ALEMBIC_INI = _REPO_ROOT / "database" / "migrations" / "alembic.ini"
 
 
 def _sha256_bytes(data: bytes) -> str:

@@ -27,7 +27,7 @@ def _result(rewards: Any, **changes: Any) -> dict[str, Any]:
 def test_0144_repairs_only_missing_valid_matching_scores(
     isolated_migration_postgres_url: str,
 ) -> None:
-    config = Config("migrations/alembic.ini")
+    config = Config("database/migrations/alembic.ini")
     config.set_main_option("sqlalchemy.url", isolated_migration_postgres_url)
     command.downgrade(config, "0143")
     cases = {

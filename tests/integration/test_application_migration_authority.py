@@ -45,8 +45,8 @@ def application_migration_roles(
         )
         connection.exec_driver_sql(f"CREATE DATABASE {quote(database)} OWNER {quote(owner)}")
     root = Path(__file__).resolve().parents[2]
-    cfg = Config(str(root / "migrations/alembic.ini"))
-    cfg.set_main_option("script_location", str(root / "migrations"))
+    cfg = Config(str(root / "database/migrations/alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "database" / "migrations"))
     cfg.set_main_option(
         "sqlalchemy.url",
         source.set(database=database, username=migrator, password=password)

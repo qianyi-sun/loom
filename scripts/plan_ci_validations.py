@@ -287,7 +287,7 @@ def plan_validations(
         "database/capacity_guard_migrations/",
         "src/",
         "packages/",
-        "migrations/",
+        "database/migrations/",
         "config/",
         "tests/integration/",
         "tests/contract/",
@@ -306,7 +306,7 @@ def plan_validations(
         "src/loom/task_image_",
         "src/loom/db/",
         "src/loom/security/",
-        "migrations/",
+        "database/migrations/",
         "packages/loom-launcher/",
         "tests/integration/",
     )
@@ -331,7 +331,7 @@ def plan_validations(
         "packages/",
         "web/src/",
         "cmd/",
-        "migrations/",
+        "database/migrations/",
     )
     cluster_exact = {
         ".github/workflows/cluster-smoke.yml",
@@ -381,7 +381,7 @@ def plan_validations(
         "src/loom_worker/",
         "src/loom_family_orchestrator/",
         "src/loom_cli/templates/k8s/",
-        "migrations/",
+        "database/migrations/",
         "packages/",
         "web/",
     )

@@ -279,7 +279,7 @@ def test_migration_template_runs_history_once_and_isolates_clones(
                 finally:
                     engine.dispose()
             expected_head = ScriptDirectory(
-                str(Path(__file__).resolve().parents[2] / "migrations")
+                str(Path(__file__).resolve().parents[2] / "database" / "migrations")
             ).get_current_head()
             assert versions == [expected_head, expected_head]
             assert upgrades == 1

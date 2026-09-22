@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
-from migrations.env import _assert_compatible_migration_lineage
+from database.migrations.env import _assert_compatible_migration_lineage
 from sqlalchemy import create_engine, text
 from testcontainers.postgres import PostgresContainer
 

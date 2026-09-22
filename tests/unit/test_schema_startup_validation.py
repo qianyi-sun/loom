@@ -66,7 +66,7 @@ async def test_assert_schema_at_head_rejects_stale_database(
     assert "current revision(s): 0035_provider_rate_cards" in message
     assert "head revision(s): 0036_provider_model_preflight" in message
     assert "LOOM_SVC_DB_URL" in message
-    assert "alembic -c migrations/alembic.ini upgrade head" in message
+    assert "alembic -c database/migrations/alembic.ini upgrade head" in message
 
 
 @pytest.mark.asyncio

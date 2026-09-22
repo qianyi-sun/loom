@@ -104,7 +104,7 @@ async def _observe_fresh_database(
             "-m",
             "alembic",
             "-c",
-            str(_ROOT / "migrations/alembic.ini"),
+            str(_ROOT / "database/migrations/alembic.ini"),
             "upgrade",
             application_head,
             cwd=_ROOT,

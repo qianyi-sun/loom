@@ -14,7 +14,7 @@ from loom.db.schema_startup import service_schema_head
 def test_0151_preserves_batches_and_rolling_upgrade_compatibility(
     isolated_migration_postgres_url: str,
 ) -> None:
-    cfg = Config("migrations/alembic.ini")
+    cfg = Config("database/migrations/alembic.ini")
     cfg.set_main_option("sqlalchemy.url", isolated_migration_postgres_url)
     command.downgrade(cfg, "0150")
     engine = create_engine(isolated_migration_postgres_url)

@@ -30,7 +30,7 @@ PIPELINE_ARTIFACT_COLUMNS = {
 
 
 def _alembic_cfg(postgres_url: str) -> Config:
-    cfg = Config("migrations/alembic.ini")
+    cfg = Config("database/migrations/alembic.ini")
     cfg.set_main_option("sqlalchemy.url", postgres_url)
     return cfg
 

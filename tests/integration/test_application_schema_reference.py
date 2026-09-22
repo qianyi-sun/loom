@@ -81,7 +81,7 @@ def test_bundled_reference_pins_image_and_existing_historical_revisions() -> Non
         "60f4761b9035e0b8d5218f701a8c3382f641bf12b1604822574cf5be3baeb537"
     )
     for directory, head in (
-        ("migrations", expected.application_head),
+        ("database/migrations", expected.application_head),
         ("database/capacity_guard_migrations", expected.guard_head),
     ):
         config = Config(str(root / directory / "alembic.ini"))

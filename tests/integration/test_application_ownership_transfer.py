@@ -72,8 +72,8 @@ async def transfer_database(
         ),
     )
     root = Path(__file__).resolve().parents[2]
-    config = Config(str(root / "migrations/alembic.ini"))
-    config.set_main_option("script_location", str(root / "migrations"))
+    config = Config(str(root / "database/migrations/alembic.ini"))
+    config.set_main_option("script_location", str(root / "database" / "migrations"))
     config.set_main_option(
         "sqlalchemy.url", instance_database_url(transfer_postgres_url, identity, password)
     )

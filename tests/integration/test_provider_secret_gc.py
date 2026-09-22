@@ -185,7 +185,7 @@ async def test_cancellation_rolls_back_open_pass(factory, monkeypatch):
 
 
 def test_migration_downgrade_upgrade_and_reference_inventory(isolated_migration_postgres_url):
-    cfg = Config("migrations/alembic.ini")
+    cfg = Config("database/migrations/alembic.ini")
     cfg.set_main_option("sqlalchemy.url", isolated_migration_postgres_url.replace("%", "%%"))
     engine = create_engine(isolated_migration_postgres_url)
     try:

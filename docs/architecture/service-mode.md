@@ -556,14 +556,14 @@ state before propagating:
 | `batches` | Service | Batch grouping + idempotency keys |
 | `cloud_compute_records` | Cloud drivers | Per-sandbox lifetime + cost; `cloud_provider` column |
 
-Migrations live in `migrations/versions/` and are applied with
-`alembic -c migrations/alembic.ini upgrade head`.
+Migrations live in `database/migrations/versions/` and are applied with
+`alembic -c database/migrations/alembic.ini upgrade head`.
 `loom service up` runs this automatically after Postgres is
 healthy. Direct service startup does
 not auto-migrate: `loom-service`, the Control Plane, and the LLM Gateway refuse
 to start when the database Alembic revision is behind repository code, so
 production deploys must run migrations before rolling DB-facing services. Their
-production images carry `migrations/alembic.ini` and `migrations/versions/` so
+production images carry `database/migrations/alembic.ini` and `database/migrations/versions/` so
 the startup gate compares the live DB against the same migration tree as the
 running image. Startup DB probes use bounded retry for transient DNS,
 connection, or Postgres-starting failures; worker startup retries initial

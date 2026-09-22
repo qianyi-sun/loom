@@ -461,7 +461,7 @@ async def test_fence_replacement_ttl_and_cancel_reconciliation_purge_bytes(
 
 def test_preview_backend_is_ephemeral_and_not_artifact_storage() -> None:
     migration = (
-        Path(__file__).parents[2] / "migrations/versions/0093_pipeline_live_preview.py"
+        Path(__file__).parents[2] / "database/migrations/versions/0093_pipeline_live_preview.py"
     ).read_text()
     lowered = migration.lower()
     assert "pipeline_live_preview_frames" in lowered

@@ -90,8 +90,8 @@ dc up -d --wait postgres
 
 dc run --rm --no-deps control-plane sh -ec '
   export LOOM_DB_URL="$LOOM_CP_DB_URL"
-  alembic -c migrations/alembic.ini upgrade head
-  alembic -c migrations/alembic.ini current
+  alembic -c database/migrations/alembic.ini upgrade head
+  alembic -c database/migrations/alembic.ini current
 '
 
 dc restart control-plane

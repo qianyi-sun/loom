@@ -16,7 +16,7 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from alembic.script import ScriptDirectory
-from migrations.env import _assert_direct_postgres_connection
+from database.migrations.env import _assert_direct_postgres_connection
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.exc import SQLAlchemyError

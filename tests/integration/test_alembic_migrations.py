@@ -35,17 +35,17 @@ def postgres_url():
         repo_root = Path(__file__).resolve().parents[2]
         # Use the venv's alembic via `python -m alembic` so PATH doesn't matter.
         subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "0120"],
+            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "0120"],
             cwd=repo_root,
             check=True,
         )
         subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "downgrade", "0081"],
+            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "downgrade", "0081"],
             cwd=repo_root,
             check=True,
         )
         subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "head"],
             cwd=repo_root,
             check=True,
         )
@@ -57,7 +57,7 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
     repo_root = Path(__file__).resolve().parents[2]
     try:
         subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "downgrade", "0120"],
+            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "downgrade", "0120"],
             cwd=repo_root,
             check=True,
         )
@@ -163,7 +163,7 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
             await engine.dispose()
 
         subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "head"],
             cwd=repo_root,
             check=True,
         )
@@ -189,7 +189,7 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
             engine.dispose()
     finally:
         subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "head"],
             cwd=repo_root,
             check=True,
         )
