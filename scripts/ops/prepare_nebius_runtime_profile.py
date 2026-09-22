@@ -312,6 +312,9 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         runtime_image_ref=bindings["execution_runtime"]["image_ref"],
         agent_image_ref=bindings["worker"]["image_ref"] if "worker" in bindings else None,
         runtime_binary_sha256=runtime_binary_sha256,
+        supports_task_web_egress=getattr(args, "supports_task_web_egress", False),
+        service_lifecycle_ready=getattr(args, "service_lifecycle_ready", False),
+        supports_task_identity=getattr(args, "supports_task_identity", False),
         image_admission=bundle,
     )
     public_bytes = private_key.public_key().public_bytes(
@@ -357,6 +360,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--service-release-record", required=True, type=Path)
     parser.add_argument("--execution-runtime-release-record", required=True, type=Path)
     parser.add_argument("--worker-release-record", type=Path)
+    parser.add_argument("--supports-task-web-egress", action="store_true")
+    parser.add_argument("--service-lifecycle-ready", action="store_true")
+    parser.add_argument("--supports-task-identity", action="store_true")
     parser.add_argument("--signing-key", required=True, type=Path)
     parser.add_argument("--signing-key-id", required=True)
     parser.add_argument("--create-signing-key", action="store_true")

@@ -53,6 +53,26 @@ token is not a supported bootstrap credential. Rotate/revoke the authorized key
 through IAM as needed, without editing pipeline code. See the
 [Nebius service-account authentication contract](https://docs.nebius.com/container-registry/authentication).
 
+Runtime readiness is explicit and remains disabled by default. The publication
+workflow accepts the persistent variables `NEBIUS_TASK_WEB_EGRESS_READY`,
+`NEBIUS_SERVICE_LIFECYCLE_READY` and `NEBIUS_TASK_IDENTITY_READY`, each exactly
+`true` or `false`. Configure them in the protected publication environment only
+after the corresponding runtime and deployment path has been qualified. They
+persist the matching profile fields on later platform publications; they do not
+activate deployment configuration. Harbor-only publications do not emit a
+platform profile. Invalid values fail publication.
+
+For the equivalent local preparation path, `nebius_candidate.py create` and
+`build`, and `prepare_nebius_runtime_profile.py`, accept the optional flags
+`--supports-task-web-egress`, `--service-lifecycle-ready` and
+`--supports-task-identity`. Without them, the corresponding fields remain
+omitted from the canonical profile. Web egress still requires the matching
+[deployment policy](nebius-platform.md); the renderer rejects missing or
+unmatched configuration. Current restricted execution namespaces cannot admit
+the root task-identity extension, so the renderer rejects identity readiness
+until a separate qualified admission path is implemented. Do not enable that
+variable based only on successful image publication.
+
 BuildKit is pinned to `v0.33.0` and its manifest digest in the workflow.
 Skopeo is pinned to Ubuntu package `1.13.3+ds1-2ubuntu0.24.04.3`; the explicit
 Ubuntu 24.04 runner label keeps that package source stable. Its APT update and

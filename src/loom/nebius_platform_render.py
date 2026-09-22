@@ -11,7 +11,7 @@ import json
 import re
 from datetime import datetime
 from decimal import ROUND_CEILING, Decimal
-from ipaddress import IPv4Address
+from ipaddress import IPv4Address, ip_address, ip_network
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -97,12 +97,35 @@ def validate_environment(config: dict[str, Any]) -> None:
             "service_execution_scheduler_max_deadline_sec",
             "task_resource_requests",
             "default_task_resource_requests",
+            "task_egress",
         }
         != expected
     ):
         raise NebiusPlatformError("platform configuration has missing or unknown fields")
     if type(config.get("public_tls_bootstrap", False)) is not bool:
         raise NebiusPlatformError("public_tls_bootstrap must be a boolean")
+    if "task_egress" in config:
+        from loom_llm_gateway.task_egress import TaskEgressConfig
+
+        egress = TaskEgressConfig.model_validate(config["task_egress"])
+        protected = [ip_network(cidr) for cidr in egress.protected_cidrs]
+        # Check literal addresses already known to this offline renderer. DNS
+        # hosts and other platform addresses still require an operator inventory.
+        hosts = [config.get("public_gateway_ipv4"),
+                 urlsplit(str(config.get("kubernetes_api_server", ""))).hostname]
+        for target in config.get("regional_execution_targets", []):
+            hosts.append(urlsplit(str(target.get("kubernetes_api_server", ""))).hostname)
+        for host in hosts:
+            if host is None:
+                continue
+            try:
+                address = ip_address(host)
+            except ValueError:
+                continue
+            if not any(address.version == block.version and address in block for block in protected):
+                raise NebiusPlatformError(
+                    "task egress protected_cidrs must cover configured platform addresses"
+                )
     ExecutionResourceRequestsV1.model_validate(
         config.get("default_task_resource_requests", DEFAULT_TASK_RESOURCE_REQUESTS)
     )
@@ -1312,6 +1335,17 @@ def _build_platform(
 ) -> dict[str, list[dict[str, Any]]]:
     """Shared stack templates; managed output is finalized by its owning renderer."""
     validate_environment(config)
+    for capability in ("supports_task_web_egress", "service_lifecycle_ready", "supports_task_identity"):
+        if type(profile.get(capability, False)) is not bool:
+            raise NebiusPlatformError(f"runtime profile {capability} must be a boolean")
+    if profile.get("supports_task_web_egress", False) != ("task_egress" in config):
+        raise NebiusPlatformError(
+            "task egress configuration and runtime profile readiness must agree"
+        )
+    if profile.get("supports_task_identity", False):
+        raise NebiusPlatformError(
+            "task identity readiness requires a qualified policy; execution namespaces remain restricted"
+        )
     # Resolve the environment-owned baseline once and persist it with the
     # environment and each release profile. Task limits remain source-owned.
     default_requests = ExecutionResourceRequestsV1.model_validate(
@@ -1396,6 +1430,8 @@ def _build_platform(
         "catalog.json": canonical(catalog).decode(),
         "public-tls.json": canonical(public_tls_config(config)).decode(),
     }
+    if "task_egress" in config:
+        cm["data"]["task-egress.json"] = canonical(config["task_egress"]).decode()
     private_ingress = [
         {"from": [_peer(ns), _peer(ex)], "ports": [{"protocol": "TCP", "port": port}]}
         for port in (8080, 8090, 9100)
@@ -1669,6 +1705,20 @@ def _build_platform(
         _mount_secret(pod, "admin", "loom-admin-secret", "/var/run/loom/admin")
         if component == "gateway":
             pod["terminationGracePeriodSeconds"] = 300
+            if "task_egress" in config:
+                pod.setdefault("volumes", []).append({
+                    "name": "task-egress-config",
+                    "configMap": {"name": "loom-platform-config", "items": [
+                        {"key": "task-egress.json", "path": "task-egress.json"},
+                    ]},
+                })
+                pod["containers"][0].setdefault("volumeMounts", []).append({
+                    "name": "task-egress-config", "mountPath": "/var/run/loom-task-egress",
+                    "readOnly": True,
+                })
+                pod["containers"][0]["env"].extend(_env({
+                    "LOOM_GW_TASK_EGRESS_CONFIG_FILE": "/var/run/loom-task-egress/task-egress.json",
+                }))
             connections = {}
             for regional in config.get("regional_execution_targets", []):
                 tid = regional["target_id"]

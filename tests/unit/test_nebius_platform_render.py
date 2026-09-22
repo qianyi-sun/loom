@@ -1017,7 +1017,7 @@ def test_task_egress_requires_matching_profile_readiness(
     if configured:
         config['task_egress'] = {'protected_cidrs': ['198.51.100.0/24']}
     profile['supports_task_web_egress'] = ready
-    with pytest.raises(NebiusPlatformError, match='task.*egress'):
+    with pytest.raises(NebiusPlatformError, match=r'task.*egress'):
         build_platform(config, candidate, profile, {}, repo_root=ROOT)
 
 
@@ -1058,5 +1058,5 @@ def test_task_egress_requires_known_public_platform_addresses_protected(regional
 def test_task_identity_readiness_cannot_relax_restricted_execution_policy(platform_inputs: tuple) -> None:
     config, candidate, profile = platform_inputs
     profile['supports_task_identity'] = True
-    with pytest.raises(NebiusPlatformError, match='task identity.*restricted'):
+    with pytest.raises(NebiusPlatformError, match=r'task identity.*restricted'):
         build_platform(config, candidate, profile, {}, repo_root=ROOT)

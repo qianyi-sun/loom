@@ -146,6 +146,32 @@ A single configuration revision triggers Pod updates and new configure Jobs when
 environment settings, the runtime profile or trusted public keys change, while
 retries reuse the same completed Jobs.
 
+Task web egress is disabled unless the published runtime profile has
+`supports_task_web_egress: true` and the protected environment configuration
+contains a `task_egress` object. The renderer rejects either setting alone.
+The object uses the Gateway schema: a required nonempty `protected_cidrs` list
+and optional `maximum_connections` (1–256, default 64) and
+`maximum_connections_per_lease` (1–32, default 8). Inventory this deployment's
+actual platform, control-plane and public ingress addresses in those CIDRs;
+do not copy example addresses. Rendering checks configured literal API and
+public Gateway addresses against the inventory. DNS-named infrastructure and
+other protected destinations still require operator review.
+
+The renderer persists that object in `loom-platform-config` as
+`task-egress.json`, mounts only that key read-only into Gateway, and sets
+`LOOM_GW_TASK_EGRESS_CONFIG_FILE=/var/run/loom-task-egress/task-egress.json`.
+Configuration changes participate in the existing rollout revision. Regional
+WebSocket tunnels use the existing `/internal/service-execution/*` public
+Gateway route and native Pod authentication. Task-Pod NetworkPolicy and
+restricted Pod Security labels remain unchanged. See the
+[egress contract](../architecture/sandbox-isolation.md#declared-hosted-task-web-egress)
+for destination enforcement and required installed acceptance.
+
+The renderer also rejects `supports_task_identity: true` under its current
+restricted execution namespace policy. Publishing a readiness flag does not
+qualify a root-admission path or change Pod Security policy. Keep identity
+readiness disabled until that separate policy and admission evidence exist.
+
 The example execution price records the September 8, 2026 cpu-e2 eu-north1
 [official rates](https://docs.nebius.com/compute/resources/pricing): 12,000 micro-USD/vCPU-hour,
 3,200 micro-USD/GiB-hour RAM, and a conservative 98 micro-USD/GiB-hour

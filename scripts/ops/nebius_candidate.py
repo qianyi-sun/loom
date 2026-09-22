@@ -235,6 +235,9 @@ def create_candidate(
     signing_key: Path,
     signing_key_id: str,
     keyring_json: str,
+    supports_task_web_egress: bool = False,
+    service_lifecycle_ready: bool = False,
+    supports_task_identity: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     validate_identity(document, require_current_images=True)
     key = _trusted_signer(signing_key, signing_key_id, keyring_json)
@@ -267,6 +270,9 @@ def create_candidate(
         runtime_image_ref=document["images"]["execution_runtime"]["image_ref"],
         agent_image_ref=document["images"]["harbor_runtime"]["image_ref"],
         runtime_binary_sha256=document["runtime_binary_sha256"],
+        supports_task_web_egress=supports_task_web_egress,
+        service_lifecycle_ready=service_lifecycle_ready,
+        supports_task_identity=supports_task_identity,
         image_admission=ExecutionImageAdmissionBundleV1(
             schema_version="loom.execution-image-admission.v1",
             admissions=tuple(admissions),
@@ -656,6 +662,9 @@ def build(args: argparse.Namespace) -> None:
                 signing_key=args.signing_key,
                 signing_key_id=args.signing_key_id,
                 keyring_json=args.trusted_keyring.read_text(),
+                supports_task_web_egress=getattr(args, "supports_task_web_egress", False),
+                service_lifecycle_ready=getattr(args, "service_lifecycle_ready", False),
+                supports_task_identity=getattr(args, "supports_task_identity", False),
             )
             write_json(args.output / "candidate.json", manifest)
             write_json(args.output / "runtime-profile.json", profile)
@@ -690,6 +699,10 @@ def main() -> int:
         command.add_argument("--output", type=Path, required=True)
     for command in (create, builder, release):
         command.add_argument("--trusted-keyring", type=Path, required=True)
+    for command in (create, builder):
+        command.add_argument("--supports-task-web-egress", action="store_true")
+        command.add_argument("--service-lifecycle-ready", action="store_true")
+        command.add_argument("--supports-task-identity", action="store_true")
     args = parser.parse_args()
     try:
         if args.command == "check-shape":
@@ -707,6 +720,9 @@ def main() -> int:
                 signing_key=args.signing_key,
                 signing_key_id=args.signing_key_id,
                 keyring_json=args.trusted_keyring.read_text(),
+                supports_task_web_egress=args.supports_task_web_egress,
+                service_lifecycle_ready=args.service_lifecycle_ready,
+                supports_task_identity=args.supports_task_identity,
             )
             args.output.mkdir(parents=True, exist_ok=False)
             write_json(args.output / "candidate.json", manifest)

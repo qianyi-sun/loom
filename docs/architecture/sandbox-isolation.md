@@ -46,6 +46,13 @@ JSON object with `protected_cidrs` containing the deployment's actual platform
 and control-plane addresses, including public addresses. Optional
 `maximum_connections` and `maximum_connections_per_lease` default to 64 and 8.
 No configured file means no task-egress listener authorization.
+The Nebius renderer takes this object from the protected environment's optional
+`task_egress` setting and mounts it into Gateway. It requires exact agreement
+between configuration presence and the published profile capability; an update
+cannot silently drop readiness or advertise an unconfigured proxy. It checks
+known literal platform addresses against the configured CIDRs without resolving
+DNS during rendering. The [platform runbook](../runbooks/nebius-platform.md)
+describes the remaining deployment-owned address inventory.
 
 Declare exact, lowercase DNS names, sorted by host and protocol:
 
