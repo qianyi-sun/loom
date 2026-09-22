@@ -22,8 +22,10 @@ from loom_service.environment_management.candidates import (
     ProtectedPublication,
     _json,
 )
+from loom_service.environment_management.child_client import ChildEnvironmentClient
 from loom_service.environment_management.manager import EnvironmentManager, EnvironmentPlanFactory
 from loom_service.environment_management.registry import EnvironmentRegistry, ManagementError
+from loom_service.environment_management.runtime import ProviderRuntimeSettings
 
 
 class PlatformBudget(BaseModel):
@@ -44,6 +46,7 @@ class ManagementInstallation(BaseModel):
     keyring: dict[str, Any]
     publications: tuple[ProtectedPublication, ...] = Field(max_length=1000)
     platform_budget: PlatformBudget
+    provider_runtime: ProviderRuntimeSettings | None = None
 
     @model_validator(mode="after")
     def validate_publications(self) -> ManagementInstallation:
@@ -90,4 +93,4 @@ class ManagementInstallation(BaseModel):
                 raise ManagementError("platform_budget_configuration_changed", 503)
         return EnvironmentManager(EnvironmentRegistry(session_factory), EnvironmentPlanFactory(
             self.foundation, catalog, keyring=self.keyring, repo_root=Path(__file__).resolve().parents[3],
-        ))
+        ), child=ChildEnvironmentClient(http))

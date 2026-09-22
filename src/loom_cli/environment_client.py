@@ -10,6 +10,7 @@ from pydantic import TypeAdapter
 
 from loom.nebius_environment_contract import (
     EnvironmentCreateRequestV1,
+    EnvironmentOperationRequestV1,
     EnvironmentOperationV1,
     EnvironmentRegistrationV1,
     EnvironmentStatusV1,
@@ -39,6 +40,12 @@ class EnvironmentClient:
             assert_2xx(response, action="list personal environments")["items"],
         )
 
+    def destroy(self, environment_id: UUID, *, expected_generation: int, idempotency_key: str) -> EnvironmentOperationV1:
+        request = EnvironmentOperationRequestV1(action="destroy_retained", expected_generation=expected_generation)
+        response = self.http.post(f"/api/v1/environments/{environment_id}/operations", json=request.model_dump(mode="json"),
+                                  headers={"Idempotency-Key": idempotency_key})
+        return EnvironmentOperationV1.model_validate(assert_2xx(response, action="retain data and destroy personal environment"))
+
     def status(self, environment_id: UUID) -> EnvironmentStatusV1:
         return EnvironmentStatusV1.model_validate(assert_2xx(
             self.http.get(f"/api/v1/environments/{environment_id}"), action="read personal environment",
@@ -48,6 +55,11 @@ class EnvironmentClient:
         return EnvironmentOperationV1.model_validate(assert_2xx(
             self.http.get(f"/api/v1/environment-operations/{operation_id}", timeout=timeout),
             action="read environment operation",
+        ))
+
+    def retry(self, operation_id: UUID) -> EnvironmentOperationV1:
+        return EnvironmentOperationV1.model_validate(assert_2xx(
+            self.http.post(f"/api/v1/environment-operations/{operation_id}/retry"), action="retry frozen environment operation",
         ))
 
     def wait(self, operation_id: UUID, *, timeout: float) -> tuple[EnvironmentOperationV1, bool]:

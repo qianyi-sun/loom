@@ -169,6 +169,11 @@ used_by     = ["loom-service"]
 python_type = "SecretStr"
 description = "Read-only GitHub credential for protected candidate run, PR-check and artifact verification. Required with environment_management_config_file; never passed to child Pods or artifact redirect hosts."
 
+[service_config.managed_environment_config_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+description = "Protected child environment JSON with its exact owner, incarnation, namespace and public host. Enables singleton-admin owner enrollment and one-use child login proof issuance in application mode only. Contains no management credentials."
+
 [service_config.service_execution_scheduler_interval_sec]
 used_by     = ["control-plane"]
 python_type = "float"

@@ -42,8 +42,10 @@ from loom.workload_trust import WorkloadTrustContract
 from loom_service.batch_runner import run_loop as batch_run_loop
 from loom_service.behavior_pipeline_adapter import install_behavior_pipeline_public_adapter
 from loom_service.config import LoomServiceSettings
+from loom_service.environment_management.child import load_child_registration
 from loom_service.environment_management.installation import ManagementInstallation
 from loom_service.environment_management.registry import ManagementError
+from loom_service.environment_management.runtime import EnvironmentRuntime
 from loom_service.metrics import (
     HTTP_REQUEST_LATENCY_SEC,
     HTTP_REQUESTS_TOTAL,
@@ -63,6 +65,7 @@ from loom_service.routes import (
     health,
     invites,
     local_servers,
+    managed_child,
     management_health,
     models,
     monitor,
@@ -142,6 +145,7 @@ async def _assert_schema_startup(engine: AsyncEngine) -> int:
 
 def create_app(settings: LoomServiceSettings) -> FastAPI:
     management = settings.service_mode == "management"
+    child_registration = load_child_registration(settings)
     workload_contract = None if management else _validated_v1_workload_contract(settings)
     # Fail deployment health immediately rather than discovering a malformed
     # automatic-execution profile on the first user Batch.
@@ -167,15 +171,24 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         app.state.admin_secret_verifier = _load_admin_secret_verifier(settings)
         app.state.settings = settings
         app.state.session_factory = session_factory
-        if settings.environment_management_config_file is not None:
-            installation = ManagementInstallation.load(settings.environment_management_config_file)
-            client = httpx.AsyncClient(trust_env=False, timeout=30, follow_redirects=False)
-            app.state._owned_management_http_client = client
-            assert settings.environment_management_github_token is not None
-            app.state.environment_manager = await installation.manager(
-                session_factory, http=client, token=settings.environment_management_github_token.get_secret_value(),
-            )
-        yield
+        async with contextlib.AsyncExitStack() as resources:
+            if settings.environment_management_config_file is not None:
+                installation = ManagementInstallation.load(settings.environment_management_config_file)
+                client = httpx.AsyncClient(trust_env=False, timeout=30, follow_redirects=False)
+                app.state._owned_management_http_client = client
+                assert settings.environment_management_github_token is not None
+                app.state.environment_manager = await installation.manager(
+                    session_factory, http=client, token=settings.environment_management_github_token.get_secret_value(),
+                )
+                if installation.provider_runtime is not None:
+                    app.state.environment_runtime = await resources.enter_async_context(EnvironmentRuntime.open(
+                        installation.provider_runtime, app.state.environment_manager.registry, child_http=client,
+                    ))
+            try:
+                yield
+            finally:
+                if hasattr(app.state, "environment_runtime"):
+                    del app.state.environment_runtime
 
     @asynccontextmanager
     async def _service_lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -358,6 +371,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                     await dispose()
 
     app = FastAPI(title="Loom Service", version="0.0.1", lifespan=lifespan)
+    app.state.managed_environment = child_registration
     @app.exception_handler(ManagementError)
     async def _management_error(_request: Request, exc: ManagementError) -> JSONResponse:
         return JSONResponse(status_code=exc.status_code, content={
@@ -412,6 +426,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     if management:
         app.include_router(environments.router, prefix="/api/v1")
     if not management:
+        app.include_router(managed_child.router, prefix="/api/v1")
         for workload_router in (
             trials.router, trajectory.router, atif.router, tasks.router, benchmarks.router,
             tasksets.router, terminalgen_corpora.router, batches.router, delivery_exports.router,
