@@ -356,6 +356,7 @@ source_paths = [
   ".dockerignore",
   "deploy/Dockerfile.egress-xds",
   "src/loom_egress_xds/**",
+  "src/loom_listen/**",
 ]
 smoke_owner = "egress-conformance"
 scan_owner = "images"
@@ -393,12 +394,12 @@ build_context = "."
 source_paths = [
   ".dockerignore",
   "README.md",
+  "config/**",
   "deploy/Dockerfile.pipeline-orchestrator",
   "migrations/**",
   "packages/loom-bundle-checksum/**",
   "pyproject.toml",
-  "src/loom/pipeline/**",
-  "src/loom_pipeline_orchestrator/**",
+  "src/**",
 ]
 smoke_owner = "family-orchestrator-conformance"
 scan_owner = "images"
@@ -436,9 +437,10 @@ source_paths = [
   ".dockerignore",
   "deploy/Dockerfile.behavior-stage1-sim",
   "deploy/behavior-stage1-sim/**",
-  "src/loom/integrations/behavior/**",
-  "src/loom/pipeline/behavior_*.py",
-  "src/loom/pipeline/**",
+  "src/loom/**",
+  "src/loom_worker/__init__.py",
+  "src/loom_worker/pipeline_attempt_workspace.py",
+  "src/loom_worker/pipeline_live_preview.py",
   "third_party/behavior-stage1/**",
 ]
 smoke_owner = "worker-runtime-conformance"
@@ -637,7 +639,7 @@ runtime_policy = "runtime-payload"
 id = "execution-runtime-fixture"
 kind = "runtime-payload-image"
 dockerfile = "tests/fixtures/execution_runtime_fixture/Dockerfile"
-build_context = "tests/fixtures/execution_runtime_fixture"
+build_context = "."
 source_paths = ["tests/fixtures/execution_runtime_fixture/**"]
 smoke_owner = "task-fixture-conformance"
 scan_owner = "runtime-payload-scan"
