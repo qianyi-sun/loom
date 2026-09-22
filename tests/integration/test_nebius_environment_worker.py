@@ -375,7 +375,7 @@ async def test_management_login_issues_only_target_child_proof_with_real_auth(
                 assert response.status_code == expected, response.text
             client.headers.pop("Authorization")
             async with factory.begin() as session:
-                membership = await session.get(TeamMembership, (alice.user_id, alice.team_id))
+                membership = await session.get(TeamMembership, {"user_id": alice.user_id, "team_id": alice.team_id})
                 membership.role = "viewer"
             login = await client.post("/api/v1/auth/login", json={"username": "alice", "password": "owner-passphrase"})
             assert login.status_code == 200

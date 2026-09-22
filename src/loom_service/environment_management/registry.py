@@ -19,7 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from loom.auth import AuthContext, is_admin
+from loom.auth import AuthContext, is_admin, role_scopes
 from loom.db.nebius_environment_schema import (
     NebiusEnvironment,
     NebiusEnvironmentNamespace,
@@ -238,7 +238,13 @@ class EnvironmentRegistry:
         """
         from loom.security.secret_store import LocalEncryptedSecretStore, parse_ref
 
-        owner, team = owner_identity(principal)
+        owner, team = owner_identity(principal, mutation=True)
+        # A logged-in management member may administer their own personal
+        # environment. A delegable bearer must explicitly carry every scope
+        # granted by the child owner session, not merely identify its creator.
+        if (principal.auth_kind != "session" and not is_admin(principal)
+                and not set(role_scopes("owner")).issubset(principal.scopes)):
+            raise ManagementError("environment_scope_required", 403)
         async with self.session_factory.begin() as session:
             row = (await session.scalars(select(NebiusEnvironment).where(
                 NebiusEnvironment.environment_id == environment_id,
