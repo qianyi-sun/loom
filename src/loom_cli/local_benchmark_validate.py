@@ -35,6 +35,11 @@ from loom.terminal_bench_normalize import (
     normalize_terminal_bench_task_toml,
 )
 from loom_cli.benchmarks_sync import walk_task_tomls
+from loom_cli.local_compatibility_report import (
+    TaskCompatibilityReport,
+    collect_compatibility_reports,
+    render_compatibility_payload,
+)
 
 
 class LocalBenchmarkValidationError(Exception):
@@ -77,6 +82,7 @@ class LocalBenchmarkValidationResult:
     task_tomls: tuple[Path, ...]
     execution_profile: str | None = None
     profile_stats: NebiusTerminusProfileStats | None = None
+    compatibility_reports: tuple[TaskCompatibilityReport, ...] | None = None
 
     @property
     def task_count(self) -> int:
@@ -92,6 +98,7 @@ def validate_local_benchmark(
     license_spdx: str | None = None,
     source_subdir: str | None = None,
     execution_profile: str | None = None,
+    compatibility_report: bool = False,
 ) -> LocalBenchmarkValidationResult:
     root = root.resolve()
     if not root.is_dir():
@@ -146,11 +153,18 @@ def validate_local_benchmark(
         raise LocalBenchmarkValidationError(
             f"no task.toml files found under {task_root}", exit_code=1,
         )
-    for task_toml in task_tomls:
-        _validate_task_toml(task_toml)
+    reports = None
+    if compatibility_report:
+        reports = collect_compatibility_reports(
+            benchmark_id=entry.id, task_root=task_root, task_tomls=task_tomls,
+            execution_profile=profile,
+        )
+    else:
+        for task_toml in task_tomls:
+            _validate_task_toml(task_toml)
 
     profile_stats: NebiusTerminusProfileStats | None = None
-    if profile == NEBIUS_TERMINUS_PROFILE:
+    if profile == NEBIUS_TERMINUS_PROFILE and not compatibility_report:
         profile_stats = _validate_nebius_terminus_profile(entry.id, task_root, task_tomls)
 
     return LocalBenchmarkValidationResult(
@@ -160,6 +174,7 @@ def validate_local_benchmark(
         task_tomls=task_tomls,
         execution_profile=profile,
         profile_stats=profile_stats,
+        compatibility_reports=reports,
     )
 
 
@@ -185,6 +200,8 @@ def render_validation_json(result: LocalBenchmarkValidationResult) -> str:
     }
     if result.execution_profile is not None:
         payload["execution_profile"] = result.execution_profile
+    if result.compatibility_reports is not None:
+        payload["compatibility_report"] = render_compatibility_payload(result.compatibility_reports)
     if result.profile_stats is not None:
         payload["profile_stats"] = {
             "adapted_tasks": result.profile_stats.adapted_tasks,
