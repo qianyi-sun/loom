@@ -74,13 +74,13 @@ This is an **offline provisioning contract, not operational multi-person
 acceptance**. The managed format keeps the scheduler and capacity policy disabled,
 renders no actuator/collector Pods, grants only observer RBAC, and sets zero-Pod
 quotas in execution/build namespaces. The standalone deploy helper rejects this
-format. Candidate publication verification, management authentication/provisioning,
-shared admission/write enforcement and installed
-concurrent-owner execution are not established by rendering these resources.
+format. The management request layer below verifies candidates and reserves
+identities, but rendering does not provision resources or establish shared
+admission/write enforcement or installed concurrent-owner execution.
 
 ## Independent management service runtime
 
-`LOOM_SVC_SERVICE_MODE=management` selects the identity-only management runtime in
+`LOOM_SVC_SERVICE_MODE=management` selects the identity and environment-management runtime in
 the existing Service image. It must use a **separate management database** via
 `LOOM_SVC_DB_URL` (and its optional pool URL), not a child application's database.
 It checks the current schema and existing encrypted secrets before serving.
@@ -101,10 +101,86 @@ errors and has no dependency on child availability. Application-mode readiness
 and its authentication contract are unchanged. Hosted sessions retain secure
 host-only cookies and sibling-origin rejection in either mode.
 
-This runtime does **not yet provision environments**. The durable operation
-journal, owner-scoped provisioning API/CLI, protected deployment and installed
-two-owner acceptance remain separate delivery work. A healthy management process
-is not evidence that personal environments or shared execution are operational.
+This runtime does **not yet create cloud resources**. Its request layer can
+reserve and journal a desired stack; the provider worker, retained cleanup, child
+credential exchange and installed two-owner acceptance remain unfinished. Do not
+enable owner creation on a live installation until that worker and cleanup are
+available. A healthy management process is not evidence that personal environments
+or shared execution are operational.
+
+### Managed provisioning requests
+
+`LOOM_SVC_ENVIRONMENT_MANAGEMENT_CONFIG_FILE` optionally enables the request
+layer. This protected installation JSON uses schema
+`loom.nebius-management-installation.v1` and contains `foundation`, `registry_prefix`,
+`keyring`, `publications` and `platform_budget`. `foundation` is the validated
+shared infrastructure binding; its `platform_config_json` holds the standalone
+configuration as JSON text. Neither the foundation nor resource requests come
+from developer input. The budget supplies nonnegative `cpu_millis`, `memory_mib`,
+`storage_mib` and `ephemeral_storage_mib` available **after** fixed platform and
+management headroom. Startup inserts an absent budget or verifies an exact match;
+a changed allowance is rejected, not silently resized.
+
+`LOOM_SVC_ENVIRONMENT_MANAGEMENT_GITHUB_TOKEN` is a read-only credential for
+publication metadata, PR checks and artifacts. Configuration is rejected outside
+management mode or without that credential. It must not enter child manifests,
+operation records or redirected artifact-download requests. Invalid configuration
+fails startup without echoing its contents. Without the installation file,
+management still serves identity/readiness; environment routes return 503.
+
+Each protected publication binds a `candidate_id` UUID to `source_sha`, `run_id`,
+`run_attempt`, `artifact_id`, `artifact_sha256` and `pull_request`. New requests
+verify the successful same-repository `dev` publication attempt, the exact merged
+PR's squash SHA, and all four required GitHub-Actions-app checks on that PR head.
+There is no assumption that CI ran on the subsequent `dev` push. The exact named
+artifact must be unexpired, its downloaded bytes must match both pinned and GitHub
+digests, and its seven image identities must match the configured registry.
+Runtime image signatures, platform and vulnerability policy are checked with the
+installation keyring. Evidence timestamps remain metadata, not a new image TTL.
+Unknown candidates return 404; unavailable or invalid publication authority fails
+closed with a sanitized 503.
+
+The authenticated API supports:
+
+- `POST /api/v1/environments`: `{slug, candidate_id}` and an `Idempotency-Key`;
+  returns 202 with the durable operation UUID, not a readiness assertion.
+- `GET /api/v1/environments`: this user's current team's retained registrations.
+- `GET /api/v1/environments/{environment_id}`: desired registration and operation.
+- `GET /api/v1/environment-operations/{operation_id}`: current operation state.
+
+The actual user/team and scopes come from existing authentication; owner fields
+in the body are rejected, generic credentials without a user are insufficient,
+and cookie mutations retain CSRF enforcement. Another owner's lookup is forbidden.
+Migration `0155` adds a cluster-locked platform allowance/reservation and ordered
+operation/resource journal. Creation atomically reserves all namespaces, resource
+costs, registration and immutable resource intents before any provider action.
+Over-capacity requests return 409 `platform_capacity_exhausted` with needed and
+available values. This is application/PVC accounting, not execution-pool admission.
+
+Same-user, same-key, same-request retries recover the existing operation even if
+publication is now unavailable; changed requests conflict. The journal uses
+database-time expiring leases and increasing runner epochs to reject stale or
+out-of-order confirmations. Provider identities cannot change on replay, and
+completion requires all steps through application readiness. These are journal
+invariants; external write fencing and real readiness require the provider worker.
+No current background loop consumes this journal, so new requests remain pending.
+
+After logging in to the selected management origin, the request/status commands are:
+
+```sh
+loom dev create alice --candidate <approved-candidate-uuid> --idempotency-key create-alice-1
+loom dev list
+loom dev status <environment-uuid>
+loom dev wait <operation-uuid> --timeout 60
+```
+
+`loom service up --environment dev-alice --candidate <approved-candidate-uuid>`
+dispatches the same create request. It is not yet an update command or arbitrary
+source deployment. Reuse the printed idempotency key after a lost response; `wait`
+timeout exits 2 without cancelling the operation. Hosted-target errors never fall
+back to local Compose. No target (or explicit `--environment local`) retains local
+Compose and prints that target. Suspend/resume/update/destroy and shared-target
+management are not implemented by this request slice.
 
 ## Supported workload boundary
 

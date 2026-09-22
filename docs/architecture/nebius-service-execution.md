@@ -479,7 +479,7 @@ materializing. A terminal rerun uses a new Trial and its own image prerequisites
 Nonterminal retries still advance the attempt after cleanup, and exact event
 replay still returns its original event without projecting again. Transition/event admission also
 refreshes the locked lease so a cached generation cannot bypass revocation.
-The unpublished `0135` migration additionally rejects terminal-to-nonterminal
+The published `0135` migration additionally rejects terminal-to-nonterminal
 Trial updates in PostgreSQL, including BEFORE-trigger rewrites. Metadata updates
 and terminal-to-terminal corrections remain permitted. The row-local invariant
 adds no related-row locks; migration installation/removal fails without waiting

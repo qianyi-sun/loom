@@ -101,7 +101,7 @@ normal dev schema, and checks retained data and atomic failure. It supplements
 the ordinary migration-lineage rejection test; neither test grants live
 deployment authority or replaces actual-backup evidence.
 
-The current fresh-install protected schema reference is `0150/guard_0035`,
+The default fresh-install protected schema reference is pinned to `0152/guard_0035`,
 independently provisioned for PostgreSQL 16 and 17. Historical references retain
 their original recipes and fingerprints. Conversion qualification compares logical
 schema and retained data; it does not prove a restored historical database matches

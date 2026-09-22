@@ -8,6 +8,7 @@ only verified purge may release names. Child databases contain no management row
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
@@ -21,7 +22,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import TIMESTAMP
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.dialects.postgresql import UUID as PgUUID  # noqa: N811
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -102,3 +103,91 @@ class NebiusEnvironmentNamespace(Base):
     namespace_name: Mapped[str] = mapped_column(Text, primary_key=True)
     environment_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     role: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class NebiusPlatformBudget(Base):
+    """Operator-configured child allowance AFTER fixed platform headroom.
+
+    Lock this row for every reservation change. This is platform application/PVC
+    accounting, not task admission or permission to resize a node group.
+    """
+
+    __tablename__ = "nebius_platform_budgets"
+    __table_args__ = (
+        CheckConstraint("cpu_millis >= 0 AND memory_mib >= 0 AND storage_mib >= 0 AND ephemeral_storage_mib >= 0",
+                        name="nebius_platform_budget_nonnegative"),
+    )
+    cluster_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    cpu_millis: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    memory_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    storage_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    ephemeral_storage_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class NebiusPlatformReservation(Base):
+    __tablename__ = "nebius_platform_reservations"
+    __table_args__ = (
+        ForeignKeyConstraint(["environment_id", "cluster_id"],
+                             ["nebius_environments.environment_id", "nebius_environments.cluster_id"],
+                             ondelete="RESTRICT", name="nebius_platform_reservation_environment_fk"),
+        CheckConstraint("cpu_millis >= 0 AND memory_mib >= 0 AND storage_mib >= 0 AND ephemeral_storage_mib >= 0",
+                        name="nebius_platform_reservation_nonnegative"),
+    )
+    environment_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    cluster_id: Mapped[str] = mapped_column(Text, ForeignKey("nebius_platform_budgets.cluster_id", ondelete="RESTRICT"), nullable=False)
+    cpu_millis: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    memory_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    storage_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    ephemeral_storage_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class NebiusEnvironmentOperation(Base):
+    """Immutable plan plus mutable, fenced progress; never a bag of user secrets."""
+
+    __tablename__ = "nebius_environment_operations"
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "idempotency_key", name="nebius_environment_operation_replay_key"),
+        UniqueConstraint("environment_id", "deployment_generation", name="nebius_environment_operation_generation_key"),
+        CheckConstraint("action IN ('create', 'destroy_retained')", name="nebius_environment_operation_action_check"),
+        CheckConstraint("phase IN ('pending', 'running', 'blocked', 'completed')", name="nebius_environment_operation_phase_check"),
+        CheckConstraint("deployment_generation > 0 AND runner_epoch >= 0", name="nebius_environment_operation_generation_check"),
+        CheckConstraint("request_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(plan_json) = 'object'",
+                        name="nebius_environment_operation_plan_check"),
+        CheckConstraint("(lease_token IS NULL) = (lease_expires_at IS NULL)", name="nebius_environment_operation_lease_check"),
+    )
+    operation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    environment_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("nebius_environments.environment_id", ondelete="RESTRICT"), nullable=False)
+    owner_user_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
+    request_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    deployment_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    phase: Mapped[str] = mapped_column(Text, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(Text)
+    plan_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    runner_epoch: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
+    lease_token: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
+
+
+class NebiusEnvironmentResource(Base):
+    """Write-ahead intent and confirmed provider identity, not name-only adoption."""
+
+    __tablename__ = "nebius_environment_resources"
+    __table_args__ = (
+        UniqueConstraint("operation_id", "sequence", name="nebius_environment_resource_sequence_key"),
+        CheckConstraint("sequence >= 0", name="nebius_environment_resource_sequence_check"),
+        CheckConstraint("kind IN ('kubernetes', 'object_bucket', 'credentials', 'database_ready', 'job_ready', 'application_ready')",
+                        name="nebius_environment_resource_kind_check"),
+        CheckConstraint("phase IN ('planned', 'applied') AND ((phase = 'applied') = (provider_identity IS NOT NULL))",
+                        name="nebius_environment_resource_phase_check"),
+        CheckConstraint("jsonb_typeof(payload_json) = 'object'", name="nebius_environment_resource_payload_check"),
+    )
+    operation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("nebius_environment_operations.operation_id", ondelete="RESTRICT"), primary_key=True)
+    resource_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    phase: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_identity: Mapped[str | None] = mapped_column(Text)

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
+import shlex
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -1892,3 +1894,46 @@ include_paths = ["tests/unit/**/*.py"]
     assert "smoke owner has no component: unused-smoke" in errors
     assert "scan owner has no component: unused-scan" in errors
     assert "attestation owner has no component: unused-attestation" in errors
+
+
+@pytest.mark.parametrize("script", ["component_ownership.py", "plan_ci_validations.py"])
+def test_ci_planners_start_before_package_installation(script):
+    environment = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    result = subprocess.run([sys.executable, "-S", "scripts/" + script, "--help"],
+                            env=environment, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_guard_migration_changes_rebuild_both_consuming_images() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    matrix = component_ownership.select_release_image_matrix(
+        manifest,
+        changed_paths=("database/capacity_guard_migrations/env.py",),
+        force_all=False,
+        image_set="nebius",
+    )
+    assert {"control-plane", "service"} <= {entry["image"] for entry in matrix}
+
+
+def test_nebius_image_ownership_covers_every_local_copy_input() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=REPO_ROOT, text=True).split("\0")
+    components = {component.id: component for component in manifest.components}
+    missing = []
+    for image in component_ownership.release_image_matrix(manifest, image_set="nebius"):
+        component = components[image["image"]]
+        dockerfile = (REPO_ROOT / component.dockerfile).read_text().replace("\\\n", " ")
+        for line in dockerfile.splitlines():
+            if not line.startswith("COPY ") or "--from=" in line:
+                continue
+            arguments = shlex.split(line)[1:]
+            for source in arguments[:-1]:
+                if source.startswith("--"):
+                    continue
+                source = source.removeprefix("./").rstrip("/")
+                inputs = [path for path in tracked if path == source or path.startswith(source + "/")]
+                assert inputs, (component.id, source)
+                for path in inputs:
+                    if not any(component_ownership.matches_path(path, pattern) for pattern in component.source_paths):
+                        missing.append((component.id, path))
+    assert not missing, missing

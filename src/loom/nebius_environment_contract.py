@@ -134,6 +134,34 @@ class EnvironmentRegistrationV1(_Contract):
         return self
 
 
+class EnvironmentOperationV1(_Contract):
+    """Public operation state; pending creation is never execution readiness."""
+
+    operation_id: UUID
+    environment_id: UUID
+    deployment_generation: int = Field(ge=1, strict=True)
+    action: Literal["create", "destroy_retained"]
+    phase: Literal["pending", "running", "blocked", "completed"]
+    error_code: str | None = None
+    execution_enabled: Literal[False] = False
+
+
+class EnvironmentCreateRequestV1(_Contract):
+    slug: str = Field(min_length=1, max_length=54, pattern="^" + _LABEL + "$")
+    candidate_id: UUID
+
+    @model_validator(mode="after")
+    def _personal_only(self) -> EnvironmentCreateRequestV1:
+        if self.slug in _RESERVED_SLUGS or self.candidate_id.int == 0:
+            raise ValueError("create requires a personal slug and candidate identity")
+        return self
+
+
+class EnvironmentStatusV1(_Contract):
+    registration: EnvironmentRegistrationV1
+    operation: EnvironmentOperationV1 | None
+
+
 def new_environment_registration(
     foundation: FoundationBinding,
     *,

@@ -159,6 +159,16 @@ python_type = "str"
 default     = "application"
 description = "application serves workloads; management serves only identity and environment management from its own database, with no child workload clients or loops."
 
+[service_config.environment_management_config_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+description = "Protected management-installation JSON: foundation, pinned publications, public image trust and child platform allowance. Management mode only; absent leaves provisioning unconfigured. Never mount in personal applications."
+
+[service_config.environment_management_github_token]
+used_by     = ["loom-service"]
+python_type = "SecretStr"
+description = "Read-only GitHub credential for protected candidate run, PR-check and artifact verification. Required with environment_management_config_file; never passed to child Pods or artifact redirect hosts."
+
 [service_config.service_execution_scheduler_interval_sec]
 used_by     = ["control-plane"]
 python_type = "float"

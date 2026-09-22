@@ -69,7 +69,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 
 Before declaring work shipped:
 
-- `ruff check src tests packages` passes
+- `uv run --no-sync ruff check src tests packages migrations database/capacity_guard_migrations database/capacity_migrations` passes
 - `mypy --strict` passes
 - `pytest tests/unit tests/contract tests/property tests/loom_cli`
   passes (the CI gate runs the same set + sibling packages)

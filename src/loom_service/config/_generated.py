@@ -42,6 +42,8 @@ class LoomServiceSettings(BaseSettings):
     db_url: PostgresDsn
     db_url_pool: PostgresDsn | None = None
     dev_reload: bool = False
+    environment_management_config_file: Path | None = None
+    environment_management_github_token: SecretStr | None = None
     gateway_url: HttpUrl = cast(HttpUrl, "http://loom-llm-gateway:9100")
     huggingface_api_key: SecretStr | None = Field(default=None, validation_alias="HF_TOKEN")
     k8s_worker_enabled: bool = True
