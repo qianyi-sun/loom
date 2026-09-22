@@ -17,7 +17,7 @@
 
 - [ ] This PR targets `dev` for normal development.
 - [ ] For this normal `dev` PR, a developer or maintainer enables
-      GitHub's native squash auto-merge for the non-draft PR, regardless of
+      GitHub's native squash auto-merge for every non-draft PR, regardless of
       author or reviewer. GitHub keeps the candidate queued until
       `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
       `staging-smoke-gate` succeed on the current head SHA. These four strict,
