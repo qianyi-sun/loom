@@ -93,16 +93,16 @@ def test_adapt_fills_resources_forces_gateway_and_verifier(tmp_path: Path) -> No
     assert env["memory_mb"] == DEFAULT_MEMORY_MB
     assert env["storage_mb"] == DEFAULT_STORAGE_MB
     assert env["cpu_arch"] == "x86_64"
-    assert env["user"] == "agent"
+    assert env["user"] == "root"
     assert env["workdir"] == "/app"
     assert env["network_policies_supported"] == ["gateway-only"]
     assert env["baseline_network_policy"] == {"kind": "gateway-only"}
-    assert "user" not in adapted["verifier"]
+    assert adapted["verifier"]["user"] == "root"
     assert adapted["verifier"]["env_mode"] == "shared"
     assert adapted["verifier"]["args"]["script_path"] == VERIFIER_SCRIPT_PATH
     assert stats.resources_filled
     assert stats.network_forced_gateway_only
-    assert stats.verifier_identity_stripped
+    assert not stats.verifier_identity_stripped
     assert stats.verifier_path_forced
     assert stats.cpu_arch_forced
     assert stats.workspace_identity_forced

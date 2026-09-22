@@ -294,3 +294,26 @@ def test_ambiguous_or_unsupported_image_preparation_does_not_write_outputs(
         prepare_nebius_terminus_image(tmp_path, environment)
     assert not (tmp_path / OFFLINE_SCRIPT).exists()
     assert not (tmp_path / "environment/Dockerfile.loom-nebius").exists()
+
+
+@pytest.mark.parametrize("user,home,expected", [
+    ("root", "/root", "0:0"), ("1001:1002", "/home/miles", "1001:1002"),
+])
+def test_preparation_preserves_declared_user_home_and_missing_task_dependencies(tmp_path, user, home, expected):
+    environment = bundle(tmp_path)
+    environment.update(user=user, environment={"HOME": home})
+    prepare_nebius_terminus_image(tmp_path, environment)
+    derived = (tmp_path / environment["dockerfile"]).read_text()
+    assert f"ENV HOME={home}\n" in derived
+    assert f"USER {expected}\n" in derived
+    assert "php" not in derived and "composer" not in derived and "wget" not in derived
+    assert "chown -R 65532:65532 /app" not in derived
+    assert "ENV PATH=" not in derived
+
+
+def test_preparation_rejects_unresolved_named_user_before_writing(tmp_path):
+    environment = bundle(tmp_path)
+    environment["user"] = "miles"
+    with pytest.raises(ValueError, match="unsupported task identity"):
+        prepare_nebius_terminus_image(tmp_path, environment)
+    assert not (tmp_path / OFFLINE_SCRIPT).exists()
