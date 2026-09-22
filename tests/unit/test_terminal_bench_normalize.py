@@ -400,3 +400,25 @@ def test_continue_until_timeout_is_retained_for_explicit_rejection(identity) -> 
     assert normalized["agent"]["continue_until_timeout"] is True
     with pytest.raises(ValidationError, match="continue_until_timeout"):
         TaskConfig.model_validate(normalized)
+
+
+@pytest.mark.parametrize("stamp", [{"version": "1.0"}, {"schema_version": "1.1"}])
+def test_harbor_schema_markers_do_not_depend_on_missing_task_identity(stamp) -> None:
+    raw = {
+        **stamp, "metadata": {"tags": ["shell"]},
+        "task": {"id": "authored-id", "name": "Authored title"},
+        "environment": {"cpus": 2, "memory": "1.5G", "storage": "3G"},
+    }
+    normalized = normalize_terminal_bench_task_toml(raw, task_id="context")
+    task = TaskConfig.model_validate(normalized)
+    assert task.task.id == "authored-id"
+    assert task.task.name == "Authored title"
+    assert task.environment.memory_mb == 1536
+    assert task.environment.storage_mb == 3072
+
+
+def test_metadata_only_harbor_schema_1_1_is_stamped_as_loom_schema() -> None:
+    raw = {"schema_version": "1.1", "metadata": {"tags": ["shell"]}}
+    task = TaskConfig.model_validate(normalize_terminal_bench_task_toml(raw, task_id="context"))
+    assert task.task.id == "context"
+    assert task.schema_version == "1"
