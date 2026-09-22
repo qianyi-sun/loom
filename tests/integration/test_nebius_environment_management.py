@@ -211,3 +211,68 @@ async def test_completion_requires_all_durable_steps_including_health_and_auth(e
     await registry.complete(lease)
     assert (await registry.get_operation(operation.operation_id, principal=alice)).phase == "completed"
     assert await registry.claim(operation.operation_id) is None
+
+
+async def test_real_management_api_derives_owner_and_rejects_other_users(
+    environment_registry, isolated_migration_postgres_url, platform_inputs,
+):
+    import httpx
+
+    from loom.db.schema import TeamMembership
+    from loom_service.app import create_app
+    from loom_service.config import LoomServiceSettings
+    from loom_service.environment_management.manager import (
+        CandidateBundle, EnvironmentManager, EnvironmentPlanFactory,
+    )
+    from loom_service.password_auth import hash_password
+
+    registry, factory, (alice, bob), prepare = environment_registry
+    candidate_id = prepare().registration.candidate_id
+
+    class PublicationApi:
+        async def resolve(self, identity):
+            assert identity == candidate_id
+            return CandidateBundle(identity, platform_inputs[1], platform_inputs[2])
+
+    async with factory.begin() as session:
+        for principal, name in ((alice, "alice"), (bob, "bob")):
+            user = await session.get(User, principal.user_id)
+            user.password_hash = hash_password(name + "-owner-passphrase")
+            session.add(TeamMembership(user_id=principal.user_id, team_id=principal.team_id, role="owner"))
+    app = create_app(LoomServiceSettings(
+        _env_file=None, service_mode="management", db_url=isolated_migration_postgres_url,
+        auth_local_http=False, public_base_url="https://management.example.com",
+    ))
+    async with app.router.lifespan_context(app):
+        app.state.environment_manager = EnvironmentManager(registry, EnvironmentPlanFactory(
+            foundation_from(platform_inputs[0]), PublicationApi(), keyring={}, repo_root=ROOT,
+        ))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://management.example.com") as a, \
+                httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://management.example.com") as b:
+            for client, name in ((a, "alice"), (b, "bob")):
+                response = await client.post("/api/v1/auth/login", json={
+                    "username": name, "password": name + "-owner-passphrase",
+                })
+                assert response.status_code == 200
+                client.headers["X-Loom-CSRF"] = client.cookies.get("loom_csrf")
+            request = {"slug": "alice", "candidate_id": str(candidate_id)}
+            first = await a.post("/api/v1/environments", json=request, headers={"Idempotency-Key": "api-create-1"})
+            assert first.status_code == 202, first.text
+            repeated = await a.post("/api/v1/environments", json=request, headers={"Idempotency-Key": "api-create-1"})
+            assert repeated.json() == first.json()
+            environment_id = first.json()["environment_id"]
+            operation_id = first.json()["operation_id"]
+            status = await a.get(f"/api/v1/environments/{environment_id}")
+            assert status.status_code == 200
+            assert status.json()["registration"]["owner_user_id"] == str(alice.user_id)
+            assert status.json()["operation"]["phase"] == "pending"
+            assert (await b.get(f"/api/v1/environments/{environment_id}")).status_code == 403
+            assert (await b.get(f"/api/v1/environment-operations/{operation_id}")).status_code == 403
+            assert (await b.get("/api/v1/environments")).json() == {"items": []}
+            impersonation = await b.post("/api/v1/environments", json={
+                **request, "owner_user_id": str(alice.user_id),
+            }, headers={"Idempotency-Key": "impersonate"})
+            assert impersonation.status_code == 422
+            a.headers.pop("X-Loom-CSRF")
+            assert (await a.post("/api/v1/environments", json=request,
+                                 headers={"Idempotency-Key": "no-csrf"})).status_code == 403
