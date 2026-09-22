@@ -44,3 +44,39 @@ is unavailable, never a hardcoded node count or inferred zero capacity.
 Focused verification uses API/database fixtures, a build/failure/cache-reuse
 path and browser interactions. These checks do not replace the ordinary-member
 deployed browser journey in issue #1981, nor require another paid model batch.
+
+## Capacity and delivery presentation
+
+Admission's conservative zero is not a capacity measurement. The public
+projection returns unknown slot estimates when calibration/binding or fresh
+observations are unavailable, while retaining confirmed zero forecasts and
+unchanged admission decisions. Disabled targets appear under Inactive regions,
+not as active service faults; their historical observations remain in the API.
+Draining targets remain visible with node occupancy until their resources are released.
+
+Trial artifact listings merge trajectory-index references and canonical artifact
+records by the download API's file key. Canonical size and sharing metadata take
+precedence. Unknown size stays null; zero means an actual empty file.
+
+Run Library and Batch detail use the same LLM-call accounting projection for
+monetary estimates and cost status. Legacy result cost defaults do not establish
+that a tokens-only or unpriced run was free.
+
+Owner-team members and platform administrators can access the existing batch
+family delivery flow from Run Library as well as Batch detail. The server selects
+final results across the batch and linked reruns; this is not arbitrary checkbox
+selection. Active runs retain individual completed-Trial downloads and explain
+why batch export is deferred. Cross-team shared artifact browsing does not grant
+access to private full-batch delivery. Metadata export remains a separate action.
+
+
+### Home readiness
+
+Home uses the existing Nebius execution-capacity projection. An active target
+with an enabled capacity policy satisfies execution setup, even when autoscaling
+has reduced its node count to zero. Home readiness means ready to submit; it does
+not promise immediate per-task admission. Missing or stale observations remain
+unknown, and current capacity blockers link to Monitor without inventing a
+worker-start prerequisite. Provider, catalog and team checks still apply. The
+legacy `worker_health` response remains for API compatibility but no longer
+controls Home readiness or its execution card.

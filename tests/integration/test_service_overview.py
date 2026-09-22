@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import httpx
@@ -34,6 +35,7 @@ from loom.db.schema import (
 )
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from loom_service.routes import overview as overview_route
 
 RAW_ADMIN_TOKEN = "loom_admin_" + "O" * 43
 
@@ -323,7 +325,7 @@ async def test_overview_summarizes_signed_in_team_readiness(
     assert r.status_code == 200, r.text
     assert r.headers["cache-control"] == "no-store"
     body = r.json()
-    assert body["status"] == "ready"
+    assert body["status"] == "needs_setup"
     assert body["team_context"] == {
         "team_id": str(team_id),
         "team_name": "EAI",
@@ -387,7 +389,8 @@ async def test_overview_summarizes_signed_in_team_readiness(
         "expected_trial_count": 2,
     } == body["run_activity"]["latest_batch"]
     action_ids = {item["id"] for item in body["next_actions"]}
-    assert {"create_batch", "repair_provider"} <= action_ids
+    assert {"configure_execution", "repair_provider"} <= action_ids
+    assert "create_batch" not in action_ids
     assert "start_worker" not in action_ids
 
 
@@ -673,5 +676,42 @@ async def test_overview_marks_operator_prerequisites_separately(
     ]
     assert {action["id"] for action in operator_actions} == {
         "publish_benchmarks",
-        "start_worker",
+        "configure_execution",
     }
+
+
+@pytest.mark.parametrize("fresh,nodes,blockers,expected", [
+    (True, 1, [], "observed"),
+    (True, 0, [], "observed"),
+    (False, 0, ["execution_capacity_observation_stale"], "unknown"),
+    (True, 0, ["execution_capacity_provider_quota_nodes_exceeded"], "needs_attention"),
+])
+async def test_overview_native_submission_does_not_require_legacy_workers(
+    overview_setup, monkeypatch, fresh: bool, nodes: int, blockers: list[str], expected: str,
+) -> None:
+    app, _team_id, _batch_id = overview_setup
+    monkeypatch.setattr(overview_route, "get_active_worker_count", AsyncMock(return_value=0))
+    monkeypatch.setattr(overview_route, "get_active_backends", AsyncMock(return_value=set()))
+    monkeypatch.setattr(overview_route, "fetch_execution_capacity_status", AsyncMock(return_value={
+        "targets": [{
+            "desired_state": "active", "policy": {"enabled": True},
+            "observation": {"is_fresh": fresh, "active_nodes": nodes},
+            "blockers": blockers,
+        }, {
+            "desired_state": "disabled", "policy": {"enabled": True},
+            "observation": None, "blockers": ["execution_capacity_target_not_active"],
+        }],
+    }), raising=False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://svc") as ac:
+        await _login(ac)
+        response = await ac.get("/api/v1/overview")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["execution_health"] == {
+        "configured_targets": 1, "status": expected,
+    }
+    actions = {item["id"] for item in body["next_actions"]}
+    assert "create_batch" in actions
+    assert "start_worker" not in actions
+    assert ("inspect_execution" in actions) is (expected != "observed")

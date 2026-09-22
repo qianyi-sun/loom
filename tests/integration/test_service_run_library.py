@@ -2501,3 +2501,30 @@ async def test_reuse_shared_artifact_creates_provenance_and_blocks_raw(
         assert row.required_worker_pools == []
         assert row.expected_trial_count == 1
     sync_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_library_costs_match_batch_accounting_without_inventing_zero(run_library_setup):
+    setup = run_library_setup
+    engine = create_engine(str(setup["postgres_url"]))
+    with engine.begin() as conn:
+        conn.execute(insert(LlmCall).values(
+            id=uuid4(), team_id=setup["team_a"], trial_id=setup["trial_shared"],
+            step_id="main", model="openai/test", dialect="openai",
+            input_tokens=10, output_tokens=5, provider_extras={},
+            cost_usd=Decimal("0"), rate_card_hash="facade:tokens-only:test",
+        ))
+    engine.dispose()
+    headers = {"Authorization": f"Bearer {setup['raw_a']}"}
+    batch_id = str(setup["batch_shared"])
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=setup["app"]), base_url="http://svc") as client:
+        listing = await client.get("/api/v1/run-library/batches?scope=my", headers=headers)
+        detail = await client.get(f"/api/v1/run-library/batches/{batch_id}", headers=headers)
+        batch = await client.get(f"/api/v1/batches/{batch_id}", headers=headers)
+    assert listing.status_code == detail.status_code == batch.status_code == 200
+    item = next(row for row in listing.json()["items"] if row["id"] == batch_id)
+    for row in (item, detail.json(), batch.json()):
+        assert row["estimated_cost_usd"] is None
+        assert row["cost_status"] == "not_applicable"
+        assert row["cost_estimate_source"] == "tokens-only"
+        assert row["llm_calls_count"] == 1

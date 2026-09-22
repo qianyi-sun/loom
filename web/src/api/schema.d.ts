@@ -869,12 +869,12 @@ export interface components {
           blockers: string[];
           resource_profile: {
             forecast_is_fresh: boolean;
-            observed_fit_slots: number;
-            immediate_executable_slots: number;
-            configured_additional_nodes: number;
-            configured_slots_per_node: number;
-            configured_scale_headroom_slots: number;
-            configured_total_fit_slots: number;
+            observed_fit_slots: number | null;
+            immediate_executable_slots: number | null;
+            configured_additional_nodes: number | null;
+            configured_slots_per_node: number | null;
+            configured_scale_headroom_slots: number | null;
+            configured_total_fit_slots: number | null;
             blockers: string[];
           } | null;
         }[];
@@ -1052,7 +1052,7 @@ export interface components {
       artifacts: {
         step_name?: string;
         key: string;
-        size: number;
+        size: number | null;
         sha256?: string | null;
         media_type?: string | null;
         download_url: string;
