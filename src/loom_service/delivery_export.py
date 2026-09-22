@@ -48,6 +48,7 @@ from loom_service.delivery_export_tb2_v2 import (
 )
 
 SELECTION_RULE = "highest_priority_deliverable_by_task_sample_combination"
+EXPLICIT_TRIAL_IDS_SELECTION_RULE = "explicit_trial_ids"
 SCHEMA_VERSION = "1"
 TERMINAL_BATCH_STATES = {"finished", "cancelled"}
 PAYLOAD_CHECKSUMS_FILE = "checksums/SHA256SUMS"
@@ -702,12 +703,7 @@ def _select_trials(
             key = _trial_coordinate(trial)
             if key in all_by_key:
                 all_by_key[key].append(trial)
-            if key not in main_keys or not (
-                str(trial.state) == "succeeded"
-                or is_scored_agent_timeout(
-                    state=str(trial.state), result=trial.result, failure_reason=trial.failure_reason
-                )
-            ):
+            if key not in main_keys or not _is_delivery_eligible(trial):
                 continue
             priority = priority_by_batch[batch.id]
             current = selected_by_key.get(key)
@@ -718,23 +714,11 @@ def _select_trials(
                 trial_submitted = trial.submitted_at or datetime.min.replace(tzinfo=UTC)
                 if (trial_submitted, str(trial.id)) <= (current_submitted, str(current.trial.id)):
                     continue
-            reward = _extract_reward(trial.result)
-            selected_by_key[key] = SelectedTrial(
+            selected_by_key[key] = _selected_trial_for(
                 trial=trial,
                 batch=batch,
                 priority=priority,
-                selection_source="main" if batch.id == main.id else "supplemental",
-                trajectory=_object_ref_for_trial(
-                    trial,
-                    kind="trajectory",
-                    trajectories_bucket=trajectories_bucket,
-                ),
-                atif=_object_ref_for_trial(
-                    trial,
-                    kind="atif",
-                    trajectories_bucket=trajectories_bucket,
-                ),
-                reward=reward,
+                trajectories_bucket=trajectories_bucket,
             )
 
     for key in sorted(main_keys):
@@ -763,6 +747,45 @@ def _select_trials(
         selected_by_key[key]
         for key in sorted(selected_by_key, key=lambda item: (item[0], item[1], item[2]))
     ]
+    _assert_selected_terminal_consistency(selected)
+    return selected
+
+
+def _is_delivery_eligible(trial: Trial) -> bool:
+    return str(trial.state) == "succeeded" or is_scored_agent_timeout(
+        state=str(trial.state),
+        result=trial.result,
+        failure_reason=trial.failure_reason,
+    )
+
+
+def _selected_trial_for(
+    *,
+    trial: Trial,
+    batch: Batch,
+    priority: int,
+    trajectories_bucket: str,
+) -> SelectedTrial:
+    return SelectedTrial(
+        trial=trial,
+        batch=batch,
+        priority=priority,
+        selection_source="main" if priority == 0 else "supplemental",
+        trajectory=_object_ref_for_trial(
+            trial,
+            kind="trajectory",
+            trajectories_bucket=trajectories_bucket,
+        ),
+        atif=_object_ref_for_trial(
+            trial,
+            kind="atif",
+            trajectories_bucket=trajectories_bucket,
+        ),
+        reward=_extract_reward(trial.result),
+    )
+
+
+def _assert_selected_terminal_consistency(selected: list[SelectedTrial]) -> None:
     inconsistent: list[dict[str, Any]] = []
     for item in selected:
         trial = item.trial
@@ -790,7 +813,106 @@ def _select_trials(
                 "inconsistent_trials": inconsistent,
             }
         )
-    return selected
+
+
+def _select_trials_by_ids(
+    *,
+    main: Batch,
+    supplements: list[Batch],
+    trials_by_batch: dict[UUID, list[Trial]],
+    trial_ids: list[UUID],
+    trajectories_bucket: str,
+) -> tuple[list[SelectedTrial], dict[str, Any]]:
+    """Select explicit trial IDs from the authorized batch family.
+
+    Sibling main coordinates need not resolve. Selected trials must still be
+    delivery-eligible and terminal-consistent.
+    """
+    if not trial_ids:
+        raise InvalidDeliveryBatchFamilyError(
+            {
+                "message": "selection.trial_ids must be a non-empty list when provided",
+            }
+        )
+    if len(set(trial_ids)) != len(trial_ids):
+        raise InvalidDeliveryBatchFamilyError(
+            {
+                "message": "selection.trial_ids must not contain duplicates",
+            }
+        )
+
+    batches = [main, *supplements]
+    batch_by_id = {batch.id: batch for batch in batches}
+    priority_by_batch = {batch.id: index for index, batch in enumerate(batches)}
+    trials_by_id: dict[UUID, Trial] = {}
+    for batch in batches:
+        for trial in trials_by_batch.get(batch.id, []):
+            trials_by_id[trial.id] = trial
+
+    missing = [str(trial_id) for trial_id in trial_ids if trial_id not in trials_by_id]
+    if missing:
+        raise InvalidDeliveryBatchFamilyError(
+            {
+                "message": "selected trial ids are not in the authorized batch family",
+                "unknown_trial_ids": missing,
+            }
+        )
+
+    ineligible: list[dict[str, Any]] = []
+    selected: list[SelectedTrial] = []
+    for trial_id in trial_ids:
+        trial = trials_by_id[trial_id]
+        batch = batch_by_id[trial.batch_id]
+        if not _is_delivery_eligible(trial):
+            ineligible.append(
+                {
+                    "trial_id": str(trial.id),
+                    "batch_id": str(batch.id),
+                    "task_id": trial.task_id,
+                    "sample_idx": int(trial.sample_idx),
+                    "combination_idx": int(trial.combination_idx),
+                    "state": str(trial.state),
+                    "failure_reason": trial.failure_reason,
+                }
+            )
+            continue
+        selected.append(
+            _selected_trial_for(
+                trial=trial,
+                batch=batch,
+                priority=priority_by_batch[batch.id],
+                trajectories_bucket=trajectories_bucket,
+            )
+        )
+    if ineligible:
+        raise UnresolvedDeliveryTrialsError(
+            {
+                "message": (
+                    "explicitly selected trials are not eligible for delivery export"
+                ),
+                "ineligible_trials": ineligible,
+            }
+        )
+    _assert_selected_terminal_consistency(selected)
+
+    main_keys = {_trial_coordinate(trial) for trial in trials_by_batch.get(main.id, [])}
+    selected_keys = {_trial_coordinate(item.trial) for item in selected}
+    skipped_coordinates = [
+        {
+            "task_id": key[0],
+            "sample_idx": key[1],
+            "combination_idx": key[2],
+        }
+        for key in sorted(main_keys - selected_keys)
+    ]
+    selection_meta = {
+        "selection_rule": EXPLICIT_TRIAL_IDS_SELECTION_RULE,
+        "requested_trial_ids": [str(trial_id) for trial_id in trial_ids],
+        "selected_trial_ids": [str(item.trial.id) for item in selected],
+        "skipped_coordinates_count": len(skipped_coordinates),
+        "skipped_coordinates": skipped_coordinates,
+    }
+    return selected, selection_meta
 
 
 def _head_delivery_objects(
@@ -1083,6 +1205,7 @@ def _summary(
     object_validation: dict[str, Any],
     mode: DeliveryExportMode = "lightweight",
     extra_object_counts: dict[str, int] | None = None,
+    selection_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     provider, model = _model_info(main)
     reward_distribution: dict[str, int] = {}
@@ -1098,11 +1221,16 @@ def _summary(
     }
     if extra_object_counts:
         object_counts.update(extra_object_counts)
+    selection_rule = (
+        str(selection_meta["selection_rule"])
+        if selection_meta and selection_meta.get("selection_rule")
+        else SELECTION_RULE
+    )
     summary = {
         "schema_version": SCHEMA_VERSION,
         "status": "ready",
         "mode": mode,
-        "selection_rule": SELECTION_RULE,
+        "selection_rule": selection_rule,
         "batch_family": {
             "main_batch_id": str(main.id),
             "supplemental_batch_ids": [str(batch.id) for batch in supplements],
@@ -1117,6 +1245,16 @@ def _summary(
         "object_validation": object_validation,
         "created_at": datetime.now(UTC).isoformat(),
     }
+    if selection_meta is not None:
+        summary["selection"] = {
+            "rule": selection_rule,
+            "requested_trial_ids": list(selection_meta.get("requested_trial_ids") or []),
+            "selected_trial_ids": list(selection_meta.get("selected_trial_ids") or []),
+            "skipped_coordinates_count": int(
+                selection_meta.get("skipped_coordinates_count") or 0
+            ),
+            "skipped_coordinates": list(selection_meta.get("skipped_coordinates") or []),
+        }
     if _is_raw_harbor_mode(mode):
         summary["layout"] = _raw_harbor_layout()
     if _is_tb2_v1_profile(mode):
@@ -2495,6 +2633,7 @@ async def create_delivery_export(
     main_batch_id: UUID,
     supplemental_batch_ids: list[UUID] | None,
     mode: DeliveryExportMode = "lightweight",
+    trial_ids: list[UUID] | None = None,
     public_base_url: str | None = None,
 ) -> dict[str, Any]:
     main, supplements = await _load_batch_family(session, main_batch_id, supplemental_batch_ids)
@@ -2505,12 +2644,22 @@ async def create_delivery_export(
     )
     batch_ids = [main.id, *[batch.id for batch in supplements]]
     trials_by_batch = await _trials_for_batches(session, batch_ids)
-    selected = _select_trials(
-        main=main,
-        supplements=supplements,
-        trials_by_batch=trials_by_batch,
-        trajectories_bucket=settings.trajectories_bucket,
-    )
+    selection_meta: dict[str, Any] | None = None
+    if trial_ids is not None:
+        selected, selection_meta = _select_trials_by_ids(
+            main=main,
+            supplements=supplements,
+            trials_by_batch=trials_by_batch,
+            trial_ids=trial_ids,
+            trajectories_bucket=settings.trajectories_bucket,
+        )
+    else:
+        selected = _select_trials(
+            main=main,
+            supplements=supplements,
+            trials_by_batch=trials_by_batch,
+            trajectories_bucket=settings.trajectories_bucket,
+        )
     canonical_bundles = await _canonical_bundles_for_selected(session, selected)
     # Scored deadlines are native attempts. Their reward alone is insufficient:
     # require the committed canonical bundle before exporting their evidence.
@@ -2566,6 +2715,7 @@ async def create_delivery_export(
         object_validation=object_validation,
         mode=mode,
         extra_object_counts=extra_object_counts,
+        selection_meta=selection_meta,
     )
     archive_manifest = dict(summary)
     archive_manifest["payload_checksums"] = {
@@ -2675,9 +2825,25 @@ async def create_delivery_export(
         retention={"policy": "keep_forever", "reason": "delivery_export"},
         provenance={
             "relation": "delivery_export",
-            "selection_rule": SELECTION_RULE,
+            "selection_rule": (
+                selection_meta["selection_rule"]
+                if selection_meta is not None
+                else SELECTION_RULE
+            ),
             "source_batch_ids": source_batch_ids,
             "selected_trial_ids": [str(item.trial.id) for item in selected],
+            **(
+                {
+                    "requested_trial_ids": list(
+                        selection_meta.get("requested_trial_ids") or []
+                    ),
+                    "skipped_coordinates_count": int(
+                        selection_meta.get("skipped_coordinates_count") or 0
+                    ),
+                }
+                if selection_meta is not None
+                else {}
+            ),
         },
         artifact_metadata={
             "delivery_export": {

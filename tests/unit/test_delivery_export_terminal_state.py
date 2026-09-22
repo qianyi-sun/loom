@@ -151,3 +151,97 @@ def test_clean_supplement_supersedes_dirty_historical_main_candidate() -> None:
         trajectories_bucket="trajectories",
     )
     assert [item.trial.id for item in selected] == [clean.id]
+
+
+def test_explicit_trial_ids_skip_unresolved_sibling_coordinates() -> None:
+    team_id = uuid4()
+    main_id = uuid4()
+
+    def trial(
+        *,
+        trial_id: UUID,
+        task_id: str,
+        state: str = "succeeded",
+        failure_reason: str | None = None,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=trial_id,
+            team_id=team_id,
+            batch_id=main_id,
+            task_id=task_id,
+            sample_idx=0,
+            combination_idx=0,
+            state=state,
+            submitted_at=datetime.now(UTC),
+            result={"aggregate_reward": 1.0} if state == "succeeded" else None,
+            failure_reason=failure_reason,
+            config={},
+            trajectory_index={},
+        )
+
+    ok_a = trial(trial_id=uuid4(), task_id="task-a")
+    ok_b = trial(trial_id=uuid4(), task_id="task-b")
+    failed = trial(
+        trial_id=uuid4(),
+        task_id="task-c",
+        state="failed",
+        failure_reason="task_image_build_failed",
+    )
+    from loom_service.delivery_export import _select_trials_by_ids
+
+    selected, meta = _select_trials_by_ids(
+        main=cast(Any, SimpleNamespace(id=main_id)),
+        supplements=[],
+        trials_by_batch={main_id: [ok_a, ok_b, failed]},
+        trial_ids=[ok_a.id, ok_b.id],
+        trajectories_bucket="trajectories",
+    )
+    assert [item.trial.id for item in selected] == [ok_a.id, ok_b.id]
+    assert meta["selection_rule"] == "explicit_trial_ids"
+    assert meta["skipped_coordinates_count"] == 1
+    assert meta["skipped_coordinates"] == [
+        {"task_id": "task-c", "sample_idx": 0, "combination_idx": 0}
+    ]
+
+
+def test_explicit_trial_ids_reject_unknown_and_ineligible() -> None:
+    from loom_service.delivery_export import (
+        InvalidDeliveryBatchFamilyError,
+        UnresolvedDeliveryTrialsError,
+        _select_trials_by_ids,
+    )
+
+    team_id = uuid4()
+    main_id = uuid4()
+    failed = SimpleNamespace(
+        id=uuid4(),
+        team_id=team_id,
+        batch_id=main_id,
+        task_id="task-a",
+        sample_idx=0,
+        combination_idx=0,
+        state="failed",
+        submitted_at=datetime.now(UTC),
+        result=None,
+        failure_reason="gateway_error",
+        config={},
+        trajectory_index={},
+    )
+    with pytest.raises(InvalidDeliveryBatchFamilyError) as unknown:
+        _select_trials_by_ids(
+            main=cast(Any, SimpleNamespace(id=main_id)),
+            supplements=[],
+            trials_by_batch={main_id: [failed]},
+            trial_ids=[uuid4()],
+            trajectories_bucket="trajectories",
+        )
+    assert "unknown_trial_ids" in unknown.value.detail
+    with pytest.raises(UnresolvedDeliveryTrialsError) as ineligible:
+        _select_trials_by_ids(
+            main=cast(Any, SimpleNamespace(id=main_id)),
+            supplements=[],
+            trials_by_batch={main_id: [failed]},
+            trial_ids=[failed.id],
+            trajectories_bucket="trajectories",
+        )
+    assert ineligible.value.detail["ineligible_trials"][0]["trial_id"] == str(failed.id)
