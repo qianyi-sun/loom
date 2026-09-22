@@ -141,7 +141,7 @@ async def test_owner_creates_lists_and_revokes_invite_without_revealing_code(
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport,
-        base_url="http://svc",
+        base_url="https://loom.example.com",
     ) as ac:
         _body, csrf = await _login(ac)
         created = await ac.post(
@@ -207,7 +207,7 @@ async def test_admin_cannot_invite_users_to_the_system_canary_team(
     assert system_team.name == TASKSET_FENCE_CANARY_TEAM_NAME
 
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+    async with httpx.AsyncClient(transport=transport, base_url="https://loom.example.com") as ac:
         response = await ac.post(
             "/api/v1/invites",
             headers=_admin_headers(),
@@ -229,7 +229,7 @@ async def test_resend_rotates_invite_code_and_old_code_fails(
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport,
-        base_url="http://svc",
+        base_url="https://loom.example.com",
     ) as ac:
         _body, csrf = await _login(ac)
         created = await ac.post(
@@ -257,7 +257,7 @@ async def test_resend_rotates_invite_code_and_old_code_fails(
 
     async with httpx.AsyncClient(
         transport=transport,
-        base_url="http://svc",
+        base_url="https://loom.example.com",
     ) as accept_client:
         old_accept = await accept_client.post(
             "/api/v1/invites/accept",
@@ -282,7 +282,7 @@ async def test_accept_invite_creates_user_membership_session_and_safe_audit(
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport,
-        base_url="http://svc",
+        base_url="https://loom.example.com",
     ) as ac:
         created = await ac.post(
             "/api/v1/invites",
@@ -318,7 +318,7 @@ async def test_accept_invite_creates_user_membership_session_and_safe_audit(
     assert accepted_body["user"]["email"] == "beta@example.com"
     assert accepted_body["current_team"]["id"] == str(team_a)
     assert accepted_body["current_team"]["role"] == "member"
-    assert "loom_session" in ac.cookies
+    assert "__Host-loom_session" in ac.cookies
     assert me.status_code == 200, me.text
     assert me.json()["user"]["email"] == "beta@example.com"
     assert duplicate.status_code == 409, duplicate.text
@@ -343,7 +343,7 @@ async def test_invite_acceptance_denies_expired_and_wrong_email_without_leaks(
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport,
-        base_url="http://svc",
+        base_url="https://loom.example.com",
     ) as ac:
         created = await ac.post(
             "/api/v1/invites",
@@ -377,7 +377,7 @@ async def test_invite_acceptance_denies_expired_and_wrong_email_without_leaks(
 
     async with httpx.AsyncClient(
         transport=transport,
-        base_url="http://svc",
+        base_url="https://loom.example.com",
     ) as ac:
         expired = await ac.post(
             "/api/v1/invites/accept",
@@ -399,7 +399,7 @@ async def test_domain_invite_allows_matching_email_domain_only(
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport,
-        base_url="http://svc",
+        base_url="https://loom.example.com",
     ) as ac:
         created = await ac.post(
             "/api/v1/invites",

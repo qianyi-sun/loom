@@ -76,7 +76,9 @@ revokes the session and clears the authentication cookies. Bearer-token
 requests do not use the browser-session CSRF check.
 
 Hosted unsafe browser requests must also match the canonical `public_base_url`
-origin. Sibling-host, null and malformed origins are rejected, including before
+origin (or the supported `LOOM_PUBLIC_BASE_URL` fallback when unset). Links,
+cookie HTTPS policy and origin checks share that same precedence. Sibling-host,
+null and malformed origins are rejected, including before
 unauthenticated login. When Origin is absent, cross-site/same-site Fetch Metadata
 is rejected; non-browser clients without either header retain normal auth/CSRF
 requirements. This is an origin check, not a wildcard CORS allowance. Configure
@@ -90,7 +92,8 @@ host scoping for production, an HTTPS `public_base_url`, or a `__Host-` name.
 
 The CLI stores its current session cookie and CSRF token in the selected Loom
 profile, including the issued cookie name. It understands both legacy and hosted
-cookies, rejects invalid hosted cookie attributes and name downgrades, and bounds
+cookies, promotes validated rotations before the next request, rejects invalid
+hosted cookie attributes and name downgrades, and bounds
 session requests and redirects to the authenticated origin. Changing `server_url`
 with `loom config set` clears the old environment's login credentials. These
 values are credentials and must not be printed or committed. Internal trial

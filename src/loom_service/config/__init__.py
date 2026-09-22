@@ -9,11 +9,13 @@ from __future__ import annotations
 import os
 from functools import cached_property
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import computed_field
 
 from loom.workload_trust import WorkloadTrustContract
 from loom_service.config._generated import LoomServiceSettings as _BaseSettings
+from loom_service.public_links import configured_public_base_url
 
 
 class LoomServiceSettings(_BaseSettings):
@@ -22,11 +24,12 @@ class LoomServiceSettings(_BaseSettings):
     @property
     def hosted_session_cookie(self) -> bool:
         """Secure by default; local HTTP must be explicitly selected."""
+        public_url = configured_public_base_url(self.public_base_url)
         return (
             not self.auth_local_http
             or self.auth_session_cookie_name.startswith("__Host-")
             or os.environ.get("LOOM_ENV", "").lower() == "production"
-            or (self.public_base_url is not None and self.public_base_url.scheme == "https")
+            or (public_url is not None and urlsplit(public_url).scheme == "https")
         )
 
     @property

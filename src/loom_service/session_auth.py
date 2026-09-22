@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loom.auth import AuthContext, role_scopes
 from loom.db.schema import LoginChallenge, Team, TeamMembership, User, UserSession
 from loom_service.config import LoomServiceSettings
+from loom_service.public_links import configured_public_base_url
 
 SessionSecretPrefix = Literal["loom_session", "loom_session_staging_admin"]
 
@@ -98,13 +99,14 @@ def browser_origin_allowed(request: Request, settings: LoomServiceSettings) -> b
         return False
     try:
         supplied = urlsplit(origin)
-        expected = urlsplit(str(settings.public_base_url or request.base_url))
+        expected = urlsplit(configured_public_base_url(settings.public_base_url) or str(request.base_url))
         if (supplied.scheme not in {"http", "https"} or not supplied.hostname
                 or supplied.username is not None or supplied.password is not None
                 or supplied.path or supplied.query or supplied.fragment):
             return False
         def identity(url: SplitResult) -> tuple[str, str | None, int]:
-            return url.scheme, url.hostname, url.port or (443 if url.scheme == "https" else 80)
+            port = url.port if url.port is not None else (443 if url.scheme == "https" else 80)
+            return url.scheme, url.hostname, port
         return identity(supplied) == identity(expected)
     except ValueError:
         return False

@@ -46,6 +46,15 @@ def _configured_public_base_url(request: Request) -> str | None:
     state = getattr(app, "state", None)
     settings = getattr(state, "settings", None)
     settings_base = getattr(settings, "public_base_url", None)
+    return configured_public_base_url(settings_base)
+
+
+def configured_public_base_url(settings_base: object = None) -> str | None:
+    """One configuration precedence for links and hosted authentication.
+
+    Unlike public_base_url this never accepts forwarded request headers.
+    LOOM_PUBLIC_BASE_URL remains a supported operator-configured fallback.
+    """
     candidates = (
         str(settings_base) if settings_base else None,
         os.environ.get("LOOM_PUBLIC_BASE_URL"),
