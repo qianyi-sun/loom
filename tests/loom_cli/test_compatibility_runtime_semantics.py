@@ -151,3 +151,18 @@ def test_schema_only_report_does_not_apply_runtime_overrides(tmp_path, capsys):
 
     assert rc == 0
     assert payload["compatibility_report"]["tasks"][0]["status"] == "schema_valid"
+
+
+def test_prepared_input_still_reports_the_original_user_override(tmp_path, capsys):
+    bundle = _write_bundle(tmp_path, "prepared", dockerfile="environment/Dockerfile.loom-nebius")
+    original = "FROM ubuntu:24.04\nUSER root\n"
+    (bundle / "environment/Dockerfile").write_text(original)
+    (bundle / "environment/Dockerfile.loom-nebius").write_text(original + "USER 65532:65532\n")
+
+    rc, payload = _report(tmp_path, capsys)
+
+    assert rc == 1
+    report = payload["compatibility_report"]["tasks"][0]
+    assert report["admission_passed"] is True
+    diagnostic = next(item for item in report["diagnostics"] if item["code"] == "dockerfile_user_overridden")
+    assert diagnostic["source_location"] == f"{bundle}/environment/Dockerfile:2"
