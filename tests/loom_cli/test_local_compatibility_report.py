@@ -153,3 +153,78 @@ def test_report_includes_raw_harbor_missing_identity_without_losing_next_task(
     assert reports[0]["status"] == "blocked"
     assert "task.id" in reports[0]["diagnostics"][0]["reason"]
     assert reports[1]["status"] == "schema_valid"
+
+
+def test_missing_copy_sources_are_package_defects_without_creating_directories(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    bundle = _write_bundle(tmp_path, "copy-input")
+    (bundle / "environment/Dockerfile").write_text(
+        'FROM ubuntu:24.04\nCOPY ./task_file /app/task_file\n'
+        'COPY --chown=65532:65532 ["missing.json", "/app/data.json"]\n'
+    )
+
+    rc, payload = _report(tmp_path, capsys, profile=False)
+
+    assert rc == 1
+    report = payload["compatibility_report"]["tasks"][0]
+    assert report["status"] == "blocked"
+    diagnostics = report["diagnostics"]
+    assert [row["code"] for row in diagnostics] == ["missing_copy_source", "missing_copy_source"]
+    assert diagnostics[0]["source_location"].endswith("environment/Dockerfile:2")
+    assert "task_file" in diagnostics[0]["reason"]
+    assert diagnostics[1]["source_location"].endswith("environment/Dockerfile:3")
+    assert not (bundle / "environment/task_file").exists()
+
+
+def test_copy_report_uses_build_context_and_ignores_heredoc_and_stage_sources(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    bundle = _write_bundle(tmp_path, "copy-input")
+    (bundle / "environment/actual.txt").write_text("data\n")
+    (bundle / "environment/Dockerfile").write_text(
+        "FROM ubuntu:24.04 AS builder\n"
+        "RUN <<'SCRIPT'\nCOPY fictional /heredoc/content\nSCRIPT\n"
+        "FROM ubuntu:24.04\n"
+        "COPY --from=builder /generated /app/generated\n"
+        "COPY *.txt /app/\n"
+        "COPY <<'CONTENT' /app/file\ninline contents\nCONTENT\n"
+    )
+
+    rc, payload = _report(tmp_path, capsys, profile=False)
+
+    assert rc == 0
+    assert payload["compatibility_report"]["tasks"][0]["diagnostics"] == []
+
+
+def test_unknown_config_type_still_emits_a_complete_json_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    bundle = _write_bundle(tmp_path, "wrong-type")
+    (bundle / "task.toml").write_text(
+        '[task]\nid = "date"\nname = "date"\n'
+        '[environment]\nos = 2026-09-22\n'
+        '[agent]\nname = "oracle"\n[verifier]\nname = "script"\n'
+    )
+    _write_bundle(tmp_path, "valid")
+
+    rc, payload = _report(tmp_path, capsys, profile=False)
+
+    assert rc == 1
+    assert len(payload["compatibility_report"]["tasks"]) == 2
+    assert payload["compatibility_report"]["tasks"][1]["status"] == "blocked"
+
+
+def test_custom_verifier_entrypoint_is_not_reported_as_equivalent_conversion(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    bundle = _write_bundle(tmp_path, "custom-verifier")
+    config_path = bundle / "task.toml"
+    config_path.write_text(config_path.read_text().replace('script_path = "verifier/run.sh"', 'script_path = "private/check.sh"'))
+
+    rc, payload = _report(tmp_path, capsys)
+
+    assert rc == 1
+    report = payload["compatibility_report"]["tasks"][0]
+    assert report["admission_passed"] is True
+    assert any(diagnostic["code"] == "verifier_entrypoint_changed" for diagnostic in report["diagnostics"])
