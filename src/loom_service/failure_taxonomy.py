@@ -20,6 +20,7 @@ _ACTIVE_TRIAL_STATES = {
     "claimed",
     "running",
     "submitted",
+    "materializing",
 }
 
 _AUTO_SAFE_REASONS: frozenset[str] = frozenset(
@@ -194,19 +195,19 @@ def classify_trial_outcome(trial: Any) -> dict[str, Any]:
         )
 
     if state in _ACTIVE_TRIAL_STATES:
+        # State alone cannot establish staleness. Reclaim/deadline evidence is
+        # owned by stale-running diagnostics and the lifecycle controller.
         return _common(
             reason_code=f"trial.{state}",
             reason=None,
-            failure_class="lifecycle_failure",
-            root_cause="stale_lifecycle",
+            failure_class="active",
+            root_cause="none",
             platform_outcome="active",
             score_outcome="unscored",
-            rerun_recommendation="operator_approval",
-            message=message,
-            category="lifecycle",
-            attribution="platform",
-            rerunnable=True,
-            requires_operator_approval=True,
+            rerun_recommendation="wait",
+            message=None,
+            category="active",
+            attribution="pending",
         )
 
     if reason is not None and reason in _TASK_FAILURE_REASONS:
@@ -407,6 +408,7 @@ def is_auto_safe_rerun(trial: Any) -> bool:
 def is_replaceable_by_successful_supplemental(trial: Any) -> bool:
     classification = classify_trial_outcome(trial)
     return classification["failure_class"] not in {
+        "active",
         "platform_success",
         "score_failure",
         "task_failure",
@@ -569,7 +571,7 @@ def classification_counts(trials: Sequence[Any]) -> dict[str, int]:
     counts = Counter(
         cast(str, classify_trial_outcome(trial)["failure_class"])
         for trial in trials
-        if classify_trial_outcome(trial)["failure_class"] != "platform_success"
+        if classify_trial_outcome(trial)["failure_class"] not in {"platform_success", "active"}
     )
     return dict(sorted(counts.items()))
 
@@ -581,6 +583,7 @@ def rerun_recommendation_counts(trials: Sequence[Any]) -> dict[str, int]:
         if classify_trial_outcome(trial)["rerun_recommendation"] not in {
             "not_needed",
             "inspect",
+            "wait",
         }
     )
     return dict(sorted(counts.items()))

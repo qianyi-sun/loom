@@ -9,7 +9,9 @@ import pytest
 
 from loom_service.failure_taxonomy import (
     build_supplemental_rerun_plan,
+    classification_counts,
     classify_trial_outcome,
+    rerun_recommendation_counts,
 )
 
 
@@ -397,7 +399,11 @@ def test_5003_manual_classification_fixture_replays() -> None:
         for item in rows
     }
 
-    assert actual == {item["task_id"]: item["manual_failure_class"] for item in rows}
+    # The historical annotation called a claimed row stale, but the stored
+    # state alone supplies no deadline/heartbeat evidence for that conclusion.
+    expected = {item["task_id"]: item["manual_failure_class"] for item in rows}
+    expected["source-useful-5003/main/stale-claimed"] = "active"
+    assert actual == expected
 
 
 def test_5003_production_supplemental_targets_replay() -> None:
@@ -448,3 +454,26 @@ def test_5003_production_supplemental_targets_replay() -> None:
         "already_covered": 0,
         "selected_final_trials": 32,
     }
+
+
+@pytest.mark.parametrize("state", ["queued", "protected-pending", "claimed", "running", "submitted", "materializing"])
+def test_active_work_is_not_a_failure_or_supplemental_target(state: str) -> None:
+    active = _trial(task_id="local/active", state=state)
+    failed = _trial(task_id="local/failed", state="failed", failure_reason="agent_timeout")
+    classification = classify_trial_outcome(active)
+    assert classification["platform_outcome"] == "active"
+    assert classification["failure_class"] == "active"
+    assert classification["root_cause"] == "none"
+    assert classification["attribution"] == "pending"
+    assert classification["rerunnable"] is False
+    assert classification_counts([active, failed]) == {"agent_failure": 1}
+    assert rerun_recommendation_counts([active]) == {}
+    plan = build_supplemental_rerun_plan(
+        SimpleNamespace(id=uuid4()), [active, failed], include_operator_approval=True,
+    )
+    assert plan["supplemental_task_ids"] == ["local/failed"]
+    replacement = _trial(task_id="local/active", state="succeeded", result={"aggregate_reward": 1})
+    plan = build_supplemental_rerun_plan(
+        SimpleNamespace(id=uuid4()), [active], supplemental_trials=[replacement],
+    )
+    assert plan["final_trial_selection"][0]["selected_trial_id"] == str(active.id)

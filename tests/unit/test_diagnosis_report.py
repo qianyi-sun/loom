@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from loom_service.diagnosis import build_batch_diagnosis, build_trial_diagnosis
+from loom_service.failure_taxonomy import classify_trial_outcome
 
 
 def test_trial_gateway_error_diagnosis_is_human_readable_and_redacted() -> None:
@@ -266,3 +268,23 @@ def test_batch_diagnosis_handles_fanout_failure_without_child_trials() -> None:
         "label": "Inspect batch fan-out errors",
         "kind": "manual",
     } in report["next_actions"]
+
+
+@pytest.mark.parametrize("state", ["running", "materializing"])
+def test_active_trial_diagnosis_reports_pending_outcome(state: str) -> None:
+    classification = classify_trial_outcome(SimpleNamespace(state=state))
+    report = build_trial_diagnosis({
+        "entity": {"type": "trial", "id": "active-trial"},
+        "lifecycle": {"state": state},
+        "failure": classification,
+        "provider": {"llm_calls_count": 1},
+    })
+    assert "still active" in report["summary"]
+    assert "ended" not in report["summary"]
+    assert "pending" in report["impact"]
+    assert report["primary_cause"]["attribution"] == "pending"
+    assert report["primary_cause"]["affected_trials"] == 0
+    assert report["reason_clusters"] == []
+    assert report["next_actions"] == [{
+        "label": "Follow task progress and live trajectory events.", "kind": "manual",
+    }]
