@@ -330,3 +330,17 @@ def test_apt_cleanup_does_not_hide_arbitrary_task_commands(suffix):
     with pytest.raises(ValueError, match="unsupported apt bootstrap"):
         adapt_harbor_test_script(SCRIPT.replace("apt-get install -y curl primer3", 
                                                "apt-get install -y curl primer3" + suffix))
+
+
+def test_uvx_without_python_pin_uses_base_interpreter_in_isolated_venv(tmp_path):
+    environment = bundle(tmp_path)
+    script = SCRIPT.replace('  -p 3.13 \\\n', '')
+    (tmp_path / "tests/test.sh").write_text(script)
+    result = adapt_harbor_test_script(script)
+    assert result.python_version is None
+    prepare_nebius_terminus_image(tmp_path, environment)
+    derived = (tmp_path / environment["dockerfile"]).read_text()
+    assert '--python "$(command -v python3)" /opt/verifier' in derived
+    assert "--system-site-packages" not in derived
+    assert "/opt/verifier/bin/pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA" in result.script
+    assert result.script.endswith(script[script.index("if [ $? -eq 0 ]"):])
