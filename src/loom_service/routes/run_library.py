@@ -50,6 +50,10 @@ from loom_service.multi_model import apply_plan_mode
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.public_links import public_url_for
+from loom_service.routes.batches import (
+    _freeze_task_resource_requests,
+    _reject_if_backend_cannot_execute_or_cold_start,
+)
 from loom_service.routes.object_downloads import stream_object_response
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 from loom_service.task_config_validation import expected_trial_count
@@ -2139,6 +2143,37 @@ async def _resolve_new_batch_snapshot(
     return list(result.task_ids), list(result.benchmark_selection_provenance)
 
 
+async def _freeze_derived_runtime_profile(
+    request: Request,
+    session: AsyncSession,
+    *,
+    team_id: UUID,
+    backend: str,
+    task_ids: list[str],
+    trial_config: dict[str, Any],
+    combinations: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """A derived batch is a new submission under current deployment policy.
+
+    Resolve current harness releases and resource defaults through the ordinary
+    admission path; never copy a historical runtime snapshot into a new batch.
+    """
+    await validate_submission_agent_task_compatibility(
+        session, team_id=team_id, task_ids=task_ids,
+        combinations=combinations, trial_config=trial_config,
+    )
+    profile = await _reject_if_backend_cannot_execute_or_cold_start(
+        session, backend=backend, task_ids=task_ids,
+        trial_config=trial_config, combinations=combinations,
+        runtime_profile_json=request.app.state.settings.service_execution_runtime_profile_json,
+    )
+    profile = await _freeze_task_resource_requests(
+        session, backend=backend, task_ids=task_ids,
+        trial_config=trial_config, combinations=combinations, profile=profile, overrides={},
+    )
+    return profile.model_dump(mode="json") if profile is not None else None
+
+
 @router.post("/run-library/batches/{batch_id}/clone-config", status_code=201)
 async def clone_run_library_batch_config(
     request: Request,
@@ -2185,12 +2220,10 @@ async def clone_run_library_batch_config(
         team_id=ctx.team_id,
     )
     combinations = list(source.combinations or [])
-    await validate_submission_agent_task_compatibility(
-        session,
-        team_id=ctx.team_id,
-        task_ids=resolved_task_ids,
-        combinations=combinations,
-        trial_config=source.trial_config,
+    trial_config = apply_plan_mode(dict(source.trial_config), mode=payload.model_switch_plan_mode)
+    runtime_profile = await _freeze_derived_runtime_profile(
+        request, session, team_id=ctx.team_id, backend=source.backend,
+        task_ids=resolved_task_ids, combinations=combinations, trial_config=trial_config,
     )
     # #1109: user clone must not re-inject operator pool-coverage trials.
     required_worker_pools: list[str] = []
@@ -2226,10 +2259,8 @@ async def clone_run_library_batch_config(
         description=payload.description or (f"Cloned config from shared batch {source.id}."),
         task_filter=task_filter,
         resolved_task_ids=resolved_task_ids,
-        trial_config=apply_plan_mode(
-            dict(source.trial_config),
-            mode=payload.model_switch_plan_mode,
-        ),
+        trial_config=trial_config,
+        service_execution_runtime_profile=runtime_profile,
         state="submitted",
         created_by_token_prefix=token_prefix,
         submitted_by_user_id=ctx.user_id,
@@ -2320,6 +2351,7 @@ async def download_run_library_artifact(
 
 @router.post("/run-library/trials/{trial_id}/artifacts/reuse", status_code=201)
 async def reuse_run_library_artifact(
+    request: Request,
     sc: SessionAndCtx,
     trial_id: UUID,
     payload: _ReuseArtifactRequest,
@@ -2404,6 +2436,11 @@ async def reuse_run_library_artifact(
         team_id=ctx.team_id,
     )
     combinations = list(batch.combinations or []) if batch else []
+    backend = batch.backend if batch else "docker"
+    runtime_profile = await _freeze_derived_runtime_profile(
+        request, session, team_id=ctx.team_id, backend=backend,
+        task_ids=resolved_task_ids, combinations=combinations, trial_config=trial_config,
+    )
     # #1109: user artifact reuse must not re-inject operator pool-coverage.
     required_worker_pools: list[str] = []
     n_per_task = batch.n_per_task if batch else 1
@@ -2438,7 +2475,8 @@ async def reuse_run_library_artifact(
         usage_attributed_actor=(f"user:{ctx.user_id}" if ctx.user_id is not None else None),
         expected_trial_count=expected,
         n_per_task=n_per_task,
-        backend=batch.backend if batch else "docker",
+        backend=backend,
+        service_execution_runtime_profile=runtime_profile,
         combinations=combinations,
         required_worker_pools=required_worker_pools,
         provider_connection_id=payload.provider_connection_id,

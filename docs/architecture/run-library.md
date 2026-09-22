@@ -118,6 +118,15 @@ legacy artifact JSON still says `share_status = "shared"`.
   batch record in the caller's team that records the shared artifact as source
   provenance. Unsafe artifacts are denied before reuse.
 
+Both clone and reuse are new submissions: they validate the resolved tasks and
+harness selections against the **current deployment**, resolve current published
+harness runtimes, and freeze its runtime profile and resource policy before
+committing the batch. Explicit harness version selections still apply. Source
+runtime images and per-task resource overrides are not copied; the source batch,
+its history, and artifact provenance remain unchanged. Missing or incompatible
+runtime configuration rejects the request before a derived batch is created.
+Hosted submissions require Nebius, including clones and artifact reuse.
+
 ## SPA Behavior
 
 The top-level Run Library page provides:

@@ -20,7 +20,11 @@ from loom.models.trajectory import (
     Terminus2UserPromptEvent,
 )
 from loom.models.trial import TrialConfig
-from loom.service_execution_terminus_trace import reconcile_terminus_ledger, terminus_usage
+from loom.service_execution_terminus_trace import (
+    parse_terminus_events,
+    reconcile_terminus_ledger,
+    terminus_usage,
+)
 from loom.trajectory.llm_call_events import llm_call_row_to_event
 from loom_control_plane.service_execution_materializer import (
     build_canonical_atif,
@@ -115,8 +119,13 @@ def _case():
     )
 
 
-def test_truncated_request_counts_without_inventing_a_harbor_turn():
+@pytest.mark.parametrize("limited", [False, True])
+def test_truncated_request_counts_without_inventing_a_harbor_turn(limited):
     trial, trial_id, native, rows = _case()
+    if limited:
+        trial = trial.model_copy(update={"agent_model": trial.agent_model.model_copy(update={
+            "max_input_tokens": 16384, "max_output_tokens": 256,
+        })})
     assert terminus_usage(native, trial)["call_count"] == 5
     events = reconcile_terminus_ledger(native, rows, trial, trial_id)
     usage = terminus_usage(events, trial)
@@ -281,3 +290,20 @@ def test_projection_rejects_unbounded_status_strings_without_relaxing_counter_co
         LLMCallEvent.model_validate({**event.model_dump(), "provider_extras": {"string": "secret"}})
     # Existing healthy source usage documents retain the old shape.
     assert "missing_usage_call_count" not in terminus_usage([event], trial)
+
+
+@pytest.mark.parametrize("identity", [
+    {"provider": "anthropic"}, {"name": "another-model"}, {"source": "local-server"},
+])
+def test_terminus_model_identity_still_rejects_other_provider_model_or_source(identity):
+    trial, trial_id, native, rows = _case()
+    trial = trial.model_copy(update={"agent_model": trial.agent_model.model_copy(update={
+        **identity, "max_input_tokens": 16384, "max_output_tokens": 256,
+    })})
+    with pytest.raises(ValueError, match="another model identity"):
+        parse_terminus_events(
+            b"\n".join(event.model_dump_json().encode() for event in native),
+            trial=trial, trial_id=trial_id,
+        )
+    with pytest.raises(ValueError, match="another model identity"):
+        reconcile_terminus_ledger(native, rows, trial, trial_id)

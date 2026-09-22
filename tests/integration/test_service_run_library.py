@@ -30,6 +30,8 @@ from loom.db.schema import (
     DataLifecycleObject,
     LlmCall,
     ProviderConnection,
+    ServiceExecutionClass,
+    ServiceExecutionTarget,
     Task,
     Team,
     TeamQuota,
@@ -37,9 +39,18 @@ from loom.db.schema import (
     Trial,
     User,
 )
+from loom.execution_contract import NEBIUS_CPU_EXECUTION_CLASS_V1
+from loom.pipeline.keys import canonical_digest
+from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from loom_service.routes import run_library as run_library_routes
+from tests.integration.test_service_batch_resource_requests import _NEBIUS_DEFAULT_REQUESTS
+from tests.integration.test_service_batches_crud import (
+    _automatic_service_execution_task_config,
+    _service_execution_runtime_profile,
+)
+from tests.support.execution_image_admission import signed_image_admission_bundle
 
 
 @pytest.fixture
@@ -60,7 +71,20 @@ async def run_library_setup(
     }.items():
         monkeypatch.setenv(k, v)
 
-    settings = LoomServiceSettings(_env_file=None)
+    monkeypatch.setenv("LOOM_ENV", "development")
+    profile = _service_execution_runtime_profile()
+    controller = "registry.example/controller@sha256:" + "9" * 64
+    profile = ServiceExecutionRuntimeProfileV1.model_validate({
+        **profile.model_dump(mode="json"),
+        "agent_image_ref": controller,
+        "image_admission": signed_image_admission_bundle((
+            profile.task_image_ref, profile.runtime_image_ref, controller,
+        )).model_dump(mode="json"),
+        "default_task_resource_requests": _NEBIUS_DEFAULT_REQUESTS,
+    })
+    settings = LoomServiceSettings(_env_file=None).model_copy(update={
+        "service_execution_runtime_profile_json": profile.model_dump_json(),
+    })
     app = create_app(settings)
     engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
@@ -109,7 +133,22 @@ async def run_library_setup(
     blocked_artifact_id = uuid4()
     parent_artifact_id = uuid4()
 
+    target_id = "library-" + uuid4().hex
+    execution_class = NEBIUS_CPU_EXECUTION_CLASS_V1
     with sl() as s:
+        s.add(ServiceExecutionClass(
+            id=execution_class.class_id, schema_version=execution_class.schema_version,
+            spec_json=execution_class.model_dump(mode="json"),
+            spec_sha256=canonical_digest(execution_class.model_dump(mode="json")), enabled=True,
+        ))
+        s.add(ServiceExecutionTarget(
+            id=target_id, logical_pool_id="nebius-cpu", execution_class_id=execution_class.class_id,
+            schema_version="loom.execution-target.v1", spec_json={"health_stale_after_seconds": 60},
+            spec_sha256="sha256:" + "e" * 64, environment="development", provider="nebius",
+            region="eu-north1", failure_domain="eu-north1-a", data_residency="eu",
+            desired_state="active", observed_state="ready", health_status="healthy",
+            health_observed_at=now,
+        ))
         s.execute(insert(Team).values(id=team_a, name="Alpha Research"))
         s.execute(insert(Team).values(id=team_b, name="Beta Apps"))
         s.execute(
@@ -161,8 +200,13 @@ async def run_library_setup(
             insert(Task).values(
                 id=task_id,
                 checksum="1" * 64,
-                config={"benchmark_id": "humaneval"},
+                config=_automatic_service_execution_task_config(task_id),
                 source="local",
+                source_provenance={"service_execution_input": {
+                    "schema_version": "loom.service-execution-input.v1",
+                    "manifest_uri": "s3://artifacts/task-inputs/task.json",
+                    "manifest_sha256": "sha256:" + "d" * 64, "file_count": 3, "total_bytes": 4096,
+                }},
             )
         )
         for conn_id, team_id, name in (
@@ -463,6 +507,8 @@ async def run_library_setup(
         await app.state.http_client.aclose()
         await engine.dispose()
         with sl() as s:
+            s.execute(delete(ServiceExecutionTarget).where(ServiceExecutionTarget.id == target_id))
+            s.execute(delete(ServiceExecutionClass).where(ServiceExecutionClass.id == execution_class.class_id))
             s.execute(delete(ArtifactLineageEdge))
             s.execute(delete(Artifact))
             s.execute(delete(LlmCall))
@@ -2528,3 +2574,72 @@ async def test_library_costs_match_batch_accounting_without_inventing_zero(run_l
         assert row["cost_status"] == "not_applicable"
         assert row["cost_estimate_source"] == "tokens-only"
         assert row["llm_calls_count"] == 1
+
+
+@pytest.mark.parametrize("route", ["clone", "reuse"])
+async def test_derived_nebius_batch_freezes_current_runtime_and_enters_trial_admission(
+    run_library_setup, route,
+):
+    from loom_control_plane.routes.trials import router as cp_trials_router
+
+    f = run_library_setup
+    app = f["app"]
+    app.include_router(cp_trials_router, prefix="/cp")
+    engine = create_engine(str(f["postgres_url"]))
+    sessions = sessionmaker(engine)
+    config = {"agent_name": "terminus-2", "agent_model": {"provider": "openai", "name": "gpt-4o-mini"}}
+    combinations = [{**config, "label": label, "n_per_task": 2} for label in ("a", "b")]
+    stale_profile = {**json.loads(app.state.settings.service_execution_runtime_profile_json),
+                     "candidate_sha": "2" * 40}
+    with sessions() as s:
+        source = s.get(Batch, f["batch_shared"])
+        source.trial_config = config
+        source.combinations = combinations
+        source.n_per_task = 2
+        source.service_execution_runtime_profile = stale_profile
+        s.commit()
+    url = (f"/api/v1/run-library/batches/{f['batch_shared']}/clone-config" if route == "clone"
+           else f"/api/v1/run-library/trials/{f['trial_shared']}/artifacts/reuse")
+    payload = {"name": "derived native", "provider_connection_id": str(f["conn_b"])}
+    if route == "reuse":
+        payload["key"] = f["safe_key"]
+    headers = {"Authorization": f"Bearer {f['raw_b']}"}
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+            response = await c.post(url, json=payload, headers=headers)
+            assert response.status_code == 201, response.text
+            derived_id = UUID(response.json()["batch_id"])
+            # Follow the real persisted batch through Control Plane admission;
+            # a 201 from Run Library alone did not detect the original defect.
+            submitted = await c.post("/cp/trials", headers=headers, json={
+                "batch_id": str(derived_id), "task_id": f["task_id"], "config": config,
+                "provider_connection_id": str(f["conn_b"]),
+            })
+            assert submitted.status_code == 201, submitted.text
+            with sessions() as s:
+                derived = s.get(Batch, derived_id)
+                frozen = derived.service_execution_runtime_profile
+                current = json.loads(app.state.settings.service_execution_runtime_profile_json)
+                assert frozen["candidate_sha"] == current["candidate_sha"]
+                assert frozen["agent_image_ref"] == current["agent_image_ref"]
+                assert frozen["task_resource_requests"] == {f["task_id"]: {
+                    "task_revision_sha256": "sha256:" + "1" * 64,
+                    "requests": _NEBIUS_DEFAULT_REQUESTS,
+                }}
+                assert derived.team_id == f["team_b"] and derived.provider_connection_id == f["conn_b"]
+                assert derived.combinations == combinations and derived.expected_trial_count == 4
+                assert derived.source_provenance[0]["source_batch_id"] == str(f["batch_shared"])
+                assert s.get(Batch, f["batch_shared"]).service_execution_runtime_profile == stale_profile
+                admitted = s.get(Trial, UUID(submitted.json()["trial_id"]))
+                assert admitted.requires_caps["worker_pool"] == "nebius-cpu"
+            # No profile means reject before persisting another derived batch.
+            app.state.settings = app.state.settings.model_copy(update={
+                "service_execution_runtime_profile_json": "{}",
+            })
+            rejected = await c.post(url, json={**payload, "name": "no runtime"}, headers=headers)
+            assert rejected.status_code == 400, rejected.text
+            assert "runtime_profile_unavailable" in rejected.text
+            with sessions() as s:
+                assert s.scalar(select(func.count()).select_from(Batch).where(Batch.name == "no runtime")) == 0
+    finally:
+        engine.dispose()
