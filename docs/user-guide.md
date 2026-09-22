@@ -601,6 +601,14 @@ setup/build/image/preflight failures remain separated between
 reported as invalid, retryable evidence because the score row cannot be audited
 against the verifier's output-file contract.
 
+Active Trials (including output archival) report `platform_outcome=active`,
+`failure_class=active`, pending attribution and `rerun_recommendation=wait`.
+They do not count as failures, become supplemental rerun targets, or get
+replaced by an older supplemental result. A running/claimed state alone does
+not establish staleness: inspect the existing `stale_running` deadline and
+activity evidence. Controller-confirmed terminal failures retain their normal
+failure classification and rerun policy.
+
 Use `loom eval batch rerun-plan <batch-id>` or
 `GET /api/v1/batches/{id}/rerun-plan` before launching supplemental work. The
 plan is deterministic and separates failed coordinates into `auto_safe`,

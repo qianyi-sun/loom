@@ -1768,3 +1768,25 @@ async def test_filter_by_benchmark_agent_and_model(
     assert r.status_code == 200, r.text
     items = r.json()["items"]
     assert [item["id"] for item in items] == [str(trial_ids[0])]
+
+
+async def test_running_trial_diagnosis_stays_pending_through_public_routes(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+) -> None:
+    app, raw, _, trial_ids = trials_setup
+    trial_id = trial_ids[1]  # The persisted fixture's active trial.
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://svc",
+        headers={"Authorization": f"Bearer {raw}"},
+    ) as client:
+        debug = await client.get(f"/api/v1/trials/{trial_id}/debug")
+        diagnosis = await client.get(f"/api/v1/trials/{trial_id}/diagnosis")
+        detail = await client.get(f"/api/v1/trials/{trial_id}")
+    assert debug.status_code == diagnosis.status_code == detail.status_code == 200
+    assert debug.json()["failure"]["failure_class"] == "active"
+    assert debug.json()["failure"]["rerunnable"] is False
+    report = diagnosis.json()
+    assert "still active (running)" in report["summary"]
+    assert report["primary_cause"]["attribution"] == "pending"
+    assert report["reason_clusters"] == []
+    assert detail.json()["diagnosis"]["summary"] == report["summary"]
