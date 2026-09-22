@@ -91,3 +91,72 @@ async def test_service_survives_consistent_snapshot_and_private_verifier(service
     await agent.stop_processes()
     assert (await verifier.exec(request)).return_code != 0
     assert (await agent.exec("test ! -e /proc/$(cat /tmp/service.pid)")).return_code == 0
+
+
+async def test_real_sigterm_unwinds_verifier_and_stops_retained_service(service_sandboxes, tmp_path):
+    import os
+    import signal
+    import sys
+
+    from loom.trial.workspace_snapshot import _export_workspace_archive
+    from tests.unit.test_service_execution_terminus_plan import _inputs
+
+    agent, verifier = service_sandboxes
+    task, trial, _ = _inputs()
+    raw = task.model_dump(mode="json")
+    raw["environment"]["service_lifecycle"] = {"readiness": {"command": "true"}}
+    raw["verifier"]["args"]["script_path"] = "verifier/run.sh"
+    workspace = tmp_path / "workspace"
+    (workspace / "verifier").mkdir(parents=True)
+    (workspace / "verifier/run.sh").write_text("touch /tmp/verifier-entered\nsleep 300\n")
+    (workspace / ".loom").mkdir()
+    await _export_workspace_archive(agent, PurePosixPath("/app"), workspace / ".loom/workspace.tar")
+    assert (await agent.exec("sleep 300 >/dev/null 2>&1 & echo $! > /tmp/retained.pid")).return_code == 0
+    child = """
+import asyncio, json, os
+from pathlib import Path
+from loom import service_execution_sandbox_task as module
+from loom.driver.service_sandbox import ServiceSandboxDriver
+from loom.models.capabilities import Capabilities
+from loom.models.networking import NoNetwork
+from loom.models.task import TaskConfig
+from loom.models.trial import TrialConfig
+root = Path(os.environ['LOOM_TEST_ROOT'])
+def connect(role, task):
+    name = 'agent' if role == 'task-sandbox' else 'verifier'
+    return ServiceSandboxDriver(root / name / 'sandbox.sock',
+        capabilities=Capabilities(os='linux', gpu_vendor='none', network_policies=frozenset({'no-network'}),
+                                  dynamic_network_policy=False, mounted_fs=False, resource_modes=frozenset({'limit'})),
+        network_policy=NoNetwork())
+module.sandbox_driver = connect
+asyncio.run(module.run_verifier(root / 'workspace', TaskConfig.model_validate_json(os.environ['LOOM_TEST_TASK']),
+                               TrialConfig.model_validate_json(os.environ['LOOM_TEST_TRIAL'])))
+"""
+    import json
+    import time
+
+    process = await asyncio.create_subprocess_exec(sys.executable, "-c", child, env={
+        **os.environ, "LOOM_TEST_ROOT": str(tmp_path), "LOOM_TEST_TASK": json.dumps(raw),
+        "LOOM_TEST_TRIAL": trial.model_dump_json(),
+        "LOOM_EXECUTION_PHASE_DEADLINE": str(time.time() + 60),
+        "LOOM_EXECUTION_TERMINATION_GRACE_SECONDS": "5",
+    }, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        for _ in range(100):
+            if (await verifier.exec("test -e /tmp/verifier-entered")).return_code == 0:
+                break
+            await asyncio.sleep(0.02)
+        else:
+            if process.returncode is not None:
+                stdout, stderr = await process.communicate()
+                raise AssertionError(f"verifier did not enter: {stdout!r} {stderr!r}")
+            raise AssertionError("verifier did not enter")
+        process.send_signal(signal.SIGTERM)
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+        assert process.returncode != 0, (stdout, stderr)
+        checked = await agent.exec("test ! -e /proc/$(cat /tmp/retained.pid)")
+        assert checked.return_code == 0, "retained service survived verifier SIGTERM"
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.communicate()
