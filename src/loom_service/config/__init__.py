@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import os
 from functools import cached_property
-from typing import Any
+from typing import Any, Self
 from urllib.parse import urlsplit
 
-from pydantic import computed_field
+from pydantic import computed_field, model_validator
 
 from loom.workload_trust import WorkloadTrustContract
 from loom_service.config._generated import LoomServiceSettings as _BaseSettings
@@ -20,6 +20,20 @@ from loom_service.public_links import configured_public_base_url
 
 class LoomServiceSettings(_BaseSettings):
     """LoomServiceSettings adds behavior on top of the codegen'd class."""
+
+    @model_validator(mode="after")
+    def _validate_service_mode(self) -> Self:
+        if self.service_mode not in {"application", "management"}:
+            raise ValueError("service_mode must be application or management")
+        if self.service_mode == "application":
+            self.storage_credentials()
+        return self
+
+    def storage_credentials(self) -> tuple[str, str]:
+        """Reject workload storage use without explicitly supplied credentials."""
+        if self.minio_access_key is None or self.minio_secret_key is None:
+            raise ValueError("application mode requires storage credentials")
+        return self.minio_access_key.get_secret_value(), self.minio_secret_key.get_secret_value()
 
     @property
     def hosted_session_cookie(self) -> bool:

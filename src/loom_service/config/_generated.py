@@ -47,13 +47,14 @@ class LoomServiceSettings(BaseSettings):
     k8s_worker_enabled: bool = True
     local_servers_json: str = "{}"
     log_level: LogLevel = "info"
-    minio_access_key: SecretStr
+    minio_access_key: SecretStr | None = None
     minio_endpoint: str = "http://loom-minio:9000"
     minio_public_endpoint: str | None = None
     minio_region: str = "us-east-1"
-    minio_secret_key: SecretStr
+    minio_secret_key: SecretStr | None = None
     public_base_url: HttpUrl | None = None
     service_execution_runtime_profile_json: str = "{}"
+    service_mode: str = "application"
     signed_url_expiry_sec: int = 3600
     stale_running_trial_grace_sec: float = 900.0
     stale_running_trial_reclaim_enabled: bool = True

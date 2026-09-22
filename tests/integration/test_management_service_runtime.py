@@ -64,11 +64,20 @@ async def test_management_lifespan_login_and_readiness_without_children(
             }, headers={"Origin": "https://alice.example.com"})
             assert rejected.status_code == 403
     assert not hasattr(app.state, "session_factory")
+    restarted = create_app(settings)
+    async with restarted.router.lifespan_context(restarted), httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=restarted), base_url="https://manage.example.com",
+        cookies=client.cookies,
+    ) as resumed_client:
+        me = await resumed_client.get("/api/v1/auth/me")
+        assert me.status_code == 200
+        assert str(user.id) in me.text
 
 
 async def test_management_startup_rejects_schema_drift(isolated_migration_postgres_url: str) -> None:
-    from loom.db.schema_startup import SchemaNotAtHeadError
     from sqlalchemy.ext.asyncio import create_async_engine
+
+    from loom.db.schema_startup import SchemaNotAtHeadError
 
     engine = create_async_engine(isolated_migration_postgres_url)
     try:
@@ -83,3 +92,36 @@ async def test_management_startup_rejects_schema_drift(isolated_migration_postgr
         assert not hasattr(app.state, "session_factory")
     finally:
         await engine.dispose()
+
+
+async def test_management_readiness_reports_database_outage_without_details(
+    isolated_migration_postgres_url: str,
+) -> None:
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    url = make_url(isolated_migration_postgres_url)
+    assert url.database is not None and url.database.startswith("loom_migration_")
+    admin = create_async_engine(url.set(database="postgres"), isolation_level="AUTOCOMMIT")
+    quoted_database = admin.dialect.identifier_preparer.quote(url.database)
+    app = create_app(LoomServiceSettings(
+        _env_file=None, service_mode="management", db_url=isolated_migration_postgres_url,
+    ))
+    try:
+        async with app.router.lifespan_context(app), httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="https://manage.example.com",
+        ) as client:
+            async with admin.connect() as connection:
+                await connection.execute(text(f"ALTER DATABASE {quoted_database} ALLOW_CONNECTIONS false"))
+            await app.state._owned_service_engine.dispose()
+            response = await client.get("/api/v1/health/ready")
+            assert response.status_code == 503
+            assert response.json() == {"status": "not-ready", "mode": "management", "postgres": "not-ready"}
+            assert (await client.get("/api/v1/health")).status_code == 200
+            async with admin.connect() as connection:
+                await connection.execute(text(f"ALTER DATABASE {quoted_database} ALLOW_CONNECTIONS true"))
+            assert (await client.get("/api/v1/health/ready")).status_code == 200
+    finally:
+        async with admin.connect() as connection:
+            await connection.execute(text(f"ALTER DATABASE {quoted_database} ALLOW_CONNECTIONS true"))
+        await admin.dispose()

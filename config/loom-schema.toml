@@ -153,6 +153,12 @@ python_type = "str"
 default     = '{}'
 description = "Versioned deployment-owned profile used to compile compatible ordinary TaskSets into immutable Nebius runtime plans. Empty disables automatic compilation while retaining explicitly bound legacy tasks."
 
+[service_config.service_mode]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "application"
+description = "application serves workloads; management serves only identity and environment management from its own database, with no child workload clients or loops."
+
 [service_config.service_execution_scheduler_interval_sec]
 used_by     = ["control-plane"]
 python_type = "float"
@@ -186,12 +192,14 @@ default     = "http://loom-minio:9000"
 used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]
 python_type = "SecretStr"
 required    = true
+required_per_service = { loom-service = false }
 secret      = { key = "minio-access-key" }
 
 [service_config.minio_secret_key]
 used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]
 python_type = "SecretStr"
 required    = true
+required_per_service = { loom-service = false }
 secret      = { key = "minio-secret-key" }
 
 [service_config.minio_region]

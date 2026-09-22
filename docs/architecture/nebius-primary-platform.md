@@ -78,6 +78,34 @@ format. Candidate publication verification, management authentication/provisioni
 shared admission/write enforcement and installed
 concurrent-owner execution are not established by rendering these resources.
 
+## Independent management service runtime
+
+`LOOM_SVC_SERVICE_MODE=management` selects the identity-only management runtime in
+the existing Service image. It must use a **separate management database** via
+`LOOM_SVC_DB_URL` (and its optional pool URL), not a child application's database.
+It checks the current schema and existing encrypted secrets before serving.
+Its database/admin credentials are installation-owned; do not put them into
+personal deployments.
+
+Management retains account/session, invitation, token, team and administrative
+identity/audit APIs. It does not expose workload, pipeline, provider or storage
+routes, initialize child Control Plane/Gateway/object-store clients, validate a
+child execution profile, or start batch/materialization/GC loops. Storage keys
+are unnecessary in this mode; they remain required by default application mode.
+The local-execution flag cannot turn management into a workload service.
+
+`/api/v1/health` is process liveness. In management mode `/api/v1/health/ready`
+is an unauthenticated, bounded, read-only database probe returning only component
+status, with HTTP 503 on failure. It reports no identities, credentials or database
+errors and has no dependency on child availability. Application-mode readiness
+and its authentication contract are unchanged. Hosted sessions retain secure
+host-only cookies and sibling-origin rejection in either mode.
+
+This runtime does **not yet provision environments**. The durable operation
+journal, owner-scoped provisioning API/CLI, protected deployment and installed
+two-owner acceptance remain separate delivery work. A healthy management process
+is not evidence that personal environments or shared execution are operational.
+
 ## Supported workload boundary
 
 Native Kubernetes execution is the hosted path. OLDLAB, GB10, Slurm and remote
