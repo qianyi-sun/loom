@@ -407,8 +407,47 @@ def test_invalid_disposable_cache_becomes_a_cold_build(
     runtime.prepare(claim, tmp_path / "work", tmp_path / "secrets")
     assert (tmp_path / "work/context/run.sh").is_file()
     assert not (tmp_path / "work/cache-in/0").exists()
-    assert json.loads(capsys.readouterr().out)["reason"] == "invalid_archive"
+    events = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("{")
+    ]
+    assert any(row.get("reason") == "invalid_archive" for row in events)
+    assert any(
+        row.get("loom_task_image_stage") == "cache_import" and row.get("event") == "miss"
+        for row in events
+    )
+    assert any(
+        row.get("loom_task_image_stage") == "prepare" and row.get("event") == "end"
+        for row in events
+    )
     assert cache.closed and source.closed
+
+
+def test_prepare_emits_stage_timing_for_absent_cache(
+    source_bundle, tmp_path, monkeypatch, capsys
+) -> None:
+    claim, source = source_bundle
+    cache = FakeS3({})
+    monkeypatch.setattr(
+        runtime, "_client", lambda _claim, secret: source if secret.name == "source" else cache
+    )
+    (tmp_path / "secrets/cache").mkdir(parents=True)
+    runtime.prepare(claim, tmp_path / "work", tmp_path / "secrets")
+    events = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("{")
+    ]
+    stages = [(row["loom_task_image_stage"], row["event"]) for row in events]
+    assert ("prepare", "start") in stages and ("prepare", "end") in stages
+    assert ("cache_import", "start") in stages and ("cache_import", "miss") in stages
+    assert any(
+        row.get("loom_task_image_stage") == "prepare"
+        and row.get("event") == "end"
+        and "duration_ms" in row
+        for row in events
+    )
 
 
 def test_cache_round_trip_preserves_nested_regular_files(tmp_path) -> None:

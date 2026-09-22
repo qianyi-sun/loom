@@ -33,6 +33,8 @@ class NativeTaskImageSettings(BaseModel):
     max_processes: int = Field(default=512, ge=64, le=4096)
     active_deadline_seconds: int = Field(default=1800, ge=60, le=7200)
     max_concurrent: int = Field(default=1, ge=1, le=16)
+    # OverlayFS is the measured Nebius default; set "native" to roll back.
+    snapshotter: Literal["overlayfs", "native"] = "overlayfs"
 
     def job_config(self) -> TaskImageJobConfig:
         from loom_execution_actuator.task_image_renderer import TaskImageJobConfig
@@ -40,6 +42,7 @@ class NativeTaskImageSettings(BaseModel):
         return TaskImageJobConfig(**{key: getattr(self, key) for key in (
             "service_image", "source_secret_name", "cache_secret_name", "registry_secret_name", "registry_auth_kind",
             "cpu_millis", "memory_mib", "ephemeral_storage_mib", "max_processes", "active_deadline_seconds",
+            "snapshotter",
         )})
 
     def runtime_configuration(self) -> dict[str, Any]:
