@@ -86,3 +86,18 @@ def test_harbor_normalization_preserves_capabilities_and_does_not_infer_from_tex
     plain = TaskConfig.model_validate(normalize_terminal_bench_task_toml({"task": {"name": "download-docker-script"}}))
     assert plain.environment.execution_requirements is None
     assert plain.environment.workdir == PurePosixPath("/app")
+
+
+def test_absent_execution_requirements_preserve_old_frozen_serialization():
+    task, _, _ = _inputs()
+    requirements = workload_requirements_from_task(task)
+    assert "execution_requirements" not in requirements.model_dump(mode="json")
+
+
+def test_many_prerequisites_cannot_expand_unbounded_admission_records():
+    with pytest.raises(ValidationError):
+        EnvironmentConfig.model_validate({
+            "os": "linux", "execution_requirements": {
+                "prerequisites": [{"name": f"fixture_{i}", "kind": "fixture"} for i in range(33)],
+            },
+        })
