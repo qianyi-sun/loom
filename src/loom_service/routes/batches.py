@@ -351,7 +351,7 @@ def _reject_invalid_workspace_staging_policy_name(
     policy_name = trial_config.get("workspace_staging_policy_name")
     if policy_name is None:
         return
-    if policy_name not in {"tb21", "none"}:
+    if not isinstance(policy_name, str) or policy_name not in {"tb21", "none"}:
         _reject_submission(
             reason="invalid_input",
             status_code=400,
