@@ -7,8 +7,9 @@ import pytest
 from tests.loom_cli.test_local_compatibility_report import _report, _write_bundle
 
 
-def test_report_keeps_capabilities_and_prerequisites_when_bootstrap_is_unsupported(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+@pytest.mark.parametrize("bootstrap_supported", [False, True])
+def test_report_keeps_capabilities_and_prerequisites_across_bootstrap_adaptation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], bootstrap_supported: bool,
 ) -> None:
     declaration = {
         "capabilities": ["external_cluster"],
@@ -18,7 +19,8 @@ def test_report_keeps_capabilities_and_prerequisites_when_bootstrap_is_unsupport
         ],
     }
     bundle = _write_bundle(tmp_path, "cluster", execution_requirements=declaration)
-    (bundle / "tests/test.sh").write_text("#!/bin/sh\nunknown-bootstrap\n")
+    if not bootstrap_supported:
+        (bundle / "tests/test.sh").write_text("#!/bin/sh\nunknown-bootstrap\n")
     original = {str(path): path.read_bytes() for path in bundle.rglob("*") if path.is_file()}
 
     rc, payload = _report(tmp_path, capsys)
@@ -29,8 +31,9 @@ def test_report_keeps_capabilities_and_prerequisites_when_bootstrap_is_unsupport
     diagnostics = {item["code"]: item for item in report["diagnostics"]}
     assert {
         "external_cluster_unqualified", "execution_prerequisite_missing",
-        "execution_prerequisite_unverified", "profile_adaptation_failed",
+        "execution_prerequisite_unverified",
     } <= diagnostics.keys()
+    assert ("profile_adaptation_failed" in diagnostics) is not bootstrap_supported
     assert diagnostics["execution_prerequisite_missing"]["source_location"].endswith(
         "task.toml#environment.execution_requirements.prerequisites.cluster"
     )
