@@ -166,6 +166,7 @@ def _normalize_harbor_native_task_toml(payload: dict[str, Any]) -> dict[str, Any
         "tmpfs",
         "healthcheck",
         "workdir",
+        "mutable_paths",
         "user",
         "network_policies_supported",
         "baseline_network_policy",

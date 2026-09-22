@@ -131,6 +131,48 @@ class Sandbox(FakeDriver):
 
 
 @pytest.mark.asyncio
+async def test_phase_handoff_preserves_declared_state_at_original_absolute_path(tmp_path, monkeypatch):
+    from loom.models.task import TaskConfig
+
+    task, trial, _ = _inputs()
+    raw = task.model_dump(mode="json")
+    raw["environment"]["mutable_paths"] = ["/data", "/home/agent"]
+    task = TaskConfig.model_validate(raw)
+    (tmp_path / "instruction.md").write_text("Produce outputs outside workdir")
+    agent, verifier = Sandbox(), Sandbox()
+    monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
+    monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
+    monkeypatch.setattr("loom.service_execution_sandbox_task.sandbox_driver",
+                        lambda role, task: agent if role == "task-sandbox" else verifier)
+
+    async def identity(_):
+        return uuid4(), uuid4()
+
+    async def terminus(**kwargs):
+        agent.filesystem[PurePosixPath("/data/answer")] = b"unique output"
+        agent.filesystem[PurePosixPath("/home/agent/kernelspec")] = b"installed kernel"
+        agent.filesystem[PurePosixPath("/undeclared/secret")] = b"not exported"
+
+    def check(cmd, user, cwd, env):
+        if cmd == "id -u; id -g":
+            return ExecResult(return_code=0, stdout=b"0\n0\n", stderr=b"", duration_sec=0)
+        if env and "LOOM_VERIFIER_OUTPUT" in env:
+            assert verifier.filesystem[PurePosixPath("/data/answer")] == b"unique output"
+            assert verifier.filesystem[PurePosixPath("/home/agent/kernelspec")] == b"installed kernel"
+            assert PurePosixPath("/undeclared/secret") not in verifier.filesystem
+            verifier.filesystem[PurePosixPath(env["LOOM_VERIFIER_OUTPUT"])] = b'{"rewards":{"passed":0}}'
+        return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0)
+
+    verifier.exec_handler = check
+    monkeypatch.setattr("loom.service_execution_sandbox_task._execution_identity", identity)
+    monkeypatch.setattr("loom.service_execution_sandbox_task.run_terminus2", terminus)
+    await run_agent(tmp_path, task, trial)
+    await run_verifier(tmp_path, task, trial)
+    manifest = json.loads((tmp_path / ".loom/mutable-paths/manifest.json").read_text())
+    assert [item["path"] for item in manifest["paths"]] == ["/data", "/home/agent"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("agent_error", [False, True])
 async def test_phase_handoff_keeps_tests_private_and_quiesces_before_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_error: bool,

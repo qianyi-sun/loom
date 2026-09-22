@@ -82,3 +82,15 @@ async def test_tampered_manifest_cannot_change_destination(docker_drivers, tmp_p
     manifest.write_text(manifest.read_text().replace("/data", "/tests"))
     with pytest.raises(RuntimeError, match="manifest"):
         await import_mutable_paths(verifier, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+
+
+async def test_new_directory_can_be_restored_into_fresh_verifier(docker_drivers, tmp_path):  # noqa: F811
+    from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
+
+    agent, verifier = docker_drivers
+    await agent.exec("mkdir -p /data/new; echo created > /data/new/marker", user="root")
+    paths = (PurePosixPath("/data/new"),)
+    await export_mutable_paths(agent, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+    await import_mutable_paths(verifier, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+    result = await verifier.exec("cat /data/new/marker", user="root")
+    assert result.stdout.strip() == b"created"

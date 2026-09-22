@@ -35,6 +35,7 @@ from loom.service_execution_task import (
 )
 from loom.service_execution_terminus2 import TASK_IMAGE_TOOLS_REQUIRED, run_terminus2
 from loom.service_execution_terminus_trace import parse_terminus_events, terminus_usage
+from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
 from loom.trial.workspace import WorkspaceStagingPolicy, materialize_workspace
 from loom.trial.workspace_snapshot import (
     _export_workspace_archive,
@@ -178,6 +179,11 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                         await _export_workspace_archive(driver, task.environment.workdir, archive)
                         await asyncio.to_thread(_strip_private_entries, archive, _POLICY)
                         await asyncio.to_thread(_validate_workspace_archive, archive, _POLICY)
+                        if task.environment.mutable_paths:
+                            await export_mutable_paths(
+                                driver, task.environment.mutable_paths, workspace / ".loom/mutable-paths",
+                                workdir=task.environment.workdir,
+                            )
                         for path in json.loads(os.environ["LOOM_TASK_ARTIFACTS_JSON"]):
                             destination = _safe_workspace_path(workspace / ".loom/collected", path)
                             try:
@@ -224,6 +230,11 @@ async def run_verifier(workspace: Path, task: TaskConfig, trial: TrialConfig) ->
         # The archive was validated by the agent phase before durable capture;
         # it stays in the private controller workspace between phases.
         await _import_workspace_archive(driver, archive, task.environment.workdir)
+        if task.environment.mutable_paths:
+            await import_mutable_paths(
+                driver, task.environment.mutable_paths, workspace / ".loom/mutable-paths",
+                workdir=task.environment.workdir,
+            )
         remote_output = task.environment.workdir / ".loom/verifier/output.json"
         result = await driver.exec(
             "/bin/sh " + shlex.quote(str(task.verifier.args["script_path"])),
