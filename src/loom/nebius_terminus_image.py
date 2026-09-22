@@ -33,6 +33,7 @@ class HarborOfflineBootstrap:
     requirements: tuple[str, ...]
     index_args: tuple[str, ...] = ()
     downloads: tuple[tuple[str, str], ...] = ()
+    system_site_packages: bool = False
 
 
 def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
@@ -173,14 +174,11 @@ def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
                     raise ValueError("nebius-terminus: unsupported verifier package index")
                 indexes.extend((option, value))
                 position += 2
-            if (
-                words[position : position + 1] not in (["-p"], ["--python"])
-                or position + 1 >= len(words)
-                or not re.fullmatch(r"\d+\.\d+", words[position + 1])
-            ):
-                raise ValueError("nebius-terminus: unsupported uvx Python declaration")
-            python_version = words[position + 1]
-            position += 2
+            if words[position : position + 1] in (["-p"], ["--python"]):
+                if position + 1 >= len(words) or not re.fullmatch(r"\d+\.\d+", words[position + 1]):
+                    raise ValueError("nebius-terminus: unsupported uvx Python declaration")
+                python_version = words[position + 1]
+                position += 2
             while position + 1 < len(words) and words[position] in {"-w", "--with"}:
                 requirements.append(requirement(words[position + 1]))
                 position += 2
@@ -246,6 +244,7 @@ def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
         requirements=tuple(dict.fromkeys(requirements)),
         index_args=tuple(indexes),
         downloads=tuple(downloads),
+        system_site_packages=pip_mode and venv is None,
     )
 
 
@@ -314,8 +313,10 @@ def _preparation_dockerfile(
     )
     requirements = shlex.join((*bootstrap.index_args, *bootstrap.requirements))
     if bootstrap.python_version is None:
-        # Plain pip scripts use the base interpreter and its task dependencies.
-        python_setup = 'loom-nebius-uv venv --python "$(command -v python3)" --system-site-packages /opt/verifier'
+        # No Python override uses the image interpreter. uvx still isolates its
+        # tool environment; plain pip scripts see the base task dependencies.
+        inherit = " --system-site-packages" if bootstrap.system_site_packages else ""
+        python_setup = f'loom-nebius-uv venv --python "$(command -v python3)"{inherit} /opt/verifier'
     else:
         python_setup = (
             f"UV_PYTHON_INSTALL_DIR=/opt/verifier-python loom-nebius-uv python install {bootstrap.python_version} && "
