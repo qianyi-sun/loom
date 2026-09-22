@@ -389,7 +389,36 @@ loom eval batch delivery-bundle <batch-id> \
 task/sample/combination coordinate across the main batch and any explicit
 supplemental rerun batches. Later linked reruns replace earlier failed attempts
 only at the same coordinate, so the manifest preserves the lineage from the
-selected trial back to its source batch. Before the archive is marked ready, the
+selected trial back to its source batch.
+
+To export only specific succeeded (or scored-timeout) attempts without waiting
+for every sibling coordinate to resolve, pass `--trial-id` (repeatable):
+
+```bash
+loom eval batch delivery-bundle <batch-id> \
+  --mode raw-harbor-tb2-v2 \
+  --trial-id <succeeded-trial-uuid> \
+  --trial-id <another-succeeded-trial-uuid> \
+  --output subset-delivery.tar.gz
+```
+
+Equivalent API body:
+
+```json
+{
+  "mode": "raw-harbor-tb2-v2",
+  "selection": { "trial_ids": ["…", "…"] }
+}
+```
+
+Selected trials must still belong to the authorized batch family and remain
+delivery-eligible; missing objects / TB2 join failures still fail closed for
+those IDs. Unresolved sibling coordinates are skipped and recorded under
+`manifest.selection` (`selection_rule=explicit_trial_ids`,
+`skipped_coordinates_count`, optional `skipped_coordinates`). Omitting
+`--trial-id` / `selection` keeps the default full-family behavior.
+
+Before the archive is marked ready, the
 service verifies that every selected trajectory and ATIF object can be read
 through object storage. Successful attempts remain eligible. A native agent
 attempt with state `failed` and failure reason `timed_out` is also eligible when
