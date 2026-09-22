@@ -64,6 +64,8 @@ its private key in developer namespaces. This contract does not provision it.
         config = self.platform_config
         if not isinstance(config, dict):
             raise ValueError("foundation configuration must be an object")
+        if config.get("schema_version") != "loom.nebius-platform.v1":
+            raise ValueError("foundation must be the operator's standalone installation")
         validate_environment(config)
         if config.get("regional_execution_targets"):
             raise ValueError("managed environments require one primary-region foundation")
