@@ -6,7 +6,10 @@ from pydantic import ValidationError
 
 from loom.models.exec import ExecResult
 from loom.models.task import TaskConfig
-from loom.service_execution_materialization import compile_service_execution_plan
+from loom.service_execution_materialization import (
+    compile_service_execution_plan,
+    runtime_profile_rejections,
+)
 from tests.unit.test_service_execution_materialization import _REVISION, _provenance
 from tests.unit.test_service_execution_sandbox_task import Sandbox
 from tests.unit.test_service_execution_terminus_plan import _inputs
@@ -24,6 +27,7 @@ def inputs():
 
 def test_lifecycle_requires_runtime_readiness_and_declares_startup_evidence():
     task, trial, profile = inputs()
+    assert "service_lifecycle_runtime_unavailable" in runtime_profile_rejections(task, trial, profile)
     with pytest.raises(ValueError, match=r"service_lifecycle.*ready"):
         compile_service_execution_plan(task=task, trial=trial, profile=profile,
             source_provenance=_provenance(), task_revision_sha256=_REVISION)

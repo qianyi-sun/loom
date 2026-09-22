@@ -631,6 +631,8 @@ def runtime_profile_rejections(
                 else ("task_image_not_in_runtime_profile",))
     if _requires_task_identity(task) and not profile.supports_task_identity:
         return ("task_identity_runtime_unavailable",)
+    if task.environment.service_lifecycle is not None and not profile.service_lifecycle_ready:
+        return ("service_lifecycle_runtime_unavailable",)
     agent_image = controller_image_for_trial(profile, trial)
     if agent_image is None:
         return ("terminus_controller_unavailable",)
