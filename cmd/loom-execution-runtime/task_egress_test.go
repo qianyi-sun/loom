@@ -1,0 +1,75 @@
+package main
+
+import (
+ "context"
+ "crypto/tls"
+ "encoding/json"
+ "io"
+ "net"
+ "net/http"
+ "net/http/httptest"
+ "net/url"
+ "strings"
+ "testing"
+ "time"
+
+ "github.com/coder/websocket"
+)
+
+func TestTaskEgressRealHTTPAndTLSAndRedirectDenial(t *testing.T) {
+ for _, secure := range []bool{false, true} {
+  t.Run(map[bool]string{false:"http", true:"https"}[secure], func(t *testing.T) {
+   handler := http.HandlerFunc(func(w http.ResponseWriter,r *http.Request) {
+    if r.URL.Path == "/redirect" { http.Redirect(w,r,"https://denied.example.org/",302); return }
+    if r.Host != "packages.example.org" { t.Errorf("host drift: %s",r.Host) }
+    _,_ = io.WriteString(w, "downloaded-package")
+   })
+   var upstream *httptest.Server
+   if secure { upstream = httptest.NewTLSServer(handler) } else { upstream = httptest.NewServer(handler) }
+   defer upstream.Close()
+   protocol := "http"; if secure { protocol = "https" }
+   gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    if r.URL.Path != "/internal/service-execution/task-egress" || r.Header.Get("X-Loom-Execution-Lease-Id") != "lease-one" || r.Header.Get("X-Loom-Runtime-Contract-SHA256") != "sha256:bound" { t.Error("missing authoritative identity") }
+    ws,err := websocket.Accept(w,r,nil); if err != nil {t.Error(err);return}; defer ws.CloseNow()
+    kind,raw,err:=ws.Read(r.Context()); if err!=nil {return}
+    var destination webDestination
+    if kind!=websocket.MessageText || json.Unmarshal(raw,&destination)!=nil || destination.Host!="packages.example.org" || destination.Protocol!=protocol {t.Error("invalid destination");return}
+    remote,err:=net.Dial("tcp",strings.TrimPrefix(strings.TrimPrefix(upstream.URL,"http://"),"https://"));if err!=nil {t.Error(err);return};defer remote.Close()
+    _=ws.Write(r.Context(),websocket.MessageText,[]byte(`{"status":"ready"}`))
+    stream:=websocket.NetConn(r.Context(),ws,websocket.MessageBinary)
+    done:=make(chan struct{},2)
+    go func(){_,_=io.Copy(remote,stream);done<-struct{}{}}()
+    go func(){_,_=io.Copy(stream,remote);done<-struct{}{}}()
+    <-done
+   })); defer gateway.Close()
+   root,_:=url.Parse(gateway.URL)
+   broker:=&workloadBroker{root:root, identity:workloadIdentity{LeaseID:"lease-one",Generation:1,ExecutionRole:"attempt"},client:gateway.Client()}
+   broker.setPhaseDeadline(time.Now().Add(time.Minute))
+   ctx,cancel:=context.WithCancel(context.Background()); defer cancel()
+   proxy,stop,err:=broker.startTaskEgress(ctx, &webAllowlist{Kind:"web-allowlist",Destinations:[]webDestination{{Host:"packages.example.org",Protocol:protocol}}},"sha256:bound",io.Discard)
+   if err!=nil {t.Fatal(err)}; defer stop()
+   proxyURL,_:=url.Parse(proxy)
+   transport:=&http.Transport{Proxy:http.ProxyURL(proxyURL),TLSClientConfig:&tls.Config{InsecureSkipVerify:true}} // fixture certificate only
+   defer transport.CloseIdleConnections()
+   client:=&http.Client{Transport:transport,Timeout:3*time.Second}
+   response,err:=client.Get(protocol+"://packages.example.org/package");if err!=nil {t.Fatal(err)}
+   body,_:=io.ReadAll(response.Body);response.Body.Close();if string(body)!="downloaded-package" {t.Fatalf("bad body %q status %d",body,response.StatusCode)}
+   response,err=client.Get(protocol+"://packages.example.org/redirect")
+   if err==nil { response.Body.Close();t.Fatal("redirect escaped allowlist") }
+   cancel()
+   response,err=client.Get(protocol+"://packages.example.org/package")
+   if err==nil && response.StatusCode==200 {response.Body.Close();t.Fatal("cancelled tunnel remained usable")}
+  })
+ }
+}
+
+func TestWebEgressContractRejectsAmbiguousHostAndLegacyOmission(t *testing.T) {
+ p:=testPlan("/workspace",phase{Role:"agent",Argv:[]string{"true"},WorkingDirectory:"/workspace",TimeoutSeconds:2})
+ raw,_:=json.Marshal(p); if strings.Contains(string(raw),"task_egress") {t.Fatal("legacy bytes changed")}
+ p.TaskEgress=&webAllowlist{Kind:"web-allowlist",Destinations:[]webDestination{{Host:"example.org",Protocol:"https"}}}
+ raw,_=json.Marshal(p);if _,err:=decodePlan(raw);err!=nil {t.Fatal(err)}
+ for _,host:=range []string{"localhost","127.0.0.1","EXAMPLE.org","example.org.","*.example.org","a.svc.cluster.local"} {
+  p.TaskEgress.Destinations[0].Host=host
+  if p.TaskEgress.validate()==nil {t.Errorf("accepted %s",host)}
+ }
+}
