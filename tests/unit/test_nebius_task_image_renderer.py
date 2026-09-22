@@ -281,6 +281,24 @@ def test_task_image_job_config_rejects_unknown_snapshotter() -> None:
         )
 
 
+def test_export_cache_mode_min_wires_into_build_script(inputs) -> None:
+    inputs["config"] = replace(inputs["config"], export_cache_mode="min")
+    _, job = render_task_image_job(**inputs)
+    script = job["spec"]["template"]["spec"]["initContainers"][1]["command"][-1]
+    assert "mode=min" in script
+    assert "mode=max" not in script
+
+
+def test_task_image_job_config_rejects_unknown_export_cache_mode() -> None:
+    with pytest.raises(ValueError, match="export_cache_mode"):
+        TaskImageJobConfig(
+            service_image="registry.example/service@sha256:" + "a" * 64,
+            source_secret_name="loom-task-build-source",
+            registry_secret_name="loom-task-build-registry",
+            export_cache_mode="balanced",  # type: ignore[arg-type]
+        )
+
+
 def test_dockerfile_paths_cannot_inject_shell_commands(inputs) -> None:
     path = "nested/space ' ;$(touch BAD)/Dockerfile"
     inputs["components"] = (

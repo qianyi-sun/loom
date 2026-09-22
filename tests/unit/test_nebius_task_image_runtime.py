@@ -450,6 +450,58 @@ def test_prepare_emits_stage_timing_for_absent_cache(
     )
 
 
+def test_prepare_imports_compatible_revision_cache_after_exact_miss(
+    source_bundle, tmp_path, monkeypatch, capsys
+) -> None:
+    claim, source = source_bundle
+    donor = "c" * 64
+    assert donor != claim["materialization_key"]
+    claim = {**claim, "cache_import_materialization_key": donor}
+    cache_root = tmp_path / "donor-cache"
+    cache_root.mkdir()
+    (cache_root / "index.json").write_bytes(b'{"schemaVersion":2}')
+    archive = tmp_path / "donor.tar"
+    runtime.pack_cache(cache_root, archive)
+    cache = FakeS3({f"task-build-cache/{donor}/0.tar": archive.read_bytes()})
+    monkeypatch.setattr(
+        runtime, "_client", lambda _claim, secret: source if secret.name == "source" else cache
+    )
+    (tmp_path / "secrets/cache").mkdir(parents=True)
+    work = tmp_path / "work"
+    runtime.prepare(claim, work, tmp_path / "secrets")
+    assert (work / "cache-in/0/index.json").is_file()
+    assert cache.gets == [
+        f"task-build-cache/{claim['materialization_key']}/0.tar",
+        f"task-build-cache/{donor}/0.tar",
+    ]
+    events = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("{")
+    ]
+    assert any(
+        row.get("loom_task_image_stage") == "cache_import"
+        and row.get("event") == "miss"
+        and row.get("source") == "exact"
+        for row in events
+    )
+    assert any(
+        row.get("loom_task_image_stage") == "cache_import"
+        and row.get("event") == "hit"
+        and row.get("source") == "compatible"
+        for row in events
+    )
+
+
+def test_load_claim_rejects_invalid_compatible_cache_hint(source_bundle, tmp_path) -> None:
+    claim, _ = source_bundle
+    claim = {**claim, "cache_import_materialization_key": "not-a-key"}
+    path = tmp_path / "claim.json"
+    path.write_text(json.dumps(claim))
+    with pytest.raises(runtime.BuildPreparationError, match="compatible cache"):
+        runtime.load_claim(path)
+
+
 def test_cache_round_trip_preserves_nested_regular_files(tmp_path) -> None:
     cache = tmp_path / "cache"
     (cache / "blobs/sha256").mkdir(parents=True)

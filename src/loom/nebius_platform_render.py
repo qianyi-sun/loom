@@ -881,6 +881,9 @@ def _task_image_builder_settings(config: dict[str, Any], *, service_image: str) 
         "max_processes",
         "active_deadline_seconds",
         "max_concurrent",
+        "snapshotter",
+        "compatible_revision_cache",
+        "export_cache_mode",
     }
     if (
         not isinstance(supplied, dict)

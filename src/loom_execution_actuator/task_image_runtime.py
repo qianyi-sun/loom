@@ -105,6 +105,11 @@ def load_claim(path: Path) -> dict[str, Any]:
         raise BuildPreparationError("task image repository exceeds receipt size budget")
     if len(derive_task_image_build_components(claim["task_config"])) > 8:
         raise BuildPreparationError("native build supports at most eight image components")
+    hint = claim.get("cache_import_materialization_key")
+    if hint is not None and (
+        not isinstance(hint, str) or not _KEY.fullmatch(hint)
+    ):
+        raise BuildPreparationError("invalid compatible cache import identity")
     return claim
 
 
@@ -253,6 +258,85 @@ def _cache_prefix(claim: dict[str, Any]) -> str:
     return f"task-build-cache/{claim['materialization_key']}/"
 
 
+def _cache_import_candidates(claim: dict[str, Any]) -> list[tuple[str, str]]:
+    """Ordered (source, materialization_key) pairs for BuildKit cache import.
+
+    Exact key first; optional same-task prior key only when the controller set a
+    claim hint. Publish always writes under the claim's own materialization_key.
+    """
+    current = claim["materialization_key"]
+    candidates = [("exact", current)]
+    hint = claim.get("cache_import_materialization_key")
+    if isinstance(hint, str) and _KEY.fullmatch(hint) and hint != current:
+        candidates.append(("compatible", hint))
+    return candidates
+
+
+def _try_import_cache(
+    cache: Any,
+    claim: dict[str, Any],
+    *,
+    index: int,
+    work: Path,
+) -> None:
+    archive_parent = Path(tempfile.mkdtemp(prefix="loom-cache-"))
+    try:
+        for source, key in _cache_import_candidates(claim):
+            archive = archive_parent / f"{source}.tar"
+            try:
+                _download(
+                    cache,
+                    bucket=claim["cache_bucket"],
+                    key=f"task-build-cache/{key}/{index}.tar",
+                    destination=archive,
+                    limit=_CACHE_BYTES,
+                )
+            except ClientError as error:
+                if error.response.get("Error", {}).get("Code") in {"NoSuchKey", "404"}:
+                    emit_stage(
+                        "cache_import",
+                        "miss",
+                        component_index=index,
+                        reason="absent",
+                        source=source,
+                    )
+                    continue
+                raise
+            cache_directory = work / "cache-in" / str(index)
+            try:
+                unpack_cache(archive, cache_directory)
+            except (BuildPreparationError, tarfile.TarError):
+                shutil.rmtree(cache_directory, ignore_errors=False)
+                emit_stage(
+                    "cache_import",
+                    "miss",
+                    component_index=index,
+                    reason="invalid_archive",
+                    source=source,
+                )
+                print(
+                    json.dumps(
+                        {
+                            "cache": "miss",
+                            "reason": "invalid_archive",
+                            "component_index": index,
+                            "source": source,
+                        }
+                    ),
+                    flush=True,
+                )
+                continue
+            emit_stage(
+                "cache_import",
+                "hit",
+                component_index=index,
+                source=source,
+            )
+            return
+    finally:
+        shutil.rmtree(archive_parent, ignore_errors=True)
+
+
 def prepare(claim: dict[str, Any], work: Path, secrets: Path) -> None:
     with stage_span("prepare"):
         source = _client(claim, secrets / "source")
@@ -267,59 +351,7 @@ def prepare(claim: dict[str, Any], work: Path, secrets: Path) -> None:
         try:
             for index, _ in enumerate(derive_task_image_build_components(claim["task_config"])):
                 with stage_span("cache_import", component_index=index):
-                    with tempfile.TemporaryDirectory() as temporary:
-                        archive = Path(temporary) / "cache.tar"
-                        try:
-                            _download(
-                                cache,
-                                bucket=claim["cache_bucket"],
-                                key=_cache_prefix(claim) + f"{index}.tar",
-                                destination=archive,
-                                limit=_CACHE_BYTES,
-                            )
-                        except ClientError as error:
-                            if error.response.get("Error", {}).get("Code") in {
-                                "NoSuchKey",
-                                "404",
-                            }:
-                                emit_stage(
-                                    "cache_import",
-                                    "miss",
-                                    component_index=index,
-                                    reason="absent",
-                                )
-                                continue
-                            raise
-                        cache_directory = work / "cache-in" / str(index)
-                        try:
-                            unpack_cache(archive, cache_directory)
-                        except (BuildPreparationError, tarfile.TarError):
-                            # Disposable cache must not permanently poison this
-                            # source revision. No links are extracted by unpack_cache.
-                            shutil.rmtree(cache_directory, ignore_errors=False)
-                            emit_stage(
-                                "cache_import",
-                                "miss",
-                                component_index=index,
-                                reason="invalid_archive",
-                            )
-                            # Keep legacy field for existing log greps.
-                            print(
-                                json.dumps(
-                                    {
-                                        "cache": "miss",
-                                        "reason": "invalid_archive",
-                                        "component_index": index,
-                                    }
-                                ),
-                                flush=True,
-                            )
-                        else:
-                            emit_stage(
-                                "cache_import",
-                                "hit",
-                                component_index=index,
-                            )
+                    _try_import_cache(cache, claim, index=index, work=work)
         finally:
             cache.close()
 

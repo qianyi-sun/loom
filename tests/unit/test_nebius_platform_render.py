@@ -196,6 +196,29 @@ def test_native_build_configuration_rejects_wrong_boundary(
         build_platform(config, candidate, profile, {}, repo_root=ROOT)
 
 
+def test_native_build_configuration_accepts_phase3_cache_policy(
+    platform_inputs: tuple,
+) -> None:
+    config, candidate, profile = platform_inputs
+    config["task_image_builder"] = {
+        "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
+        "cache_bucket": "loom-integration-artifacts-cache",
+        "snapshotter": "overlayfs",
+        "compatible_revision_cache": "same_task",
+        "export_cache_mode": "min",
+    }
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    actuator = next(doc for doc in files["60-execution.yaml"] if doc["kind"] == "Deployment")
+    env = {
+        row["name"]: row.get("value")
+        for row in actuator["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    settings = json.loads(env["LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER"])
+    assert settings["compatible_revision_cache"] == "same_task"
+    assert settings["export_cache_mode"] == "min"
+    assert settings["snapshotter"] == "overlayfs"
+
+
 @pytest.fixture
 def platform_inputs() -> tuple[dict, dict, dict]:
     config = json.loads((ROOT / "deploy/nebius/integration.platform.json.example").read_text())

@@ -35,6 +35,11 @@ class NativeTaskImageSettings(BaseModel):
     max_concurrent: int = Field(default=1, ge=1, le=16)
     # OverlayFS is the measured Nebius default; set "native" to roll back.
     snapshotter: Literal["overlayfs", "native"] = "overlayfs"
+    # When "same_task", prepare may import BuildKit cache from a prior ready
+    # revision of the same task_id+cpu_arch. Results still use this mat key.
+    compatible_revision_cache: Literal["off", "same_task"] = "off"
+    # BuildKit local export mode; keep max until Nebius timing compares say otherwise.
+    export_cache_mode: Literal["max", "min"] = "max"
 
     def job_config(self) -> TaskImageJobConfig:
         from loom_execution_actuator.task_image_renderer import TaskImageJobConfig
@@ -42,7 +47,7 @@ class NativeTaskImageSettings(BaseModel):
         return TaskImageJobConfig(**{key: getattr(self, key) for key in (
             "service_image", "source_secret_name", "cache_secret_name", "registry_secret_name", "registry_auth_kind",
             "cpu_millis", "memory_mib", "ephemeral_storage_mib", "max_processes", "active_deadline_seconds",
-            "snapshotter",
+            "snapshotter", "export_cache_mode",
         )})
 
     def runtime_configuration(self) -> dict[str, Any]:

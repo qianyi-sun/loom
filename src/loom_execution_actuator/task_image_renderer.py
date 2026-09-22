@@ -49,6 +49,7 @@ class TaskImageJobConfig:
     max_processes: int = 512
     active_deadline_seconds: int = 1800
     snapshotter: Literal["overlayfs", "native"] = "overlayfs"
+    export_cache_mode: Literal["max", "min"] = "max"
 
     def __post_init__(self) -> None:
         for image in (self.service_image, self.buildkit_image):
@@ -71,6 +72,8 @@ class TaskImageJobConfig:
             raise ValueError("native task-image builds require at least 16 GiB ephemeral storage")
         if self.snapshotter not in {"overlayfs", "native"}:
             raise ValueError("task-image snapshotter must be overlayfs or native")
+        if self.export_cache_mode not in {"max", "min"}:
+            raise ValueError("task-image export_cache_mode must be max or min")
 
 
 def task_image_job_name(materialization_id: UUID, lease_epoch: int) -> str:
@@ -95,6 +98,7 @@ def _build_script(
     build_timeout_seconds: int,
     build_args: dict[str, str] | None = None,
     build_target: str | None = None,
+    export_cache_mode: Literal["max", "min"] = "max",
 ) -> str:
     lines = [
         "set -eu",
@@ -139,7 +143,12 @@ def _build_script(
                 argv.extend(["--opt", f"target={build_target}"])
         lines.append("set --")
         if cache_enabled:
-            argv.extend(["--export-cache", f"type=local,dest={cache_out},mode=max"])
+            argv.extend(
+                [
+                    "--export-cache",
+                    f"type=local,dest={cache_out},mode={export_cache_mode}",
+                ]
+            )
             lines.append(
                 f"if [ -f {shlex.quote(cache_in + '/index.json')} ]; then set -- --import-cache {shlex.quote('type=local,src=' + cache_in)}; fi"
             )
@@ -327,6 +336,7 @@ def render_task_image_job(
                 ),
                 build_args=environment.docker_build_args if environment else None,
                 build_target=environment.docker_build_target if environment else None,
+                export_cache_mode=config.export_cache_mode,
             ),
         ],
         "env": [

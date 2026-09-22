@@ -886,7 +886,9 @@ configuration; omission leaves native building disabled:
   "ephemeral_storage_mib": 16384,
   "max_processes": 512,
   "active_deadline_seconds": 1800,
-  "snapshotter": "overlayfs"
+  "snapshotter": "overlayfs",
+  "compatible_revision_cache": "off",
+  "export_cache_mode": "max"
 }
 ```
 
@@ -895,6 +897,15 @@ configuration; omission leaves native building disabled:
 historical forced-native setting). Set `"snapshotter": "native"` to roll back
 without redeploying a prior actuator image. Omission uses the same OverlayFS
 default.
+
+`compatible_revision_cache` controls whether prepare may import BuildKit layer
+cache from a **prior ready revision of the same `task_id` + `cpu_arch`**. Values
+are `"off"` (default) or `"same_task"`. Results and registry tags still use the
+exact current `materialization_key`; only disposable cache import is shared.
+When enabled, Job logs show `cache_import` hits with `"source":"compatible"`.
+
+`export_cache_mode` selects BuildKit `--export-cache` `mode=max` (default) or
+`mode=min`. Keep `max` until Nebius stage timings justify flipping the default.
 
 Prepare, BuildKit, and publish containers emit one JSON object per line with
 `loom_task_image_stage` set to `prepare`, `cache_import`, `solve`, `oci_export`,
