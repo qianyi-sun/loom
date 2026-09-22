@@ -15,7 +15,8 @@ from loom.db.schema import Team, User
 from loom.nebius_environment_contract import EnvironmentRegistrationV1, new_environment_registration
 from loom.nebius_environment_render import render_environment
 from tests.unit.test_nebius_environment_contract import foundation_from
-from tests.unit.test_nebius_platform_render import ROOT, platform_inputs as platform_inputs
+from tests.unit.test_nebius_platform_render import ROOT
+from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 @pytest.fixture
@@ -60,7 +61,9 @@ async def environment_registry(isolated_migration_postgres_url, platform_inputs)
 
 async def test_create_replay_commits_one_environment_complete_namespaces_and_one_budget_hold(environment_registry):
     from loom.db.nebius_environment_schema import (
-        NebiusEnvironment, NebiusEnvironmentNamespace, NebiusPlatformReservation,
+        NebiusEnvironment,
+        NebiusEnvironmentNamespace,
+        NebiusPlatformReservation,
     )
 
     registry, factory, (alice, _), prepare = environment_registry
@@ -155,3 +158,56 @@ async def test_resource_namespace_collision_rolls_back_every_claim(environment_r
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(NebiusEnvironment)) == 1
         assert await session.scalar(select(func.count()).select_from(NebiusEnvironmentNamespace)) == 3
+
+
+async def test_restart_replays_prepared_resource_and_rejects_stale_finalizer(environment_registry):
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    from loom.db.nebius_environment_schema import NebiusEnvironmentOperation
+    from loom_service.environment_management.registry import EnvironmentRegistry, ManagementError
+
+    registry, factory, (alice, _), prepare = environment_registry
+    operation = await registry.create(principal=alice, idempotency_key="a", prepared=prepare())
+    old = await registry.claim(operation.operation_id)
+    assert old is not None
+    assert await registry.claim(operation.operation_id) is None
+    step = await registry.next_step(old)
+    assert step is not None and step.kind == "kubernetes"
+    assert step.payload["kind"] == "Namespace"
+    # The external create happened but its reply was lost: the durable intent
+    # exists before it and a new manager must see exactly that same intent.
+    async with factory.begin() as session:
+        await session.execute(update(NebiusEnvironmentOperation).where(
+            NebiusEnvironmentOperation.operation_id == operation.operation_id,
+        ).values(lease_expires_at=datetime.now(UTC) - timedelta(seconds=1)))
+    restarted = EnvironmentRegistry(factory)
+    current = await restarted.claim(operation.operation_id)
+    assert current is not None and current.runner_epoch > old.runner_epoch
+    assert await restarted.next_step(current) == step
+    with pytest.raises(ManagementError, match="stale_operation_lease"):
+        await registry.confirm_step(old, step.key, provider_identity="namespace-uid-1")
+    await restarted.confirm_step(current, step.key, provider_identity="namespace-uid-1")
+    following = await restarted.next_step(current)
+    assert following is not None and following.key != step.key
+    with pytest.raises(ManagementError, match="resource_identity_conflict"):
+        await restarted.confirm_step(current, step.key, provider_identity="different-uid")
+    with pytest.raises(ManagementError, match="operation_resources_incomplete"):
+        await restarted.complete(current)
+
+
+async def test_completion_requires_all_durable_steps_including_health_and_auth(environment_registry):
+    registry, _, (alice, _), prepare = environment_registry
+    operation = await registry.create(principal=alice, idempotency_key="a", prepared=prepare())
+    lease = await registry.claim(operation.operation_id)
+    assert lease is not None
+    kinds = []
+    while (step := await registry.next_step(lease)) is not None:
+        kinds.append(step.kind)
+        await registry.confirm_step(lease, step.key, provider_identity="confirmed-" + step.key)
+    assert {"kubernetes", "object_bucket", "credentials", "database_ready", "job_ready", "application_ready"} <= set(kinds)
+    assert kinds[-1] == "application_ready"
+    await registry.complete(lease)
+    assert (await registry.get_operation(operation.operation_id, principal=alice)).phase == "completed"
+    assert await registry.claim(operation.operation_id) is None
