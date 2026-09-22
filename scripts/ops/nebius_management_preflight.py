@@ -76,7 +76,7 @@ def inspect(kube: Kubectl, *, namespace: str, expected_cluster_id: str) -> dict[
         "schema_version": "loom.nebius-management-preflight.v1",
         "status": "observed", "observed_at": datetime.now(UTC).isoformat(),
         "cluster_id": expected_cluster_id, "namespace": namespace,
-        "execution_namespace": config["execution_namespace"], "candidate_sha": candidate,
+        "execution_namespace": config["execution_namespace"], "configured_candidate_sha": candidate,
         "public_host": config["public_host"],
         "configured_execution_node_group_id": config["execution_node_group_id"],
         "nodes": [{**_identity(item), "role": item["metadata"].get("labels", {}).get("loom.nebius/node-role"),
@@ -110,7 +110,7 @@ def inspect(kube: Kubectl, *, namespace: str, expected_cluster_id: str) -> dict[
         } for item in volumes],
         "storage_classes": [{**_identity(item), **_fields(item, ("provisioner", "reclaimPolicy", "volumeBindingMode"))}
                             for item in storage_classes],
-        "unverified": ["provider_iam", "wildcard_dns_tls", "management_installation", "platform_child_allowance",
+        "unverified": ["running_candidate_correspondence", "provider_iam", "wildcard_dns_tls", "management_installation", "platform_child_allowance",
                        "live_nebius_pool_limits_and_quota", "concurrent_owner_acceptance"],
     }
 

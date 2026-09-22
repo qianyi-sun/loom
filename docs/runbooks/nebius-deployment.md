@@ -62,7 +62,7 @@ DNS or cloud mutation. It shares rollout concurrency so the two workflow modes
 do not race each other.
 
 Download `nebius-inspect-RUN_ID-ATTEMPT` for the sanitized
-`management-preflight.json` artifact. It contains the installed candidate,
+`management-preflight.json` artifact. It contains the configured candidate,
 namespace identities, node allocatable resources, declared Pod requests including
 init containers and overhead, services/ingress, PVC sizes and storage classes.
 It excludes Secret values, Pod environment/commands, annotations, kubeconfig and
@@ -70,6 +70,10 @@ configuration payloads. Failed or incomplete inventory fails the command rather
 than being treated as an empty cluster.
 
 `observed` means inventory succeeded, not that personal environments are ready.
+The configured candidate is read from the platform ConfigMap, which rollout can
+update before migrations and workload replacement complete. It is not proof of
+the running workload versions; use successful candidate-bound rollout evidence
+and workload readback to qualify that separately.
 No child capacity allowance is inferred from a naive request sum. Wildcard
 DNS/TLS, provisioning IAM, management installation, live Nebius quota and pool
 limits, and installed concurrent-owner acceptance still require qualification.
