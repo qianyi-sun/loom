@@ -117,6 +117,34 @@ async def test_supplied_owner_or_generic_team_credentials_cannot_create(environm
         await registry.create(principal=replace(alice, user_id=None), idempotency_key="create-1", prepared=prepare())
 
 
+async def test_manager_recovers_lost_reply_without_publication_and_rejects_changed_request(
+    environment_registry, platform_inputs,
+):
+    from loom.nebius_environment_contract import EnvironmentCreateRequestV1
+    from loom_service.environment_management.manager import EnvironmentManager, EnvironmentPlanFactory
+    from loom_service.environment_management.registry import ManagementError
+
+    registry, _, (alice, bob), prepare = environment_registry
+    prepared = prepare()
+    first = await registry.create(principal=alice, idempotency_key="lost-reply", prepared=prepared)
+
+    class OfflinePublicationApi:
+        async def resolve(self, identity):
+            raise ConnectionError("Publication temporarily unavailable")
+
+    # A restarted process must answer from its durable operation, not re-render
+    # or revalidate an artifact which might have expired since the first request.
+    manager = EnvironmentManager(registry, EnvironmentPlanFactory(
+        foundation_from(platform_inputs[0]), OfflinePublicationApi(), keyring={}, repo_root=ROOT,
+    ))
+    request = EnvironmentCreateRequestV1(slug="alice", candidate_id=prepared.registration.candidate_id)
+    assert await manager.create(alice, request, idempotency_key="lost-reply") == first
+    with pytest.raises(ManagementError, match="idempotency_conflict"):
+        await manager.create(alice, request.model_copy(update={"slug": "changed"}), idempotency_key="lost-reply")
+    with pytest.raises(ConnectionError):
+        await manager.create(bob, request, idempotency_key="lost-reply")
+
+
 async def test_two_owners_cannot_overbook_last_platform_capacity(environment_registry):
     from sqlalchemy import update
 
